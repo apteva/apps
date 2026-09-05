@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.3.6
+version: 0.3.8
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -102,6 +102,7 @@ provides:
     - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
     - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
     - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier. Args: recording_id." }
+    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier, including purchased numbers without a route, with Telephony routing and outbound status." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing. Args: country? or countries?, number_type?, features?, area_code?, pattern?, limit?. Returns short-lived confirmation tokens for purchase-ready offers." }
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
     - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }

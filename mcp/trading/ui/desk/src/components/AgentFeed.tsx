@@ -11,9 +11,11 @@ const KIND_META: Record<JournalEntry["kind"], { label: string; color: string; bg
   thesis:    { label: "thesis",    color: "var(--color-accent)", bg: "var(--color-accent-light)" },
   rationale: { label: "rationale", color: "var(--color-purple)", bg: "var(--color-purple-light)" },
   fill:      { label: "fill",      color: "var(--color-up)",     bg: "var(--color-up-light)" },
+  funding:   { label: "funding",   color: "var(--color-warn)",   bg: "var(--color-warn-light)" },
   alert:     { label: "alert",     color: "var(--color-warn)",   bg: "var(--color-warn-light)" },
   rejection: { label: "rejection", color: "var(--color-down)",   bg: "var(--color-down-light)" },
   note:      { label: "note",      color: "var(--text-secondary)", bg: "var(--surface-inset)" },
+  corporate_action: { label: "action", color: "var(--color-accent)", bg: "var(--color-accent-light)" },
 };
 
 export function AgentFeed({

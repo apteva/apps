@@ -12,6 +12,9 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
     this.lookaheadSamples = Math.max(1, Math.round(sampleRate * 0.005));
     this.delay = new Float32Array(this.lookaheadSamples);
     this.delayOffset = 0;
+    this.peakValues = new Float32Array(this.lookaheadSamples + 1);
+    this.peakIndices = new Float64Array(this.lookaheadSamples + 1);
+    this.peakHead = this.peakTail = this.sampleIndex = 0;
     this.limiterGain = 1;
     this.release = Math.exp(-1 / (sampleRate * 0.1));
     this.hpAlpha = (1 / (2 * Math.PI * 80)) / ((1 / (2 * Math.PI * 80)) + (1 / sampleRate));
@@ -34,6 +37,10 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
         this.transport.start?.();
       } else if (event.data?.type === "muted") {
         this.muted = Boolean(event.data.value);
+        this.buffer.fill(0); this.filled = 0;
+        this.delay.fill(0); this.delayOffset = 0; this.peakHead = this.peakTail = this.sampleIndex = 0;
+        this.hpX = this.hpY = 0; this.limiterGain = 1;
+        this.activeSquares = this.activeSamples = this.prePeak = this.postPeak = this.maxReductionDB = 0;
       }
     };
   }
@@ -48,8 +55,11 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
     }
     filtered *= this.inputGain;
     this.delay[this.delayOffset] = filtered;
-    let peak = 0;
-    for (let i = 0; i < this.delay.length; i += 1) peak = Math.max(peak, Math.abs(this.delay[i]));
+    const length=this.peakValues.length, index=this.sampleIndex++, amplitude=Math.abs(filtered);
+    while (this.peakHead!==this.peakTail && this.peakIndices[this.peakHead]<=index-this.lookaheadSamples) this.peakHead=(this.peakHead+1)%length;
+    while (this.peakHead!==this.peakTail) { const last=(this.peakTail-1+length)%length; if(this.peakValues[last]>amplitude) break; this.peakTail=last; }
+    this.peakValues[this.peakTail]=amplitude; this.peakIndices[this.peakTail]=index; this.peakTail=(this.peakTail+1)%length;
+    const peak=this.peakValues[this.peakHead];
     const wanted = peak > this.ceiling ? this.ceiling / peak : 1;
     if (wanted < this.limiterGain) this.limiterGain = wanted;
     else this.limiterGain = 1 - (1 - this.limiterGain) * this.release;
@@ -76,6 +86,7 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
       type: "capture.stats", active_rms: activeRms, pre_peak: this.prePeak, post_peak: this.postPeak,
       input_gain_db: this.inputGainDB, limiter_reduction_db: this.maxReductionDB,
     });
+    this.activeSquares = this.activeSamples = this.prePeak = this.postPeak = this.maxReductionDB = 0;
   }
 
   process(inputs, outputs) {
@@ -90,7 +101,7 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
       if (this.filled === this.buffer.length) { this.emitFrame(); this.filled = 0; }
     }
     this.statsSamples += channel.length;
-    if (this.statsSamples >= sampleRate) { this.statsSamples -= sampleRate; this.reportStats(); }
+    if (this.statsSamples >= sampleRate / 10) { this.statsSamples -= sampleRate / 10; this.reportStats(); }
     return true;
   }
 }
@@ -108,6 +119,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     this.queued = 0;
     this.offset = 0;
     this.playing = false;
+    this.startupWaitSamples = 0;
     this.underruns = 0;
     this.droppedSamples = 0;
     this.maxQueuedSamples = 0;
@@ -202,7 +214,9 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
     const out = outputs[0][0];
     if (!out) return true;
     out.fill(0);
-    if (!this.playing && this.queued >= this.msToSamples(this.targetMs)) this.playing = true;
+    if (!this.playing && this.queued > 0) this.startupWaitSamples += out.length;
+    if (!this.playing && this.queued > 0 && (this.queued >= this.msToSamples(this.targetMs) || this.startupWaitSamples >= this.msToSamples(this.targetMs))) { this.playing = true; this.startupWaitSamples = 0; }
+    if (this.queued === 0) this.startupWaitSamples = 0;
     let written = 0;
     if (this.playing) {
       while (written < out.length && this.queue.length > 0) {

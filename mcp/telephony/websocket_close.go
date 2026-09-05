@@ -40,6 +40,7 @@ type websocketWriterPump struct {
 	conn     net.Conn
 	state    ws.State
 	requests chan websocketWriteRequest
+	audio    chan websocketWriteRequest
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -112,6 +113,7 @@ func newWebSocketWriterPump(conn net.Conn, state ws.State) *websocketWriterPump 
 		conn:     conn,
 		state:    state,
 		requests: make(chan websocketWriteRequest, websocketWriteQueueSize),
+		audio:    make(chan websocketWriteRequest, 6),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -122,26 +124,60 @@ func newWebSocketWriterPump(conn net.Conn, state ws.State) *websocketWriterPump 
 func (p *websocketWriterPump) run() {
 	defer close(p.done)
 	for {
+		var request websocketWriteRequest
+		// Controls take priority over queued audio, but cannot interrupt an active write.
 		select {
 		case <-p.stop:
 			return
-		case request := <-p.requests:
-			timeout := request.timeout
-			if timeout <= 0 {
-				timeout = websocketWriteTimeout
-			}
-			err := p.conn.SetWriteDeadline(time.Now().Add(timeout))
-			if err == nil {
-				err = wsutil.WriteMessage(p.conn, p.state, request.op, request.payload)
-			}
-			if err != nil {
-				p.setError(err)
-			}
-			request.complete <- err
-			if err != nil {
+		case request = <-p.requests:
+		default:
+			select {
+			case <-p.stop:
 				return
+			case request = <-p.requests:
+			case request = <-p.audio:
 			}
 		}
+		timeout := request.timeout
+		if timeout <= 0 {
+			timeout = websocketWriteTimeout
+		}
+		err := p.conn.SetWriteDeadline(time.Now().Add(timeout))
+		if err == nil {
+			err = wsutil.WriteMessage(p.conn, p.state, request.op, request.payload)
+		}
+		if request.complete != nil {
+			request.complete <- err
+		}
+		if err != nil {
+			p.setError(err)
+			_ = p.conn.Close()
+			return
+		}
+	}
+}
+
+// QueueAudio never blocks a carrier read loop. Keep at most 120ms of speech;
+// discard the oldest frame on overload and close stalled sockets after 250ms.
+func (p *websocketWriterPump) QueueAudio(data []byte) {
+	request := websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: 250 * time.Millisecond}
+	select {
+	case <-p.done:
+		return
+	default:
+	}
+	select {
+	case p.audio <- request:
+		return
+	default:
+	}
+	select {
+	case <-p.audio:
+	default:
+	}
+	select {
+	case p.audio <- request:
+	default:
 	}
 }
 
@@ -303,7 +339,11 @@ func readWebSocketData(conn net.Conn, state ws.State, writer *websocketWriterPum
 			}
 			continue
 		}
-		data, err := io.ReadAll(&reader)
+		data, err := io.ReadAll(io.LimitReader(&reader, maxCarrierFrameBytes+1))
+		if len(data) > maxCarrierFrameBytes {
+			_ = writer.Write(ws.OpClose, ws.NewCloseFrameBody(ws.StatusMessageTooBig, "message exceeds limit"))
+			return nil, 0, errors.New("websocket message exceeds limit")
+		}
 		return data, header.OpCode, err
 	}
 }

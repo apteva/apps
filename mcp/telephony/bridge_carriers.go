@@ -143,12 +143,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		return
 	}
 	dialer := ws.Dialer{}
-	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
+	core, buffered, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "provider", cfg.Provider, "err", err, "url", redactURL(coreURL.String()))
 		return
+	}
+	if buffered != nil {
+		core = hijackedConn{Conn: core, reader: buffered}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -309,7 +312,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	droppedStaleMS := 0
 	pacerPolicy := bufferedCarrierPacerPolicy()
 	pacerMode := "buffered"
-	if row.PeerKind == peerKindHuman {
+	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
@@ -459,7 +462,7 @@ func validateCarrierStartFormat(cfg jsonMediaBridgeConfig, frame carrierMediaFra
 // to a person-to-person call can suppress quiet syllables and make the browser
 // leg sound substantially worse than the carrier recording.
 func processCarrierInput(row *callRow, frontend *carrierAudioFrontend, pcm []int16) audioFrontendResult {
-	if row != nil && row.PeerKind == peerKindHuman {
+	if row != nil && (row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal) {
 		return audioFrontendResult{PCM: pcm}
 	}
 	return frontend.process(pcm)
@@ -536,12 +539,15 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dialer := ws.Dialer{}
-	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
+	core, buffered, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
 		globalCtx.Logger().Warn("dial core audio bridge", "provider", "vonage", "err", err, "url", redactURL(coreURL.String()))
 		return
+	}
+	if buffered != nil {
+		core = hijackedConn{Conn: core, reader: buffered}
 	}
 	coreWriter := newWebSocketWriterPump(core, ws.StateClientSide)
 	coreCloser := newGracefulWebSocket(core, coreWriter)
@@ -606,7 +612,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			if op != ws.OpBinary || len(data) == 0 {
 				continue
 			}
-			processed := audioFrontend.process(bytesToPCM16(data))
+			processed := processCarrierInput(row, audioFrontend, bytesToPCM16(data))
 			pcm24 := inputResampler.Process(processed.PCM)
 			if len(pcm24) == 0 {
 				continue

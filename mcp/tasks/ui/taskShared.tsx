@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export interface HostProps {
   appName?: string;
@@ -76,6 +76,8 @@ export interface Task {
   last_result_reference?: string;
   scheduled_for?: string;
   dispatched_at?: string;
+  dispatch_attempts?: number;
+  last_dispatch_attempt_at?: string;
   accepted_at?: string;
   telemetry_reference?: string;
   result?: string;
@@ -102,6 +104,8 @@ export interface TaskResponse {
   tasks: Task[];
   enabled: boolean;
   scheduling_enabled: boolean;
+  next_cursor?: string;
+  has_more?: boolean;
 }
 
 export interface Agent {
@@ -135,18 +139,25 @@ async function json<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const taskAPI = {
-  list: (props: HostProps, params: Record<string, string> = {}) => {
+  list: (props: HostProps, params: Record<string, string> = {}, signal?: AbortSignal) => {
     const url = new URL(baseURL(props), window.location.origin);
     for (const [key, value] of Object.entries(params))
       if (value) url.searchParams.set(key, value);
-    return json<TaskResponse>(url.pathname + url.search);
+    return json<TaskResponse>(url.pathname + url.search, { signal });
   },
   get: (props: HostProps, id: string) =>
-    json<{ task: Task; events: TaskEvent[] }>(
+    json<{ task: Task; events: TaskEvent[]; events_next_cursor?: string }>(
       endpoint(props, encodeURIComponent(id)),
     ),
-  runs: (props: HostProps, id: string) =>
-    json<{ runs: Task[] }>(endpoint(props, `${encodeURIComponent(id)}/runs`)),
+  runs: (props: HostProps, id: string, cursor = "") =>
+    json<{ runs: Task[]; next_cursor?: string }>(endpoint(props, `${encodeURIComponent(id)}/runs`) + `&cursor=${encodeURIComponent(cursor)}`),
+  events: (props: HostProps, id: string, cursor: string) =>
+    json<{ events: TaskEvent[]; next_cursor?: string }>(endpoint(props, `${encodeURIComponent(id)}/events`) + `&cursor=${encodeURIComponent(cursor)}`),
+  recover: (props: HostProps, id: string, reason: string, key: string) =>
+    json<{ task: Task }>(endpoint(props, `${encodeURIComponent(id)}/recover`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason, idempotency_key: key }),
+    }),
   create: (props: HostProps, input: Record<string, unknown>) =>
     json<{ task: Task; created: boolean }>(baseURL(props), {
       method: "POST",
@@ -181,28 +192,35 @@ export function useTasks(
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [nextCursor, setNextCursor] = useState("");
+  const request = useRef<AbortController | null>(null);
   const paramsKey = JSON.stringify(params);
-  const reload = useCallback(async () => {
-    if (!props.projectId) return;
+  const fetchPage = useCallback(async (cursor = "") => {
+    request.current?.abort();
+    const controller = new AbortController();
+    request.current = controller;
+    if (!props.projectId) { setTasks([]); setNextCursor(""); setLoading(false); return; }
+    setLoading(true);
     try {
-      const response = await taskAPI.list(props, params);
-      setTasks(response.tasks || []);
+      const response = await taskAPI.list(props, { projection: "summary", ...params, cursor }, controller.signal);
+      if (controller.signal.aborted) return;
+      setTasks(previous => cursor ? [...new Map([...previous, ...response.tasks].map(task => [task.id, task])).values()] : response.tasks || []);
+      setNextCursor(response.next_cursor || "");
       setError("");
     } catch (reason) {
-      setError(
-        reason instanceof Error ? reason.message : "Unable to load tasks",
-      );
+      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Unable to load tasks");
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
-    // The serialized values, rather than the params object identity, define the query.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.appName, props.installId, props.projectId, paramsKey]);
-
+  const reload = useCallback(() => fetchPage(), [fetchPage]);
   useEffect(() => {
-    void reload();
+    setTasks([]);
+    setNextCursor("");
+    const timer = setTimeout(() => void reload(), 100);
+    return () => { clearTimeout(timer); request.current?.abort(); };
   }, [reload, props.eventRevision]);
-  return { tasks, loading, error, reload, setTasks };
+  return { tasks, loading, error, reload, setTasks, hasMore: !!nextCursor, loadMore: () => fetchPage(nextCursor) };
 }
 
 export function isSchedule(task: Task) {
@@ -215,7 +233,7 @@ export function isTerminal(task: Task) {
   return ["completed", "failed", "cancelled"].includes(task.state);
 }
 export function isScheduleDefinition(task: Task) {
-  return isSchedule(task) && task.state === "waiting" && !isTerminal(task);
+  return isSchedule(task) && !task.scheduled_for && !task.parent_task_id && !isTerminal(task);
 }
 export function isPendingSchedule(task: Task) {
   return (
@@ -359,7 +377,7 @@ export function TaskRow({
 }) {
   const summary = taskRowSummary(task);
   const attentionTone =
-    task.state === "failed"
+    (task.state === "failed" || task.last_occurrence_status === "failed")
       ? "border-l-2 border-l-red bg-red/5"
       : task.state === "blocked"
         ? "border-l-2 border-l-yellow bg-yellow/5"
@@ -429,19 +447,29 @@ export function TaskDetails({
   const [detail, setDetail] = useState<{
     task: Task;
     events: TaskEvent[];
+    events_next_cursor?: string;
   } | null>(null);
   const [runs, setRuns] = useState<Task[]>([]);
+  const [runsCursor, setRunsCursor] = useState("");
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ title: "", description: "", expression: "", timezone: "UTC" });
+  const [recoveryReason, setRecoveryReason] = useState("");
+  const [recoveryKey] = useState(() => crypto.randomUUID());
+  const dialogRef = useTaskDialog(onClose);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
   useEffect(() => {
+    let current = true;
+    setDetail(null); setRuns([]); setError("");
     void Promise.all([
       taskAPI.get(props, task.id),
       isSchedule(task)
         ? taskAPI.runs(props, task.id)
-        : Promise.resolve({ runs: [] }),
+        : Promise.resolve({ runs: [], next_cursor: "" }),
     ]).then(([next, child]) => {
-      setDetail(next);
-      setRuns(child.runs);
-    });
+      if (current) { setDetail(next); setRuns(child.runs); setRunsCursor(child.next_cursor || ""); }
+    }).catch(reason => { if (current) setError(reason instanceof Error ? reason.message : "Unable to load task"); });
+    return () => { current = false; };
   }, [
     props.appName,
     props.installId,
@@ -457,12 +485,43 @@ export function TaskDetails({
       else await taskAPI.action(props, task.id, name);
       onChanged();
       onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Unable to update task");
     } finally {
       setBusy(false);
     }
   };
+  const edit = () => {
+    setDraft({ title: current.title, description: current.description || "", expression: current.schedule_expression || "", timezone: current.schedule_timezone || "UTC" });
+    setEditing(true);
+  };
+  const runOperation = async (operation: () => Promise<void>) => {
+    setBusy(true); setError("");
+    try { await operation(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Operation failed"); }
+    finally { setBusy(false); }
+  };
+  const save = () => runOperation(async () => {
+    let schedule: Record<string, string> | undefined;
+    if (isScheduleDefinition(current)) {
+      const patch: Record<string, string> = {};
+      if (draft.timezone !== (current.schedule_timezone || "UTC")) patch.timezone = draft.timezone;
+      if (draft.expression !== (current.schedule_expression || "")) patch[current.schedule_kind === "once" ? "at" : current.schedule_kind === "interval" ? "every" : "cron"] = draft.expression;
+      if (Object.keys(patch).length) schedule = patch;
+    }
+    await taskAPI.update(props, current.id, { title: draft.title, description: draft.description, ...(schedule ? { schedule } : {}) });
+    onChanged(); onClose();
+  });
+  const loadEvents = () => runOperation(async () => {
+    const page = await taskAPI.events(props, current.id, detail?.events_next_cursor || "");
+    setDetail(previous => previous ? { ...previous, events: [...page.events, ...previous.events], events_next_cursor: page.next_cursor } : previous);
+  });
+  const loadRuns = () => runOperation(async () => {
+    const page = await taskAPI.runs(props, current.id, runsCursor);
+    setRuns(previous => [...previous, ...page.runs]); setRunsCursor(page.next_cursor || "");
+  });
   return (
     <div
+      ref={dialogRef} tabIndex={-1}
       className="fixed inset-0 z-[90]"
       role="dialog"
       aria-modal="true"
@@ -478,6 +537,7 @@ export function TaskDetails({
           <div className="flex items-center gap-2">
             <StatePill task={current} />
             <button
+              autoFocus aria-label="Close task details"
               className="ml-auto text-lg text-text-dim hover:text-text"
               onClick={onClose}
             >
@@ -495,6 +555,21 @@ export function TaskDetails({
           <Progress task={current} />
         </header>
         <div className="flex-1 space-y-5 overflow-auto p-5">
+          {error && <p role="alert" className="text-xs text-red">{error}</p>}
+          {editing && <section className="space-y-3 rounded border border-border p-3">
+            <label className="block text-xs">Title<input value={draft.title} onChange={e => setDraft({ ...draft, title: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+            <label className="block text-xs">Instructions<textarea value={draft.description} onChange={e => setDraft({ ...draft, description: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+            {isScheduleDefinition(current) && <>
+              <label className="block text-xs">{current.schedule_kind === "once" ? "Run at (RFC3339 timestamp with offset)" : current.schedule_kind === "interval" ? "Repeat every (for example 1h)" : "Five-field cron"}<input value={draft.expression} onChange={e => setDraft({ ...draft, expression: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+              <label className="block text-xs">Timezone<input value={draft.timezone} onChange={e => setDraft({ ...draft, timezone: e.target.value })} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+            </>}
+            <button disabled={busy || !draft.title.trim()} onClick={() => void save()} className="rounded border border-accent p-2 text-xs text-accent">Save changes</button>
+          </section>}
+          {current.state === "failed" && current.scheduled_for && <section className="space-y-2 rounded border border-border p-3">
+            <p className="text-xs text-text-muted">Create a recovery attempt. The executor must verify the existing outcome before repeating an action.</p>
+            <label className="block text-xs">Reason for recovery<textarea value={recoveryReason} onChange={e => setRecoveryReason(e.target.value)} className="mt-1 w-full rounded bg-bg-input p-2" /></label>
+            <button disabled={busy || !recoveryReason.trim()} onClick={() => void runOperation(async () => { await taskAPI.recover(props,current.id,recoveryReason,recoveryKey); onChanged(); onClose(); })} className="rounded border border-accent p-2 text-xs text-accent">Recover occurrence</button>
+          </section>}
           {isSchedule(current) && (
             <section className="rounded border border-purple-400/20 bg-purple-400/5 p-3">
               <h3 className="text-[10px] font-bold uppercase tracking-wide text-purple-300">
@@ -552,6 +627,7 @@ export function TaskDetails({
               ))}
             </div>
           </section>
+          {detail?.events_next_cursor && <button disabled={busy} onClick={() => void loadEvents()} className="text-xs text-accent">Load older activity</button>}
           {runs.length > 0 && (
             <section>
               <h3 className="text-[10px] font-bold uppercase tracking-wide text-text-dim">
@@ -566,6 +642,8 @@ export function TaskDetails({
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] text-text-muted">
                       <span>Dispatched</span><span>{formatWhen(run.dispatched_at) || "No"}</span>
+                      <span>Delivery attempts</span><span>{run.dispatch_attempts || 0}</span>
+                      <span>Last attempt</span><span>{formatWhen(run.last_dispatch_attempt_at) || "No"}</span>
                       <span>Accepted</span><span>{formatWhen(run.accepted_at) || "No"}</span>
                       <span>Started</span><span>{formatWhen(run.started_at) || "No"}</span>
                       <span>Completed</span><span>{formatWhen(run.completed_at) || "No"}</span>
@@ -582,8 +660,10 @@ export function TaskDetails({
             </section>
           )}
         </div>
+        {runsCursor && <button disabled={busy} onClick={() => void loadRuns()} className="p-3 text-xs text-accent">Load older occurrences</button>}
         {!isTerminal(current) && (
           <footer className="flex justify-end gap-2 border-t border-border p-4">
+            {!current.scheduled_for && !current.parent_task_id && <button disabled={busy} onClick={edit} className="rounded border border-border px-3 py-2 text-xs">Edit definition</button>}
             {isScheduleDefinition(current) && (
               <>
                 <button
@@ -635,7 +715,13 @@ export function taskEventLabel(event: TaskEvent) {
     label = "Occurrence skipped to avoid overlap";
   else if (event.event_type === "occurrence_dispatched")
     label = "Occurrence dispatched";
-  else if (event.event_type === "occurrence_accepted")
+  else if (event.event_type === "occurrence_redispatched") {
+    const attempt = event.data?.dispatch_attempt;
+    label =
+      typeof attempt === "number"
+        ? `Occurrence redispatched · attempt ${attempt}`
+        : "Occurrence redispatched";
+  } else if (event.event_type === "occurrence_accepted")
     label = "Occurrence accepted";
   else label = event.event_type.replaceAll("_", " ");
 
@@ -654,7 +740,12 @@ export function selectGroups(tasks: Task[]) {
   };
 }
 
+export function needsAttention(task: Task) {
+  return ["failed", "blocked"].includes(task.state) || (isScheduleDefinition(task) && ["failed", "blocked"].includes(task.last_occurrence_status || ""));
+}
+
 export function taskQueueRank(task: Task) {
+  if (needsAttention(task)) return task.state === "blocked" || task.last_occurrence_status === "blocked" ? 1 : 0;
   if (task.state === "failed") return 0;
   if (task.state === "blocked") return 1;
   if (task.state === "running") return 2;
@@ -682,14 +773,14 @@ export function selectTaskQueue(
 ) {
   const roots = tasks.filter((task) => !task.parent_task_id);
   const operational = roots.filter((task) => {
-    if (task.state === "failed" || isActive(task))
+    if (needsAttention(task) || isActive(task))
       return preferences.showActive;
     if (isPendingSchedule(task) || isPausedSchedule(task))
       return preferences.showUpcoming;
     return false;
   });
   const recent = preferences.showRecent
-    ? roots
+    ? tasks
         .filter(
           (task) =>
             task.state === "completed" || task.state === "cancelled",
@@ -734,7 +825,7 @@ export function taskMatchesQueueFilter(
   task: Task,
   filter: TaskQueueFilter,
 ) {
-  if (filter === "active") return task.state === "failed" || isActive(task);
+  if (filter === "active") return needsAttention(task) || isActive(task);
   if (filter === "scheduled")
     return (
       task.schedule_kind === "once" &&
@@ -748,15 +839,40 @@ export function taskMatchesQueueFilter(
 export function useAgentNames(projectId?: string) {
   const [agents, setAgents] = useState<Agent[]>([]);
   useEffect(() => {
-    if (projectId)
-      void json<Agent[]>(
-        `/api/agents?project_id=${encodeURIComponent(projectId)}`,
-      )
-        .then(setAgents)
-        .catch(() => setAgents([]));
+    let active = true;
+    setAgents([]);
+    if (projectId) void json<Agent[]>(`/api/agents?project_id=${encodeURIComponent(projectId)}`)
+      .then(value => { if (active) setAgents(value); })
+      .catch(() => { if (active) setAgents([]); });
+    return () => { active = false; };
   }, [projectId]);
+
   return useMemo(
     () => new Map(agents.map((agent) => [agent.id, agent.name])),
     [agents],
   );
+}
+
+export function useTaskDialog(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose); close.current = onClose;
+  const previousFocus = useRef(typeof document === "undefined" ? null : document.activeElement as HTMLElement | null);
+  useEffect(() => {
+    const previous = previousFocus.current;
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (!dialog.contains(document.activeElement)) dialog.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); close.current(); return; }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')).filter(element => element.getClientRects().length > 0);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (!first) { event.preventDefault(); dialog.focus(); }
+      else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    dialog.addEventListener("keydown", keydown);
+    return () => { dialog.removeEventListener("keydown", keydown); previous?.focus(); };
+  }, []);
+  return ref;
 }

@@ -1,0 +1,62 @@
+name: terminal-mcp-before-idle
+description: |
+  A real agent reaches a successful 100% running milestone. Progress alone is
+  deliberately nonterminal, so the installed Tasks guidance must lead it to
+  record the concrete result with tasks_complete before it returns idle.
+
+timeout: 90s
+settle_for: 5s
+max_iterations: 8
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Run one simulated export and track it as exactly one task named "Finalize
+  simulated export". The simulated domain work succeeds with the exact result
+  "EXPORT READY". First record a running milestone at progress 100 with the
+  exact current step "Export generated; ready to finalize". At that point no
+  domain work remains. Follow the installed Tasks lifecycle guidance, then
+  stop. Do not list, delegate, wait for anything, or create another task.
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      args:
+        title: Finalize simulated export
+      count: 1
+  - tool_called_with:
+      tool: tasks_set_progress
+      args:
+        state: running
+        progress: 100
+        current_step: Export generated; ready to finalize
+      count: 1
+      before: tasks_complete
+  - tool_called_with:
+      tool: tasks_complete
+      args:
+        result: EXPORT READY
+      count: 1
+  - tool_not_called: tasks_update
+  - tool_not_called: tasks_list | tasks_assign | spawn
+  - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.progress
+    expect_field_eq: 100
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.current_step
+    expect_field_eq: Completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.result
+    expect_field_eq: EXPORT READY
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 120000
+  cost_usd: 1.00

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.3.3
+version: 0.4.0
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -51,7 +51,7 @@ requires:
       capabilities: [files.read, files.write, files.delete]
       required: true
       label: "Storage"
-      hint: "Instruction media (audio/video) and worker submissions are stored here under /.gigs/."
+      hint: "Instruction media (images/audio/video) and worker submissions are stored here under /.gigs/."
     - role: domains
       kind: app
       compatible_app_names: [domains]
@@ -87,7 +87,7 @@ provides:
       description: List all skills in the project.
     # ─── Instruction library ─────────────────────────────────────────
     - name: instructions_create
-      description: Create a versioned instruction. Read-only kinds can define body.response with independent note and files rules; files can restrict accepted types, counts, and size. Omitting response means no worker upload or note. Returns the head row + v1.
+      description: Create a versioned instruction. The content kind stores ordered markdown, image, callout, and divider blocks in one worker card. Read-only kinds can define body.response with independent note and files rules; omitting response means no worker upload or note. Returns the head row + v1.
     - name: instructions_list
       description: Filter the library by kind or search.
     - name: instructions_get
@@ -108,7 +108,9 @@ provides:
     - name: templates_get
       description: Full template incl. composition + derived result_schema + media_manifest + variables.
     - name: templates_set_instructions
-      description: Replace the composition. Per-use overrides may replace body.response for that template. Returns the derived result_schema, media_manifest, variables.
+      description: Replace the composition and optionally its generic response rules. Per-use overrides may replace body.response, while response rules enforce a final contract by instruction kind. Returns the derived result_schema, media_manifest, variables.
+    - name: templates_set_response_rules
+      description: Replace versioned template response rules that enforce worker note/file contracts by instruction kind.
     - name: templates_insert_instruction
       description: Insert one instruction at sort_order n; per-use overrides may replace body.response (granular edit on the draft version).
     - name: templates_remove_instruction
@@ -127,7 +129,7 @@ provides:
     - name: gigs_create_from_template
       description: Primary dispatch path. Template slug/id + vars + optional worker_id, notify_worker=false, and public_domain_id. Returns the gig + assignment.
     - name: gigs_create_from_instructions
-      description: Ad-hoc dispatch — list of instruction refs + vars, no template required. Optional worker_id, notify_worker=false, and public_domain_id.
+      description: Dynamic dispatch from instruction refs. Optional template slug/id applies that active template's response rules, defaults, and commercial rate context. Optional worker_id, notify_worker=false, and public_domain_id.
     - name: gigs_create
       description: Fully inline composition (raw instruction bodies, no library refs). Optional worker_id, notify_worker=false, and public_domain_id.
     - name: gigs_assign

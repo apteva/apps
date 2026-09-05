@@ -53,10 +53,11 @@ const (
 )
 
 type ContainerState struct {
-	ID      string `json:"id"`
-	Status  string `json:"status"`
-	Running bool   `json:"running"`
-	Health  string `json:"health"`
+	ID       string `json:"id"`
+	Status   string `json:"status"`
+	Running  bool   `json:"running"`
+	Health   string `json:"health"`
+	ExitCode int    `json:"exit_code"`
 }
 
 func (d LocalDocker) Probe(ctx context.Context) error {
@@ -179,9 +180,10 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 	var arr []struct {
 		ID    string `json:"Id"`
 		State struct {
-			Status  string `json:"Status"`
-			Running bool   `json:"Running"`
-			Health  *struct {
+			Status   string `json:"Status"`
+			Running  bool   `json:"Running"`
+			ExitCode int    `json:"ExitCode"`
+			Health   *struct {
 				Status string `json:"Status"`
 			} `json:"Health"`
 		} `json:"State"`
@@ -192,7 +194,7 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 	if len(arr) == 0 {
 		return nil, errors.New("container not found")
 	}
-	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running}
+	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running, ExitCode: arr[0].State.ExitCode}
 	if arr[0].State.Health != nil {
 		st.Health = arr[0].State.Health.Status
 	}
@@ -308,7 +310,14 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 	if spec.Resources.CPU > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
 	}
+	if spec.WorkingDirectory != "" {
+		args = append(args, "--workdir", spec.WorkingDirectory)
+	}
+	if spec.User != "" {
+		args = append(args, "--user", spec.User)
+	}
 	args = append(args, spec.Image)
+	args = append(args, spec.Command...)
 	return args, nil
 }
 
@@ -392,9 +401,10 @@ func (d *RemoteDocker) Inspect(ctx context.Context, containerName string) (*Cont
 	var arr []struct {
 		ID    string `json:"Id"`
 		State struct {
-			Status  string `json:"Status"`
-			Running bool   `json:"Running"`
-			Health  *struct {
+			Status   string `json:"Status"`
+			Running  bool   `json:"Running"`
+			ExitCode int    `json:"ExitCode"`
+			Health   *struct {
 				Status string `json:"Status"`
 			} `json:"Health"`
 		} `json:"State"`
@@ -405,7 +415,7 @@ func (d *RemoteDocker) Inspect(ctx context.Context, containerName string) (*Cont
 	if len(arr) == 0 {
 		return nil, errors.New("container not found")
 	}
-	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running}
+	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running, ExitCode: arr[0].State.ExitCode}
 	if arr[0].State.Health != nil {
 		st.Health = arr[0].State.Health.Status
 	}
@@ -515,10 +525,14 @@ func docker(ctx context.Context, args ...string) (string, error) {
 }
 
 func dockerWithInput(ctx context.Context, stdin []byte, args ...string) (string, error) {
+	return dockerWithInputLimit(ctx, stdin, maxDockerOutputBytes, args...)
+}
+
+func dockerWithInputLimit(ctx context.Context, stdin []byte, stdoutLimit int, args ...string) (string, error) {
 	start := time.Now()
 	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	out := newLimitedBuffer(maxDockerOutputBytes)
+	out := newLimitedBuffer(stdoutLimit)
 	stderr := newLimitedBuffer(maxDockerErrorBytes)
 	cmd.Stdout = out
 	cmd.Stderr = stderr

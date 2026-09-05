@@ -28,6 +28,9 @@ func TestStreamerAccumulatesPartialText(t *testing.T) {
 	for len(texts) < 3 {
 		select {
 		case f := <-ch:
+			if f.AgentID != 41 {
+				t.Fatalf("stream frame agent=%d, want 41", f.AgentID)
+			}
 			texts = append(texts, f.Text)
 		case <-time.After(time.Second):
 			t.Fatalf("timed out with %d frames: %v", len(texts), texts)
@@ -128,7 +131,7 @@ func TestAckLifecycle(t *testing.T) {
 	ch, cancel := h.subscribeFrames("conv-1")
 	defer cancel()
 
-	s.emitAck("conv-1", "chat-conv-1")
+	s.emitAck("conv-1", "chat-conv-1", 41)
 	s.settleAck("conv-1")
 
 	var got []StreamFrame
@@ -142,6 +145,9 @@ func TestAckLifecycle(t *testing.T) {
 	}
 	if got[0].Phase != "acknowledgement" || got[0].Done {
 		t.Fatalf("ack frame = %+v", got[0])
+	}
+	if got[0].AgentID != 41 {
+		t.Fatalf("ack agent=%d, want 41", got[0].AgentID)
 	}
 	if !got[1].Done || got[1].CallID != got[0].CallID {
 		t.Fatalf("settle frame = %+v, want done on %s", got[1], got[0].CallID)
@@ -211,9 +217,9 @@ func TestAckIDsUniquePerEmission(t *testing.T) {
 	ch, cancel := h.subscribeFrames("conv-1")
 	defer cancel()
 
-	s.emitAck("conv-1", "chat-conv-1")
+	s.emitAck("conv-1", "chat-conv-1", 41)
 	s.settleAck("conv-1")
-	s.emitAck("conv-1", "chat-conv-1")
+	s.emitAck("conv-1", "chat-conv-1", 41)
 	s.settleAck("conv-1")
 
 	var frames []StreamFrame

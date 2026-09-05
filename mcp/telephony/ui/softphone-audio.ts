@@ -6,7 +6,7 @@
 //
 // The AudioContext is opened at 24 kHz so neither direction needs resampling in
 // JS — the browser's own high-quality resampler handles the device rate. If a
-// browser refuses that rate we fall back to linear resampling rather than
+// browser refuses that rate we fall back to band-limited resampling rather than
 // failing the call.
 
 const SAMPLE_RATE = 24_000;
@@ -29,18 +29,22 @@ function pcm16ToFloat(buffer: ArrayBuffer): Float32Array {
   return out;
 }
 
-// Linear resampling fallback, only used when a browser refuses a 24 kHz context.
-function resample(input: Float32Array, from: number, to: number): Float32Array {
-  if (from === to) return input;
-  const ratio = from / to;
-  const out = new Float32Array(Math.floor(input.length / ratio));
-  for (let i = 0; i < out.length; i++) {
-    const pos = i * ratio;
-    const low = Math.floor(pos);
-    const high = Math.min(low + 1, input.length - 1);
-    out[i] = input[low] + (input[high] - input[low]) * (pos - low);
+// The local microphone preview uses the same streaming anti-alias filter as
+// the worker fallback, with independent history for each recording session.
+class PreviewResampler {
+  private history = new Float32Array(64);
+  private phase = 0;
+  process(frame:Float32Array,from:number,to:number):Float32Array {
+    if(from===to)return frame;
+    const input=new Float32Array(64+frame.length);input.set(this.history);input.set(frame,64);
+    const ratio=from/to,cutoff=Math.min(1,to/from)*0.9,values:number[]=[];
+    let pos=this.phase;
+    for(;pos<frame.length;pos+=ratio){const center=pos+32;let value=0,weight=0;
+      for(let j=Math.ceil(center-32);j<=Math.floor(center+32);j++){const x=j-center;const sinc=Math.abs(x)<1e-9?cutoff:Math.sin(Math.PI*cutoff*x)/(Math.PI*x);const w=sinc*(0.5+0.5*Math.cos(Math.PI*x/32));if(j>=0&&j<input.length){value+=input[j]*w;weight+=w;}}
+      values.push(weight?value/weight:0);
+    }
+    this.phase=pos-frame.length;this.history=input.slice(-64);return new Float32Array(values);
   }
-  return out;
 }
 
 function rms(frame: Float32Array): number {
@@ -53,11 +57,15 @@ export type SoftphoneState = "connecting" | "reconnecting" | "live" | "ended" | 
 
 export interface SoftphoneCallbacks {
   onState?: (state: SoftphoneState, detail?: string) => void;
+  onNotice?: (detail:string) => void;
   onLevels?: (mic: number, speaker: number) => void;
   onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
 }
 
 export interface SoftphoneAudioOptions {
+  inputDeviceId?: string;
+  outputDeviceId?: string;
+  outputVolume?: number;
   echoCancellation: boolean;
   noiseSuppression: boolean;
   autoGainControl: boolean;
@@ -107,8 +115,9 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
   highpassFilter: true,
 };
 
-function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {
+export function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {
   return {
+    ...(options.inputDeviceId ? {deviceId:{exact:options.inputDeviceId}} : {}),
     echoCancellation: options.echoCancellation,
     noiseSuppression: options.noiseSuppression,
     autoGainControl: options.autoGainControl,
@@ -202,19 +211,25 @@ export class MicrophoneTestSession {
   private limiterReductionDB = 0;
   private settings: MicrophoneAppliedSettings | null = null;
   private stopped = false;
+  private resampler = new PreviewResampler();
+  private ensureOpen(): void { if (this.stopped) { void this.release(); throw new Error("Microphone test cancelled."); } }
 
   constructor(private readonly onLevel?: (level: number) => void) {}
 
   async start(workletURL: string, options: SoftphoneAudioOptions): Promise<MicrophoneAppliedSettings> {
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
+      this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
       this.settings = appliedMicrophoneSettings(track);
 
-      this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
+      try { this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" }); }
+      catch { this.ctx = new AudioContext({ latencyHint: "interactive" }); }
       if (this.ctx.state === "suspended") await this.ctx.resume();
+      this.ensureOpen();
       await this.ctx.audioWorklet.addModule(workletURL);
+      this.ensureOpen();
       const contextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
       this.capture = new AudioWorkletNode(this.ctx, "softphone-capture", {
@@ -235,7 +250,7 @@ export class MicrophoneTestSession {
           return;
         }
         let frame = event.data;
-        if (contextRate !== SAMPLE_RATE) frame = resample(frame, contextRate, SAMPLE_RATE);
+        if (contextRate !== SAMPLE_RATE) frame = this.resampler.process(frame, contextRate, SAMPLE_RATE);
         const level = rms(frame);
         this.onLevel?.(level);
         const pcm = new Int16Array(floatToPCM16(frame));
@@ -305,6 +320,7 @@ export class SoftphoneSession {
   private capture: AudioWorkletNode | null = null;
   private playback: AudioWorkletNode | null = null;
   private sink: GainNode | null = null;
+  private output: GainNode | null = null;
   private muted = false;
   private closed = false;
   private micLevel = 0;
@@ -336,6 +352,7 @@ export class SoftphoneSession {
     this.callbacks.onState?.("connecting");
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
+      this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
       const applied = appliedMicrophoneSettings(track);
@@ -345,9 +362,13 @@ export class SoftphoneSession {
         noiseSuppression: applied.noiseSuppression, autoGainControl: applied.autoGainControl,
         micInputGainDb: options.inputGainDB,
       };
-      this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
+      try { this.ctx = new AudioContext({ sampleRate:SAMPLE_RATE, latencyHint:"interactive" }); }
+      catch { this.ctx = new AudioContext({latencyHint:"interactive"}); }
       if (this.ctx.state === "suspended") await this.ctx.resume();
+      this.ensureOpen();
+      if (options.outputDeviceId && "setSinkId" in this.ctx) { await (this.ctx as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId); this.ensureOpen(); }
       await this.ctx.audioWorklet.addModule(workletURL);
+      this.ensureOpen();
       this.diagnostics.audioContextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
       this.capture = new AudioWorkletNode(this.ctx, "softphone-capture", {
@@ -362,18 +383,32 @@ export class SoftphoneSession {
       this.sink.gain.value = 0;
       this.capture.connect(this.sink).connect(this.ctx.destination);
       source.connect(this.capture);
-      this.playback.connect(this.ctx.destination);
+      this.output = this.ctx.createGain(); this.output.gain.value = options.outputVolume ?? 1;
+      this.playback.connect(this.output).connect(this.ctx.destination);
       await this.openWorker(mediaURL, workerURL);
+      this.ensureOpen();
+      track.onmute = () => this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser.");
+      track.onunmute = () => this.callbacks.onNotice?.("Microphone input restored.");
+      track.onended = () => { if (!this.closed) this.fail("Microphone disconnected. Select a microphone and reconnect audio."); };
+      this.capture.onprocessorerror = this.playback.onprocessorerror = () => this.fail("Audio processing stopped. Reconnect audio.");
+      this.ctx.onstatechange = () => { if (!this.closed && this.ctx?.state === "suspended") this.callbacks.onState?.("reconnecting", "Browser paused audio. Resume audio to continue."); };
       this.levelTimer = setInterval(() => {
         this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
         this.micLevel *= 0.65;
         this.speakerLevel *= 0.65;
       }, 100);
     } catch (error) {
+      if (this.closed) this.teardown();
       if (!this.closed) this.fail(error instanceof Error ? error.message : "browser audio setup failed");
       throw error;
     }
   }
+
+  private ensureOpen(): void { if (this.closed) { this.teardown(); throw new Error("Audio session was cancelled."); } }
+
+  async resumeAudio(): Promise<void> { await this.ctx?.resume(); if (this.microphoneTransportReady) this.callbacks.onState?.("live"); }
+  setOutputVolume(value:number): void { if (this.output) this.output.gain.value=Math.max(0,Math.min(1,value)); }
+  sendDTMF(digits: string): void { if (/^[0-9*#]+$/.test(digits)) this.sendText(JSON.stringify({type:"dtmf",digits})); }
 
   private installWorkletDiagnostics(): void {
     if (!this.capture || !this.playback) return;
@@ -423,6 +458,7 @@ export class SoftphoneSession {
         if (error) reject(error); else resolve();
       };
       worker.onmessage = (event: MessageEvent) => {
+        if (this.closed) { finish(new Error("audio session closed")); return; }
         const message = event.data;
         if (message?.type === "socket.open") {
           this.opened = true;
@@ -443,7 +479,7 @@ export class SoftphoneSession {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
         }
       };
-      worker.onerror = () => finish(new Error("audio worker failed"));
+      worker.onerror = () => { finish(new Error("audio worker failed")); if (!this.closed) this.fail("Audio worker failed. Reconnect audio."); };
       worker.postMessage({
         type: "init", mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE,
         capturePort: captureChannel.port2, playbackPort: playbackChannel.port2,
@@ -452,9 +488,12 @@ export class SoftphoneSession {
   }
 
   private handleControl(data: string): void {
+    if (this.closed) return;
     try {
-      const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number };
-      if (parsed.type === "pong" && typeof parsed.nonce === "number") {
+      const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number };
+      if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
+      } else if (parsed.type === "pong" && typeof parsed.nonce === "number") {
+        this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
         this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
       } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
@@ -510,13 +549,14 @@ export class SoftphoneSession {
 
   setMuted(muted: boolean): void {
     this.muted = muted;
+    this.worker?.postMessage({type:"muted",value:muted});
     this.capture?.port.postMessage({ type: "muted", value: muted });
     if (muted) this.sendText(JSON.stringify({ type: "interrupt" }));
   }
 
   stop(): void {
-    if (this.closed) return;
-    this.closed = true; this.callbacks.onState?.("ended"); this.teardown();
+    if (!this.closed) this.callbacks.onState?.("ended");
+    this.closed = true; this.teardown();
   }
 
   private fail(detail: string): void {
@@ -535,7 +575,7 @@ export class SoftphoneSession {
     this.worker = null;
     this.capture?.disconnect();
     this.playback?.disconnect();
-    this.sink?.disconnect();
+    this.sink?.disconnect(); this.output?.disconnect(); this.output=null;
     this.stream?.getTracks().forEach((track) => track.stop());
     this.stream = null;
     void this.ctx?.close().catch(() => undefined);

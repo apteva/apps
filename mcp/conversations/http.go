@@ -23,6 +23,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/participants", Handler: a.handleParticipants},
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
 		{Pattern: "/messages", Handler: a.handleMessages},
+		{Pattern: "/changes", Handler: a.handleChanges},
+		{Pattern: "/deliveries", Handler: a.handleDeliveryStatus},
 		{Method: "GET", Pattern: "/stream", Handler: a.handleStream},
 		{Method: "GET", Pattern: "/inbox", Handler: a.handleInbox},
 		{Method: "POST", Pattern: "/message-action", Handler: a.handleMessageAction},
@@ -87,6 +89,33 @@ func requestAgentScope(r *http.Request) (int64, error) {
 	return id, nil
 }
 
+// requestLeadAgentScope parses the optional single-conversation projection.
+// Unlike agent_id, which means any explicit participant, lead_agent_id means
+// the selected agent leads the conversation and is still a participant.
+func requestLeadAgentScope(r *http.Request) (int64, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("lead_agent_id"))
+	if raw == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("lead_agent_id must be a positive integer")
+	}
+	return id, nil
+}
+
+func requestConversationListLimit(r *http.Request) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("limit"))
+	if raw == "" {
+		return 100, nil
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit <= 0 || limit > 200 {
+		return 0, fmt.Errorf("limit must be an integer between 1 and 200")
+	}
+	return limit, nil
+}
+
 func (a *App) authorizeConversation(r *http.Request, id string) (*Conversation, error) {
 	userID, projectID, err := requestIdentity(r)
 	if err != nil {
@@ -137,28 +166,63 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, identityErr.Error(), http.StatusUnauthorized)
 			return
 		}
+		if id := r.URL.Query().Get("id"); id != "" {
+			conv, err := a.authorizeConversation(r, id)
+			if err != nil {
+				http.Error(w, "conversation not found", 404)
+				return
+			}
+			writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
+			return
+		}
 		agentID, scopeErr := requestAgentScope(r)
 		if scopeErr != nil {
 			http.Error(w, scopeErr.Error(), http.StatusBadRequest)
 			return
 		}
-		var conversations []Conversation
-		var err error
-		if r.URL.Query().Get("archived") == "1" {
-			conversations, err = a.store.ListArchivedForUserAndAgent(projectID, userID, agentID, 100)
-		} else {
-			conversations, err = a.store.ListConversationsForUserAndAgent(projectID, userID, agentID, 100)
+		leadAgentID, leadScopeErr := requestLeadAgentScope(r)
+		if leadScopeErr != nil {
+			http.Error(w, leadScopeErr.Error(), http.StatusBadRequest)
+			return
 		}
+		if agentID != 0 && leadAgentID != 0 {
+			http.Error(w, "agent_id and lead_agent_id cannot be combined", http.StatusBadRequest)
+			return
+		}
+		limit, limitErr := requestConversationListLimit(r)
+		if limitErr != nil {
+			http.Error(w, limitErr.Error(), http.StatusBadRequest)
+			return
+		}
+		archived := r.URL.Query().Get("archived") == "1"
+		if archived && leadAgentID != 0 {
+			http.Error(w, "lead_agent_id only lists active conversations", http.StatusBadRequest)
+			return
+		}
+		page, err := a.store.ListConversationPage(projectID, userID, agentID, leadAgentID, archived, r.URL.Query().Get("query"), r.URL.Query().Get("cursor"), limit)
+		conversations := page.Conversations
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		names := map[int64]string{}
+		if ctx := a.appCtx(r); ctx != nil {
+			if agents, err := sdk.ListAgentsVia(ctx.PlatformAPI(), projectID); err == nil {
+				for _, agent := range agents {
+					names[agent.ID] = agent.Name
+				}
+			}
 		}
 		entries := make([]chatListEntry, 0, len(conversations))
 		for _, conv := range conversations {
 			entries = append(entries, chatListEntry{
 				Conversation:  conv,
-				LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID),
+				LeadAgentName: names[conv.LeadAgentID],
 			})
+		}
+		if r.URL.Query().Get("page") == "1" {
+			writeJSON(w, map[string]any{"conversations": entries, "next_cursor": page.NextCursor})
+			return
 		}
 		writeJSON(w, entries)
 	case http.MethodPost:
@@ -282,6 +346,10 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "audience must be public or operator", http.StatusBadRequest)
 		return
 	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(body.ConversationKey)), "app:") && strings.HasSuffix(strings.ToLower(strings.TrimSpace(body.ConversationKey)), ":inbox") {
+		http.Error(w, "reserved conversation key", http.StatusBadRequest)
+		return
+	}
 	origin := ""
 	if body.ConversationKey != "" {
 		origin = "app"
@@ -290,21 +358,17 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		ProjectID: projectID, LeadAgentID: lead,
 		Title: body.Title, OwnerUserID: userID,
 		ConversationKey: body.ConversationKey, Audience: audience, Origin: origin,
-		Directive: body.Directive,
+		Directive: body.Directive, AgentIDs: agents,
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	for _, agentID := range agents {
-		if agentID == lead || agentID == 0 {
-			continue
-		}
-		if err := a.store.AddAgentParticipant(conv.ID, agentID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if _, err := a.authorizeConversation(r, conv.ID); err != nil {
+		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
 	}
+
 	conv, _ = a.store.GetConversation(conv.ID)
 	writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
 }
@@ -484,6 +548,17 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
+		if r.URL.Query().Get("page") == "1" {
+			before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			page, err := a.store.MessagePage(conversationID, before, limit)
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			writeJSON(w, page)
+			return
+		}
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		messages, err := a.store.Transcript(conversationID, since, limit)
@@ -513,6 +588,8 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		ChatID         string       `json:"chat_id"`
 		Content        string       `json:"content"`
 		ClientID       string       `json:"client_message_id"`
+		Intent         string       `json:"intent"`
+		TargetCallID   string       `json:"target_call_id"`
 		Attachments    []Attachment `json:"attachments"`
 		TargetAgentIDs []int64      `json:"target_agent_ids"`
 	}
@@ -527,8 +604,27 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat_id required", http.StatusBadRequest)
 		return
 	}
+	body.Intent = strings.TrimSpace(body.Intent)
+	switch body.Intent {
+	case "", messageIntentSoftBreak:
+	default:
+		http.Error(w, "unsupported message intent", http.StatusBadRequest)
+		return
+	}
+	if len(body.TargetCallID) > 256 || strings.ContainsAny(body.TargetCallID, "\r\n\x00") {
+		http.Error(w, "invalid target_call_id", http.StatusBadRequest)
+		return
+	}
+	if body.Intent != messageIntentSoftBreak && body.TargetCallID != "" {
+		http.Error(w, "target_call_id requires soft_break intent", http.StatusBadRequest)
+		return
+	}
 	if strings.TrimSpace(body.Content) == "" && len(body.Attachments) == 0 {
 		http.Error(w, "content or attachments required", http.StatusBadRequest)
+		return
+	}
+	if body.Intent == messageIntentSoftBreak && len(body.Attachments) != 0 {
+		http.Error(w, "soft_break does not support attachments", http.StatusBadRequest)
 		return
 	}
 	conv, err := a.authorizeConversation(r, conversationID)
@@ -552,10 +648,17 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	metadata := map[string]any{"target_agent_ids": targets}
+	if body.Intent != "" {
+		metadata["intent"] = body.Intent
+	}
+	if body.TargetCallID != "" {
+		metadata["target_call_id"] = body.TargetCallID
+	}
 	msg, inserted, err := a.appendAndDeliver(a.appCtx(r), conv, &Message{
 		ConversationID: conv.ID, Role: "user", Content: body.Content,
 		UserID: requestUser(r), ClientID: body.ClientID, Attachments: body.Attachments,
-		Metadata: map[string]any{"target_agent_ids": targets},
+		Metadata: metadata,
 	})
 	if err != nil {
 		http.Error(w, "insert failed", http.StatusInternalServerError)
@@ -664,6 +767,12 @@ func isRouteWordByte(b byte) bool {
 
 func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {
 	text := "[chat] " + msg.Content
+	if messageIntent(msg) == messageIntentSoftBreak {
+		text = "[chat soft break] The user requested a conversational break while work may still be in progress. " +
+			"This is a new advisory event: no model call, tool, or thread was canceled. " +
+			"At the next decision boundary, reconsider the current work and decide whether to finish a safety-critical action, pause future work, redirect, or ask for clarification. " +
+			"User request: " + msg.Content
+	}
 	if conv.Kind == "room" {
 		text += fmt.Sprintf("\nConversation: %s (%s). Addressed agent: %d. Other addressed agent ids: %v. Reply with conversations_send to this conversation.",
 			conv.Title, conv.ID, agentID, targets)
@@ -714,6 +823,8 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	var cancel, cancelFrames func()
 	switch {
 	case conversationID != "":
+		ch, cancel = a.hub.subscribeConversation(conversationID)
+		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		if since > 0 {
 			backlog, err := a.store.Transcript(conversationID, since, 200)
@@ -724,8 +835,6 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 				flusher.Flush()
 			}
 		}
-		ch, cancel = a.hub.subscribeConversation(conversationID)
-		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
 	case r.URL.Query().Get("scope") == "user":
 		ch, cancel = a.hub.subscribeUser(projectID + ":" + fmt.Sprint(userID))
 	}
@@ -738,11 +847,20 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	if frames == nil {
 		frames = make(chan StreamFrame) // never fires for user scope
 	}
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
 	for {
 		select {
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": heartbeat\n\n")
+			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		case f := <-frames:
+			allowed, err := a.store.UserCanAccessConversation(f.ConversationID, projectID, userID)
+			if err != nil || !allowed {
+				continue
+			}
 			// Named event: the client's `stream` listener gets ephemeral
 			// bubbles; default-event listeners never see them.
 			encoded, err := json.Marshal(f)
@@ -753,6 +871,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		case m, open := <-ch:
 			if !open {
 				return
+			}
+			allowed, err := a.store.UserCanAccessConversation(m.ConversationID, projectID, userID)
+			if err != nil || !allowed {
+				continue
 			}
 			writeSSE(w, m)
 			flusher.Flush()
@@ -779,6 +901,15 @@ func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if r.URL.Query().Get("page") == "1" {
+		page, err := a.store.InboxPage(projectID, userID, agentID, limit, r.URL.Query().Get("cursor"))
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		writeJSON(w, page)
+		return
+	}
 	items, err := a.store.InboxForAgent(projectID, userID, agentID, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -892,7 +1023,7 @@ func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDeliveryFailures(w http.ResponseWriter, r *http.Request) {
-	_, projectID, identityErr := requestIdentity(r)
+	userID, projectID, identityErr := requestIdentity(r)
 	if identityErr != nil {
 		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
 		return
@@ -905,13 +1036,33 @@ func (a *App) handleDeliveryFailures(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, items)
+		visible := items[:0]
+		for _, item := range items {
+			ok, err := a.store.UserCanAccessConversation(item.ConversationID, projectID, userID)
+			if err != nil {
+				http.Error(w, "authorization unavailable", 500)
+				return
+			}
+			if ok {
+				visible = append(visible, item)
+			}
+		}
+		writeJSON(w, visible)
 	case http.MethodPost:
 		var body struct {
 			ID int64 `json:"id"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&body); err != nil || body.ID <= 0 {
 			http.Error(w, "id required", http.StatusBadRequest)
+			return
+		}
+		var convID string
+		if err := a.store.db.QueryRow(`SELECT m.conversation_id FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE d.id=?`, body.ID).Scan(&convID); err != nil {
+			http.Error(w, "delivery not found", 404)
+			return
+		}
+		if _, err := a.authorizeConversation(r, convID); err != nil {
+			http.Error(w, "delivery not found", 404)
 			return
 		}
 		if err := a.store.RetryFailedDelivery(projectID, body.ID); err != nil {

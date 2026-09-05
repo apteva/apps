@@ -10,6 +10,7 @@ export const readJournal      = (id: number, opts: { kind?: string; limit?: numb
   apiGet<{ entries: JournalEntry[] }>(`/portfolios/${id}/journal`, opts).then(r => r.entries);
 
 export type PlaceOrderArgs = {
+  idempotency_key?: string;
   symbol: string;
   side: "buy" | "sell" | "yes" | "no";
   outcome?: "yes" | "no";
@@ -22,8 +23,14 @@ export type PlaceOrderArgs = {
 };
 
 export type PlaceOrderResult =
-  | { order_id: string; status: "working" | "filled" }
+  | { order_id: string; status: "working" | "filled"; uncertain?: boolean; detail?: string }
   | { status: "rejected"; code: string; detail: string };
 
 export const placeOrder = (portfolioId: number, args: PlaceOrderArgs) =>
   apiPost<PlaceOrderResult>(`/portfolios/${portfolioId}/orders`, args);
+
+export const setLiveArmed = (portfolioId: number, armed: boolean) =>
+  apiPost<{ portfolio: Portfolio }>(`/portfolios/${portfolioId}/arm`, {
+    armed,
+    confirmation: armed ? "LIVE MONEY" : "",
+  }).then((result) => result.portfolio);

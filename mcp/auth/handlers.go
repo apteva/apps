@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,16 +104,12 @@ func (a *App) handleOIDCConfig(w http.ResponseWriter, r *http.Request) {
 	base := orgBaseURL(ctx, r, org)
 	platformBase := platformBaseURL(ctx, r)
 	resp := map[string]any{
-		"issuer":                                base,
-		"jwks_uri":                              base + "/.well-known/jwks.json",
-		"authorization_endpoint":                base + "/oauth/authorize",
-		"token_endpoint":                        platformBase + "/oauth/token",
-		"userinfo_endpoint":                     platformBase + "/me",
-		"id_token_signing_alg_values_supported": []string{"EdDSA"},
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token", "password", "client_credentials"},
-		"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post", "client_secret_basic"},
+		"issuer": base, "jwks_uri": base + "/.well-known/jwks.json",
+		"userinfo_endpoint": platformBase + "/me", "login_endpoint": platformBase + "/login", "refresh_endpoint": platformBase + "/refresh",
+		"protocol": "apteva-auth", "oauth_supported": false, "mfa_supported": false, "magic_link_supported": false,
+		"access_token_signing_alg_values_supported": []string{"EdDSA"},
 	}
+
 	httpJSON(w, resp)
 }
 
@@ -129,13 +127,20 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body signupRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
 	body.IP = r.RemoteAddr
 	body.UserAgent = r.UserAgent()
 	body.Origin = r.Header.Get("Origin")
+	if id, secret, ok := r.BasicAuth(); ok {
+		if id != body.ClientID {
+			httpErr(w, 401, "invalid_client")
+			return
+		}
+		body.ClientSecret = secret
+	}
 
 	res, status, err := performSignup(ctx, pid, body, mintSessionFor(r))
 	if err != nil {
@@ -143,7 +148,7 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if res.VerificationRequired {
-		httpStatus(w, status, map[string]any{"user": res.User, "verification_required": true})
+		httpStatus(w, status, res)
 		return
 	}
 	resp := map[string]any{
@@ -174,6 +179,7 @@ type signupRequest struct {
 	Password         string `json:"password"`
 	DisplayName      string `json:"display_name"`
 	ClientID         string `json:"client_id"`
+	ClientSecret     string `json:"client_secret"`
 	OrganizationSlug string `json:"organization_slug"`
 	ContinueURL      string `json:"continue_url"`
 	IP               string `json:"-"`
@@ -195,17 +201,18 @@ type signupResult struct {
 	AptevaAccessToken    string                `json:"apteva_access_token,omitempty"`
 	AptevaExpiresIn      int                   `json:"apteva_expires_in,omitempty"`
 	VerificationRequired bool                  `json:"verification_required,omitempty"`
+	DeliveryError        string                `json:"delivery_error,omitempty"`
 }
 
 // mintSessionFor returns a closure that calls mintSession with the
 // originating HTTP request — letting performSignup stay HTTP-agnostic
 // (the MCP path supplies a closure backed by a synthetic request that
 // carries just the IP/UA the agent passed in).
-type sessionMinter func(ctx *sdk.AppCtx, pid string, org *Organization, user *User, client *Client) (tokenPair, error)
+type sessionMinter func(ctx *sdk.AppCtx, tx *sql.Tx, pid string, org *Organization, user *User, client *Client) (tokenPair, error)
 
 func mintSessionFor(r *http.Request) sessionMinter {
-	return func(ctx *sdk.AppCtx, pid string, org *Organization, user *User, client *Client) (tokenPair, error) {
-		return mintSession(ctx, pid, org, user, client, r)
+	return func(ctx *sdk.AppCtx, tx *sql.Tx, pid string, org *Organization, user *User, client *Client) (tokenPair, error) {
+		return mintSessionTx(ctx, tx, pid, org.ID, user.ID, client.ClientID, r, "", time.Time{}, "")
 	}
 }
 
@@ -223,6 +230,18 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if clientErr != nil {
 		return nil, http.StatusBadRequest, clientErr
 	}
+	if err := authenticateClient(ctx, pid, client, nil, body.ClientSecret); err != nil {
+		return nil, 401, err
+	}
+	if err := validateEmail(body.Email); err != nil {
+		return nil, 400, err
+	}
+	if len(body.DisplayName) > 256 {
+		return nil, 400, errors.New("display_name too long")
+	}
+	if err := consumeRate(ctx.AppDB(), pid+":signup:"+client.ClientID, 600, time.Hour); err != nil {
+		return nil, 429, err
+	}
 	if err := requireAllowedOrigin(client, body.Origin); err != nil {
 		return nil, http.StatusForbidden, err
 	}
@@ -233,10 +252,12 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if orgErr != nil {
 		return nil, http.StatusBadRequest, orgErr
 	}
-	if reason := validatePassword(body.Password,
-		cfgInt(ctx, "password_min_length", 8),
-		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-		return nil, http.StatusBadRequest, errors.New(reason)
+	if err := checkPasswordPolicy(ctx, org, body.Password); err != nil {
+		return nil, 400, err
+	}
+	policy, _ := effectivePolicy(ctx, org)
+	if client.RequireMFA {
+		return nil, 403, errors.New("mfa_required: MFA authentication is not implemented")
 	}
 	if existing, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, body.Email); err == nil && existing != nil {
 		dbAudit(ctx.AppDB(), pid, org.ID, &existing.ID, client.ClientID, "signup_conflict",
@@ -250,29 +271,54 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	verificationRequired := cfgBool(ctx, "email_verification_required", true)
-	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired, "{}")
+	tx, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
+	if err != nil {
+		return nil, 500, err
+	}
+	defer tx.Rollback()
+	org, err = dbGetOrgByID(tx, pid, org.ID)
+	if err != nil || org.Status != "active" {
+		return nil, 403, errors.New("organization inactive")
+	}
+	policy, err = effectivePolicy(ctx, org)
+	if err != nil {
+		return nil, 400, err
+	}
+	if err = checkPasswordPolicy(ctx, org, body.Password); err != nil {
+		return nil, 400, err
+	}
+	verificationRequired := policy.Verify
+	uid, err := dbCreateUser(tx, pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired, "{}")
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
+	user, err := dbGetUserByID(tx, pid, org.ID, uid)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, client.ClientID, "signup", body.IP, body.UserAgent, nil)
+	dbAudit(tx, pid, org.ID, &uid, client.ClientID, "signup", body.IP, body.UserAgent, nil)
 
 	if verificationRequired {
+		if err = tx.Commit(); err != nil {
+			return nil, 500, err
+		}
+		deliveryError := ""
 		if err := issueVerifyEmailTokenForClient(ctx, pid, org, uid, body.Email, recoveryLinkOptions{
 			ClientID: client.ClientID, ContinueURL: body.ContinueURL,
 		}); err != nil {
-			ctx.Logger().Warn("verify-email send failed", "err", err)
+			ctx.Logger().Warn("verify-email send failed")
+			deliveryError = "Account created; verification email was not delivered. Retry verification after email delivery is configured."
 		}
-		return &signupResult{User: user, VerificationRequired: true}, http.StatusAccepted, nil
+		return &signupResult{User: user, VerificationRequired: true, DeliveryError: deliveryError}, http.StatusAccepted, nil
 	}
 
-	tokens, err := mint(ctx, pid, org, user, client)
+	tokens, err := mint(ctx, tx, pid, org, user, client)
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return nil, 500, err
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
 	if err != nil {
@@ -313,9 +359,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Email            string `json:"email"`
 		Password         string `json:"password"`
 		ClientID         string `json:"client_id"`
+		ClientSecret     string `json:"client_secret"`
 		OrganizationSlug string `json:"organization_slug"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -334,12 +381,27 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := authenticateClient(ctx, pid, client, r, body.ClientSecret); err != nil {
+		httpErr(w, 401, err.Error())
+		return
+	}
+	policy, err := effectivePolicy(ctx, org)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if err := consumeRate(ctx.AppDB(), pid+":login:"+client.ClientID+":"+strings.ToLower(strings.TrimSpace(body.Email)), 30, time.Minute); err != nil {
+		httpErr(w, 429, "rate_limited")
+		return
+	}
+
 	user, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, body.Email)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if user == nil {
+		_, _ = verifyPassword(dummyPasswordHash(), body.Password)
 		dbAudit(ctx.AppDB(), pid, org.ID, nil, client.ClientID, "login_failed",
 			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "no_user", "email": body.Email})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
@@ -374,22 +436,24 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		threshold := cfgInt(ctx, "lockout_threshold", 5)
-		var lockUntil time.Time
-		if threshold > 0 && newFailureCount(user)+1 >= threshold {
-			minutes := cfgInt(ctx, "lockout_initial_minutes", 15)
-			lockUntil = time.Now().Add(time.Duration(minutes) * time.Minute)
+		if err := markLoginFailure(ctx, pid, org, user, policy); err != nil {
+			httpErr(w, 500, "login unavailable")
+			return
 		}
-		_ = dbMarkLoginFailure(ctx.AppDB(), pid, org.ID, user.ID, lockUntil)
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
 			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "bad_password"})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	if cfgBool(ctx, "email_verification_required", true) && user.EmailVerifiedAt == "" {
+	if policy.Verify && user.EmailVerifiedAt == "" {
 		dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login_failed",
 			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "email_unverified"})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "email_unverified"})
+		return
+	}
+
+	if err := sessionEligibility(ctx, org, user, client); err != nil {
+		httpErr(w, 403, err.Error())
 		return
 	}
 
@@ -442,9 +506,10 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RefreshToken     string `json:"refresh_token"`
 		ClientID         string `json:"client_id"`
+		ClientSecret     string `json:"client_secret"`
 		OrganizationSlug string `json:"organization_slug"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -462,66 +527,13 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash := hashToken(body.RefreshToken)
-	sess, err := dbFindActiveSessionByRefresh(ctx.AppDB(), pid, hash)
+	if err := authenticateClient(ctx, pid, client, r, body.ClientSecret); err != nil {
+		httpErr(w, 401, err.Error())
+		return
+	}
+	tokens, org, user, err := refreshSession(ctx, pid, client, body.RefreshToken, strings.ToLower(strings.TrimSpace(body.OrganizationSlug)), r)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if sess == nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-	if sess.ClientID != client.ClientID {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-	// The session carries the org it was minted under. For single-org
-	// clients we cross-check that the session's org matches the
-	// client's org (defense-in-depth — they're the same partition,
-	// mismatching would be a strong signal of cross-org replay). For
-	// multi-org clients we accept whichever org the session was issued
-	// for, but if the caller passed organization_slug we also verify
-	// it matches the session — a stale-but-correct hint shouldn't
-	// override the session, but a *wrong* one is a red flag.
-	if client.OrganizationID > 0 && sess.OrganizationID != client.OrganizationID {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-	org, err := dbGetOrgByID(ctx.AppDB(), pid, sess.OrganizationID)
-	if err != nil {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-	if org.Status != "active" {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-	if hint := strings.TrimSpace(strings.ToLower(body.OrganizationSlug)); hint != "" && hint != org.Slug {
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-
-	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, sess.UserID)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if user.Status != "active" {
-		_ = dbRevokeSession(ctx.AppDB(), pid, org.ID, sess.ID)
-		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
-		return
-	}
-
-	if client.RefreshRotation {
-		if err := dbRevokeSession(ctx.AppDB(), pid, org.ID, sess.ID); err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-	}
-	tokens, err := mintSession(ctx, pid, org, user, client, r)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, 401, err.Error())
 		return
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
@@ -562,13 +574,17 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RefreshToken string `json:"refresh_token"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := decodeRequest(w, r, &body); err != nil {
+		httpErr(w, 400, "invalid JSON")
+		return
+	}
 	if body.RefreshToken != "" {
-		hash := hashToken(body.RefreshToken)
-		if sess, err := dbFindActiveSessionByRefresh(ctx.AppDB(), pid, hash); err == nil && sess != nil {
-			_ = dbRevokeSession(ctx.AppDB(), pid, sess.OrganizationID, sess.ID)
-			uid := sess.UserID
-			dbAudit(ctx.AppDB(), pid, sess.OrganizationID, &uid, sess.ClientID, "logout", r.RemoteAddr, r.UserAgent(), nil)
+		var family string
+		if err := ctx.AppDB().QueryRow(`SELECT IFNULL(family_id,'') FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(body.RefreshToken)).Scan(&family); err == nil && family != "" {
+			if err := revokeFamily(ctx.AppDB(), pid, family); err != nil {
+				httpErr(w, 500, "logout unavailable")
+				return
+			}
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -624,7 +640,7 @@ func (a *App) handleMeMetadata(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Metadata *json.RawMessage `json:"metadata"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -660,6 +676,10 @@ func (a *App) authenticatedBearerUser(w http.ResponseWriter, r *http.Request, ct
 		return nil, nil, false
 	}
 	token := strings.TrimPrefix(authz, prefix)
+	if len(token) > 16000 {
+		httpErr(w, 401, "invalid_token")
+		return nil, nil, false
+	}
 
 	// Peek the org slug out of the unverified payload so we know which
 	// org's keys to load. Then verify against those keys — a token
@@ -707,9 +727,36 @@ func (a *App) authenticatedBearerUser(w http.ResponseWriter, r *http.Request, ct
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "user_inactive"})
 		return nil, nil, false
 	}
+	if org.Status != "active" {
+		httpErr(w, 401, "organization_inactive")
+		return nil, nil, false
+	}
+	cid, _ := claims["azp"].(string)
+	sid, _ := claims["sid"].(string)
+	iss, _ := claims["iss"].(string)
+	aud, _ := claims["aud"].(string)
+	client, err := dbGetClientByClientID(ctx.AppDB(), pid, cid)
+	if err != nil || sid == "" || claims["token_use"] != "access" || iss != orgBaseURL(ctx, r, org) {
+		httpErr(w, 401, "invalid_token")
+		return nil, nil, false
+	}
+	expectedAud := client.JWTAudience
+	if expectedAud == "" {
+		expectedAud = cid
+	}
+	if aud != expectedAud || sessionEligibility(ctx, org, user, client) != nil {
+		httpErr(w, 401, "invalid_token")
+		return nil, nil, false
+	}
+	var active int
+	err = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM auth_session_families WHERE id=? AND project_id=? AND organization_id=? AND user_id=? AND client_id=? AND revoked_at IS NULL AND expires_at>?`, sid, pid, org.ID, user.ID, cid, rfc3339(time.Now())).Scan(&active)
+	if err != nil || active != 1 {
+		httpErr(w, 401, "session_revoked")
+		return nil, nil, false
+	}
 	tokenVersion, hasVersion := jwtInt64Claim(claims, "authorization_version")
 	if (hasVersion && tokenVersion != user.AuthorizationVersion) ||
-		(!hasVersion && user.AuthorizationVersion > 1) {
+		!hasVersion {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{
 			"error":  "stale_authorization",
 			"detail": "refresh the session to receive current roles and permissions",
@@ -735,82 +782,9 @@ type tokenPair struct {
 // mintSession issues a fresh access + refresh token pair, persisting
 // the refresh row. Uses the org's per-org signing key; the JWT carries
 // the org slug in the new `org` claim and in the `iss` URL.
-func mintSession(ctx *sdk.AppCtx, projectID string, org *Organization, user *User, client *Client, r *http.Request) (tokenPair, error) {
-	kid, priv, err := dbActiveSigningKey(ctx.AppDB(), projectID, org.ID)
-	if err != nil {
-		return tokenPair{}, err
-	}
-
-	accessTTL := time.Duration(cfgInt(ctx, "jwt_access_ttl_seconds", 900)) * time.Second
-	if client.AccessTokenTTLSeconds > 0 {
-		accessTTL = time.Duration(client.AccessTokenTTLSeconds) * time.Second
-	}
-	refreshTTLDays := cfgInt(ctx, "jwt_refresh_ttl_days", 30)
-	refreshTTL := time.Duration(refreshTTLDays) * 24 * time.Hour
-	if client.RefreshTokenTTLSeconds > 0 {
-		refreshTTL = time.Duration(client.RefreshTokenTTLSeconds) * time.Second
-	}
-
-	now := time.Now()
-	aud := client.JWTAudience
-	if aud == "" {
-		aud = client.ClientID
-	}
-	authorization, err := dbAuthorizationContext(ctx.AppDB(), projectID, org, user.ID)
-	if err != nil {
-		return tokenPair{}, err
-	}
-	claims := jwtClaims{
-		Iss:   orgBaseURL(ctx, r, org),
-		Sub:   uintToStr(user.ID),
-		Aud:   aud,
-		Azp:   client.ClientID,
-		Iat:   now.Unix(),
-		Exp:   now.Add(accessTTL).Unix(),
-		Email: user.Email,
-		EVer:  user.EmailVerifiedAt != "",
-		Extra: map[string]any{
-			"org":                   org.Slug, // legacy claim
-			"user_id":               authorization.UserID,
-			"organization_id":       authorization.OrganizationID,
-			"organization_slug":     authorization.OrganizationSlug,
-			"roles":                 authorization.Roles,
-			"permissions":           authorization.Permissions,
-			"authorization_version": authorization.AuthorizationVersion,
-		},
-	}
-	access, err := jwtSign(priv, kid, claims)
-	if err != nil {
-		return tokenPair{}, err
-	}
-	refresh, err := randSlug(32)
-	if err != nil {
-		return tokenPair{}, err
-	}
-	expiresAt := now.Add(refreshTTL)
-	if _, err := dbCreateSession(ctx.AppDB(), projectID, org.ID, user.ID, client.ClientID,
-		hashToken(refresh), r.UserAgent(), r.RemoteAddr, expiresAt); err != nil {
-		return tokenPair{}, err
-	}
-	return tokenPair{
-		access: access, refresh: refresh, expiresIn: int(accessTTL.Seconds()),
-		authorization: authorization,
-	}, nil
-}
 
 func jwtInt64Claim(claims map[string]any, key string) (int64, bool) {
-	switch v := claims[key].(type) {
-	case float64:
-		return int64(v), true
-	case json.Number:
-		n, err := v.Int64()
-		return n, err == nil
-	case int64:
-		return v, true
-	case int:
-		return int64(v), true
-	}
-	return 0, false
+	return strictID(claims[key], false)
 }
 
 // requireClient looks up the client by id. Does NOT resolve the org —
@@ -846,8 +820,11 @@ func requireClient(ctx *sdk.AppCtx, projectID, clientID string) (*Client, error)
 
 func requireAllowedOrigin(client *Client, origin string) error {
 	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
-	if origin == "" || client == nil || len(client.AllowedOrigins) == 0 {
+	if origin == "" {
 		return nil
+	}
+	if client == nil {
+		return errors.New("client required")
 	}
 	for _, allowed := range client.AllowedOrigins {
 		allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
@@ -868,6 +845,9 @@ func validateRecoveryContinueURL(client *Client, raw string) error {
 		return errors.New("continue_url must be an absolute http(s) URL")
 	}
 	origin := u.Scheme + "://" + u.Host
+	if client == nil {
+		return errors.New("client required")
+	}
 	for _, allowed := range client.AllowedOrigins {
 		if strings.TrimRight(strings.TrimSpace(allowed), "/") == origin || strings.TrimSpace(allowed) == "*" {
 			return nil
@@ -920,6 +900,9 @@ func resolveOrgForRequest(ctx *sdk.AppCtx, projectID string, client *Client, bod
 		}
 		org = o
 	}
+	if bodyOrgSlug != "" && strings.ToLower(strings.TrimSpace(bodyOrgSlug)) != org.Slug {
+		return nil, errors.New("organization does not match client")
+	}
 	if org.Status != "active" {
 		return nil, errors.New("organization archived")
 	}
@@ -960,37 +943,24 @@ func userLocked(u *User) bool {
 	return t.After(time.Now())
 }
 
-func newFailureCount(u *User) int {
-	if u == nil || globalCtx == nil {
-		return 0
-	}
-	var n int
-	_ = globalCtx.AppDB().QueryRow(
-		`SELECT failed_login_count FROM users WHERE id = ?`, u.ID).Scan(&n)
-	return n
-}
-
-// platformBaseURL — the URL the SaaS frontend hits for /signup, /login,
-// /token, /me, etc. Resolution: explicit app_url override → SDK
-// PlatformInfo → request host. NB: this is *not* the JWT issuer;
-// orgBaseURL is, because issuers must be org-prefixed in v0.4.0.
 func platformBaseURL(ctx *sdk.AppCtx, r *http.Request) string {
 	if ctx != nil {
 		if v := cfgStr(ctx, "app_url", ""); v != "" {
+			u, err := url.Parse(v)
+			if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return ""
+			}
 			return strings.TrimRight(v, "/")
 		}
 		if info, err := ctx.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
-			return strings.TrimRight(info.PublicURL, "/")
+			base := strings.TrimRight(info.PublicURL, "/") + "/api/apps/auth"
+			if id, ok := parseUint(os.Getenv("APTEVA_INSTALL_ID")); ok {
+				base += "/_install/" + uintToStr(id)
+			}
+			return base
 		}
 	}
-	if r == nil {
-		return ""
-	}
-	scheme := "https"
-	if r.TLS == nil {
-		scheme = "http"
-	}
-	return scheme + "://" + r.Host
+	return ""
 }
 
 // orgBaseURL — the JWT issuer string + the prefix for org-scoped
@@ -999,6 +969,9 @@ func platformBaseURL(ctx *sdk.AppCtx, r *http.Request) string {
 // signing keys somehow collide.
 func orgBaseURL(ctx *sdk.AppCtx, r *http.Request, org *Organization) string {
 	base := platformBaseURL(ctx, r)
+	if base == "" {
+		return ""
+	}
 	if org == nil {
 		return base
 	}
@@ -1012,20 +985,8 @@ func publicBaseURL(ctx *sdk.AppCtx, r *http.Request) string {
 }
 
 func parseUint(s string) (int64, bool) {
-	if s == "" {
-		return 0, false
-	}
-	var n int64
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return 0, false
-		}
-		n = n*10 + int64(r-'0')
-		if n < 0 {
-			return 0, false
-		}
-	}
-	return n, true
+	n, err := strconv.ParseInt(s, 10, 64)
+	return n, err == nil && n > 0
 }
 
 func uintToStr(n int64) string {

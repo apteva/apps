@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"image"
 	"image/jpeg"
 	"image/png"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,6 +30,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/clickguard"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
+	"github.com/apteva/apps/mcp/computer/internal/browser/downloads"
 	"github.com/apteva/apps/mcp/computer/internal/browser/environment"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
@@ -63,6 +66,8 @@ type Options struct {
 }
 
 type Computer struct {
+	tabManager  *cdptabs.Manager
+	tabTrackers map[string]*stability.Tracker
 	display     computer.DisplaySize
 	opts        Options
 	allocCtx    context.Context
@@ -111,6 +116,7 @@ type Computer struct {
 	// fetch failed; see WARN log line for cause.
 	debugURL    string
 	environment computer.EnvironmentOptions
+	downloads   *downloads.Tracker
 }
 
 // pickFreePort asks the OS for an unused TCP port on loopback by
@@ -340,7 +346,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	// it breaks the network service IPC: Chrome launches and CDP connects,
 	// but every navigation fails with ERR_CONNECTION_RESET because the
 	// network service can't initialize without the sandbox scaffolding.
-	if runtime.GOOS != "windows" {
+	if os.Getenv("APTEVA_CHROME_NO_SANDBOX") == "1" {
 		opts = append(opts, chromedp.Flag("no-sandbox", true))
 	}
 
@@ -416,7 +422,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 		// only, allowing any origin doesn't widen the attack surface;
 		// it just lets our local viewer page (served from a different
 		// loopback port) actually connect.
-		chromedp.Flag("remote-allow-origins", "*"),
+		chromedp.Flag("remote-allow-origins", "http://localhost:"+strconv.Itoa(debugPort)),
 	)
 
 	// Persistent context: when the agent passed a context_id, point
@@ -438,7 +444,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	}
 
 	fmt.Fprintf(os.Stderr, "[BROWSER] allocator opts count=%d (no-sandbox=%v win-defaults=%v)\n",
-		len(opts), runtime.GOOS != "windows",
+		len(opts), os.Getenv("APTEVA_CHROME_NO_SANDBOX") == "1",
 		runtime.GOOS == "windows" && os.Getenv("APTEVA_CHROME_DEFAULT_WIN") != "0")
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
@@ -450,6 +456,25 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 		allocCancel()
 		return fmt.Errorf("local chrome: failed to start: %w (goos=%s)", err, runtime.GOOS)
 	}
+	downloadDir, err := os.MkdirTemp("", "apteva-computer-downloads-")
+	if err != nil {
+		cancel()
+		allocCancel()
+		return fmt.Errorf("local chrome: create download directory: %w", err)
+	}
+	downloadTracker := downloads.New(downloads.Options{Directory: downloadDir, Lifetime: allocCtx})
+	if err := downloadTracker.Attach(ctx); err != nil {
+		_ = downloadTracker.Close()
+		cancel()
+		allocCancel()
+		return fmt.Errorf("local chrome: enable downloads: %w", err)
+	}
+	downloadReady := false
+	defer func() {
+		if !downloadReady {
+			_ = downloadTracker.Close()
+		}
+	}()
 
 	// Proxy auth: Chrome can't accept inline credentials in the
 	// --proxy-server flag, so we intercept the proxy's 407 challenge
@@ -457,7 +482,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	// Without this, an http://user:pass@proxy URL would simply 407
 	// every request. Skipped when the proxy needs no auth.
 	if useProxy && (proxyUser != "" || proxyPass != "") {
-		if err := chromedp.Run(ctx, fetch.Enable().WithHandleAuthRequests(true)); err != nil {
+		if err := cdputil.Run(ctx, fetch.Enable().WithHandleAuthRequests(true)); err != nil {
 			cancel()
 			allocCancel()
 			return fmt.Errorf("local chrome: enable Fetch domain for proxy auth: %w", err)
@@ -475,7 +500,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	// caller asked for. mobile=false keeps desktop layout; deviceScaleFactor=1
 	// avoids retina double-pixel screenshots that would then need
 	// downscaling in scaleToDisplay.
-	if err := chromedp.Run(ctx,
+	if err := cdputil.Run(ctx,
 		emulation.SetDeviceMetricsOverride(
 			int64(display.Width), int64(display.Height), 1, false,
 		),
@@ -491,7 +516,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	// (Cloudflare's challenge JS, generic webdriver-checkers, etc.).
 	// Failures here are non-fatal: a launched-but-unstealthed Chrome
 	// is still useful for friendly sites.
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	if err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		_, err := page.AddScriptToEvaluateOnNewDocument(stealthScript).Do(ctx)
 		return err
 	})); err != nil {
@@ -500,13 +525,13 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 
 	// Verify the override stuck.
 	var vpWidth, vpHeight int
-	chromedp.Run(ctx, chromedp.Evaluate(`window.innerWidth`, &vpWidth))
-	chromedp.Run(ctx, chromedp.Evaluate(`window.innerHeight`, &vpHeight))
+	cdputil.Run(ctx, chromedp.Evaluate(`window.innerWidth`, &vpWidth))
+	cdputil.Run(ctx, chromedp.Evaluate(`window.innerHeight`, &vpHeight))
 
 	// User agent + process identity. Useful when diagnosing sandbox /
 	// elevation issues ("running as Admin" on Windows refuses to sandbox).
 	var ua string
-	chromedp.Run(ctx, chromedp.Evaluate(`navigator.userAgent`, &ua))
+	cdputil.Run(ctx, chromedp.Evaluate(`navigator.userAgent`, &ua))
 
 	// UA rewrite: even with --headless=new, some Chromium builds
 	// still leak "HeadlessChrome" in the UA string. Stripping it via
@@ -515,7 +540,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	// patched in the same call when sets the right metadata.
 	if strings.Contains(ua, "HeadlessChrome") {
 		fixed := strings.ReplaceAll(ua, "HeadlessChrome", "Chrome")
-		if err := chromedp.Run(ctx, emulation.SetUserAgentOverride(fixed)); err == nil {
+		if err := cdputil.Run(ctx, emulation.SetUserAgentOverride(fixed)); err == nil {
 			ua = fixed
 		}
 	}
@@ -537,6 +562,8 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 	c.allocCancel = allocCancel
 	c.proxyActive = useProxy
 	c.activeContextID = contextID
+	c.downloads = downloadTracker
+	downloadReady = true
 	return nil
 }
 
@@ -567,16 +594,19 @@ func parseProxyURL(raw string) (server, user, pass string, err error) {
 // the proxy URL had inline creds. The listener lives for the
 // lifetime of ctx — when relaunch tears down ctx, it goes with it.
 func (c *Computer) installProxyAuthHandler(ctx context.Context, user, pass string) {
+	configuredProxy := c.opts.ProxyURL
+	attempted := &proxyAuthAttempts{seen: make(map[fetch.RequestID]bool)}
 	chromedp.ListenTarget(ctx, func(ev interface{}) {
 		switch e := ev.(type) {
 		case *fetch.EventAuthRequired:
+			response := &fetch.AuthChallengeResponse{Response: fetch.AuthChallengeResponseResponseCancelAuth}
+			if attempted.allow(e, configuredProxy) {
+				response.Response = fetch.AuthChallengeResponseResponseProvideCredentials
+				response.Username, response.Password = user, pass
+			}
 			go func() {
-				_ = chromedp.Run(ctx,
-					fetch.ContinueWithAuth(e.RequestID, &fetch.AuthChallengeResponse{
-						Response: fetch.AuthChallengeResponseResponseProvideCredentials,
-						Username: user,
-						Password: pass,
-					}),
+				_ = cdputil.Run(ctx,
+					fetch.ContinueWithAuth(e.RequestID, response),
 				)
 			}()
 		case *fetch.EventRequestPaused:
@@ -584,7 +614,7 @@ func (c *Computer) installProxyAuthHandler(ctx context.Context, user, pass strin
 			// but Fetch.enable+handleAuthRequests delivers paused
 			// non-auth requests we must continue() or they hang.
 			go func() {
-				_ = chromedp.Run(ctx, fetch.ContinueRequest(e.RequestID))
+				_ = cdputil.Run(ctx, fetch.ContinueRequest(e.RequestID))
 			}()
 		}
 	})
@@ -666,6 +696,9 @@ func (c *Computer) DebugURL() string { return c.debugURL }
 // process Context first so the proxy relaunch (if also needed)
 // inherits the right user-data-dir.
 func (c *Computer) OpenSession(opts computer.OpenOptions) error {
+	if opts.ContextID != "" && !opts.Persist {
+		return fmt.Errorf("local: persist=false with a saved context is unsupported; use an ephemeral session or persist=true")
+	}
 	if opts.SessionID != "" {
 		return fmt.Errorf("local backend has no remote sessions; pass context_id for persistence instead")
 	}
@@ -725,7 +758,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	}
 	switch action.Type {
 	case "screenshot":
-		return c.finishAction(action)
+		return c.Screenshot()
 
 	case "navigate", "back", "reload":
 		if err := navigation.Run(c.ctx, action.Type, action.URL, 30*time.Second); err != nil {
@@ -775,13 +808,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			}
 		}
 		var urlBefore string
-		chromedp.Run(c.ctx, chromedp.Location(&urlBefore))
+		cdputil.Run(c.ctx, chromedp.Location(&urlBefore))
 		fmt.Fprintf(os.Stderr, "[BROWSER] click (%d,%d) on %s (display=%dx%d)%s\n",
 			x, y, urlBefore, c.display.Width, c.display.Height, labelNote)
 		if err := presentation.BeforeClick(c.ctx, x, y, action.Presentation); err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -807,14 +841,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return null;
 		})()`, x, y)
 		var focusedTag string
-		if err := chromedp.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag)); err == nil && focusedTag != "" {
+		if err := cdputil.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag)); err == nil && focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSER] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
 		// Wait for potential navigation to complete
-		chromedp.Run(c.ctx, chromedp.WaitReady("body", chromedp.ByQuery))
+		cdputil.Run(c.ctx, chromedp.WaitReady("body", chromedp.ByQuery))
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
 		var urlAfter string
-		chromedp.Run(c.ctx, chromedp.Location(&urlAfter))
+		cdputil.Run(c.ctx, chromedp.Location(&urlAfter))
 		if urlAfter != urlBefore {
 			fmt.Fprintf(os.Stderr, "[BROWSER] click navigated: %s → %s\n", urlBefore, urlAfter)
 		} else {
@@ -845,6 +879,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
+			TargetID:     action.TargetID,
 			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
@@ -862,14 +897,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			return nil, fmt.Errorf("type: %w", err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "key":
 		if err := c.dispatchKey(action.Key); err != nil {
 			return nil, fmt.Errorf("key %q: %w", action.Key, err)
 		}
 		presentation.AfterAction(action.Presentation, 100*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "scroll":
 		if err := c.scroll(action); err != nil {
@@ -882,10 +917,10 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		dur := action.Duration
 		if dur <= 0 {
 			dur = 1000 // default 1s
-		} else if dur < 100 {
-			dur = dur * 1000 // Claude sends seconds, convert to ms
 		}
-		time.Sleep(time.Duration(dur) * time.Millisecond)
+		if err := cdputil.Sleep(c.ctx, time.Duration(dur)*time.Millisecond); err != nil {
+			return nil, err
+		}
 		return c.finishAction(action)
 
 	case "wait_for_stable":
@@ -912,7 +947,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, cueSelector, "File uploaded")
 		presentation.AfterAction(action.Presentation, 500*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "select_option":
 		c.moveToTarget(action)
@@ -922,7 +957,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, res.Selector, "Option selected")
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_checked":
 		c.moveToTarget(action)
@@ -936,7 +971,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, res.Selector, caption)
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_temporal":
 		c.moveToTarget(action)
@@ -946,7 +981,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, res.Selector, "Date/time set")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	case "set_text":
 		c.moveToTarget(action)
@@ -956,7 +991,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		c.cueTarget(action, res.Selector, "Text updated")
 		presentation.AfterAction(action.Presentation, 150*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
@@ -971,17 +1006,20 @@ func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
 }
 
 func (c *Computer) ExecuteAction(action computer.Action) error {
-	switch action.Type {
-	case "click", "double_click", "scroll", "wait", "wait_for", "wait_for_stable":
-		action.NoScreenshot = true
-		_, err := c.Execute(action)
-		return err
-	default:
-		return fmt.Errorf("local action-only unsupported for %s", action.Type)
-	}
+	action.NoScreenshot = true
+	_, err := c.Execute(action)
+	return err
 }
 
 func (c *Computer) attachStabilityTracker() {
+	id := cdptabs.ActiveID(c.ctx)
+	if c.tabTrackers == nil {
+		c.tabTrackers = make(map[string]*stability.Tracker)
+	}
+	if tracker := c.tabTrackers[id]; tracker != nil {
+		c.stabilityTracker = tracker
+		return
+	}
 	c.stabilityTracker = nil
 	if c.ctx == nil {
 		return
@@ -992,6 +1030,7 @@ func (c *Computer) attachStabilityTracker() {
 		return
 	}
 	c.stabilityTracker = tracker
+	c.tabTrackers[id] = tracker
 }
 
 func (c *Computer) WaitForStable(quietMS, timeoutMS int) (stability.Result, error) {
@@ -1006,6 +1045,10 @@ func (c *Computer) WaitForOutcome(conditions []computer.WaitCondition, match str
 		return c.stabilityTracker.WaitForOutcome(conditions, match, quietMS, timeoutMS)
 	}
 	return stability.WaitForOutcome(c.ctx, conditions, match, quietMS, timeoutMS)
+}
+
+func (c *Computer) ObserveMedia() (computer.MediaObservation, error) {
+	return stability.ObserveMedia(c.ctx)
 }
 
 func (c *Computer) LastSelectResult() *selectinput.Result {
@@ -1058,7 +1101,7 @@ func (c *Computer) setLastTextResult(res *textinput.SetResult) {
 
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
 	c.setLastSelectResult(nil)
-	target := selectinput.Target{Selector: action.Selector}
+	target := selectinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1084,7 +1127,7 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 
 func (c *Computer) setChecked(action computer.Action) (checkedinput.Result, error) {
 	c.setLastCheckedResult(nil)
-	target := checkedinput.Target{Selector: action.Selector}
+	target := checkedinput.Target{ID: action.TargetID, Selector: action.Selector, ExpectedName: action.ExpectedName, ExpectedRole: action.ExpectedRole}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1104,7 +1147,7 @@ func (c *Computer) setChecked(action computer.Action) (checkedinput.Result, erro
 
 func (c *Computer) setTemporal(action computer.Action) (temporalinput.Result, error) {
 	c.setLastTemporalResult(nil)
-	target := temporalinput.Target{Selector: action.Selector}
+	target := temporalinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1131,7 +1174,7 @@ func (c *Computer) setTemporal(action computer.Action) (temporalinput.Result, er
 
 func (c *Computer) setText(action computer.Action) (textinput.SetResult, error) {
 	c.setLastTextResult(nil)
-	target := textinput.Target{Selector: action.Selector}
+	target := textinput.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1192,7 +1235,7 @@ func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 }
 
 func (c *Computer) uploadFile(action computer.Action) (fileupload.Result, error) {
-	target := fileupload.Target{Selector: action.Selector}
+	target := fileupload.Target{ID: action.TargetID, Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			target.X, target.Y = e.Center()
@@ -1341,7 +1384,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	}
 
 	var buf []byte
-	err := chromedp.Run(c.ctx,
+	err := cdputil.Run(c.ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			b, err := page.CaptureScreenshot().
 				WithFormat(page.CaptureScreenshotFormatJpeg).
@@ -1574,13 +1617,13 @@ func (c *Computer) dispatchKey(key string) error {
 		} else {
 			// Unknown modifier — fall back to literal typing.
 			fmt.Fprintf(os.Stderr, "[BROWSER] key fallback (unknown modifier in %q): typing literally\n", key)
-			return chromedp.Run(c.ctx, chromedp.KeyEvent(key))
+			return cdputil.Run(c.ctx, chromedp.KeyEvent(key))
 		}
 	}
 
 	// Try the named-key table first.
 	if spec, ok := specialKeys[strings.ToLower(keyName)]; ok {
-		return chromedp.Run(c.ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		return cdputil.Run(c.ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 			down := input.DispatchKeyEvent(input.KeyDown).
 				WithKey(spec.Key).WithCode(spec.Code).
 				WithWindowsVirtualKeyCode(int64(spec.VK)).
@@ -1615,7 +1658,7 @@ func (c *Computer) dispatchKey(key string) error {
 				code = "Digit" + keyName
 			}
 			vk := int64(strings.ToUpper(keyName)[0])
-			return chromedp.Run(c.ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+			return cdputil.Run(c.ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 				down := input.DispatchKeyEvent(input.KeyDown).
 					WithKey(strings.ToLower(keyName)).WithCode(code).
 					WithWindowsVirtualKeyCode(vk).
@@ -1631,7 +1674,7 @@ func (c *Computer) dispatchKey(key string) error {
 			}))
 		}
 		// No modifier — type the char as text (existing path).
-		return chromedp.Run(c.ctx, chromedp.KeyEvent(keyName))
+		return cdputil.Run(c.ctx, chromedp.KeyEvent(keyName))
 	}
 
 	// Multi-char unknown name — surface a fallback log and type
@@ -1639,7 +1682,7 @@ func (c *Computer) dispatchKey(key string) error {
 	// us discover real names the agent uses that we should add to
 	// specialKeys.
 	fmt.Fprintf(os.Stderr, "[BROWSER] key fallback (unknown key %q): typing literally\n", keyName)
-	return chromedp.Run(c.ctx, chromedp.KeyEvent(keyName))
+	return cdputil.Run(c.ctx, chromedp.KeyEvent(keyName))
 }
 
 // enumerate runs the SoM enumeration script in the page's main world
@@ -1650,7 +1693,7 @@ func (c *Computer) enumerate() ([]som.Element, error) {
 	// + open shadow roots + the page's main document, with dedup,
 	// occlusion, and type-weighted ranking baked in).
 	var raw json.RawMessage
-	if err := chromedp.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+	if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
 		return nil, err
 	}
 	jsEls, err := som.UnmarshalElements(raw)
@@ -1704,8 +1747,11 @@ func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
 			ID: e.ID, Label: e.Label, X: e.X, Y: e.Y, W: e.W, H: e.H,
 			Tag: e.Tag, Role: e.Role, Text: e.Text, AccessibleName: e.AccessibleName, Type: e.Type,
 			Placeholder: e.Placeholder, CurrentValue: e.CurrentValue, Pattern: e.Pattern,
+			Checked: e.Checked, Indeterminate: e.Indeterminate,
 			FormatHint: e.FormatHint, DateLike: e.DateLike, Validity: e.Validity,
-			Disabled: e.Disabled, Loading: e.Loading, Dangerous: e.Dangerous, DestructiveEffect: e.DestructiveEffect,
+			Disabled: e.Disabled, Loading: e.Loading, TargetLoading: e.TargetLoading,
+			ContainerLoading: e.ContainerLoading, PageLoadingCount: e.PageLoadingCount,
+			Dangerous: e.Dangerous, Effect: e.Effect, DestructiveEffect: e.DestructiveEffect,
 		})
 	}
 	return out
@@ -1765,6 +1811,10 @@ func (c *Computer) scaleToDisplay(data []byte) ([]byte, error) {
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
 
+func (c *Computer) EffectiveEnvironment() (computer.EffectiveEnvironment, error) {
+	return environment.Probe(c.ctx)
+}
+
 // SessionInfo implementation
 func (c *Computer) SessionType() string { return "local" }
 func (c *Computer) SessionID() string   { return "" }
@@ -1773,7 +1823,7 @@ func (c *Computer) CurrentURL() string {
 		return ""
 	}
 	var url string
-	_ = chromedp.Run(c.ctx, chromedp.Location(&url))
+	_ = cdputil.Run(c.ctx, chromedp.Location(&url))
 	return url
 }
 
@@ -1821,6 +1871,10 @@ func (c *Computer) gracefulCancel() {
 // persistent contexts, where SIGKILL would lose any state still in
 // the cookie write journal. Always falls through to a hard cancel.
 func (c *Computer) Close() error {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	c.gracefulCancel()
 	if c.cancel != nil {
 		c.cancel()
@@ -1829,6 +1883,8 @@ func (c *Computer) Close() error {
 		c.allocCancel()
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
 	return nil
 }
 
@@ -1838,6 +1894,10 @@ func (c *Computer) Close() error {
 // (load-bearing — context switches must flush) and from
 // relaunchIfProxyChanged (less critical but matches user expectations).
 func (c *Computer) gracefulTeardownForRelaunch() {
+	if c.downloads != nil {
+		_ = c.downloads.Close()
+		c.downloads = nil
+	}
 	c.gracefulCancel()
 	if c.cancel != nil {
 		c.cancel()
@@ -1846,6 +1906,43 @@ func (c *Computer) gracefulTeardownForRelaunch() {
 		c.allocCancel()
 	}
 	c.allocCtx = nil
+	c.tabManager = nil
+	c.tabTrackers = nil
+}
+
+func (c *Computer) ListDownloads(ctx context.Context) ([]computer.Download, error) {
+	if c.downloads == nil {
+		return nil, downloads.ErrClosed
+	}
+	return c.downloads.ListDownloads(ctx)
+}
+
+func (c *Computer) WaitForDownload(ctx context.Context, id string) (computer.Download, error) {
+	if c.downloads == nil {
+		return computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.WaitForDownload(ctx, id)
+}
+
+func (c *Computer) OpenDownload(ctx context.Context, id string) (io.ReadCloser, computer.Download, error) {
+	if c.downloads == nil {
+		return nil, computer.Download{}, downloads.ErrClosed
+	}
+	return c.downloads.OpenDownload(ctx, id)
+}
+
+func (c *Computer) DownloadEventCursor() uint64 {
+	if c.downloads == nil {
+		return 0
+	}
+	return c.downloads.DownloadEventCursor()
+}
+
+func (c *Computer) DownloadsStartedSince(cursor uint64) []computer.Download {
+	if c.downloads == nil {
+		return nil
+	}
+	return c.downloads.DownloadsStartedSince(cursor)
 }
 
 func (c *Computer) ListTabs() ([]computer.TabInfo, error) {
@@ -1858,15 +1955,26 @@ func (c *Computer) ActiveTabID() string {
 
 func (c *Computer) SwitchTab(tabID string) error {
 	if tabID == c.ActiveTabID() {
-		return nil
+		return cdptabs.Activate(c.ctx, tabID)
 	}
-	ctx, cancel, err := cdptabs.Switch(c.ctx, tabID)
+	if c.tabManager == nil {
+		c.tabManager = cdptabs.NewManager(c.ctx, c.cancel)
+	}
+	ctx, cancel, created, err := c.tabManager.Switch(tabID)
 	if err != nil {
 		return err
+	}
+	if created && c.downloads != nil {
+		if err := c.downloads.Attach(ctx); err != nil {
+			return err
+		}
 	}
 	c.ctx = ctx
 	c.cancel = cancel
 	c.attachStabilityTracker()
+	c.labelMu.Lock()
+	c.lastLabels = nil
+	c.labelMu.Unlock()
 	if err := environment.Apply(c.ctx, c.environment, c.display); err != nil {
 		return fmt.Errorf("reapply browser environment: %w", err)
 	}
@@ -1890,5 +1998,69 @@ func (c *Computer) CloseTab(tabID string) error {
 			return fmt.Errorf("switch fallback tab: %w", err)
 		}
 	}
-	return cdptabs.Close(c.ctx, tabID)
+	if err := cdptabs.Close(c.ctx, tabID); err != nil {
+		return err
+	}
+	if c.tabManager != nil {
+		if detached := c.tabManager.Forget(tabID); detached != nil && c.downloads != nil {
+			c.downloads.Detach(detached)
+		}
+	}
+	delete(c.tabTrackers, tabID)
+	return nil
+}
+
+func sameProxyOrigin(origin, configured string) bool {
+	a, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	b, err := url.Parse(configured)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+func (c *Computer) RefreshSemantics() error {
+	var raw json.RawMessage
+	if err := cdputil.Run(c.ctx, chromedp.Evaluate(som.EnumScript, &raw)); err != nil {
+		return err
+	}
+	elements, err := som.UnmarshalElements(raw)
+	if err != nil {
+		return err
+	}
+	if som.ShouldAugmentAX(elements) {
+		elements = som.MergeAX(elements, som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height))
+	}
+	labels := make(map[int]som.Element, len(elements))
+	for _, el := range elements {
+		labels[el.Label] = el
+	}
+	c.labelMu.Lock()
+	c.lastLabels = labels
+	c.labelMu.Unlock()
+	c.refreshScrollRegions()
+	return nil
+}
+
+func (c *Computer) BindRequest(ctx context.Context) func() { return cdputil.Bind(c.ctx, ctx) }
+
+type proxyAuthAttempts struct {
+	seen  map[fetch.RequestID]bool
+	order []fetch.RequestID
+}
+
+func (a *proxyAuthAttempts) allow(event *fetch.EventAuthRequired, configured string) bool {
+	if event.AuthChallenge == nil || event.AuthChallenge.Source != fetch.AuthChallengeSourceProxy || !sameProxyOrigin(event.AuthChallenge.Origin, configured) || a.seen[event.RequestID] {
+		return false
+	}
+	if len(a.order) >= 128 {
+		delete(a.seen, a.order[0])
+		a.order = a.order[1:]
+	}
+	a.seen[event.RequestID] = true
+	a.order = append(a.order, event.RequestID)
+	return true
 }

@@ -72,7 +72,7 @@ func newRecordingPlatform() *recordingPlatform {
 			InstallID: 99,
 			ProjectID: "test-proj",
 		},
-		executeResponses: map[string]*sdk.ExecuteResult{},
+		executeResponses: map[string]*sdk.ExecuteResult{"query_creator_info": {Success: true, Status: 200, Data: json.RawMessage(`{"data":{"privacy_level_options":["PUBLIC_TO_EVERYONE","SELF_ONLY"],"max_video_post_duration_sec":600},"error":{"code":"ok"}}`)}},
 		executeQueues:    map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
@@ -500,7 +500,7 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	if r["display_name"] != "My Restaurant" {
 		t.Errorf("display_name wrong: %+v", r)
 	}
-	if r["avatar_url"] != "https://cdn/r.jpg" {
+	if r["avatar_url"] != "" {
 		t.Errorf("avatar_url wrong: %+v", r)
 	}
 	if r["external_account_id"] != "100" {
@@ -649,7 +649,7 @@ func TestAccountCheck_TwitterProfileOK(t *testing.T) {
 	)
 	acctID, _ := r.LastInsertId()
 
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	out, err := app.toolAccountCheck(ctx, map[string]any{"social_account_id": acctID})
 	if err != nil {
 		t.Fatal(err)
@@ -1029,6 +1029,33 @@ func TestPostList_DateRangeUsesLifecycleDate(t *testing.T) {
 	}
 	if len(got) != 4 {
 		t.Fatalf("range returned %d posts, want 4: %+v", len(got), got)
+	}
+}
+
+func TestPostList_OrdersByLifecycleDateBeforeLimit(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, row := range []struct {
+		body, publishedAt string
+	}{
+		{body: "newer upstream post", publishedAt: "2026-03-16T10:00:37Z"},
+		{body: "older imported later", publishedAt: "2026-02-26T14:33:46Z"},
+	} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, status, created_at, published_at, source)
+			 VALUES ('test-proj', ?, 'published', ?, ?, 'provider')`,
+			row.body, row.publishedAt, row.publishedAt,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := (&App{}).listPosts(ctx, map[string]any{"limit": 1}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := out.(map[string]any)["posts"].([]map[string]any)
+	if len(posts) != 1 || posts[0]["body"] != "newer upstream post" {
+		t.Fatalf("ordered posts = %+v, want newer upstream publication first", posts)
 	}
 }
 
@@ -1901,6 +1928,288 @@ func TestZernioImportReconcilesDraftAndScheduledLifecycle(t *testing.T) {
 	}
 }
 
+func TestZernioImportPreservesPublishedPlatformHistoryAndRepairsExisting(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{
+			"_id":"69a059c7627edb9b6d64e139",
+			"content":"AgentDojo history",
+			"createdAt":"2026-02-26T14:33:43.886Z",
+			"scheduledFor":"2026-02-26T14:33:42.520Z",
+			"status":"published",
+			"updatedAt":"2026-02-26T14:33:47.089Z",
+			"platforms":[
+				{
+					"accountId":{"_id":"other-account"},
+					"platform":"facebook",
+					"platformPostId":"facebook-wrong",
+					"platformPostUrl":"https://facebook.example/wrong",
+					"publishedAt":"2026-02-26T14:33:45.000Z",
+					"scheduledFor":"2026-02-26T14:30:00.000Z",
+					"status":"published"
+				},
+				{
+					"accountId":{"_id":"za_linkedin"},
+					"platform":"linkedin",
+					"platformPostId":"urn:li:share:7432795016680497152",
+					"platformPostUrl":"https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/",
+					"publishedAt":"2026-02-26T14:33:46.829Z",
+					"scheduledFor":"2026-02-26T14:33:42.520Z",
+					"status":"published"
+				}
+			]
+		}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_linkedin')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	result := app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_linkedin", 0, 50)
+	if result.Status != "ok" || result.Imported != 1 {
+		t.Fatalf("import result = %+v", result)
+	}
+
+	assertStored := func() int64 {
+		t.Helper()
+		var postID int64
+		var status, requestedMode, createdAt, scheduleAt, publishedAt, source string
+		if err := ctx.AppDB().QueryRow(
+			`SELECT id,status,requested_mode,created_at,COALESCE(schedule_at,''),COALESCE(published_at,''),source
+			   FROM posts WHERE body='AgentDojo history'`,
+		).Scan(&postID, &status, &requestedMode, &createdAt, &scheduleAt, &publishedAt, &source); err != nil {
+			t.Fatal(err)
+		}
+		if status != "published" || requestedMode != postModePublish || source != "provider" ||
+			createdAt != "2026-02-26T14:33:43.886Z" || scheduleAt != "2026-02-26T14:33:42.520Z" ||
+			publishedAt != "2026-02-26T14:33:46.829Z" {
+			t.Fatalf("stored parent = status=%q mode=%q source=%q created=%q scheduled=%q published=%q",
+				status, requestedMode, source, createdAt, scheduleAt, publishedAt)
+		}
+		var targetStatus, platformID, platformURL, targetPublishedAt, providerID string
+		var attempts int
+		if err := ctx.AppDB().QueryRow(
+			`SELECT status,COALESCE(platform_post_id,''),COALESCE(platform_url,''),COALESCE(published_at,''),provider_post_id,attempts
+			   FROM post_targets WHERE post_id=?`, postID,
+		).Scan(&targetStatus, &platformID, &platformURL, &targetPublishedAt, &providerID, &attempts); err != nil {
+			t.Fatal(err)
+		}
+		if targetStatus != "published" || platformID != "urn:li:share:7432795016680497152" ||
+			platformURL != "https://www.linkedin.com/feed/update/urn:li:share:7432795016680497152/" ||
+			targetPublishedAt != "2026-02-26T14:33:46.829Z" || providerID != "69a059c7627edb9b6d64e139" || attempts != 0 {
+			t.Fatalf("stored target = status=%q platform_id=%q url=%q published=%q provider_id=%q attempts=%d",
+				targetStatus, platformID, platformURL, targetPublishedAt, providerID, attempts)
+		}
+		return postID
+	}
+
+	postID := assertStored()
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE posts SET status='published',requested_mode='schedule',created_at='2026-08-24 09:27:14',published_at='2026-08-27 09:41:51'
+		  WHERE id=?`, postID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE post_targets SET status='scheduled',platform_post_id=NULL,platform_url=NULL,published_at=NULL WHERE post_id=?`, postID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result = app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_linkedin", 0, 50)
+	if result.Status != "ok" || result.SkippedExisting != 1 {
+		t.Fatalf("reconcile result = %+v", result)
+	}
+	assertStored()
+	for _, call := range pf.executeCalls {
+		if call.Tool == "create_post" {
+			t.Fatalf("history import attempted upstream publication: %+v", pf.executeCalls)
+		}
+	}
+}
+
+func TestProviderReconcilerManagedOnlyDoesNotDiscoverHistory(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{"id":"unmanaged-history","status":"published","content":"unrelated history"}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug,
+		    provider_account_id, provider_profile_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1', 'zp_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var postCount int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
+	if postCount != 0 {
+		t.Fatalf("managed-only reconciliation imported %d unrelated posts", postCount)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("managed-only account with no managed posts called provider history tools: %+v", pf.executeCalls)
+	}
+
+	out, err := (&App{}).toolAccountProviderSyncUpdate(ctx, map[string]any{
+		"social_account_id": accountID,
+		"mode":              providerImportModeFullHistory,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["publishing_unchanged"] != true {
+		t.Fatalf("sync update response = %+v", out)
+	}
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount)
+	if postCount != 1 {
+		t.Fatalf("full-history opt-in imported %d posts, want 1", postCount)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "sync_external_posts" || pf.executeCalls[1].Tool != "list_posts" {
+		t.Fatalf("full-history calls = %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[1].Input["accountId"] != "za_1" || pf.executeCalls[1].Input["profileId"] != "zp_1" {
+		t.Fatalf("full-history list was not account/profile scoped: %+v", pf.executeCalls[1].Input)
+	}
+}
+
+func TestProviderReconcilerManagedOnlyReadsExactKnownPost(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_post"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"data":{"post":{
+			"id":"known-1","content":"managed post","status":"published","createdAt":"2026-08-01T09:00:00Z",
+			"platforms":[{"accountId":{"_id":"za_1","profileId":"zp_1"},"platform":"linkedin",
+				"status":"published","platformPostId":"urn:li:share:1","platformPostUrl":"https://linkedin.example/1",
+				"publishedAt":"2026-08-01T09:05:00Z"}]
+		}}
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug,
+		    provider_account_id, provider_profile_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1', 'zp_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	post, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id,body,status,source,provider_sync_mode,requested_mode)
+		 VALUES ('test-proj','managed post','scheduled','provider','mirror','schedule')`,
+	)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id,social_account_id,status,provider_post_id,provider_sync_status)
+		 VALUES (?,?,'scheduled','known-1','scheduled')`, postID, accountID,
+	)
+
+	if err := (&App{}).runProviderReconciler(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_post" || pf.executeCalls[0].Input["postId"] != "known-1" {
+		t.Fatalf("managed reconciliation calls = %+v", pf.executeCalls)
+	}
+	var parentStatus, targetStatus, platformID, publishedAt string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.status,t.status,COALESCE(t.platform_post_id,''),COALESCE(t.published_at,'')
+		   FROM posts p JOIN post_targets t ON t.post_id=p.id WHERE p.id=?`, postID,
+	).Scan(&parentStatus, &targetStatus, &platformID, &publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if parentStatus != "published" || targetStatus != "published" || platformID != "urn:li:share:1" || publishedAt != "2026-08-01T09:05:00Z" {
+		t.Fatalf("managed reconciliation stored parent=%q target=%q id=%q published=%q", parentStatus, targetStatus, platformID, publishedAt)
+	}
+}
+
+func TestProviderImportDeletionTombstonePreventsReimport(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["sync_external_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
+	pf.executeResponses["list_posts"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"posts":[{"id":"deleted-provider-post","status":"published","content":"remove me","createdAt":"2026-02-01T10:00:00Z",
+			"platforms":[{"accountId":{"_id":"za_1"},"platform":"linkedin","status":"published",
+			"platformPostId":"urn:li:share:deleted","platformPostUrl":"https://linkedin.example/deleted",
+			"publishedAt":"2026-02-01T10:01:00Z"}]}]
+	}`)}
+	ctx := newSocialCtx(t, pf)
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := account.LastInsertId()
+	app := &App{}
+	result := app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_1", 0, 50)
+	if result.Imported != 1 {
+		t.Fatalf("initial import = %+v", result)
+	}
+	var postID int64
+	_ = ctx.AppDB().QueryRow(`SELECT id FROM posts WHERE body='remove me'`).Scan(&postID)
+	if _, err := app.toolPostDelete(ctx, map[string]any{"post_id": postID, "force_local_only": true}); err != nil {
+		t.Fatal(err)
+	}
+	var tombstones int
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM provider_import_tombstones
+		  WHERE social_account_id=? AND provider_post_id='deleted-provider-post'`, accountID,
+	).Scan(&tombstones)
+	if tombstones != 1 {
+		t.Fatalf("provider tombstones = %d, want 1", tombstones)
+	}
+	result = app.importZernioPosts(ctx, "test-proj", importResult{}, accountID, 99, "za_1", 0, 50)
+	var postCount int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE body='remove me'`).Scan(&postCount)
+	if postCount != 0 || result.Imported != 0 {
+		t.Fatalf("deleted provider post was reimported: count=%d result=%+v", postCount, result)
+	}
+}
+
+func TestProviderImportedScheduleIsNeverPublishedByFallbackWorkerOrRollup(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	account, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'Apteva', 'active', 'zernio', 'za_linkedin')`,
+	)
+	accountID, _ := account.LastInsertId()
+	post, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id,body,status,schedule_at,source,provider_sync_mode)
+		 VALUES ('test-proj','provider schedule','scheduled','2026-02-26T14:33:42Z','provider','mirror')`,
+	)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id,social_account_id,status,provider_post_id,provider_sync_status)
+		 VALUES (?,?,'scheduled','provider-1','scheduled')`, postID, accountID,
+	)
+
+	if err := (&App{}).runScheduledPublisher(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := (&App{}).rollupPostStatus(ctx, postID); got != "scheduled" {
+		t.Fatalf("rollup status = %q, want scheduled", got)
+	}
+	var parentStatus, targetStatus, publishedAt string
+	var attempts int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT p.status,COALESCE(p.published_at,''),t.status,t.attempts
+		   FROM posts p JOIN post_targets t ON t.post_id=p.id WHERE p.id=?`, postID,
+	).Scan(&parentStatus, &publishedAt, &targetStatus, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if parentStatus != "scheduled" || targetStatus != "scheduled" || publishedAt != "" || attempts != 0 {
+		t.Fatalf("provider schedule mutated: parent=%q target=%q published=%q attempts=%d",
+			parentStatus, targetStatus, publishedAt, attempts)
+	}
+}
+
 func TestInboxReply_ZernioBackedDMUsesProvider(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["send_inbox_message"] = &sdk.ExecuteResult{
@@ -2752,18 +3061,18 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "ride the wave #fyp",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(7)},
+		"mode":              "publish",
+		"body":              "ride the wave #fyp",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(7)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected one post_video init call: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected one post_video init call: %+v", pf.nonCreatorInfoCalls())
 	}
-	in := pf.executeCalls[0].Input
+	in := pf.nonCreatorInfoCalls()[0].Input
 	postInfo, ok := in["post_info"].(map[string]any)
 	if !ok {
 		t.Fatalf("post_info not nested: %+v", in)
@@ -2819,14 +3128,14 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode": "publish", "body": "verified pull", "social_account_ids": []any{acctID}, "media_storage_ids": []any{int64(17)},
+		"mode": "publish", "body": "verified pull", "targets": []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}}, "media_storage_ids": []any{int64(17)},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.executeCalls) < 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected post_video: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) < 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected post_video: %+v", pf.nonCreatorInfoCalls())
 	}
-	source := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	source := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
 	if source["source"] != "PULL_FROM_URL" || source["video_url"] == "" {
 		t.Fatalf("expected PULL_FROM_URL input, got %+v", source)
 	}
@@ -2860,18 +3169,18 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "long video",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(8)},
+		"mode":              "publish",
+		"body":              "long video",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(8)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected post_video init: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected post_video init: %+v", pf.nonCreatorInfoCalls())
 	}
-	srcInfo := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	srcInfo := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
 	if srcInfo["video_size"] != int64(videoBytes) {
 		t.Errorf("video_size = %v, want %d", srcInfo["video_size"], videoBytes)
 	}
@@ -2884,12 +3193,25 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 }
 
 func TestPublishTikTok_PhotoPostInput(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Errorf("preflight method = %s, want GET", r.Method)
+		}
+		if got := r.Header.Get("Range"); got != "bytes=0-0" {
+			t.Errorf("preflight Range = %q, want bytes=0-0", got)
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0xff})
+	}))
+	defer mediaSrv.Close()
+
 	pf := newRecordingPlatform()
 	pf.callAppResponses["storage:files_get"] = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":9,\"content_type\":\"image/jpeg\",\"size_bytes\":12345}"}]}}`,
 	)
 	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
-		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/p.jpg\"}"}]}}`,
+		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":%q}]}}`, `{"url":"`+mediaSrv.URL+`/p.jpg"}`),
 	)
 	pf.executeResponses["post_photo"] = &sdk.ExecuteResult{
 		Success: true,
@@ -2909,11 +3231,13 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
 		"mode":              "publish",
+		"media_project_id":  "media-proj",
 		"body":              "photo description #fyp",
 		"media_storage_ids": []any{int64(9)},
 		"targets": []any{
 			map[string]any{
 				"social_account_id": acctID,
+				"privacy_level":     "PUBLIC_TO_EVERYONE",
 				"title":             "Photo title",
 				"auto_add_music":    true,
 			},
@@ -2922,10 +3246,10 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "post_photo" || pf.executeCalls[1].Tool != "get_publish_status" {
-		t.Fatalf("expected post_photo followed by get_publish_status: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 2 || pf.nonCreatorInfoCalls()[0].Tool != "post_photo" || pf.nonCreatorInfoCalls()[1].Tool != "get_publish_status" {
+		t.Fatalf("expected post_photo followed by get_publish_status: %+v", pf.nonCreatorInfoCalls())
 	}
-	in := pf.executeCalls[0].Input
+	in := pf.nonCreatorInfoCalls()[0].Input
 	if in["post_mode"] != "DIRECT_POST" || in["media_type"] != "PHOTO" {
 		t.Fatalf("unexpected photo mode fields: %+v", in)
 	}
@@ -2947,8 +3271,28 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		t.Fatalf("unexpected source_info: %+v", srcInfo)
 	}
 	images := srcInfo["photo_images"].([]string)
-	if len(images) != 1 || images[0] != "https://cdn.test/p.jpg" {
+	if len(images) != 1 || images[0] != mediaSrv.URL+"/p.jpg" {
 		t.Fatalf("photo_images = %+v", images)
+	}
+	var proxyCall *callAppCall
+	for i := range pf.callAppCalls {
+		call := &pf.callAppCalls[i]
+		if call.AppName == "storage" && call.Tool == "files_get_url" && call.Input["delivery"] == "proxy" {
+			proxyCall = call
+			break
+		}
+	}
+	if proxyCall == nil {
+		t.Fatalf("TikTok photo did not request a Storage proxy URL: %+v", pf.callAppCalls)
+	}
+	if got := proxyCall.Input["_project_id"]; got != "media-proj" {
+		t.Fatalf("proxy _project_id = %v, want media-proj", got)
+	}
+	if got := proxyCall.Input["ttl_seconds"]; got != 7200 {
+		t.Fatalf("proxy ttl_seconds = %v, want %d", got, tiktokPhotoURLTTLSeconds)
+	}
+	if got := proxyCall.Input["disposition"]; got != "inline" {
+		t.Fatalf("proxy disposition = %v, want inline", got)
 	}
 	var status, platformPostID string
 	ctx.AppDB().QueryRow(
@@ -2956,6 +3300,116 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	).Scan(&status, &platformPostID)
 	if status != "published" || platformPostID != "photo_post_1" {
 		t.Fatalf("target = status %q platform_post_id %q", status, platformPostID)
+	}
+}
+
+func TestPrepareTikTokPhotoStoresHiddenJPEGDerivative(t *testing.T) {
+	sourceImage := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 4; y < 12; y++ {
+		for x := 4; x < 12; x++ {
+			i := sourceImage.PixOffset(x, y)
+			sourceImage.Pix[i] = 255
+			sourceImage.Pix[i+3] = 128
+		}
+	}
+	var source bytes.Buffer
+	if err := png.Encode(&source, sourceImage); err != nil {
+		t.Fatal(err)
+	}
+
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get_content"] = json.RawMessage(
+		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":%q}]}}`,
+			`{"content_base64":"`+base64.StdEncoding.EncodeToString(source.Bytes())+`"}`),
+	)
+	pf.callAppResponses["storage:files_upload"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":109,\"name\":\"9-tiktok-photo-jpeg-v1.jpg\",\"size_bytes\":456}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+	prepared, err := (&App{}).prepareTikTokPhoto(ctx, mediaItem{
+		ID: 9, Mime: "image/png", Name: "source.png", Bytes: int64(source.Len()),
+	}, "media-proj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ID != 109 || prepared.Mime != "image/jpeg" || prepared.Name != "9-tiktok-photo-jpeg-v1.jpg" {
+		t.Fatalf("prepared media = %+v", prepared)
+	}
+
+	var upload *callAppCall
+	for i := range pf.callAppCalls {
+		call := &pf.callAppCalls[i]
+		if call.AppName == "storage" && call.Tool == "files_upload" {
+			upload = call
+			break
+		}
+	}
+	if upload == nil {
+		t.Fatalf("files_upload was not called: %+v", pf.callAppCalls)
+	}
+	if upload.Input["folder"] != tiktokJPEGFolder || upload.Input["source"] != "social-tiktok-derivative" {
+		t.Fatalf("hidden derivative identity = %+v", upload.Input)
+	}
+	if upload.Input["content_type"] != "image/jpeg" || upload.Input["visibility"] != "private" {
+		t.Fatalf("derivative delivery metadata = %+v", upload.Input)
+	}
+	if upload.Input["_project_id"] != "media-proj" {
+		t.Fatalf("derivative project = %v, want media-proj", upload.Input["_project_id"])
+	}
+	tags, ok := upload.Input["tags"].([]string)
+	if !ok || strings.Join(tags, ",") != "internal,derived,tiktok" {
+		t.Fatalf("derivative tags = %#v", upload.Input["tags"])
+	}
+	jpegBody, err := base64.StdEncoding.DecodeString(upload.Input["content_base64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	converted, err := jpeg.Decode(bytes.NewReader(jpegBody))
+	if err != nil {
+		t.Fatalf("uploaded derivative is not JPEG: %v", err)
+	}
+	r, g, b, _ := converted.At(0, 0).RGBA()
+	if r < 50000 || g < 50000 || b < 50000 {
+		t.Fatalf("transparent background was not composited onto white: rgb16=(%d,%d,%d)", r, g, b)
+	}
+}
+
+func TestPrepareTikTokPhotoPassesSupportedFormatsThrough(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	for _, mime := range []string{"image/jpeg", "image/webp"} {
+		item := mediaItem{ID: 9, URL: "https://cdn.test/image", Mime: mime, Name: "image"}
+		got, err := (&App{}).prepareTikTokPhoto(ctx, item, "media-proj")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != item {
+			t.Fatalf("%s changed: got %+v want %+v", mime, got, item)
+		}
+	}
+	if len(pf.callAppCalls) != 0 {
+		t.Fatalf("supported formats touched Storage: %+v", pf.callAppCalls)
+	}
+}
+
+func TestPreflightTikTokPhotoURLRejectsRedirect(t *testing.T) {
+	destinationHit := false
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		destinationHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer destination.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusFound)
+	}))
+	defer redirect.Close()
+
+	err := preflightTikTokPhotoURL(redirect.URL)
+	if err == nil || !strings.Contains(err.Error(), "redirect status 302") {
+		t.Fatalf("preflight error = %v, want redirect rejection", err)
+	}
+	if destinationHit {
+		t.Fatal("preflight followed the redirect")
 	}
 }
 
@@ -2982,16 +3436,16 @@ func TestPublishTikTok_PhotoPostRejectsMixedMedia(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "mixed media",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(9), int64(10)},
+		"mode":              "publish",
+		"body":              "mixed media",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(9), int64(10)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 0 {
-		t.Fatalf("TikTok integration should not be called for mixed media: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 0 {
+		t.Fatalf("TikTok integration should not be called for mixed media: %+v", pf.nonCreatorInfoCalls())
 	}
 	var lastErr string
 	ctx.AppDB().QueryRow(
@@ -4205,7 +4659,7 @@ func TestCacheAvatar_WritesContentAddressedFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	got := app.cacheAvatar(ctx, srv.URL+"/avatar.jpg")
 	wantPrefix := "/api/apps/social/avatars/"
@@ -4239,18 +4693,18 @@ func TestCacheAvatar_WritesContentAddressedFile(t *testing.T) {
 	}
 }
 
-func TestCacheAvatar_FailsOpenOnUpstreamError(t *testing.T) {
+func TestCacheAvatar_OmitsUntrustedFallbackOnUpstreamError(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DB_PATH", dir+"/app.db")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", 500)
 	}))
 	defer srv.Close()
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	upstream := srv.URL + "/img"
-	if got := app.cacheAvatar(ctx, upstream); got != upstream {
-		t.Errorf("expected fallback to upstream URL on 5xx, got %q", got)
+	if got := app.cacheAvatar(ctx, upstream); got != "" {
+		t.Errorf("expected omitted avatar on 5xx, got %q", got)
 	}
 }
 
@@ -4573,15 +5027,15 @@ func TestPostDelete_FansOutUpstream(t *testing.T) {
 		t.Errorf("instagram outcome: %+v", byPlatform["instagram"])
 	}
 
-	// Local rows are still gone — best-effort semantics.
+	// A failed remote deletion retains local rows for an explicit retry.
 	var n int
 	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&n)
-	if n != 0 {
-		t.Errorf("post row should be deleted regardless of upstream outcome")
+	if n != 1 {
+		t.Errorf("post must remain after an upstream failure")
 	}
 	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=?`, postID).Scan(&n)
-	if n != 0 {
-		t.Errorf("post_targets should be deleted regardless of upstream outcome")
+	if n == 0 {
+		t.Errorf("targets must remain after an upstream failure")
 	}
 }
 
@@ -4795,7 +5249,7 @@ func TestMetricBreakdownsPersistWithoutPollutingHistory(t *testing.T) {
 	if len(history["views"]) != 1 || history["views"][0].Value != 1000 {
 		t.Fatalf("history polluted by dimensions: %#v", history)
 	}
-	breakdowns := loadAccountBreakdowns(ctx, "test-proj", 42, "range_28d")
+	breakdowns := loadAccountBreakdowns(ctx, "test-proj", 42, (analyticsQuery{RangeDays: 28}).cacheKey())
 	if len(breakdowns) != 1 || len(breakdowns[0].Rows) != 2 {
 		t.Fatalf("stored breakdowns = %#v", breakdowns)
 	}
@@ -4821,4 +5275,14 @@ func TestAccountComparisonFiltersUnsupportedAccounts(t *testing.T) {
 	if comparison.Rows[0].Dimensions["account_name"] != "YouTube A" || comparison.Rows[0].Metrics["views"] != 700 {
 		t.Fatalf("comparison = %#v", comparison.Rows[0])
 	}
+}
+
+func (p *recordingPlatform) nonCreatorInfoCalls() []executeCall {
+	var out []executeCall
+	for _, c := range p.executeCalls {
+		if c.Tool != "query_creator_info" {
+			out = append(out, c)
+		}
+	}
+	return out
 }

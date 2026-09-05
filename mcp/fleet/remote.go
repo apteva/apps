@@ -33,6 +33,9 @@ func unwrapMCP(raw []byte) (any, error) {
 		}
 		if result, ok := env["result"]; ok {
 			if m, ok := result.(map[string]any); ok {
+				if failed, _ := m["isError"].(bool); failed {
+					return nil, fmt.Errorf("tenant MCP tool returned an error")
+				}
 				if content, ok := m["content"].([]any); ok && len(content) > 0 {
 					if first, ok := content[0].(map[string]any); ok {
 						if text, ok := first["text"].(string); ok && text != "" {

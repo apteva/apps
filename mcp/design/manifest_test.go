@@ -9,7 +9,7 @@ import (
 func TestManifestMatchesRuntimeSurface(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "design" || manifest.Version != "0.1.1" {
+	if manifest.Name != "design" || manifest.Version != "0.4.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	declared := map[string]bool{}
@@ -31,6 +31,33 @@ func TestManifestMatchesRuntimeSurface(t *testing.T) {
 	for _, path := range []string{"ui/DesignPanel.mjs", "ui/DesignCard.mjs", "ui/icon.svg", "skills/how-to-use-design.md", "runner/dist/runner.mjs", "runner/dist/replicad_single.wasm"} {
 		if info, err := os.Stat(path); err != nil || info.Size() == 0 {
 			t.Errorf("required asset %s missing or empty", path)
+		}
+	}
+}
+
+func TestManifestUsesNativeStorageAndOptionalPCBSourceBindings(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if len(manifest.Requires.Apps) != 0 {
+		t.Fatalf("legacy requires.apps dependencies remain: %#v", manifest.Requires.Apps)
+	}
+	want := map[string]struct {
+		required bool
+		app      string
+	}{
+		"storage":    {required: true, app: "storage"},
+		"pcb_source": {required: false, app: "pcb"},
+	}
+	if len(manifest.Requires.Integrations) != len(want) {
+		t.Fatalf("got %d bindings, want %d", len(manifest.Requires.Integrations), len(want))
+	}
+	for _, dependency := range manifest.Requires.Integrations {
+		expected, ok := want[dependency.Role]
+		if !ok {
+			t.Errorf("unexpected dependency role %q", dependency.Role)
+			continue
+		}
+		if dependency.Kind != "app" || dependency.Required != expected.required || len(dependency.CompatibleAppNames) != 1 || dependency.CompatibleAppNames[0] != expected.app {
+			t.Errorf("binding %s does not match expected native app contract: %#v", dependency.Role, dependency)
 		}
 	}
 }

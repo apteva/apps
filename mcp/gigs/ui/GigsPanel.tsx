@@ -87,6 +87,20 @@ interface CompositionItem {
   result_key?: string;
   overrides?: Record<string, unknown>;
 }
+interface TemplateResponseRule {
+  instruction_kind: string;
+  response: {
+    note?: { enabled?: boolean; required?: boolean; label?: string; placeholder?: string };
+    files?: {
+      enabled?: boolean;
+      required?: boolean;
+      accept?: string[];
+      min_items?: number;
+      max_items?: number;
+      max_size_mb?: number;
+    };
+  };
+}
 interface TemplateVersion {
   id: number;
   version: number;
@@ -94,6 +108,7 @@ interface TemplateVersion {
   title_template: string;
   default_due_hours?: number;
   default_access_grace_days?: number;
+  response_rules?: TemplateResponseRule[];
   composition?: CompositionItem[];
   derived?: {
     result_schema: Record<string, unknown>;
@@ -188,6 +203,18 @@ interface StorageFolder {
   path: string;
   file_count?: number;
   size_bytes?: number;
+}
+
+type ContentBlockType = "markdown" | "image" | "callout" | "divider";
+interface ContentBlockDraft {
+  key: string;
+  type: ContentBlockType;
+  markdown: string;
+  caption: string;
+  alt: string;
+  text: string;
+  tone: "info" | "tip" | "warning";
+  file: StorageFile | null;
 }
 interface PublicDomain {
   id: number;
@@ -1372,6 +1399,121 @@ function PublicDomainSelect({
   );
 }
 
+const TEMPLATE_RESPONSE_KINDS = [
+  "audio", "video", "image", "document", "content", "text", "link", "script", "warning", "example", "timer_hint",
+];
+
+function TemplateResponseRulesEditor({
+  rules, onChange,
+}: { rules: TemplateResponseRule[]; onChange: (rules: TemplateResponseRule[]) => void }) {
+  const updateResponse = (index: number, response: TemplateResponseRule["response"]) => {
+    onChange(rules.map((rule, i) => i === index ? { ...rule, response } : rule));
+  };
+  const setNoteMode = (index: number, mode: string) => {
+    const response = { ...rules[index].response };
+    if (mode === "none") delete response.note;
+    else response.note = { ...response.note, enabled: true, required: mode === "required" };
+    updateResponse(index, response);
+  };
+  const setFileMode = (index: number, mode: string) => {
+    const response = { ...rules[index].response };
+    if (mode === "none") delete response.files;
+    else response.files = {
+      ...response.files,
+      enabled: true,
+      required: mode === "required",
+      ...(mode === "required" && !response.files?.min_items ? { min_items: 1 } : {}),
+    };
+    updateResponse(index, response);
+  };
+  const setFileField = (index: number, field: "min_items" | "max_items" | "max_size_mb", value: string) => {
+    const response = { ...rules[index].response };
+    const files = { ...(response.files || {}) };
+    if (value === "") delete files[field];
+    else files[field] = Number(value);
+    response.files = files;
+    updateResponse(index, response);
+  };
+  const addRule = () => {
+    const used = new Set(rules.map((rule) => rule.instruction_kind));
+    const kind = TEMPLATE_RESPONSE_KINDS.find((candidate) => !used.has(candidate));
+    if (!kind) return;
+    onChange([...rules, {
+      instruction_kind: kind,
+      response: { files: { enabled: true, required: true, min_items: 1, max_items: 1 } },
+    }]);
+  };
+
+  return (
+    <div className="space-y-2 border-t border-border pt-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold">Default responses by instruction kind</div>
+          <div className="text-xs text-text-muted mt-0.5">
+            Enforced when a gig is dispatched, including dynamic instruction lists that name this template.
+          </div>
+        </div>
+        <Button type="button" size="xs" onClick={addRule} disabled={rules.length >= TEMPLATE_RESPONSE_KINDS.length}>Add rule</Button>
+      </div>
+      {rules.length === 0 && (
+        <div className="rounded border border-border bg-bg p-3 text-xs text-text-muted">No template response rules.</div>
+      )}
+      {rules.map((rule, index) => {
+        const noteMode = !rule.response.note?.enabled ? "none" : rule.response.note.required ? "required" : "optional";
+        const fileMode = !rule.response.files?.enabled ? "none" : rule.response.files.required ? "required" : "optional";
+        const usedElsewhere = new Set(rules.filter((_, i) => i !== index).map((item) => item.instruction_kind));
+        return (
+          <Panel key={`${rule.instruction_kind}-${index}`} className="p-3 space-y-2 bg-bg">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              <label className="text-xs text-text-muted">
+                Instruction kind
+                <Field
+                  as="select"
+                  value={rule.instruction_kind}
+                  onChange={(event) => onChange(rules.map((item, i) => i === index ? { ...item, instruction_kind: event.target.value } : item))}
+                >
+                  {TEMPLATE_RESPONSE_KINDS.map((kind) => <option key={kind} value={kind} disabled={usedElsewhere.has(kind)}>{kind}</option>)}
+                </Field>
+              </label>
+              <label className="text-xs text-text-muted">
+                Note
+                <Field as="select" value={noteMode} onChange={(event) => setNoteMode(index, event.target.value)}>
+                  <option value="none">None</option><option value="optional">Optional</option><option value="required">Required</option>
+                </Field>
+              </label>
+              <label className="text-xs text-text-muted">
+                Files
+                <Field as="select" value={fileMode} onChange={(event) => setFileMode(index, event.target.value)}>
+                  <option value="none">None</option><option value="optional">Optional</option><option value="required">Required</option>
+                </Field>
+              </label>
+            </div>
+            {fileMode !== "none" && (
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-2">
+                <Field
+                  value={(rule.response.files?.accept || []).join(", ")}
+                  onChange={(event) => {
+                    const response = { ...rule.response };
+                    response.files = { ...response.files, accept: event.target.value.split(",").map((value) => value.trim()).filter(Boolean) };
+                    updateResponse(index, response);
+                  }}
+                  placeholder="Accepted types, e.g. video/*"
+                />
+                <Field type="number" min="0" value={rule.response.files?.min_items ?? ""} onChange={(event) => setFileField(index, "min_items", event.target.value)} placeholder="Minimum files" />
+                <Field type="number" min="0" value={rule.response.files?.max_items ?? ""} onChange={(event) => setFileField(index, "max_items", event.target.value)} placeholder="Maximum files" />
+                <Field type="number" min="0" value={rule.response.files?.max_size_mb ?? ""} onChange={(event) => setFileField(index, "max_size_mb", event.target.value)} placeholder="Max MB each" />
+              </div>
+            )}
+            <div className="flex justify-end">
+              <Button type="button" tone="danger" size="xs" onClick={() => onChange(rules.filter((_, i) => i !== index))}>Remove rule</Button>
+            </div>
+          </Panel>
+        );
+      })}
+    </div>
+  );
+}
+
 function InstructionOrderEditor({
   instructions, selectedIds, onChange,
 }: { instructions: Instruction[]; selectedIds: number[]; onChange: (ids: number[]) => void }) {
@@ -1574,6 +1716,13 @@ function summariseBody(kind: string, body: Record<string, unknown>): string {
   if (!responseParts.length && body.response_mode && body.response_mode !== "none") responseParts.push(`legacy ${String(body.response_mode)}`);
   const response = responseParts.length ? ` · ${responseParts.join(" + ")}` : "";
   if (kind === "text") return String(body.markdown || "").slice(0, 80) + response;
+  if (kind === "content") {
+    const blocks = Array.isArray(body.blocks) ? body.blocks : [];
+    const images = blocks.filter((raw) => asRecord(raw)?.type === "image").length;
+    const firstText = blocks.map((raw) => asRecord(raw)).find((block) => block?.type === "markdown" || block?.type === "callout");
+    const preview = String(firstText?.markdown || firstText?.text || "Mixed content").slice(0, 60);
+    return `${preview} · ${blocks.length} blocks${images ? ` · ${images} image${images === 1 ? "" : "s"}` : ""}${response}`;
+  }
   if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return String(body.text || "");
   if (kind === "link") return String(body.label || body.url || "");
   if (kind === "audio" || kind === "video" || kind === "image" || kind === "document")
@@ -1735,6 +1884,11 @@ function TemplatesTab({ projectId }: { projectId: string }) {
                 {t.current_version.derived.media_manifest.length} media
               </div>
             )}
+            {(t.current_version?.response_rules?.length || 0) > 0 && (
+              <div className="mt-2 text-xs text-text-muted">
+                {t.current_version?.response_rules?.length} response rule{t.current_version?.response_rules?.length === 1 ? "" : "s"}
+              </div>
+            )}
             {t.current_version?.composition && t.current_version.composition.length > 0 && (
               <div className="mt-2 space-y-1">
                 {t.current_version.composition.slice(0, 3).map((c) => (
@@ -1777,11 +1931,13 @@ function TemplateComposer({
 }) {
   const initial = (template.current_version?.composition || []).map((c) => c.instruction_id);
   const [selectedIds, setSelectedIds] = useState<number[]>(initial);
+  const [responseRules, setResponseRules] = useState<TemplateResponseRule[]>(template.current_version?.response_rules || []);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     setSelectedIds((template.current_version?.composition || []).map((c) => c.instruction_id));
+    setResponseRules(template.current_version?.response_rules || []);
   }, [template.id, template.current_version?.id]);
 
   const save = async () => {
@@ -1791,6 +1947,7 @@ function TemplateComposer({
         method: "PUT",
         body: JSON.stringify({
           instructions: preserveCompositionMetadata(selectedIds, template.current_version?.composition || []),
+          response_rules: responseRules,
         }),
       });
       onDone();
@@ -1811,6 +1968,7 @@ function TemplateComposer({
         <Button onClick={onClose} tone="ghost" size="xs">Close</Button>
       </div>
       <InstructionOrderEditor instructions={instructions} selectedIds={selectedIds} onChange={setSelectedIds} />
+      <TemplateResponseRulesEditor rules={responseRules} onChange={setResponseRules} />
       {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
         <Button disabled={busy} onClick={save} tone="primary">Save composition</Button>
@@ -1992,6 +2150,7 @@ function NewInstructionForm({
   const [responseMax, setResponseMax] = useState(initialResponseFiles.max);
   const [responseMaxSize, setResponseMaxSize] = useState(initialResponseFiles.maxSize);
   const [selectedFile, setSelectedFile] = useState<StorageFile | null>(storageFileFromBody(instruction?.kind || "text", initialBody));
+  const [contentBlocks, setContentBlocks] = useState<ContentBlockDraft[]>(contentBlocksFromBody(initialBody));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1999,11 +2158,15 @@ function NewInstructionForm({
     if (!editMode) setSelectedFile(null);
   }, [editMode, kind]);
 
+  useEffect(() => {
+    if (kind === "content" && contentBlocks.length === 0) setContentBlocks([newContentBlock("markdown")]);
+  }, [contentBlocks.length, kind]);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      const body = buildInstructionBody(kind, text, selectedFile, responsePreset, responseAccept, responseMin, responseMax, responseMaxSize);
+      const body = buildInstructionBody(kind, text, selectedFile, contentBlocks, responsePreset, responseAccept, responseMin, responseMax, responseMaxSize);
       if (instruction) {
         await api(`/instructions/${instruction.id}`, projectId, {
           method: "PATCH",
@@ -2043,14 +2206,18 @@ function NewInstructionForm({
         <Field value={slug} onChange={(e) => setSlug(e.target.value)} disabled={editMode} placeholder="Slug (optional)" />
       </div>
 
-      <Field
-        as="textarea"
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-        placeholder={kind === "text" ? "Instruction text" : "Text shown with this media"}
-        rows={4}
-        required
-      />
+      {kind === "content" ? (
+        <ContentBlockEditor projectId={projectId} blocks={contentBlocks} onChange={setContentBlocks} />
+      ) : (
+        <Field
+          as="textarea"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder={kind === "text" ? "Instruction text" : "Text shown with this media"}
+          rows={4}
+          required
+        />
+      )}
       <Field
         as="select"
         value={responsePreset}
@@ -2075,10 +2242,10 @@ function NewInstructionForm({
         </div>
       )}
 
-      {(kind === "audio" || kind === "video") && (
+      {(kind === "audio" || kind === "video" || kind === "image") && (
         <StorageFilePicker
           projectId={projectId}
-          kind={kind}
+          kind={kind as "audio" | "video" | "image"}
           selected={selectedFile}
           onSelect={setSelectedFile}
         />
@@ -2086,7 +2253,7 @@ function NewInstructionForm({
 
       {err && <div className="text-red text-xs">{err}</div>}
       <div className="flex gap-2">
-        <Button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} tone="primary">{editMode ? "Save draft" : "Create draft"}</Button>
+        <Button disabled={busy || ((kind === "audio" || kind === "video" || kind === "image") && !selectedFile) || (kind === "content" && !contentBlocksValid(contentBlocks))} tone="primary">{editMode ? "Save draft" : "Create draft"}</Button>
         <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
       </div>
     </form>
@@ -2094,9 +2261,87 @@ function NewInstructionForm({
   );
 }
 
+function ContentBlockEditor({
+  projectId, blocks, onChange,
+}: { projectId: string; blocks: ContentBlockDraft[]; onChange: (blocks: ContentBlockDraft[]) => void }) {
+  const patchBlock = (index: number, patch: Partial<ContentBlockDraft>) => {
+    onChange(blocks.map((block, current) => current === index ? { ...block, ...patch } : block));
+  };
+  const moveBlock = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= blocks.length) return;
+    const next = [...blocks];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  const removeBlock = (index: number) => onChange(blocks.filter((_, current) => current !== index));
+  const addBlock = (type: ContentBlockType) => onChange([...blocks, newContentBlock(type)]);
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-sm font-medium">Instruction content</div>
+        <div className="text-xs text-text-muted mt-1">Text and images render together inside one numbered worker instruction.</div>
+      </div>
+      {blocks.map((block, index) => (
+        <Panel key={block.key} className="p-3 space-y-3 bg-bg">
+          <div className="flex flex-wrap items-center gap-2">
+            <Pill>Block {index + 1}</Pill>
+            <Field
+              as="select"
+              value={block.type}
+              onChange={(e) => patchBlock(index, { ...newContentBlock(e.target.value as ContentBlockType), key: block.key })}
+              className="max-w-44"
+            >
+              <option value="markdown">Text</option>
+              <option value="image">Image</option>
+              <option value="callout">Callout</option>
+              <option value="divider">Divider</option>
+            </Field>
+            <div className="ml-auto flex gap-1">
+              <Button type="button" size="xs" disabled={index === 0} onClick={() => moveBlock(index, -1)}>Up</Button>
+              <Button type="button" size="xs" disabled={index === blocks.length - 1} onClick={() => moveBlock(index, 1)}>Down</Button>
+              <Button type="button" size="xs" tone="danger" onClick={() => removeBlock(index)}>Remove</Button>
+            </div>
+          </div>
+          {block.type === "markdown" && (
+            <Field as="textarea" rows={5} value={block.markdown} onChange={(e) => patchBlock(index, { markdown: e.target.value })} placeholder="Instruction text. Template variables such as {{model}} are supported." required />
+          )}
+          {block.type === "image" && (
+            <div className="space-y-2">
+              <StorageFilePicker projectId={projectId} kind="image" selected={block.file} onSelect={(file) => patchBlock(index, { file })} />
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <Field value={block.caption} onChange={(e) => patchBlock(index, { caption: e.target.value })} placeholder="Caption (optional)" />
+                <Field value={block.alt} onChange={(e) => patchBlock(index, { alt: e.target.value })} placeholder="Accessibility description (optional)" />
+              </div>
+            </div>
+          )}
+          {block.type === "callout" && (
+            <div className="grid grid-cols-1 md:grid-cols-[160px_1fr] gap-2">
+              <Field as="select" value={block.tone} onChange={(e) => patchBlock(index, { tone: e.target.value as ContentBlockDraft["tone"] })}>
+                <option value="info">Information</option>
+                <option value="tip">Tip</option>
+                <option value="warning">Warning</option>
+              </Field>
+              <Field as="textarea" rows={3} value={block.text} onChange={(e) => patchBlock(index, { text: e.target.value })} placeholder="Important note" required />
+            </div>
+          )}
+          {block.type === "divider" && <div className="border-t border-border" />}
+        </Panel>
+      ))}
+      <div className="flex flex-wrap gap-2">
+        <Button type="button" size="xs" onClick={() => addBlock("markdown")}>+ Text</Button>
+        <Button type="button" size="xs" onClick={() => addBlock("image")}>+ Image</Button>
+        <Button type="button" size="xs" onClick={() => addBlock("callout")}>+ Callout</Button>
+        <Button type="button" size="xs" onClick={() => addBlock("divider")}>+ Divider</Button>
+      </div>
+    </div>
+  );
+}
+
 function StorageFilePicker({
   projectId, kind, selected, onSelect,
-}: { projectId: string; kind: "audio" | "video"; selected: StorageFile | null; onSelect: (file: StorageFile | null) => void }) {
+}: { projectId: string; kind: "audio" | "video" | "image"; selected: StorageFile | null; onSelect: (file: StorageFile | null) => void }) {
   const [query, setQuery] = useState("");
   const [folder, setFolder] = useState("");
   const [folders, setFolders] = useState<StorageFolder[]>([]);
@@ -2197,12 +2442,21 @@ function StorageFilePicker({
         )}
       </Panel>
       {selected && (
-        <div className="flex items-center justify-between gap-3 p-2 border border-accent/30 rounded bg-accent/10">
-          <div className="min-w-0">
-            <div className="text-sm truncate">{selected.name}</div>
-            <div className="text-xs text-text-muted truncate">{selected.folder} · {formatBytes(selected.size_bytes || 0)}</div>
+        <div className="p-2 border border-accent/30 rounded bg-accent/10 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-sm truncate">{selected.name}</div>
+              <div className="text-xs text-text-muted truncate">{selected.folder} · {formatBytes(selected.size_bytes || 0)}</div>
+            </div>
+            <Button type="button" onClick={() => onSelect(null)} size="xs">Clear</Button>
           </div>
-          <Button type="button" onClick={() => onSelect(null)} size="xs">Clear</Button>
+          {kind === "image" && (
+            <img
+              src={selected.url || `${STORAGE_API}/files/${selected.id}/content?project_id=${encodeURIComponent(projectId)}`}
+              alt={selected.name}
+              className="max-h-72 w-full object-contain rounded border border-border bg-black"
+            />
+          )}
         </div>
       )}
       <Panel className="divide-y divide-border bg-bg max-h-56 overflow-auto">
@@ -2228,6 +2482,48 @@ function StorageFilePicker({
 function instructionTextFromBody(kind: string, body: Record<string, unknown>): string {
   if (kind === "text") return String(body.markdown || "");
   return String(body.caption || body.transcript || "");
+}
+
+function newContentBlock(type: ContentBlockType): ContentBlockDraft {
+  return {
+    key: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    type,
+    markdown: "",
+    caption: "",
+    alt: "",
+    text: "",
+    tone: "info",
+    file: null,
+  };
+}
+
+function contentBlocksFromBody(body: Record<string, unknown>): ContentBlockDraft[] {
+  if (!Array.isArray(body.blocks)) return [];
+  return body.blocks.flatMap((raw, index) => {
+    const block = asRecord(raw);
+    const type = String(block?.type || "") as ContentBlockType;
+    if (!block || !["markdown", "image", "callout", "divider"].includes(type)) return [];
+    const storageID = Number(block.storage_file_id || 0);
+    return [{
+      key: `existing-${index}`,
+      type,
+      markdown: String(block.markdown || ""),
+      caption: String(block.caption || ""),
+      alt: String(block.alt || ""),
+      text: String(block.text || ""),
+      tone: (["info", "tip", "warning"].includes(String(block.tone)) ? String(block.tone) : "info") as ContentBlockDraft["tone"],
+      file: storageID ? { id: storageID, name: `Storage file #${storageID}`, folder: "", content_type: "image/" } : null,
+    }];
+  });
+}
+
+function contentBlocksValid(blocks: ContentBlockDraft[]): boolean {
+  return blocks.length > 0 && blocks.every((block) => {
+    if (block.type === "markdown") return Boolean(block.markdown.trim());
+    if (block.type === "image") return Boolean(block.file?.id);
+    if (block.type === "callout") return Boolean(block.text.trim());
+    return block.type === "divider";
+  });
 }
 
 type ResponsePreset =
@@ -2275,7 +2571,7 @@ function responseFileSettingsFromBody(body: Record<string, unknown>): { accept: 
 }
 
 function storageFileFromBody(kind: string, body: Record<string, unknown>): StorageFile | null {
-  if (kind !== "audio" && kind !== "video") return null;
+  if (kind !== "audio" && kind !== "video" && kind !== "image") return null;
   const id = Number(body.storage_file_id || 0);
   if (!id) return null;
   return {
@@ -2290,6 +2586,7 @@ function buildInstructionBody(
   kind: string,
   text: string,
   selectedFile: StorageFile | null,
+  contentBlocks: ContentBlockDraft[],
   responsePreset: ResponsePreset,
   responseAccept: string,
   responseMin: string,
@@ -2314,6 +2611,20 @@ function buildInstructionBody(
     },
   };
   if (kind === "text") return { markdown: text, ...response };
+  if (kind === "content") return {
+    blocks: contentBlocks.map((block) => {
+      if (block.type === "markdown") return { type: "markdown", markdown: block.markdown };
+      if (block.type === "image") return {
+        type: "image",
+        storage_file_id: block.file?.id,
+        ...(block.caption.trim() ? { caption: block.caption } : {}),
+        ...(block.alt.trim() ? { alt: block.alt } : {}),
+      };
+      if (block.type === "callout") return { type: "callout", text: block.text, tone: block.tone };
+      return { type: "divider" };
+    }),
+    ...response,
+  };
   return {
     storage_file_id: selectedFile?.id,
     caption: text,
@@ -2321,10 +2632,11 @@ function buildInstructionBody(
   };
 }
 
-function fileExtensionMatchesKind(name: string, kind: "audio" | "video"): boolean {
+function fileExtensionMatchesKind(name: string, kind: "audio" | "video" | "image"): boolean {
   const audio = [".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"];
   const video = [".mp4", ".mov", ".webm", ".m4v", ".ogv"];
-  return (kind === "audio" ? audio : video).some((ext) => name.endsWith(ext));
+  const image = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".heic"];
+  return (kind === "audio" ? audio : kind === "video" ? video : image).some((ext) => name.endsWith(ext));
 }
 
 function joinStorageFolder(parent: string, name: string): string {
@@ -2352,7 +2664,7 @@ function formatBytes(n: number): string {
   return `${value.toFixed(value >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-const ALL_KINDS = ["text", "audio", "video"];
+const ALL_KINDS = ["text", "content", "image", "audio", "video"];
 
 // ─── Public links ──────────────────────────────────────────────
 

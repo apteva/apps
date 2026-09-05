@@ -3,7 +3,7 @@ import { money, moneySigned, pctSigned } from "../lib/format.ts";
 import { AgentIcon } from "./AgentIcon.tsx";
 import { iconFor } from "../lib/agentIcon.ts";
 
-export function PortfolioHeader({ p }: { p: Portfolio }) {
+export function PortfolioHeader({ p, onSetLiveArmed }: { p: Portfolio; onSetLiveArmed?: (armed: boolean) => Promise<void> }) {
   const dayUp = p.day_pnl >= 0;
   const openUp = p.open_pnl >= 0;
 
@@ -26,7 +26,7 @@ export function PortfolioHeader({ p }: { p: Portfolio }) {
                 color: p.mode === "paper" ? "var(--color-warn)" : "var(--color-up)",
               }}
             >
-              {p.mode.toUpperCase()}
+              {(p.execution_environment || p.mode).replaceAll("_", " ").toUpperCase()}
             </span>
             <span
               className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium"
@@ -45,6 +45,15 @@ export function PortfolioHeader({ p }: { p: Portfolio }) {
           <p className="text-[12.5px] t-secondary mt-2 leading-relaxed max-w-3xl">
             {p.mandate}
           </p>
+          {p.execution_environment === "broker_live" && (
+            <button
+              className={`btn mt-3 ${p.live_armed ? "btn-ghost t-down" : "btn-primary"}`}
+              onClick={() => onSetLiveArmed?.(!p.live_armed)}
+              title="Live broker orders require an explicit safety arm"
+            >
+              {p.live_armed ? "Disarm live orders" : "Arm live orders"}
+            </button>
+          )}
         </div>
         <div className="grid grid-cols-2 gap-x-5 gap-y-1 shrink-0 ml-auto">
           <Stat label="Equity"        value={money(p.equity)} />

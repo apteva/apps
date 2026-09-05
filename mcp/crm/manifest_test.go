@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -19,14 +20,14 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 51 {
-		t.Errorf("expected 51 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 53 {
+		t.Errorf("expected 53 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
-	if len(m.Provides.Publishes) != 25 {
-		t.Errorf("expected 25 published event declarations, got %d", len(m.Provides.Publishes))
+	if len(m.Provides.Publishes) != 26 {
+		t.Errorf("expected 26 published event declarations, got %d", len(m.Provides.Publishes))
 	}
 	// Surfaces the embedded scopes — should accept project + global.
 	gotScopes := map[string]bool{}
@@ -53,6 +54,7 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 	for _, want := range []string{
 		"contact.added",
 		"contact.updated",
+		"contact.channel.deliverability.changed",
 		"contact.deleted",
 		"contact.merged",
 		"contact.activity.added",
@@ -79,6 +81,44 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 	} {
 		if !got[want] {
 			t.Errorf("manifest missing published event %q", want)
+		}
+	}
+}
+
+func TestContactAddedManifestDeclaresEmittedPayload(t *testing.T) {
+	want := map[string]string{
+		"event_id":     "string",
+		"id":           "integer",
+		"display_name": "string",
+		"first_name":   "string",
+		"last_name":    "string",
+		"archived":     "boolean",
+		"list_ids":     "array<integer>",
+	}
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for source, manifest := range map[string]sdk.Manifest{
+		"embedded": (&App{}).Manifest(),
+		"disk":     *disk,
+	} {
+		found := false
+		for _, event := range manifest.Provides.Publishes {
+			if event.Name != "contact.added" {
+				continue
+			}
+			found = true
+			if !reflect.DeepEqual(event.Payload, want) {
+				t.Fatalf("%s contact.added payload=%v, want %v", source, event.Payload, want)
+			}
+		}
+		if !found {
+			t.Fatalf("%s manifest does not declare contact.added", source)
 		}
 	}
 }

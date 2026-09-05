@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -11,19 +12,124 @@ import (
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
+			Name:        "instance_list_providers",
+			Description: "List all VPS provider connections bound to this Instances install and identify the configured default. Read-only and does not call a provider API.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolListProviders,
+		},
+		{
 			Name: "instance_create",
-			Description: "Provision a new instance via the bound VPS provider. Compatible provider bindings: hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
-				"Implemented provisioning adapters today: hetzner, digitalocean, runpod. Args: name (req), provider? (defaults to the bound provider), region?, size?, image?, tags_json?. " +
+			Description: "Provision a new instance via a bound VPS provider. Compatible provider bindings: hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
+				"Args: name (req), provider? (defaults to the configured default binding), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
-				"name":      map[string]any{"type": "string"},
-				"provider":  map[string]any{"type": "string"},
-				"region":    map[string]any{"type": "string"},
-				"size":      map[string]any{"type": "string"},
-				"image":     map[string]any{"type": "string"},
-				"tags_json": map[string]any{"type": "string"},
+				"name":                   map[string]any{"type": "string"},
+				"provider":               map[string]any{"type": "string"},
+				"provider_connection_id": map[string]any{"type": "integer", "description": "Choose a specific bound account when more than one connection exists for the provider"},
+				"region":                 map[string]any{"type": "string"},
+				"size":                   map[string]any{"type": "string"},
+				"image":                  map[string]any{"type": "string"},
+				"tags_json":              map[string]any{"type": "string"},
+				"retain_for_diagnosis":   map[string]any{"type": "boolean", "description": "Keep a failed provider resource for diagnostics instead of automatic rollback; defaults to true"},
+				"elastic_metal": map[string]any{"type": "object", "description": "Optional Scaleway Elastic Metal install settings", "properties": map[string]any{
+					"raid_level":          map[string]any{"type": "string", "enum": []string{"raid0", "raid1", "raid5", "raid6", "raid10"}},
+					"partitioning_schema": map[string]any{"type": "object", "description": "Explicit Scaleway partitioning schema; validated before server creation"},
+					"retain_flexible_ips": map[string]any{"type": "boolean"},
+				}},
+				"storage": map[string]any{
+					"type":        "object",
+					"description": "Optional provider-neutral boot storage. Omit to preserve the provider/image default.",
+					"properties": map[string]any{
+						"boot": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"size_gb":       map[string]any{"type": "integer", "minimum": 1},
+								"storage_class": map[string]any{"type": "string", "enum": []string{"local", "block", "network", "ephemeral"}},
+								"tier":          map[string]any{"type": "string", "enum": []string{"provider-default", "local", "balanced", "performance"}},
+								"provider_type": map[string]any{"type": "string"},
+								"delete_policy": map[string]any{"type": "string", "enum": []string{"with_instance", "retain"}},
+							},
+							"required": []string{"size_gb"},
+						},
+					},
+				},
 			}, []string{"name"}),
 			Handler: a.toolCreate,
+		},
+		{
+			Name:        "instance_storage_capabilities",
+			Description: "Describe boot/data storage support for a bound provider. Returns separate boot_size_configurable, data_volumes, dynamic_attach, detach, resize, snapshots, storage_classes, and provider tier mappings.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil),
+			Handler:     a.toolStorageCapabilities,
+		},
+		{
+			Name:        "instance_list_storage_types",
+			Description: "List provider-neutral storage classes and tiers with their native provider type mappings.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil),
+			Handler:     a.toolListStorageTypes,
+		},
+		{
+			Name:        "instance_volume_create",
+			Description: "Create a managed data volume and optionally attach it to an existing instance. Pass prepare to safely format a newly created blank volume, persist it by filesystem UUID, and mount it for immediate use. Data volumes default to delete_policy=retain.",
+			InputSchema: schemaObject(map[string]any{
+				"instance_id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"},
+				"name": map[string]any{"type": "string"}, "size_gb": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"},
+				"tier": map[string]any{"type": "string", "enum": []string{"provider-default", "balanced", "performance"}}, "provider_type": map[string]any{"type": "string"},
+				"delete_policy": map[string]any{"type": "string", "enum": []string{"retain", "with_instance"}},
+				"prepare":       volumePrepareObjectSchema("Optional guest activation after attachment. For a newly created volume format_if_blank defaults to true."),
+			}, []string{"name", "size_gb"}),
+			Handler: a.toolVolumeCreate,
+		},
+		{Name: "instance_volume_get", Description: "Get one managed volume by Instances volume id.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolVolumeGet},
+		{Name: "instance_volume_list", Description: "List volumes tracked by Instances. Optional filters: instance_id, provider.", InputSchema: schemaObject(map[string]any{"instance_id": map[string]any{"type": "integer"}, "provider": map[string]any{"type": "string"}}, nil), Handler: a.toolVolumeList},
+		{Name: "instance_volume_attach", Description: "Attach an available managed volume to an existing instance in the same provider and region. Pass prepare to mount it automatically; formatting an existing blank volume requires format_if_blank=true.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "instance_id": map[string]any{"type": "integer"}, "prepare": volumePrepareObjectSchema("Optional guest activation after attachment. format_if_blank defaults to false for an existing volume.")}, []string{"id", "instance_id"}), Handler: a.toolVolumeAttach},
+		{Name: "instance_volume_prepare", Description: "Make an attached Linux data block volume usable inside the guest over SSH. Discovers the stable device, refuses ambiguous devices and unknown signatures, optionally formats only when blank, writes a UUID-based fstab entry, mounts it, and verifies the result.", InputSchema: schemaObject(map[string]any{
+			"id":              map[string]any{"type": "integer"},
+			"filesystem":      map[string]any{"type": "string", "enum": []string{"ext4", "xfs"}},
+			"mount_path":      map[string]any{"type": "string", "description": "Dedicated absolute path such as /srv/media"},
+			"owner":           map[string]any{"type": "string", "description": "user:group or uid:gid; defaults to root:root"},
+			"mode":            map[string]any{"type": "string", "description": "Octal mode; defaults to 0755"},
+			"mount_options":   map[string]any{"type": "string", "description": "Comma-separated fstab options; defaults to defaults,nofail"},
+			"format_if_blank": map[string]any{"type": "boolean", "description": "Required to create a filesystem on a blank existing volume; never overwrites a signature"},
+		}, []string{"id", "mount_path"}), Handler: a.toolVolumePrepare},
+		{Name: "instance_volume_detach", Description: "Detach a data volume without deleting it. Boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolVolumeDetach},
+		{Name: "instance_volume_resize", Description: "Increase a managed volume size. Shrinking is refused. Filesystem growth remains a separate guest operation.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "size_gb": map[string]any{"type": "integer", "minimum": 1}}, []string{"id", "size_gb"}), Handler: a.toolVolumeResize},
+		{Name: "instance_volume_delete", Description: "Permanently delete a detached, app-managed data volume. Requires confirm=true; external and boot volumes are refused.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolVolumeDelete},
+		{
+			Name:        "object_storage_list_providers",
+			Description: "List bound provider accounts that can provision object storage through Instances.",
+			InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolObjectStorageListProviders,
+		},
+		{
+			Name:        "object_storage_list_plans",
+			Description: "List object-storage regions/clusters and plans/tiers for a bound provider.",
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolObjectStorageListPlans,
+		},
+		{Name: "object_storage_preflight", Description: "Read-only preflight for object storage. Scaleway verifies the default project, IAM settings, normalized region, and optional bucket-name availability without creating credentials or resources.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}, "region": map[string]any{"type": "string"}, "bucket": map[string]any{"type": "string"}}, nil), Handler: a.toolObjectStoragePreflight},
+		{
+			Name:        "object_storage_create",
+			Description: "Provision object storage and return its S3 credentials once. Instances stores resource metadata and access-key ID, never the secret and never an automatic Connection.",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"},
+				"region": map[string]any{"type": "string", "description": "Scaleway region or Vultr cluster ID"}, "plan": map[string]any{"type": "string", "description": "Provider tier ID; optional where supported"},
+				"bucket": map[string]any{"type": "string", "description": "Optional Scaleway bucket name; a globally unique name is generated when omitted"},
+			}, []string{"name"}), Handler: a.toolObjectStorageCreate,
+		},
+		{Name: "object_storage_get", Description: "Get one provisioned object-storage resource. Secrets are never persisted and are not returned here.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolObjectStorageGet},
+		{Name: "object_storage_list", Description: "List object-storage resources tracked by Instances. Optional provider filter.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil), Handler: a.toolObjectStorageList},
+		{Name: "object_storage_rotate_credentials", Description: "Rotate credentials and return the new secret once. The previous provider key is invalidated where supported.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolObjectStorageRotateCredentials},
+		{Name: "object_storage_destroy", Description: "Delete a managed object-storage resource. Requires confirm=true. Scaleway buckets must be empty.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "confirm": map[string]any{"type": "boolean"}}, []string{"id", "confirm"}), Handler: a.toolObjectStorageDestroy},
+		{
+			Name:        "instance_register",
+			Description: "Register an externally managed SSH host such as a Mac. Instances generates a dedicated keypair and returns the public key to add to the remote user's authorized_keys. The row remains provisioning until instance_wait_ready succeeds. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?.",
+			InputSchema: schemaObject(map[string]any{
+				"name":      map[string]any{"type": "string"},
+				"ssh_host":  map[string]any{"type": "string"},
+				"ssh_user":  map[string]any{"type": "string"},
+				"ssh_port":  map[string]any{"type": "integer"},
+				"tags_json": map[string]any{"type": "string"},
+			}, []string{"name", "ssh_host", "ssh_user"}),
+			Handler: a.toolRegister,
 		},
 		{
 			Name:        "instance_get",
@@ -42,10 +148,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "instance_destroy",
-			Description: "Terminate the upstream resource and remove the row. Refused for local (id 0). Idempotent.",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
+			Description: "Terminate the upstream resource and remove the row. Provider deletion does not depend on SSH. Set force=true to continue provider-side volume cleanup when a guest unmount cannot run. Refused for local (id 0).",
+			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "force": map[string]any{"type": "boolean"}, "retain_volumes": map[string]any{"type": "boolean", "description": "Override all managed volume policies: true retains, false deletes"}, "retain_flexible_ips": map[string]any{"type": "boolean", "description": "Keep Elastic Metal Flexible IPs; defaults to false"}}, []string{"id"}),
 			Handler:     a.toolDestroy,
 		},
+		{Name: "instance_compare_provider", Description: "Read provider state and compare it with tracked server, IP, status, and volumes. This action never changes provider resources.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolCompareProvider},
+		{Name: "instance_provider_inventory", Description: "Read provider resources for orphan detection. Scaleway includes virtual Instances, Elastic Metal servers, and Elastic Metal Flexible IPs across supported zones.", InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer"}}, nil), Handler: a.toolProviderInventory},
+		{Name: "instance_storage_benchmark", Description: "Run a bounded 256 MiB sequential write benchmark against target_path and save the result. The temporary file is always removed.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "target_path": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolStorageBenchmark},
 		{
 			Name: "instance_upgrade",
 			Description: "Change a remote instance to another server type in-place where the provider adapter supports it. Hetzner is implemented today. This shuts the server down, " +
@@ -150,7 +259,35 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 }
 
+func volumePrepareObjectSchema(description string) map[string]any {
+	return map[string]any{
+		"type":        "object",
+		"description": description,
+		"properties": map[string]any{
+			"filesystem":      map[string]any{"type": "string", "enum": []string{"ext4", "xfs"}},
+			"mount_path":      map[string]any{"type": "string"},
+			"owner":           map[string]any{"type": "string"},
+			"mode":            map[string]any{"type": "string"},
+			"mount_options":   map[string]any{"type": "string"},
+			"format_if_blank": map[string]any{"type": "boolean"},
+		},
+		"required": []string{"mount_path"},
+	}
+}
+
 // ─── Handlers ─────────────────────────────────────────────────────
+
+func (a *App) toolListProviders(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	providers := boundInstanceProviders(ctx)
+	defaultProvider := ""
+	for _, provider := range providers {
+		if provider.Default {
+			defaultProvider = provider.Provider
+			break
+		}
+	}
+	return map[string]any{"providers": providers, "default": defaultProvider, "count": len(providers)}, nil
+}
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	name := strArg(args, "name")
@@ -159,18 +296,82 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	provider := strArg(args, "provider")
 	in := CreateInstanceInput{
-		Name:     name,
-		Provider: provider,
-		Region:   strArg(args, "region"),
-		Size:     strArg(args, "size"),
-		Image:    strArg(args, "image"),
-		TagsJSON: strArg(args, "tags_json"),
+		Name: name, Provider: provider, ProviderConnectionID: int64Arg(args, "provider_connection_id"),
+		Region: strArg(args, "region"), Size: strArg(args, "size"), Image: strArg(args, "image"), TagsJSON: strArg(args, "tags_json"),
+		Storage:      storageRequestArg(args),
+		ElasticMetal: elasticMetalConfigArg(args),
+	}
+	if value, present := args["retain_for_diagnosis"]; present {
+		in.RetainOnFailureSet = true
+		in.RetainOnFailure, _ = value.(bool)
 	}
 	inst, err := provisionInstance(ctx, in)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"instance": inst.stripSecrets()}, nil
+}
+
+func elasticMetalConfigArg(args map[string]any) *ElasticMetalConfig {
+	raw, _ := args["elastic_metal"].(map[string]any)
+	if len(raw) == 0 {
+		return nil
+	}
+	schema, _ := raw["partitioning_schema"].(map[string]any)
+	return &ElasticMetalConfig{RAIDLevel: strArg(raw, "raid_level"), PartitioningSchema: schema, RetainFlexibleIPs: boolArg(raw, "retain_flexible_ips", false)}
+}
+
+func storageRequestArg(args map[string]any) InstanceStorageRequest {
+	storage, _ := args["storage"].(map[string]any)
+	boot, _ := storage["boot"].(map[string]any)
+	if len(boot) == 0 {
+		return InstanceStorageRequest{}
+	}
+	return InstanceStorageRequest{Boot: &BootStorageRequest{
+		SizeGB: intArg(boot, "size_gb", 0), StorageClass: strArg(boot, "storage_class"), Tier: strArg(boot, "tier"), ProviderType: strArg(boot, "provider_type"), DeletePolicy: strArg(boot, "delete_policy"),
+	}}
+}
+
+func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	name := strings.TrimSpace(strArg(args, "name"))
+	host := strings.TrimSpace(strArg(args, "ssh_host"))
+	user := strings.TrimSpace(strArg(args, "ssh_user"))
+	port := intArg(args, "ssh_port", 22)
+	if name == "" || host == "" || user == "" {
+		return nil, errors.New("name, ssh_host, and ssh_user are required")
+	}
+	if strings.ContainsAny(host, " /\\\t\r\n") {
+		return nil, errors.New("ssh_host must be a hostname or IP address without whitespace")
+	}
+	if strings.ContainsAny(user, " /\\\t\r\n@:") {
+		return nil, errors.New("ssh_user contains invalid characters")
+	}
+	if port <= 0 || port > 65535 {
+		return nil, errors.New("ssh_port must be between 1 and 65535")
+	}
+	privateKey, publicKey, err := generateSSHKeypair()
+	if err != nil {
+		return nil, err
+	}
+	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
+		Name: name, Provider: "external", ProviderID: host + ":" + fmt.Sprint(port),
+		Status: "provisioning", SSHHost: host, SSHPort: port, SSHUser: user,
+		SSHPrivateKey: privateKey, SSHPublicKey: publicKey,
+		TagsJSON: strArg(args, "tags_json"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	emitInstanceCreated(ctx, inst)
+	emitInstanceStatus(ctx, inst)
+	return map[string]any{
+		"instance": inst.stripSecrets(),
+		"authorization": map[string]any{
+			"ssh_user": user, "ssh_host": host, "ssh_port": port,
+			"public_key": publicKey,
+			"next_step":  "Add public_key as one line in the remote user's ~/.ssh/authorized_keys, then call instance_wait_ready with this instance id.",
+		},
+	}, nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -205,7 +406,12 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := destroyManagedInstance(ctx, inst); err != nil {
+	options := DestroyOptions{Force: boolArg(args, "force", false), RetainFlexibleIPs: boolArg(args, "retain_flexible_ips", false)}
+	if value, present := args["retain_volumes"]; present {
+		parsed, _ := value.(bool)
+		options.RetainVolumes = &parsed
+	}
+	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		return nil, err
 	}
 	return map[string]any{"destroyed": true, "id": id}, nil
@@ -347,27 +553,39 @@ func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	types, err := listServerTypes(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"server_types": types, "count": len(types)}, nil
+	types, err := listServerTypes(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "server_types": types, "count": len(types)}, nil
 }
 
 func (a *App) toolListLocations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	locs, err := listLocations(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"locations": locs, "count": len(locs)}, nil
+	locs, err := listLocations(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "locations": locs, "count": len(locs)}, nil
 }
 
 func (a *App) toolListImages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	imgs, err := listImages(ctx, strArg(args, "provider"))
+	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"images": imgs, "count": len(imgs)}, nil
+	imgs, err := listImages(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"provider": provider, "images": imgs, "count": len(imgs)}, nil
 }
 
 // ─── arg helpers ──────────────────────────────────────────────────

@@ -29,12 +29,18 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.6.3
+version: 0.7.4
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
   AI music soundtrack quick-add, timed AI audio clips, audio-only renders,
   and AI-backed clip/soundtrack sources generated through Media Studio.
+  Rendering applies opacity, crop, rounded corners, shadows, and camera
+  keyframes consistently with preview. Native V2 shapes support gradients,
+  borders, ellipses, and structured shadows. Text wraps and fits within padded
+  boxes with safe-area diagnostics. FFmpeg/native jobs report measured progress,
+  remote shell values preserve special characters, and diagnostics redact
+  credentials before they are stored or emitted.
   Composer shows audio-only edits as visible audio timelines, lists
   compositions by active project without blocking on render metadata, probes
   generated Storage assets itself for actual duration, reads local Storage
@@ -64,6 +70,12 @@ description: |
   position, offset, width, height, scale, opacity, z_index, and layout alias
   fields. Overlay/PIP video audio is muted by default unless source_audio is
   explicitly set to keep.
+  Stable V1 screen-recording clips can reuse one video or audio source through
+  source_start/source_end ranges. Visual sources support normalized crop
+  rectangles and eased source-space pan/zoom keyframes in both local and remote
+  ffmpeg renders. Editable timeline markers preserve browser and recorder
+  events, including optional active-region metadata, and the panel exposes the
+  new ranges, crops, camera motion, and markers.
   ElevenLabs narration continuity is planned in timeline order across silence
   and SFX, uses stable text context for cache identity, and shares one
   server-side generation path between the panel and renderer. Provider request
@@ -85,8 +97,11 @@ description: |
   Regular, Medium, Semibold, and Bold plus Go Mono Regular and Bold, resolves
   every requested family and weight to an explicit font file, and serves the
   same bytes to local and remote render hosts. Validation and render QA report
-  family substitutions and unsupported spacing fields instead of silently
+  family substitutions and unsupported letter spacing instead of silently
   depending on host Fontconfig packages or proprietary fonts.
+  Local Storage resolution decodes files_get's wrapped found/file response and
+  reads disk-backed blobs directly when present, avoiding unnecessary fallback
+  to signed public URLs for local ffmpeg renders.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -113,6 +128,8 @@ provides:
   mcp_tools:
     - { name: composition_create }
     - { name: composition_update }
+    - { name: composition_validate }
+    - { name: composition_examples }
     - { name: composition_get }
     - { name: composition_list }
     - { name: composition_delete }
@@ -294,7 +311,10 @@ func browserNodePath() string {
 
 func composerV2Enabled() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("COMPOSER_V2_ENABLED")))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
+	if v == "" {
+		return true
+	}
+	return v != "0" && v != "false" && v != "no" && v != "off"
 }
 
 // renderHostID reads the optional install-config field. When > 0,

@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,8 +16,12 @@ import (
 // ─── rows_insert ───────────────────────────────────────────────────
 
 func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	var writeBytes int64
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_insert", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -25,6 +31,9 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	rawRows := sliceArg(args, "rows")
+	if err := checkBatchBytes(ctx, rawRows); err != nil {
+		return nil, err
+	}
 	if len(rawRows) == 0 {
 		return nil, errf("rows is required and must be non-empty")
 	}
@@ -69,10 +78,13 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			}
 			coerced, err := coerceForStorage(col, v)
 			if err != nil {
-				return nil, errf("rows[%d]: %v", i, err)
+				return nil, fmt.Errorf("rows[%d]: %w", i, err)
+			}
+			if err := chargeStoredValue(ctx, &writeBytes, col.Name, coerced); err != nil {
+				return nil, err
 			}
 			if err := validateStoredValueSize(ctx, col, coerced); err != nil {
-				return nil, errf("rows[%d]: %v", i, err)
+				return nil, fmt.Errorf("rows[%d]: %w", i, err)
 			}
 			usedCols = append(usedCols, col.Name)
 			usedVals = append(usedVals, coerced)
@@ -81,34 +93,22 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		colsUsed[i] = usedCols
 	}
 
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	statements := newBatchStatements(tx)
+	defer statements.close()
 	if err := reserveRows(tx, t, int64(len(rawRows)), maxRowsPerTable(ctx)); err != nil {
 		return nil, err
 	}
 
 	ids := make([]int64, 0, len(rawRows))
 	for i, vals := range prepared {
-		colNames := colsUsed[i]
-		var sqlText string
-		if len(colNames) == 0 {
-			sqlText = fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quote(t.PhysicalName))
-		} else {
-			placeholders := strings.Repeat("?,", len(vals))
-			placeholders = placeholders[:len(placeholders)-1]
-			cols := make([]string, len(colNames))
-			for j, n := range colNames {
-				cols[j] = quote(n)
-			}
-			sqlText = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-				quote(t.PhysicalName), strings.Join(cols, ", "), placeholders)
-		}
-		res, err := tx.Exec(sqlText, vals...)
+		res, err := statements.insert(t.PhysicalName, colsUsed[i], vals)
 		if err != nil {
-			return nil, errf("rows[%d]: insert failed: %v", i, err)
+			return nil, fmt.Errorf("rows[%d]: insert failed: %w", i, err)
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
@@ -130,8 +130,12 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── rows_upsert ────────────────────────────────────────────────────
 
 func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	var writeBytes int64
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_upsert", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -167,6 +171,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		keyCols = append(keyCols, name)
 	}
 	rawRows := sliceArg(args, "rows")
+	if err := checkBatchBytes(ctx, rawRows); err != nil {
+		return nil, err
+	}
 	if len(rawRows) == 0 {
 		return nil, errf("rows is required and must be non-empty")
 	}
@@ -223,11 +230,13 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		prepared[i] = preparedRow{obj: obj, keyVals: keyVals}
 	}
 
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	statements := newBatchStatements(tx)
+	defer statements.close()
 	if _, err := tx.Exec(`UPDATE tables_meta SET updated_at = updated_at WHERE id = ?`, t.ID); err != nil {
 		return nil, err
 	}
@@ -242,15 +251,18 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	where := strings.Join(whereParts, " AND ")
 	ids := make([]int64, 0, len(prepared))
 	inserted, updated := 0, 0
+	insertedIDs, updatedIDs := []int64{}, []int64{}
 
+	lookup, err := tx.Prepare(fmt.Sprintf("SELECT id FROM %s WHERE %s ORDER BY id LIMIT 1", quote(t.PhysicalName), where))
+	if err != nil {
+		return nil, err
+	}
+	defer lookup.Close()
 	for i, row := range prepared {
 		var existingID int64
-		err := tx.QueryRow(
-			fmt.Sprintf("SELECT id FROM %s WHERE %s ORDER BY id LIMIT 1", quote(t.PhysicalName), where),
-			row.keyVals...,
-		).Scan(&existingID)
+		err := lookup.QueryRowContext(tx.ctx, row.keyVals...).Scan(&existingID)
 		if err != nil && err != sql.ErrNoRows {
-			return nil, errf("rows[%d]: lookup failed: %v", i, err)
+			return nil, fmt.Errorf("rows[%d]: lookup failed: %w", i, err)
 		}
 		if err == nil {
 			setCols := make([]string, 0, len(row.obj)+1)
@@ -262,24 +274,28 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				}
 				coerced, err := coerceForStorage(col, v)
 				if err != nil {
-					return nil, errf("rows[%d]: %v", i, err)
+					return nil, fmt.Errorf("rows[%d]: %w", i, err)
+				}
+				if err := chargeStoredValue(ctx, &writeBytes, col.Name, coerced); err != nil {
+					return nil, err
 				}
 				if err := validateStoredValueSize(ctx, col, coerced); err != nil {
-					return nil, errf("rows[%d]: %v", i, err)
+					return nil, fmt.Errorf("rows[%d]: %w", i, err)
 				}
 				setCols = append(setCols, quote(col.Name)+" = ?")
 				vals = append(vals, coerced)
 			}
 			if len(setCols) > 0 {
-				setCols = append(setCols, `"updated_at" = CURRENT_TIMESTAMP`)
+				setCols = append(setCols, `"updated_at" = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), "_revision" = "_revision" + 1`)
 				vals = append(vals, existingID)
 				stmt := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", quote(t.PhysicalName), strings.Join(setCols, ", "))
-				if _, err := tx.Exec(stmt, vals...); err != nil {
-					return nil, errf("rows[%d]: update failed: %v", i, err)
+				if _, err := statements.exec(stmt, vals...); err != nil {
+					return nil, fmt.Errorf("rows[%d]: update failed: %w", i, err)
 				}
 			}
 			ids = append(ids, existingID)
 			updated++
+			updatedIDs = append(updatedIDs, existingID)
 			continue
 		}
 
@@ -299,33 +315,24 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			}
 			coerced, err := coerceForStorage(col, v)
 			if err != nil {
-				return nil, errf("rows[%d]: %v", i, err)
+				return nil, fmt.Errorf("rows[%d]: %w", i, err)
+			}
+			if err := chargeStoredValue(ctx, &writeBytes, col.Name, coerced); err != nil {
+				return nil, err
 			}
 			if err := validateStoredValueSize(ctx, col, coerced); err != nil {
-				return nil, errf("rows[%d]: %v", i, err)
+				return nil, fmt.Errorf("rows[%d]: %w", i, err)
 			}
 			usedCols = append(usedCols, col.Name)
 			usedVals = append(usedVals, coerced)
 		}
-		var sqlText string
-		if len(usedCols) == 0 {
-			sqlText = fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quote(t.PhysicalName))
-		} else {
-			placeholders := strings.Repeat("?,", len(usedVals))
-			placeholders = placeholders[:len(placeholders)-1]
-			cols := make([]string, len(usedCols))
-			for j, n := range usedCols {
-				cols[j] = quote(n)
-			}
-			sqlText = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-				quote(t.PhysicalName), strings.Join(cols, ", "), placeholders)
-		}
+
 		if err := reserveRows(tx, t, 1, maxRowsPerTable(ctx)); err != nil {
 			return nil, err
 		}
-		res, err := tx.Exec(sqlText, usedVals...)
+		res, err := statements.insert(t.PhysicalName, usedCols, usedVals)
 		if err != nil {
-			return nil, errf("rows[%d]: insert failed: %v", i, err)
+			return nil, fmt.Errorf("rows[%d]: insert failed: %w", i, err)
 		}
 		id, err := res.LastInsertId()
 		if err != nil {
@@ -333,6 +340,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		ids = append(ids, id)
 		inserted++
+		insertedIDs = append(insertedIDs, id)
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -341,57 +349,108 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		emit(ctx, topicRowInserted, map[string]any{
 			"table": tableName,
 			"count": inserted,
+			"ids":   insertedIDs,
 		})
 	}
 	if updated > 0 {
 		emit(ctx, topicRowUpdated, map[string]any{
 			"table": tableName,
 			"count": updated,
+			"ids":   updatedIDs,
 		})
 	}
 	return map[string]any{"ids": ids, "inserted": inserted, "updated": updated}, nil
 }
 
-func ensureUniqueUpsertIndex(tx *sql.Tx, t *Table, keyCols []string) error {
-	sum := sha256.Sum256([]byte(strings.Join(keyCols, "\x00")))
-	indexName := fmt.Sprintf("ux_%s_%x", t.PhysicalName, sum[:8])
-	logicalName := fmt.Sprintf("managed_upsert_%x", sum[:8])
-	var existing int64
-	if err := tx.QueryRow(`SELECT id FROM indexes_meta WHERE table_id = ? AND name = ?`, t.ID, logicalName).Scan(&existing); err == nil {
-		return nil
-	} else if err != sql.ErrNoRows {
+func managedIndexName(columns []IndexColumn) string {
+	names := make([]string, len(columns))
+	for i, c := range columns {
+		names[i] = c.Col
+	}
+	sort.Strings(names)
+	sum := sha256.Sum256([]byte(strings.Join(names, "\x00")))
+	return fmt.Sprintf("managed_upsert_%x", sum[:8])
+}
+func ensureUniqueUpsertIndex(tx *writeTx, t *Table, keyCols []string) error {
+	if err := reconcileIndexes(tx, t); err != nil {
 		return err
 	}
-	var physicalExists int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?`, indexName).Scan(&physicalExists); err != nil {
+	rows, err := tx.Query(`SELECT i.id,c.column_name FROM indexes_meta i JOIN index_columns c ON c.index_id=i.id WHERE i.table_id=? AND i.unique_index=1 ORDER BY i.id,c.position`, t.ID)
+	if err != nil {
 		return err
+	}
+	groups := map[int64][]string{}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		groups[id] = append(groups[id], name)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	key := append([]string{}, keyCols...)
+	sort.Strings(key)
+	for _, names := range groups {
+		sort.Strings(names)
+		if strings.Join(names, "\x00") == strings.Join(key, "\x00") {
+			return nil
+		}
+	}
+	var count int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM indexes_meta WHERE table_id=?", t.ID).Scan(&count); err != nil {
+		return err
+	}
+	if count >= 64 {
+		return errf("table already has maximum of 64 indexes")
 	}
 	columns := make([]IndexColumn, len(keyCols))
 	for i, col := range keyCols {
 		columns[i] = IndexColumn{Col: col, Order: "asc"}
 	}
-	if physicalExists == 0 {
-		if _, err := tx.Exec(buildCreateIndexSQL(indexName, t.PhysicalName, columns, true)); err != nil {
-			return errf("cannot enforce upsert key (%s); remove duplicate key rows first: %v", strings.Join(keyCols, ", "), err)
+	logical := managedIndexName(columns)
+	physical := physicalIndexName(t.ID, logical, true)
+	// Old hashes can persist after renames; choose an unused identity while actual
+	// index columns above remain the authority for reuse.
+	var exists int
+	if err := tx.QueryRow("SELECT COUNT(*) FROM indexes_meta WHERE table_id=? AND name=?", t.ID, logical).Scan(&exists); err != nil {
+		return err
+	}
+	if exists > 0 {
+		var last int64
+		if err := tx.QueryRow("SELECT COALESCE(MAX(id),0)+1 FROM indexes_meta").Scan(&last); err != nil {
+			return err
 		}
+		logical = fmt.Sprintf("%s_%d", logical, last)
+		physical = physicalIndexName(t.ID, logical, true)
 	}
-	res, err := tx.Exec(`INSERT INTO indexes_meta(table_id, name, physical_name, unique_index, managed)
-		VALUES (?, ?, ?, 1, 1)`, t.ID, logicalName, indexName)
+	if _, err := tx.Exec(buildCreateIndexSQL(physical, t.PhysicalName, columns, true)); err != nil {
+		return conflict("cannot enforce upsert key; remove duplicate key rows first: %v", err)
+	}
+	result, err := tx.Exec("INSERT INTO indexes_meta(table_id,name,physical_name,unique_index,managed) VALUES(?,?,?,1,1)", t.ID, logical, physical)
 	if err != nil {
 		return err
 	}
-	indexID, err := res.LastInsertId()
+	id, err := result.LastInsertId()
 	if err != nil {
 		return err
 	}
-	return insertIndexColumns(tx, indexID, columns)
+	return insertIndexColumns(tx, id, columns)
 }
 
 // ─── rows_get ──────────────────────────────────────────────────────
 
 func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_get", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -418,7 +477,7 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	qctx, cancel := queryTimeoutContext(ctx)
 	started := time.Now()
-	row, found, err := fetchRowByIDContext(qctx, read.conn, t, id, selectClause)
+	row, found, err := fetchRowByIDBudget(qctx, read.conn, t, id, selectClause, maxQueryBytes(ctx))
 	cancel()
 	closeErr := read.conn.Close()
 	sqlTime := time.Since(started)
@@ -433,17 +492,29 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if !found {
 		return map[string]any{"row": nil, "found": false}, nil
 	}
+	result := map[string]any{"row": row, "found": true}
 	if boolArg(args, "hydrate_files") {
-		hydrateFileColumns(ctx, t, row)
+		result["file_hydration"] = hydrateFileColumns(ctx, t, row)
+		size, err := jsonSize(result, maxQueryBytes(ctx))
+		if err != nil {
+			return nil, err
+		}
+		if size > maxQueryBytes(ctx) {
+			return nil, oversized()
+		}
 	}
-	return map[string]any{"row": row, "found": true}, nil
+	return result, nil
 }
 
 // ─── rows_update ───────────────────────────────────────────────────
 
 func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	var writeBytes int64
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_update", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -464,6 +535,12 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	if expected, ok := args["expected_table_id"]; ok {
+		id, _ := exactInteger(expected)
+		if id != t.ID {
+			return nil, conflict("table was replaced; reload before editing")
+		}
+	}
 
 	setCols := make([]string, 0, len(fields))
 	vals := make([]any, 0, len(fields))
@@ -479,52 +556,68 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		if err != nil {
 			return nil, err
 		}
+		if err := chargeStoredValue(ctx, &writeBytes, k, coerced); err != nil {
+			return nil, err
+		}
 		if err := validateStoredValueSize(ctx, t.Columns[idx], coerced); err != nil {
 			return nil, err
 		}
 		setCols = append(setCols, fmt.Sprintf("%s = ?", quote(k)))
 		vals = append(vals, coerced)
 	}
-	setCols = append(setCols, `"updated_at" = CURRENT_TIMESTAMP`)
+	setCols = append(setCols, `"updated_at" = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), "_revision" = "_revision" + 1`)
 	vals = append(vals, id)
 
 	stmt := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", quote(t.PhysicalName), strings.Join(setCols, ", "))
-	res, err := ctx.AppDB().Exec(stmt, vals...)
+	if v, ok := args["expected_revision"]; ok {
+		revision, _ := exactInteger(v)
+		stmt += " AND _revision = ?"
+		vals = append(vals, revision)
+	}
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
-	n, err := res.RowsAffected()
+	defer tx.Rollback()
+	selection, err := parseSelect(args, t)
 	if err != nil {
 		return nil, err
 	}
-	if n == 0 {
-		return nil, errf("row id=%d not found in table %q", id, tableName)
-	}
-	read, err := acquireReadConn(ctx, tableName)
+	returned, err := tx.Query(stmt+" RETURNING "+strings.TrimPrefix(selection, "SELECT "), vals...)
 	if err != nil {
 		return nil, err
 	}
-	qctx, cancel := queryTimeoutContext(ctx)
-	row, _, err := fetchRowByIDContext(qctx, read.conn, t, id, "")
-	cancel()
-	_ = read.conn.Close()
+	result, _, err := scanRowsBudget(returned, t, maxQueryBytes(ctx), 1)
+	returned.Close()
 	if err != nil {
-		return nil, queryStageErr("select", tableName, err)
+		return nil, err
 	}
-	emit(ctx, topicRowUpdated, map[string]any{
-		"table":  tableName,
-		"id":     id,
-		"fields": fields,
-		"row":    row,
-	})
+	if len(result) == 0 {
+		var exists int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM "+quote(t.PhysicalName)+" WHERE id=?", id).Scan(&exists); err != nil {
+			return nil, err
+		}
+		if exists == 0 {
+			return nil, notFound("row id=%d not found in table %q", id, tableName)
+		}
+		return nil, conflict("row changed since it was loaded; reload before saving")
+	}
+	row := result[0]
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	emit(ctx, topicRowUpdated, map[string]any{"table": tableName, "id": id, "ids": []int64{id}, "count": 1, "fields": fields, "row": row})
 	return map[string]any{"row": row}, nil
 }
 
 // ─── rows_delete ───────────────────────────────────────────────────
 
 func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_delete", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -545,12 +638,27 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-
-	if id != 0 {
-		return deleteRows(ctx, t, tableName, id,
-			fmt.Sprintf("DELETE FROM %s WHERE id = ?", quote(t.PhysicalName)), []any{id})
+	if expected, ok := args["expected_table_id"]; ok {
+		id, _ := exactInteger(expected)
+		if id != t.ID {
+			return nil, conflict("table was replaced; reload before editing")
+		}
 	}
 
+	if id != 0 {
+		stmt := fmt.Sprintf("DELETE FROM %s WHERE id = ?", quote(t.PhysicalName))
+		values := []any{id}
+		if v, ok := args["expected_revision"]; ok {
+			revision, _ := exactInteger(v)
+			stmt += " AND _revision=?"
+			values = append(values, revision)
+		}
+		return deleteRows(ctx, t, tableName, id, stmt, values)
+	}
+
+	if _, ok := args["expected_revision"]; ok {
+		return nil, errf("expected_revision requires a single row id")
+	}
 	if !boolArg(args, "confirm") {
 		return nil, errf("filter delete requires confirm=true")
 	}
@@ -566,16 +674,25 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func deleteRows(ctx *sdk.AppCtx, t *Table, tableName string, id int64, stmt string, vals []any) (any, error) {
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := initializeCountTx(tx, t); err != nil {
+		return nil, err
+	}
 	res, err := tx.Exec(stmt, vals...)
 	if err != nil {
 		return nil, err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 0 && id != 0 && len(vals) > 1 {
+		return nil, conflict("row changed or was deleted; reload before deleting")
+	}
 	if n > 0 {
 		if _, err := tx.Exec(`UPDATE tables_meta SET row_count = MAX(0, row_count - ?) WHERE id = ?`, n, t.ID); err != nil {
 			return nil, err
@@ -600,8 +717,11 @@ func deleteRows(ctx *sdk.AppCtx, t *Table, tableName string, id int64, stmt stri
 // ─── rows_search ───────────────────────────────────────────────────
 
 func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_search", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -687,6 +807,32 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Include pagination keys internally even when the caller projects them out.
+	col, _ := orderColumn(args)
+	visible := map[string]bool{}
+	if picks := sliceArg(args, "select"); len(picks) > 0 {
+		for _, p := range picks {
+			visible[p.(string)] = true
+		}
+		if !visible["id"] {
+			selectClause += ", \"id\""
+		}
+		if col != "id" && !visible[col] {
+			selectClause += ", " + quote(col)
+		}
+	}
+	seek, seekValues, err := cursorWhere(pid, t, args)
+	if err != nil {
+		return nil, err
+	}
+	if seek != "" {
+		if clause == "" {
+			clause = "WHERE " + seek
+		} else {
+			clause += " AND " + seek
+		}
+		vals = append(vals, seekValues...)
+	}
 	stmt := selectClause + " FROM " + quote(t.PhysicalName)
 	if clause != "" {
 		stmt += " " + clause
@@ -716,7 +862,19 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 	logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, nil, "")
-	result := map[string]any{"rows": out, "truncated": truncated, "has_more": truncated}
+	result := map[string]any{"rows": out, "truncated": truncated, "has_more": truncated, "next_offset": offset + len(out)}
+	if truncated && len(out) > 0 {
+		result["next_cursor"] = makeCursor(pid, t, args, out[len(out)-1])
+	}
+	if len(visible) > 0 {
+		for _, row := range out {
+			for key := range row {
+				if !visible[key] {
+					delete(row, key)
+				}
+			}
+		}
+	}
 	if includeTotal {
 		result["total"] = total
 	}
@@ -726,8 +884,11 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── rows_count ────────────────────────────────────────────────────
 
 func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_count", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -776,8 +937,11 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── rows_aggregate ────────────────────────────────────────────────
 
 func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "rows_aggregate", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -880,7 +1044,7 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 // ─── shared row machinery ──────────────────────────────────────────
 
 func buildSelectAll(t *Table) string {
-	cols := []string{`"id"`, `"created_at"`, `"updated_at"`}
+	cols := []string{`"id"`, `"created_at"`, `"updated_at"`, `"_revision"`}
 	for _, c := range t.Columns {
 		cols = append(cols, quote(c.Name))
 	}
@@ -896,7 +1060,7 @@ func buildSelect(t *Table, picks []string) (string, error) {
 	if len(picks) == 0 {
 		return "", errf("select must be non-empty if provided")
 	}
-	valid := map[string]bool{"id": true, "created_at": true, "updated_at": true}
+	valid := map[string]bool{"id": true, "created_at": true, "updated_at": true, "_revision": true}
 	for _, c := range t.Columns {
 		valid[c.Name] = true
 	}
@@ -977,6 +1141,9 @@ func scanRowsBudget(rows *sql.Rows, t *Table, byteCap int64, rowCap int) ([]map[
 		if i, ok := colIdx["id"]; ok {
 			row["id"] = scalarOrInt(dest[i])
 		}
+		if i, ok := colIdx["_revision"]; ok {
+			row["_revision"] = scalarOrInt(dest[i])
+		}
 		if i, ok := colIdx["created_at"]; ok {
 			row["created_at"] = scalarString(dest[i])
 		}
@@ -990,10 +1157,15 @@ func scanRowsBudget(rows *sql.Rows, t *Table, byteCap int64, rowCap int) ([]map[
 			}
 			row[c.Name] = hydrateForResult(c, dest[i])
 		}
-		for k, v := range row {
-			usedBytes += int64(len(k)) + valueSize(v)
+		size, err := jsonSize(row, byteCap)
+		if err != nil {
+			return nil, false, err
 		}
+		usedBytes += size + 1
 		if byteCap > 0 && usedBytes > byteCap {
+			if len(out) == 0 {
+				return nil, false, oversized()
+			}
 			truncated = true
 			break
 		}
@@ -1039,6 +1211,9 @@ type searchQueryer interface {
 }
 
 func fetchRowByIDContext(ctx context.Context, db rowQueryer, t *Table, id int64, selectClause string) (map[string]any, bool, error) {
+	return fetchRowByIDBudget(ctx, db, t, id, selectClause, 0)
+}
+func fetchRowByIDBudget(ctx context.Context, db rowQueryer, t *Table, id int64, selectClause string, cap int64) (map[string]any, bool, error) {
 	if selectClause == "" {
 		selectClause = buildSelectAll(t)
 	}
@@ -1048,7 +1223,7 @@ func fetchRowByIDContext(ctx context.Context, db rowQueryer, t *Table, id int64,
 		return nil, false, err
 	}
 	defer rows.Close()
-	out, err := scanRows(rows, t)
+	out, _, err := scanRowsBudget(rows, t, cap, 1)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1062,37 +1237,88 @@ func fetchRowByIDContext(ctx context.Context, db rowQueryer, t *Table, id int64,
 // by calling the storage app's files_get_url tool through the
 // platform's app-to-app surface. Best-effort: any lookup failure
 // leaves the integer in place.
-func hydrateFileColumns(ctx *sdk.AppCtx, t *Table, row map[string]any) {
+var hydrationSlots = make(chan struct{}, 16)
+
+func hydrateFileColumns(ctx *sdk.AppCtx, t *Table, row map[string]any) map[string]string {
+	statuses := map[string]string{}
+	defer func() {
+		for _, col := range t.Columns {
+			if col.Type == "file_id" && row[col.Name] != nil && statuses[col.Name] == "" {
+				statuses[col.Name] = "hydration timed out"
+			}
+		}
+	}()
 	api := ctx.PlatformAPI()
-	if api == nil {
-		return
+	cache := map[int64]map[string]any{}
+	failures := map[int64]string{}
+	for _, col := range t.Columns {
+		if col.Type != "file_id" || row[col.Name] == nil {
+			continue
+		}
+		id, err := exactInteger(row[col.Name])
+		if err != nil {
+			statuses[col.Name] = "invalid file id"
+			continue
+		}
+		if result, ok := cache[id]; ok {
+			row[col.Name] = result
+			statuses[col.Name] = "resolved"
+			continue
+		}
+		if message, ok := failures[id]; ok {
+			statuses[col.Name] = message
+			continue
+		}
+		if api == nil {
+			statuses[col.Name] = "storage connection unavailable"
+			continue
+		}
+		if requestContext(ctx).Err() != nil {
+			return statuses
+		}
+		type result struct {
+			data map[string]any
+			err  error
+		}
+		done := make(chan result, 1)
+		select {
+		case hydrationSlots <- struct{}{}:
+		case <-requestContext(ctx).Done():
+			statuses[col.Name] = "hydration timed out"
+			return statuses
+		}
+		go func() {
+			defer func() { <-hydrationSlots }()
+			var data map[string]any
+			var storageID any = id
+			if id > 9007199254740991 {
+				storageID = fmt.Sprint(id)
+			}
+			err := api.CallAppResult("storage", "files_get_url", map[string]any{"id": storageID}, &data)
+			done <- result{data, err}
+		}()
+		select {
+		case <-requestContext(ctx).Done():
+			statuses[col.Name] = "hydration timed out"
+			return statuses
+		case result := <-done:
+			if result.err != nil {
+				failures[id] = result.err.Error()
+				statuses[col.Name] = result.err.Error()
+				continue
+			}
+			if strArg(result.data, "url") == "" {
+				failures[id] = "storage returned no URL"
+				statuses[col.Name] = failures[id]
+				continue
+			}
+			result.data["id"] = id
+			cache[id] = result.data
+			row[col.Name] = result.data
+			statuses[col.Name] = "resolved"
+		}
 	}
-	for _, c := range t.Columns {
-		if c.Type != "file_id" {
-			continue
-		}
-		v, ok := row[c.Name]
-		if !ok || v == nil {
-			continue
-		}
-		var id int64
-		switch n := v.(type) {
-		case int64:
-			id = n
-		case float64:
-			id = int64(n)
-		default:
-			continue
-		}
-		var resp struct {
-			URL       string `json:"url"`
-			ExpiresAt string `json:"expires_at"`
-		}
-		if err := api.CallAppResult("storage", "files_get_url", map[string]any{"id": id}, &resp); err != nil {
-			continue
-		}
-		row[c.Name] = map[string]any{"id": id, "url": resp.URL, "expires_at": resp.ExpiresAt}
-	}
+	return statuses
 }
 
 // ─── filter / order_by builders ────────────────────────────────────
@@ -1111,7 +1337,8 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 		return "", nil, errf("where exceeds maximum of 100 predicates")
 	}
 	allowed := map[string]Column{
-		"id":         {Name: "id", Type: "number"},
+		"id":         {Name: "id", Type: "integer"},
+		"_revision":  {Name: "_revision", Type: "integer"},
 		"created_at": {Name: "created_at", Type: "datetime"},
 		"updated_at": {Name: "updated_at", Type: "datetime"},
 	}
@@ -1144,13 +1371,20 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 			}
 			clauses = append(clauses, q+" "+sqlOp(p.Op)+" ?")
 			args = append(args, coerced)
-		case "contains":
+		case "contains", "like":
+			if col.Type != "text" {
+				return "", nil, errf("where[%d]: %s requires text column", i, p.Op)
+			}
 			s, ok := p.Value.(string)
 			if !ok {
 				return "", nil, errf("where[%d]: op contains needs string value", i)
 			}
-			clauses = append(clauses, q+" LIKE ?")
-			args = append(args, "%"+s+"%")
+			if p.Op == "contains" {
+				s = strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(s)
+				s = "%" + s + "%"
+			}
+			clauses = append(clauses, q+` LIKE ? ESCAPE '\'`)
+			args = append(args, s)
 		case "in":
 			arr, ok := p.Value.([]any)
 			if !ok || len(arr) == 0 {
@@ -1305,7 +1539,7 @@ func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
 			if err != nil {
 				return nil, errf("metrics[%d]: %w", i, err)
 			}
-			if col.Type != "number" {
+			if col.Type != "number" && col.Type != "integer" {
 				return nil, errf("metrics[%d]: op %s requires number column, got %s", i, op, col.Type)
 			}
 			expr = strings.ToUpper(op) + "(" + quote(col.Name) + ")"
@@ -1324,7 +1558,7 @@ func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
 			if err != nil {
 				return nil, errf("metrics[%d]: denominator: %w", i, err)
 			}
-			if num.Type != "number" || den.Type != "number" {
+			if (num.Type != "number" && num.Type != "integer") || (den.Type != "number" && den.Type != "integer") {
 				return nil, errf("metrics[%d]: avg_ratio requires number numerator and denominator", i)
 			}
 			expr = "AVG(CASE WHEN " + quote(den.Name) + " IS NOT NULL AND " + quote(den.Name) + " != 0 THEN " + quote(num.Name) + " / " + quote(den.Name) + " END)"
@@ -1355,8 +1589,8 @@ func ensureUniqueAggregateOutputs(groups []aggregateGroup, metrics []aggregateMe
 
 func aggregateColumn(t *Table, name string) (Column, error) {
 	switch name {
-	case "id":
-		return Column{Name: "id", Type: "number"}, nil
+	case "id", "_revision":
+		return Column{Name: name, Type: "integer"}, nil
 	case "created_at":
 		return Column{Name: "created_at", Type: "datetime"}, nil
 	case "updated_at":
@@ -1441,20 +1675,33 @@ func scanAggregateRows(rows *sql.Rows, byteCap int64) ([]map[string]any, bool, e
 		row := map[string]any{}
 		for i, c := range cols {
 			v := normaliseScanValue(dest[i])
-			usedBytes += int64(len(c)) + valueSize(v)
-			if byteCap > 0 && usedBytes > byteCap {
-				return out, true, nil
+			if err := finiteResult(v); err != nil {
+				return nil, false, err
 			}
 			row[c] = v
+		}
+		size, err := jsonSize(row, byteCap)
+		if err != nil {
+			return nil, false, err
+		}
+		usedBytes += size + 1
+		if byteCap > 0 && usedBytes > byteCap {
+			if len(out) == 0 {
+				return nil, false, oversized()
+			}
+			return out, true, nil
 		}
 		out = append(out, row)
 	}
 	return out, false, rows.Err()
 }
 
-func reserveRows(tx *sql.Tx, t *Table, delta, cap int64) error {
+func reserveRows(tx *writeTx, t *Table, delta, cap int64) error {
 	if delta <= 0 {
 		return nil
+	}
+	if _, err := initializeCountTx(tx, t); err != nil {
+		return err
 	}
 	stmt := `UPDATE tables_meta SET row_count = row_count + ? WHERE id = ?`
 	args := []any{delta, t.ID}
@@ -1471,7 +1718,8 @@ func reserveRows(tx *sql.Tx, t *Table, delta, cap int64) error {
 		return err
 	}
 	if n == 1 {
-		t.RowCount += delta
+		tx.counts[t.ID] += delta
+		t.RowCount = tx.counts[t.ID]
 		return nil
 	}
 	var current int64
@@ -1505,6 +1753,9 @@ func buildOrderBy(t *Table, raw string) (string, error) {
 		return `ORDER BY "id" DESC`, nil
 	}
 	parts := strings.Fields(raw)
+	if len(parts) > 2 {
+		return "", errf("order_by must be column asc|desc")
+	}
 	col := parts[0]
 	dir := "ASC"
 	if len(parts) > 1 {
@@ -1517,8 +1768,64 @@ func buildOrderBy(t *Table, raw string) (string, error) {
 			return "", errf("order_by direction must be asc or desc, got %q", parts[1])
 		}
 	}
-	if col != "id" && col != "created_at" && col != "updated_at" && columnIndex(t.Columns, col) < 0 {
+	if !reservedColumns[col] && columnIndex(t.Columns, col) < 0 {
 		return "", errf("order_by: unknown column %q", col)
 	}
-	return "ORDER BY " + quote(col) + " " + dir, nil
+	out := "ORDER BY " + quote(col) + " " + dir
+	if col != "id" {
+		out += ", \"id\" " + dir
+	}
+	return out, nil
+}
+
+func finiteResult(v any) error {
+	if n, ok := v.(float64); ok && (math.IsInf(n, 0) || math.IsNaN(n)) {
+		return errf("numeric result overflow: result is not finite")
+	}
+	return nil
+}
+
+type batchStatements struct {
+	tx         *writeTx
+	statements map[string]*sql.Stmt
+	insertSQL  map[string]string
+	timestamp  string
+}
+
+func newBatchStatements(tx *writeTx) *batchStatements {
+	return &batchStatements{tx: tx, statements: make(map[string]*sql.Stmt), insertSQL: map[string]string{}, timestamp: time.Now().UTC().Format(timestampLayout)}
+}
+func (b *batchStatements) exec(query string, args ...any) (sql.Result, error) {
+	stmt := b.statements[query]
+	if stmt == nil {
+		var err error
+		stmt, err = b.tx.Prepare(query)
+		if err != nil {
+			return nil, err
+		}
+		b.statements[query] = stmt
+	}
+	return stmt.ExecContext(b.tx.ctx, args...)
+}
+func (b *batchStatements) close() {
+	for _, s := range b.statements {
+		_ = s.Close()
+	}
+}
+
+func (b *batchStatements) insert(physical string, columns []string, values []any) (sql.Result, error) {
+	key := strings.Join(columns, ",")
+	query := b.insertSQL[key]
+	if query == "" {
+		quoted := []string{`"created_at"`, `"updated_at"`}
+		for _, col := range columns {
+			quoted = append(quoted, quote(col))
+		}
+		query = "INSERT INTO " + quote(physical) + " (" + strings.Join(quoted, ",") + ") VALUES (?1,?1" + strings.Repeat(",?", len(columns)) + ")"
+		b.insertSQL[key] = query
+	}
+	args := make([]any, 1, len(values)+1)
+	args[0] = b.timestamp
+	args = append(args, values...)
+	return b.exec(query, args...)
 }

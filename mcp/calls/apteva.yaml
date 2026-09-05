@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: calls
 display_name: Calls
-version: 0.1.6
+version: 0.2.2
 description: |
-  Standalone realtime audio/video calls with WebRTC-ready rooms,
-  join tokens, unified human/agent/service participants, chat,
-  transcripts, and app-bus lifecycle events.
+  Secure realtime audio/video rooms using authenticated WebRTC mesh
+  signaling, expiring join links, unified human/agent/service
+  participants, chat, transcripts, presence, and lifecycle events.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/calls
@@ -24,6 +24,14 @@ requires:
 
 provides:
   http_routes:
+    - prefix: /join/
+      no_auth: true
+    - prefix: /room/
+      no_auth: true
+    - prefix: /api/join
+      no_auth: true
+    - prefix: /api/rooms/
+      no_auth: true
     - prefix: /
   mcp_tools:
     - { name: calls_create_room,          description: "Create a call room. Args: title, slug?, metadata?. Returns room, host_join_token, host_join_url." }
@@ -31,7 +39,7 @@ provides:
     - { name: calls_list_rooms,           description: "List rooms by status. Args: status?, limit?." }
     - { name: calls_end_room,             description: "End a room, close sessions, mark participants left, and emit calls.room.ended. Args: id." }
     - { name: calls_create_join_token,    description: "Create a join token. Args: room_id, participant_kind?, role?, display_name?, capabilities?, expires_at?, max_uses?." }
-    - { name: calls_join_room,            description: "Join a room using a token. Args: token, display_name?, client_info?. Returns participant, session, rtc_config." }
+    - { name: calls_join_room,            description: "Join a room using a token. Args: token, display_name?, client_info?. Returns participant, participant_token, session, rtc_config." }
     - { name: calls_leave_room,           description: "Leave a room. Args: room_id, participant_id." }
     - { name: calls_list_participants,    description: "List room participants. Args: room_id, status?, kind?." }
     - { name: calls_update_participant,   description: "Patch participant fields/capabilities/mute state. Args: room_id, participant_id, patch." }
@@ -61,10 +69,11 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: rtc_udp_port_range
+  - name: ice_servers_json
     type: text
-    default: "50000-50100"
-    label: WebRTC UDP port range
+    default: '[{"urls":["stun:stun.l.google.com:19302"]}]'
+    label: WebRTC ICE servers (JSON)
+    description: JSON array of RTCIceServer objects. Configure TURN credentials for production NAT traversal.
   - name: max_participants_per_room
     type: number
     default: 16
@@ -77,5 +86,14 @@ config_schema:
     type: number
     default: 300
     label: Idle room timeout
+  - name: join_token_ttl_seconds
+    type: number
+    default: 86400
+    label: Default join-link lifetime
+  - name: retention_days
+    type: number
+    default: 90
+    label: Ended-room retention
+    description: Ended rooms and their messages, transcripts, participants, and signaling metadata are deleted after this many days.
 
 upgrade_policy: auto-patch

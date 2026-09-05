@@ -7,7 +7,7 @@
 // Calls the sidecar's /admin/* HTTP routes; never imports the SDK.
 // React + jsx-runtime are externalised to the dashboard's importmap.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/auth";
 
@@ -22,6 +22,7 @@ interface User {
   id: number;
   organization_id: number;
   email: string;
+  kind?: "guest" | "account";
   email_verified_at?: string;
   display_name?: string;
   avatar_url?: string;
@@ -124,8 +125,8 @@ interface OIDCInfo {
   issuer: string;
   jwks_uri: string;
   openid_configuration: string;
-  authorization_endpoint: string;
-  token_endpoint: string;
+  login_endpoint: string;
+  refresh_endpoint: string;
   userinfo_endpoint: string;
   signing_keys: SigningKey[];
   app_url_configured: boolean;
@@ -152,48 +153,42 @@ interface Organization {
   updated_at?: string;
 }
 
-// panelProjectId — set once at mount from the panel's projectId prop.
-// Every admin request includes it as a project_id query param. The
-// sidecar prefers its APTEVA_PROJECT_ID env when set (project-scoped
-// installs), so this is a harmless redundancy there — but it's the
-// difference between working and a 400 when the env isn't set (global
-// scope, or a mid-upgrade blue-green window where the new sidecar
-// booted before the platform injected the env). Other panels (media)
-// always send project_id; auth was the outlier.
-let panelProjectId = "";
-
-// orgQS — builds the query string for an admin call: always project_id,
-// plus organization_slug when scoped (null = "All organizations"
-// project-wide rollup), plus any extra params.
-function orgQS(slug: string | null, extra?: string): string {
-  const params = new URLSearchParams();
-  if (panelProjectId) params.set("project_id", panelProjectId);
-  if (slug) params.set("organization_slug", slug);
-  if (extra) {
-    for (const [k, v] of new URLSearchParams(extra)) params.set(k, v);
-  }
-  const s = params.toString();
-  return s ? `?${s}` : "";
+const PanelScope = createContext({projectId: "", installId: 0});
+function usePanelAPI() {
+ const scope=useContext(PanelScope);
+ const requests=useRef(new Map<string,AbortController>());
+ useEffect(()=>()=>{for(const controller of requests.current.values())controller.abort();requests.current.clear()},[]);
+ const orgQS=(slug:string|null,extra?:string)=>{
+  const params=new URLSearchParams(extra);
+  if(scope.projectId)params.set("project_id",scope.projectId);
+  if(scope.installId)params.set("install_id",String(scope.installId));
+  if(slug)params.set("organization_slug",slug);
+  return params.size?`?${params}`:"";
+ };
+ const fetch=async(input:string,init?:RequestInit):Promise<Response>=>{
+  if(init?.method&&init.method!=="GET")return globalThis.fetch(input,init);
+  const key=input.split("?")[0];requests.current.get(key)?.abort();
+  const controller=new AbortController();requests.current.set(key,controller);
+  const response=await globalThis.fetch(input,{...init,signal:controller.signal});
+  const json=response.json.bind(response);
+  response.json=async()=>{const data=await json();if(controller.signal.aborted)throw new DOMException("Superseded request","AbortError");return data};
+  if(controller.signal.aborted)throw new DOMException("Superseded request","AbortError");
+  return response;
+ };
+ return {orgQS,projectQS:()=>orgQS(null),fetch,abortReads:()=>{for(const c of requests.current.values())c.abort()}};
 }
-
-// projectQS — project_id-only query string for admin endpoints that
-// don't take an org (organizations CRUD) or build their own params.
-function projectQS(): string {
-  return panelProjectId ? `?project_id=${encodeURIComponent(panelProjectId)}` : "";
+export default function AuthPanel(props:NativePanelProps){
+ return <PanelScope.Provider value={{projectId:props.projectId,installId:props.installId}}><AuthPanelContent key={`${props.projectId}:${props.installId}`} {...props}/></PanelScope.Provider>;
 }
-
-// ─── Panel root ──────────────────────────────────────────────────────
-
-export default function AuthPanel({ projectId }: NativePanelProps) {
-  // Set the module-level project id before any child effect fires.
-  panelProjectId = projectId || "";
+function AuthPanelContent({projectId,installId}:NativePanelProps){
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [tab, setTab] = useState<Tab>("overview");
   const [stats, setStats] = useState<Stats | null>(null);
   const [status, setStatus] = useState("");
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [activeOrgSlug, setActiveOrgSlug] = useState<string | null>(() => {
     try {
-      return localStorage.getItem(`auth.activeOrg.${projectId || ""}`);
+      return localStorage.getItem(`auth.activeOrg.${projectId || ""}.${installId}`);
     } catch {
       return null;
     }
@@ -203,9 +198,9 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     try {
       if (activeOrgSlug == null) {
-        localStorage.removeItem(`auth.activeOrg.${projectId || ""}`);
+        localStorage.removeItem(`auth.activeOrg.${projectId || ""}.${installId}`);
       } else {
-        localStorage.setItem(`auth.activeOrg.${projectId || ""}`, activeOrgSlug);
+        localStorage.setItem(`auth.activeOrg.${projectId || ""}.${installId}`, activeOrgSlug);
       }
     } catch {}
   }, [activeOrgSlug, projectId]);
@@ -217,6 +212,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
       const data = await r.json();
       setOrgs(data.organizations || []);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`orgs: ${(e as Error).message}`);
     }
   }, []);
@@ -227,6 +223,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
       if (!r.ok) throw new Error(`stats ${r.status}`);
       setStats(await r.json());
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`stats: ${(e as Error).message}`);
     }
   }, [activeOrgSlug]);
@@ -262,7 +259,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
 
       <div className="flex-1 overflow-auto">
         {tab === "overview" && (
-          <OverviewTab
+          <OverviewTab key={activeOrgSlug || "all"}
             stats={stats}
             orgs={orgs}
             activeOrgSlug={activeOrgSlug}
@@ -280,7 +277,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "users" && (
-          <UsersTab
+          <UsersTab key={activeOrgSlug || "all"}
             activeOrgSlug={activeOrgSlug}
             orgs={orgs}
             projectId={projectId}
@@ -289,7 +286,7 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "clients" && (
-          <ClientsTab
+          <ClientsTab key={activeOrgSlug || "all"}
             activeOrgSlug={activeOrgSlug}
             orgs={orgs}
             projectId={projectId}
@@ -297,14 +294,14 @@ export default function AuthPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "authorization" && (
-          <AuthorizationTab
+          <AuthorizationTab key={activeOrgSlug || "all"}
             activeOrgSlug={activeOrgSlug}
             projectId={projectId}
             setStatus={setStatus}
           />
         )}
         {tab === "endpoints" && (
-          <EndpointsTab
+          <EndpointsTab key={activeOrgSlug || "all"}
             activeOrgSlug={activeOrgSlug}
             onSelectOrg={setActiveOrgSlug}
             orgs={orgs}
@@ -426,6 +423,7 @@ function OverviewTab({ stats, orgs, activeOrgSlug, projectId, setStatus }: {
   projectId: string;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const loadAudit = useCallback(async () => {
     try {
@@ -434,6 +432,7 @@ function OverviewTab({ stats, orgs, activeOrgSlug, projectId, setStatus }: {
       const data = await r.json();
       setEvents(data.events || []);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`audit: ${(e as Error).message}`);
     }
   }, [activeOrgSlug, setStatus]);
@@ -516,6 +515,7 @@ function OrganizationsTab({ orgs, activeOrgSlug, onSelect, onChanged, setStatus 
   onChanged: () => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [createOpen, setCreateOpen] = useState(false);
   const [editing, setEditing] = useState<Organization | null>(null);
 
@@ -530,6 +530,7 @@ function OrganizationsTab({ orgs, activeOrgSlug, onSelect, onChanged, setStatus 
       onChanged();
       if (activeOrgSlug === o.slug) onSelect(null);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`archive: ${(e as Error).message}`);
     }
   };
@@ -631,6 +632,7 @@ function CreateOrgModal({ existingSlugs, onClose, onCreated, setStatus }: {
   onCreated: (slug: string) => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [slug, setSlug] = useState("");
   const [name, setName] = useState("");
   const [color, setColor] = useState("#3b82f6");
@@ -717,6 +719,7 @@ function EditOrgModal({ org, onClose, onSaved, setStatus }: {
   onSaved: () => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [name, setName] = useState(org.name);
   const [color, setColor] = useState(org.color || "#94a3b8");
   const [busy, setBusy] = useState(false);
@@ -796,6 +799,7 @@ function AuthorizationTab({ activeOrgSlug, projectId, setStatus }: {
   projectId: string;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [roles, setRoles] = useState<Role[]>([]);
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [roleKey, setRoleKey] = useState("");
@@ -821,6 +825,7 @@ function AuthorizationTab({ activeOrgSlug, projectId, setStatus }: {
       setRoles(roleData.roles || []);
       setPermissions(permissionData.permissions || []);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`authorization: ${(e as Error).message}`);
     }
   }, [activeOrgSlug, setStatus]);
@@ -894,6 +899,7 @@ function AuthorizationTab({ activeOrgSlug, projectId, setStatus }: {
       if (!r.ok) throw new Error(data.error || `set permissions ${r.status}`);
       setRoles((current) => current.map((item) => item.id === role.id ? data.role : item));
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`set permissions: ${(e as Error).message}`);
     } finally {
       setBusy(false);
@@ -912,6 +918,7 @@ function AuthorizationTab({ activeOrgSlug, projectId, setStatus }: {
       if (!r.ok) throw new Error(data.error || `delete ${r.status}`);
       await load();
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`delete authorization record: ${(e as Error).message}`);
     } finally {
       setBusy(false);
@@ -1045,8 +1052,11 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
   setStatus: (s: string) => void;
   onUsersChanged: () => void;
 }) {
+ const {orgQS,projectQS,fetch,abortReads}=usePanelAPI();
   const [users, setUsers] = useState<User[]>([]);
   const [q, setQ] = useState("");
+  const [cursor,setCursor]=useState("");
+  const [nextCursor,setNextCursor]=useState("");
   const [statusFilter, setStatusFilter] = useState<"" | "active" | "disabled">("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1055,24 +1065,25 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (panelProjectId) params.set("project_id", panelProjectId);
+      const params = new URLSearchParams(projectQS());
       if (activeOrgSlug) params.set("organization_slug", activeOrgSlug);
       if (q) params.set("q", q);
       if (statusFilter) params.set("status", statusFilter);
-      params.set("limit", "200");
+      params.set("limit", "100");
+      if(cursor)params.set("cursor",cursor);
       const r = await fetch(`${API}/admin/users?${params.toString()}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`users ${r.status}`);
       const data = await r.json();
-      setUsers(data.users || []);
+      setUsers(data.users || []);setNextCursor(data.next_cursor || "");
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`users: ${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
-  }, [activeOrgSlug, q, statusFilter, setStatus]);
+  }, [activeOrgSlug, q, statusFilter, cursor, setStatus]);
 
-  useEffect(() => { load(); }, [load, projectId]);
+  useEffect(() => {abortReads();setUsers([]);setNextCursor("");const timer=setTimeout(()=>load(),200);return()=>clearTimeout(timer)}, [load, projectId]);
 
   // When user clicks an "All" row, the drawer needs the user's own org —
   // it lives on the user row. The drawer takes orgSlug as a prop and
@@ -1087,10 +1098,12 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
     <div className="flex h-full">
       <div className={selectedId ? "flex-1 border-r border-border" : "flex-1"}>
         <div className="p-3 flex items-center gap-2 border-b border-border">
-          <SearchInput value={q} onChange={setQ} placeholder="Search email or name" />
+          <button disabled={!cursor||loading} onClick={()=>{setCursor("");setSelectedId(null)}}>First page</button>
+          <button disabled={!nextCursor||loading} onClick={()=>{setCursor(nextCursor);setSelectedId(null)}}>Next page</button>
+          <SearchInput value={q} onChange={(value)=>{setQ(value);setCursor("");setSelectedId(null)}} placeholder="Search email or name" />
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as "" | "active" | "disabled")}
+            onChange={(e) => {setStatusFilter(e.target.value as "" | "active" | "disabled");setCursor("");setSelectedId(null)}}
             className="bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
           >
             <option value="">All statuses</option>
@@ -1146,7 +1159,7 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
                   }
                 >
                   <td className="px-3 py-2">
-                    <div className="text-text">{u.email}</div>
+                    <div className="text-text">{u.kind === "guest" ? `Guest #${u.id}` : u.email}</div>
                     {u.display_name && <div className="text-text-dim text-xs">{u.display_name}</div>}
                   </td>
                   {!activeOrgSlug && (
@@ -1206,12 +1219,20 @@ function UsersTab({ activeOrgSlug, orgs, projectId, setStatus, onUsersChanged }:
   );
 }
 
+function usePasswordPolicy(orgSlug:string){
+ const {orgQS,fetch}=usePanelAPI();const [policy,setPolicy]=useState<OIDCInfo|null>(null);const [error,setError]=useState("");
+ useEffect(()=>{let active=true;(async()=>{try{const response=await fetch(`${API}/admin/oidc${orgQS(orgSlug)}`);if(!response.ok)throw Error("Cannot load password policy");const next=await response.json();if(active)setPolicy(next)}catch(e){if(active)setError((e as Error).message)}})();return()=>{active=false}},[orgSlug]);
+ return {policy,error,hint:policy?`At least ${policy.password_min_length} characters; ${policy.password_classes} required character classes.`:"Loading password policy…"};
+}
+
 function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
   orgSlug: string;
   onClose: () => void;
   onCreated: (userId: number, openDrawer: boolean) => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
+ const {policy,error:policyError,hint:policyHint}=usePasswordPolicy(orgSlug);
   const [email, setEmail] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [mode, setMode] = useState<"invite" | "password">("invite");
@@ -1248,6 +1269,7 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `create failed (${r.status})`);
+      if(data.delivery_error)setStatus(data.delivery_error);
       onCreated(data.user.id, true);
     } catch (e2) {
       // Surface inline (the header status line is hidden behind the
@@ -1289,11 +1311,11 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
           </div>
         </Field>
         {mode === "password" && (
-          <Field label="Password" hint="Default policy: at least 8 characters. Tighten via install settings (password_min_length / password_classes_required).">
+          <Field label="Password" hint={policyHint}>
             <input
-              type="text" value={password} onChange={(e) => setPassword(e.target.value)}
-              required minLength={8}
-              placeholder="at least 8 characters"
+              type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)}
+              required minLength={policy?.password_min_length}
+              placeholder="New password"
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
             />
           </Field>
@@ -1311,13 +1333,13 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono resize-y"
           />
         </Field>
-        <FormError message={err} />
+        <FormError message={err || policyError} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
             Cancel
           </button>
           <button
-            type="submit" disabled={busy || !email.trim() || (mode === "password" && !password)}
+            type="submit" disabled={busy || !email.trim() || (mode === "password" && (!password || !policy))}
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
           >{busy ? "Creating…" : "Create user"}</button>
         </div>
@@ -1371,7 +1393,8 @@ function UserStatusPill({ user }: { user: User }) {
   return <Pill tone="muted">{user.status}</Pill>;
 }
 
-function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus }: {
+function UserDrawer(props: Parameters<typeof UserDrawerContent>[0]){return <UserDrawerContent key={`${props.projectId}:${props.orgSlug}:${props.userId}`} {...props}/>}
+function UserDrawerContent({ userId, orgSlug, projectId, onClose, onChanged, setStatus }: {
   userId: number;
   orgSlug: string;
   projectId: string;
@@ -1379,6 +1402,7 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   onChanged: () => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [data, setData] = useState<{
     user: User;
     authorization: AuthorizationContext;
@@ -1398,6 +1422,7 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
       if (!r.ok) throw new Error(`user ${r.status}`);
       setData(await r.json());
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`user: ${(e as Error).message}`);
     }
   }, [userId, orgSlug, setStatus]);
@@ -1420,32 +1445,32 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
         throw new Error(errBody.error || `${path || "patch"} ${r.status}`);
       }
       await load();
-      onChanged();
+      onChanged();return true;
     } catch (e) {
-      setStatus(`${path || "patch"}: ${(e as Error).message}`);
+      if((e as Error).name==="AbortError")return;
+      setStatus(`${path || "patch"}: ${(e as Error).message}`);return false;
     } finally {
       setBusy(false);
     }
   };
 
   const saveName = async () => {
-    await act("", { display_name: nameDraft }, "PATCH");
-    setEditingName(false);
+    if(await act("", { display_name: nameDraft }, "PATCH")) setEditingName(false);
   };
 
   const saveMetadata = async () => {
     try {
       const metadata = parseMetadataDraft(metadataDraft);
-      await act("", { metadata }, "PATCH");
-      setEditingMetadata(false);
+      if(await act("", { metadata }, "PATCH")) setEditingMetadata(false);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`metadata: ${(e as Error).message}`);
     }
   };
 
   if (!data) {
     return (
-      <aside style={{ width: 420 }} className="flex-shrink-0 p-4 text-text-dim text-sm">Loading…</aside>
+      <aside style={{ width: 420, maxWidth:"100vw" }} className="flex-shrink-0 p-4 text-text-dim text-sm">Loading…</aside>
     );
   }
   const u = data.user;
@@ -1455,13 +1480,13 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   // on a just-created user.
   const sessions = data.sessions ?? [];
   const auditLog = data.audit_log ?? [];
-  const activeSessions = sessions.filter((s) => !s.revoked_at);
+  const activeSessions = sessions.filter((s) => !s.revoked_at && !!s.expires_at && Date.parse(s.expires_at)>Date.now());
   const metadataText = JSON.stringify(u.metadata || {}, null, 2);
   return (
-    <aside style={{ width: 420 }} className="flex-shrink-0 overflow-auto">
+    <aside style={{ width: 420, maxWidth:"100vw" }} className="flex-shrink-0 overflow-auto">
       <header className="sticky top-0 bg-bg border-b border-border px-4 py-3 flex items-start gap-2">
         <div className="flex-1 min-w-0">
-          <div className="text-text font-semibold truncate" title={u.email}>{u.email}</div>
+          <div className="text-text font-semibold truncate" title={u.email}>{u.kind === "guest" ? `Guest #${u.id}` : u.email}</div>
           <div className="text-text-dim text-xs">
             #{u.id} · {u.status}{u.email_verified_at ? " · verified" : " · unverified"}
           </div>
@@ -1665,7 +1690,8 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   );
 }
 
-function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged, setStatus }: {
+function UserRolesEditor(props: Parameters<typeof UserRolesEditorContent>[0]){return <UserRolesEditorContent key={`${props.projectId}:${props.orgSlug}:${props.userId}`} {...props}/>}
+function UserRolesEditorContent({ userId, orgSlug, authorization, projectId, onChanged, setStatus }: {
   userId: number;
   orgSlug: string;
   authorization: AuthorizationContext;
@@ -1673,22 +1699,26 @@ function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged,
   onChanged: () => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [roles, setRoles] = useState<Role[]>([]);
   const [selected, setSelected] = useState<number[]>([]);
+  const [ready,setReady]=useState(false);
   const [busy, setBusy] = useState(false);
 
   const loadRoles = useCallback(async () => {
+    setReady(false);
     try {
       const r = await fetch(`${API}/admin/roles${orgQS(orgSlug)}`, { credentials: "same-origin" });
       if (!r.ok) throw new Error(`roles ${r.status}`);
       const data = await r.json();
       const nextRoles: Role[] = data.roles || [];
-      setRoles(nextRoles);
+      setRoles(nextRoles);setReady(true);
       setSelected(nextRoles.filter((role) => (authorization.roles || []).includes(role.key)).map((role) => role.id));
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`roles: ${(e as Error).message}`);
     }
-  }, [orgSlug, authorization.authorization_version, setStatus]);
+  }, [userId, orgSlug, authorization.authorization_version, JSON.stringify(authorization.roles), setStatus]);
 
   useEffect(() => { loadRoles(); }, [loadRoles, projectId]);
 
@@ -1699,6 +1729,7 @@ function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged,
   };
 
   const save = async () => {
+    if(!ready || authorization.user_id!==String(userId))return;
     setBusy(true);
     try {
       const r = await fetch(`${API}/admin/users/${userId}/roles${orgQS(orgSlug)}`, {
@@ -1711,6 +1742,7 @@ function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged,
       if (!r.ok) throw new Error(data.error || `set roles ${r.status}`);
       await onChanged();
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`set roles: ${(e as Error).message}`);
     } finally {
       setBusy(false);
@@ -1731,7 +1763,7 @@ function UserRolesEditor({ userId, orgSlug, authorization, projectId, onChanged,
         </div>
         <button
           onClick={save}
-          disabled={busy || !changed}
+          disabled={busy || !ready || !changed}
           className="px-2.5 py-1 text-xs bg-accent text-bg rounded disabled:opacity-40"
         >{busy ? "Saving…" : "Save roles"}</button>
       </div>
@@ -1767,15 +1799,18 @@ function SetPasswordModal({ user, orgSlug, onClose, onSaved, setStatus }: {
   onSaved: () => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
+ const {policy,error:policyError,hint:policyHint}=usePasswordPolicy(orgSlug);
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
-  const [revokeSessions, setRevokeSessions] = useState(true);
+  const revokeSessions=true;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr("");
+    if(!policy)return;
     if (!password) {
       setErr("Password required");
       return;
@@ -1809,39 +1844,39 @@ function SetPasswordModal({ user, orgSlug, onClose, onSaved, setStatus }: {
         <div className="text-text-dim text-sm">
           Set a new password for <span className="text-text">{user.email}</span>.
         </div>
-        <Field label="New password" hint="Default policy: at least 8 characters. Tighten via install settings.">
+        <Field label="New password" hint={policyHint}>
           <input
-            type="text"
+            type="password" autoComplete="new-password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             autoFocus
             required
-            minLength={8}
+            minLength={policy?.password_min_length}
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
           />
         </Field>
         <Field label="Confirm password">
           <input
-            type="text"
+            type="password" autoComplete="new-password"
             value={confirm}
             onChange={(e) => setConfirm(e.target.value)}
             required
-            minLength={8}
+            minLength={policy?.password_min_length}
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
           />
         </Field>
         <label className="flex items-center gap-2 text-sm text-text">
-          <input type="checkbox" checked={revokeSessions} onChange={(e) => setRevokeSessions(e.target.checked)} />
+          <input type="checkbox" checked={revokeSessions} disabled />
           Revoke active sessions
         </label>
-        <FormError message={err} />
+        <FormError message={err || policyError} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
             Cancel
           </button>
           <button
             type="submit"
-            disabled={busy || !password || password !== confirm}
+            disabled={busy || !policy || !password || password !== confirm}
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
           >{busy ? "Saving..." : "Set password"}</button>
         </div>
@@ -1858,6 +1893,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
   projectId: string;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [clients, setClients] = useState<Client[]>([]);
   const [includeDisabled, setIncludeDisabled] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -1871,6 +1907,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       const data = await r.json();
       setClients(data.clients || []);
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`clients: ${(e as Error).message}`);
     }
   }, [activeOrgSlug, includeDisabled, setStatus]);
@@ -1887,6 +1924,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       const data = await r.json();
       setRevealed({ client_id: c.client_id, secret: data.client_secret });
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`rotate: ${(e as Error).message}`);
     }
   };
@@ -1900,6 +1938,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       if (!r.ok) throw new Error(`disable ${r.status}`);
       await load();
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`disable: ${(e as Error).message}`);
     }
   };
@@ -1909,7 +1948,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       <div className="flex items-center gap-3">
         <button
           onClick={() => setCreateOpen(true)}
-          title="Register a new OAuth client"
+          title="Register a new first-party client"
           className="px-3 py-1 text-sm bg-accent text-bg rounded font-medium"
         >+ New client</button>
         <label className="flex items-center gap-2 text-text-muted text-sm">
@@ -1926,8 +1965,8 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
       {clients.length === 0 ? (
         <EmptyState
           icon={<KeyIcon />}
-          title="No OAuth clients yet"
-          hint="Create one for each frontend or service that consumes auth — SPA, web, mobile, or M2M. Bind to one organization, or leave multi-organization to serve many."
+          title="No clients yet"
+          hint="Create one for each frontend or service that consumes auth — SPA, web, or mobile. Bind to one organization, or leave multi-organization to serve many."
         />
       ) : (
         <ul className="space-y-2">
@@ -1939,6 +1978,7 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
               showOrg={!activeOrgSlug || !c.organization_id}
               onRotate={() => rotate(c)}
               onDisable={() => disable(c)}
+                  onUpdated={load}
             />
           ))}
         </ul>
@@ -1968,12 +2008,13 @@ function ClientsTab({ activeOrgSlug, orgs, projectId, setStatus }: {
   );
 }
 
-function ClientCard({ client, org, showOrg, onRotate, onDisable }: {
+function ClientCard({ client, org, showOrg, onRotate, onDisable, onUpdated }: {
   client: Client;
   org: Organization | null | undefined;
   showOrg: boolean;
   onRotate: () => void;
   onDisable: () => void;
+  onUpdated: () => void;
 }) {
   const isPublic = client.type === "spa" || client.type === "native";
   const isMultiOrg = !client.organization_id;
@@ -1998,8 +2039,8 @@ function ClientCard({ client, org, showOrg, onRotate, onDisable }: {
               )
             )}
             {client.disabled_at && <Pill tone="muted">disabled</Pill>}
-            {client.require_mfa && <Pill tone="ok">MFA required</Pill>}
-            {client.require_pkce && <Pill tone="muted">PKCE</Pill>}
+            {client.require_mfa && <Pill tone="warn">Login blocked: MFA unsupported</Pill>}
+
           </div>
           <div className="text-text-dim text-xs font-mono mt-1 truncate" title={client.client_id}>
             {client.client_id}
@@ -2012,10 +2053,11 @@ function ClientCard({ client, org, showOrg, onRotate, onDisable }: {
           )}
           {client.allowed_grant_types && client.allowed_grant_types.length > 0 && (
             <div className="text-xs">
-              <span className="text-text-dim">Grants:</span>{" "}
+              <span className="text-text-dim">Legacy grant configuration:</span>{" "}
               <span className="text-text-muted">{client.allowed_grant_types.join(", ")}</span>
             </div>
           )}
+          {!client.disabled_at && <OriginEditor client={client} onUpdated={onUpdated}/>}
           {client.jwt_audience && (
             <div className="text-xs">
               <span className="text-text-dim">Audience:</span>{" "}
@@ -2042,6 +2084,13 @@ function ClientCard({ client, org, showOrg, onRotate, onDisable }: {
   );
 }
 
+function OriginEditor({client,onUpdated}:{client:Client;onUpdated:()=>void}){
+ const {projectQS,fetch}=usePanelAPI();const [draft,setDraft]=useState((client.allowed_origins||[]).join("\n"));const [message,setMessage]=useState("");const [busy,setBusy]=useState(false);
+ useEffect(()=>setDraft((client.allowed_origins||[]).join("\n")),[JSON.stringify(client.allowed_origins)]);
+ const save=async()=>{setBusy(true);try{const origins=draft.split(/\s+|,/).filter(Boolean);const old=client.allowed_origins||[];const response=await fetch(`${API}/admin/clients/${encodeURIComponent(client.client_id)}${projectQS()}`,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({add_allowed_origins:origins.filter(v=>!old.includes(v)),remove_allowed_origins:old.filter(v=>!origins.includes(v))})});const data=await response.json();if(!response.ok)throw Error(data.error||"Save failed");setMessage(data.browser_origins_synced===false?"Saved, but browser-origin synchronization failed. Save again to retry.":"Origins saved.");onUpdated()}catch(e){setMessage((e as Error).message)}finally{setBusy(false)}};
+ return <div className="mt-3"><label className="text-xs">Allowed browser origins<textarea aria-label="Allowed browser origins" value={draft} onChange={e=>setDraft(e.target.value)} className="block w-full bg-bg-input border border-border rounded p-2"/></label><button disabled={busy} onClick={save} className="text-xs border rounded p-1 mt-1">Save origins / retry sync</button><p role="status" className="text-xs">{message}</p></div>;
+}
+
 function ClientTypePill({ type }: { type: Client["type"] }) {
   const label = {
     spa: "SPA",
@@ -2059,6 +2108,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
   onCreated: (clientId: string, secret?: string) => void;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [name, setName] = useState("");
   const [type, setType] = useState<Client["type"]>("web");
   // scope: "single" → bound to one org (the v0.4.0 default).
@@ -2067,6 +2117,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
   const [scope, setScope] = useState<"single" | "multi">(defaultOrgSlug ? "single" : "multi");
   const [orgSlug, setOrgSlug] = useState<string>(defaultOrgSlug || (orgs[0]?.slug ?? ""));
   const [redirects, setRedirects] = useState("");
+  const [origins,setOrigins]=useState("");
   const [audience, setAudience] = useState("");
   const [requireMFA, setRequireMFA] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -2082,6 +2133,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
       const body = {
         name: name.trim(),
         type,
+        allowed_origins: origins.split(/\s+|,/).map(s=>s.trim()).filter(Boolean),
         redirect_uris: redirects.split(/\s+|,/).map((s) => s.trim()).filter(Boolean),
         require_mfa: requireMFA,
         jwt_audience: audience.trim() || undefined,
@@ -2147,13 +2199,14 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
             className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
           >
             <option value="web">web — server-rendered (gets client_secret)</option>
-            <option value="spa">spa — single-page app (PKCE, no secret)</option>
-            <option value="native">native — mobile or desktop (PKCE, no secret)</option>
-            <option value="m2m">m2m — service-to-service (client credentials)</option>
+            <option value="spa">spa — single-page app (no secret)</option>
+            <option value="native">native — mobile or desktop (no secret)</option>
+
           </select>
         </Field>
-        {type !== "m2m" && (
-          <Field label="Redirect URIs" hint="One per line, or comma-separated.">
+        {type !== "m2m" && (<>
+          <Field label="Allowed browser origins" hint="One origin per line, e.g. https://app.example.com. Empty denies browser-origin requests."><textarea value={origins} onChange={e=>setOrigins(e.target.value)} className="w-full bg-bg-input border border-border rounded p-2"/></Field>
+        <Field label="Redirect URIs" hint="One per line, or comma-separated.">
             <textarea
               value={redirects} onChange={(e) => setRedirects(e.target.value)}
               rows={3}
@@ -2161,7 +2214,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
             />
           </Field>
-        )}
+        </>)}
         <Field label="JWT audience (optional)" hint="Defaults to client_id when blank.">
           <input
             value={audience} onChange={(e) => setAudience(e.target.value)}
@@ -2171,7 +2224,7 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
         </Field>
         <label className="flex items-center gap-2 text-sm text-text">
           <input type="checkbox" checked={requireMFA} onChange={(e) => setRequireMFA(e.target.checked)} />
-          Require MFA for this client
+          Block login until MFA support is available for this client
         </label>
         <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
@@ -2191,8 +2244,8 @@ function CreateClientModal({ defaultOrgSlug, orgs, onClose, onCreated, setStatus
 function typeHint(t: Client["type"]): string {
   switch (t) {
     case "web": return "Server-rendered app. Stores client_secret server-side.";
-    case "spa": return "Browser-only app. Cannot keep a secret; uses PKCE.";
-    case "native": return "Mobile or desktop. Cannot keep a secret; uses PKCE.";
+    case "spa": return "Browser app. Uses the first-party Auth API without a client secret.";
+    case "native": return "Mobile or desktop app. Uses the first-party Auth API without a client secret.";
     case "m2m": return "Service that authenticates as itself, not on behalf of a user.";
   }
 }
@@ -2233,6 +2286,7 @@ function EndpointsTab({ activeOrgSlug, onSelectOrg, orgs, projectId, setStatus }
   projectId: string;
   setStatus: (s: string) => void;
 }) {
+ const {orgQS,projectQS,fetch}=usePanelAPI();
   const [info, setInfo] = useState<OIDCInfo | null>(null);
   const load = useCallback(async () => {
     if (!activeOrgSlug) return;
@@ -2241,6 +2295,7 @@ function EndpointsTab({ activeOrgSlug, onSelectOrg, orgs, projectId, setStatus }
       if (!r.ok) throw new Error(`oidc ${r.status}`);
       setInfo(await r.json());
     } catch (e) {
+      if((e as Error).name==="AbortError")return;
       setStatus(`oidc: ${(e as Error).message}`);
     }
   }, [activeOrgSlug, setStatus]);
@@ -2280,8 +2335,7 @@ function EndpointsTab({ activeOrgSlug, onSelectOrg, orgs, projectId, setStatus }
       {!info.app_url_configured && (
         <div className="border border-warning rounded bg-warning/10 px-3 py-2 text-sm text-text">
           <strong className="text-warning">app_url not configured.</strong>{" "}
-          The URLs below derive from the request host, which may not match
-          your production domain. Set <code className="font-mono text-xs">app_url</code> in install settings.
+          The URLs below use the platform’s public URL and install route. Verify that these match your deployment. Set <code className="font-mono text-xs">app_url</code> in install settings.
         </div>
       )}
 
@@ -2291,9 +2345,10 @@ function EndpointsTab({ activeOrgSlug, onSelectOrg, orgs, projectId, setStatus }
         </header>
         <div className="p-3 space-y-3">
           <UrlField label="Issuer" value={info.issuer} />
-          <UrlField label="OpenID configuration" value={info.openid_configuration} />
+          <UrlField label="Auth API discovery (not OIDC)" value={info.openid_configuration} />
           <UrlField label="JWKS" value={info.jwks_uri} />
-          <UrlField label="Token endpoint" value={info.token_endpoint} />
+          <UrlField label="Login endpoint" value={info.login_endpoint} />
+          <UrlField label="Refresh endpoint" value={info.refresh_endpoint} />
           <UrlField label="Userinfo endpoint" value={info.userinfo_endpoint} />
         </div>
       </section>
@@ -2489,9 +2544,12 @@ function Modal({ title, children, onClose }: {
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const previous=document.activeElement as HTMLElement|null;
+    const focusable=()=>Array.from(ref.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')||[]);
+    focusable()[0]?.focus();
+    const onKey = (e: KeyboardEvent) => {if(e.key==="Escape")onClose();if(e.key==="Tab"){const list=focusable();const first=list[0],last=list[list.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}}};
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {window.removeEventListener("keydown", onKey);previous?.focus()};
   }, [onClose]);
   return (
     <div
@@ -2499,7 +2557,7 @@ function Modal({ title, children, onClose }: {
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
-        ref={ref}
+        ref={ref} role="dialog" aria-modal="true" aria-label={title}
         style={{ width: 480, maxWidth: "90vw", maxHeight: "85vh" }}
         className="bg-bg border border-border rounded shadow-lg overflow-auto"
       >
@@ -2597,3 +2655,5 @@ function CloseIcon() {
     </svg>
   );
 }
+
+export { UserDrawer, UserRolesEditor };

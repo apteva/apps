@@ -16,11 +16,11 @@ func TestValidateIdentifier(t *testing.T) {
 		{"a_1", true},
 		{"a1", true},
 		{"", false},
-		{"Books", false},                // uppercase
-		{"1books", false},               // leading digit
-		{"books-list", false},           // hyphen
-		{"books table", false},          // space
-		{"books;DROP TABLE x;", false},  // injection attempt
+		{"Books", false},                 // uppercase
+		{"1books", false},                // leading digit
+		{"books-list", false},            // hyphen
+		{"books table", false},           // space
+		{"books;DROP TABLE x;", false},   // injection attempt
 		{strings.Repeat("a", 65), false}, // too long
 	}
 	for _, c := range cases {
@@ -51,7 +51,7 @@ func TestCoerceForStorage_Types(t *testing.T) {
 		{Column{Name: "d", Type: "datetime"}, "yesterday", true},
 		{Column{Name: "j", Type: "json"}, map[string]any{"a": 1}, false},
 		{Column{Name: "f", Type: "file_id"}, 42.0, false},
-		{Column{Name: "f", Type: "file_id"}, "42", true},
+		{Column{Name: "f", Type: "file_id"}, "42", false},
 	}
 	for i, c := range cases {
 		_, err := coerceForStorage(c.col, c.in)

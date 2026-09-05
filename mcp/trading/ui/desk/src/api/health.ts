@@ -15,6 +15,14 @@ export type HealthDetails = {
   last_tick_at?: string;
   last_marks_refreshed: number;
   providers: Partial<Record<ProviderClass, ProviderHealth>>;
+  venues?: Record<string, { status: string; consecutive_failures: number; last_ok_at?: string; last_error?: string; retry_at?: string }>;
+  streams?: Partial<Record<"market_data" | "trade_updates" | "corporate_actions", {
+    status: string;
+    feed?: string;
+    connected_at?: string;
+    last_event_at?: string;
+    last_error?: string;
+  }>>;
 };
 
 export const getHealth = () => apiGet<HealthDetails>("/healthz/details");

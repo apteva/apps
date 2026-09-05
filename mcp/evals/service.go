@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -108,6 +109,9 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	if len(item.Goals) == 0 && len(item.Assertions) == 0 {
 		return nil, errors.New("case requires a goal or deterministic assertion")
 	}
+	if err := s.validateAssertions(item.Assertions); err != nil {
+		return nil, err
+	}
 	if item.TimeoutSeconds < 0 || item.TimeoutSeconds > 1800 {
 		return nil, errors.New("timeout_seconds must be at most 1800")
 	}
@@ -121,6 +125,68 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 		return nil, err
 	}
 	return s.db.getCase(item.ID)
+}
+
+const outputEqualsAssertionType = "output_equals"
+
+func (s *service) validateAssertions(assertions []Assertion) error {
+	if len(assertions) == 0 {
+		return nil
+	}
+	assertionTypes, err := s.loadAssertionTypes()
+	if err != nil {
+		return fmt.Errorf("load supported assertion types: %w", err)
+	}
+	supported := make(map[string]bool, len(assertionTypes))
+	for _, assertionType := range assertionTypes {
+		supported[assertionType] = true
+	}
+	for i := range assertions {
+		assertions[i].Type = strings.TrimSpace(assertions[i].Type)
+		if !supported[assertions[i].Type] {
+			return fmt.Errorf("unsupported assertion type %q; supported types: %s. For agent output, use goals or the Evals-native %s assertion", assertions[i].Type, strings.Join(assertionTypes, ", "), outputEqualsAssertionType)
+		}
+		if assertions[i].Type == outputEqualsAssertionType {
+			if _, ok := assertions[i].Equals.(string); !ok {
+				return fmt.Errorf("assertion %q: output_equals requires equals to be a string", assertions[i].Name)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *service) loadAssertionTypes() ([]string, error) {
+	var environmentCatalog map[string]any
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &environmentCatalog); err != nil {
+		return nil, err
+	}
+	return evalAssertionTypes(environmentCatalog), nil
+}
+
+func evalAssertionTypes(environmentCatalog map[string]any) []string {
+	result := []string{}
+	seen := map[string]bool{}
+	appendType := func(value string) {
+		value = strings.TrimSpace(value)
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	switch values := environmentCatalog["assertion_types"].(type) {
+	case []string:
+		for _, value := range values {
+			appendType(value)
+		}
+	case []any:
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				appendType(text)
+			}
+		}
+	}
+	appendType(outputEqualsAssertionType)
+	return result
 }
 
 func (s *service) createExperiment(suiteID, name, trigger string, targets []Target, repetitions, baseline int, judgeModel string) (*Experiment, error) {
@@ -152,8 +218,44 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 	if judgeModel == "" {
 		judgeModel = suite.JudgeModel
 	}
+	judgeModel, err = s.resolveJudgeModel(judgeModel)
+	if err != nil {
+		return nil, err
+	}
 
-	agents, _ := s.ctx.RuntimeAPI().ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+	cases := []Case{}
+	validatedEnvironments := map[string]bool{}
+	for _, item := range suite.Cases {
+		if !item.Enabled {
+			continue
+		}
+		if item.EnvironmentID == "" {
+			item.EnvironmentID = suite.EnvironmentID
+		}
+		if item.EnvironmentID != "" && !validatedEnvironments[item.EnvironmentID] {
+			var definition EnvironmentDefinition
+			if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": item.EnvironmentID}, &definition); err != nil {
+				return nil, fmt.Errorf("case %s: load environment %s: %w", item.ID, item.EnvironmentID, err)
+			}
+			if definition.ID != item.EnvironmentID {
+				return nil, fmt.Errorf("case %s: environment %s not found or inaccessible", item.ID, item.EnvironmentID)
+			}
+			validatedEnvironments[item.EnvironmentID] = true
+		}
+		cases = append(cases, item)
+	}
+	if len(cases) == 0 {
+		return nil, errors.New("suite has no enabled cases")
+	}
+
+	runtimeAPI := s.ctx.RuntimeAPI()
+	if runtimeAPI == nil {
+		return nil, errors.New("runtime catalog API unavailable")
+	}
+	agents, err := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+	if err != nil {
+		return nil, fmt.Errorf("list target agents: %w", err)
+	}
 	byID := map[int64]sdk.RuntimeCatalogAgent{}
 	for _, agent := range agents {
 		byID[agent.ID] = agent
@@ -172,22 +274,58 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 			targets[i].Provider, targets[i].Model = parts[0], parts[1]
 		}
 	}
-	cases := []Case{}
-	for _, item := range suite.Cases {
-		if !item.Enabled {
-			continue
-		}
-		if item.EnvironmentID == "" {
-			item.EnvironmentID = suite.EnvironmentID
-		}
-		cases = append(cases, item)
-	}
 	exp := &Experiment{ID: "exp_" + token(12), SuiteID: suite.ID, SuiteRevision: suite.Revision, Name: strings.TrimSpace(name), TriggerType: trigger, Status: "queued", Targets: targets, Repetitions: repetitions, JudgeModel: judgeModel, BaselineTarget: baseline, CreatedAt: time.Now().UTC()}
 	if err := s.db.createExperiment(exp, cases); err != nil {
 		return nil, err
 	}
 	s.ctx.Emit("eval.experiment.created", map[string]any{"experiment_id": exp.ID, "suite_id": suite.ID, "trigger_type": trigger})
 	return s.db.getExperiment(exp.ID)
+}
+
+func (s *service) resolveJudgeModel(requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return "", nil
+	}
+
+	var catalog LLMModels
+	if err := s.ctx.PlatformAPI().CallAppResult("llm", "llm_models_list", map[string]any{}, &catalog); err != nil {
+		return "", fmt.Errorf("resolve judge_model %q from LLM catalog: %w", requested, err)
+	}
+
+	canonicalMatches := map[string]struct{}{}
+	aliasMatches := map[string]struct{}{}
+	for _, model := range catalog.Models {
+		gatewayModel := strings.TrimSpace(model.GatewayModel)
+		if gatewayModel == "" {
+			continue
+		}
+		if requested == gatewayModel {
+			canonicalMatches[gatewayModel] = struct{}{}
+		}
+		if requested == strings.TrimSpace(model.ModelID) {
+			aliasMatches[gatewayModel] = struct{}{}
+		}
+	}
+	if len(canonicalMatches) == 1 {
+		for gatewayModel := range canonicalMatches {
+			return gatewayModel, nil
+		}
+	}
+	if len(aliasMatches) == 1 {
+		for gatewayModel := range aliasMatches {
+			return gatewayModel, nil
+		}
+	}
+	if len(aliasMatches) > 1 {
+		matches := make([]string, 0, len(aliasMatches))
+		for gatewayModel := range aliasMatches {
+			matches = append(matches, gatewayModel)
+		}
+		sort.Strings(matches)
+		return "", fmt.Errorf("judge_model %q is ambiguous; matching gateway models: %s; select eval_catalog.models[].gateway_model", requested, strings.Join(matches, ", "))
+	}
+	return "", fmt.Errorf("judge_model %q is not available; select eval_catalog.models[].gateway_model", requested)
 }
 
 func (s *service) catalog() (map[string]any, error) {
@@ -206,6 +344,7 @@ func (s *service) catalog() (map[string]any, error) {
 	if environmentCatalog == nil {
 		environmentCatalog = map[string]any{}
 	}
+	environmentCatalog["assertion_types"] = evalAssertionTypes(environmentCatalog)
 	environmentCatalog["environments"] = environments
 	environmentCatalog["models"] = models.Models
 	return environmentCatalog, nil

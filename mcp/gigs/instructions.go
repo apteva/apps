@@ -45,7 +45,7 @@ func (a *App) instructionTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "instructions_create",
-			Description: "Create a new instruction (kind + body). Media kinds reference a storage_file_id. Read-only instructions may define body.response with independent note/files rules; files supports enabled, required, accept, min_items, max_items, and max_size_mb. No response is shown when omitted. The first version is a draft. Args: name, kind, body, slug?, default_result_key?. Returns {instruction}.",
+			Description: "Create a new instruction (kind + body). The content kind accepts ordered markdown, image, callout, and divider blocks; image blocks reference storage_file_id. Standalone media kinds also reference a storage_file_id. Read-only instructions may define body.response with independent note/files rules; files supports enabled, required, accept, min_items, max_items, and max_size_mb. No response is shown when omitted. The first version is a draft. Args: name, kind, body, slug?, default_result_key?. Returns {instruction}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":               map[string]any{"type": "string"},
 				"kind":               map[string]any{"type": "string"},

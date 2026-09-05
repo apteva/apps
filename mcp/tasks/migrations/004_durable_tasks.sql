@@ -1,5 +1,6 @@
-DROP TABLE IF EXISTS task_events;
-DROP TABLE IF EXISTS tasks;
+-- This migration may still be reached by legacy installations. Preserve the
+-- exact v2 ledger for audit/recovery; applied migrations are not rerun by SDK.
+ALTER TABLE tasks RENAME TO tasks_legacy_v2;
 
 CREATE TABLE tasks (
     id TEXT PRIMARY KEY,
@@ -55,3 +56,16 @@ CREATE TABLE task_events (
 );
 
 CREATE INDEX idx_task_events_task_created ON task_events(task_id, created_at ASC);
+
+-- Project/thread identity is resolved from the platform before imported rows
+-- become visible. Active legacy work requires reassignment, never blind replay.
+INSERT INTO tasks(id,agent_id,project_id,title,description,state,progress,current_step,
+ assigned_thread_id,result,error,created_at,updated_at,completed_at)
+SELECT 'legacy-'||id,agent_id,'',title,notes,
+ CASE status WHEN 'done' THEN 'completed' WHEN 'cancelled' THEN 'cancelled' ELSE 'blocked' END,
+ CASE WHEN status='done' THEN 100 ELSE MAX(0,MIN(100,progress)) END,
+ CASE WHEN status IN ('done','cancelled') THEN '' ELSE 'Imported legacy work; verify outcome and reassign before continuing' END,
+ COALESCE(assigned_thread,''),CASE WHEN status='done' THEN notes ELSE '' END,'',
+ strftime('%Y-%m-%dT%H:%M:%fZ',created_at),strftime('%Y-%m-%dT%H:%M:%fZ',updated_at),
+ CASE WHEN completed_at IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%fZ',completed_at) ELSE NULL END
+FROM tasks_legacy_v2;

@@ -125,10 +125,12 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_create_from_instructions",
-			Description: "Ad-hoc dispatch from instruction refs. Scheduling supports scheduled_for?, soft due_at?, optional hard access_expires_at? or access_grace_days?, and deprecated deadline_at as a due_at alias. Returns {gig, assignment?}.",
+			Description: "Ad-hoc dispatch from instruction refs. Optional template_id/template_slug applies that active template's response rules, variable defaults, schedule defaults and commercial rate context to the dynamic composition. Scheduling supports scheduled_for?, soft due_at?, optional hard access_expires_at? or access_grace_days?, and deprecated deadline_at as a due_at alias. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
 				"title":             map[string]any{"type": "string"},
 				"instructions":      map[string]any{"type": "array"},
+				"template_id":       map[string]any{"type": "integer"},
+				"template_slug":     map[string]any{"type": "string"},
 				"vars":              map[string]any{"type": "object"},
 				"worker_id":         map[string]any{"type": "integer"},
 				"notify_worker":     map[string]any{"type": "boolean"},
@@ -326,6 +328,10 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 	if err != nil {
 		return nil, err
 	}
+	composition, err = applyTemplateResponseRules(composition, tplv.ResponseRules)
+	if err != nil {
+		return nil, err
+	}
 
 	vars := mapArg(args, "vars")
 	// Apply template-level variable defaults under unset keys.
@@ -404,6 +410,10 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 	if len(raw) == 0 {
 		return nil, errors.New("instructions required (non-empty)")
 	}
+	templateID, templateVersionID, templateVersion, err := resolveOptionalTemplateContext(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
 	// Resolve refs into compositionItems by reading instruction_versions.
 	items := make([]compositionItem, 0, len(raw))
 	for i, r := range raw {
@@ -463,32 +473,65 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 		})
 	}
 	vars := mapArg(args, "vars")
+	if templateVersion != nil {
+		if templateVersion.VariableOverrides != nil {
+			if vars == nil {
+				vars = map[string]any{}
+			}
+			for k, value := range templateVersion.VariableOverrides {
+				if _, set := vars[k]; set {
+					continue
+				}
+				if setting, ok := value.(map[string]any); ok {
+					if defaultValue, ok := setting["default"]; ok {
+						vars[k] = defaultValue
+					}
+				}
+			}
+		}
+		items, err = applyTemplateResponseRules(items, templateVersion.ResponseRules)
+		if err != nil {
+			return nil, err
+		}
+	}
 	rendered := renderCompositionForGig(items, vars)
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
-	compensation, err := compensationQuoteForCreate(ctx, pid, 0, int64Arg(args, "worker_id"), args)
+	compensation, err := compensationQuoteForCreate(ctx, pid, templateID, int64Arg(args, "worker_id"), args)
 	if err != nil {
 		return nil, err
 	}
+	accessGraceDays := intArg(args, "access_grace_days", 0)
+	defaultDueHours := 0
+	if templateVersion != nil {
+		defaultDueHours = templateVersion.DefaultDueHours
+		if _, graceSupplied := args["access_grace_days"]; !graceSupplied {
+			if _, expirySupplied := args["access_expires_at"]; !expirySupplied {
+				accessGraceDays = templateVersion.DefaultAccessGraceDays
+			}
+		}
+	}
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:           title,
-		Vars:            vars,
-		Rendered:        rendered,
-		Derived:         derived,
-		ScheduledFor:    strArg(args, "scheduled_for"),
-		DueAt:           strArg(args, "due_at"),
-		DeadlineAt:      strArg(args, "deadline_at"),
-		AccessExpiresAt: strArg(args, "access_expires_at"),
-		AccessGraceDays: intArg(args, "access_grace_days", 0),
-		Priority:        strArg(args, "priority"),
-		BudgetCents:     int64Arg(args, "budget_cents"),
-		WorkerID:        int64Arg(args, "worker_id"),
-		NotifyWorker:    boolArg(args, "notify_worker", false),
-		PublicDomainID:  int64Arg(args, "public_domain_id"),
-		Compensation:    compensation,
-		ContractID:      int64Arg(args, "_contract_id"),
-		MilestoneID:     int64Arg(args, "_milestone_id"),
-		OverrideReason:  strArg(args, "compensation_override_reason"),
+		TemplateVersionID:  templateVersionID,
+		Title:              title,
+		Vars:               vars,
+		Rendered:           rendered,
+		Derived:            derived,
+		ScheduledFor:       strArg(args, "scheduled_for"),
+		DueAt:              strArg(args, "due_at"),
+		DeadlineAt:         strArg(args, "deadline_at"),
+		AccessExpiresAt:    strArg(args, "access_expires_at"),
+		AccessGraceDays:    accessGraceDays,
+		Priority:           strArg(args, "priority"),
+		BudgetCents:        int64Arg(args, "budget_cents"),
+		WorkerID:           int64Arg(args, "worker_id"),
+		NotifyWorker:       boolArg(args, "notify_worker", false),
+		PublicDomainID:     int64Arg(args, "public_domain_id"),
+		DefaultDeadlineHrs: defaultDueHours,
+		Compensation:       compensation,
+		ContractID:         int64Arg(args, "_contract_id"),
+		MilestoneID:        int64Arg(args, "_milestone_id"),
+		OverrideReason:     strArg(args, "compensation_override_reason"),
 	})
 	if err != nil {
 		return nil, err
@@ -498,6 +541,46 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 		out["assignment"] = ass
 	}
 	return out, nil
+}
+
+func resolveOptionalTemplateContext(db *sql.DB, pid string, args map[string]any) (int64, int64, *templateVersion, error) {
+	templateID := int64Arg(args, "template_id")
+	if templateID == 0 {
+		if slug := strings.TrimSpace(strArg(args, "template_slug")); slug != "" {
+			if err := db.QueryRow(
+				`SELECT id FROM templates WHERE project_id=? AND slug=? AND archived_at IS NULL`,
+				pid, slug,
+			).Scan(&templateID); errors.Is(err, sql.ErrNoRows) {
+				return 0, 0, nil, fmt.Errorf("template %q not found", slug)
+			} else if err != nil {
+				return 0, 0, nil, err
+			}
+		}
+	}
+	if templateID == 0 {
+		return 0, 0, nil, nil
+	}
+	var exists int
+	if err := db.QueryRow(
+		`SELECT 1 FROM templates WHERE id=? AND project_id=? AND archived_at IS NULL`,
+		templateID, pid,
+	).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil, fmt.Errorf("template %d not found", templateID)
+	} else if err != nil {
+		return 0, 0, nil, err
+	}
+	activeVersionID, err := resolveActiveTemplateVersion(db, templateID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	if activeVersionID == 0 {
+		return 0, 0, nil, errors.New("template has no active version (publish a draft first)")
+	}
+	version, err := getTemplateVersion(db, activeVersionID)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return templateID, activeVersionID, version, nil
 }
 
 func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2065,20 +2148,19 @@ func (a *App) handleHTTPGigsCollection(w http.ResponseWriter, r *http.Request) {
 			body = map[string]any{}
 		}
 		body["_project_id"] = pid
-		// Body must declare which create path: template_id|template_slug
-		// → from_template; instructions present and items have kind →
-		// inline; instructions with instruction_id → from_instructions.
+		// An explicit instruction list is a dynamic composition even when
+		// template_id/template_slug is also supplied for inherited policies.
 		var out any
 		if body["offer_id"] != nil || body["offer_slug"] != nil {
 			out, err = a.toolGigsCreateFromOffer(ctx, body)
-		} else if body["template_id"] != nil || body["template_slug"] != nil {
-			out, err = a.toolGigsCreateFromTemplate(ctx, body)
 		} else if items, ok := body["instructions"].([]any); ok && len(items) > 0 {
 			if first, ok := items[0].(map[string]any); ok && first["kind"] != nil {
 				out, err = a.toolGigsCreateInline(ctx, body)
 			} else {
 				out, err = a.toolGigsCreateFromInstructions(ctx, body)
 			}
+		} else if body["template_id"] != nil || body["template_slug"] != nil {
+			out, err = a.toolGigsCreateFromTemplate(ctx, body)
 		} else {
 			httpErr(w, http.StatusBadRequest, "need template_id, template_slug, or instructions")
 			return

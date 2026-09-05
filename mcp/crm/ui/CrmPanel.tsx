@@ -89,10 +89,52 @@ interface NativePanelProps {
   instanceId?: number;
 }
 interface Channel {
+  id?: number;
   kind: string;
   value: string;
   label?: string;
   is_primary?: boolean;
+  verification_verdict?: string;
+  verification_confidence?: string;
+  verification_reason?: string;
+  verification_recommendation?: string;
+  verification_source?: string;
+  verification_suggested_value?: string;
+  verification_checked_at?: string;
+  verification_details?: {
+    disposable?: boolean;
+    role?: boolean;
+    domain_status?: string;
+    retryable?: boolean;
+    smtp?: {
+      checked?: boolean;
+      rcpt_status?: string;
+      catch_all?: boolean;
+      retryable?: boolean;
+      note?: string;
+    };
+  };
+  deliverability?: ChannelDeliverability[];
+}
+interface ChannelDeliverability {
+  transport: "email" | "sms" | "whatsapp";
+  status: "active" | "soft_bounced" | "hard_bounced" | "complained" | "unsubscribed";
+  consecutive_soft_bounces: number;
+  last_bounce_at?: string;
+  last_delivered_at?: string;
+  status_reason?: string;
+  status_updated_at?: string;
+  quarantined: boolean;
+  quarantined_at?: string;
+  suppressed: boolean;
+  suppression_kind?: string;
+  suppression_match?: string;
+  suppression_reason?: string;
+  suppression_source?: string;
+  suppressed_at?: string;
+  suppression_checked_at?: string;
+  messageable: boolean;
+  messageability_reason?: string;
 }
 interface Attribute {
   key: string;
@@ -170,6 +212,7 @@ interface MessageStatus {
 }
 interface Contact {
   id: string;
+  updated_at?: string;
   first_name?: string;
   last_name?: string;
   display_name?: string;
@@ -236,8 +279,7 @@ interface InboundRoute {
 }
 
 const API = "/api/apps/crm";
-const MESSAGING_API = "/api/apps/messaging";
-type PanelApi = <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+type PanelApi = <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
 
 // Activity-kind families. Used to pick icons + decide whether the
 // row gets a Reply button (received-only) and whether it groups into
@@ -524,6 +566,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [contactOpportunities, setContactOpportunities] = useState<Opportunity[]>([]);
   const [opportunityStatusFilter, setOpportunityStatusFilter] = useState("open");
+  const [opportunityPipeline, setOpportunityPipeline] = useState("");
+  const [opportunityOffset, setOpportunityOffset] = useState(0);
+  const [opportunityTotal, setOpportunityTotal] = useState(0);
+  const [opportunityError, setOpportunityError] = useState("");
+  const opportunitySequence = useRef(0);
   const [newOpportunityOpen, setNewOpportunityOpen] = useState(false);
 
   // Auto-dismiss the error toast after 5s. Manual dismiss via the
@@ -540,33 +587,47 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     return u.toString();
   }, [projectId, installId]);
 
-  const api = useCallback(async <T,>(method: string, path: string, body?: any, params: Record<string, string> = {}): Promise<T> => {
-    const res = await fetch(`${API}${path}?${withParams(params)}`, {
-      method,
-      credentials: "same-origin",
-      headers: body ? { "Content-Type": "application/json" } : {},
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-    return res.json();
+  const requests = useRef(new Set<AbortController>());
+  useEffect(() => () => { for (const controller of requests.current) controller.abort(); requests.current.clear(); }, [projectId, installId]);
+  const api = useCallback(async <T,>(method: string, path: string, body?: any, params: Record<string, string> = {}, signal?: AbortSignal): Promise<T> => {
+    const controller = new AbortController(); requests.current.add(controller);
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    signal?.addEventListener("abort", abort, {once:true});
+    try {
+      const res = await fetch(`${API}${path}?${withParams(params)}`, {
+        method, credentials:"same-origin", signal:controller.signal,
+        headers:body?{"Content-Type":"application/json"}:{},body:body?JSON.stringify(body):undefined,
+      });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(()=>"")}`);
+      return await res.json();
+    } finally { requests.current.delete(controller);signal?.removeEventListener("abort",abort); }
   }, [withParams]);
 
   const messagingTool = useCallback(async <T,>(tool: string, args: Record<string, unknown> = {}): Promise<T> => {
-    const params = new URLSearchParams({ project_id: projectId });
-    const res = await fetch(`${MESSAGING_API}/tools/call?${params.toString()}`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tool, args: { ...args, _project_id: projectId } }),
-    });
-    if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-    return res.json();
-  }, [projectId]);
+    if (tool === "inbound_route_list") return api<T>("GET", "/messaging/routes");
+    if (tool === "inbound_route_set") return api<T>("POST", "/messaging/routes", args);
+    throw new Error("Unsupported CRM messaging settings action");
+  }, [api]);
+
+  const detailAbort = useRef<AbortController | null>(null);
+  const listAbort = useRef<AbortController | null>(null);
+  const detailSequence = useRef(0);
+  const listSequence = useRef(0);
+  const selectedContactRef = useRef<string | null>(null);
+  useEffect(() => {
+    ++detailSequence.current; ++listSequence.current;
+    selectedContactRef.current = null;
+    setSelectedId(null); setDetail(null); setEdits({});
+    setActivities([]); setConversations([]); setContactLists([]); setContactOpportunities([]);
+  }, [projectId, installId]);
 
   // loadList(q, offset): offset 0 replaces the list; offset > 0 appends
   // the next page (for "Load more"). total comes back from the backend
   // so the UI can show "X of Y" and know when to stop paging.
   const loadList = useCallback(async (q = "", offset = 0) => {
+    const sequence = ++listSequence.current;
+    listAbort.current?.abort(); const controller = new AbortController(); listAbort.current=controller;
     setStatus("Loading…");
     try {
       const params: Record<string, string> = { limit: String(CONTACTS_PAGE) };
@@ -575,7 +636,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       const ser = serializeFilters(filtersRef.current);
       if (listFilterId) ser.push({ predicate: "in_list", list_id: Number(listFilterId) });
       if (ser.length) params.filters = JSON.stringify(ser);
-      const r = await api<{ contacts?: Contact[]; total?: number }>("GET", "/contacts", undefined, params);
+      const r = await api<{ contacts?: Contact[]; total?: number }>("GET", "/contacts", undefined, params, controller.signal);
+      if (sequence !== listSequence.current) return;
       const rows = r.contacts || [];
       setContacts((prev) => (offset > 0 ? [...prev, ...rows] : rows));
       const t = typeof r.total === "number" ? r.total : rows.length;
@@ -583,6 +645,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       const shown = offset > 0 ? offset + rows.length : rows.length;
       setStatus(`${shown} of ${t}${ser.length ? ` · ${ser.length} filter${ser.length !== 1 ? "s" : ""}` : ""}`);
     } catch (e) {
+      if (sequence !== listSequence.current) return;
       setStatus("Error: " + (e as Error).message);
     }
   }, [api, listFilterId]);
@@ -624,18 +687,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   }, [api]);
 
   const loadOpportunities = useCallback(async () => {
+    const sequence = ++opportunitySequence.current;
+    const pipeline = opportunityPipeline || String(defaultPipeline(pipelines)?.id || "");
+    if (!pipeline) return;
+    setOpportunityError("");
     try {
-      const r = await api<{ opportunities?: Opportunity[] }>(
-        "GET",
-        "/opportunities",
-        undefined,
-        { status: opportunityStatusFilter, limit: "200" },
-      );
-      setOpportunities(r.opportunities || []);
-    } catch {
-      setOpportunities([]);
+      const r = await api<{ opportunities?: Opportunity[]; total?: number }>("GET", "/opportunities", undefined,
+        { status: opportunityStatusFilter, pipeline_id: pipeline, limit: "100", offset: String(opportunityOffset) });
+      if (sequence !== opportunitySequence.current) return;
+      setOpportunities(r.opportunities || []); setOpportunityTotal(r.total || 0);
+    } catch (e) {
+      if (sequence === opportunitySequence.current) setOpportunityError((e as Error).message);
     }
-  }, [api, opportunityStatusFilter]);
+  }, [api, pipelines, opportunityStatusFilter, opportunityPipeline, opportunityOffset]);
 
   const loadContactOpportunities = useCallback(async (id: string | number) => {
     try {
@@ -645,6 +709,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         undefined,
         { status: "all" },
       );
+      if (selectedContactRef.current !== String(id)) return;
       setContactOpportunities(r.opportunities || []);
     } catch {
       setContactOpportunities([]);
@@ -719,6 +784,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     ) {
       loadList(query.trim());
     }
+    if (ev.topic === "contact.channel.deliverability.changed") {
+      const data = (ev.data || {}) as { contact_id?: number };
+      loadList(query.trim());
+      if (detail && String(data.contact_id) === String(detail.id)) {
+        api<{ contact: Contact }>("GET", `/contacts/${detail.id}`)
+          .then((result) => {if (selectedContactRef.current === String(result.contact.id)) setDetail(result.contact);})
+          .catch(() => {});
+      }
+    }
     if (ev.topic === "contact.activity.added" && detail) {
       const data = (ev.data || {}) as { contact_id?: number };
       if (String(data.contact_id) === String(detail.id)) {
@@ -761,6 +835,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const loadContactLists = useCallback(async (id: string | number) => {
     try {
       const r = await api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`);
+      if (selectedContactRef.current !== String(id)) return;
       setContactLists(r.lists || []);
     } catch (e) {
       // Endpoint may not exist on older CRMs; fallback to client-side
@@ -776,6 +851,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         api<{ activities?: Activity[] }>("GET", `/contacts/${id}/activities`),
         api<{ conversations?: Conversation[] }>("GET", `/contacts/${id}/conversations`),
       ]);
+      if (selectedContactRef.current !== String(id)) return;
       setActivities(a.activities || []);
       setConversations(conv.conversations || []);
     } catch (e) {
@@ -783,7 +859,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
-  const selectContact = useCallback(async (id: string) => {
+  const selectContact = useCallback(async (id: string, discard = false) => {
+    id = String(id);
+    if (!discard && Object.keys(edits).length) {
+      if (selectedContactRef.current === id) return;
+      setConfirmDialog({title:"Unsaved contact edits",message:"Discard your unsaved changes and open this contact?",confirmLabel:"Discard changes",onConfirm:()=>selectContact(id,true)});
+      return;
+    }
+    const sequence = ++detailSequence.current;
+    detailAbort.current?.abort();const controller=new AbortController();detailAbort.current=controller;
+    selectedContactRef.current = id;
     setSelectedId(id);
     setDetail(null);
     setActivities([]);
@@ -793,27 +878,30 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setEdits({});
     try {
       const [c, a, conv, ls, opps] = await Promise.all([
-        api<{ contact: Contact }>("GET", `/contacts/${id}`),
-        api<{ activities?: Activity[] }>("GET", `/contacts/${id}/activities`),
-        api<{ conversations?: Conversation[] }>("GET", `/contacts/${id}/conversations`),
-        api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`).catch(() => ({ lists: [] })),
-        api<{ opportunities?: Opportunity[] }>("GET", `/contacts/${id}/opportunities`, undefined, { status: "all" })
+        api<{ contact: Contact }>("GET", `/contacts/${id}`,undefined,{},controller.signal),
+        api<{ activities?: Activity[] }>("GET", `/contacts/${id}/activities`,undefined,{},controller.signal),
+        api<{ conversations?: Conversation[] }>("GET", `/contacts/${id}/conversations`,undefined,{},controller.signal),
+        api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`,undefined,{},controller.signal).catch(() => ({ lists: [] })),
+        api<{ opportunities?: Opportunity[] }>("GET", `/contacts/${id}/opportunities`, undefined, { status: "all" },controller.signal)
           .catch(() => ({ opportunities: [] })),
       ]);
+      if (sequence !== detailSequence.current) return;
       setDetail(c.contact);
       setActivities(a.activities || []);
       setConversations(conv.conversations || []);
       setContactLists(ls.lists || []);
       setContactOpportunities(opps.opportunities || []);
     } catch (e) {
+      if (sequence !== detailSequence.current) return;
       setStatus("Detail error: " + (e as Error).message);
     }
-  }, [api]);
+  }, [api, edits]);
 
   const handleSave = async () => {
     if (!detail) return;
     try {
-      const r = await api<{ contact: Contact }>("PATCH", `/contacts/${detail.id}`, edits);
+      const r = await api<{ contact: Contact }>("PATCH", `/contacts/${detail.id}`, { ...edits, expected_updated_at: detail.updated_at });
+      if (selectedContactRef.current !== String(r.contact.id)) return;
       setDetail(r.contact);
       setEdits({});
       await loadList(query.trim());
@@ -859,6 +947,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       await api("POST", `/contacts/${detail.id}/attributes`, { key, value, source: "human" });
       // Refresh the contact to pick up the new attribute value.
       const r = await api<{ contact: Contact }>("GET", `/contacts/${detail.id}`);
+      if (selectedContactRef.current !== String(r.contact.id)) return;
       setDetail(r.contact);
     } catch (e) {
       setErrorToast("Save field failed: " + (e as Error).message);
@@ -1048,7 +1137,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       channel,
       subject: preset.subject || "",
       body: "",
-      from: defaultForChannel?.address || "",
+      from: preset.mode === "reply" ? "" : defaultForChannel?.address || "",
       templateId: "",
       templateVars: {},
       attachments: [],
@@ -1058,11 +1147,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       busy: false,
       error: null,
     });
+    if (preset.mode === "reply" && preset.conversationId) {
+      api<{to:string;from:string}>("GET","/messaging/reply-route",undefined,{contact_id:String(target.id),conversation_id:String(preset.conversationId),activity_id:String(preset.replyToActivityId || 0)})
+        .then(route => setComposer(current => current?.conversationId === preset.conversationId ? {...current,to:route.to,from:route.from} : current))
+        .catch(e => setComposer(current => current?.conversationId === preset.conversationId ? {...current,error:(e as Error).message} : current));
+    }
   };
 
   useEffect(() => {
     if (!composer || !composerContact || composer.channel !== "whatsapp") return;
-    const to = addressForChannel(composerContact, "whatsapp");
+    const to = composer.to || addressForChannel(composerContact, "whatsapp");
     const from = composer.from;
     if (!from || !to || to.startsWith("(no ")) {
       setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "idle" } } : prev);
@@ -1139,6 +1233,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           subject: composer.subject || undefined,
           body: useTemplate ? "" : composer.body,
           conversation_id: composer.conversationId,
+ reply_to_activity_id: composer.replyToActivityId,
           template_id: useTemplate && composer.templateId ? Number(composer.templateId) : undefined,
           template_vars: useTemplate && composer.templateId ? composer.templateVars : undefined,
           attachments: composer.attachments.length > 0
@@ -1177,7 +1272,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const saveChannels = useCallback(async (channels: Channel[]) => {
     if (!detail) return false;
     try {
-      const r = await api<{ contact: Contact }>("PATCH", `/contacts/${detail.id}`, { channels, source: "human" });
+      const r = await api<{ contact: Contact }>("PATCH", `/contacts/${detail.id}`, { channels, source: "human", expected_updated_at: detail.updated_at });
+      if (selectedContactRef.current !== String(r.contact.id)) return;
       setDetail(r.contact);
       setEdits((prev) => {
         const next = { ...prev };
@@ -1204,6 +1300,20 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     if (!detail) return;
     await saveChannels((detail.channels || []).filter((_, i) => i !== idx));
   }, [detail, saveChannels]);
+  const handleVerifyEmail = useCallback(async (channel: Channel, smtp: boolean) => {
+    if (!detail || !channel.id) return;
+    try {
+      const r = await api<{ contact: Contact }>(
+        "POST",
+        `/contacts/${detail.id}/channels/${channel.id}/verify`,
+        { smtp },
+      );
+      if (selectedContactRef.current !== String(r.contact.id)) return;
+      setDetail(r.contact);
+    } catch (e) {
+      setErrorToast("Email verification failed: " + (e as Error).message);
+    }
+  }, [api, detail]);
 
   // Group activities by conversation. Within a conversation, order
   // chronologically (oldest first) so the agent reads the thread top-
@@ -1362,7 +1472,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                         onChange={(e) => updateField("status", e.target.value)}
                         className="bg-bg-input border border-border rounded px-2 py-1"
                       >
-                        {["active", "archived", "spam", "merged"].map((opt) => (
+                        {["active", "archived", "spam"].map((opt) => (
                           <option key={opt} value={opt}>{opt}</option>
                         ))}
                       </select>
@@ -1373,6 +1483,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     channels={detail.channels || []}
                     onAdd={() => setAddChannelOpen(true)}
                     onRemove={handleRemoveChannel}
+                    onVerify={handleVerifyEmail}
                   />
 
                   {detail.tags && detail.tags.length > 0 && (
@@ -1479,8 +1590,10 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           <OpportunitiesTab
             opportunities={opportunities}
             pipelines={pipelines}
+            pipelineId={opportunityPipeline} onPipeline={(id) => { setOpportunityPipeline(id); setOpportunityOffset(0); }}
+            offset={opportunityOffset} total={opportunityTotal} error={opportunityError} onPage={setOpportunityOffset}
             statusFilter={opportunityStatusFilter}
-            onStatusFilter={setOpportunityStatusFilter}
+            onStatusFilter={(value) => {setOpportunityStatusFilter(value);setOpportunityOffset(0);}}
             onRefresh={() => { loadPipelines(); loadOpportunities(); }}
             onMove={handleMoveOpportunity}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
@@ -1589,6 +1702,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
 
       {editSegmentId !== null && (
         <SegmentEditorModal
+          attrDefs={attrDefs}
           editing={editSegmentId === "new" ? null : (segments.find((s) => s.id === editSegmentId) || null)}
           lists={lists}
           segments={segments}
@@ -1630,11 +1744,66 @@ function ContactField({ label, value, onChange }: { label: string; value: string
   );
 }
 
-function ChannelsList({ channels, onAdd, onRemove }: {
+function EmailVerificationBadge({ channel }: { channel: Channel }) {
+  if (channel.kind !== "email") return null;
+  const verdict = channel.verification_verdict || "unchecked";
+  const styles: Record<string, string> = {
+    deliverable: "bg-green-500/15 text-green-400",
+    risky: "bg-amber-500/15 text-amber-400",
+    undeliverable: "bg-red-500/15 text-red-400",
+    unknown: "bg-border text-text-muted",
+    unchecked: "bg-border/60 text-text-dim",
+  };
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${styles[verdict] || styles.unknown}`}>
+      {verdict}
+    </span>
+  );
+}
+
+function DeliveryBadge({ state }: { state: ChannelDeliverability }) {
+  const healthy = state.messageable && state.status === "active";
+  const warning = state.messageable && state.status === "soft_bounced";
+  const cls = healthy
+    ? "bg-green-500/15 text-green-400"
+    : warning
+      ? "bg-amber-500/15 text-amber-400"
+      : "bg-red-500/15 text-red-400";
+  const label = state.suppressed
+    ? "suppressed"
+    : state.quarantined
+      ? "quarantined"
+      : state.status.replaceAll("_", " ");
+  const title = [
+    `${state.transport}: ${label}`,
+    state.messageability_reason,
+    state.status_reason,
+    state.suppression_match ? `matched ${state.suppression_kind || "suppression"}: ${state.suppression_match}` : "",
+    state.suppression_source ? `source: ${state.suppression_source}` : "",
+  ].filter(Boolean).join("\n");
+  return (
+    <span className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`} title={title}>
+      {state.transport} · {label}
+    </span>
+  );
+}
+
+function ChannelsList({ channels, onAdd, onRemove, onVerify }: {
   channels: Channel[];
   onAdd: () => void;
   onRemove: (idx: number) => void | Promise<void>;
+  onVerify: (channel: Channel, smtp: boolean) => void | Promise<void>;
 }) {
+  const [verifying, setVerifying] = useState("");
+  const verify = async (channel: Channel, smtp: boolean) => {
+    const key = `${channel.id}-${smtp ? "smtp" : "local"}`;
+    setVerifying(key);
+    try {
+      await onVerify(channel, smtp);
+    } finally {
+      setVerifying("");
+    }
+  };
   return (
     <section>
       <div className="flex items-center gap-2 mb-2">
@@ -1646,19 +1815,60 @@ function ChannelsList({ channels, onAdd, onRemove }: {
         >Add channel</button>
       </div>
       {channels.length > 0 ? (
-        <ul className="space-y-1">
+        <ul className="space-y-2">
           {channels.map((ch, i) => (
-            <li key={`${ch.kind}-${ch.value}-${i}`} className="text-sm flex items-center gap-2">
-              <span className="text-[10px] uppercase text-text-dim w-16">{ch.kind}</span>
-              <span className="text-text flex-1 truncate">{ch.value}</span>
-              {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
-              {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
-              <button
-                type="button"
-                onClick={() => onRemove(i)}
-                className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
-                title="Remove channel"
-              >Remove</button>
+            <li key={ch.id || `${ch.kind}-${ch.value}-${i}`} className="text-sm rounded border border-border/70 p-2">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] uppercase text-text-dim w-16">{ch.kind}</span>
+                <span className="text-text flex-1 truncate">{ch.value}</span>
+                {ch.label && <span className="text-[10px] px-1 rounded bg-border text-text-muted">{ch.label}</span>}
+                {ch.is_primary && <span className="text-[10px] px-1 rounded bg-accent/15 text-accent">primary</span>}
+                <EmailVerificationBadge channel={ch} />
+                {(ch.deliverability || []).map((state) => <DeliveryBadge key={state.transport} state={state} />)}
+                <button
+                  type="button"
+                  onClick={() => onRemove(i)}
+                  className="text-[11px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input"
+                  title="Remove channel"
+                >Remove</button>
+              </div>
+              {ch.kind === "email" && (
+                <div className="mt-2 ml-[4.5rem] flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-text-muted">
+                  {ch.verification_confidence && <span>Confidence: {ch.verification_confidence}</span>}
+                  {ch.verification_reason && <span>Reason: {ch.verification_reason.replaceAll("_", " ")}</span>}
+                  {ch.verification_recommendation && <span>Recommendation: {ch.verification_recommendation}</span>}
+                  {ch.verification_source && <span>Source: {ch.verification_source}</span>}
+                  {ch.verification_details?.smtp?.catch_all && <span>Catch-all domain</span>}
+                  {(ch.verification_details?.retryable || ch.verification_details?.smtp?.retryable) && <span>Retry recommended</span>}
+                  {ch.verification_suggested_value && <span>Suggestion: {ch.verification_suggested_value}</span>}
+                  {ch.verification_checked_at && <span>Checked {formatTime(ch.verification_checked_at)}</span>}
+                  <span className="flex-1" />
+                  <button
+                    type="button"
+                    disabled={!ch.id || Boolean(verifying)}
+                    onClick={() => verify(ch, false)}
+                    className="px-1.5 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                  >{verifying === `${ch.id}-local` ? "Checking…" : "Verify again"}</button>
+                  <button
+                    type="button"
+                    disabled={!ch.id || Boolean(verifying)}
+                    onClick={() => verify(ch, true)}
+                    className="px-1.5 py-0.5 border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                    title="Ask Email Checker to probe the recipient mail server"
+                  >{verifying === `${ch.id}-smtp` ? "Probing…" : "Run SMTP probe"}</button>
+                </div>
+              )}
+              {(ch.deliverability || []).some((state) => state.status !== "active" || state.suppressed || state.quarantined) && (
+                <div className="mt-2 ml-[4.5rem] flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-text-muted">
+                  {(ch.deliverability || []).map((state) => (
+                    <Fragment key={state.transport}>
+                      {state.consecutive_soft_bounces > 0 && <span>{state.transport}: {state.consecutive_soft_bounces} consecutive transient bounce{state.consecutive_soft_bounces === 1 ? "" : "s"}</span>}
+                      {state.messageability_reason && <span>{state.transport}: {state.messageability_reason}</span>}
+                      {state.last_bounce_at && <span>Last bounce {formatTime(state.last_bounce_at)}</span>}
+                    </Fragment>
+                  ))}
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -2005,6 +2215,7 @@ interface ComposerState {
   // default. Operator picks via the composer dropdown; defaults to
   // the messaging-side default sender for the current channel when
   // the composer opens.
+  to?: string;
   from: string;
   templateId: string;
   templateVars: Record<string, string>;
@@ -2044,9 +2255,10 @@ type WhatsAppSessionState =
   | { state: "error"; error?: string };
 
 function preferredChannel(c: Contact, senders: SenderOption[] = []): string {
-  if (c.primary_email) return "email";
-  if (c.primary_phone) return senders.some((s) => s.channel === "whatsapp") ? "whatsapp" : "sms";
-  return "email";
+  const channels = availableChannels(c);
+  if (channels.includes("email")) return "email";
+  if (channels.includes("whatsapp") && senders.some((s) => s.channel === "whatsapp")) return "whatsapp";
+  return channels[0] || "email";
 }
 
 function preferredSenderForChannel(senders: SenderOption[], channel: string): SenderOption | undefined {
@@ -2084,7 +2296,7 @@ function ComposerModal({
   const channels = availableChannels(contact);
   const isEmail = composer.channel === "email";
   const isWhatsApp = composer.channel === "whatsapp";
-  const toAddr = addressForChannel(contact, composer.channel);
+  const toAddr = composer.to || addressForChannel(contact, composer.channel);
   // Filter senders to those that match the current channel — picking
   // an SMS sender for an email send is never what the operator wants.
   const sendersForChannel = senders.filter((s) => s.channel === composer.channel);
@@ -2190,6 +2402,8 @@ function ComposerModal({
                 onChange={(e) => onChange({ from: e.target.value })}
                 className={fieldCls}
               >
+                {composer.from && !sendersForChannel.some(s => s.address === composer.from) && <option value={composer.from}>{composer.from} (received identity)</option>}
+                {!composer.from && <option value="">Use reply/default identity</option>}
                 {sendersForChannel.map((s) => (
                   <option key={s.address} value={s.address}>
                     {s.label}{s.isDefault ? "  (default)" : ""}
@@ -2434,19 +2648,27 @@ function ComposerModal({
 
 function availableChannels(c: Contact): string[] {
   const out: string[] = [];
-  if (c.primary_email) out.push("email");
-  if (c.primary_phone) out.push("whatsapp", "sms");
-  // Fall back to any contact_channels entries.
   if (c.channels) {
     for (const ch of c.channels) {
-      if (ch.kind === "email" && !out.includes("email")) out.push("email");
+      if (ch.kind === "email" && channelIsMessageable(ch, "email") && !out.includes("email")) out.push("email");
       if (ch.kind === "phone") {
-        if (!out.includes("whatsapp")) out.push("whatsapp");
-        if (!out.includes("sms")) out.push("sms");
+        if (channelIsMessageable(ch, "whatsapp") && !out.includes("whatsapp")) out.push("whatsapp");
+        if (channelIsMessageable(ch, "sms") && !out.includes("sms")) out.push("sms");
       }
     }
   }
-  return out.length > 0 ? out : ["email"];
+  // Older CRM responses have no per-route state. Preserve their previous
+  // behavior until the contact is refreshed against the upgraded backend.
+  if (!c.channels || c.channels.length === 0) {
+    if (c.primary_email) out.push("email");
+    if (c.primary_phone) out.push("whatsapp", "sms");
+  }
+  return out;
+}
+
+function channelIsMessageable(channel: Channel, transport: string): boolean {
+  const state = channel.deliverability?.find((item) => item.transport === transport);
+  return state ? state.messageable : true;
 }
 
 async function fileToComposeAttachment(file: File): Promise<ComposeAttachment> {
@@ -2482,8 +2704,12 @@ function formatBytes(value?: number): string {
 }
 
 function addressForChannel(c: Contact, channel: string): string {
-  if (channel === "email") return c.primary_email || c.channels?.find((ch) => ch.kind === "email")?.value || "(no email)";
-  if (channel === "sms" || channel === "whatsapp") return c.primary_phone || c.channels?.find((ch) => ch.kind === "phone")?.value || "(no phone)";
+  if (channel === "email") {
+    return c.channels?.find((ch) => ch.kind === "email" && channelIsMessageable(ch, "email"))?.value || "(no messageable email)";
+  }
+  if (channel === "sms" || channel === "whatsapp") {
+    return c.channels?.find((ch) => ch.kind === "phone" && channelIsMessageable(ch, channel))?.value || `(no messageable ${channel} phone)`;
+  }
   return "—";
 }
 
@@ -2628,7 +2854,9 @@ function ContactOpportunitiesSection({ opportunities, pipelines, onCreate, onMov
   );
 }
 
-function OpportunitiesTab({ opportunities, pipelines, statusFilter, onStatusFilter, onRefresh, onMove, onOpenContact }: {
+function OpportunitiesTab({ opportunities, pipelines, pipelineId, onPipeline, offset, total, error, onPage, statusFilter, onStatusFilter, onRefresh, onMove, onOpenContact }: {
+  pipelineId: string; onPipeline: (id: string) => void;
+  offset: number; total: number; error: string; onPage: (offset: number) => void;
   opportunities: Opportunity[];
   pipelines: Pipeline[];
   statusFilter: string;
@@ -2637,7 +2865,7 @@ function OpportunitiesTab({ opportunities, pipelines, statusFilter, onStatusFilt
   onMove: (opportunity: Opportunity, patch: Partial<Opportunity> & { note?: string }) => void;
   onOpenContact: (contactId: number) => void;
 }) {
-  const pipeline = defaultPipeline(pipelines);
+  const pipeline = pipelines.find(p => String(p.id) === pipelineId) || defaultPipeline(pipelines);
   const stages = activeStages(pipeline);
   const byStage = useMemo(() => {
     const out = new Map<number, Opportunity[]>();
@@ -2658,6 +2886,13 @@ function OpportunitiesTab({ opportunities, pipelines, statusFilter, onStatusFilt
             {pipeline?.name || "No pipeline"} · {opportunities.length} shown
           </p>
         </div>
+        <select aria-label="Pipeline" value={String(pipeline?.id || "")} onChange={e => onPipeline(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-xs">
+          {pipelines.filter(p => !p.archived_at).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        <button disabled={offset === 0} onClick={() => onPage(Math.max(0, offset - 100))}>Previous</button>
+        <span className="text-xs">{offset + opportunities.length} of {total}</span>
+        <button disabled={offset + opportunities.length >= total} onClick={() => onPage(offset + 100)}>Next</button>
+        {error && <span role="alert" className="text-red text-xs">{error}</span>}
         <select
           value={statusFilter}
           onChange={(e) => onStatusFilter(e.target.value)}
@@ -2802,7 +3037,7 @@ const CRM_INBOUND_LEGACY_TARGET_ROUTE = "/inbound";
 
 function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
   messagingTool: <T,>(tool: string, args?: Record<string, unknown>) => Promise<T>;
-  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   lists: List[];
   attrDefs: AttributeDef[];
   onAddField: () => void;
@@ -2832,24 +3067,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
     });
   }, [messagingTool]);
 
-  useEffect(() => {
-    let cancelled = false;
-    setBusy(true);
-    setError(null);
-    Promise.all([
-      ensureRoute("email"),
-      ensureRoute("sms"),
-      ensureRoute("whatsapp"),
-    ])
-      .catch((e) => { if (!cancelled) setError((e as Error).message); })
-      .finally(async () => {
-        if (!cancelled) {
-          setBusy(false);
-          await loadRoutes();
-        }
-      });
-    return () => { cancelled = true; };
-  }, [ensureRoute, loadRoutes]);
+  useEffect(() => { void loadRoutes(); }, [loadRoutes]);
 
   // CRM-pointing routes — what we wire up.
   const crmRoutes = useMemo(
@@ -2881,7 +3099,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
     <div className="p-6 max-w-2xl space-y-6">
       <header>
         <h1 className="text-xl text-text font-semibold">Settings</h1>
-        <p className="text-text-muted text-sm">CRM keeps Messaging routes in place so inbound mail/SMS/WhatsApp lands on the right contact's timeline automatically.</p>
+        <p className="text-text-muted text-sm">Configure inbound routes for the Messaging install bound to this CRM.</p>
       </header>
 
       <section>
@@ -2900,7 +3118,7 @@ function SettingsTab({ messagingTool, api, lists, attrDefs, onAddField }: {
             <RouteRow label="SMS"      wired={hasSMS}       onWire={() => wire("sms")} busy={busy} />
             <RouteRow label="WhatsApp" wired={hasWhatsApp}  onWire={() => wire("whatsapp")} busy={busy} />
             <p className="text-text-dim text-xs pt-2">
-              CRM creates low-priority <span className="font-mono">*</span> catch-all routes in messaging. To
+              Use Repair to create low-priority <span className="font-mono">*</span> catch-all routes in messaging. To
               constrain by recipient pattern, edit the route from the messaging panel.
             </p>
           </div>
@@ -2978,7 +3196,7 @@ interface RoutingRule {
 }
 
 function RoutingRulesSection({ api, lists }: {
-  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   lists: List[];
 }) {
   const [rules, setRules] = useState<RoutingRule[] | null>(null);
@@ -3108,7 +3326,7 @@ function stripDomainPrefix(value: string): string {
 }
 
 function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
-  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   projectId: string;
   lists: List[];
   onOpenContact: (contactId: number) => void;
@@ -3136,9 +3354,12 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   const itemsRef = useRef<InboxItem[]>([]);
   const listLoadSeq = useRef(0);
   const threadLoadSeq = useRef(0);
+  const inboxAbort=useRef<AbortController | null>(null);
+  const threadAbort=useRef<AbortController | null>(null);
 
   const load = useCallback(async (offset = 0) => {
     const seq = ++listLoadSeq.current;
+    inboxAbort.current?.abort();const controller=new AbortController();inboxAbort.current=controller;
     setErr(null);
     if (offset > 0) setLoadingMore(true);
     try {
@@ -3154,7 +3375,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
       const params: Record<string, string> = { status: statusFilter, limit: String(INBOX_PAGE) };
       if (offset > 0) params.offset = String(offset);
       if (filters.length) params.filters = JSON.stringify(filters);
-      const r = await api<InboxResponse>("GET", "/inbox", undefined, params);
+      const r = await api<InboxResponse>("GET", "/inbox", undefined, params,controller.signal);
       if (seq !== listLoadSeq.current) return;
       const rows = r.inbox || [];
       const nextRows = offset > 0 ? [...itemsRef.current, ...rows] : rows;
@@ -3184,12 +3405,13 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
 
   const loadThreadFor = useCallback(async (item: InboxItem, activityOffset = 0) => {
     const seq = ++threadLoadSeq.current;
+    threadAbort.current?.abort();const controller=new AbortController();threadAbort.current=controller;
     if (activityOffset > 0) setThreadLoadingMore(true);
     else setThreadLoading(true);
     setThreadErr(null);
     try {
       const [contact, convo] = await Promise.all([
-        api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`),
+        api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`,undefined,{},controller.signal),
         api<{
           conversation?: Conversation;
           activities?: Activity[];
@@ -3201,7 +3423,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
           {
             activity_limit: "200",
             activity_offset: String(activityOffset),
-          },
+          }, controller.signal,
         ),
       ]);
       if (seq !== threadLoadSeq.current) return;
@@ -3239,22 +3461,33 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
       return;
     }
     loadThreadFor(selected);
-  }, [selected, loadThreadFor]);
+  }, [selected?.id, loadThreadFor]);
 
   const reloadSelectedThread = useCallback(async () => {
     if (selected) await loadThreadFor(selected);
     await load();
   }, [load, loadThreadFor, selected]);
 
+  const eventRefresh = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refreshThreadPending = useRef(false);
+  useEffect(() => () => {if(eventRefresh.current) clearTimeout(eventRefresh.current);}, [api]);
   useAppEvents("crm", projectId, (ev) => {
     if (
       ev.topic === "conversation.message.received" ||
       ev.topic === "conversation.status.changed" ||
       ev.topic === "contact.activity.added" ||
+      ev.topic === "contact.channel.deliverability.changed" ||
       ev.topic === "contact.merged"
     ) {
-      load();
-      if (selected) loadThreadFor(selected);
+      if (eventRefresh.current) clearTimeout(eventRefresh.current);
+      const data = (ev.data || {}) as { conversation_id?: number; contact_id?: number };
+      refreshThreadPending.current ||= !!selected && (!data.conversation_id || String(data.conversation_id) === String(selected.id));
+      eventRefresh.current = setTimeout(() => {
+        load();
+        const refresh = refreshThreadPending.current;
+        refreshThreadPending.current = false;
+        if (selected && refresh) loadThreadFor(selected);
+      }, 150);
     }
   });
 
@@ -3503,7 +3736,11 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
                   <ul className="space-y-1">
                     {threadContact.channels.map((ch, i) => (
                       <li key={`${ch.kind}-${ch.value}-${i}`} className="text-xs">
-                        <div className="text-[10px] uppercase text-text-dim">{ch.kind}{ch.is_primary ? " · primary" : ""}</div>
+                        <div className="text-[10px] uppercase text-text-dim flex items-center gap-1">
+                          <span>{ch.kind}{ch.is_primary ? " · primary" : ""}</span>
+                          <EmailVerificationBadge channel={ch} />
+                          {(ch.deliverability || []).map((state) => <DeliveryBadge key={state.transport} state={state} />)}
+                        </div>
                         <div className="text-text truncate">{ch.value}</div>
                       </li>
                     ))}
@@ -4231,6 +4468,9 @@ function ListsTab({ api, lists, onCreate, onEdit, onArchive, onOpenContact }: {
 }) {
   const active = useMemo(() => lists.filter((l) => !l.archived_at), [lists]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [memberCursor, setMemberCursor] = useState(0);
+  const [hasMoreMembers, setHasMoreMembers] = useState(false);
+  useEffect(() => {setMemberCursor(0);setMembers([]);}, [selectedId]);
   const [members, setMembers] = useState<Contact[]>([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
   const [memberError, setMemberError] = useState("");
@@ -4252,9 +4492,9 @@ function ListsTab({ api, lists, onCreate, onEdit, onArchive, onOpenContact }: {
     let cancelled = false;
     setLoadingMembers(true);
     setMemberError("");
-    api<{ contacts?: Contact[] }>("GET", `/lists/${selectedId}/members`, undefined, { limit: "100" })
+    api<{ contacts?: Contact[] }>("GET", `/lists/${selectedId}/members`, undefined, { limit: "100", after_contact_id: String(memberCursor) })
       .then((r) => {
-        if (!cancelled) setMembers(r.contacts || []);
+        if (!cancelled) {setMembers(prev => memberCursor ? [...prev, ...(r.contacts || [])] : r.contacts || []);setHasMoreMembers((r.contacts || []).length === 100); }
       })
       .catch((e) => {
         if (!cancelled) {
@@ -4266,7 +4506,7 @@ function ListsTab({ api, lists, onCreate, onEdit, onArchive, onOpenContact }: {
         if (!cancelled) setLoadingMembers(false);
       });
     return () => { cancelled = true; };
-  }, [api, selectedId, lists]);
+  }, [api, selectedId, lists, memberCursor]);
 
   return (
     <div className="p-6 max-w-6xl space-y-4">
@@ -4373,9 +4613,9 @@ function ListsTab({ api, lists, onCreate, onEdit, onArchive, onOpenContact }: {
                     ))}
                   </ul>
                 )}
-                {members.length >= 100 && (
+                {hasMoreMembers && (
                   <div className="border-t border-border px-3 py-2 text-xs text-text-dim">
-                    Showing first 100 members.
+                    <button disabled={loadingMembers} onClick={() => setMemberCursor(Number(members[members.length-1]?.id || 0))}>Load more members</button>
                   </div>
                 )}
               </>
@@ -4660,6 +4900,7 @@ interface DraftPredicate {
   value?: string;
   tags?: string;       // comma-separated
   key?: string;
+  valueType?: string;
   days?: string;
   kind?: string;
   list_id?: number;
@@ -4671,12 +4912,12 @@ const FIELD_OPS = ["eq", "neq", "contains", "starts_with", "is_null", "in"];
 
 function predicateToDraft(p: SegmentPredicate): DraftPredicate {
   if ("field" in p) {
-    return { k: "field", field: p.field, op: p.op || "eq", value: p.value == null ? "" : String(p.value) };
+    return { k: "field", field: p.field, op: p.op || "eq", valueType: Array.isArray(p.value)?"array":typeof p.value, value: Array.isArray(p.value)?p.value.join(", "):p.value == null ? "" : String(p.value) };
   }
   switch (p.predicate) {
     case "tag_in": return { k: "tag_in", tags: (p.tags || []).join(", ") };
     case "tag_not_in": return { k: "tag_not_in", tags: (p.tags || []).join(", ") };
-    case "attribute": return { k: "attribute", key: p.key, op: p.op || "eq", value: p.value == null ? "" : String(p.value) };
+    case "attribute": return { k: "attribute", key: p.key, op: p.op || "eq", valueType: Array.isArray(p.value) ? "array" : typeof p.value, value: Array.isArray(p.value) ? JSON.stringify(p.value) : p.value == null ? "" : String(p.value) };
     case "last_activity_within": return { k: "last_activity_within", days: String(p.days), kind: p.kind || "" };
     case "channel_present": return { k: "channel_present", kind: p.kind };
     case "in_list": return { k: "in_list", list_id: p.list_id };
@@ -4701,7 +4942,13 @@ function draftToPredicate(d: DraftPredicate): SegmentPredicate | null {
     }
     case "attribute": {
       if (!d.key) return null;
-      return { predicate: "attribute", key: d.key, op: d.op || "eq", value: d.value ?? "" };
+      if (d.op === "is_null" || d.op === "is_not_null") return {predicate: "attribute", key: d.key, op: d.op};
+      let value: any = d.value ?? "";
+      if (d.valueType === "number") {if (!d.value?.trim()) return null; value=Number(d.value);}
+      if (d.valueType === "boolean") {if (d.value !== "true" && d.value !== "false") return null; value=d.value === "true";}
+      if (d.valueType === "array") {try {value=JSON.parse(d.value || "[]");if (!Array.isArray(value)) return null;}catch{return null;}}
+      if (typeof value === "number" && !Number.isFinite(value)) return null;
+      return { predicate: "attribute", key: d.key, op: d.op || "eq", value };
     }
     case "last_activity_within": {
       const days = Number(d.days || 0);
@@ -4727,8 +4974,9 @@ function draftToPredicate(d: DraftPredicate): SegmentPredicate | null {
   return null;
 }
 
-function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
+function SegmentEditorModal({ editing, lists, segments, attrDefs, onCancel, onSubmit }: {
   editing?: Segment | null;
+  attrDefs: AttributeDef[];
   lists: List[];
   segments: Segment[];
   onCancel: () => void;
@@ -4743,11 +4991,14 @@ function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
     (editing?.definition || []).map(predicateToDraft)
   );
   const [busy, setBusy] = useState(false);
+  const [validationError,setValidationError]=useState("");
 
   const submit = async () => {
     if (!name.trim()) return;
-    const def = predicates.map(draftToPredicate).filter((p): p is SegmentPredicate => p !== null);
-    setBusy(true);
+    const parsed = predicates.map(draftToPredicate);
+    if (parsed.some(p => p === null)) { setValidationError("Complete or remove each condition before saving."); return; }
+    const def = parsed as SegmentPredicate[];
+    setValidationError("");setBusy(true);
     try {
       const patch: Partial<Segment> = {
         name: name.trim(),
@@ -4781,6 +5032,7 @@ function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
         </>
       }
     >
+      {validationError && <p role="alert" className="text-red">{validationError}</p>}
       <div className="flex items-center gap-2">
         <label className="text-text-muted w-24">Name</label>
         <input
@@ -4868,6 +5120,7 @@ function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
                   >×</button>
                 </div>
                 <PredicateRow
+                  attrDefs={attrDefs}
                   draft={p}
                   lists={lists}
                   segments={segments}
@@ -4883,7 +5136,8 @@ function SegmentEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
   );
 }
 
-function PredicateRow({ draft, lists, segments, excludeSegmentId, onChange }: {
+function PredicateRow({ draft, attrDefs, lists, segments, excludeSegmentId, onChange }: {
+  attrDefs: AttributeDef[];
   draft: DraftPredicate;
   lists: List[];
   segments: Segment[];
@@ -4926,12 +5180,15 @@ function PredicateRow({ draft, lists, segments, excludeSegmentId, onChange }: {
     case "attribute":
       return (
         <div className="flex items-center gap-1.5">
-          <input type="text" value={draft.key || ""} onChange={(e) => onChange({ key: e.target.value })} placeholder="lead_score" className={`${cls} flex-1`} />
-          <select value={draft.op || "eq"} onChange={(e) => onChange({ op: e.target.value })} className={cls}>
+          <select value={draft.key || ""} onChange={e => {const def=attrDefs.find(d=>d.key===e.target.value);onChange({key:e.target.value,value:"",valueType:def?.type==="number"?"number":def?.type==="bool"?"boolean":def?.type==="multi_select" && draft.op!=="contains"?"array":"string"});}} className={cls}>
+            <option value="">Choose field</option>{attrDefs.map(d=><option key={d.key} value={d.key}>{d.label}</option>)}
+          </select>
+          <select value={draft.op || "eq"} onChange={(e) => onChange({ op: e.target.value, ...(attrDefs.find(d=>d.key===draft.key)?.type === "multi_select" ? {value:"",valueType:e.target.value==="contains"?"string":"array"} : {}) })} className={cls}>
             {["eq", "neq", "gt", "gte", "lt", "lte", "contains", "is_null"].map((o) => <option key={o} value={o}>{o}</option>)}
           </select>
           {draft.op !== "is_null" && (
-            <input type="text" value={draft.value || ""} onChange={(e) => onChange({ value: e.target.value })} placeholder="value" className={`${cls} flex-1`} />
+            draft.valueType === "boolean" ? <select value={draft.value || ""} onChange={e=>onChange({value:e.target.value})} className={cls}><option value="">Choose value</option><option value="true">True</option><option value="false">False</option></select> :
+            <input type={draft.valueType === "number" ? "number" : attrDefs.find(d=>d.key===draft.key)?.type === "date" ? "date" : "text"} value={draft.value || ""} onChange={(e) => onChange({ value: e.target.value })} placeholder={draft.valueType === "array" ? '["value"]' : "value"} className={`${cls} flex-1`} />
           )}
         </div>
       );

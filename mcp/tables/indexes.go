@@ -25,8 +25,11 @@ type TableIndex struct {
 }
 
 func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.Lock()
-	defer a.schemaMu.Unlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "indexes_create", true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -54,7 +57,7 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	unique := boolArg(args, "unique")
 	physical := physicalIndexName(table.ID, name, unique)
 
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -98,8 +101,11 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.RLock()
-	defer a.schemaMu.RUnlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "indexes_list", false)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -113,7 +119,7 @@ func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	qctx, cancel := context.WithTimeout(context.Background(), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
 	defer cancel()
 	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT
 		i.id, i.name, i.unique_index, i.managed, i.created_at,
@@ -148,8 +154,11 @@ func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	a.schemaMu.Lock()
-	defer a.schemaMu.Unlock()
+	ctx, finish, err := a.beginOperation(ctx, args, "indexes_drop", true)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -170,7 +179,7 @@ func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	tx, err := ctx.AppDB().Begin()
+	tx, err := beginWrite(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -180,12 +189,12 @@ func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	var managed int
 	if err := tx.QueryRow(`SELECT id, physical_name, managed FROM indexes_meta WHERE table_id = ? AND name = ?`, table.ID, name).
 		Scan(&indexID, &physical, &managed); err == sql.ErrNoRows {
-		return nil, errf("index %q not found on table %q", name, tableName)
+		return nil, notFound("index %q not found on table %q", name, tableName)
 	} else if err != nil {
 		return nil, err
 	}
-	if managed != 0 {
-		return nil, errf("index %q is managed by rows_upsert and cannot be dropped", name)
+	if managed != 0 && !boolArg(args, "release_managed") {
+		return nil, errf("index %q is managed by rows_upsert; pass release_managed=true to remove its uniqueness guarantee", name)
 	}
 	if _, err := tx.Exec("DROP INDEX " + quote(physical)); err != nil {
 		return nil, err
@@ -206,7 +215,7 @@ func parseIndexColumns(table *Table, raw []any) ([]IndexColumn, error) {
 	if len(raw) > 16 {
 		return nil, errf("columns exceeds maximum of 16")
 	}
-	valid := map[string]bool{"id": true, "created_at": true, "updated_at": true}
+	valid := map[string]bool{"id": true, "created_at": true, "updated_at": true, "_revision": true}
 	for _, column := range table.Columns {
 		valid[column.Name] = true
 	}
@@ -261,7 +270,7 @@ func buildCreateIndexSQL(physical, tablePhysical string, columns []IndexColumn, 
 	return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)", modifier, quote(physical), quote(tablePhysical), strings.Join(parts, ", "))
 }
 
-func insertIndexColumns(tx *sql.Tx, indexID int64, columns []IndexColumn) error {
+func insertIndexColumns(tx *writeTx, indexID int64, columns []IndexColumn) error {
 	for position, column := range columns {
 		if _, err := tx.Exec(`INSERT INTO index_columns(index_id, column_name, direction, position) VALUES (?, ?, ?, ?)`,
 			indexID, column.Col, column.Order, position); err != nil {

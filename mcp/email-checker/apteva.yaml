@@ -2,12 +2,16 @@ schema: apteva-app/v1
 
 name: email-checker
 display_name: Email Checker
-version: 0.3.1
+version: 0.5.2
 description: |
-  Stateless email validation. Live checks (RFC 5322 syntax, DNS MX
-  lookup, optional SMTP RCPT probe) plus list-based classification
-  (disposable provider, free provider, role account). No DB, no
-  state — every call is a fresh resolution.
+  Stateless email validation. Run local syntax, RFC-correct MX/A/AAAA routing,
+  Null MX, disposable/free/role and typo classification, plus an optional
+  multi-MX SMTP probe with generated-recipient catch-all detection.
+  Catch-all domains remain routable and allowed while their individual mailbox
+  status stays unverified; role accounts are informational rather than risky.
+  Optionally route a passing address through a bound verification provider
+  such as ZeroBounce, Bouncer, NeverBounce, Kickbox, MillionVerifier, or
+  Hunter and return one normalized deliverability verdict. No DB, no state.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/email-checker
@@ -21,12 +25,23 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - net.egress
+    - platform.connections.execute
+  integrations:
+    - role: verification_providers
+      kind: integration
+      mode: multiple
+      compatible_slugs: [zerobounce, bouncer, neverbounce, kickbox, millionverifier, hunter]
+      capabilities: [email.verify]
+      required: false
+      label: "Email verification providers (optional)"
+      hint: "Bind one or more providers for mailbox-level verification. Provider checks may consume credits; local checks remain available without a connection."
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: email_check,       description: "Email validation — syntax + MX + classification, with optional SMTP RCPT TO probe via smtp=true. Returns {valid, reasons, mx, disposable, role, free, smtp}." }
+    - { name: email_check, description: "Email validation — local syntax/MX/classification plus optional SMTP or bound provider verification. Provider calls are explicit and may consume credits." }
+    - { name: email_verification_providers, description: "List the verification-provider connections bound to Email Checker. Read-only and does not consume provider credits." }
   ui_panels:
     - slot: project.page
       label: Email Checker

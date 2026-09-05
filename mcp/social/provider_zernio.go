@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -103,6 +104,7 @@ func zernioPlatformAllowed(platform string) bool {
 }
 
 func (a *App) toolAccountImportProvider(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	provider := strings.ToLower(strings.TrimSpace(toString(args["provider"])))
 	if provider == "" {
 		provider = zernioProviderSlug
@@ -284,6 +286,9 @@ func (a *App) upsertZernioSocialAccount(ctx *sdk.AppCtx, pid string, connID int6
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		row.Status = "skipped_existing"
+		if _, err := ctx.AppDB().Exec(`UPDATE social_accounts SET connection_id=?,status='active',display_name=?,avatar_url=?,provider_data=?,capabilities=? WHERE project_id=? AND provider_slug=? AND provider_account_id=?`, connID, row.DisplayName, nullable(za.Avatar), string(rawJSON), string(capsJSON), pid, zernioProviderSlug, za.AccountID); err != nil {
+			return row, err
+		}
 		_ = ctx.AppDB().QueryRow(
 			`SELECT id FROM social_accounts
 			  WHERE project_id=? AND provider_slug=? AND provider_account_id=?`,
@@ -339,7 +344,14 @@ func (a *App) startZernioAccountConnect(ctx *sdk.AppCtx, args map[string]any) (a
 	if strings.Contains(returnTo, "?") {
 		sep = "&"
 	}
-	returnURL := fmt.Sprintf("%s%spending=%d&provider=%s", returnTo, sep, pendingID, zernioProviderSlug)
+	nonce, err := callbackNonce()
+	if err != nil {
+		return nil, err
+	}
+	if _, err = ctx.AppDB().Exec(`UPDATE pending_accounts SET callback_nonce=? WHERE id=?`, nonce, pendingID); err != nil {
+		return nil, err
+	}
+	returnURL := fmt.Sprintf("%s%spending=%d&provider=%s", returnTo, sep, pendingID, zernioProviderSlug) + "&callback_nonce=" + url.QueryEscape(nonce)
 	connectInput := map[string]any{
 		"platform":     platform,
 		"profileId":    zProfileID,
@@ -401,10 +413,26 @@ func (a *App) resolveZernioProfileID(ctx *sdk.AppCtx, connID int64, args map[str
 }
 
 func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pendingRow) (int64, bool) {
+	unlock := lockSocialResource(ctx, row.id, "oauth-callback")
+	defer unlock()
 	if row.connectionID == 0 {
 		return 0, false
 	}
+	ctx = ctx.WithProject(row.projectID)
 	q := r.URL.Query()
+	var nonce string
+	if err := ctx.AppDB().QueryRow(`SELECT callback_nonce FROM pending_accounts WHERE id=? AND project_id=? AND status='pending_oauth'`, row.id, row.projectID).Scan(&nonce); err != nil {
+		return row.connectionID, false
+	}
+	if nonce != "" && subtle.ConstantTimeCompare([]byte(nonce), []byte(q.Get("callback_nonce"))) != 1 {
+		return row.connectionID, false
+	}
+	if q.Get("state") != "" && row.providerState != "" && subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(row.providerState)) != 1 {
+		return row.connectionID, false
+	}
+	if nonce == "" && (q.Get("state") == "" || row.providerState == "" || q.Get("code") == "") {
+		return row.connectionID, false
+	}
 	state := strings.TrimSpace(q.Get("state"))
 	if state == "" {
 		state = row.providerState
@@ -433,20 +461,32 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 		if state == "" {
 			state = firstDeepStringRaw(raw, "state")
 		}
-		updateRes, _ := ctx.AppDB().Exec(
+		updateRes, err := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?
 			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, string(raw), row.id, row.projectID,
 		)
+		if err != nil {
+			return row.connectionID, false
+		}
 		if n, _ := updateRes.RowsAffected(); n != 1 {
 			return row.connectionID, false
 		}
 	} else {
-		updateRes, _ := ctx.AppDB().Exec(
+		// Hosted OAuth redirects may omit a code. Confirm provider-side state
+		// using the vetted profile before marking our one-time callback ready.
+		accounts, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, "list_accounts", map[string]any{"profileId": row.providerProfileID})
+		if err != nil || accounts == nil || !accounts.Success || len(jsonItems(accounts.Data, "accounts", "data", "items")) == 0 {
+			return row.connectionID, false
+		}
+		updateRes, err := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?
 			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, row.id, row.projectID,
 		)
+		if err != nil {
+			return row.connectionID, false
+		}
 		if n, _ := updateRes.RowsAffected(); n != 1 {
 			return row.connectionID, false
 		}
@@ -888,6 +928,8 @@ func (a *App) checkZernioAccount(ctx *sdk.AppCtx, pid string, result accountChec
 }
 
 func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, error) {
+	unlock := lockSocialResource(ctx, j.connID, "delivery-connection")
+	defer unlock()
 	if j.providerAccountID == "" {
 		return "", "", errors.New("zernio-backed account missing provider_account_id")
 	}
@@ -898,15 +940,12 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 		if err != nil {
 			return "", "", err
 		}
-		_, platformID, platformURL := extractZernioPostIdentity(result.Raw)
+
 		_, _ = ctx.AppDB().Exec(
-			`UPDATE post_targets SET provider_post_id=?, provider_data=?, provider_sync_status='published', provider_updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			`UPDATE post_targets SET provider_post_id=?, provider_data=?, provider_sync_status='publishing', provider_updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 			result.ProviderPostID, string(result.Raw), j.targetID,
 		)
-		if platformID == "" {
-			platformID = result.ProviderPostID
-		}
-		return platformID, platformURL, nil
+		return providerPublicationResult(result.Raw, j.providerAccountID)
 	}
 	input := map[string]any{
 		"content":    j.body,
@@ -966,15 +1005,12 @@ func (a *App) publishZernio(ctx *sdk.AppCtx, j publishJob) (string, string, erro
 	if res == nil || !res.Success {
 		return "", "", upstreamError(res)
 	}
-	providerID, platformID, platformURL := extractZernioPostIdentity(res.Data)
+	providerID, _, _ := extractZernioPostIdentity(res.Data)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE post_targets SET provider_post_id=?, provider_data=? WHERE id=?`,
 		nullable(providerID), string(sanitizeRawJSON(res.Data)), j.targetID,
 	)
-	if platformID == "" {
-		platformID = providerID
-	}
-	return platformID, platformURL, nil
+	return providerPublicationResult(res.Data, j.providerAccountID)
 }
 
 func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, accountID, connID int64, providerAccountID string, profileID int64, limit int) importResult {
@@ -986,6 +1022,11 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
+	var accountPlatform, providerProfileID string
+	_ = ctx.AppDB().QueryRow(
+		`SELECT platform, COALESCE(provider_profile_id,'')
+		   FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid,
+	).Scan(&accountPlatform, &providerProfileID)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "sync_external_posts", map[string]any{
 		"accountId": providerAccountID,
 	})
@@ -995,6 +1036,9 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 		ctx.Logger().Warn("zernio sync_external_posts upstream failed", "account", accountID, "err", upstreamError(res))
 	}
 	listArgs := map[string]any{"accountId": providerAccountID}
+	if providerProfileID != "" {
+		listArgs["profileId"] = providerProfileID
+	}
 	if limit > 0 {
 		listArgs["limit"] = limit
 	}
@@ -1008,24 +1052,9 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 		return out
 	}
 	for _, item := range jsonItems(list.Data, "posts", "data", "items", "results") {
-		providerPostID := firstString(item, "id", "_id", "postId")
-		platformPostID := firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id")
-		if providerPostID == "" {
-			providerPostID = platformPostID
-		}
-		if providerPostID == "" {
-			continue
-		}
-		body := firstString(item, "content", "text", "caption", "description", "title", "body")
-		url := firstString(item, "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
-		occurredAt := firstString(item, "publishedAt", "published_at", "updatedAt", "updated_at", "createdAt", "created_at")
-		status, requestedMode, scheduleAt := zernioWorkflowStatus(item)
-		imported, err := a.reconcileImportedProviderPost(
-			ctx, pid, accountID, profileID, body, providerPostID, platformPostID, url,
-			status, requestedMode, scheduleAt, occurredAt, zernioMediaURLs(item), item,
-		)
+		imported, err := a.reconcileZernioItem(ctx, pid, accountID, profileID, providerAccountID, providerProfileID, accountPlatform, item)
 		if err != nil {
-			ctx.Logger().Warn("import: reconcile zernio post failed", "provider_post_id", providerPostID, "err", err)
+			ctx.Logger().Warn("import: reconcile zernio post failed", "provider_post_id", firstString(item, "id", "_id", "postId"), "err", err)
 			continue
 		}
 		if imported {
@@ -1036,6 +1065,116 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 	}
 	out.Status = "ok"
 	return out
+}
+
+// reconcileManagedZernioPosts deliberately reads only provider posts already
+// represented by a Social target. It never calls sync_external_posts and never
+// lists the provider account timeline, so connecting an account for publishing
+// cannot turn into an implicit historical import.
+func (a *App) reconcileManagedZernioPosts(ctx *sdk.AppCtx, pid string, accountID, connID int64, providerAccountID string, profileID int64) importResult {
+	out := importResult{AccountID: accountID, Platform: zernioProviderSlug, Status: "ok"}
+	var accountPlatform, providerProfileID string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT platform, COALESCE(provider_profile_id,'')
+		   FROM social_accounts WHERE id=? AND project_id=?`, accountID, pid,
+	).Scan(&accountPlatform, &providerProfileID); err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT DISTINCT t.provider_post_id
+		   FROM post_targets t JOIN posts p ON p.id=t.post_id
+		  WHERE t.social_account_id=? AND p.project_id=? AND COALESCE(t.provider_post_id,'')!=''
+		    AND (t.status!='published' OR COALESCE(t.provider_sync_status,'')!='published'
+		         OR COALESCE(t.platform_post_id,'')='' OR COALESCE(t.platform_url,'')=''
+		         OR t.published_at IS NULL)
+		  ORDER BY t.id DESC LIMIT 200`, accountID, pid,
+	)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	providerPostIDs := []string{}
+	for rows.Next() {
+		var providerPostID string
+		if rows.Scan(&providerPostID) == nil && providerPostID != "" {
+			providerPostIDs = append(providerPostIDs, providerPostID)
+		}
+	}
+	rows.Close()
+	for _, providerPostID := range providerPostIDs {
+		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_post", map[string]any{"postId": providerPostID})
+		if callErr != nil || res == nil || !res.Success {
+			if callErr != nil {
+				ctx.Logger().Warn("provider managed reconciliation failed", "account", accountID, "provider_post_id", providerPostID, "err", callErr)
+			} else {
+				ctx.Logger().Warn("provider managed reconciliation failed", "account", accountID, "provider_post_id", providerPostID, "err", upstreamError(res))
+			}
+			continue
+		}
+		item := zernioPostObject(res.Data)
+		if len(item) == 0 {
+			ctx.Logger().Warn("provider managed reconciliation returned no post", "account", accountID, "provider_post_id", providerPostID)
+			continue
+		}
+		imported, reconcileErr := a.reconcileZernioItem(ctx, pid, accountID, profileID, providerAccountID, providerProfileID, accountPlatform, item)
+		if reconcileErr != nil {
+			ctx.Logger().Warn("provider managed reconciliation failed", "account", accountID, "provider_post_id", providerPostID, "err", reconcileErr)
+			continue
+		}
+		if imported {
+			// Managed-only reconciliation must never discover a new post.
+			ctx.Logger().Warn("provider managed reconciliation unexpectedly inserted a post", "account", accountID, "provider_post_id", providerPostID)
+			out.Imported++
+		} else {
+			out.SkippedExisting++
+		}
+	}
+	return out
+}
+
+func (a *App) reconcileZernioItem(
+	ctx *sdk.AppCtx, pid string, accountID, profileID int64,
+	providerAccountID, providerProfileID, accountPlatform string, item map[string]any,
+) (bool, error) {
+	platformItem := zernioPlatformPost(item, providerAccountID, accountPlatform)
+	if !zernioPlatformBindingMatches(platformItem, providerAccountID, providerProfileID) {
+		return false, nil
+	}
+	providerPostID := firstString(item, "id", "_id", "postId")
+	platformPostID := firstString(platformItem, "platformPostId", "platform_post_id", "externalId", "external_id")
+	if platformPostID == "" {
+		platformPostID = firstString(item, "platformPostId", "platform_post_id", "externalId", "external_id")
+	}
+	if providerPostID == "" {
+		providerPostID = platformPostID
+	}
+	if providerPostID == "" {
+		return false, nil
+	}
+	body := firstString(item, "content", "text", "caption", "description", "title", "body")
+	url := firstString(platformItem, "platformPostUrl", "platform_post_url", "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
+	if url == "" {
+		url = firstString(item, "platformPostUrl", "platform_post_url", "platformUrl", "platform_url", "permalink", "permalinkUrl", "url", "shareUrl")
+	}
+	status, requestedMode, scheduleAt := zernioWorkflowStatus(item, platformItem)
+	createdAt := firstString(item, "createdAt", "created_at")
+	if createdAt == "" {
+		createdAt = firstString(platformItem, "createdAt", "created_at")
+	}
+	publishedAt := firstString(platformItem, "publishedAt", "published_at")
+	if publishedAt == "" {
+		publishedAt = firstString(item, "publishedAt", "published_at")
+	}
+	if status == "published" && publishedAt == "" {
+		// Keep the fallback provider-owned. Import/synchronization time
+		// must never be substituted for an upstream publication time.
+		publishedAt = firstString(item, "updatedAt", "updated_at", "createdAt", "created_at")
+	}
+	return a.reconcileImportedProviderPost(
+		ctx, pid, accountID, profileID, body, providerPostID, platformPostID, url,
+		status, requestedMode, scheduleAt, createdAt, publishedAt, zernioMediaURLs(item), item,
+	)
 }
 
 func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerAccountID, platform string, query analyticsQuery) accountMetricsResult {
@@ -1284,14 +1423,20 @@ type zernioInboxReport struct {
 }
 
 func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int64, providerAccountID, platform string) (zernioInboxReport, error) {
+	done := beginInboxSync(ctx, accountID)
+	defer done()
 	var report zernioInboxReport
+	var warnings []string
 	if providerAccountID == "" {
 		return report, errors.New("zernio account missing provider_account_id")
 	}
-	convRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_conversations", map[string]any{
+	convRes, err := collectInboxPages(ctx, accountID, connID, "list_conversations", map[string]any{
 		"accountId": providerAccountID,
 		"limit":     50,
 	})
+	if err != nil || convRes == nil || !convRes.Success {
+		warnings = append(warnings, "conversation collection failed")
+	}
 	if err == nil && convRes != nil && convRes.Success {
 		for _, conv := range jsonItems(convRes.Data, "conversations", "data", "items", "results") {
 			convID := firstString(conv, "id", "_id", "conversationId", "conversation_id")
@@ -1299,24 +1444,32 @@ func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int
 				continue
 			}
 			report.Conversations++
-			msgRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_conversation_messages", map[string]any{
+			msgRes, err := collectInboxPages(ctx, accountID, connID, "list_conversation_messages", map[string]any{
 				"conversationId": convID,
 				"limit":          50,
 			})
 			if err != nil || msgRes == nil || !msgRes.Success {
+				warnings = append(warnings, "message collection failed")
 				continue
 			}
+
 			for _, msg := range jsonItems(msgRes.Data, "messages", "data", "items", "results") {
 				if a.upsertZernioInboxItem(ctx, pid, accountID, platform, inboxKindDM, convID, msg) {
 					report.Messages++
 				}
 			}
+			if w := finishInboxPages(ctx, accountID, msgRes); w != "" {
+				warnings = append(warnings, w)
+			}
 		}
 	}
-	commentRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_commented_posts", map[string]any{
+	commentRes, err := collectInboxPages(ctx, accountID, connID, "list_commented_posts", map[string]any{
 		"accountId": providerAccountID,
 		"limit":     50,
 	})
+	if err != nil || commentRes == nil || !commentRes.Success {
+		warnings = append(warnings, "comment collection failed")
+	}
 	if err == nil && commentRes != nil && commentRes.Success {
 		for _, post := range jsonItems(commentRes.Data, "posts", "data", "items", "results") {
 			postID := firstString(post, "id", "_id", "postId", "post_id", "platformPostId", "platform_post_id")
@@ -1324,19 +1477,35 @@ func (a *App) syncZernioInbox(ctx *sdk.AppCtx, pid string, accountID, connID int
 				continue
 			}
 			report.CommentPosts++
-			commentsRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_post_comments", map[string]any{
+			commentsRes, err := collectInboxPages(ctx, accountID, connID, "get_post_comments", map[string]any{
 				"postId": postID,
 				"limit":  100,
 			})
 			if err != nil || commentsRes == nil || !commentsRes.Success {
+				warnings = append(warnings, "comment collection failed")
 				continue
 			}
+
 			for _, c := range jsonItems(commentsRes.Data, "comments", "data", "items", "results") {
 				if a.upsertZernioInboxItem(ctx, pid, accountID, platform, inboxKindComment, postID, c) {
 					report.Comments++
 				}
 			}
+			if w := finishInboxPages(ctx, accountID, commentsRes); w != "" {
+				warnings = append(warnings, w)
+			}
 		}
+	}
+	for _, res := range []*sdk.ExecuteResult{convRes, commentRes} {
+		if len(warnings) > 0 {
+			break
+		}
+		if w := finishInboxPages(ctx, accountID, res); w != "" {
+			warnings = append(warnings, w)
+		}
+	}
+	if len(warnings) > 0 {
+		return report, fmt.Errorf("partial inbox sync: %s", strings.Join(warnings, "; "))
 	}
 	return report, nil
 }
@@ -1441,6 +1610,7 @@ func (a *App) zernioInboxReply(ctx *sdk.AppCtx, item *inboxItem, message inboxMe
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), item.SocialAccountID, item.Kind, item.ExternalID)
 	if item.Kind == inboxKindDM && extID != "" {
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  item.SocialAccountID,
 			Platform:         item.Platform,
@@ -1932,18 +2102,29 @@ func isZernioMetricMetadata(name string) bool {
 }
 
 func zernioCapabilities(platform string) map[string]any {
-	return map[string]any{
-		"post":                   true,
-		"image":                  true,
-		"video":                  true,
-		"analytics":              true,
-		"inbox":                  true,
-		"inbox_attachment_types": []string{"image", "video", "audio", "file"},
-		"inbox_max_attachments":  1,
-		"comments":               true,
-		"provider":               zernioProviderSlug,
-		"platform":               platform,
+	caps := map[string]any{
+		"post":              true,
+		"image":             true,
+		"video":             true,
+		"analytics":         true,
+		"native_drafts":     true,
+		"native_scheduling": true,
+		"provider":          zernioProviderSlug,
+		"platform":          platform,
 	}
+	// Zernio's account envelope is cross-platform, but inbox support is
+	// not. Pinterest's public organic API exposes publishing/analytics,
+	// not the generic comment and DM lifecycle Social implements.
+	if normalizeZernioPlatform(platform) != "pinterest" {
+		caps["inbox"] = true
+		caps["inbox_attachment_types"] = []string{"image", "video", "audio", "file"}
+		caps["inbox_max_attachments"] = 1
+		caps["comments"] = true
+	} else {
+		caps["inbox"] = false
+		caps["comments"] = false
+	}
+	return caps
 }
 
 func zernioPlatformSpecificData(opts map[string]any) map[string]any {
@@ -1987,6 +2168,90 @@ func zernioMediaURLs(item map[string]any) []string {
 		}
 	}
 	return out
+}
+
+// zernioPlatformPost selects the provider's per-platform result for the
+// Social account being synchronized. Zernio keeps the durable provider post
+// at the top level and the actual network identity, URL, status, and publish
+// timestamp under platforms[]. Matching the account id first prevents a
+// cross-posted item from attaching another destination's identity.
+func zernioPlatformPost(item map[string]any, providerAccountID, platform string) map[string]any {
+	items, _ := item["platforms"].([]any)
+	var platformMatch map[string]any
+	for _, value := range items {
+		candidate, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		accountID := firstString(candidate,
+			"accountId._id", "accountId.id", "account_id._id", "account_id.id", "accountId", "account_id")
+		if providerAccountID != "" && accountID == providerAccountID {
+			return candidate
+		}
+		if platformMatch == nil && platform != "" && strings.EqualFold(firstString(candidate, "platform"), platform) {
+			platformMatch = candidate
+		}
+	}
+	if platformMatch != nil {
+		return platformMatch
+	}
+	if len(items) == 1 {
+		if only, ok := items[0].(map[string]any); ok {
+			return only
+		}
+	}
+	return map[string]any{}
+}
+
+func zernioPlatformBindingMatches(platformItem map[string]any, providerAccountID, providerProfileID string) bool {
+	if len(platformItem) == 0 {
+		// Some provider-native drafts have no expanded platforms[] payload.
+		// The accountId/profileId filters on list_posts (or the exact get_post
+		// id used by managed reconciliation) remain the binding in that case.
+		return true
+	}
+	actualAccountID := firstString(platformItem,
+		"accountId._id", "accountId.id", "account_id._id", "account_id.id", "accountId", "account_id")
+	if providerAccountID != "" && actualAccountID != "" && actualAccountID != providerAccountID {
+		return false
+	}
+	actualProfileID := firstString(platformItem,
+		"accountId.profileId._id", "accountId.profileId.id", "accountId.profileId",
+		"account_id.profile_id._id", "account_id.profile_id.id", "account_id.profile_id")
+	if providerProfileID != "" && actualProfileID != "" && actualProfileID != providerProfileID {
+		return false
+	}
+	return true
+}
+
+// zernioPostObject accepts the direct post object as well as the common
+// {data:{post:{...}}}, {post:{...}}, and {result:{...}} response envelopes.
+func zernioPostObject(raw json.RawMessage) map[string]any {
+	var current any
+	if json.Unmarshal(raw, &current) != nil {
+		return nil
+	}
+	for depth := 0; depth < 5; depth++ {
+		object, ok := current.(map[string]any)
+		if !ok {
+			return nil
+		}
+		if firstString(object, "id", "_id", "postId", "post_id") != "" {
+			return object
+		}
+		advanced := false
+		for _, key := range []string{"post", "data", "item", "result"} {
+			if child, ok := object[key].(map[string]any); ok {
+				current = child
+				advanced = true
+				break
+			}
+		}
+		if !advanced {
+			return object
+		}
+	}
+	return nil
 }
 
 func jsonItems(raw json.RawMessage, keys ...string) []map[string]any {

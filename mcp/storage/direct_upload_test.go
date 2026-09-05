@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,10 @@ type fakeS3Backend struct {
 	getOptions GetObjectOptions
 	getTTL     time.Duration
 	getURL     string
+	headCalls  int32
+	openCalls  int32
+	openHook   func(context.Context, string, ObjectReadOptions) (*ObjectReadResult, error)
+	metadata   *ObjectMetadata
 }
 
 func newFakeS3() *fakeS3Backend { return &fakeS3Backend{objects: map[string][]byte{}} }
@@ -65,6 +70,55 @@ func (f *fakeS3Backend) Stat(_ context.Context, key string) (int64, error) {
 		return 0, ErrNotFound
 	}
 	return int64(len(b)), nil
+}
+
+func (f *fakeS3Backend) HeadObject(_ context.Context, key string) (ObjectMetadata, error) {
+	atomic.AddInt32(&f.headCalls, 1)
+	if f.metadata != nil {
+		return *f.metadata, nil
+	}
+	b, ok := f.objects[key]
+	if !ok {
+		return ObjectMetadata{}, ErrNotFound
+	}
+	return ObjectMetadata{
+		Size: int64(len(b)), ContentType: "application/octet-stream",
+		ETag: "fake-etag", LastModified: time.Unix(1_700_000_000, 0).UTC(),
+	}, nil
+}
+
+func (f *fakeS3Backend) OpenObject(ctx context.Context, key string, options ObjectReadOptions) (*ObjectReadResult, error) {
+	atomic.AddInt32(&f.openCalls, 1)
+	if f.openHook != nil {
+		return f.openHook(ctx, key, options)
+	}
+	b, ok := f.objects[key]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	start, end, ranged, err := resolveByteRange(options.Range, int64(len(b)))
+	if err != nil {
+		return nil, err
+	}
+	selected := b
+	status := http.StatusOK
+	contentRange := ""
+	if ranged {
+		selected = b[start : end+1]
+		status = http.StatusPartialContent
+		contentRange = fmt.Sprintf("bytes %d-%d/%d", start, end, len(b))
+	}
+	return &ObjectReadResult{
+		Body: io.NopCloser(bytes.NewReader(selected)), StatusCode: status,
+		ContentLength: int64(len(selected)), ContentRange: contentRange,
+		ContentType: func() string {
+			if f.metadata != nil {
+				return f.metadata.ContentType
+			}
+			return "application/octet-stream"
+		}(), ETag: "fake-etag",
+		LastModified: time.Unix(1_700_000_000, 0).UTC(),
+	}, nil
 }
 
 func (f *fakeS3Backend) LocalPath(string) (string, bool) { return "", false }
@@ -197,7 +251,7 @@ func TestDirectUpload_InitDedupShortCircuit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := strings.NewReader(`{"name":"clip.mp4","size_bytes":999,"sha256":"` + sha + `"}`)
+	body := strings.NewReader(`{"name":"clip.mp4","content_type":"video/mp4","size_bytes":999,"sha256":"` + sha + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", body)
 	rec := httptest.NewRecorder()
 	(&App{}).handleFilesItem(rec, req)
@@ -273,7 +327,7 @@ func TestDirectUpload_FinalizeRoundtrip(t *testing.T) {
 	globalBackend = stub
 
 	// 1. init → returns upload_id + URL
-	sha := repeat64Hex("d")
+	sha := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	body := []byte(`{"name":"clip.mp4","size_bytes":5,"sha256":"` + sha + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -334,7 +388,7 @@ func TestDirectUpload_FinalizeSameBytesElsewhereCreatesRequestedFile(t *testing.
 	stub := newFakeS3()
 	globalBackend = stub
 
-	sha := repeat64Hex("a")
+	sha := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1",
 		strings.NewReader(`{"name":"requested.png","folder":"/hgv/tracy/","size_bytes":5,"sha256":"`+sha+`"}`))
 	rec := httptest.NewRecorder()

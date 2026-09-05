@@ -118,7 +118,7 @@ async function main() {
   // useCallback against a vendor that only had a default export.
   console.log("\nVerifying panel imports against host React surface…");
   const verifyURL = new URL("./verify-panels.ts", import.meta.url).pathname;
-  const proc = Bun.spawn(["bun", "run", verifyURL], {
+  const proc = Bun.spawn(["bun", "run", verifyURL, ...(requestedApp ? ["--app", requestedApp] : [])], {
     stdout: "inherit",
     stderr: "inherit",
   });

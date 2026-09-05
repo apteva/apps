@@ -279,6 +279,15 @@ describe("Tasks app UI model", () => {
     ).toBe("accepted");
     expect(
       taskEventLabel({
+        id: "event-redispatched",
+        task_id: "task-1",
+        event_type: "occurrence_redispatched",
+        data: { dispatch_attempt: 2 },
+        created_at: "2026-08-08T10:00:01Z",
+      }),
+    ).toBe("Occurrence redispatched · attempt 2");
+    expect(
+      taskEventLabel({
         id: "event-accepted",
         task_id: "task-1",
         event_type: "occurrence_accepted",

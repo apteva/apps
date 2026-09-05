@@ -181,6 +181,11 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" {
+		_ = a.db().updateStatus(stored.ID, "completed", "")
+		writePlivoHangup(w)
+		return
+	}
 	if route.AnswerMode == answerModeRealtimeImmediate {
 		if globalCtx == nil {
 			_ = a.db().updateStatus(stored.ID, "failed", "app context unavailable for immediate answer")

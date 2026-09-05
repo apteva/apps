@@ -1,0 +1,26 @@
+name: support-lookup
+description: |
+  A support request names a player by display name. The agent must look
+  the player up and report what it finds without guessing, on an empty
+  title.
+
+timeout: 90s
+max_iterations: 6
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  A player called "Nova" says they lost their save. Find their player
+  record and tell me what data keys and statistics we hold for them. If
+  no such player exists, say so plainly. Then stop.
+
+assert:
+  - tool_called: players_search | players_get | players_get_context
+  - iterations_at_most: 6
+
+budget:
+  total_tokens: 8000
+  cost_usd: 0.15

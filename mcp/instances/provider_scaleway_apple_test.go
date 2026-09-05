@@ -90,8 +90,10 @@ func (p *scalewayApplePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		data = json.RawMessage(`{"servers":{}}`)
 	case "apple_products_list":
 		data = json.RawMessage(appleProductFixture)
-	case "project_list":
-		data = json.RawMessage(`{"projects":[{"id":"project-1"}]}`)
+	case "api_key_get":
+		data = json.RawMessage(`{"access_key":"SCWACCESSKEY","default_project_id":"project-default"}`)
+	case "security_group_list":
+		data = json.RawMessage(`{"security_groups":[{"id":"sg-1","project":"project-1","project_default":true}]}`)
 	case "ssh_key_create":
 		data = json.RawMessage(`{"id":"key-created-by-apteva"}`)
 	case "apple_server_create":
@@ -103,6 +105,31 @@ func (p *scalewayApplePlatform) ExecuteIntegrationTool(_ int64, tool string, inp
 		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"error":"unexpected tool"}`)}, nil
 	}
 	return &sdk.ExecuteResult{Success: true, Status: status, Data: data}, nil
+}
+
+type scalewayConfiguredPlatform struct {
+	*scalewayApplePlatform
+}
+
+func (p *scalewayConfiguredPlatform) GetConnectionPublicConfig(id int64) (*sdk.ConnectionPublicConfig, error) {
+	return &sdk.ConnectionPublicConfig{ConnectionID: id, Slug: "scaleway", Fields: map[string]string{"access_key": "SCWACCESSKEY"}}, nil
+}
+
+func TestScalewayProjectDefaultsFromAPIKey(t *testing.T) {
+	base := &scalewayApplePlatform{}
+	platform := &scalewayConfiguredPlatform{scalewayApplePlatform: base}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(platform))
+
+	projectID, err := scalewayDefaultProject(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projectID != "project-default" {
+		t.Fatalf("projectID=%q", projectID)
+	}
+	if len(base.tools) != 1 || base.tools[0] != "api_key_get" || base.args[0]["access_key"] != "SCWACCESSKEY" {
+		t.Fatalf("tools=%#v args=%#v", base.tools, base.args)
+	}
 }
 
 func TestScalewayAppleProvisionAndDestroyUseOwnedResources(t *testing.T) {
@@ -129,6 +156,19 @@ func TestScalewayAppleProvisionAndDestroyUseOwnedResources(t *testing.T) {
 	metadata := parseScalewayAppleMetadata(stored.ProviderMetadataJSON)
 	if metadata.SSHKeyID != "key-created-by-apteva" || metadata.ProjectID != "project-1" {
 		t.Fatalf("metadata=%#v", metadata)
+	}
+	if containsString(platform.tools, "project_list") {
+		t.Fatalf("project discovery used organization-scoped project_list: %#v", platform.tools)
+	}
+	discoveryAt := -1
+	for index, tool := range platform.tools {
+		if tool == "security_group_list" {
+			discoveryAt = index
+			break
+		}
+	}
+	if discoveryAt < 0 || platform.args[discoveryAt]["zone"] != "fr-par-1" || platform.args[discoveryAt]["project_default"] != true {
+		t.Fatalf("project discovery args=%#v tools=%#v", platform.args, platform.tools)
 	}
 	if containsString(platform.tools, "server_create") || containsString(platform.tools, "server_set_cloud_init") || containsString(platform.tools, "server_action") {
 		t.Fatalf("Mac provisioning used Linux instance tools: %#v", platform.tools)

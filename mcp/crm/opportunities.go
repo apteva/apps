@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -158,7 +159,7 @@ func parseStageCategory(category string) (string, error) {
 }
 
 func validateStageProbability(probability *float64) error {
-	if probability != nil && (*probability < 0 || *probability > 1) {
+	if probability != nil && (math.IsNaN(*probability) || math.IsInf(*probability, 0) || *probability < 0 || *probability > 1) {
 		return errors.New("stage probability must be between 0 and 1")
 	}
 	return nil
@@ -411,7 +412,7 @@ func scanPipelineStage(row interface{ Scan(...any) error }) (*PipelineStage, err
 	return st, nil
 }
 
-func dbPipelineStageGet(db *sql.DB, pid string, id int64) (*PipelineStage, error) {
+func dbPipelineStageGet(db sqlQueryExecer, pid string, id int64) (*PipelineStage, error) {
 	row := db.QueryRow(
 		`SELECT id, project_id, pipeline_id, name, position, category,
 				probability, archived_at, created_at, updated_at
@@ -573,6 +574,13 @@ func dbPipelineStageArchive(db *sql.DB, pid string, id int64) error {
 }
 
 func dbOpportunityCreate(db *sql.DB, pid string, in opportunityCreateInput) (*Opportunity, error) {
+	if in.Value != nil && (math.IsNaN(*in.Value) || math.IsInf(*in.Value, 0)) {
+		return nil, errors.New("value must be a finite number")
+	}
+	if err := validateOpportunityDates(in.ExpectedCloseDate, in.ClosedAt); err != nil {
+		return nil, err
+	}
+
 	if in.ContactID == 0 {
 		return nil, errors.New("contact_id required")
 	}
@@ -683,7 +691,7 @@ func dbOpportunityCreate(db *sql.DB, pid string, in opportunityCreateInput) (*Op
 	return dbOpportunityGet(db, pid, id)
 }
 
-func dbOpportunityGet(db *sql.DB, pid string, id int64) (*Opportunity, error) {
+func dbOpportunityGet(db sqlQueryExecer, pid string, id int64) (*Opportunity, error) {
 	row := db.QueryRow(opportunitySelectSQL()+` WHERE o.project_id = ? AND o.id = ?`, pid, id)
 	o, err := scanOpportunity(row)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -732,12 +740,30 @@ func scanOpportunity(row interface{ Scan(...any) error }) (*Opportunity, error) 
 }
 
 func dbOpportunityUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Opportunity, *Opportunity, error) {
-	before, err := dbOpportunityGet(db, pid, id)
+	if err := validateOpportunityDates(strFromAny(patch["expected_close_date"]), strFromAny(patch["closed_at"])); err != nil {
+		return nil, nil, err
+	}
+	if v, ok := patch["value"]; ok {
+		n := floatFromAnyPtr(v)
+		if n != nil && (math.IsNaN(*n) || math.IsInf(*n, 0)) {
+			return nil, nil, errors.New("value must be a finite number")
+		}
+	}
+	if v, ok := patch["title"]; ok && strings.TrimSpace(strFromAny(v)) == "" {
+		return nil, nil, errors.New("title cannot be empty")
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	before, err := dbOpportunityGet(tx, pid, id)
 	if err != nil || before == nil {
 		return nil, nil, err
 	}
 	targetStageID := before.StageID
-	targetStage, err := dbPipelineStageGet(db, pid, targetStageID)
+	targetStage, err := dbPipelineStageGet(tx, pid, targetStageID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -746,7 +772,7 @@ func dbOpportunityUpdate(db *sql.DB, pid string, id int64, patch map[string]any)
 	}
 	if raw, ok := patch["stage_id"]; ok {
 		targetStageID = int64FromAny(raw)
-		targetStage, err = dbPipelineStageGet(db, pid, targetStageID)
+		targetStage, err = dbPipelineStageGet(tx, pid, targetStageID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -821,11 +847,6 @@ func dbOpportunityUpdate(db *sql.DB, pid string, id int64, patch map[string]any)
 		return before, before, nil
 	}
 	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, nil, err
-	}
-	defer tx.Rollback()
 	updateArgs := append(append([]any{}, args...), pid, id)
 	if _, err := tx.Exec(
 		`UPDATE crm_opportunities SET `+strings.Join(sets, ", ")+`
@@ -846,11 +867,11 @@ func dbOpportunityUpdate(db *sql.DB, pid string, id int64, patch map[string]any)
 			return nil, nil, err
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	after, err := dbOpportunityGet(tx, pid, id)
+	if err != nil {
 		return nil, nil, err
 	}
-	after, err := dbOpportunityGet(db, pid, id)
-	if err != nil {
+	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
 	return before, after, nil
@@ -1021,7 +1042,7 @@ func emitOpportunity(ctx *sdk.AppCtx, topic string, o *Opportunity, previousStag
 	if previousStageID != 0 {
 		payload["previous_stage_id"] = previousStageID
 	}
-	ctx.Emit(topic, payload)
+	emitCRMEvent(ctx, o.ProjectID, topic, payload)
 }
 
 func nullableFloat(v *float64) any {
@@ -1036,6 +1057,20 @@ func nullableInt64(v int64) any {
 		return nil
 	}
 	return v
+}
+
+func validateOpportunityDates(expected, closed string) error {
+	if expected != "" {
+		if _, err := time.Parse("2006-01-02", expected); err != nil {
+			return errors.New("expected_close_date must be YYYY-MM-DD")
+		}
+	}
+	if closed != "" {
+		if _, err := time.Parse(time.RFC3339Nano, closed); err != nil {
+			return errors.New("closed_at must be RFC3339")
+		}
+	}
+	return nil
 }
 
 func floatFromAnyPtr(v any) *float64 {
@@ -1059,11 +1094,13 @@ func floatFromAnyPtr(v any) *float64 {
 		}
 		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
 		if err != nil {
-			return nil
+			f = math.NaN()
+			return &f
 		}
 		return &f
 	default:
-		return nil
+		f := math.NaN()
+		return &f
 	}
 }
 
@@ -1138,7 +1175,7 @@ func (a *App) toolPipelineCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("pipeline.created", map[string]any{"pipeline_id": out.ID})
+	emitCRMEvent(ctx, pid, "pipeline.created", map[string]any{"pipeline_id": out.ID})
 	return map[string]any{"pipeline": out}, nil
 }
 
@@ -1158,7 +1195,7 @@ func (a *App) toolPipelineStageCreate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("pipeline.stage.created", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
+	emitCRMEvent(ctx, pid, "pipeline.stage.created", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
 	return map[string]any{"stage": out}, nil
 }
 
@@ -1176,7 +1213,7 @@ func (a *App) toolPipelineStageUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("pipeline.stage.updated", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
+	emitCRMEvent(ctx, pid, "pipeline.stage.updated", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
 	return map[string]any{"stage": out}, nil
 }
 
@@ -1192,7 +1229,7 @@ func (a *App) toolPipelineStageArchive(ctx *sdk.AppCtx, args map[string]any) (an
 	if err := dbPipelineStageArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	ctx.Emit("pipeline.stage.updated", map[string]any{"stage_id": id, "archived": true})
+	emitCRMEvent(ctx, pid, "pipeline.stage.updated", map[string]any{"stage_id": id, "archived": true})
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -1398,7 +1435,7 @@ func (a *App) handleHTTPPipelineCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("pipeline.created", map[string]any{"pipeline_id": out.ID})
+	emitCRMEvent(globalCtx, pid, "pipeline.created", map[string]any{"pipeline_id": out.ID})
 	httpJSON(w, map[string]any{"pipeline": out})
 }
 
@@ -1425,7 +1462,7 @@ func (a *App) handleHTTPPipelineStageCreate(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("pipeline.stage.created", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
+	emitCRMEvent(globalCtx, pid, "pipeline.stage.created", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
 	httpJSON(w, map[string]any{"stage": out})
 }
 
@@ -1445,7 +1482,7 @@ func (a *App) handleHTTPPipelineStageUpdate(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("pipeline.stage.updated", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
+	emitCRMEvent(globalCtx, pid, "pipeline.stage.updated", map[string]any{"pipeline_id": out.PipelineID, "stage_id": out.ID})
 	httpJSON(w, map[string]any{"stage": out})
 }
 
@@ -1459,7 +1496,7 @@ func (a *App) handleHTTPPipelineStageArchive(w http.ResponseWriter, r *http.Requ
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("pipeline.stage.updated", map[string]any{"stage_id": stageID, "archived": true})
+	emitCRMEvent(globalCtx, pid, "pipeline.stage.updated", map[string]any{"stage_id": stageID, "archived": true})
 	httpJSON(w, map[string]any{"archived": true, "id": stageID})
 }
 

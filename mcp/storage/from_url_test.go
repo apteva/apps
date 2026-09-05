@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -29,9 +30,11 @@ func newFromURLCtx(t *testing.T) (*sdk.AppCtx, *tk.EmitRecorder, string) {
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml",
 		tk.WithProjectID("test-proj"),
+		tk.WithConfig(map[string]string{"import_internal_hosts": "127.0.0.1"}),
 		tk.WithEnv("STORAGE_BLOBS_DIR", dir),
 		tk.WithEmitter(rec),
 	)
+	globalBackend = nil
 	globalCtx = ctx
 	return ctx, rec, dir
 }
@@ -267,3 +270,61 @@ func TestHTTPFromURL_RejectsInvalidJSON(t *testing.T) {
 
 // quiet io import
 var _ = io.Discard
+
+func TestHTTPFromURL_InternalPolicyStatus(t *testing.T) {
+	for _, redirected := range []bool{false, true} {
+		name := "direct"
+		if redirected {
+			name = "redirect"
+		}
+		t.Run(name, func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				http.Redirect(w, r, "http://localhost"+r.Host[strings.LastIndex(r.Host, ":"):]+"/blocked.txt", http.StatusFound)
+			}))
+			defer srv.Close()
+			allowed := ""
+			if redirected {
+				allowed = "127.0.0.1"
+			}
+			ctx := auditCtx(t, tk.WithConfig(map[string]string{"import_internal_hosts": allowed}))
+			body, _ := json.Marshal(map[string]any{"url": srv.URL + "/fixture.txt", "name": "blocked.txt"})
+			req := httptest.NewRequest(http.MethodPost, "/files/from-url?project_id=test-proj", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			(&App{}).httpFromURL(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("want 403 for blocked import, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "internal network imports are not allowed") {
+				t.Fatalf("policy error missing: %s", rec.Body.String())
+			}
+			wantHits := int32(0)
+			if redirected {
+				wantHits = 1
+			}
+			if hits.Load() != wantHits {
+				t.Fatalf("blocked destination was requested; got %d requests, want %d", hits.Load(), wantHits)
+			}
+			var files int
+			if err := ctx.AppDB().QueryRow(`SELECT count(*) FROM files`).Scan(&files); err != nil || files != 0 {
+				t.Fatalf("blocked import persisted files: count=%d, err=%v", files, err)
+			}
+		})
+	}
+}
+
+func TestHTTPFromURL_UpstreamFailureRemainsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	newFromURLCtx(t)
+	body, _ := json.Marshal(map[string]any{"url": srv.URL + "/fixture.txt"})
+	req := httptest.NewRequest(http.MethodPost, "/files/from-url?project_id=test-proj", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	(&App{}).httpFromURL(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("upstream failure incorrectly classified: %d: %s", rec.Code, rec.Body.String())
+	}
+}

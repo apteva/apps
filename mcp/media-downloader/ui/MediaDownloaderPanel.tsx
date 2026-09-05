@@ -175,10 +175,12 @@ function statusTone(status: string) {
 
 const stageLabels: Record<string, string> = {
   queued: "Queued",
+  probing: "Reading source",
   downloading: "Downloading",
   postprocessing: "Processing",
   preparing: "Preparing upload",
   uploading: "Uploading",
+  transcribing: "Transcribing",
   completed: "Completed",
   failed: "Failed",
   canceled: "Canceled",
@@ -363,13 +365,13 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
     window.setTimeout(() => document.getElementById("media-download-url")?.focus(), 0);
   };
 
-  const submit = async (event: any) => {
+  const submit = async (event: any, ingest = false) => {
     event.preventDefault();
     if (!draft.url.trim()) return;
     setSubmitting(true);
     setNotice("");
     try {
-      await request("/jobs", { method: "POST", body: JSON.stringify(draft) }, projectId);
+      await request(ingest ? "/ingest" : "/jobs", { method: "POST", body: JSON.stringify(draft) }, projectId);
       setDraft((current: any) => ({ ...current, url: "" }));
       setMetadata(null);
       await onRefresh();
@@ -474,6 +476,9 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
             <Button type="submit" tone="primary" icon={submitting ? LoaderCircle : Download} className={submitting ? "[&>svg]:animate-spin" : ""} disabled={!draft.url.trim() || submitting}>
               Download
             </Button>
+            <Button type="button" tone="primary" icon={submitting ? LoaderCircle : Download} className={submitting ? "[&>svg]:animate-spin" : ""} onClick={(event: any) => submit(event, true)} disabled={!draft.url.trim() || submitting}>
+              Ingest all
+            </Button>
           </div>
         </div>
         <div className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -517,10 +522,11 @@ function DownloadsTab({ jobs, profiles, projectId, draft, setDraft, onRefresh, s
         {metadata && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-l-2 border-accent px-3 py-1 text-xs text-text-muted">
             <strong className="max-w-full truncate text-text">{metadata.title || metadata.id}</strong>
-            {metadata.uploader && <span>{metadata.uploader}</span>}
-            {metadata.duration != null && <span>{Math.round(Number(metadata.duration) / 60)} min</span>}
+            {(metadata.channel || metadata.uploader) && <span>{metadata.channel || metadata.uploader}</span>}
+            {(metadata.duration_seconds ?? metadata.duration) != null && <span>{Math.round(Number(metadata.duration_seconds ?? metadata.duration) / 60)} min</span>}
             {metadata.age_limit > 0 && <span>Age {metadata.age_limit}+</span>}
             {metadata.format_count != null && <span>{metadata.format_count} formats</span>}
+            {metadata.caption_tracks?.length > 0 && <span>{metadata.caption_tracks.length} caption tracks</span>}
             <IconButton label="Clear probe result" icon={X} className="ml-auto size-7 border-0" onClick={() => setMetadata(null)} />
           </div>
         )}
@@ -569,7 +575,7 @@ function JobRow({ job, projectId, onCancel, onRetry, setNotice }: any) {
         <button className="min-w-0 basis-full text-left sm:basis-auto sm:flex-1" onClick={toggle} aria-expanded={expanded}>
           <div className="truncate text-sm font-medium" title={job.title || job.url}>{job.title || job.url}</div>
           <div className="mt-0.5 flex flex-wrap gap-x-2 text-xs text-text-dim">
-            <span>{job.mode} / {job.quality}</span>
+            <span>{job.ingest ? "ingestion" : job.mode} / {job.quality}</span>
             <span className="max-w-full truncate">{job.storage_folder}</span>
           </div>
         </button>
@@ -609,6 +615,20 @@ function JobRow({ job, projectId, onCancel, onRetry, setNotice }: any) {
                 {job.extractor && <div><dt className="inline text-text-dim">Extractor: </dt><dd className="inline">{job.extractor}</dd></div>}
                 <div><dt className="inline text-text-dim">Job: </dt><dd className="inline font-mono">{job.id}</dd></div>
               </dl>
+              {(details?.job?.artifacts || job.artifacts)?.length > 0 && (
+                <div className="grid gap-1 border-l-2 border-border pl-3 text-text-muted">
+                  {(details?.job?.artifacts || job.artifacts).map((artifact: any) => (
+                    <div key={`${artifact.kind}-${artifact.storage_file_id}`} className="flex min-w-0 flex-wrap items-center gap-x-2">
+                      <span className="font-medium text-text">{artifact.kind}</span>
+                      {artifact.language && <span>{artifact.language}</span>}
+                      {artifact.caption_source && <span>{artifact.caption_source}</span>}
+                      <span className="font-mono">#{artifact.storage_file_id}</span>
+                      {artifact.storage_url && <a href={artifact.storage_url} target="_blank" rel="noreferrer" className="text-accent hover:underline">Open</a>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {(details?.job?.warnings || job.warnings)?.map((warning: string) => <div key={warning} className="text-warn">{warning}</div>)}
               {details?.logs?.length > 0 && (
                 <div className="max-h-48 overflow-auto border-l-2 border-border pl-3 font-mono text-[11px] leading-5 text-text-muted">
                   {details.logs.map((log: any, index: number) => <div key={`${log.created_at}-${index}`} className={log.level === "error" || log.level === "stderr" ? "text-error" : ""}>{log.message}</div>)}

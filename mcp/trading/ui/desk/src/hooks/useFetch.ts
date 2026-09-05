@@ -10,6 +10,7 @@ export type FetchState<T> = {
   error: string | null;
   loading: boolean;
   refresh: () => void;
+  updateData: (update: (current: T | null) => T | null) => void;
 };
 
 export function useFetch<T>(
@@ -17,7 +18,14 @@ export function useFetch<T>(
   deps: any[] = [],
   intervalMs: number = 5000,
 ): FetchState<T> {
-  const [data, setData] = useState<T | null>(null);
+  const identity = JSON.stringify(deps);
+  const [snapshot, setSnapshot] = useState<{ identity: string; value: T | null }>({ identity, value: null });
+  const data = snapshot.identity === identity ? snapshot.value : null;
+  const identityRef = useRef(identity); identityRef.current = identity;
+  const setData = useCallback((value: T | null | ((current: T | null) => T | null)) => {
+    const key = identityRef.current;
+    setSnapshot((old) => ({ identity: key, value: typeof value === "function" ? (value as (v: T | null) => T | null)(old.identity === key ? old.value : null) : value }));
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const fetcherRef = useRef(fetcher);
@@ -25,6 +33,7 @@ export function useFetch<T>(
 
   const [refreshSeq, setRefreshSeq] = useState(0);
   const refresh = useCallback(() => { setRefreshSeq((n) => n + 1); }, []);
+  const updateData = useCallback((update: (current: T | null) => T | null) => setData(update), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,7 +42,7 @@ export function useFetch<T>(
       try {
         const v = await fetcherRef.current();
         if (cancelled) return;
-        setData(v);
+        setSnapshot({ identity, value: v });
         setError(null);
       } catch (e: any) {
         if (cancelled) return;
@@ -54,5 +63,5 @@ export function useFetch<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, refreshSeq]);
 
-  return { data, error, loading, refresh };
+  return { data, error: snapshot.identity === identity ? error : null, loading: snapshot.identity !== identity || loading, refresh, updateData };
 }

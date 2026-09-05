@@ -20,7 +20,9 @@ directive: |
   below is authoritative: it contains exactly four unread messages, exactly
   one of which (from Clima Confort) needs an attention alert.
 
-  Track the occurrence as exactly one task named "Review simulated inbox".
+  Track the occurrence as exactly one immediate, unscheduled task named
+  "Review simulated inbox". Call tasks_create exactly once, omit the schedule
+  argument entirely, and retain its returned task ID.
   This is deliberately multi-stage work: record each of these meaningful
   milestones on that same task, with the exact state, progress, and current
   step shown:
@@ -36,7 +38,7 @@ directive: |
   the assignment event's task ID before reporting anything. Do not grant any
   Tasks mutation tool to the worker. The worker reports each milestone and the
   final result to its parent; main remains responsible for calling
-  tasks_update and tasks_complete on the worker's behalf. Do not set the task
+  tasks_set_progress and tasks_complete on the worker's behalf. Do not set the task
   to waiting: the task remains active while the worker is working.
 
   The simulated worker must report all three exact milestones and the final
@@ -79,9 +81,9 @@ assert:
       tool: tasks_get
       thread_id: gmail-review-worker
       count: 1
-      before: send
+      before: send | done
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -89,7 +91,7 @@ assert:
         current_step: Listing unread Gmail messages
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -97,7 +99,7 @@ assert:
         current_step: Found 4 unread messages
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -105,7 +107,7 @@ assert:
         current_step: Gmail review worker processing 4 messages
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -113,7 +115,7 @@ assert:
         current_step: 4 messages classified and marked read
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       thread_id: main
       args:
         state: running
@@ -121,7 +123,7 @@ assert:
         current_step: Publishing attention alert for Clima Confort
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       count: 5
   - tool_called_with:
       tool: tasks_complete
@@ -129,6 +131,7 @@ assert:
       args:
         result: Processed 4 messages; 1 alert published
       count: 1
+  - tool_not_called: tasks_update
   - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200
     expect_count_at: tasks

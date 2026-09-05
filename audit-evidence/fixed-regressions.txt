@@ -1,0 +1,38 @@
+=== RUN   TestAuditGlobalHTTPEventProject
+--- PASS: TestAuditGlobalHTTPEventProject (0.01s)
+=== RUN   TestAuditMembershipEventsAreIdempotent
+--- PASS: TestAuditMembershipEventsAreIdempotent (0.01s)
+=== RUN   TestAuditFullMessageBody
+--- PASS: TestAuditFullMessageBody (0.01s)
+=== RUN   TestAuditSystemAttributeSeeding
+--- PASS: TestAuditSystemAttributeSeeding (0.01s)
+=== RUN   TestAuditDiagnosticsInboxQueryPlan
+    audit_repro_test.go:97: SCAN a USING INDEX ix_act_conv
+    audit_repro_test.go:97: USE TEMP B-TREE FOR ORDER BY
+--- PASS: TestAuditDiagnosticsInboxQueryPlan (0.01s)
+=== RUN   TestAuditMergePersistentConversations
+--- PASS: TestAuditMergePersistentConversations (0.01s)
+=== RUN   TestAuditMergeLookupAndPrimary
+--- PASS: TestAuditMergeLookupAndPrimary (0.01s)
+=== RUN   TestAuditArchivedContactRecovery
+--- PASS: TestAuditArchivedContactRecovery (0.01s)
+=== RUN   TestAuditActivityProjectOwnership
+--- PASS: TestAuditActivityProjectOwnership (0.01s)
+=== RUN   TestAuditReplyUsesThreadAddress
+--- PASS: TestAuditReplyUsesThreadAddress (0.02s)
+=== RUN   TestAuditCrossContactThreadLink
+--- PASS: TestAuditCrossContactThreadLink (0.02s)
+=== RUN   TestAuditDateSegmentExecutes
+--- PASS: TestAuditDateSegmentExecutes (0.01s)
+=== RUN   TestAuditTypedAttributeFilters
+--- PASS: TestAuditTypedAttributeFilters (0.01s)
+=== RUN   TestAuditReconcilePreservesDeliveryEvidence
+--- PASS: TestAuditReconcilePreservesDeliveryEvidence (0.01s)
+=== RUN   TestAuditRecencyDoesNotRegress
+--- PASS: TestAuditRecencyDoesNotRegress (0.01s)
+=== RUN   TestAuditPrimaryScalarMaintainsChannels
+--- PASS: TestAuditPrimaryScalarMaintainsChannels (0.01s)
+=== RUN   TestAuditAttributeWriteUpdatesContactTimestamp
+--- PASS: TestAuditAttributeWriteUpdatesContactTimestamp (0.01s)
+PASS
+ok  	github.com/apteva/apps/mcp/crm	0.649s

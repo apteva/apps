@@ -13,6 +13,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
-	"github.com/google/uuid"
 )
 
 // engine bundles everything the tick loops need. Instantiated once
@@ -83,7 +83,33 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		return errors.New("engine not initialised")
 	}
 	tickStart := time.Now().UTC()
-
+	if portfolios, err := dbAllPortfolios(e.db); err == nil {
+		for _, pf := range portfolios {
+			if pf.Status != "active" {
+				continue
+			}
+			equity, err := computeEquity(e.db, pf)
+			if err != nil {
+				continue
+			}
+			policy, err := dbGetPortfolioRiskPolicy(e.db, pf)
+			if err != nil {
+				continue
+			}
+			breach, err := currentLossBreach(e.db, pf, policy, equity)
+			if err != nil || breach == nil {
+				continue
+			}
+			if err := dbSetPortfolioStatus(e.db, pf.ID, "halted"); err != nil {
+				continue
+			}
+			if pf.Mode == "live" {
+				_, _ = e.db.Exec(`UPDATE orders SET cancel_requested=1 WHERE portfolio_id=? AND status='working'`, pf.ID)
+			}
+			emit("risk.limit.breached", map[string]any{"portfolio_id": pf.ID, "project_id": pf.ProjectID, "code": breach.Code, "detail": breach.Detail})
+			emit("portfolio.status.changed", map[string]any{"id": pf.ID, "status": "halted", "reason": breach.Code})
+		}
+	}
 	// 1. Refresh marks. One transaction per tick so we hold the
 	// writer lock once instead of N times. A single bad row gets
 	// logged but does NOT poison the whole batch — we keep going
@@ -97,19 +123,12 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		marks = append(marks, refreshPersistedMarks(e, marks)...)
 		if tx, err := e.db.Begin(); err == nil {
 			for _, m := range marks {
-				if _, err := tx.Exec(`
-					INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?)
-					ON CONFLICT(symbol) DO UPDATE SET
-						asset_class = excluded.asset_class,
-						price       = excluded.price,
-						no_price    = excluded.no_price,
-						prev_close  = excluded.prev_close,
-						volume_24h  = excluded.volume_24h,
-						marked_at   = excluded.marked_at`,
-					m.Symbol, m.AssetClass, m.Price, nullable(m.NoPrice), nullable(m.PrevClose),
-					nullable(m.Volume24h), m.MarkedAt); err != nil {
-					e.logger.Warn("upsert mark failed", "symbol", m.Symbol, "err", err)
+				if err := dbUpsertMarkExec(tx, m); err != nil {
+					symbol := ""
+					if m != nil {
+						symbol = m.Symbol
+					}
+					e.logger.Warn("upsert mark failed", "symbol", symbol, "err", err)
 					continue
 				}
 				marksOK++
@@ -168,54 +187,84 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		reconcileLiveAccounts(e)
 	}
 
-	// 3. Daily-loss halt sweep.
+	// 3. Portfolio risk + objective sweep, shared by simulation, broker
+	// paper, and broker live portfolios.
 	pfs, err := dbAllPortfolios(e.db)
 	if err != nil {
 		return nil
 	}
 	for _, p := range pfs {
-		if p.Status == "halted" {
-			continue
-		}
 		eq, err := computeEquity(e.db, p)
 		if err != nil {
 			continue
 		}
-		day := utcDay(time.Now())
+		now := executionTime(e.db, p.ID)
+		state, _ := dbUpdatePortfolioRiskState(e.db, p, eq)
+		_ = initializeDueObjectiveBaselines(e.db, p, eq, now)
+		policy, policyErr := dbGetPortfolioRiskPolicy(e.db, p)
+		if policyErr != nil {
+			continue
+		}
+		day := utcDay(now)
 		baseline, ok, _ := dbGetDayBaseline(e.db, p.ID, day)
 		if !ok {
 			_ = dbSetDayBaseline(e.db, p.ID, day, eq)
-			continue
+			baseline = eq
 		}
-		if baseline <= 0 {
-			continue
+		dayPctMove := 0.0
+		if baseline > 0 {
+			dayPctMove = (eq - baseline) / baseline * 100
 		}
-		dayPctMove := (eq - baseline) / baseline * 100
-		halt := portfolioLossHaltPct(p)
-		if dayPctMove < -halt {
-			// For live portfolios, cancel working broker orders BEFORE
-			// flipping status — turns the halt from a paper concept into
-			// a real circuit-breaker. Best-effort: failures don't stall
-			// the local status flip (the next reconcile tick catches it).
+
+		snap, _ := snapshotPortfolio(e.db, p)
+		objectives, _ := dbListPortfolioObjectives(e.db, p, false)
+		for _, objective := range objectives {
+			objectiveProgress(e.db, p, objective, snap)
+		}
+		emit("portfolio.performance.updated", map[string]any{
+			"portfolio_id": p.ID, "project_id": p.ProjectID, "equity": eq,
+			"day_return_pct": dayPctMove, "risk_policy": policy, "risk_state": state,
+			"objectives": objectives,
+		})
+
+		if p.Status == "halted" {
 			if p.Mode == "live" {
-				cancelLiveWorkingOrders(e, p, "daily_loss_halt")
+				cancelLiveWorkingOrders(e, p, "risk_halted")
 			}
-			_ = dbSetPortfolioStatus(e.db, p.ID, "halted")
-			emit("portfolio.status.changed", map[string]any{
-				"id": p.ID, "status": "halted", "reason": "daily_loss_halt",
-				"day_pct": dayPctMove, "threshold": -halt, "mode": p.Mode,
-			})
-			body := fmt.Sprintf("Daily-loss halt fired — equity %.2f vs baseline %.2f (%.2f%%, threshold -%.1f%%).",
-				eq, baseline, dayPctMove, halt)
-			if entryID, jerr := dbInsertJournal(e.db, p.ProjectID, p.ID, "alert",
-				body,
-				map[string]any{"rule": "daily_loss_halt", "day_pct": dayPctMove, "threshold": -halt}); jerr == nil {
-				emit("journal.appended", map[string]any{
-					"id": entryID, "portfolio_id": p.ID, "kind": "alert", "body": body,
-				})
-			}
-			notifyInstances(e, p, fmt.Sprintf("HALT %s — daily-loss halt fired (%.2f%%).", p.Name, dayPctMove))
+			continue
 		}
+		reason, actual, limit := "", 0.0, 0.0
+		if state != nil && state.CurrentDrawdownPct < -policy.MaxDrawdownPct {
+			reason, actual, limit = "max_drawdown_halt", state.CurrentDrawdownPct, -policy.MaxDrawdownPct
+		} else if dayPctMove < -policy.MaxDailyLossPct {
+			reason, actual, limit = "daily_loss_halt", dayPctMove, -policy.MaxDailyLossPct
+		}
+		if reason == "" {
+			continue
+		}
+		// Cancel broker working orders before flipping the local status. The
+		// cancellation is best-effort; reconciliation keeps checking it.
+		if p.Mode == "live" {
+			cancelLiveWorkingOrders(e, p, reason)
+		}
+		_ = dbSetPortfolioStatus(e.db, p.ID, "halted")
+		emit("portfolio.status.changed", map[string]any{
+			"id": p.ID, "status": "halted", "reason": reason,
+			"actual_pct": actual, "threshold_pct": limit, "mode": p.Mode,
+		})
+		emit("risk.limit.breached", map[string]any{
+			"portfolio_id": p.ID, "project_id": p.ProjectID, "code": reason,
+			"actual_pct": actual, "limit_pct": limit, "mode": p.Mode,
+		})
+		body := fmt.Sprintf("Risk halt fired (%s) — equity %.2f, actual %.2f%%, boundary %.2f%%.",
+			reason, eq, actual, limit)
+		if entryID, jerr := dbInsertJournal(e.db, p.ProjectID, p.ID, "alert", body,
+			map[string]any{"rule": reason, "actual_pct": actual, "threshold_pct": limit}); jerr == nil {
+			emit("journal.appended", map[string]any{
+				"id": entryID, "portfolio_id": p.ID, "kind": "alert", "body": body,
+			})
+		}
+		notifyInstances(e, p, fmt.Sprintf("HALT %s — %s fired (%.2f%%).", p.Name, reason, actual))
 	}
 
 	// 4. Record tick metrics + emit one-line summary so a sidecar log
@@ -246,6 +295,11 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		"working":         len(working),
 		"strategy_orders": strategyOrders,
 		"fills_this_tick": fillsThisTick,
+	})
+	app.Emit("market.heartbeat", map[string]any{
+		"schema_version": 1, "tick": tickN, "providers": providerHealthSnapshot(),
+		"streams": alpacaStreamHealthSnapshot(app.CurrentProject()), "marks_refreshed": marksOK,
+		"working_orders": len(working), "strategy_orders": strategyOrders,
 	})
 	return nil
 }
@@ -321,7 +375,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
 			continue
 		}
-		if pf.Status != "active" || strings.ToLower(strings.TrimSpace(pf.Mode)) != "paper" {
+		if pf.Status != "active" || !portfolioAllowsAutomatedExecution(pf) {
 			continue
 		}
 		if portfolioUsesBacktestPricing(e.db, pf.ID) {
@@ -335,14 +389,34 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if strategy.Status != "active" {
 			continue
 		}
+		if latest, err := dbGetStrategy(e.db, pf.ProjectID, strategy.ID); err != nil || latest.Version != strategy.Version {
+			continue
+		}
 		def, _, err := validateStrategyDefinition(strategy.Definition)
 		if err != nil {
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
+		var pendingTargets string
+		if err := e.db.QueryRow(`SELECT targets_json FROM strategy_rebalances WHERE assignment_id=? AND strategy_version=? AND status='pending'`, a.ID, strategy.Version).Scan(&pendingTargets); err == nil {
+			var targets []StrategyAllocation
+			if json.Unmarshal([]byte(pendingTargets), &targets) == nil {
+				_, _, err := placeStrategyPaperOrders(e, app, pf, strategy, a, &StrategyEvaluation{TargetAllocations: targets, Decisions: []string{"Resume pending rebalance"}})
+				if err != nil {
+					e.logger.Warn("rebalance pending", "assignment_id", a.ID, "err", err)
+				}
+			}
+			continue
+		}
 		runtimeDef := strategyAssignmentDefinition(a, def)
 		checkSlot, ok := strategyAssignmentCheckSlot(runtimeDef, now)
 		if !ok || !strategyAssignmentCheckDue(a, checkSlot) {
+			continue
+		}
+		if err := validateStrategyUniverseForPortfolio(e.db, pf, def); err != nil {
+			continue
+		}
+		if allowed, _ := scorecardAllowsExecution(e.db, pf, strategy.ID); !allowed {
 			continue
 		}
 		if !stockStrategyExecutionReady(e, runtimeDef, now) {
@@ -374,13 +448,47 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		created, pending, err := placeStrategyPaperOrders(e, pf, strategy, a, eval)
+		claimed, err := dbClaimStrategyRun(e.db, &StrategyRunEvent{
+			ProjectID: a.ProjectID, PortfolioID: pf.ID, AssignmentID: a.ID,
+			StrategyID: strategy.ID, StrategyVersion: strategy.Version, SignalBarAt: marketBarAt,
+		}, eval.Decisions, eval.TargetAllocations)
+		if err != nil {
+			e.logger.Warn("strategy run claim failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		if !claimed {
+			_ = dbSetStrategyAssignmentEvaluated(e.db, a.ID, checkSlot, marketBarAt, checkSlot)
+			continue
+		}
+		app.Emit("strategy.run.started", map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at":         marketBarAt.Format(time.RFC3339Nano),
+			"execution_environment": normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug),
+		})
+		app.Emit("strategy.decision.created", map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano),
+			"decisions":     eval.Decisions, "target_allocations": eval.TargetAllocations,
+		})
+		created, pending, err := placeStrategyPaperOrders(e, app, pf, strategy, a, eval)
 		if err != nil {
 			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			app.Emit("strategy.run.failed", map[string]any{"schema_version": 1, "portfolio_id": pf.ID,
+				"assignment_id": a.ID, "strategy_id": strategy.ID, "error": err.Error()})
+			_ = dbFinishStrategyRun(e.db, a.ID, marketBarAt, "failed", nil, err)
 			continue
 		}
 		resolved := !pending
 		for _, order := range created {
+			if portfolioBrokerBacked(pf) {
+				stored, err := dbGetOrder(e.db, pf.ProjectID, order.ID)
+				if err != nil || stored.Status == "working" {
+					resolved = false
+				}
+				continue
+			}
 			if err := tryFill(e, order); err != nil {
 				e.logger.Warn("strategy order execution failed", "assignment_id", a.ID, "order_id", order.ID, "err", err)
 				resolved = false
@@ -397,6 +505,23 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 				e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
 			}
 		}
+		orderIDs := make([]string, 0, len(created))
+		for _, order := range created {
+			orderIDs = append(orderIDs, order.ID)
+		}
+		eventTopic := "strategy.run.completed"
+		runStatus := "completed"
+		if !resolved {
+			eventTopic = "strategy.run.orders_submitted"
+			runStatus = "orders_submitted"
+		}
+		_ = dbFinishStrategyRun(e.db, a.ID, marketBarAt, runStatus, orderIDs, nil)
+		app.Emit(eventTopic, map[string]any{
+			"schema_version": 1, "portfolio_id": pf.ID, "assignment_id": a.ID,
+			"strategy_id": strategy.ID, "strategy_version": strategy.Version,
+			"signal_bar_at": marketBarAt.Format(time.RFC3339Nano), "order_ids": orderIDs,
+			"orders_pending": !resolved,
+		})
 		totalOrders += len(created)
 	}
 	return totalOrders
@@ -513,7 +638,9 @@ func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.T
 	return open.Add(time.Duration(int64(elapsed) / int64(duration) * int64(duration))).UTC(), true
 }
 
-func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
+func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
+	rebalanceMu.Lock()
+	defer rebalanceMu.Unlock()
 	equity, err := computeEquity(e.db, pf)
 	if err != nil {
 		return nil, false, err
@@ -525,7 +652,7 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 	if err != nil {
 		return nil, false, err
 	}
-	working, err := dbListOrders(e.db, pf.ID, "working", 200)
+	working, err := workingPortfolioOrders(e.db, pf.ID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -609,53 +736,47 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 			buys[i].qty = floor4(buys[i].qty * scale)
 		}
 	}
-	plans := append(sells, buys...)
+	if err := persistRebalance(e.db, pf, strategy, assignment, eval); err != nil {
+		return nil, false, err
+	}
+	plans := buys
+	if len(sells) > 0 {
+		plans = sells
+	}
 	created := make([]*Order, 0, len(plans))
 	for _, p := range plans {
 		if p.qty <= 0 {
 			continue
 		}
 		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
-		order := &Order{
-			ID:          "o-" + uuid.NewString()[:8],
-			PortfolioID: pf.ID,
-			Symbol:      p.symbol,
-			AssetClass:  inferAssetClass(p.symbol),
-			Side:        p.side,
-			Type:        "market",
-			Qty:         p.qty,
-			TIF:         "day",
-			Status:      "working",
-			Rationale:   rationale,
-			Source:      "strategy",
+		out, err := (&App{}).toolOrderPlace(app, map[string]any{
+			"_project_id": pf.ProjectID, "portfolio_id": pf.ID, "symbol": p.symbol,
+			"side": p.side, "type": "market", "qty": p.qty, "tif": "day",
+			"rationale": rationale, "source_override": "strategy", "strategy_id": strategy.ID,
+			"assignment_id": assignment.ID, "target_weight": targets[p.symbol],
+		})
+		if err != nil {
+			return created, false, err
 		}
-		if err := dbInsertOrder(e.db, order, pf.ProjectID); err != nil {
+		result, _ := out.(map[string]any)
+		if fmt.Sprint(result["status"]) == "rejected" {
+			return created, false, fmt.Errorf("strategy order rejected: %s", fmt.Sprint(result["detail"]))
+		}
+		orderID := strings.TrimSpace(fmt.Sprint(result["order_id"]))
+		if orderID == "" {
+			return created, false, errors.New("strategy order returned no order_id")
+		}
+		order, err := dbGetOrder(e.db, pf.ProjectID, orderID)
+		if err != nil {
 			return created, false, err
 		}
 		created = append(created, order)
-		emit("order.placed", map[string]any{
-			"order_id":      order.ID,
-			"portfolio_id":  pf.ID,
-			"strategy_id":   strategy.ID,
-			"assignment_id": assignment.ID,
-			"symbol":        order.Symbol,
-			"asset_class":   order.AssetClass,
-			"side":          order.Side,
-			"type":          order.Type,
-			"qty":           order.Qty,
-			"status":        "working",
-			"rationale":     rationale,
-			"mode":          "paper",
-			"source":        "strategy",
-		})
-		if entryID, err := dbInsertJournal(e.db, pf.ProjectID, pf.ID, "rationale", rationale, map[string]any{
-			"order_id": order.ID, "symbol": order.Symbol, "side": order.Side, "qty": order.Qty,
-			"strategy_id": strategy.ID, "assignment_id": assignment.ID, "target_weight": targets[p.symbol],
-		}); err == nil {
-			emit("journal.appended", map[string]any{
-				"id": entryID, "portfolio_id": pf.ID, "kind": "rationale", "body": rationale,
-			})
-		}
+	}
+	if len(sells) > 0 {
+		return created, true, nil
+	}
+	if _, err := e.db.Exec(`UPDATE strategy_rebalances SET status='completed' WHERE assignment_id=?`, assignment.ID); err != nil {
+		return created, false, err
 	}
 	return created, false, nil
 }
@@ -722,13 +843,14 @@ func (e *engine) takeFillCounter() int {
 	return int(n)
 }
 
-// portfolioLossHaltPct — pulls per-portfolio override from config_json
-// or falls back to the install-wide default from APTEVA_APP_CONFIG.
-func portfolioLossHaltPct(p *Portfolio) float64 {
-	// Per-portfolio override (config_json column) — TODO when we expose it.
+// configuredDailyLossHaltPct returns the install-wide compatibility default.
+func configuredDailyLossHaltPct() float64 {
+	if globalCtx == nil {
+		return -defaultLossHalt
+	}
 	cfgRaw := globalCtx.Config().Get("daily_loss_halt_pct")
 	if cfgRaw != "" {
-		if v, err := strconv.ParseFloat(cfgRaw, 64); err == nil {
+		if v, err := strconv.ParseFloat(cfgRaw, 64); err == nil && v > 0 {
 			return v
 		}
 	}
@@ -738,6 +860,23 @@ func portfolioLossHaltPct(p *Portfolio) float64 {
 // tryFill — given a working order and the fresh marks, decide whether
 // to fill. Single-pass, single-tick.
 func tryFill(e *engine, o *Order) error {
+	orderPlacementMu.Lock()
+	defer orderPlacementMu.Unlock()
+	if o.Status != "working" {
+		return nil
+	}
+	if o.TIF == "day" {
+		placed, err := parseOrderTime(o.PlacedAt)
+		if err == nil && utcDay(placed) != utcDay(executionTime(e.db, o.PortfolioID)) {
+			_, err = e.db.Exec(`UPDATE orders SET status='cancelled',resolved_at=CURRENT_TIMESTAMP,rejection_detail='day_expired' WHERE id=? AND status='working'`, o.ID)
+			return err
+		}
+	}
+	if o.TIF == "ioc" || o.TIF == "fok" {
+		defer func() {
+			_, _ = e.db.Exec(`UPDATE orders SET status='cancelled',resolved_at=CURRENT_TIMESTAMP,rejection_detail='immediate_order_unfilled' WHERE id=? AND status='working'`, o.ID)
+		}()
+	}
 	mark, err := dbGetMark(e.db, o.Symbol)
 	if err != nil {
 		return nil // no mark yet — skip
@@ -755,6 +894,36 @@ func tryFill(e *engine, o *Order) error {
 		return nil
 	}
 
+	if err := validateWorkingPolicy(e.db, pf, o); err != nil {
+		_, cancelErr := dbCancelOrder(e.db, pf.ProjectID, o.ID, err.Error())
+		return cancelErr
+	}
+	if isBuySide(o.Side) {
+		violation, err := portfolioUniverseViolation(e.db, pf, o.Symbol)
+		if err != nil {
+			return err
+		}
+		if violation != nil {
+			_, err = dbCancelOrder(e.db, pf.ProjectID, o.ID, violation.Detail)
+			return err
+		}
+		policy, err := dbGetPortfolioRiskPolicy(e.db, pf)
+		if err != nil {
+			return err
+		}
+		equity, err := computeEquity(e.db, pf)
+		if err != nil {
+			return err
+		}
+		breach, err := currentLossBreach(e.db, pf, policy, equity)
+		if err != nil {
+			return err
+		}
+		if breach != nil {
+			_, err = dbCancelOrder(e.db, pf.ProjectID, o.ID, breach.Detail)
+			return err
+		}
+	}
 	// Mark used for the rule decision: YES vs NO for polymarket.
 	outcome := polyOutcome(o)
 	mp := mark.Price
@@ -764,31 +933,69 @@ func tryFill(e *engine, o *Order) error {
 		}
 	}
 
-	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
+	if mark.QuoteAt != "" {
+		q := *mark
+		q.MarkedAt = mark.QuoteAt
+		if !markFresh(&q, time.Now()) {
+			mark.BidPrice = nil
+			mark.AskPrice = nil
+		}
+	}
+	profile := resolveVenueProfile(e.db, pf, o.Symbol, o.AssetClass)
+	if violation := validateExecutionOrder(profile, mark.Instrument, mark, o.Qty, mp); violation != nil {
+		// A working order waits through a closed session or venue outage. New
+		// orders are rejected earlier by toolOrderPlace; existing intent is
+		// preserved and resumes when the venue becomes executable again.
+		return nil
+	}
 
 	// Decide fill price by order type.
 	var fillPrice float64
+	estimate := estimateSimulationExecution(mark, o.Side, o.Type, o.Qty, mp, profile, o.LiquidityRole)
 	switch o.Type {
 	case "market":
-		fillPrice = applySlippage(mp, o.Side, settings.SlippageBps)
+		fillPrice = estimate.Price
 	case "limit":
 		if o.LimitPrice == nil {
 			return nil
 		}
+		// Limit orders become executable at the opposite quote, not merely at
+		// the midpoint/last trade. Falling back to mp keeps older marks and
+		// prediction-market feeds without a book compatible.
+		triggerPrice := mp
+		if isBuySide(o.Side) && mark.AskPrice != nil && *mark.AskPrice > 0 {
+			triggerPrice = *mark.AskPrice
+		} else if o.Side == "sell" && mark.BidPrice != nil && *mark.BidPrice > 0 {
+			triggerPrice = *mark.BidPrice
+		}
 		ok := false
 		switch o.Side {
 		case "buy":
-			ok = mp <= *o.LimitPrice+priceTolerance
+			ok = triggerPrice <= *o.LimitPrice+priceTolerance
 		case "sell":
-			ok = mp >= *o.LimitPrice-priceTolerance
+			ok = triggerPrice >= *o.LimitPrice-priceTolerance
 		case "yes", "no":
 			// polymarket — buyer of YES/NO is willing to pay at most limit
-			ok = mp <= *o.LimitPrice+priceTolerance
+			ok = triggerPrice <= *o.LimitPrice+priceTolerance
 		}
 		if !ok {
 			return nil
 		}
-		fillPrice = mp
+		fillPrice = estimate.Price
+		if estimate.LiquidityRole == "maker" {
+			fillPrice = *o.LimitPrice
+			estimate.SpreadCost, estimate.SlippageCost = 0, 0
+		} else if isBuySide(o.Side) && fillPrice > *o.LimitPrice {
+			fillPrice = *o.LimitPrice
+		}
+		if o.Side == "sell" && fillPrice < *o.LimitPrice {
+			fillPrice = *o.LimitPrice
+		}
+		// A marketable limit may cap adverse slippage. Attribute the actual
+		// executed distance rather than retaining the pre-cap estimate.
+		if estimate.LiquidityRole == "taker" {
+			estimate.SlippageCost = math.Abs(fillPrice-estimate.TouchPrice) * o.Qty
+		}
 	case "stop":
 		if o.StopPrice == nil {
 			return nil
@@ -806,11 +1013,23 @@ func tryFill(e *engine, o *Order) error {
 		if !ok {
 			return nil
 		}
-		fillPrice = applySlippage(mp, o.Side, settings.SlippageBps)
+		fillPrice = estimate.Price
 	default:
 		return nil
 	}
-	fee := fillFee(o.Qty, fillPrice, settings.FeeBps)
+	if isBuySide(o.Side) {
+		breach, err := preTradeRiskCheckExcluding(e.db, pf, o.Symbol, o.Side, o.Qty-o.FilledQty, fillPrice, o.ID)
+		if err != nil {
+			return err
+		}
+		if breach != nil {
+			_, err := dbCancelOrder(e.db, pf.ProjectID, o.ID, breach.Detail)
+			return err
+		}
+	}
+	estimate.Price = fillPrice
+	estimate.Fee = fillFee(o.Qty, fillPrice, estimate.FeeBps)
+	fee := estimate.Fee
 
 	// Claim, validate, and apply inside one transaction. The status CAS stops
 	// overlapping ticks from filling one order twice, while the in-transaction
@@ -820,6 +1039,13 @@ func tryFill(e *engine, o *Order) error {
 		return err
 	}
 	defer tx.Rollback()
+	var currentStatus string
+	if err := tx.QueryRow(`SELECT status FROM portfolios WHERE id=?`, pf.ID).Scan(&currentStatus); err != nil {
+		return err
+	}
+	if currentStatus != "active" {
+		return nil
+	}
 	claimed, err := dbMarkOrderFilled(tx, o.ID, o.Qty, fillPrice)
 	if err != nil {
 		return err
@@ -865,7 +1091,12 @@ func tryFill(e *engine, o *Order) error {
 		notifyInstances(e, pf, fmt.Sprintf("REJECTED %s — %s", o.ID, rejectDetail))
 		return nil
 	}
-	if err := dbInsertFill(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, fee); err != nil {
+	if err := dbInsertFillDetailed(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, fee, FillCostDetails{
+		VenueSlug: profile.VenueSlug, FeeCurrency: estimate.FeeCurrency, FeeSource: "model",
+		LiquidityRole: estimate.LiquidityRole, FeeBps: estimate.FeeBps,
+		SpreadCost: estimate.SpreadCost, SlippageCost: estimate.SlippageCost,
+		Metadata: map[string]any{"reference_price": estimate.ReferencePrice, "touch_price": estimate.TouchPrice},
+	}); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -877,7 +1108,7 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if fee > 0 {
+	if fee != 0 {
 		if _, err := tx.Exec(`UPDATE portfolios SET cash = cash - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, fee, pf.ID); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -887,8 +1118,11 @@ func tryFill(e *engine, o *Order) error {
 		strings.ToUpper(o.Symbol), strings.ToUpper(o.Side), o.Qty, formatPrice(fillPrice, o.AssetClass), o.ID)
 	if err := dbInsertJournalTx(tx, pf.ProjectID, pf.ID, "fill", body, map[string]any{
 		"order_id": o.ID, "qty": o.Qty, "price": fillPrice, "fee": fee,
-		"fee_bps": settings.FeeBps, "slippage_bps": settings.SlippageBps,
-		"side": o.Side, "symbol": o.Symbol,
+		"fee_bps": estimate.FeeBps, "slippage_bps": profile.SlippageBps,
+		"liquidity_role": estimate.LiquidityRole, "fee_currency": estimate.FeeCurrency,
+		"spread_cost": estimate.SpreadCost, "slippage_cost": estimate.SlippageCost,
+		"venue_slug": profile.VenueSlug,
+		"side":       o.Side, "symbol": o.Symbol,
 	}); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -905,6 +1139,9 @@ func tryFill(e *engine, o *Order) error {
 	emit("order.filled", map[string]any{
 		"order_id": o.ID, "portfolio_id": pf.ID, "symbol": o.Symbol,
 		"side": o.Side, "qty": o.Qty, "price": fillPrice, "fee": fee,
+		"fee_currency": estimate.FeeCurrency, "liquidity_role": estimate.LiquidityRole,
+		"spread_cost": estimate.SpreadCost, "slippage_cost": estimate.SlippageCost,
+		"venue_slug": profile.VenueSlug,
 	})
 	if newPos, _ := dbGetPosition(e.db, pf.ID, o.Symbol, polyOutcome(o)); newPos != nil {
 		emit("position.changed", map[string]any{
@@ -966,7 +1203,7 @@ func applySlippage(mark float64, side string, bps float64) float64 {
 }
 
 func fillFee(qty, price, bps float64) float64 {
-	if qty <= 0 || price <= 0 || bps <= 0 {
+	if qty <= 0 || price <= 0 || bps == 0 || !finite(bps) {
 		return 0
 	}
 	return qty * price * bps / 10_000.0
@@ -1111,20 +1348,50 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		return nil
 	}
 	brokerOrderID, _ := dbBrokerOrderIDFor(e.db, o.ID)
+	var cancel int
+	if err := e.db.QueryRow(`SELECT cancel_requested FROM orders WHERE id=?`, o.ID).Scan(&cancel); err != nil {
+		return err
+	}
+	if err := validateWorkingPolicy(e.db, pf, o); err != nil {
+		cancel = 1
+	}
+	if cancel != 0 {
+		_, err := (&App{}).toolOrderCancel(globalCtx, map[string]any{"_project_id": pf.ProjectID, "order_id": o.ID, "reason": "pending_cancel"})
+		if err != nil {
+			return err
+		}
+	}
+	if cancel != 0 {
+		fresh, err := dbGetOrder(e.db, pf.ProjectID, o.ID)
+		if err != nil {
+			return err
+		}
+		*o = *fresh
+		if o.Status != "working" {
+			return nil
+		}
+		brokerOrderID, _ = dbBrokerOrderIDFor(e.db, o.ID)
+	}
+	if brokerOrderID == "" && !recoverableByClientID(bb.Adapter.Slug()) {
+		_, err := e.db.Exec(`UPDATE orders SET reconciliation_required=1,rejection_detail='broker response missing: manual account reconciliation required' WHERE id=?`, o.ID)
+		return err
+	}
 	args := bb.Adapter.StatusArgs(o, brokerOrderID)
 	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
 		bb.ConnectionID, bb.toolFor("order.status"), args,
 	)
 	if err != nil {
+		noteVenueCall(bb.Adapter.Slug(), err)
 		// Transient — retry next tick.
 		return err
 	}
 	if res == nil || !res.Success {
 		code, detail := bb.Adapter.ErrText(res, nil)
+		noteVenueCall(bb.Adapter.Slug(), fmt.Errorf("%s: %s", code, detail))
 		// Broker confirms the order doesn't exist on its side — likely
 		// the placement itself failed silently. Reject locally so the
 		// agent stops waiting on a phantom.
-		if bb.Adapter.IsUnknownOrderError(code, detail) {
+		if bb.Adapter.IsUnknownOrderError(code, detail) && brokerOrderID != "" {
 			_ = dbRejectOrder(e.db, o.ID, "broker_unknown_order",
 				"broker reports order does not exist; treating as failed-to-place")
 			emit("order.rejected", map[string]any{
@@ -1136,8 +1403,10 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 	}
 	br, perr := bb.Adapter.ParseOrder(res.Data)
 	if perr != nil {
+		noteVenueCall(bb.Adapter.Slug(), perr)
 		return perr
 	}
+	noteVenueCall(bb.Adapter.Slug(), nil)
 	previousFilled := o.FilledQty
 	changed, aerr := applyBrokerProgress(e.db, pf.ProjectID, pf, o, br)
 	if aerr != nil {
@@ -1165,6 +1434,9 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 // or status flipped; callers can use this to decide whether to bump
 // metrics.
 func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, br *brokerOrderResult) (bool, error) {
+	if br == nil || !finite(br.ExecutedQty) || !finite(br.CummulativeQuoteQty) || br.ExecutedQty < 0 || br.CummulativeQuoteQty < 0 {
+		return false, errors.New("invalid broker cumulative execution")
+	}
 	deltaQty := br.ExecutedQty - o.FilledQty
 	changed := false
 
@@ -1173,21 +1445,50 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		// array (create_order with newOrderRespType=FULL); fall back to
 		// whole-order VWAP via cumulative quote qty (polled get_order
 		// doesn't carry per-fill detail).
+		profile := resolveVenueProfile(db, pf, o.Symbol, o.AssetClass)
 		var deltaPrice, fee float64
+		rawCommissions := make([]map[string]any, 0)
+		feeComplete := true
 		if len(br.Fills) > 0 {
 			var qSum, pvSum float64
 			for _, f := range br.Fills {
 				qSum += f.Qty
 				pvSum += f.Qty * f.Price
-				fee += f.Commission
+				converted, ok := convertCommissionToQuote(db, o, f.Commission, f.CommissionAsset, profile.FeeCurrency, f.Price)
+				if ok {
+					fee += converted
+				} else {
+					feeComplete = false
+				}
+				rawCommissions = append(rawCommissions, map[string]any{"amount": f.Commission, "currency": f.CommissionAsset, "converted": converted, "conversion_ok": ok})
 			}
 			if qSum > 0 {
 				deltaPrice = pvSum / qSum
 			}
 		}
-		if deltaPrice == 0 && br.CummulativeQuoteQty > 0 && br.ExecutedQty > 0 {
-			deltaPrice = br.CummulativeQuoteQty / br.ExecutedQty
+		// Broker quantities/notional are cumulative. Subtract the amounts
+		// already committed, never apply the cumulative average to a delta.
+		cumulativeNotional := br.CummulativeQuoteQty
+		if cumulativeNotional <= 0 && deltaPrice > 0 {
+			cumulativeNotional = deltaPrice * br.ExecutedQty
 		}
+		if cumulativeNotional > 0 {
+			deltaPrice = (cumulativeNotional - o.FilledQty*o.AvgFillPrice) / deltaQty
+		}
+		deltas, err := commissionDeltas(db, o, br)
+		if err != nil {
+			return false, err
+		}
+		fee = 0
+		for _, c := range deltas {
+			converted, ok := convertCommissionToQuote(db, o, c.Delta, c.Currency, profile.FeeCurrency, deltaPrice)
+			if ok {
+				fee += converted
+			} else {
+				feeComplete = false
+			}
+		}
+
 		if deltaPrice <= 0 {
 			return false, fmt.Errorf("cannot resolve fill price for order %s (executed_qty=%v, fills=%d)",
 				o.ID, br.ExecutedQty, len(br.Fills))
@@ -1204,10 +1505,7 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		// same delta. The conditional UPDATE serializes them: the second
 		// arrival sees rows_affected = 0 and bails before touching fills,
 		// positions, or cash.
-		cumAvg := deltaPrice
-		if br.CummulativeQuoteQty > 0 && br.ExecutedQty > 0 {
-			cumAvg = br.CummulativeQuoteQty / br.ExecutedQty
-		}
+		cumAvg := (o.FilledQty*o.AvgFillPrice + deltaQty*deltaPrice) / br.ExecutedQty
 		casRes, err := tx.Exec(`UPDATE orders SET filled_qty = ?, avg_fill_price = ?
 			WHERE id = ? AND ABS(filled_qty - ?) < 1e-9`,
 			br.ExecutedQty, cumAvg, o.ID, o.FilledQty)
@@ -1219,7 +1517,10 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 			_ = tx.Rollback()
 			return false, nil // another tick already applied this fill
 		}
-		if err := dbInsertFill(tx, projectID, o.ID, pf.ID, deltaQty, deltaPrice, fee); err != nil {
+		if err := dbInsertFillDetailed(tx, projectID, o.ID, pf.ID, deltaQty, deltaPrice, fee, FillCostDetails{
+			VenueSlug: profile.VenueSlug, FeeCurrency: profile.FeeCurrency, FeeSource: "broker",
+			LiquidityRole: "unknown", Metadata: map[string]any{"raw_commissions": rawCommissions, "fee_conversion_complete": feeComplete},
+		}); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}
@@ -1227,6 +1528,11 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 			_ = tx.Rollback()
 			return false, err
 		}
+		if err := applyCommissionBalances(tx, pf, o, deltas); err != nil {
+			tx.Rollback()
+			return false, err
+		}
+
 		if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, polyOutcome(o), 0, fee); err != nil {
 			_ = tx.Rollback()
 			return false, err
@@ -1236,6 +1542,8 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 			formatPrice(deltaPrice, o.AssetClass), o.ID, br.BrokerOrderID)
 		if err := dbInsertJournalTx(tx, projectID, pf.ID, "fill", body, map[string]any{
 			"order_id": o.ID, "qty": deltaQty, "price": deltaPrice, "fee": fee,
+			"fee_currency": profile.FeeCurrency, "fee_source": "broker", "liquidity_role": "unknown",
+			"raw_commissions": rawCommissions, "fee_conversion_complete": feeComplete,
 			"side": o.Side, "symbol": o.Symbol,
 			"source": "broker", "broker_order_id": br.BrokerOrderID,
 		}); err != nil {
@@ -1253,7 +1561,8 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		emit("order.filled", map[string]any{
 			"order_id": o.ID, "portfolio_id": pf.ID, "symbol": o.Symbol,
 			"side": o.Side, "qty": deltaQty, "price": deltaPrice,
-			"fee": fee, "broker_order_id": br.BrokerOrderID,
+			"fee": fee, "fee_currency": profile.FeeCurrency, "fee_source": "broker",
+			"liquidity_role": "unknown", "broker_order_id": br.BrokerOrderID,
 		})
 		if newPos, _ := dbGetPosition(db, pf.ID, o.Symbol, polyOutcome(o)); newPos != nil {
 			emit("position.changed", map[string]any{
@@ -1269,6 +1578,16 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 		emit("journal.appended", map[string]any{
 			"portfolio_id": pf.ID, "kind": "fill", "body": body,
 		})
+	}
+
+	// Some venues attach commission details after the execution update.
+	// Apply these even when cumulative quantity has not advanced.
+	if deltaQty <= 1e-9 && math.Abs(br.ExecutedQty-o.FilledQty) < 1e-9 && o.FilledQty > 0 && len(br.Fills) > 0 {
+		feesChanged, err := applyLateBrokerCommissions(db, pf, o, br)
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || feesChanged
 	}
 
 	// Terminal status flips. Status moves are independent of fills —
@@ -1358,17 +1677,22 @@ func reconcileLiveAccounts(e *engine) {
 		// Capture an ID watermark before the broker call. Timestamps in older
 		// databases only have second precision, so comparing fill timestamps
 		// can miss a fill that lands in the same second as this snapshot.
-		var fillWatermark int64
-		_ = e.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM fills WHERE portfolio_id = ?`, p.ID).Scan(&fillWatermark)
+		revision, err := accountRevision(e.db, p.ID)
+		if err != nil {
+			continue
+		}
 		res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
 			bb.ConnectionID, bb.toolFor("account.summary"), map[string]any{},
 		)
 		if err != nil || res == nil || !res.Success {
+			code, detail := bb.Adapter.ErrText(res, err)
+			noteVenueCall(bb.Adapter.Slug(), fmt.Errorf("%s: %s", code, detail))
 			e.logger.Warn("account reconcile failed", "portfolio_id", p.ID, "broker", bb.Adapter.Slug())
 			continue
 		}
 		acct, perr := bb.Adapter.ParseAccount(res.Data)
 		if perr != nil {
+			noteVenueCall(bb.Adapter.Slug(), perr)
 			e.logger.Warn("account parse failed", "portfolio_id", p.ID, "err", perr)
 			continue
 		}
@@ -1390,110 +1714,28 @@ func reconcileLiveAccounts(e *engine) {
 						acct.Holdings[k] = v
 					}
 					holdingsComplete = true
-				}
-			}
-		}
-		// Did anything fill on this portfolio after the snapshot was
-		// captured? If yes, the broker's reported balances pre-date local
-		// state — skip cash + position writes this round and let the next
-		// reconcile (after fills settle) catch up.
-		var latestFillID int64
-		_ = e.db.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM fills WHERE portfolio_id = ?`, p.ID).Scan(&latestFillID)
-		if latestFillID > fillWatermark {
-			e.logger.Info("reconcile: skipping write — fill(s) landed during broker snapshot",
-				"portfolio_id", p.ID, "fill_watermark", fillWatermark, "latest_fill_id", latestFillID)
-			continue
-		}
-		// Cash drift. QuoteCash is total cash (free + locked), preserving
-		// equity while a working order reserves funds. QuoteAvailable drives
-		// buying power independently.
-		available := acct.QuoteAvailable
-		if abs(acct.QuoteCash-p.Cash) > 0.01 || p.AvailableCash == nil || abs(available-*p.AvailableCash) > 0.01 {
-			delta := acct.QuoteCash - p.Cash
-			body := fmt.Sprintf("Cash reconcile: local %.2f → broker total %.2f (available %.2f, Δ %+.2f).", p.Cash, acct.QuoteCash, available, delta)
-			_, _ = dbInsertJournal(e.db, p.ProjectID, p.ID, "note", body, map[string]any{
-				"source": "broker_reconcile", "kind": "cash_drift",
-				"local": p.Cash, "broker_total": acct.QuoteCash, "broker_available": available, "delta": delta,
-			})
-			_, _ = e.db.Exec(`UPDATE portfolios SET cash = ?, available_cash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, acct.QuoteCash, available, p.ID)
-		}
-		// Position drift. Only authoritative holdings snapshots may reduce or
-		// delete positions; incomplete account APIs (for example Polymarket's
-		// collateral-only endpoint) remain discovery-only. Symbols with a
-		// working order are skipped until that order settles.
-		positions, _ := dbListPositions(e.db, p.ID)
-		known := map[string]*Position{}
-		for _, q := range positions {
-			if q.Outcome == "" {
-				known[strings.ToUpper(q.Symbol)] = q
-			}
-		}
-		workingBySymbol := map[string]bool{}
-		if wo, werr := dbListOrders(e.db, p.ID, "working", 200); werr == nil {
-			for _, w := range wo {
-				workingBySymbol[strings.ToUpper(w.Symbol)] = true
-			}
-		}
-		for canonical, bal := range acct.Holdings {
-			key := strings.ToUpper(canonical)
-			if workingBySymbol[key] {
-				continue
-			}
-			brokerQty := brokerBalanceTotal(bal)
-			if local := known[key]; local != nil {
-				delete(known, key)
-				if abs(local.Qty-brokerQty) <= 1e-9 {
-					continue
-				}
-				if brokerQty <= 1e-9 {
-					_, _ = e.db.Exec(`DELETE FROM positions WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ''`, p.ID, canonical)
 				} else {
-					_, _ = e.db.Exec(`UPDATE positions SET qty = ?, updated_at = CURRENT_TIMESTAMP WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ''`, brokerQty, p.ID, canonical)
+					noteVenueCall(bb.Adapter.Slug(), perr2)
 				}
-				body := fmt.Sprintf("Broker position reconcile: %s quantity %v → %v.", canonical, local.Qty, brokerQty)
-				_, _ = dbInsertJournal(e.db, p.ProjectID, p.ID, "note", body, map[string]any{
-					"source": "broker_reconcile", "kind": "position_drift", "symbol": canonical,
-					"local_qty": local.Qty, "broker_qty": brokerQty,
-				})
-				emit("position.changed", map[string]any{"portfolio_id": p.ID, "symbol": canonical, "qty": brokerQty, "reconciled": true})
-				continue
+			} else {
+				noteVenueCall(bb.Adapter.Slug(), firstError(herr, errors.New("holdings response unsuccessful")))
 			}
-			if brokerQty <= 1e-9 {
+			if !holdingsComplete {
 				continue
-			}
-			cls := inferAssetClass(canonical)
-			if err := dbInsertPositionRaw(e.db, p.ProjectID, p.ID, canonical, cls, "", brokerQty, bal.AvgCost); err == nil {
-				body := fmt.Sprintf("Discovered %v %s on broker (no prior local position).", brokerQty, canonical)
-				_, _ = dbInsertJournal(e.db, p.ProjectID, p.ID, "note", body, map[string]any{
-					"source": "broker_reconcile", "kind": "discovered_position",
-					"broker_slug": bb.Adapter.Slug(),
-					"symbol":      canonical, "qty": brokerQty, "avg_cost": bal.AvgCost,
-				})
-				emit("position.changed", map[string]any{
-					"portfolio_id": p.ID, "symbol": canonical, "qty": brokerQty,
-					"avg_cost": bal.AvgCost, "discovered": true,
-				})
 			}
 		}
 		if holdingsComplete {
-			for key, local := range known {
-				if workingBySymbol[key] {
-					continue
-				}
-				_, _ = e.db.Exec(`DELETE FROM positions WHERE portfolio_id = ? AND symbol = ? AND COALESCE(outcome, '') = ''`, p.ID, local.Symbol)
-				body := fmt.Sprintf("Broker position reconcile: %s quantity %v → 0.", local.Symbol, local.Qty)
-				_, _ = dbInsertJournal(e.db, p.ProjectID, p.ID, "note", body, map[string]any{
-					"source": "broker_reconcile", "kind": "position_drift", "symbol": local.Symbol,
-					"local_qty": local.Qty, "broker_qty": 0,
-				})
-				emit("position.changed", map[string]any{"portfolio_id": p.ID, "symbol": local.Symbol, "qty": 0.0, "closed": true, "reconciled": true})
-			}
+			noteVenueCall(bb.Adapter.Slug(), nil)
 		}
+		if err := applyAccountSnapshot(e.db, p, acct, holdingsComplete, revision); err != nil {
+			e.logger.Warn("account reconciliation deferred", "portfolio_id", p.ID, "err", err)
+		}
+
 	}
 }
 
 func brokerBalanceTotal(b brokerBalance) float64 {
-	if b.Total > 0 {
+	if b.Total != 0 {
 		return b.Total
 	}
 	return b.Free
@@ -1507,40 +1749,26 @@ func cancelLiveWorkingOrders(e *engine, p *Portfolio, reason string) {
 	if globalCtx == nil {
 		return
 	}
-	bb, ferr := brokerFor(globalCtx, p)
-	if ferr != nil {
-		return
-	}
-	working, err := dbListOrders(e.db, p.ID, "working", 200)
+	working, err := dbWorkingOrders(e.db)
 	if err != nil {
 		return
 	}
 	for _, o := range working {
-		brokerOrderID, _ := dbBrokerOrderIDFor(e.db, o.ID)
-		// Adapters without cancel-by-client-id need the broker order id.
-		// Without it, keep the row working so reconciliation continues to
-		// supervise the exchange-side state after the portfolio halts.
-		if brokerOrderID == "" && !bb.Adapter.Capabilities().CancelByClientID {
-			e.logger.Warn("halt-cancel: missing broker_order_id; order remains working",
-				"order_id", o.ID, "broker", bb.Adapter.Slug())
+		if o.PortfolioID != p.ID {
 			continue
-		} else {
-			args := bb.Adapter.CancelArgs(o, brokerOrderID)
-			res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-				bb.ConnectionID, bb.toolFor("order.cancel"), args,
-			)
-			if err != nil || res == nil || !res.Success {
-				code, detail := bb.Adapter.ErrText(res, err)
-				e.logger.Warn("halt-cancel broker call failed",
-					"order_id", o.ID, "broker", bb.Adapter.Slug(), "code", code, "detail", detail)
-				continue
-			}
 		}
-		if _, err := e.db.Exec(`UPDATE orders SET status='cancelled', resolved_at=CURRENT_TIMESTAMP, rejection_detail=? WHERE id = ?`,
-			"halt_cancel_"+reason, o.ID); err == nil {
-			emit("order.cancelled", map[string]any{
-				"order_id": o.ID, "reason": reason, "by": "halt",
-			})
+		_, err := (&App{}).toolOrderCancel(globalCtx, map[string]any{"_project_id": p.ProjectID, "order_id": o.ID, "reason": reason})
+		if err != nil {
+			e.logger.Warn("halt cancellation pending", "order_id", o.ID, "err", err)
 		}
 	}
+}
+
+func parseOrderTime(value string) (time.Time, error) {
+	for _, format := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(format, value); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid order time %q", value)
 }

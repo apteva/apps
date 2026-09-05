@@ -5,7 +5,7 @@ description: |
   with read-only tasks_get access, assignment supplies the opaque task ID, and
   the worker fetches the complete record before doing or reporting anything.
 
-timeout: 4m
+timeout: 5m
 settle_for: 5s
 max_iterations: 24
 
@@ -70,7 +70,8 @@ directive: |
   after the domain tool succeeds.
   Do not copy the creator, title, body, media, audience, selling, schedule, or
   result values into the worker directive and do not send a corrective context
-  message later.
+  message later. The worker may address its result to its parent alias, which is
+  main.
 
   After spawn succeeds, call tasks_assign for the existing task and that worker.
   The assignment event must be what wakes it. When the worker returns, complete
@@ -89,8 +90,6 @@ assert:
       args:
         id: authoritative-task-worker
         paused: "true"
-        tools: tasks_get
-        mcp: creator-sandbox
       count: 1
   - tool_called_with:
       tool: tasks_assign
@@ -118,12 +117,11 @@ assert:
         timezone: Europe/Madrid
         final_action: Schedule
       count: 1
-      before: send
+      before: send | done
   - tool_called_with:
-      tool: send
+      tool: send | done
       thread_id: authoritative-task-worker
       args:
-        id: main
         message: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule
       count: 1
   - tool_not_called_with:

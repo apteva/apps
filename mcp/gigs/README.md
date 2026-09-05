@@ -1,4 +1,4 @@
-# Gigs (v0.3.3)
+# Gigs (v0.3.5)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -38,7 +38,7 @@ milestone, and the contract completes after all milestones are resolved.
 ## Three layers
 
 1. **Instruction library** — atomic, versioned units. The dashboard creation
-   flow currently exposes text, audio, and video instructions.
+   flow exposes text, structured content, image, audio, and video instructions.
 2. **Templates** — ordered compositions of pinned instruction versions
    with title + defaults + per-use overrides.
 3. **Gigs** — immutable snapshots, composed at dispatch from a template +
@@ -73,6 +73,61 @@ recording upload:
 Template composition overrides may replace `body.response` for one template;
 the resolved contract is frozen onto every dispatched gig. Legacy
 `body.response_mode=optional|required` snapshots remain readable.
+
+Templates may also define generic `response_rules` by instruction kind. A rule
+is applied after instruction and composition overrides, so it enforces the same
+worker response contract on every matching instruction in the dispatched gig:
+
+```json
+{
+  "response_rules": [{
+    "instruction_kind": "audio",
+    "response": {
+      "note": {"enabled": true, "required": false},
+      "files": {
+        "enabled": true,
+        "required": true,
+        "accept": ["video/*"],
+        "min_items": 1,
+        "max_items": 1,
+        "max_size_mb": 2048
+      }
+    }
+  }]
+}
+```
+
+This is deliberately generic: templates can require any supported note/file
+response for any non-input instruction kind. `gigs_create_from_template`
+applies rules to fixed composition rows. For a varying composition, pass
+`template_id` or `template_slug` to `gigs_create_from_instructions`; the gig
+then inherits the active template's response rules, variable and schedule
+defaults, and commercial rate context while keeping the supplied instruction
+order. Rules are versioned with the template and frozen into the gig snapshot.
+
+### Mixed text and images
+
+Use a `content` instruction when one numbered worker card should mix text and
+multiple images. Its body is an ordered block list; supported block types are
+`markdown`, `image`, `callout`, and `divider`:
+
+```json
+{
+  "blocks": [
+    {"type": "markdown", "markdown": "## Starting position\nStand facing the camera."},
+    {"type": "image", "storage_file_id": 123, "caption": "Correct position", "alt": "Full-body reference pose"},
+    {"type": "callout", "tone": "tip", "text": "Keep your full body visible."},
+    {"type": "divider"},
+    {"type": "markdown", "markdown": "Continue with the recording brief."}
+  ]
+}
+```
+
+Images receive signed Storage URLs only when the worker loads the gig. Text,
+captions, alternative text, and callouts support template variables. Omitting
+`body.response` makes the whole content instruction read-only; the worker sees
+no per-step note or upload control. Existing text and standalone media kinds
+remain unchanged.
 
 The worker page saves an assignment draft as notes and completed uploads change.
 Each upload is bound to the instruction key and validated against its file type,
@@ -173,7 +228,7 @@ assignment and as a `gig_event`, and returns the gig to an earlier status
 
 - `crm` (required) — workers are CRM contacts; notifications and timeline
   logging go through `crm.contacts_send_message` / `contacts_log_activity`.
-- `storage` (required) — audio/video instruction media and worker submissions live
+- `storage` (required) — image/audio/video instruction media and worker submissions live
   under `/.gigs/` (configurable).
 - `catalog` (required) — owns customer-facing products and immutable sell-side
   prices. Publishing an offer synchronizes its service product and package

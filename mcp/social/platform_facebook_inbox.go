@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -59,6 +60,8 @@ func loadFacebookAccountCreds(db *sql.DB, projectID string, accountID int64) (*f
 }
 
 func syncFacebookAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*facebookSyncReport, error) {
+	done := beginInboxSync(ctx, accountID)
+	defer done()
 	creds, err := loadFacebookAccountCreds(ctx.AppDB(), projectID, accountID)
 	if err != nil {
 		return nil, err
@@ -88,13 +91,8 @@ func syncFacebookAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*f
 	} else {
 		report.Warnings = append(report.Warnings, warns...)
 	}
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at)
-		 VALUES (?, ?, '', CURRENT_TIMESTAMP)
-		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
-		   last_sync_at=excluded.last_sync_at, last_error=NULL`,
-		accountID, "all",
-	)
+	_, _ = ctx.AppDB().Exec(`INSERT INTO inbox_cursors(social_account_id,kind,cursor,last_sync_at,last_error) VALUES (?,'all','',CURRENT_TIMESTAMP,?) ON CONFLICT(social_account_id,kind) DO UPDATE SET last_sync_at=excluded.last_sync_at,last_error=excluded.last_error`, accountID, nullable(strings.Join(report.Warnings, "; ")))
+
 	return report, nil
 }
 
@@ -172,7 +170,7 @@ func syncFacebookComments(ctx *sdk.AppCtx, projectID string, creds *facebookAcco
 }
 
 func fetchAndUpsertFBComments(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds, postID int64, fbPostID string) (int, string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "list_media_comments", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "list_media_comments", map[string]any{
 		"mediaId":      fbPostID,
 		"fields":       "id,message,from{id,name,picture},created_time,like_count,parent,replies{id,message,from{id,name,picture},created_time,like_count}",
 		"limit":        50,
@@ -201,7 +199,7 @@ func fetchAndUpsertFBComments(ctx *sdk.AppCtx, projectID string, creds *facebook
 			}
 		}
 	}
-	return added, ""
+	return added, finishInboxPages(ctx, creds.AccountID, res)
 }
 
 func upsertFBComment(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds, postID int64, fbPostID, parentID string, c fbCommentNode) bool {
@@ -263,7 +261,7 @@ type fbMessageNode struct {
 }
 
 func syncFacebookDMs(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_list_conversations", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "facebook_list_conversations", map[string]any{
 		"pageId":       creds.PageID,
 		"limit":        50,
 		"access_token": creds.PageToken,
@@ -289,11 +287,14 @@ func syncFacebookDMs(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCr
 			warns = append(warns, w)
 		}
 	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		warns = append(warns, warning)
+	}
 	return added, warns
 }
 
 func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds, conversationID string) (int, string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_get_conversation", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "facebook_get_conversation", map[string]any{
 		"conversationId": conversationID,
 		"access_token":   creds.PageToken,
 	})
@@ -317,10 +318,7 @@ func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *fac
 		if m.ID == "" {
 			continue
 		}
-		if m.From.ID == creds.PageID {
-			prevID = m.ID
-			continue
-		}
+
 		mediaJSON := normalizeInboxMediaJSON(m.Attachments)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
 			ProjectID:        projectID,
@@ -328,6 +326,7 @@ func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *fac
 			Platform:         "facebook",
 			Kind:             inboxKindDM,
 			ExternalID:       m.ID,
+			Outbound:         m.From.ID == creds.PageID,
 			ParentExternalID: prevID,
 			ExternalPostID:   conversationID,
 			AuthorExternalID: m.From.ID,
@@ -345,7 +344,7 @@ func expandAndUpsertFBConversation(ctx *sdk.AppCtx, projectID string, creds *fac
 		}
 		prevID = m.ID
 	}
-	return added, ""
+	return added, finishInboxPages(ctx, creds.AccountID, res)
 }
 
 type fbTaggedNode struct {
@@ -360,7 +359,7 @@ type fbTaggedNode struct {
 }
 
 func syncFacebookMentions(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_list_tagged", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "facebook_list_tagged", map[string]any{
 		"pageId":       creds.PageID,
 		"limit":        50,
 		"access_token": creds.PageToken,
@@ -406,6 +405,9 @@ func syncFacebookMentions(ctx *sdk.AppCtx, projectID string, creds *facebookAcco
 			added++
 		}
 	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		return added, []string{warning}
+	}
 	return added, nil
 }
 
@@ -419,7 +421,7 @@ type fbReviewNode struct {
 }
 
 func syncFacebookReviews(ctx *sdk.AppCtx, projectID string, creds *facebookAccountCreds) (int, []string) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "facebook_list_reviews", map[string]any{
+	res, err := collectInboxPages(ctx, creds.AccountID, creds.ConnID, "facebook_list_reviews", map[string]any{
 		"pageId":       creds.PageID,
 		"limit":        50,
 		"access_token": creds.PageToken,
@@ -462,6 +464,9 @@ func syncFacebookReviews(ctx *sdk.AppCtx, projectID string, creds *facebookAccou
 		if inserted {
 			added++
 		}
+	}
+	if warning := finishInboxPages(ctx, creds.AccountID, res); warning != "" {
+		return added, []string{warning}
 	}
 	return added, nil
 }
@@ -516,6 +521,7 @@ func fbReplyToComment(ctx *sdk.AppCtx, out inboxOutcome, creds *facebookAccountC
 	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindComment, item.ExternalID)
 	if resp.ID != "" {
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",
@@ -604,6 +610,7 @@ func fbSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *facebookAccountCreds, it
 			mediaJSON = marshalInboxAttachments([]inboxAttachment{*part.Attachment})
 		}
 		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			Outbound:         true,
 			ProjectID:        item.ProjectID,
 			SocialAccountID:  creds.AccountID,
 			Platform:         "facebook",

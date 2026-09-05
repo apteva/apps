@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"time"
 
 	"github.com/chromedp/chromedp"
 )
 
 type Target struct {
+	ID       string
 	Selector string
 	X        int
 	Y        int
@@ -40,11 +42,14 @@ func SetFiles(ctx context.Context, target Target, files []string) (Result, error
 	if err != nil {
 		return Result{}, err
 	}
-	if err := chromedp.Run(ctx, chromedp.SetUploadFiles(result.Selector, files, chromedp.ByQuery)); err != nil {
+	defer cleanupUploadToken(ctx, result.Selector)
+	if len(files) > 1 && !result.Multiple {
+		return Result{}, errors.New("upload_file: control does not accept multiple files")
+	}
+	if err := cdputil.Run(ctx, chromedp.SetUploadFiles(result.Selector, files, chromedp.ByQuery)); err != nil {
 		return Result{}, err
 	}
 
-	cleanupUploadToken(ctx, result.Selector)
 	return result, nil
 }
 
@@ -55,6 +60,10 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 	result, err := ResolveInput(ctx, target)
 	if err != nil {
 		return Result{}, err
+	}
+	defer cleanupUploadToken(ctx, result.Selector)
+	if len(payloads) > 1 && !result.Multiple {
+		return Result{}, errors.New("upload_file: control does not accept multiple files")
 	}
 	files := make([]map[string]string, 0, len(payloads))
 	for i, payload := range payloads {
@@ -97,7 +106,7 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 		Count int    `json:"count"`
 		Error string `json:"error,omitempty"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &out)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(js, &out)); err != nil {
 		return Result{}, err
 	}
 	if out.Error != "" {
@@ -112,59 +121,35 @@ func SetPayloads(ctx context.Context, target Target, payloads []Payload) (Result
 func ResolveInput(ctx context.Context, target Target) (Result, error) {
 	token := fmt.Sprintf("apteva-upload-%d", time.Now().UnixNano())
 	selectorJSON, _ := json.Marshal(target.Selector)
+	idJSON, _ := json.Marshal(target.ID)
 	tokenJSON, _ := json.Marshal(token)
-	js := fmt.Sprintf(`(function(selector, hasPoint, x, y, token) {
+	js := fmt.Sprintf(`(function(selector, hasPoint, x, y, token, targetID) {
   function isFileInput(el) {
     return !!el && el.tagName === 'INPUT' && String(el.type || '').toLowerCase() === 'file';
   }
-  function firstFileInput(root) {
-    if (!root || !root.querySelector) return null;
-    if (isFileInput(root)) return root;
-    return root.querySelector('input[type="file"]');
-  }
-  function siblingFileInput(el) {
-    if (!el) return null;
-    var sibs = [el.previousElementSibling, el.nextElementSibling];
-    for (var i = 0; i < sibs.length; i++) {
-      var input = firstFileInput(sibs[i]);
-      if (input) return input;
-    }
-    return null;
-  }
   function relatedFileInput(el) {
-    if (isFileInput(el)) return el;
-    if (el && el.closest) {
-      var label = el.closest('label');
-      if (label) {
-        if (isFileInput(label.control)) return label.control;
-        var inLabel = firstFileInput(label);
-        if (inLabel) return inLabel;
-      }
-    }
-    for (var cur = el; cur && cur.nodeType === 1 && cur !== document.documentElement; cur = cur.parentElement) {
-      var inside = firstFileInput(cur);
-      if (inside) return inside;
-      var near = siblingFileInput(cur);
-      if (near) return near;
-    }
-    var all = Array.prototype.slice.call(document.querySelectorAll('input[type="file"]'));
-    all = all.filter(function(input) { return !input.disabled; });
-    if (all.length === 1) return all[0];
-    if (all.length > 1) {
-      var main = all.find(function(input) { return input.id === 'mainMedia'; });
-      if (main) return main;
-      var mixed = all.find(function(input) {
-        var accept = String(input.getAttribute('accept') || '').toLowerCase();
-        return accept.indexOf('image/') >= 0 && (accept.indexOf('video/') >= 0 || accept.indexOf('audio/') >= 0);
-      });
-      if (mixed) return mixed;
-      return all[0];
+    if (!el) return null;
+    if (isFileInput(el)) return el.disabled ? null : el;
+    var label = el.closest && el.closest('label');
+    if (label && isFileInput(label.control)) return label.control.disabled ? null : label.control;
+    // Stop at the first container with inputs. Never choose between unrelated
+    // fields or escape to a document-wide/site-specific fallback.
+    for (var cur=el, depth=0; cur && depth<3 && cur!==document.body && cur!==document.documentElement; cur=cur.parentElement, depth++) {
+      var inputs=Array.from(cur.querySelectorAll('input[type="file"]')).filter(function(n){return !n.disabled;});
+      if (inputs.length > 1) return null;
+      if (inputs.length === 1) return inputs[0];
+      if (cur.tagName==='FORM') break;
     }
     return null;
   }
 
-  var el = selector ? document.querySelector(selector) : null;
-  if (!el && hasPoint) el = document.elementFromPoint(x, y);
+  var el = null;
+  if (targetID) {
+    var state=window.__aptevaComputerSOM,saved=state&&state.targets&&state.targets[targetID];
+    if (!saved || !saved.element || !saved.element.isConnected) return {error:'upload_file: stable target is no longer connected'};
+    el=saved.element;
+  } else if (selector) el=document.querySelector(selector);
+  if (!el && !targetID && hasPoint) el = document.elementFromPoint(x, y);
   var input = relatedFileInput(el);
   if (!input) {
     return {error: 'no related input[type=file] found'};
@@ -177,13 +162,13 @@ func ResolveInput(ctx context.Context, target Target) (Result, error) {
     accept: input.getAttribute('accept') || '',
     multiple: !!input.multiple
   };
-})(%s, %t, %d, %d, %s)`, string(selectorJSON), target.HasPoint, target.X, target.Y, string(tokenJSON))
+})(%s, %t, %d, %d, %s, %s)`, string(selectorJSON), target.HasPoint, target.X, target.Y, string(tokenJSON), string(idJSON))
 
 	var result struct {
 		Result
 		Error string `json:"error,omitempty"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &result)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(js, &result)); err != nil {
 		return Result{}, err
 	}
 	if result.Error != "" {
@@ -203,5 +188,5 @@ func cleanupUploadToken(ctx context.Context, selector string) {
   input.removeAttribute('data-apteva-upload-token');
   return true;
 })(%s)`, string(selectorCleanupJSON))
-	_ = chromedp.Run(ctx, chromedp.Evaluate(cleanupJS, nil))
+	_ = cdputil.Run(ctx, chromedp.Evaluate(cleanupJS, nil))
 }

@@ -303,6 +303,100 @@ func TestSpecValidation(t *testing.T) {
 	if err := validateSpec(EnvironmentSpec{WebFixtures: []WebFixtureSpec{{ID: "site", Pack: "unknown"}}}); err == nil {
 		t.Fatal("accepted unknown web fixture pack")
 	}
+	if err := validateSpec(EnvironmentSpec{}); err != nil {
+		t.Fatalf("empty infrastructure spec must remain valid for Evals: %v", err)
+	}
+}
+
+func TestEnvironmentRunCreateSchemaIsStrictAndComplete(t *testing.T) {
+	var schema map[string]any
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "environment_run_create" {
+			schema = tool.InputSchema
+			break
+		}
+	}
+	if schema == nil {
+		t.Fatal("environment_run_create tool not found")
+	}
+	if additional, ok := schema["additionalProperties"].(bool); !ok || additional {
+		t.Fatalf("top-level schema must reject unknown properties: %#v", schema)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	spec, _ := properties["spec"].(map[string]any)
+	if additional, ok := spec["additionalProperties"].(bool); !ok || additional {
+		t.Fatalf("EnvironmentSpec must reject unknown properties: %#v", spec)
+	}
+	specProperties, _ := spec["properties"].(map[string]any)
+	for _, field := range []string{
+		"version", "ttl_seconds", "app_install_ids", "connection_ids", "mcp_server_ids",
+		"network_mode", "integration_mode", "allow_host_suffixes", "http_mocks",
+		"integration_fixtures", "integration_bindings", "connection_bindings", "subscriptions",
+		"seeds", "agents", "snapshot_id", "web_fixtures", "protocol_fixtures", "voice_fixtures",
+	} {
+		if _, found := specProperties[field]; !found {
+			t.Errorf("EnvironmentSpec schema is missing %q", field)
+		}
+	}
+}
+
+func TestEnvironmentRunCreateRejectsPseudoEvaluationArguments(t *testing.T) {
+	app := &App{}
+	argsWithProject := map[string]any{"_project_id": "project-one", "kind": "eval", "spec": map[string]any{"version": 1.0}}
+	var decoded struct {
+		Kind string           `json:"kind"`
+		Spec *EnvironmentSpec `json:"spec"`
+	}
+	if err := decodeStrictArgs(argsWithProject, &decoded); err != nil || decoded.Spec == nil || decoded.Spec.Version != 1 {
+		t.Fatalf("trusted project context rejected: decoded=%#v err=%v", decoded, err)
+	}
+	if argsWithProject["_project_id"] != "project-one" {
+		t.Fatal("strict decoder mutated caller arguments")
+	}
+	for name, args := range map[string]map[string]any{
+		"top-level suite": {
+			"environment_id": "env-one",
+			"suite_id":       "suite-one",
+			"spec":           map[string]any{},
+		},
+		"nested case": {
+			"spec": map[string]any{
+				"input":      "support request",
+				"case_id":    "billing-1",
+				"assertions": []any{},
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := app.toolRunCreate(nil, args); err == nil || !strings.Contains(err.Error(), "must be executed through Evals") {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+	if _, err := app.toolRunCreate(nil, map[string]any{"spec": map[string]any{}, "unexpected": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("unknown field error=%v", err)
+	}
+	if _, err := app.toolRunCreate(nil, map[string]any{}); err == nil || err.Error() != "spec required" {
+		t.Fatalf("missing spec error=%v", err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/runs", strings.NewReader(`{"suite_id":"suite-one","spec":{"input":"support request","assertions":[]}}`))
+	app.handleRuns(recorder, request)
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "must be executed through Evals") {
+		t.Fatalf("HTTP status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAssertionTypeCatalogIsAuthoritative(t *testing.T) {
+	want := []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}
+	got := assertionTypeCatalog()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("assertion types=%v, want %v", got, want)
+	}
+	got[0] = "mutated"
+	if assertionTypeCatalog()[0] != "app_state" {
+		t.Fatal("assertion type catalog returned mutable shared state")
+	}
 }
 
 func TestPatreonFixtureLifecycleAndAssertions(t *testing.T) {

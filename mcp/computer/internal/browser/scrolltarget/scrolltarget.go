@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"sort"
 	"strings"
 	"time"
@@ -76,6 +77,26 @@ const EnumerateScript = `(function(){
 	    if(tag==='aside')return 'Sidebar';if(tag==='main')return 'Main content';if(tag==='nav')return 'Navigation';
 	    return positionalName(el);
 	  }
+  // Summarize control names below the fold without returning field values or
+  // a whole DOM dump. This lets an agent locate the right panel before scrolling.
+  function contentHints(el,isDoc){
+    if(isDoc)return [];
+    var hints=[],seen=Object.create(null),nodes=el.querySelectorAll('h1,h2,h3,[role="heading"],button,input,select,textarea,[role="switch"],[role="checkbox"],[role="combobox"]');
+    for(var i=0;i<nodes.length&&i<200;i++){
+      var n=nodes[i],r=n.getBoundingClientRect(),style=getComputedStyle(n);
+      if(r.width<1||r.height<1||style.display==='none'||style.visibility==='hidden'||n.closest('[hidden],[aria-hidden="true"],[inert]'))continue;
+      if(n.checkVisibility&&!n.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))continue;
+      var name=clean(n.getAttribute('aria-label')||labelledBy(n));
+      if(!name&&n.labels)name=clean(Array.from(n.labels).map(function(l){return l.innerText||l.textContent;}).join(' '));
+      if(!name)name=clean(n.innerText||n.textContent||n.getAttribute('placeholder'));
+      if(!name&&/^(switch|checkbox|radio)$/.test(n.getAttribute('role')||n.type||'')){
+        var row=n.parentElement;
+        if(row&&row.querySelectorAll('button,input,[role="switch"],[role="checkbox"]').length===1)name=clean(row.innerText||row.textContent);
+      }
+      if(name){name=name.slice(0,100);if(!seen[name]){seen[name]=true;hints.push(name);}}
+    }
+    return hints.length>20?hints.slice(0,12).concat(hints.slice(-8)):hints;
+  }
   function roleFor(el,isDoc){if(isDoc)return 'document';return clean(el.getAttribute&&el.getAttribute('role'))||(el.tagName||'').toLowerCase()||'region';}
   function keyFor(el,isDoc){
     if(isDoc)return 'document';
@@ -95,6 +116,14 @@ const EnumerateScript = `(function(){
     var canX=sx.scrollWidth>sx.clientWidth+2,canY=sx.scrollHeight>sx.clientHeight+2;
     if(!isDoc){var s=getComputedStyle(el),ox=s.overflowX,oy=s.overflowY;canX=canX&&/(auto|scroll|overlay)/.test(ox);canY=canY&&/(auto|scroll|overlay)/.test(oy);}
     if(!canX&&!canY)return null;var r=visibleRect(el,isDoc);if(!r)return null;
+    if(!isDoc){
+      var reachable=false;
+      for(var probe=0;probe<3;probe++){
+        var x=r.left+r.width*.5,y=r.top+r.height*(.15+probe*.35),top=document.elementFromPoint(x,y);
+        if(top&&(top===el||el.contains(top))){reachable=true;break;}
+      }
+      if(!reachable)return null;
+    }
     return {node:sx,rect:r,canX:canX,canY:canY};
   }
   var records=[],nodes=[];
@@ -103,14 +132,14 @@ const EnumerateScript = `(function(){
   nodes.push({el:root,isDoc:true,q:rootQ});
   var all=document.querySelectorAll('body *');for(var i=0;i<all.length;i++){var q=qualifies(all[i],false);if(q)nodes.push({el:all[i],isDoc:false,q:q});}
   function nearestParent(item){for(var p=item.el.parentElement;p;p=p.parentElement){for(var j=0;j<nodes.length;j++)if(nodes[j].el===p)return idFor(p,nodes[j].isDoc);}return rootQ&&!item.isDoc?'scroll_document':'';}
-	  for(var n=0;n<nodes.length;n++){var item=nodes[n],q=item.q,el=q.node,r=q.rect,opener=item.isDoc?'':openerFor(item.el);records.push({id:idFor(item.el,item.isDoc),name:nameFor(item.el,item.isDoc,opener),role:roleFor(item.el,item.isDoc),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),scroll_left:Math.round(el.scrollLeft||0),scroll_top:Math.round(el.scrollTop||0),max_scroll_x:Math.max(0,Math.round(el.scrollWidth-el.clientWidth)),max_scroll_y:Math.max(0,Math.round(el.scrollHeight-el.clientHeight)),can_scroll_x:q.canX,can_scroll_y:q.canY,parent_id:nearestParent(item),opened_by:opener,document:item.isDoc});}
+	  for(var n=0;n<nodes.length;n++){var item=nodes[n],q=item.q,el=q.node,r=q.rect,opener=item.isDoc?'':openerFor(item.el);records.push({id:idFor(item.el,item.isDoc),name:nameFor(item.el,item.isDoc,opener),content_hints:contentHints(item.el,item.isDoc),role:roleFor(item.el,item.isDoc),x:Math.round(r.left),y:Math.round(r.top),w:Math.round(r.width),h:Math.round(r.height),scroll_left:Math.round(el.scrollLeft||0),scroll_top:Math.round(el.scrollTop||0),max_scroll_x:Math.max(0,Math.round(el.scrollWidth-el.clientWidth)),max_scroll_y:Math.max(0,Math.round(el.scrollHeight-el.clientHeight)),can_scroll_x:q.canX,can_scroll_y:q.canY,parent_id:nearestParent(item),opened_by:opener,document:item.isDoc});}
   records.sort(function(a,b){if(a.document!==b.document)return a.document?1:-1;var aa=a.w*a.h,ba=b.w*b.h;return aa-ba||a.id.localeCompare(b.id);});
   return records;
 })()`
 
 func Enumerate(ctx context.Context) ([]computer.ScrollRegion, error) {
 	var raw json.RawMessage
-	if err := chromedp.Run(ctx, chromedp.Evaluate(EnumerateScript, &raw)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(EnumerateScript, &raw)); err != nil {
 		return nil, err
 	}
 	var regions []computer.ScrollRegion
@@ -139,7 +168,7 @@ func Run(ctx context.Context, action computer.Action, display computer.DisplaySi
 	if action.ExpectedRole != "" && !strings.EqualFold(strings.TrimSpace(action.ExpectedRole), strings.TrimSpace(requested.Role)) {
 		return computer.ScrollResult{}, fmt.Errorf("scroll rejected: expected target role %q but resolved %q", action.ExpectedRole, requested.Role)
 	}
-	if err := chromedp.Run(ctx, input.DispatchMouseEvent(input.MouseWheel, pointX, pointY).WithDeltaX(dx).WithDeltaY(dy)); err != nil {
+	if err := cdputil.Run(ctx, input.DispatchMouseEvent(input.MouseWheel, pointX, pointY).WithDeltaX(dx).WithDeltaY(dy)); err != nil {
 		return computer.ScrollResult{}, err
 	}
 	time.Sleep(150 * time.Millisecond)

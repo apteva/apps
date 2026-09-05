@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,9 @@ func telegramCommand(text string) (string, string) {
 }
 
 func telegramMessageAddressesBot(cfg *TelegramConnectionConfig, incoming telegramMessage) bool {
+	if telegramCommandForOtherBot(cfg, incoming.Text) {
+		return false
+	}
 	if incoming.Chat.Type == "private" {
 		return true
 	}
@@ -35,7 +39,7 @@ func telegramMessageAddressesBot(cfg *TelegramConnectionConfig, incoming telegra
 		return true
 	}
 	username := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(cfg.BotUsername), "@"))
-	if username != "" && strings.Contains(strings.ToLower(incoming.Text), "@"+username) {
+	if username != "" && regexp.MustCompile(`(?i)(^|[^a-z0-9_])@`+regexp.QuoteMeta(username)+`([^a-z0-9_]|$)`).MatchString(incoming.Text) {
 		return true
 	}
 	if incoming.ReplyToMessage != nil && strconv.FormatInt(incoming.ReplyToMessage.From.ID, 10) == cfg.BotID {
@@ -105,7 +109,7 @@ func (a *App) processUnknownTelegramMessage(cfg *TelegramConnectionConfig, updat
 			return a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
 				"Welcome — your conversation “"+conv.Title+"” is ready. Send your message whenever you like.\n\nUse /new to start fresh or /help for options.")
 		}
-		if handled, commandErr := a.processTelegramCommand(cfg, binding, incoming); handled || commandErr != nil {
+		if handled, commandErr := a.processTelegramCommand(cfg, binding, incoming, updateID); handled || commandErr != nil {
 			return commandErr
 		}
 		return a.processBoundTelegramMessage(cfg, binding, updateID, incoming)
@@ -274,7 +278,7 @@ func (a *App) redeemTelegramInvite(cfg *TelegramConnectionConfig, policy *Transp
 	return binding, conv, err
 }
 
-func (a *App) processTelegramCommand(cfg *TelegramConnectionConfig, binding *TelegramBinding, incoming telegramMessage) (bool, error) {
+func (a *App) processTelegramCommand(cfg *TelegramConnectionConfig, binding *TelegramBinding, incoming telegramMessage, updateID int64) (bool, error) {
 	command, _ := telegramCommand(incoming.Text)
 	if command == "" {
 		return false, nil
@@ -318,7 +322,7 @@ func (a *App) processTelegramCommand(cfg *TelegramConnectionConfig, binding *Tel
 			return true, a.sendTelegramSystem(app, cfg.ConnectionID, binding.ChatID,
 				"/new is available in private chats. Group rooms keep one shared conversation.")
 		}
-		conv, err := a.rotateTelegramConversation(binding, incoming)
+		conv, err := a.rotateTelegramConversation(binding, incoming, updateID)
 		if err != nil {
 			return true, err
 		}
@@ -329,26 +333,47 @@ func (a *App) processTelegramCommand(cfg *TelegramConnectionConfig, binding *Tel
 	}
 }
 
-func (a *App) rotateTelegramConversation(binding *TelegramBinding, incoming telegramMessage) (*Conversation, error) {
+func (a *App) rotateTelegramConversation(binding *TelegramBinding, incoming telegramMessage, updateIDs ...int64) (*Conversation, error) {
+	updateID := int64(0)
+	if len(updateIDs) > 0 {
+		updateID = updateIDs[0]
+	}
+	if updateID > 0 {
+		var id string
+		err := a.store.db.QueryRow(`SELECT conversation_id FROM telegram_command_receipts WHERE connection_id=? AND update_id=?`, binding.ConnectionID, updateID).Scan(&id)
+		if err == nil {
+			return a.store.getConversationAny(id)
+		}
+		if err != sql.ErrNoRows {
+			return nil, err
+		}
+	}
+
 	previous, err := a.store.GetConversation(binding.ConversationID)
 	if err != nil {
 		return nil, err
 	}
 	title := telegramConversationTitle("Telegram", "", telegramDisplayName(incoming.From))
-	conv, err := a.store.CreateConversation(CreateConversationInput{
-		ProjectID: previous.ProjectID, LeadAgentID: previous.LeadAgentID, Title: title,
-		Origin:   telegramTransport,
-		Audience: previous.Audience, ExternalIdentity: fmt.Sprintf("telegram:%d:%d", binding.ConnectionID, incoming.From.ID),
-		ExternalName: telegramDisplayName(incoming.From),
-	})
-	if err != nil {
-		return nil, err
-	}
 	tx, err := a.store.db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	id, err := insertConversationTx(tx, CreateConversationInput{
+		ProjectID: previous.ProjectID, LeadAgentID: previous.LeadAgentID, Title: title, Origin: telegramTransport,
+		Audience: previous.Audience, OwnerUserID: previous.OwnerUserID, Directive: previous.Directive,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO participants(conversation_id,agent_id,user_id,external_identity,display_name) SELECT ?,agent_id,user_id,external_identity,display_name FROM participants WHERE conversation_id=?`, id, previous.ID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET kind=? WHERE id=?`, previous.Kind, id); err != nil {
+		return nil, err
+	}
+	conv := &Conversation{ID: id}
+
 	if previous.ConversationKey != "" {
 		if _, err := tx.Exec(`UPDATE conversations SET conversation_key='' WHERE id=?`, previous.ID); err != nil {
 			return nil, err
@@ -364,9 +389,27 @@ func (a *App) rotateTelegramConversation(binding *TelegramBinding, incoming tele
 	if n, _ := res.RowsAffected(); n != 1 {
 		return nil, errors.New("Telegram route changed; retry /new")
 	}
+	if _, err := tx.Exec(`UPDATE deliveries SET status='cancelled',lease_token='',last_error='Telegram route rotated' WHERE target=? AND message_id IN(SELECT id FROM messages WHERE conversation_id=?) AND status IN('pending','processing')`, "telegram:"+binding.ID, previous.ID); err != nil {
+		return nil, err
+	}
+	if updateID > 0 {
+		if _, err := tx.Exec(`INSERT INTO telegram_command_receipts(connection_id,update_id,conversation_id) VALUES(?,?,?)`, binding.ConnectionID, updateID, conv.ID); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	conv, _ = a.store.GetConversation(conv.ID)
 	return conv, nil
+}
+
+func telegramCommandForOtherBot(cfg *TelegramConnectionConfig, text string) bool {
+	fields := strings.Fields(text)
+	if len(fields) == 0 || !strings.HasPrefix(fields[0], "/") {
+		return false
+	}
+	_, target, ok := strings.Cut(fields[0], "@")
+	return ok && !strings.EqualFold(target, strings.TrimPrefix(cfg.BotUsername, "@"))
 }

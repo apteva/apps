@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: books
 display_name: Books
-version: 0.1.1
+version: 0.2.2
 description: |
-  Structured long-form manuscript workspace for Apteva. Create books,
-  organize chapters and sections, write in markdown, keep notes, track
-  revisions, and export manuscripts.
+  Publication-ready book workspace for Apteva. Write structured manuscripts,
+  manage covers and images, validate EPUB 3, typeset print PDFs, and build
+  platform-specific publication packages.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/books
@@ -48,6 +48,8 @@ provides:
       description: Fetch one manuscript node with body content.
     - name: book_nodes_update
       description: Update a node's title, body, status, summary, or target word count.
+    - name: book_node_body_edit
+      description: Atomically append, prepend, or replace exact text in a manuscript body with an optional checksum guard.
     - name: book_nodes_move
       description: Move a node to a new parent or position.
     - name: book_nodes_delete
@@ -64,8 +66,18 @@ provides:
       description: List revisions for a manuscript node.
     - name: book_revision_restore
       description: Restore a previous node revision.
+    - name: book_assets_create
+      description: Attach an ebook cover, full-wrap print cover, or interior image.
+    - name: book_assets_list
+      description: List publication assets for a book.
+    - name: book_assets_update
+      description: Update image alt text or caption.
+    - name: book_assets_delete
+      description: Delete a publication asset.
+    - name: books_publication_check
+      description: Build a store-specific publication readiness checklist and EPUB validation report.
     - name: books_export
-      description: Export a book manuscript as markdown, optionally storing it in Storage.
+      description: Export markdown, EPUB 3, print PDF, or a platform publication ZIP.
   ui_panels:
     - slot: project.page
       label: Books

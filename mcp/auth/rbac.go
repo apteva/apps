@@ -97,11 +97,28 @@ func dbListRoles(db *sql.DB, projectID string, orgID int64) ([]Role, error) {
 		return nil, err
 	}
 	rows.Close()
+	positions := map[int64]int{}
 	for i := range out {
-		out[i].Permissions, err = dbRolePermissionKeys(db, projectID, orgID, out[i].ID)
-		if err != nil {
+		positions[out[i].ID] = i
+		out[i].Permissions = []string{}
+	}
+	rows, err = db.Query(`SELECT rp.role_id,p.key FROM auth_role_permissions rp JOIN auth_permissions p ON p.id=rp.permission_id WHERE rp.project_id=? AND rp.organization_id=? ORDER BY p.key`, projectID, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var key string
+		if err = rows.Scan(&id, &key); err != nil {
 			return nil, err
 		}
+		if i, ok := positions[id]; ok {
+			out[i].Permissions = append(out[i].Permissions, key)
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -213,7 +230,20 @@ func dbUpdatePermission(db *sql.DB, projectID string, orgID, permissionID int64,
 	return dbGetPermission(db, projectID, orgID, permissionID)
 }
 
-func dbAuthorizationContext(db *sql.DB, projectID string, org *Organization, userID int64) (AuthorizationContext, error) {
+func dbAuthorizationContext(db DBTX, projectID string, org *Organization, userID int64) (AuthorizationContext, error) {
+	if conn, ok := db.(*sql.DB); ok {
+		tx, err := conn.Begin()
+		if err != nil {
+			return AuthorizationContext{}, err
+		}
+		defer tx.Rollback()
+		out, err := dbAuthorizationContext(tx, projectID, org, userID)
+		if err != nil {
+			return out, err
+		}
+		return out, tx.Commit()
+	}
+
 	ctx := AuthorizationContext{
 		UserID:           uintToStr(userID),
 		OrganizationID:   uintToStr(org.ID),
@@ -355,8 +385,16 @@ func incrementPermissionUsersAuthorizationVersion(tx *sql.Tx, projectID string, 
 }
 
 func dbSetRolePermissions(db *sql.DB, projectID string, orgID, roleID int64, permissionIDs []int64) (*Role, error) {
+	if len(permissionIDs) > 256 {
+		return nil, errors.New("too many assignments")
+	}
+	for _, id := range permissionIDs {
+		if id <= 0 {
+			return nil, errors.New("IDs must be positive integers")
+		}
+	}
 	permissionIDs = normalizeIDs(permissionIDs)
-	tx, err := db.Begin()
+	tx, err := beginAuthTx(db, projectID, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -387,6 +425,9 @@ func dbSetRolePermissions(db *sql.DB, projectID string, orgID, roleID int64, per
 			}
 		}
 	}
+	if err := validateOrgAuthorizationSizes(tx, projectID, orgID); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -394,8 +435,16 @@ func dbSetRolePermissions(db *sql.DB, projectID string, orgID, roleID int64, per
 }
 
 func dbSetUserRoles(db *sql.DB, projectID string, orgID, userID int64, roleIDs []int64) (AuthorizationContext, error) {
+	if len(roleIDs) > 64 {
+		return AuthorizationContext{}, errors.New("too many assignments")
+	}
+	for _, id := range roleIDs {
+		if id <= 0 {
+			return AuthorizationContext{}, errors.New("IDs must be positive integers")
+		}
+	}
 	roleIDs = normalizeIDs(roleIDs)
-	tx, err := db.Begin()
+	tx, err := beginAuthTx(db, projectID, orgID)
 	if err != nil {
 		return AuthorizationContext{}, err
 	}
@@ -426,6 +475,9 @@ func dbSetUserRoles(db *sql.DB, projectID string, orgID, userID int64, roleIDs [
 			return AuthorizationContext{}, err
 		}
 	}
+	if err := validateOrgAuthorizationSizes(tx, projectID, orgID); err != nil {
+		return AuthorizationContext{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return AuthorizationContext{}, err
 	}
@@ -437,7 +489,7 @@ func dbSetUserRoles(db *sql.DB, projectID string, orgID, userID int64, roleIDs [
 }
 
 func dbDeleteRole(db *sql.DB, projectID string, orgID, roleID int64) error {
-	tx, err := db.Begin()
+	tx, err := beginAuthTx(db, projectID, orgID)
 	if err != nil {
 		return err
 	}
@@ -455,7 +507,7 @@ func dbDeleteRole(db *sql.DB, projectID string, orgID, roleID int64) error {
 }
 
 func dbDeletePermission(db *sql.DB, projectID string, orgID, permissionID int64) error {
-	tx, err := db.Begin()
+	tx, err := beginAuthTx(db, projectID, orgID)
 	if err != nil {
 		return err
 	}
@@ -471,4 +523,23 @@ func dbDeletePermission(db *sql.DB, projectID string, orgID, permissionID int64)
 		return err
 	}
 	return tx.Commit()
+}
+
+// Reserve room for identity claims and base64 expansion in the 12 KiB JWT.
+func validateOrgAuthorizationSizes(tx *sql.Tx, pid string, oid int64) error {
+	var n int
+	err := tx.QueryRow(`SELECT COUNT(*) FROM (
+ SELECT user_id,SUM(size) AS bytes,SUM(perms) AS permission_count FROM (
+  SELECT ur.user_id,SUM(length(r.key)+3) AS size,0 AS perms FROM auth_user_roles ur JOIN auth_roles r ON r.id=ur.role_id WHERE ur.project_id=? AND ur.organization_id=? GROUP BY ur.user_id
+  UNION ALL
+  SELECT user_id,SUM(length(key)+3),COUNT(*) FROM (SELECT DISTINCT ur.user_id,p.key FROM auth_user_roles ur JOIN auth_role_permissions rp ON rp.role_id=ur.role_id JOIN auth_permissions p ON p.id=rp.permission_id WHERE ur.project_id=? AND ur.organization_id=?) GROUP BY user_id
+ ) GROUP BY user_id HAVING bytes>6000 OR permission_count>256
+)`, pid, oid, pid, oid).Scan(&n)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return errors.New("assignment exceeds authorization token limits")
+	}
+	return nil
 }

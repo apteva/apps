@@ -56,7 +56,7 @@ func TestComputerAppBrowserSoMLabelClick(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	shot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -122,7 +122,7 @@ func TestComputerAppBrowserDateTimeTyping(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	type field struct {
 		name string
@@ -215,7 +215,7 @@ func TestComputerAppBrowserbasePublicDatePickerSetTemporal(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -254,7 +254,7 @@ func TestComputerAppBrowserbasePublicSetText(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id":   sessionID,
@@ -321,7 +321,7 @@ func runComputerAppBrowserSetCheckedAndTemporal(t *testing.T, backend string) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -380,7 +380,7 @@ func runComputerAppBrowserSetText(t *testing.T, backend string) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id":   sessionID,
@@ -401,6 +401,19 @@ func runComputerAppBrowserSetText(t *testing.T, backend string) {
 	})
 	if got := stringValue(out["text_value"]); got != "First paragraph.\n\nSecond paragraph." {
 		t.Fatalf("contenteditable text_value: want preserved blank line, got %q out=%v", got, out)
+	}
+	if got := stringValue(out["text_verification"]); got != "paragraphs_stable" {
+		t.Fatalf("contenteditable verification: want paragraphs_stable, got %q out=%v", got, out)
+	}
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_text",
+		"selector":   "#protected-status",
+		"text":       "-checked",
+		"mode":       "append",
+	})
+	if got := stringValue(out["text_previous_value"]); got != "pass" {
+		t.Fatalf("contenteditable replacement removed protected widget: status=%q out=%v", got, out)
 	}
 
 	out = sc.MCP("computer_use", map[string]any{
@@ -448,7 +461,7 @@ func TestComputerAppBrowserShortcutKeys(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "click", "coordinate": fcoord(260, 104)})
 	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Tab"})
@@ -525,7 +538,7 @@ func TestLLMCustomComboboxUnavailableLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required")
 	}
 	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
@@ -537,7 +550,7 @@ func TestLLMCustomComboboxUnavailableLive(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 	failure := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "select_option",
 		"selector": "#aggregation-combobox", "text": "Monthly",
@@ -581,7 +594,7 @@ func TestComputerAppBrowserbasePublicMultiSelectOption(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -612,7 +625,7 @@ func runComputerAppBrowserSelectOption(t *testing.T, backend string) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -701,7 +714,7 @@ func TestComputerAppBrowserNewTabAutoFollow(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -760,7 +773,7 @@ func TestComputerAppBrowserSwitchTab(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	clickOut := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -849,7 +862,7 @@ func TestComputerAppBrowserCloseTab(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	clickOut := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -926,7 +939,7 @@ document.getElementById('fileUpload').addEventListener('change', function() {
 	if sessionID == "" {
 		t.Fatalf("open returned no session_id: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -980,7 +993,7 @@ func TestComputerAppBrowserbasePublicUploadFromURL(t *testing.T) {
 	if sessionID == "" || providerSessionID == "" {
 		t.Fatalf("open returned incomplete session ids: %v", open)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	out := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID,
@@ -1203,14 +1216,33 @@ func setTextFixtureDataURL() string {
 <label for="message">Message</label>
 <textarea id="message"></textarea>
 <label for="editor">Composer</label>
-<div id="editor" role="textbox" contenteditable="true" aria-label="Composer"></div>
+<div id="editor" role="textbox" contenteditable="true" aria-label="Composer"><div id="paywall" contenteditable="false">Paid access starts here</div><p>Original controlled value.</p></div>
+<input id="protected-status" aria-label="Protected widget status" value="pass">
 <script>
 const message = document.getElementById("message");
 const editor = document.getElementById("editor");
+const protectedStatus = document.getElementById("protected-status");
+// Model the reconciliation behavior of ProseMirror/Remirror. Browser-native
+// edits generate a trusted input event and update editor state. Direct DOM
+// replacement followed by a synthetic input event is rejected and restored.
+let acceptedEditorHTML = editor.innerHTML;
+let reconciling = false;
+editor.addEventListener("input", event => {
+  if (event.isTrusted) acceptedEditorHTML = editor.innerHTML;
+});
+new MutationObserver(() => setTimeout(() => {
+  if (reconciling || editor.innerHTML === acceptedEditorHTML) return;
+  reconciling = true;
+  editor.innerHTML = acceptedEditorHTML;
+  reconciling = false;
+  sync();
+}, 20)).observe(editor, {subtree: true, childList: true, characterData: true});
 function sync() {
   const p = new URLSearchParams();
   p.set("message", message.value);
   p.set("editor", editor.innerText);
+  protectedStatus.value = editor.querySelector("#paywall[contenteditable=false]") ? "pass" : "fail";
+  p.set("protected", protectedStatus.value);
   location.hash = p.toString();
 }
 for (const el of [message, editor]) {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import type { Portfolio, Position, Sym } from "../api/types.ts";
 import { money } from "../lib/format.ts";
 import { placeOrder, type PlaceOrderArgs, type PlaceOrderResult } from "../api/portfolios.ts";
@@ -22,6 +22,7 @@ export function OrderTicket({
   const isPoly = sym?.asset_class === "polymarket";
   const allowed = sym ? portfolio.allowed_classes.includes(sym.asset_class) : false;
 
+  const requestIntent = useRef<{ body: string; key: string } | null>(null);
   const [side, setSide] = useState<Side>(isPoly ? "yes" : "buy");
   const [outcome, setOutcome] = useState<"yes" | "no">("yes");
   const [type, setType] = useState<Type>("limit");
@@ -96,14 +97,17 @@ export function OrderTicket({
     if (type === "limit") args.limit_price = priceNum;
     if (type === "stop")  args.stop_price  = priceNum;
 
+    const body = JSON.stringify(args);
+    if (!requestIntent.current || requestIntent.current.body !== body) requestIntent.current = { body, key: crypto.randomUUID() };
+    args.idempotency_key = requestIntent.current.key;
     setBusy(true);
     try {
       const r: PlaceOrderResult = await placeOrder(portfolio.id, args);
       if ("status" in r && r.status === "rejected") {
         setFeedback({ tone: "warn", msg: `Rejected: ${r.code} — ${r.detail}` });
       } else if ("order_id" in r) {
-        setFeedback({ tone: "ok", msg: `Order ${r.order_id} placed (${r.status}).` });
-        setRationale("");
+        setFeedback({ tone: r.uncertain ? "warn" : "ok", msg: r.uncertain ? `Order ${r.order_id} needs reconciliation. ${r.detail ?? "The broker response was uncertain."}` : `Order ${r.order_id} placed (${r.status}).` });
+        if (!r.uncertain) { setRationale(""); requestIntent.current = null; }
       }
     } catch (e: any) {
       setFeedback({ tone: "warn", msg: e?.message ?? String(e) });

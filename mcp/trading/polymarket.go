@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -214,7 +215,7 @@ func (polymarketAdapter) TranslateOrder(o *Order) (map[string]any, error) {
 			"takerAmount":   strconv.FormatUint(takerAmount, 10),
 			"expiration":    "0",
 			"nonce":         "0",
-			"feeRateBps":    "0",
+			"feeRateBps":    strconv.FormatInt(int64(math.Round(o.VenueFeeBps)), 10),
 			"side":          sideCode,
 			"signatureType": "0", // EOA
 		},

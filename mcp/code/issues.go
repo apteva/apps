@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -38,6 +39,9 @@ type Issue struct {
 	StateReason   string `json:"state_reason,omitempty"`
 	Priority      string `json:"priority"`
 	Assignee      string `json:"assignee,omitempty"`
+	ClaimOwner    string `json:"claim_owner,omitempty"`
+	ClaimLabel    string `json:"claim_label,omitempty"`
+	ClaimedAt     string `json:"claimed_at,omitempty"`
 	CreatedBy     string `json:"created_by,omitempty"`
 	ClosedAt      string `json:"closed_at,omitempty"`
 	CreatedAt     string `json:"created_at"`
@@ -173,7 +177,8 @@ func normaliseIssueCreate(in IssueCreateInput) (IssueCreateInput, error) {
 }
 
 const issueCols = `i.id, i.project_id, i.repo_id, r.slug, i.number, i.title, i.body,
-	i.type, i.status, COALESCE(i.state, 'open'), COALESCE(i.state_reason, ''), i.priority, i.assignee, i.created_by,
+	i.type, i.status, COALESCE(i.state, 'open'), COALESCE(i.state_reason, ''), i.priority, i.assignee,
+	COALESCE(i.claim_owner, ''), COALESCE(i.claim_label, ''), COALESCE(i.claimed_at, ''), i.created_by,
 	COALESCE(i.closed_at, ''), i.created_at, i.updated_at,
 	(SELECT COUNT(*) FROM repo_issue_comments c WHERE c.issue_id = i.id),
 	(SELECT COUNT(*) FROM repo_issue_links l WHERE l.issue_id = i.id)`
@@ -183,7 +188,8 @@ func scanIssueRow(s rowScanner) (*Issue, error) {
 	if err := s.Scan(
 		&iss.ID, &iss.ProjectID, &iss.RepoID, &iss.RepoSlug, &iss.Number,
 		&iss.Title, &iss.Body, &iss.Type, &iss.Status, &iss.State, &iss.StateReason, &iss.Priority,
-		&iss.Assignee, &iss.CreatedBy, &iss.ClosedAt, &iss.CreatedAt, &iss.UpdatedAt,
+		&iss.Assignee, &iss.ClaimOwner, &iss.ClaimLabel, &iss.ClaimedAt, &iss.CreatedBy,
+		&iss.ClosedAt, &iss.CreatedAt, &iss.UpdatedAt,
 		&iss.CommentsCount, &iss.LinksCount,
 	); err != nil {
 		return nil, err
@@ -427,6 +433,14 @@ func dbUpdateIssue(db *sql.DB, iss *Issue, patch IssuePatch) (*Issue, error) {
 		}
 		add("state_reason", *patch.StateReason)
 	}
+	willClose := (patch.State != nil && *patch.State == issueStateClosed) ||
+		(patch.Status != nil && *patch.Status == issueStatusDone)
+	if willClose {
+		sets = append(sets, "claim_owner = ''", "claim_label = ''", "claimed_at = NULL")
+		if iss.ClaimOwner != "" {
+			eventData["claim_released"] = iss.ClaimOwner
+		}
+	}
 	if len(sets) == 0 {
 		return iss, nil
 	}
@@ -447,6 +461,175 @@ func dbUpdateIssue(db *sql.DB, iss *Issue, patch IssuePatch) (*Issue, error) {
 		return nil, err
 	}
 	return dbGetIssueByID(db, iss.ID)
+}
+
+type IssueClaimOutcome struct {
+	Issue    *Issue `json:"issue"`
+	Success  bool   `json:"success"`
+	Changed  bool   `json:"changed"`
+	Conflict bool   `json:"conflict,omitempty"`
+}
+
+func normaliseClaimant(owner, label string) (string, string, error) {
+	owner = strings.TrimSpace(owner)
+	label = strings.TrimSpace(label)
+	if owner == "" {
+		return "", "", errors.New("claim owner required")
+	}
+	if len(owner) > 255 {
+		return "", "", errors.New("claim owner must be at most 255 characters")
+	}
+	if label == "" {
+		label = owner
+	}
+	if len(label) > 255 {
+		return "", "", errors.New("claim label must be at most 255 characters")
+	}
+	return owner, label, nil
+}
+
+func dbClaimIssue(db *sql.DB, issueID int64, owner, label string) (*IssueClaimOutcome, error) {
+	owner, label, err := normaliseClaimant(owner, label)
+	if err != nil {
+		return nil, err
+	}
+	return retryIssueClaimDB(func() (*IssueClaimOutcome, error) {
+		return dbClaimIssueOnce(db, issueID, owner, label)
+	})
+}
+
+// dbClaimIssueOnce is a compare-and-set. The conditional UPDATE is the
+// collision boundary: concurrent callers cannot both change an empty claim.
+func dbClaimIssueOnce(db *sql.DB, issueID int64, owner, label string) (*IssueClaimOutcome, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`
+		UPDATE repo_issues
+		   SET claim_owner = ?, claim_label = ?, claimed_at = CURRENT_TIMESTAMP,
+		       status = 'in_progress', updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND COALESCE(state, 'open') = 'open' AND claim_owner = ''
+	`, owner, label, issueID)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 1 {
+		if err := insertIssueEventTx(tx, issueID, "claimed", label, map[string]any{"claim_owner": owner, "claim_label": label}); err != nil {
+			return nil, err
+		}
+		issue, err := scanIssueRow(tx.QueryRow(`SELECT `+issueCols+` FROM repo_issues i JOIN repositories r ON r.id = i.repo_id WHERE i.id = ?`, issueID))
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &IssueClaimOutcome{Issue: issue, Success: true, Changed: true}, nil
+	}
+	if err := tx.Rollback(); err != nil {
+		return nil, err
+	}
+	issue, err := dbGetIssueByID(db, issueID)
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil {
+		return nil, errors.New("issue not found")
+	}
+	if issue.State != issueStateOpen {
+		return nil, errors.New("closed issues cannot be claimed")
+	}
+	if issue.ClaimOwner == owner {
+		return &IssueClaimOutcome{Issue: issue, Success: true, Changed: false}, nil
+	}
+	return &IssueClaimOutcome{Issue: issue, Success: false, Changed: false, Conflict: true}, nil
+}
+
+func dbReleaseIssueClaim(db *sql.DB, issueID int64, owner, label string) (*IssueClaimOutcome, error) {
+	owner, label, err := normaliseClaimant(owner, label)
+	if err != nil {
+		return nil, err
+	}
+	return retryIssueClaimDB(func() (*IssueClaimOutcome, error) {
+		return dbReleaseIssueClaimOnce(db, issueID, owner, label)
+	})
+}
+
+func dbReleaseIssueClaimOnce(db *sql.DB, issueID int64, owner, label string) (*IssueClaimOutcome, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`
+		UPDATE repo_issues
+		   SET claim_owner = '', claim_label = '', claimed_at = NULL,
+		       status = CASE WHEN status = 'in_progress' THEN 'todo' ELSE status END,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND claim_owner = ?
+	`, issueID, owner)
+	if err != nil {
+		return nil, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, err
+	}
+	if n == 1 {
+		if err := insertIssueEventTx(tx, issueID, "claim_released", label, map[string]any{"claim_owner": owner, "claim_label": label}); err != nil {
+			return nil, err
+		}
+		issue, err := scanIssueRow(tx.QueryRow(`SELECT `+issueCols+` FROM repo_issues i JOIN repositories r ON r.id = i.repo_id WHERE i.id = ?`, issueID))
+		if err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return &IssueClaimOutcome{Issue: issue, Success: true, Changed: true}, nil
+	}
+	if err := tx.Rollback(); err != nil {
+		return nil, err
+	}
+	issue, err := dbGetIssueByID(db, issueID)
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil {
+		return nil, errors.New("issue not found")
+	}
+	if issue.ClaimOwner == "" {
+		return &IssueClaimOutcome{Issue: issue, Success: true, Changed: false}, nil
+	}
+	return &IssueClaimOutcome{Issue: issue, Success: false, Changed: false, Conflict: true}, nil
+}
+
+func retryIssueClaimDB(op func() (*IssueClaimOutcome, error)) (*IssueClaimOutcome, error) {
+	const attempts = 20
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		outcome, err := op()
+		if err == nil || !isSQLiteBusy(err) {
+			return outcome, err
+		}
+		lastErr = err
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
+	}
+	return nil, lastErr
+}
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "database is locked") || strings.Contains(message, "sqlite_busy")
 }
 
 func dbAddIssueComment(db *sql.DB, issueID int64, author, body string) (*IssueComment, error) {
@@ -592,5 +775,6 @@ func emitIssueEvent(ctx *sdk.AppCtx, topic string, repo *Repo, issue *Issue) {
 		"slug": repo.Slug, "repo_id": repo.ID, "issue_id": issue.ID, "number": issue.Number,
 		"title": issue.Title, "state": issue.State, "state_reason": issue.StateReason,
 		"status": issue.Status, "type": issue.Type, "priority": issue.Priority,
+		"claim_owner": issue.ClaimOwner, "claim_label": issue.ClaimLabel, "claimed_at": issue.ClaimedAt,
 	})
 }

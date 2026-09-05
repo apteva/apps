@@ -1,9 +1,12 @@
 module github.com/apteva/apps/mcp/books
 
-go 1.25.0
+go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.43.0
+	github.com/apteva/app-sdk v0.73.0
+	github.com/go-pdf/fpdf v0.9.0
+	github.com/yuin/goldmark v1.8.6
+	golang.org/x/image v0.31.0
 	modernc.org/sqlite v1.50.0
 )
 

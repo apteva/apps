@@ -253,14 +253,6 @@ func (a *App) verifyHostedDirectIngress(ctx context.Context, app *sdk.AppCtx, t 
 			return nil, err
 		}
 	}
-	_, enc, err := a.store.get(t.ID)
-	if err != nil {
-		return nil, err
-	}
-	key, err := a.keys.open(enc)
-	if err != nil {
-		return nil, err
-	}
 	check := &hostedIngressCheck{TargetIP: info.PublicIPv4, DNS: map[string]string{}, HTTPS: map[string]int{}}
 	for _, host := range hosts {
 		if err := verifyHostnameTargetsIP(ctx, host, info.PublicIPv4); err != nil {
@@ -271,7 +263,7 @@ func (a *App) verifyHostedDirectIngress(ctx context.Context, app *sdk.AppCtx, t 
 		if host == t.Domain {
 			path = "/api/health"
 		}
-		status, err := verifyPublicHTTPS(ctx, host, path, string(key))
+		status, err := verifyPublicHTTPS(ctx, host, path, "")
 		if err != nil {
 			return check, err
 		}
@@ -287,12 +279,15 @@ func verifyHostnameTargetsIP(ctx context.Context, hostname, targetIP string) err
 	if err != nil {
 		return fmt.Errorf("resolve %s: %w", hostname, err)
 	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("%s has no address records", hostname)
+	}
 	for _, addr := range addrs {
-		if addr == targetIP {
-			return nil
+		if addr != targetIP {
+			return fmt.Errorf("%s resolves to %s, want only %s", hostname, strings.Join(addrs, ", "), targetIP)
 		}
 	}
-	return fmt.Errorf("%s resolves to %s, want %s", hostname, strings.Join(addrs, ", "), targetIP)
+	return nil
 }
 
 func verifyHostnamesTarget(ctx context.Context, hostnames []string, target string) error {
@@ -330,21 +325,18 @@ func verifyHostnamesTarget(ctx context.Context, hostnames []string, target strin
 
 func verifyPublicHTTPS(ctx context.Context, hostname, path, apiKey string) (int, error) {
 	deadline := time.Now().Add(directIngressVerifyTimeout)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var lastErr error
 	for time.Now().Before(deadline) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+hostname+path, nil)
 		if err != nil {
 			return 0, err
 		}
-		if apiKey != "" {
-			req.Header.Set("Authorization", "Bearer "+apiKey)
-		}
 		resp, err := client.Do(req)
 		if err == nil {
-			_, _ = io.Copy(io.Discard, resp.Body)
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 			_ = resp.Body.Close()
-			if resp.StatusCode < http.StatusInternalServerError {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return resp.StatusCode, nil
 			}
 			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -505,6 +497,11 @@ func (a *App) directIngressTenant(args map[string]any) (*Tenant, error) {
 }
 
 func (a *App) toolIngressPrepareDirect(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	done, err := a.beginTenantOperation(getStr(args, "tenant_id"), "ingress cutover")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	t, err := a.directIngressTenant(args)
 	if err != nil {
 		return nil, err
@@ -519,14 +516,19 @@ func (a *App) toolIngressVerify(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	check, err := a.verifyHostedDirectIngress(context.Background(), ctx, t)
 	if err != nil {
-		_ = a.store.setIngressMode(t.ID, IngressDirectPending, err.Error())
+		_, _ = a.store.db.Exec(`UPDATE fleet_tenants SET ingress_error=? WHERE id=?`, err.Error(), t.ID)
 		return nil, err
 	}
-	_ = a.store.setIngressMode(t.ID, IngressDirectPending, "")
-	return map[string]any{"tenant_id": t.ID, "mode": IngressDirectPending, "checks": check}, nil
+	_, _ = a.store.db.Exec(`UPDATE fleet_tenants SET ingress_error=NULL WHERE id=?`, t.ID)
+	return map[string]any{"tenant_id": t.ID, "mode": t.IngressMode, "checks": check}, nil
 }
 
 func (a *App) toolIngressFinalize(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	done, err := a.beginTenantOperation(getStr(args, "tenant_id"), "ingress cutover")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	t, err := a.directIngressTenant(args)
 	if err != nil {
 		return nil, err
@@ -538,6 +540,11 @@ func (a *App) toolIngressFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolIngressRollback(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	done, err := a.beginTenantOperation(getStr(args, "tenant_id"), "ingress cutover")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	t, err := a.directIngressTenant(args)
 	if err != nil {
 		return nil, err

@@ -238,6 +238,7 @@ func providerRecordingURL(provider string, raw json.RawMessage, format string) (
 }
 
 func downloadProviderMedia(ctx context.Context, rawURL, format, username, password string) (string, int64, error) {
+	limit := recordingDownloadLimit(ctx)
 	if err := validateProviderMediaURL(rawURL); err != nil {
 		return "", 0, err
 	}
@@ -248,9 +249,12 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 	if username != "" && password != "" {
 		req.SetBasicAuth(username, password)
 	}
-	client := &http.Client{Timeout: 10 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	client := &http.Client{Timeout: 10 * time.Minute, Transport: providerMediaTransport(), CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
 			return errors.New("too many recording redirects")
+		}
+		if len(via) > 0 && !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+			req.Header.Del("Authorization")
 		}
 		return validateProviderMediaURL(req.URL.String())
 	}}
@@ -263,8 +267,8 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return "", 0, fmt.Errorf("provider recording download returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
-	if resp.ContentLength > maxProviderRecordingBytes {
-		return "", 0, errors.New("provider recording exceeds the 2 GB limit")
+	if resp.ContentLength > limit {
+		return "", 0, errors.New("provider recording exceeds the download size limit")
 	}
 	tmp, err := os.CreateTemp("", "apteva-telephony-provider-recording-*."+recordingExtension(format))
 	if err != nil {
@@ -278,12 +282,12 @@ func downloadProviderMedia(ctx context.Context, rawURL, format, username, passwo
 			_ = os.Remove(path)
 		}
 	}()
-	written, err := io.Copy(tmp, io.LimitReader(resp.Body, maxProviderRecordingBytes+1))
+	written, err := io.Copy(tmp, io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return "", 0, err
 	}
-	if written <= 0 || written > maxProviderRecordingBytes {
-		return "", 0, errors.New("provider recording is empty or exceeds the 2 GB limit")
+	if written <= 0 || written > limit {
+		return "", 0, errors.New("provider recording is empty or exceeds the download size limit")
 	}
 	if err := tmp.Close(); err != nil {
 		return "", 0, err
@@ -353,4 +357,38 @@ func firstPositiveInt64(values ...any) int64 {
 func int64Arg(value string) int64 {
 	parsed, _ := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
 	return parsed
+}
+
+func providerMediaTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, address := range addresses {
+			ip := address.IP
+			if !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				return nil, errors.New("provider media host resolves to a disallowed address")
+			}
+		}
+		var last error
+		for _, address := range addresses {
+			conn, err := (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, net.JoinHostPort(address.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			last = err
+		}
+		if last == nil {
+			last = errors.New("provider media host has no addresses")
+		}
+		return nil, last
+	}
+	return transport
 }

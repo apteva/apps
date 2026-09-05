@@ -1,0 +1,213 @@
+schema: apteva-app/v1
+
+name: workspaces
+display_name: Workspaces
+version: 0.5.0
+description: |
+  Control room for durable development environments. Workspaces owns
+  lifecycle, assignment, TTL, command history, activity, and the operator
+  UI while the required Containers app owns Docker workloads, volumes,
+  command execution, and bounded logs. v0.4.0 adds a generic, app-only source
+  round trip: producers can refresh managed files without deleting caches,
+  export a filtered source snapshot, and acknowledge an applied revision.
+  v0.5.0 lets operators and originating apps select an allowlisted custom
+  container image per workspace while retaining approved runtime profiles.
+  v0.3.0 gives each workspace a persistent
+  PTY shell session inside its durable container, so current directory, exported
+  variables, installed tools, writable files, and background services remain
+  available to later commands.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/workspaces
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [workspaces, development, agents, containers, infrastructure]
+
+scopes: [project]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: containers
+      version: ">=0.4.0"
+      optional: false
+      reason: Owns each persistent Docker workspace, named volumes, stateful PTY shell execution, cancellation, and bounded logs used by Workspaces.
+
+provides:
+  permissions:
+    - name: workspaces.read
+      description: Read workspace metadata, commands, logs, usage, and activity.
+    - name: workspaces.write
+      description: Create and operate workspaces and their commands.
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: workspaces_create
+      description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
+      requires: workspaces.write
+    - name: workspaces_list
+      description: "List current-project workspaces. Args: status?, include_destroyed?, limit?."
+      requires: workspaces.read
+    - name: workspaces_get
+      description: "Fetch one workspace with its commands and recent activity. Args: workspace_id."
+      requires: workspaces.read
+    - name: workspace_command_start
+      description: "Run one asynchronous command through the workspace's persistent PTY shell. Current directory, exported variables, installed packages, system files, volumes, and background processes persist across commands. Prefer argv for standalone programs and shell_command for shell state or syntax. Args: workspace_id, argv? or shell_command?, working_directory?, timeout_s?."
+      requires: workspaces.write
+    - name: workspace_command_get
+      description: "Refresh and fetch one command. Args: workspace_id, command_id."
+      requires: workspaces.read
+    - name: workspace_command_logs
+      description: "Tail bounded logs for one command. Args: workspace_id, command_id, tail?."
+      requires: workspaces.read
+    - name: workspace_command_cancel
+      description: "Cancel one queued or running command. Args: workspace_id, command_id."
+      requires: workspaces.write
+    - name: workspace_stop
+      description: "Cancel any active command and stop the persistent workspace container while preserving its writable layer and volumes. Args: workspace_id."
+      requires: workspaces.write
+    - name: workspace_resume
+      description: "Resume a stopped workspace whose TTL has not expired. Args: workspace_id."
+      requires: workspaces.write
+    - name: workspace_extend
+      description: "Extend a workspace TTL from now. Expired workspaces become suspended and can then be resumed. Args: workspace_id, ttl_minutes."
+      requires: workspaces.write
+    - name: workspace_destroy
+      description: "Permanently destroy a workspace and its volumes. Requires confirm=true. Git safety is only authoritative when the originating app supplied dirty/unpushed state. Args: workspace_id, confirm."
+      requires: workspaces.write
+    - name: workspace_create_for_resource
+      description: "Create a workspace for a caller-owned resource with an optional allowlisted digest-pinned image override and bounded tar.gz source archive. Authenticated app callers only."
+      exposure: app_only
+    - name: workspace_context_update
+      description: "Update origin labels, navigation, and consumer-reported dirty/unpushed safety state. Authenticated originating app only."
+      exposure: app_only
+    - name: workspace_source_export
+      description: "Export a bounded tar.gz snapshot for the authenticated originating app. managed=true filters workspace state and build/dependency caches. Args: workspace_id, path?, managed?, exclude_paths?."
+      exposure: app_only
+    - name: workspace_source_sync
+      description: "Refresh caller-managed source files while preserving workspace caches and unrelated files. Authenticated originating app only."
+      exposure: app_only
+    - name: workspace_source_accept
+      description: "Record the source revision accepted by the originating app after it applies exported changes. Authenticated originating app only."
+      exposure: app_only
+  publishes:
+    - name: workspace.created
+      description: A development workspace became ready.
+    - name: workspace.command.started
+      description: A command was accepted for execution.
+    - name: workspace.command.completed
+      description: A workspace command reached a terminal state.
+    - name: workspace.suspended
+      description: A workspace container was stopped with its writable layer and volumes preserved.
+    - name: workspace.expired
+      description: A workspace TTL elapsed and the workspace was suspended.
+    - name: workspace.destroyed
+      description: A workspace and its attached volumes were permanently destroyed.
+  workers:
+    - name: workspace-reconcile
+      schedule: "@every 5s"
+    - name: workspace-expiry
+      schedule: "@every 1m"
+  ui_panels:
+    - slot: project.page
+      label: Workspaces
+      icon: square-terminal
+      entry: /ui/WorkspacesPanel.mjs
+  skills:
+    - name: how-to-use-workspaces
+      command: /workspaces
+      body_file: skills/how-to-use-workspaces.md
+      description: |
+        Operating protocol for durable development workspaces: create from an
+        approved profile, run one attributed command at a time, inspect bounded
+        logs and exit state, preserve container and volume state across commands,
+        extend TTL before expiry, and confirm destructive cleanup.
+      metadata:
+        category: development
+        icon: 🧰
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/workspaces
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/workspaces.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_profile
+    type: text
+    default: go
+    label: Default runtime profile
+    description: Approved profile used when workspace creation omits profile (go, bun, python, or apteva).
+  - name: go_image
+    type: text
+    default: golang:1.25-bookworm
+    label: Go workspace image
+    description: Container image for the approved Go profile.
+  - name: bun_image
+    type: text
+    default: oven/bun:1-debian
+    label: Bun workspace image
+    description: Container image for the approved Bun profile.
+  - name: python_image
+    type: text
+    default: python:3.13-bookworm
+    label: Python workspace image
+    description: Container image for the approved Python profile.
+  - name: apteva_image
+    type: text
+    default: ""
+    label: Apteva workspace image
+    description: Optional combined Go, Bun, and Python image for the approved Apteva profile.
+  - name: custom_image_prefixes
+    type: text
+    default: "ghcr.io/apteva/"
+    label: Allowed custom image prefixes
+    description: Comma or whitespace-separated prefixes accepted for per-workspace image overrides.
+  - name: custom_image_require_digest
+    type: boolean
+    default: true
+    label: Require immutable custom images
+    description: Require per-workspace image overrides to use an @sha256 digest.
+  - name: default_cpu
+    type: text
+    default: "2"
+    label: Default CPUs
+    description: CPU limit applied to newly created persistent workspace containers.
+  - name: default_memory_mb
+    type: text
+    default: "4096"
+    label: Default memory
+    description: Memory limit in MB for newly created workspaces.
+  - name: default_ttl_minutes
+    type: text
+    default: "120"
+    label: Default TTL
+    description: Minutes before an active workspace is automatically suspended.
+  - name: max_ttl_minutes
+    type: text
+    default: "480"
+    label: Maximum TTL
+    description: Maximum TTL accepted per creation or extension.
+  - name: expired_retention_minutes
+    type: text
+    default: "1440"
+    label: Expired retention
+    description: Minutes an expired workspace remains recoverable before its volumes are destroyed.
+  - name: default_command_timeout_seconds
+    type: text
+    default: "1800"
+    label: Command timeout
+    description: Default asynchronous command deadline in seconds.
+
+upgrade_policy: auto-patch

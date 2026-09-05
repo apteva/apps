@@ -4,7 +4,7 @@ description: Use CRM tools for contacts, customer conversations, lists, segments
 compatibility: Requires the CRM MCP tools supplied by an Apteva app installation.
 metadata:
   author: apteva
-  version: "1.0"
+  version: "1.2"
 ---
 
 # CRM
@@ -45,6 +45,12 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Use `contacts_set_conversation_status` only when the user asks to change
   workflow state or when the requested workflow clearly requires it.
 
+- Change primary addresses through `channels`; `primary_email` and `primary_phone`
+  are read-only mirrors. Include the contact's `updated_at` as
+  `expected_updated_at` in update patches, and reread on a stale-edit conflict.
+- Archived contacts remain readable and can be restored with `status: active`.
+  A merged record exposes `merged_into_id`; use the surviving contact for work.
+
 ## Lists, segments, and pipeline
 
 - Lists are explicit memberships. Segments are saved predicates or snapshots.
@@ -55,11 +61,23 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Use opportunity search for pipeline totals and current sales work. State the
   filters used when a count could otherwise be ambiguous.
 
+- Preserve declared JSON types in attribute predicates. Static segments populate
+  snapshots on creation and definition updates; `not_in_segment` accepts only
+  active static references from the same project.
+- Page list/segment evaluation using `next_after_contact_id` until an empty page.
+  Resolve an audience before sending; static membership alone is not eligibility.
+
 ## Messaging safety
 
 - `contacts_send_message`, `contacts_reply`, and `contacts_send_test` create
   real external messages. Call them only when the user explicitly requests a
   send or a previously approved workflow requires it.
+- Replies use the inbound message's Reply-To/From and receiving identity. Use
+  `reply_to_activity_id` for a specific inbound message; do not work around a
+  blocked reply route by silently sending to a different address.
+- `do_not_contact` blocks sending and audience eligibility. Delivery recovery
+  does not remove Messaging suppressions. Legacy messages with unknown source
+  installation retain local history but omit remote status enrichment.
 - For free-form sends, pass `body` and omit `template_id`, `content_sid`,
   `template_vars`, and every other unused optional field. Never manufacture
   placeholders such as `template_id: 0`, `list_id: 0`, or empty strings/maps.
@@ -69,6 +87,29 @@ customer conversations, lists, segments, opportunities, and pipelines.
   placeholder message merely to test whether a sender is configured.
 - Preserve returned delivery, threading, and deduplication information in the
   user-facing result.
+- Each stored email or phone channel can include per-transport `deliverability`
+  state. Treat `messageable: false` as authoritative for CRM selection; an
+  email, SMS route, or WhatsApp route may be blocked without deactivating the
+  contact or the phone's other transport.
+- `contacts_list_messageable` already excludes suppressed, quarantined, hard
+  bounced, complained, and unsubscribed routes for the requested transport.
+- `contacts_resolve_audience` is the paginated bulk contract for downstream
+  apps. It evaluates one segment, list, or contact for a selected transport,
+  returns healthy resolved addresses, and reports exact raw, eligible, and
+  excluded counts without exposing CRM tables.
+
+## Email verification
+
+- Contact writes may return `email_verifications` for new or changed email
+  channels. Treat these as address-validity annotations, not Messaging delivery
+  state and not proof that the
+  contact owns the address; `verified_at` has separate semantics.
+- Do not repeatedly verify an unchanged address. Use `contacts_verify_email`
+  only when the user asks for a recheck or current delivery evidence matters.
+- The optional SMTP probe contacts recipient mail servers and may be slower or
+  inconclusive. Set `smtp: true` only for an explicitly requested deeper check.
+- Never replace an address with `suggested_value` automatically. Present the
+  suggestion to the user for review.
 
 ## Reporting
 

@@ -70,7 +70,7 @@ func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (
 	}
 
 	client, err := minio.New(resolved.endpoint, &minio.Options{
-		Creds:  credentials.NewStaticV4(resolved.accessKey, resolved.secretKey, ""),
+		Creds:  credentials.New(&refreshingS3Credentials{app: ctx, connectionID: bound.ConnectionID, location: *resolved, value: credentials.Value{AccessKeyID: resolved.accessKey, SecretAccessKey: resolved.secretKey, SignerType: credentials.SignatureV4}, expires: time.Now().Add(5 * time.Minute)}),
 		Secure: resolved.useSSL,
 		Region: resolved.region,
 		BucketLookup: func() minio.BucketLookupType {
@@ -228,17 +228,71 @@ func (s *s3Backend) Delete(ctx context.Context, key string) error {
 }
 
 func (s *s3Backend) Stat(ctx context.Context, key string) (int64, error) {
+	info, err := s.HeadObject(ctx, key)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size, nil
+}
+
+func (s *s3Backend) HeadObject(ctx context.Context, key string) (ObjectMetadata, error) {
 	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		// minio-go returns a typed error — map "NoSuchKey" / 404 to
 		// our generic ErrNotFound so callers can decide.
 		errResp := minio.ToErrorResponse(err)
 		if errResp.StatusCode == 404 || errResp.Code == "NoSuchKey" {
-			return 0, ErrNotFound
+			return ObjectMetadata{}, ErrNotFound
 		}
-		return 0, fmt.Errorf("s3 stat %s: %w", key, err)
+		return ObjectMetadata{}, fmt.Errorf("s3 stat %s: %w", key, err)
 	}
-	return info.Size, nil
+	return ObjectMetadata{
+		Size: info.Size, ContentType: info.ContentType, ETag: info.ETag, LastModified: info.LastModified,
+	}, nil
+}
+
+func (s *s3Backend) OpenObject(ctx context.Context, key string, options ObjectReadOptions) (*ObjectReadResult, error) {
+	getOptions := minio.GetObjectOptions{}
+	if options.Range != "" {
+		getOptions.Set("Range", options.Range)
+	}
+	core := minio.Core{Client: s.client}
+	body, info, headers, err := core.GetObject(ctx, s.bucket, key, getOptions)
+	if err != nil {
+		errResp := minio.ToErrorResponse(err)
+		switch {
+		case errResp.StatusCode == http.StatusNotFound || errResp.Code == "NoSuchKey":
+			return nil, ErrNotFound
+		case errResp.StatusCode == http.StatusRequestedRangeNotSatisfiable || errResp.Code == "InvalidRange":
+			return nil, ErrRangeNotSatisfiable
+		default:
+			return nil, fmt.Errorf("s3 get %s: %w", key, err)
+		}
+	}
+	status := http.StatusOK
+	contentRange := headers.Get("Content-Range")
+	if contentRange != "" {
+		status = http.StatusPartialContent
+	}
+	contentLength := info.Size
+	if raw := headers.Get("Content-Length"); raw != "" {
+		if parsed, parseErr := strconv.ParseInt(raw, 10, 64); parseErr == nil {
+			contentLength = parsed
+		}
+	}
+	contentType := headers.Get("Content-Type")
+	if contentType == "" {
+		contentType = info.ContentType
+	}
+	etag := headers.Get("ETag")
+	if etag == "" {
+		etag = info.ETag
+	}
+	return &ObjectReadResult{
+		Body: body, StatusCode: status, ContentLength: contentLength,
+		ContentRange: contentRange, ContentType: contentType, ETag: etag,
+		LastModified: info.LastModified,
+	}, nil
 }
 
 // LocalPath always returns ("", false) for s3 — callers MUST switch

@@ -60,6 +60,51 @@ func TestNormalizeSessionEnvironmentPreservesIntentionalZeroCoordinates(t *testi
 	}
 }
 
+func TestNormalizeSavedContextOpenDropsOnlyGeneratedEnvironmentDefaults(t *testing.T) {
+	tests := map[string]any{
+		"null":  nil,
+		"empty": map[string]any{},
+		"generated schema values": map[string]any{
+			"user_agent": "", "locale": "", "languages": []any{}, "timezone": "UTC",
+			"geolocation":         map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+			"device_scale_factor": 0.5, "mobile": false, "touch": false, "max_touch_points": 1.0,
+		},
+	}
+	for name, environment := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(map[string]any{
+				"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+				"environment": environment,
+			})
+			if _, exists := got["environment"]; exists {
+				t.Fatalf("generated environment was not removed from saved-context open: %#v", got)
+			}
+			if got["context_name"] != "Alexa Patreon" || got["url"] != "https://www.patreon.com/c/alexaentranced" {
+				t.Fatalf("saved-context identity changed: %#v", got)
+			}
+			if environment != nil && !slices.Contains(diagnostics.IgnoredArguments, "environment") {
+				t.Fatalf("environment omission was not diagnosed: %+v", diagnostics)
+			}
+		})
+	}
+
+	material := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "context_name": "Alexa Patreon",
+		"environment": map[string]any{"timezone": "Europe/Paris"},
+	})
+	if got := material["environment"].(map[string]any)["timezone"]; got != "Europe/Paris" {
+		t.Fatalf("materially different environment was discarded: %#v", material)
+	}
+
+	authorizedDefaults := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "environment_override": true,
+		"environment": map[string]any{"timezone": "UTC", "geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0}},
+	})
+	if _, exists := authorizedDefaults["environment"]; !exists {
+		t.Fatalf("explicitly authorized environment was discarded: %#v", authorizedDefaults)
+	}
+}
+
 func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	previous := newBackend
 	t.Cleanup(func() { newBackend = previous })
@@ -69,6 +114,10 @@ func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	}
 
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := dbCreateContext(ctx.AppDB(), contextCreateInput{Name: "Saved Login", Backend: "browserbase", ProviderContextID: "saved-login", PersistDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	out, err := app.toolBrowserSession(ctx, map[string]any{
 		"action": "open", "auto_create_context": false, "backend": "local",
@@ -110,6 +159,52 @@ func TestBrowserSessionFiltersProductionStyleSynthesizedTemplate(t *testing.T) {
 	}
 }
 
+func agents0412GeneratedAlexaOpenArgs() map[string]any {
+	return map[string]any{
+		"action": "open", "auto_create_context": false, "backend": "local",
+		"context_id": "", "context_name": "Alexa Patreon", "persist": false,
+		"environment_override": false,
+		"presentation_mode":    "fast", "provider_context_id": "", "proxy_country": "",
+		"proxy_mode": "auto", "proxy_profile": "", "proxy_sticky": "rotating",
+		"session_id": "", "tab_id": "", "timeout": float64(60),
+		"url":      "https://www.patreon.com/c/alexaentranced",
+		"viewport": map[string]any{"width": float64(1600), "height": float64(800)},
+		"environment": map[string]any{
+			"device_scale_factor": float64(1),
+			"geolocation": map[string]any{
+				"accuracy": float64(100), "latitude": float64(0), "longitude": float64(0), "permission": "prompt",
+			},
+			"languages": []any{}, "locale": "", "max_touch_points": float64(1),
+			"mobile": false, "timezone": "", "touch": false, "user_agent": "",
+		},
+	}
+}
+
+func TestNormalizeAgents0412GeneratedSessionBundleDropsMinimumTimeout(t *testing.T) {
+	got, diagnostics := normalizeBrowserSessionArgsWithDiagnostics(agents0412GeneratedAlexaOpenArgs())
+	for _, key := range []string{"backend", "environment", "environment_override", "persist", "presentation_mode", "proxy_mode", "proxy_sticky", "timeout", "viewport"} {
+		if _, exists := got[key]; exists {
+			t.Errorf("generated %q survived normalization: %#v", key, got)
+		}
+		if !slices.Contains(diagnostics.IgnoredArguments, key) {
+			t.Errorf("generated %q missing from diagnostics: %+v", key, diagnostics)
+		}
+	}
+	if got["context_name"] != "Alexa Patreon" || got["url"] != "https://www.patreon.com/c/alexaentranced" {
+		t.Fatalf("request identity changed: %#v", got)
+	}
+	if len(diagnostics.Warnings) != 1 || !strings.Contains(diagnostics.Warnings[0], "session-lifetime") {
+		t.Fatalf("lifetime warning missing: %+v", diagnostics)
+	}
+
+	explicit := normalizeBrowserSessionArgs(map[string]any{
+		"action": "open", "backend": "browserbase", "timeout": float64(60),
+	})
+	if got := intArg(explicit, "timeout"); got != 60 {
+		t.Fatalf("independent explicit timeout changed: got %d, args=%#v", got, explicit)
+	}
+}
+
 func TestBrowserSessionRejectsUnsupportedArgumentsAndUnsafeScale(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	app := &App{reg: &registry{m: map[string]*session{}}}
@@ -118,7 +213,7 @@ func TestBrowserSessionRejectsUnsupportedArgumentsAndUnsafeScale(t *testing.T) {
 		t.Fatalf("unknown argument should return a typed error: %v", err)
 	}
 	if _, err := app.toolBrowserSession(ctx, map[string]any{
-		"action": "open", "environment": map[string]any{"device_scale_factor": float64(0.1)},
+		"action": "open", "environment_override": true, "environment": map[string]any{"device_scale_factor": float64(0.1)},
 	}); err == nil || !strings.Contains(err.Error(), "between 0.5 and 4") {
 		t.Fatalf("unsafe explicit device scale should be rejected: %v", err)
 	}

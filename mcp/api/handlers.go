@@ -7,11 +7,13 @@ import (
 	"errors"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -20,12 +22,12 @@ import (
 func (a *App) handleAPIs(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		pid, err := projectFromRequest(r)
+		pid, err := a.projectFromRequest(r)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		rows, err := dbListAPIs(globalCtx.AppDB(), pid)
+		rows, err := dbListAPIs(a.ctx.AppDB(), pid)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -33,11 +35,16 @@ func (a *App) handleAPIs(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"apis": rows, "count": len(rows)})
 	case http.MethodPost:
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeManagementBody(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		res, err := a.toolAPICreate(globalCtx, body)
+		ctx, err := a.managementContext(r, body)
+		if err != nil {
+			httpErr(w, http.StatusForbidden, err.Error())
+			return
+		}
+		res, err := a.toolAPICreate(ctx, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -61,7 +68,12 @@ func (a *App) handleAPIItem(w http.ResponseWriter, r *http.Request) {
 	} else {
 		args["slug"] = parts[0]
 	}
-	api, err := a.resolveAPI(globalCtx, args)
+	ctx, err := a.managementContext(r, args)
+	if err != nil {
+		httpErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	api, err := a.resolveAPI(ctx, args)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
@@ -73,7 +85,11 @@ func (a *App) handleAPIItem(w http.ResponseWriter, r *http.Request) {
 		case "keys":
 			a.handleAPIKeys(w, r, api)
 		case "logs":
-			logs, err := dbListLogs(globalCtx.AppDB(), api.ProjectID, api.ID, atoiDefault(r.URL.Query().Get("limit"), 100))
+			if r.Method != http.MethodGet {
+				httpErr(w, http.StatusMethodNotAllowed, "GET")
+				return
+			}
+			logs, err := dbListLogsBefore(a.ctx.AppDB(), api.ProjectID, api.ID, atoiDefault(r.URL.Query().Get("limit"), 100), int64(atoiDefault(r.URL.Query().Get("before_id"), 0)))
 			if err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -89,20 +105,20 @@ func (a *App) handleAPIItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"api": api})
 	case http.MethodPatch, http.MethodPut:
 		var patch map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		if err := decodeManagementBody(w, r, &patch); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		patch["project_id"] = api.ProjectID
 		patch["id"] = api.ID
-		res, err := a.toolAPIUpdate(globalCtx, patch)
+		res, err := a.toolAPIUpdate(a.ctx.WithProject(api.ProjectID), patch)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		httpJSON(w, res)
 	case http.MethodDelete:
-		res, err := a.toolAPIDelete(globalCtx, map[string]any{"project_id": api.ProjectID, "id": api.ID})
+		res, err := a.toolAPIDelete(a.ctx.WithProject(api.ProjectID), map[string]any{"project_id": api.ProjectID, "id": api.ID})
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -116,7 +132,7 @@ func (a *App) handleAPIItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleAPIRoutes(w http.ResponseWriter, r *http.Request, api *API) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := dbListRoutes(globalCtx.AppDB(), api.ProjectID, api.ID)
+		rows, err := dbListRoutes(a.ctx.AppDB(), api.ProjectID, api.ID)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -124,13 +140,13 @@ func (a *App) handleAPIRoutes(w http.ResponseWriter, r *http.Request, api *API) 
 		httpJSON(w, map[string]any{"routes": rows, "count": len(rows)})
 	case http.MethodPost:
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeManagementBody(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
 		body["project_id"] = api.ProjectID
 		body["api_id"] = api.ID
-		res, err := a.toolRouteAdd(globalCtx, body)
+		res, err := a.toolRouteAdd(a.ctx.WithProject(api.ProjectID), body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -144,7 +160,7 @@ func (a *App) handleAPIRoutes(w http.ResponseWriter, r *http.Request, api *API) 
 func (a *App) handleAPIKeys(w http.ResponseWriter, r *http.Request, api *API) {
 	switch r.Method {
 	case http.MethodGet:
-		keys, err := dbListAPIKeys(globalCtx.AppDB(), api.ProjectID, api.ID)
+		keys, err := dbListAPIKeys(a.ctx.AppDB(), api.ProjectID, api.ID)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -152,16 +168,17 @@ func (a *App) handleAPIKeys(w http.ResponseWriter, r *http.Request, api *API) {
 		httpJSON(w, map[string]any{"keys": keys, "count": len(keys)})
 	case http.MethodPost:
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeManagementBody(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		key, secret, err := dbCreateAPIKey(globalCtx.AppDB(), api.ProjectID, api.ID, stringArg(body, "name", "default"))
+		body["api_id"] = api.ID
+		result, err := a.toolKeyCreate(a.ctx.WithProject(api.ProjectID), body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		httpJSON(w, map[string]any{"key": key, "secret": secret})
+		httpJSON(w, result)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
 	}
@@ -176,7 +193,7 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 		Tool string         `json:"tool"`
 		Args map[string]any `json:"args"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeManagementBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -187,11 +204,12 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 	if body.Args == nil {
 		body.Args = map[string]any{}
 	}
-	if _, ok := body.Args["project_id"]; !ok {
-		if pid, err := projectFromRequest(r); err == nil {
-			body.Args["project_id"] = pid
-		}
+	ctx, err := a.managementContext(r, body.Args)
+	if err != nil {
+		httpErr(w, http.StatusForbidden, err.Error())
+		return
 	}
+
 	var handler sdk.ToolHandler
 	for _, t := range a.MCPTools() {
 		if t.Name == body.Tool {
@@ -203,7 +221,7 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "unknown tool: "+body.Tool)
 		return
 	}
-	out, err := handler(globalCtx, body.Args)
+	out, err := handler(ctx, body.Args)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -213,13 +231,30 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
-	pid, err := projectFromRequest(r)
+	if a.requestSlots != nil {
+		select {
+		case a.requestSlots <- struct{}{}:
+			defer func() { <-a.requestSlots }()
+		default:
+			httpErr(w, 429, "gateway concurrency limit reached")
+			return
+		}
+	}
+	if r.ContentLength > maxRequestBytes {
+		httpErr(w, 413, "request body too large")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	controller := http.NewResponseController(w)
+	_ = controller.SetReadDeadline(time.Now().Add(bodyTimeout))
+	defer controller.SetReadDeadline(time.Time{})
+	pid, err := a.projectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	host := hostOnly(r.Host)
-	gwPath := strings.TrimPrefix(r.URL.Path, "/gw")
+	gwPath := strings.TrimPrefix(r.URL.EscapedPath(), "/gw")
 	if gwPath == "" {
 		gwPath = "/"
 	}
@@ -228,10 +263,11 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	logRow := RequestLog{ProjectID: pid, APIID: api.ID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500}
+	logRow := RequestLog{ProjectID: pid, APIID: api.ID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500, RequestID: newRequestID()}
 	defer func() {
 		logRow.DurationMS = time.Since(start).Milliseconds()
-		dbInsertLog(globalCtx.AppDB(), logRow)
+		logRow.Error = redactErrorText(logRow.Error)
+		enqueueRequestLog(a.ctx.AppDB(), logRow)
 	}()
 	if api.Status != "active" {
 		logRow.StatusCode = http.StatusServiceUnavailable
@@ -244,9 +280,9 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	if preflight {
 		requestMethod = strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
 	}
-	route, params, err := dbMatchRoute(globalCtx.AppDB(), pid, api.ID, requestMethod, publicPath)
+	route, params, err := dbMatchRoute(a.ctx.AppDB(), pid, api.ID, requestMethod, publicPath)
 	if err != nil {
-		logRow.Error = err.Error()
+		logRow.Error = safeUpstreamError(err)
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -261,7 +297,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	corsWriter, handled, err := prepareGatewayCORS(w, r, api, route, requestMethod, preflight)
 	if err != nil {
 		logRow.StatusCode = http.StatusForbidden
-		logRow.Error = err.Error()
+		logRow.Error = safeUpstreamError(err)
 		httpErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -275,20 +311,57 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	logRow.Subject = authCtx.Subject
 	if err != nil {
 		logRow.StatusCode = http.StatusUnauthorized
-		logRow.Error = err.Error()
+		logRow.Error = safeUpstreamError(err)
 		httpErr(w, http.StatusUnauthorized, err.Error())
 		return
+	}
+	w.Header().Set("X-Request-ID", logRow.RequestID)
+	if route.TargetKind == "app_events" {
+		// Share the mutation lock with revocation so a stream cannot register
+		// after the mutation canceled its older credentials/configuration.
+		a.mutationMu.Lock()
+		freshAPI, loadErr := dbGetPublicAPI(a.ctx.AppDB(), pid, "id", api.ID)
+		freshRoute, routeErr := dbGetRouteByID(a.ctx.AppDB(), pid, route.ID)
+		if loadErr != nil || routeErr != nil || freshAPI == nil || freshRoute == nil || freshAPI.Status != "active" || !freshRoute.Enabled || *freshAPI != *api || *freshRoute != *route {
+			a.mutationMu.Unlock()
+			httpErr(w, 503, "stream route unavailable")
+			logRow.StatusCode = 503
+			return
+		}
+		verified, authErr := a.authorizeRequest(r, freshAPI, freshRoute)
+		if authErr != nil {
+			a.mutationMu.Unlock()
+			httpErr(w, 401, "stream authorization rejected")
+			logRow.StatusCode = 401
+			return
+		}
+		streamCtx, done, registerErr := a.streams.register(r.Context(), pid, api.ID, route.ID, verified.KeyID, verified.ExpiresAt)
+		a.mutationMu.Unlock()
+		if registerErr != nil {
+			httpErr(w, 429, registerErr.Error())
+			logRow.StatusCode = 429
+			return
+		}
+		defer done()
+		r = r.WithContext(streamCtx)
+		api = freshAPI
+		route = freshRoute
+		authCtx = verified
 	}
 	status, err := a.dispatchRoute(w, r, api, route, publicPath, params, authCtx)
 	logRow.StatusCode = status
 	if err != nil {
-		logRow.Error = err.Error()
+		logRow.Error = safeUpstreamError(err)
+		var transfer *responseTransferError
+		if errors.As(err, &transfer) {
+			panic(http.ErrAbortHandler)
+		}
 	}
 }
 
 func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, string, error) {
 	if host != "" {
-		if api, err := dbGetAPIByHostname(globalCtx.AppDB(), pid, host); err != nil {
+		if api, err := dbGetPublicAPI(a.ctx.AppDB(), pid, "hostname", host); err != nil {
 			return nil, "", err
 		} else if api != nil {
 			return api, path, nil
@@ -298,7 +371,7 @@ func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, s
 	if len(parts) == 0 {
 		return nil, "", errors.New("api slug required")
 	}
-	api, err := dbGetAPIBySlug(globalCtx.AppDB(), pid, parts[0])
+	api, err := dbGetPublicAPI(a.ctx.AppDB(), pid, "slug", parts[0])
 	if err != nil || api == nil {
 		return nil, "", errors.New("api not found")
 	}
@@ -310,13 +383,17 @@ func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, s
 }
 
 type authContext struct {
-	Kind    string
-	Subject string
+	Kind      string    `json:"kind"`
+	Subject   string    `json:"subject"`
+	KeyID     int64     `json:"-"`
+	ExpiresAt time.Time `json:"-"`
 }
 
 func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (authContext, error) {
-	policy := effectiveJSON(api.AuthJSON, route.AuthJSON)
-	kind := stringFromMap(policy, "kind", "public")
+	kind, err := effectiveAuthKind(api.AuthJSON, route.AuthJSON)
+	if err != nil {
+		return authContext{}, err
+	}
 	if route.TargetKind == "app_events" && (kind == "" || kind == "public") {
 		return authContext{Kind: "public"}, errors.New("app_events routes require api_key or auth_jwt authentication")
 	}
@@ -335,23 +412,25 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 		if key == "" {
 			key = bearerToken(r.Header.Get("Authorization"))
 		}
-		ok, err := dbValidateAPIKey(globalCtx.AppDB(), api.ProjectID, api.ID, key)
+		keyID, ok, err := validateAPIKey(a.ctx.AppDB(), api.ProjectID, api.ID, key)
 		if err != nil {
 			return authContext{Kind: "api_key"}, err
 		}
 		if !ok {
 			return authContext{Kind: "api_key"}, errors.New("invalid api key")
 		}
-		return authContext{Kind: "api_key", Subject: "api_key"}, nil
+		return authContext{Kind: "api_key", Subject: "api_key", KeyID: keyID}, nil
 	case "auth_jwt":
 		subject, err := a.verifyAuthJWT(r, api.ProjectID)
-		return authContext{Kind: "auth_jwt", Subject: subject}, err
+		return authContext{Kind: "auth_jwt", Subject: subject, ExpiresAt: bearerExpiry(r)}, err
 	default:
 		return authContext{Kind: kind}, errors.New("unknown auth policy")
 	}
 }
 
 func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
+	r, cancel := withAuthDeadline(r)
+	defer cancel()
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
 		return "", errors.New("missing bearer token")
@@ -366,29 +445,36 @@ func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.performRequest(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	body, readErr := readBounded(resp.Body, 1<<20)
+	if readErr != nil {
+		return "", errors.New("invalid Auth response")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", errors.New("auth jwt rejected")
 	}
 	var out map[string]any
-	_ = json.Unmarshal(body, &out)
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if decoder.Decode(&out) != nil {
+		return "", errors.New("invalid Auth response")
+	}
 	if user, _ := out["user"].(map[string]any); user != nil {
 		if s, _ := user["id"].(string); s != "" {
 			return s, nil
 		}
-		if f, _ := user["id"].(float64); f != 0 {
-			return strconv.FormatInt(int64(f), 10), nil
+		if n, ok := user["id"].(json.Number); ok {
+			if id, err := n.Int64(); err == nil && id > 0 {
+				return strconv.FormatInt(id, 10), nil
+			}
 		}
-		if email, _ := user["email"].(string); email != "" {
-			return email, nil
-		}
+
 	}
-	return "auth_user", nil
+	return "", errors.New("Auth response is missing user identity")
 }
 
 func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute, publicPath string, params map[string]string, auth authContext) (int, error) {
@@ -411,12 +497,21 @@ func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, ro
 }
 
 func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute, publicPath string, params map[string]string, auth authContext) (int, error) {
-	raw, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	raw, readErr := readBounded(r.Body, maxFunctionBytes)
+	if readErr != nil {
+		code := http.StatusBadRequest
+		var sizeErr *http.MaxBytesError
+		if errors.As(readErr, &sizeErr) {
+			code = http.StatusRequestEntityTooLarge
+		}
+		httpErr(w, code, "invalid or oversized function request")
+		return code, readErr
+	}
 	event := map[string]any{
 		"method":      r.Method,
 		"path":        publicPath,
 		"headers":     publicHeaders(r.Header),
-		"query":       queryMap(r.URL.Query()),
+		"query":       queryMap(sanitizedQuery(r.URL.Query())),
 		"params":      params,
 		"raw_body":    string(raw),
 		"auth":        auth,
@@ -453,7 +548,7 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 		req.Header.Set("Accept", accept)
 	}
 
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.performRequest(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			httpErr(w, http.StatusGatewayTimeout, err.Error())
@@ -471,28 +566,27 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 			return resp.StatusCode, err
 		}
 		if err := copyResponseStream(w, resp.Body); err != nil {
-			return resp.StatusCode, err
+			return resp.StatusCode, &responseTransferError{err}
 		}
 		return resp.StatusCode, nil
 	}
 
-	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	responseBody, readErr := readBounded(resp.Body, maxFunctionResponseBytes)
 	if readErr != nil {
 		httpErr(w, http.StatusBadGateway, readErr.Error())
 		return http.StatusBadGateway, readErr
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := functionUpstreamError(responseBody)
-		httpErr(w, http.StatusBadGateway, msg)
-		return http.StatusBadGateway, errors.New(msg)
-	}
 	if len(responseBody) == 0 {
-		w.WriteHeader(http.StatusNoContent)
-		return http.StatusNoContent, nil
+		copyUpstreamResponseHeaders(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		return resp.StatusCode, nil
 	}
 	rawResp := json.RawMessage(responseBody)
-	if json.Valid(rawResp) && writeStructuredResponse(w, rawResp) {
-		return statusFromStructured(rawResp, http.StatusOK), nil
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && json.Valid(rawResp) {
+		capture := &statusCapture{ResponseWriter: w}
+		if writeStructuredResponse(capture, rawResp) {
+			return capture.status, nil
+		}
 	}
 	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	if json.Valid(rawResp) {
@@ -501,8 +595,8 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	}
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(responseBody)
-	return resp.StatusCode, nil
+	_, writeErr := w.Write(responseBody)
+	return resp.StatusCode, writeErr
 }
 
 func outboundAppToken() string {
@@ -534,6 +628,8 @@ func functionUpstreamError(body []byte) string {
 }
 
 func copyUpstreamResponseHeaders(dst, src http.Header) {
+	src = src.Clone()
+	stripHopHeaders(src)
 	for key, values := range src {
 		if !proxyResponseHeaderAllowed(key) {
 			continue
@@ -564,11 +660,17 @@ func flushResponse(w http.ResponseWriter) error {
 	return err
 }
 
+var responseBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
+
 func copyResponseStream(w http.ResponseWriter, src io.Reader) error {
-	buf := make([]byte, 32*1024)
+	defer http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	buffer := responseBuffers.Get().(*[32 * 1024]byte)
+	defer responseBuffers.Put(buffer)
+	buf := buffer[:]
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
+			_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
 			if _, err := w.Write(buf[:n]); err != nil {
 				return err
 			}
@@ -596,23 +698,31 @@ func (a *App) dispatchHTTP(w http.ResponseWriter, r *http.Request, route *APIRou
 
 func (a *App) dispatchApp(w http.ResponseWriter, r *http.Request, route *APIRoute, publicPath string) (int, error) {
 	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
-	token := os.Getenv("APTEVA_APP_TOKEN")
+	token := outboundAppToken()
 	if base == "" || token == "" {
-		httpErr(w, http.StatusBadGateway, "APTEVA_GATEWAY_URL/APTEVA_APP_TOKEN required for app targets")
-		return http.StatusBadGateway, errors.New("gateway env missing")
+		httpErr(w, 502, "gateway configuration missing")
+		return 502, errors.New("gateway configuration missing")
 	}
 	targetPath := route.TargetPath
 	if targetPath == "" {
 		targetPath = publicPath
 	}
-	u := base + "/api/apps/" + url.PathEscape(route.TargetRef) + targetPath
-	if r.URL.RawQuery != "" {
-		u += "?" + r.URL.RawQuery
+	q := sanitizedQuery(r.URL.Query())
+	q.Set("project_id", route.ProjectID)
+	u, err := joinTarget(base+"/api/apps/callback/apps/"+url.PathEscape(route.TargetRef)+"/proxy", targetPath, publicPath, q.Encode())
+	if err != nil {
+		httpErr(w, 502, "invalid app target")
+		return 502, err
 	}
 	req, err := cloneProxyRequest(r, u)
 	if err != nil {
-		return http.StatusBadGateway, err
+		httpErr(w, 502, "invalid app request")
+		return 502, err
 	}
+	// joinTarget removes public routing metadata. Set the resolved project after sanitation.
+	values := req.URL.Query()
+	values.Set("project_id", route.ProjectID)
+	req.URL.RawQuery = values.Encode()
 	req.Header.Set("Authorization", "Bearer "+token)
 	return a.doProxy(w, req)
 }
@@ -626,31 +736,54 @@ func (a *App) proxyRequest(w http.ResponseWriter, r *http.Request, target string
 	return a.doProxy(w, req)
 }
 
+func (a *App) performRequest(req *http.Request) (*http.Response, error) {
+	client := *a.httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return client.Do(req)
+}
 func (a *App) doProxy(w http.ResponseWriter, req *http.Request) (int, error) {
-	resp, err := a.httpClient.Do(req)
+	resp, err := a.performRequest(req)
 	if err != nil {
-		httpErr(w, http.StatusBadGateway, err.Error())
-		return http.StatusBadGateway, err
+		code := 502
+		var size *http.MaxBytesError
+		if errors.As(err, &size) {
+			code = 413
+		} else if errors.Is(err, context.DeadlineExceeded) {
+			code = 504
+		}
+		httpErr(w, code, "upstream request failed")
+		return code, err
 	}
 	defer resp.Body.Close()
-	copyHeaders(w.Header(), resp.Header)
+	if resp.StatusCode == 101 {
+		httpErr(w, 502, "protocol upgrades are not supported")
+		return 502, errors.New("unsupported upstream upgrade")
+	}
+	copyUpstreamResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	// Known-size ordinary responses send headers with the first body chunk.
+	// Streams still expose headers immediately, before an event arrives.
+	if resp.ContentLength < 0 || functionResponseIsStreaming(resp) {
+		if err := flushResponse(w); err != nil {
+			return resp.StatusCode, &responseTransferError{err}
+		}
+	}
+	err = copyResponseStream(w, resp.Body)
+	if err != nil {
+		return resp.StatusCode, &responseTransferError{err}
+	}
 	return resp.StatusCode, nil
 }
-
 func cloneProxyRequest(r *http.Request, target string) (*http.Request, error) {
-	var body io.Reader
-	if r.Body != nil {
-		b, _ := io.ReadAll(r.Body)
-		body = bytes.NewReader(b)
+	if r.Header.Get("Upgrade") != "" {
+		return nil, errors.New("protocol upgrades are not supported")
 	}
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
 		return nil, err
 	}
-	copyHeaders(req.Header, r.Header)
-	req.Header.Del("Host")
+	req.ContentLength = r.ContentLength
+	req.Header = sanitizedHeaders(r.Header)
 	return req, nil
 }
 
@@ -668,12 +801,29 @@ func joinTarget(base, targetPath, publicPath, rawQuery string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return "", errors.New("invalid upstream URL")
+	}
 	p := targetPath
 	if p == "" {
 		p = publicPath
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/" + strings.TrimLeft(p, "/")
-	u.RawQuery = rawQuery
+	escaped := strings.TrimRight(u.EscapedPath(), "/") + "/" + strings.TrimLeft(p, "/")
+	decoded, err := url.PathUnescape(escaped)
+	if err != nil {
+		return "", err
+	}
+	u.Path = decoded
+	u.RawPath = escaped
+	supplied, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", err
+	}
+	q := sanitizedQuery(u.Query())
+	for k, v := range sanitizedQuery(supplied) {
+		q[k] = v
+	}
+	u.RawQuery = q.Encode()
 	return u.String(), nil
 }
 
@@ -686,12 +836,24 @@ func effectiveJSON(apiJSON, routeJSON string) map[string]any {
 	for k, v := range route {
 		base[k] = v
 	}
+	if _, ok := route["origins"]; ok {
+		delete(base, "allow_origin")
+	}
+	if _, ok := route["allow_origin"]; ok {
+		delete(base, "origins")
+	}
+	if _, ok := route["credentials"]; ok {
+		delete(base, "allow_credentials")
+	}
 	return base
 }
 
 func parseJSONObj(s string) map[string]any {
 	out := map[string]any{}
 	_ = json.Unmarshal([]byte(defaultJSON(s)), &out)
+	if out == nil {
+		out = map[string]any{}
+	}
 	return out
 }
 
@@ -703,56 +865,90 @@ func stringFromMap(m map[string]any, key, def string) string {
 }
 
 func writeStructuredResponse(w http.ResponseWriter, raw json.RawMessage) bool {
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
 		return false
 	}
+	// A body field alone is ordinary application JSON, not an envelope.
 	if _, ok := obj["statusCode"]; !ok {
-		if _, ok := obj["body"]; !ok {
-			return false
-		}
+		return false
 	}
-	code := statusFromStructured(raw, http.StatusOK)
-	if headers, _ := obj["headers"].(map[string]any); headers != nil {
-		for k, v := range headers {
-			if s, ok := v.(string); ok {
-				w.Header().Set(k, s)
+	code := statusFromStructured(raw, 0)
+	if code < 200 || code > 599 {
+		httpErr(w, 502, "invalid function response status")
+		return true
+	}
+	var headers map[string]any
+	if value, ok := obj["headers"]; ok && json.Unmarshal(value, &headers) != nil {
+		httpErr(w, 502, "invalid function headers")
+		return true
+	}
+	candidate := make(http.Header)
+	for key, value := range headers {
+		if !validHTTPToken(key) {
+			httpErr(w, 502, "invalid function header name")
+			return true
+		}
+		switch v := value.(type) {
+		case string:
+			if !validHeaderValue(v) {
+				httpErr(w, 502, "invalid function header value")
+				return true
 			}
+			candidate.Set(key, v)
+		case []any:
+			for _, item := range v {
+				str, ok := item.(string)
+				if !ok {
+					httpErr(w, 502, "invalid function header value")
+					return true
+				}
+				candidate.Add(key, str)
+			}
+		default:
+			httpErr(w, 502, "invalid function header value")
+			return true
 		}
 	}
+	copyUpstreamResponseHeaders(w.Header(), candidate)
 	body := obj["body"]
-	if code != 0 {
+	var text string
+	if json.Unmarshal(body, &text) == nil {
 		w.WriteHeader(code)
-	}
-	switch b := body.(type) {
-	case string:
-		_, _ = w.Write([]byte(b))
-	default:
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(b)
+		if code != 204 && code != 304 {
+			_, _ = io.WriteString(w, text)
+		}
+	} else {
+		if w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", "application/json")
+		}
+		w.WriteHeader(code)
+		if len(body) > 0 && code != 204 && code != 304 {
+			_, _ = w.Write(body)
+		}
 	}
 	return true
 }
-
 func statusFromStructured(raw json.RawMessage, def int) int {
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
 		return def
 	}
-	if f, _ := obj["statusCode"].(float64); f != 0 {
-		return int(f)
+	value, ok := obj["statusCode"]
+	if !ok {
+		return def
 	}
-	return def
+	var code int
+	if json.Unmarshal(value, &code) != nil {
+		return 0
+	}
+	return code
 }
 
 func publicHeaders(h http.Header) map[string]string {
 	out := map[string]string{}
-	for k, vals := range h {
-		l := strings.ToLower(k)
-		if l == "authorization" || l == "cookie" || l == "set-cookie" {
-			continue
-		}
-		out[k] = strings.Join(vals, ", ")
+	for key, values := range sanitizedHeaders(h) {
+		out[key] = strings.Join(values, ", ")
 	}
 	return out
 }
@@ -777,10 +973,10 @@ func bearerToken(authz string) string {
 }
 
 func hostOnly(h string) string {
-	if i := strings.IndexByte(h, ':'); i >= 0 {
-		return h[:i]
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
 	}
-	return h
+	return strings.TrimSuffix(strings.ToLower(h), ".")
 }
 
 func atoiDefault(s string, def int) int {
@@ -789,3 +985,10 @@ func atoiDefault(s string, def int) int {
 	}
 	return def
 }
+
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusCapture) WriteHeader(code int) { w.status = code; w.ResponseWriter.WriteHeader(code) }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -302,6 +303,7 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 	}
 	if provider.Slug == "telnyx" {
 		profiles, profileErr := listTelnyxOutboundProfiles(ctx, provider.ConnID)
+		readinessCache := map[string]outboundReadinessView{}
 		for i := range numbers {
 			phone := compactPhoneNumber(numbers[i].PhoneNumber)
 			applicationID := telnyxRouteApplicationID(routesByPhone[phone], ownedConnectionsByPhone[phone])
@@ -312,11 +314,16 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 				}
 				continue
 			}
+			if cached, ok := readinessCache[applicationID]; ok {
+				numbers[i].Outbound = cached
+				continue
+			}
 			readiness, readinessErr := a.telnyxOutboundReadiness(ctx, provider.ConnID, applicationID, profiles)
 			if readinessErr != nil {
 				readiness.Status = outboundConfigError
 				readiness.Message = readinessErr.Error()
 			}
+			readinessCache[applicationID] = readiness
 			numbers[i].Outbound = readiness
 		}
 	}
@@ -358,6 +365,17 @@ func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
 		"numbers":    numbers,
 		"direct_sip": directSIP,
 	}, nil
+}
+
+// toolNumbersConnected exposes the same carrier-owned inventory used by the
+// Numbers panel. Unlike telephony_routes_list, it includes purchased numbers
+// that have not been configured with an inbound Telephony route yet.
+func (a *App) toolNumbersConnected(_ context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	result, err := a.connectedNumbers(ctx)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	return result, nil
 }
 
 func (a *App) configureNumberOutboundProfile(ctx *sdk.AppCtx, phoneNumber, profileID string) (map[string]any, error) {

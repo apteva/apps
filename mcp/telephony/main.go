@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.6
+version: 0.3.8
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -130,6 +130,7 @@ provides:
     - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
     - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
     - { name: telephony_recording_delete, description: "Delete a recording from Storage and the carrier." }
+    - { name: telephony_numbers_connected, description: "List all numbers owned by the bound carrier with their Telephony routing and outbound status." }
     - { name: telephony_numbers_search, description: "Search and compare carrier phone-number inventory and pricing." }
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
     - { name: telephony_addresses_list, description: "List provider addresses." }
@@ -332,6 +333,8 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
+		{Name: "ring-legs", Schedule: "@every 1s", Run: a.runRingLegTick},
 		{
 			Name:     "call-auto-answer",
 			Schedule: "@every 1s",
@@ -625,6 +628,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Delete a recording from private Storage and its carrier. Args: recording_id.",
 			InputSchema: schemaObject(map[string]any{"recording_id": map[string]any{"type": "string"}}, []string{"recording_id"}),
 			HandlerCtx:  a.toolRecordingDelete,
+		},
+		{
+			Name: "telephony_numbers_connected",
+			Description: "List every phone number owned by the bound carrier, including purchased numbers that do not have a Telephony route. " +
+				"Returns normalized capabilities, carrier status, inbound route and routing health, outbound readiness, and direct-SIP status. This operation is read-only.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolNumbersConnected,
 		},
 		{
 			Name: "telephony_numbers_search",
@@ -977,7 +987,7 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 			onUnwind()
 		}
 	}
-	if err := a.db().insertCall(*row); err != nil {
+	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
 	}
@@ -1539,11 +1549,15 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row.Direction != "inbound" {
 		return mcpError("call is not inbound"), nil
 	}
-	if row.AgentID != agentID || row.ProjectID != currentProject(ctx) {
+	if row.ProjectID != currentProject(ctx) || (row.AgentID != agentID && !a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID)) {
 		return mcpError("this call is routed to another agent"), nil
 	}
 	if row.CarrierSlug != "twilio" && row.CarrierSlug != "telnyx" && row.CarrierSlug != "plivo" {
 		return mcpError("answer is not implemented for inbound provider " + row.CarrierSlug), nil
+	}
+	if a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID) {
+		row.AgentID = agentID
+		row.PeerKind = peerKindRealtime
 	}
 	threadID, err := a.answerCall(ctx, row, directive, voice, greeting, false)
 	if err != nil {
@@ -1557,6 +1571,15 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 }
 
 func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string, terminalOnCarrierError bool) (string, error) {
+	if row.RoutingFlowVersionID != "" {
+		_, plan, err := a.routingPlanForCall(row, nil)
+		if err != nil {
+			return "", err
+		}
+		if plan != nil && plan.TerminalType != "destination" && plan.TerminalType != "ring_group" {
+			return "", errors.New("call is still executing its routing flow and cannot be answered yet")
+		}
+	}
 	if row.Status == "answered" || row.Status == "in-progress" {
 		return row.ThreadID, nil
 	}
@@ -1620,6 +1643,12 @@ func (a *App) prepareInboundRealtime(ctx *sdk.AppCtx, row *callRow, directive, v
 		if !claimed {
 			return "", errors.New("call was already claimed")
 		}
+		current, loadErr := a.db().findCall(row.ID)
+		if loadErr != nil || current == nil {
+			_ = a.db().releaseAnswerClaim(row.ID)
+			return "", firstError(loadErr, errors.New("claimed call unavailable"))
+		}
+		*row = *current
 		threadID = "tel-" + row.ID
 		effectiveDirective := strings.TrimSpace(directive)
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
@@ -1677,11 +1706,17 @@ func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 	if row == nil {
 		return mcpError("unknown call_id"), nil
 	}
-	if row.AgentID != agentID || row.ProjectID != currentProject(ctx) {
+	if row.ProjectID != currentProject(ctx) || (row.AgentID != agentID && !a.db().hasAgentRingOffer(row.ID, row.ProjectID, agentID)) {
 		return mcpError("this call is routed to another agent"), nil
 	}
 	if row.Direction != "inbound" || (row.Status != "pending" && row.Status != "answering") {
 		return mcpError("call is not a rejectable pending inbound call"), nil
+	}
+	if grouped, err := a.db().declineRingOffers(row.ID, row.ProjectID, agentID); grouped || err != nil {
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		return map[string]any{"ok": true, "call_id": callID, "offer_declined": true}, nil
 	}
 	reason := strArg(args, "reason", "rejected by agent")
 	if err := a.rejectPendingInboundCall(ctx, row, reason); err != nil {
@@ -2030,7 +2065,7 @@ func (a *App) mediaBridgeURL(row *callRow) (string, error) {
 	// Human-peer calls bridge to this app's own loopback softphone endpoint.
 	// There is no Core thread behind them, so the renewal path below (which
 	// asks the platform for a fresh realtime bridge) must not run.
-	if row.PeerKind == peerKindHuman {
+	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		return a.peerLoopbackURL(row), nil
 	}
 	if row.MediaStatus != "disconnected" && row.MediaStatus != "error" {
@@ -2146,6 +2181,12 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "persist status", http.StatusInternalServerError)
 			return
+		}
+		if row.IngressPath == "ring_group" && (update.Status == "answered" || update.Status == "in-progress") {
+			if err := a.claimAnsweredRingLeg(callID); err != nil {
+				http.Error(w, "claim ring leg", 500)
+				return
+			}
 		}
 		if created && globalCtx != nil {
 			_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), callID)
@@ -2370,6 +2411,21 @@ type inboundCallMetadata struct {
 }
 
 func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, metadata ...inboundCallMetadata) (*callRow, bool, error) {
+	existing, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, carrierSID)
+	if err != nil {
+		return nil, false, err
+	}
+	if existing != nil {
+		pinned, plan, err := a.routingPlanForCall(existing, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if pinned != nil {
+			*route = *pinned
+		}
+		applyRoutingPlanToRoute(route, plan)
+		return existing, false, nil
+	}
 	plan, err := a.resolveInboundRoutingPlan(route, from, nil)
 	if err != nil {
 		return nil, false, fmt.Errorf("resolve published routing flow: %w", err)
@@ -2456,7 +2512,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 			callID, from, to,
 		)
 	}
-	stored, created, err := a.db().insertInboundCallWithEvent(call, msg)
+	stored, created, err := a.db().insertInboundCallWithEvent(call, msg, plan)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2465,9 +2521,18 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 			globalCtx.Logger().Warn("publish incoming call lifecycle event", "call", stored.ID, "err", err)
 		}
 	}
-	if err := a.persistRoutingExecution(stored.ID, route.ProjectID, plan); err != nil {
-		return nil, false, fmt.Errorf("persist routing execution: %w", err)
+	if !created {
+		pinned, oldPlan, err := a.routingPlanForCall(stored, nil)
+		if err != nil {
+			return nil, false, err
+		}
+		if pinned != nil {
+			*route = *pinned
+		}
+		applyRoutingPlanToRoute(route, oldPlan)
+		return stored, false, nil
 	}
+	a.emitRoutingTrace(route.ProjectID, stored.ID, plan, true)
 	// Only agent-decided routes need the main agent woken to make a pickup
 	// decision. Immediate routes answer themselves, and human_browser routes
 	// are answered by an operator in the panel — both leave their informational
@@ -2530,6 +2595,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
 				Digits        string `json:"digits"`
+				GatherID      string `json:"gather_id"`
 			} `json:"payload"`
 		} `json:"data"`
 	}
@@ -2589,8 +2655,13 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 					ctx.Logger().Warn("resolve Telnyx IVR after answer", "call", row.ID, "err", planErr)
 				}
 			case "call.gather.ended":
+				defer lockRoutingCall(row.ID)()
 				var nodeID string
 				_ = a.db().db.QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&nodeID)
+				if event.Data.Payload.GatherID != "" && event.Data.Payload.GatherID != row.ID+":"+nodeID {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 				digit := strings.TrimSpace(event.Data.Payload.Digits)
 				if digit == "" {
 					digit = routingTimeoutSelection
@@ -2623,6 +2694,12 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+	if created && (route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject") {
+		if globalCtx != nil {
+			_ = a.expireCall(globalCtx.WithProject(route.ProjectID), stored)
+		}
+		return
+	}
 	if created {
 		if route.RoutingTerminalType == "dtmf_menu" && globalCtx != nil {
 			ctx := globalCtx.WithProject(route.ProjectID)
@@ -2710,6 +2787,22 @@ func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, ro
 		http.Error(w, "call does not belong to route", http.StatusForbidden)
 		return
 	}
+	if row.Status == "pending" && row.RoutingFlowVersionID != "" {
+		current, plan, err := a.routingPlanForCall(row, nil)
+		if err != nil {
+			http.Error(w, "load routing state", 500)
+			return
+		}
+		if current != nil {
+			route = current
+		}
+		if plan != nil && !callTimedOut(*route, *row) {
+			if err := a.writeTwilioRoutingPlan(w, row, route, plan); err != nil {
+				http.Error(w, "execute routing state", 500)
+			}
+			return
+		}
+	}
 	switch row.Status {
 	case "pending":
 		if callTimedOut(*route, *row) {
@@ -2722,7 +2815,7 @@ func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, ro
 		// The answer tool updates the live Twilio call directly. If a
 		// pending redirect was already queued, keep the call open briefly.
 		w.Header().Set("Content-Type", "application/xml")
-		_, _ = w.Write([]byte(`<Response><Pause length="1"/></Response>`))
+		_, _ = fmt.Fprintf(w, `<Response><Pause length="1"/><Redirect method="POST">%s</Redirect></Response>`, xmlEscape(a.twilioWaitURL(*route, row.ID)))
 	default:
 		writeTwilioSayHangup(w, "This call has ended.")
 	}
@@ -2744,8 +2837,26 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if err := a.db().attachRingOffers(project, rows); err != nil {
+		http.Error(w, "load ring offers", 500)
+		return
+	}
 	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
 		http.Error(w, "load recording summaries", http.StatusInternalServerError)
+		return
+	}
+	if id := r.URL.Query().Get("call_id"); id != "" {
+		row, err := a.db().findCall(id)
+		if err != nil || row == nil || row.ProjectID != project {
+			http.Error(w, "call not found", 404)
+			return
+		}
+		detail := []callRow{*row}
+		if err := a.db().attachRingOffers(project, detail); err != nil {
+			http.Error(w, "load ring offers", 500)
+			return
+		}
+		writeJSON(w, map[string]any{"calls": callsPanelPublic(detail, true)})
 		return
 	}
 	writeJSON(w, map[string]any{"calls": callsPanelPublic(rows)})
@@ -2948,6 +3059,11 @@ func writeTwilioHangup(w http.ResponseWriter) {
 }
 
 func callTimedOut(route routeRow, row callRow) bool {
+	if row.StateExpiresAt != "" {
+		if expiry, err := time.Parse(time.RFC3339Nano, row.StateExpiresAt); err == nil {
+			return !time.Now().Before(expiry)
+		}
+	}
 	timeout := route.TimeoutSec
 	if timeout <= 0 {
 		timeout = 60
@@ -3031,9 +3147,14 @@ func callsPublic(rows []callRow) []map[string]any {
 	return out
 }
 
-func callsPanelPublic(rows []callRow) []map[string]any {
+func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
+		var browser, carrier map[string]any
+		if len(includeDiagnostics) > 0 && includeDiagnostics[0] {
+			browser = audioDiagnosticsPublic(r.BrowserAudioDiagnostics)
+			carrier = audioDiagnosticsPublic(r.CarrierAudioDiagnostics)
+		}
 		out = append(out, map[string]any{
 			"id": r.ID, "thread_id": r.ThreadID, "carrier_sid": r.CarrierSID,
 			"direction": r.Direction, "to_number": r.ToNumber, "from_number": r.FromNumber,
@@ -3043,8 +3164,8 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			"media_connected_at":  r.MediaConnectedAt, "media_disconnected_at": r.MediaDisconnectedAt,
 			"media_close_code": r.MediaCloseCode, "media_close_reason": r.MediaCloseReason,
 			"media_close_leg":           r.MediaCloseLeg,
-			"browser_audio_diagnostics": audioDiagnosticsPublic(r.BrowserAudioDiagnostics),
-			"carrier_audio_diagnostics": audioDiagnosticsPublic(r.CarrierAudioDiagnostics),
+			"browser_audio_diagnostics": browser,
+			"carrier_audio_diagnostics": carrier,
 			"routing_flow_id":           r.RoutingFlowID, "routing_flow_version_id": r.RoutingFlowVersionID,
 			"routing_destination_id": r.RoutingDestinationID,
 			"placed_at":              r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
@@ -3057,7 +3178,9 @@ func callsPanelPublic(rows []callRow) []map[string]any {
 			// answer and carry audio for) from an agent call (which it can only
 			// observe). peer_token is deliberately NOT exposed here — the
 			// browser receives a media URL only from an explicit answer/place.
-			"peer_kind": firstNonEmpty(r.PeerKind, peerKindRealtime),
+			"peer_kind":       panelPeerKind(r),
+			"routing_waiting": r.RoutingFlowVersionID != "" && r.RoutingDestinationID == "" && !ringHasBrowser(r.RingOffers),
+			"ring_offers":     r.RingOffers,
 		})
 	}
 	return out
@@ -3310,6 +3433,7 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
+	RingOffers              []ringOffer
 	ID                      string
 	ThreadID                string
 	Direction               string
@@ -3457,15 +3581,19 @@ func scanCall(row rowScanner) (*callRow, error) {
 	return &r, nil
 }
 
-func (c *callsDB) insertCall(r callRow) error {
-	_, err := c.db.Exec(`INSERT INTO calls
+func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
+	limit := 0
+	if len(enforceLimit) > 0 && enforceLimit[0] {
+		limit = maxCallsPerMinute()
+	}
+	result, err := c.db.Exec(`INSERT INTO calls
 		        (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_request_id,
 		         carrier_slug, carrier_connection_id, callback_secret, to_number, from_number,
 		         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
 		         peer_kind, peer_token, routing_flow_id, routing_flow_version_id, routing_destination_id)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? <= 0 OR (SELECT COUNT(*) FROM calls WHERE project_id=? AND direction='outbound' AND placed_at>=?) < ?`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.ForwardedFrom, r.IngressPath, r.Directive, r.Voice, r.AudioBridgeURL,
@@ -3474,8 +3602,15 @@ func (c *callsDB) insertCall(r callRow) error {
 		firstNonEmpty(r.RecordingStorageMode, recordingStorageCopy), r.RecordingRetentionDays,
 		firstNonEmpty(r.PeerKind, peerKindRealtime), r.PeerToken,
 		r.RoutingFlowID, r.RoutingFlowVersionID, r.RoutingDestinationID,
+		limit, r.ProjectID, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), limit,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return errors.New("outbound call rate limit reached")
+	}
+	return nil
 }
 
 func (c *callsDB) findCall(id string) (*callRow, error) {
@@ -3554,8 +3689,11 @@ func canTransitionStatus(from, to string) bool {
 }
 
 func (c *callsDB) claimPendingCall(id string, agentID int64, project string) (bool, error) {
+	if grouped, claimed, err := c.claimRingOffer(id, project, "", "agent", agentID); grouped || err != nil {
+		return claimed, err
+	}
 	res, err := c.db.Exec(`UPDATE calls SET status = 'answering'
-        WHERE id = ? AND direction = 'inbound' AND status = 'pending' AND agent_id = ? AND project_id = ?`,
+        WHERE id = ? AND direction = 'inbound' AND status = 'pending' AND agent_id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
 		id, agentID, project)
 	if err != nil {
 		return false, err
@@ -3569,10 +3707,17 @@ func (c *callsDB) claimPendingCall(id string, agentID int64, project string) (bo
 // the same atomic conditional UPDATE, so concurrent Answer clicks still resolve
 // to exactly one winner. claimPendingCall itself is deliberately left untouched
 // so the agent answer path keeps its agent scoping verbatim.
-func (c *callsDB) claimPendingCallForHuman(id, project string) (bool, error) {
+func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...string) (bool, error) {
+	destination := ""
+	if len(destinations) > 0 {
+		destination = destinations[0]
+	}
+	if grouped, claimed, err := c.claimRingOffer(id, project, destination, "browser", 0); grouped || err != nil {
+		return claimed, err
+	}
 	res, err := c.db.Exec(`UPDATE calls SET status = 'answering'
         WHERE id = ? AND direction = 'inbound' AND status = 'pending'
-          AND project_id = ? AND peer_kind = 'human'`,
+          AND project_id = ? AND peer_kind = 'human' AND (routing_flow_version_id='' OR routing_destination_id<>'') AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
 		id, project)
 	if err != nil {
 		return false, err
@@ -3613,14 +3758,20 @@ func (c *callsDB) attachHumanCall(id, bridgeURL, peerToken string) error {
 func (c *callsDB) releaseAnswerClaim(id string) error {
 	_, err := c.db.Exec(`UPDATE calls SET status = 'pending'
         WHERE id = ? AND status = 'answering' AND thread_id LIKE 'pending-%'`, id)
-	return err
+	if err != nil {
+		return err
+	}
+	return c.releaseRingClaim(id)
 }
 
 func (c *callsDB) resetAnswerClaim(id string) error {
 	_, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
 	        audio_bridge_url = 'pending', peer_token = '', directive = 'inbound pending', voice = ''
 	        WHERE id = ? AND status = 'answering' AND media_active = 0`, id)
-	return err
+	if err != nil {
+		return err
+	}
+	return c.releaseRingClaim(id)
 }
 
 func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice string) error {
@@ -3645,12 +3796,12 @@ func (c *callsDB) listActiveForAgent(agentID int64, project string) ([]callRow, 
 }
 
 func (c *callsDB) listPending(agentID int64, project string) ([]callRow, error) {
-	return c.listWhere(`direction = 'inbound' AND status IN ('pending','answering') AND agent_id = ? AND project_id = ? ORDER BY placed_at DESC`,
-		agentID, project)
+	return c.listWhere(`direction = 'inbound' AND status IN ('pending','answering') AND project_id = ? AND (agent_id = ? OR EXISTS (SELECT 1 FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id WHERE o.call_id=calls.id AND o.agent_id=? AND o.kind IN ('agent','ai') AND o.status='offered' AND r.status='ringing' AND o.expires_at>?)) ORDER BY placed_at DESC`,
+		project, agentID, agentID, ringTime(time.Now()))
 }
 
 func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
-	return c.listWhere(`(? = '' OR project_id = ?) ORDER BY placed_at DESC LIMIT `+fmt.Sprintf("%d", limit),
+	return c.listWhere(`(? = '' OR project_id = ?) AND ingress_path<>'ring_group' ORDER BY placed_at DESC LIMIT `+fmt.Sprintf("%d", limit),
 		project, project)
 }
 

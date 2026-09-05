@@ -444,11 +444,14 @@ func (s *store) MarkTelegramActionUsed(token string) {
 
 func (s *store) PruneTelegramState() error {
 	cutoff := time.Now().UTC().Add(-7 * 24 * time.Hour)
-	if _, err := s.db.Exec(`DELETE FROM telegram_updates WHERE received_at < ?`, cutoff); err != nil {
+	if _, err := s.db.Exec(`DELETE FROM telegram_command_receipts WHERE julianday(created_at)<julianday(?)`, cutoff.Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM telegram_updates WHERE completed=1 AND julianday(received_at) < julianday(?)`, cutoff.Format(time.RFC3339)); err != nil {
 		return err
 	}
 	_, err := s.db.Exec(`DELETE FROM telegram_action_tokens
-		WHERE expires_at < ? OR (used_at IS NOT NULL AND used_at < ?)`, time.Now().UTC(), cutoff)
+		WHERE julianday(expires_at) < julianday(?) OR (used_at IS NOT NULL AND julianday(used_at) < julianday(?))`, time.Now().UTC().Format(time.RFC3339), cutoff.Format(time.RFC3339))
 	return err
 }
 
@@ -613,14 +616,21 @@ func (a *App) boundTelegramConnections(app *sdk.AppCtx, projectID string) ([]sdk
 }
 
 func (a *App) boundTelegramConnection(app *sdk.AppCtx, projectID string, connectionID int64) (*sdk.PlatformConnection, error) {
-	connections, err := a.boundTelegramConnections(app, projectID)
-	if err != nil {
-		return nil, err
+	if app == nil || app.PlatformAPI() == nil {
+		return nil, errors.New("platform unavailable")
 	}
-	for i := range connections {
-		if connections[i].ID == connectionID {
-			return &connections[i], nil
+	for _, bound := range app.IntegrationsFor(telegramIntegrationRole) {
+		if bound == nil || bound.ConnectionID != connectionID {
+			continue
 		}
+		conn, err := app.PlatformAPI().GetConnection(connectionID)
+		if err != nil {
+			return nil, err
+		}
+		if conn != nil && conn.AppSlug == "telegram" && conn.Status == "active" && (conn.ProjectID == "" || conn.ProjectID == projectID) {
+			return conn, nil
+		}
+		break
 	}
 	return nil, errors.New("Telegram connection is not active and bound to Conversations in this project")
 }
@@ -938,7 +948,18 @@ func (a *App) handleTelegramBindings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"bindings": bindings})
+		visible := bindings[:0]
+		for _, b := range bindings {
+			ok, err := a.store.UserCanAccessConversation(b.ConversationID, projectID, userID)
+			if err != nil {
+				http.Error(w, "authorization unavailable", 500)
+				return
+			}
+			if ok {
+				visible = append(visible, b)
+			}
+		}
+		writeJSON(w, map[string]any{"bindings": visible})
 	case http.MethodPost:
 		var body struct {
 			ConnectionID   int64   `json:"connection_id"`
@@ -1136,18 +1157,33 @@ func (a *App) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid Telegram update", http.StatusBadRequest)
 		return
 	}
-	claimed, err := a.store.ClaimTelegramUpdate(cfg.ConnectionID, update.UpdateID)
+	claim, completed, err := a.store.ClaimTelegramProcessing(cfg.ConnectionID, update.UpdateID)
 	if err != nil {
 		http.Error(w, "could not claim Telegram update", http.StatusInternalServerError)
 		return
 	}
-	if !claimed {
+	if completed {
 		writeJSON(w, map[string]any{"ok": true, "duplicate": true})
 		return
 	}
+	if claim == "" {
+		http.Error(w, "Telegram update is still processing; retry", http.StatusServiceUnavailable)
+		return
+	}
+	stopLease := a.maintainTelegramLease(cfg.ConnectionID, update.UpdateID, claim)
+	defer stopLease()
 	if err := a.processTelegramUpdate(cfg, update); err != nil {
-		a.store.ReleaseTelegramUpdate(cfg.ConnectionID, update.UpdateID)
+		_, _ = a.store.db.Exec(`UPDATE telegram_updates SET lease_until=0,lease_token='' WHERE connection_id=? AND update_id=? AND lease_token=?`, cfg.ConnectionID, update.UpdateID, claim)
 		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	res, err := a.store.db.Exec(`UPDATE telegram_updates SET completed=1,lease_until=0,lease_token='' WHERE connection_id=? AND update_id=? AND lease_token=?`, cfg.ConnectionID, update.UpdateID, claim)
+	if err != nil {
+		http.Error(w, "could not record completion", 500)
+		return
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		http.Error(w, "Telegram update completion lost its lease; retry", 503)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -1165,6 +1201,9 @@ func (a *App) processTelegramUpdate(cfg *TelegramConnectionConfig, update telegr
 }
 
 func (a *App) processTelegramMessage(cfg *TelegramConnectionConfig, updateID int64, incoming telegramMessage) error {
+	if telegramCommandForOtherBot(cfg, incoming.Text) {
+		return nil
+	}
 	binding, err := a.store.GetTelegramBindingByChat(cfg.ConnectionID, strconv.FormatInt(incoming.Chat.ID, 10))
 	if errors.Is(err, sql.ErrNoRows) {
 		return a.processUnknownTelegramMessage(cfg, updateID, incoming)
@@ -1178,7 +1217,7 @@ func (a *App) processTelegramMessage(cfg *TelegramConnectionConfig, updateID int
 	if !telegramSenderAllowed(binding, incoming.From.ID) {
 		return nil
 	}
-	if handled, err := a.processTelegramCommand(cfg, binding, incoming); handled || err != nil {
+	if handled, err := a.processTelegramCommand(cfg, binding, incoming, updateID); handled || err != nil {
 		return err
 	}
 	if binding.RequireMention && incoming.Chat.Type != "private" && !telegramMessageAddressesBot(cfg, incoming) {
@@ -1193,7 +1232,7 @@ func (a *App) processBoundTelegramMessage(cfg *TelegramConnectionConfig, binding
 		content = strings.TrimSpace(incoming.Caption)
 	}
 	if content == "" {
-		return nil
+		return a.sendTelegramSystem(mountedCtx, cfg.ConnectionID, binding.ChatID, "This conversation accepts text and captions. Please describe the attachment in a message.")
 	}
 	conv, err := a.store.GetConversation(binding.ConversationID)
 	if err != nil || conv.ProjectID != binding.ProjectID {
@@ -1321,7 +1360,7 @@ func (t *telegramAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversa
 		return nil
 	}
 	if len(msg.Attachments) != 0 {
-		return errors.New("Telegram text transport does not yet support Conversations attachments")
+		return errors.New("unsupported Telegram attachments: open the complete message in Conversations")
 	}
 	if app == nil {
 		return errors.New("platform unavailable")
@@ -1337,42 +1376,7 @@ func (t *telegramAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversa
 	if err != nil {
 		return err
 	}
-	input := map[string]any{
-		"chat_id":    binding.ChatID,
-		"text":       telegramMarkdownToHTML(text),
-		"parse_mode": "HTML",
-	}
-	if markup != nil {
-		input["reply_markup"] = markup
-	}
-	link, linkErr := t.app.store.GetTelegramMessageLink(binding.ID, msg.ID)
-	if linkErr == nil {
-		input["message_id"] = link.TelegramMessageID
-		if msg.ComponentKind == kindApproval && markup == nil {
-			input["reply_markup"] = map[string]any{"inline_keyboard": []any{}}
-		}
-		_, err := t.app.executeTelegram(app, binding.ConnectionID, "edit_message_text", input)
-		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "message is not modified") {
-			return err
-		}
-		return nil
-	}
-	if linkErr != nil && !errors.Is(linkErr, sql.ErrNoRows) {
-		return linkErr
-	}
-	result, err := t.app.executeTelegram(app, binding.ConnectionID, "send_message", input)
-	if err != nil {
-		return err
-	}
-	var response struct {
-		Result struct {
-			MessageID int64 `json:"message_id"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(result.Data, &response); err != nil || response.Result.MessageID <= 0 {
-		return errors.New("Telegram send_message returned no message id")
-	}
-	return t.app.store.SaveTelegramMessageLink(binding.ID, msg.ID, response.Result.MessageID)
+	return t.deliverParts(app, binding, msg, text, markup)
 }
 
 func telegramTextLimit(text string) string {
@@ -1446,6 +1450,24 @@ func (a *App) telegramRenderMessage(binding *TelegramBinding, msg *Message) (str
 		case "report-card":
 			title, summary := componentString(component, "title"), componentString(component, "summary")
 			text = strings.TrimSpace("Report: " + title + "\n\n" + summary)
+			if sections, ok := component.Props["sections"]; ok {
+				raw, _ := json.Marshal(sections)
+				var entries []map[string]any
+				if json.Unmarshal(raw, &entries) == nil {
+					for _, entry := range entries {
+						for _, key := range []string{"title", "heading", "body", "text", "content"} {
+							if v, ok := entry[key]; ok {
+								text += "\n\n" + fmt.Sprint(v)
+								delete(entry, key)
+							}
+						}
+						if len(entry) > 0 {
+							extra, _ := json.MarshalIndent(entry, "", "  ")
+							text += "\n\n" + string(extra)
+						}
+					}
+				}
+			}
 		case "alert-card":
 			severity, alertText := componentString(component, "severity"), componentString(component, "text")
 			if severity == "" {
@@ -1457,5 +1479,5 @@ func (a *App) telegramRenderMessage(binding *TelegramBinding, msg *Message) (str
 	if text == "" {
 		text = "Conversation updated"
 	}
-	return telegramTextLimit(text), markup, nil
+	return text, markup, nil
 }

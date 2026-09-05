@@ -4,9 +4,27 @@ import "testing"
 
 func TestManifestVersionAndEventContract(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Version != "0.2.15" {
-		t.Fatalf("manifest version = %q, want 0.2.15", manifest.Version)
+	if manifest.Version != "0.3.0" {
+		t.Fatalf("manifest version = %q, want 0.3.0", manifest.Version)
 	}
+}
+
+func TestIngestToolIsRegistered(t *testing.T) {
+	foundRoute := false
+	for _, route := range (&App{}).HTTPRoutes() {
+		if route.Pattern == "/ingest" {
+			foundRoute = true
+		}
+	}
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "ingest_media" {
+			if !foundRoute {
+				t.Fatal("/ingest HTTP route is not registered")
+			}
+			return
+		}
+	}
+	t.Fatal("ingest_media MCP tool is not registered")
 }
 
 func TestSearchToolAndRouteAreRegistered(t *testing.T) {

@@ -109,13 +109,13 @@ func TestSidecar_ListIsAgentWideAcrossThreads(t *testing.T) {
 		title  string
 	}{
 		{thread: "opaque-default", title: "Default-thread work"},
-		{thread: "conversation-a", title: "Conversation-created work"},
+		{thread: "requester-a", title: "Requester-created work"},
 	} {
 		sc.MCPAs("create", map[string]any{"title": item.title}, 7, item.thread, testProject)
 	}
 	sc.MCPAs("create", map[string]any{"title": "Other-agent work"}, 8, "other-default", testProject)
 
-	listed := sc.MCPAs("list", map[string]any{}, 7, "conversation-reader", testProject)
+	listed := sc.MCPAs("list", map[string]any{}, 7, "inventory-reader", testProject)
 	tasks, ok := listed["tasks"].([]any)
 	if !ok || len(tasks) != 2 {
 		t.Fatalf("agent-wide list from unrelated thread=%#v", listed)

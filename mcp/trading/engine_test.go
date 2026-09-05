@@ -174,6 +174,7 @@ func TestEngine_BacktestTickPreservesReplayMarkAndFills(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	_, _ = ctx.AppDB().Exec(`DELETE FROM marks WHERE symbol='BTC-USD'`)
 	replayPrice := 50000.0
 	if err := dbUpsertMark(ctx.AppDB(), &Mark{
 		Symbol:     "BTC-USD",
@@ -226,6 +227,7 @@ func TestEngine_BacktestExecutionSettingsApplySlippageAndFee(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	_, _ = ctx.AppDB().Exec(`DELETE FROM marks WHERE symbol='BTC-USD'`)
 	replayPrice := 69263.7251
 	qty := 0.36
 	if err := dbUpsertMark(ctx.AppDB(), &Mark{

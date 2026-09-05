@@ -15,6 +15,7 @@ package main
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -65,6 +66,9 @@ func TestManifestsAgree_VersionAndScopes(t *testing.T) {
 		t.Fatalf("parse apteva.yaml: %v", err)
 	}
 
+	if !reflect.DeepEqual(embedded, *disk) {
+		t.Fatal("complete embedded and disk manifests differ")
+	}
 	if embedded.Version != disk.Version {
 		t.Errorf("version drift: embedded=%q disk=%q", embedded.Version, disk.Version)
 	}
@@ -227,7 +231,7 @@ func TestOnlySignedCallbackRoutesBypassPlatformAuth(t *testing.T) {
 	routes := (&App{}).HTTPRoutes()
 	for _, route := range routes {
 		switch route.Pattern {
-		case "/transfers/", "/provider-grants/":
+		case "/transfers/", "/provider-grants/", "/dns/":
 			if !route.NoAuth {
 				t.Errorf("%s must bypass platform auth because it uses a scoped signed credential", route.Pattern)
 			}

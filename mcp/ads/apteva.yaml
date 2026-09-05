@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.43
+version: 0.1.45
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -56,6 +56,11 @@ description: |
   provider credentials or using native IDs for resource selection.
   v0.1.43 validates resource-list kinds against each account platform before
   querying or refreshing, while preserving app-managed creative asset listing.
+  v0.1.44 prevents account-restricted Meta THRUPLAY billing requests and
+  preserves Meta's actionable user-facing error details and remediation.
+  v0.1.45 preflights Meta ad-set goals against the parent campaign, prevents
+  native overrides from bypassing billing validation, and records safe request
+  context for rejected creates.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads

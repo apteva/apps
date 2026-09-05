@@ -528,9 +528,10 @@ func TestBrowserSessionEnvironmentIsOptInAndPropagates(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 
 	out, err := app.toolBrowserSession(ctx, map[string]any{
-		"action":   "open",
-		"backend":  "steel",
-		"viewport": map[string]any{"width": 390, "height": 844},
+		"action":               "open",
+		"backend":              "steel",
+		"viewport":             map[string]any{"width": 390, "height": 844},
+		"environment_override": true,
 		"environment": map[string]any{
 			"user_agent":          "Computer-Test/1.0",
 			"locale":              "fr-FR",
@@ -596,15 +597,27 @@ func TestBrowserSessionEnvironmentRejectsUnsupportedAndInvalidSettings(t *testin
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	for name, args := range map[string]map[string]any{
-		"invalid timezone": {"action": "open", "backend": "local", "environment": map[string]any{"timezone": "Paris"}},
-		"service":          {"action": "open", "backend": "service", "environment": map[string]any{"locale": "de-DE"}},
-		"attach":           {"action": "open", "backend": "browserbase", "backend_session_id": "provider-1", "environment": map[string]any{"locale": "de-DE"}},
+		"invalid timezone": {"action": "open", "backend": "local", "environment_override": true, "environment": map[string]any{"timezone": "Paris"}},
+		"service":          {"action": "open", "backend": "service", "environment_override": true, "environment": map[string]any{"locale": "de-DE"}},
+		"attach":           {"action": "open", "backend": "browserbase", "backend_session_id": "provider-1", "environment_override": true, "environment": map[string]any{"locale": "de-DE"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := app.toolBrowserSession(ctx, args); err == nil {
 				t.Fatal("expected environment validation error")
 			}
 		})
+	}
+}
+
+func TestBrowserSessionEnvironmentRequiresExplicitOverride(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	_, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "local",
+		"environment": map[string]any{"timezone": "UTC", "geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "environment_override_required") {
+		t.Fatalf("meaningful environment without acknowledgement should fail closed: %v", err)
 	}
 }
 
@@ -807,6 +820,44 @@ func TestComputerUseOutcomeWaitAndStabilityTimeoutAreStructured(t *testing.T) {
 	}
 	if !strings.Contains(m["text"].(string), "does not mean an earlier browser action failed") {
 		t.Fatalf("timeout text conflates wait with prior operation: %#v", m)
+	}
+}
+
+func TestComputerUseMediaWaitReportsLoadedEmbedWhenTextDoesNotMatch(t *testing.T) {
+	bunnyURL := "https://iframe.mediadelivery.net/play/374587/dfea9276-4b32-44e2-be3a-87d137752dc6"
+	media := &backends.MediaObservation{
+		EmbedStatus: "loaded", PlayerVisible: true, IframeVisible: true,
+		ThumbnailVisible: true, DurationText: "03:21", ConfigurationPresent: true,
+		IframeSrc: bunnyURL, Provider: "mediadelivery.net", DraftSaveState: "saved", DraftSaveText: "Draft saved",
+	}
+	fake := &fakeComp{
+		png: []byte{0x89, 0x50, 0x4e, 0x47}, url: "https://www.patreon.com/posts/new",
+		waitResult: backends.WaitResult{
+			TimedOut: true, WaitedMS: 1000, Match: "any", CurrentURL: "https://www.patreon.com/posts/new", Media: media,
+			Conditions: []backends.WaitConditionResult{{Index: 0, Type: "text_present", Matched: false}},
+		},
+	}
+	app := appWithSession("br_media", fake, "browserbase")
+	out, err := app.toolComputerUse(tk.NewAppCtx(t, "apteva.yaml"), map[string]any{
+		"session_id": "br_media", "action": "wait_for", "timeout_ms": 1000,
+		"conditions": []any{map[string]any{"type": "text_present", "value": "This URL doesn't look like a video or audio file"}},
+	})
+	if err != nil {
+		t.Fatalf("media wait: %v", err)
+	}
+	result := out.(map[string]any)
+	if result["media_embed_status"] != "loaded" || result["media_provider"] != "mediadelivery.net" || result["media_iframe_src"] != bunnyURL {
+		t.Fatalf("media evidence missing: %#v", result)
+	}
+	if result["draft_save_state"] != "saved" || result["media_detected_despite_unmatched_text"] != true {
+		t.Fatalf("draft/mismatch evidence missing: %#v", result)
+	}
+	if !strings.Contains(stringValue(result["text"]), "rendered media block") || !strings.Contains(stringValue(result["next_step"]), "do not retry") {
+		t.Fatalf("media mismatch guidance missing: %#v", result)
+	}
+
+	if _, err := waitConditionsArg([]any{map[string]any{"type": "media_present"}, map[string]any{"type": "media_error"}}); err != nil {
+		t.Fatalf("media terminal conditions should require no selector/value: %v", err)
 	}
 }
 
@@ -1209,6 +1260,30 @@ func TestBrowserExtractIsAppOnly(t *testing.T) {
 	}
 }
 
+func TestLegacyBrowserLifecycleAliasesAreAppOnly(t *testing.T) {
+	app := &App{}
+	for _, name := range []string{"browser_open", "browser_close"} {
+		runtimeTool := findTool(t, app.MCPTools(), name)
+		if runtimeTool.Exposure != sdk.ToolExposureAppOnly {
+			t.Errorf("runtime %s exposure=%q, want app_only", name, runtimeTool.Exposure)
+		}
+
+		foundManifest := false
+		for _, manifestTool := range app.Manifest().Provides.MCPTools {
+			if manifestTool.Name != name {
+				continue
+			}
+			foundManifest = true
+			if manifestTool.Exposure != sdk.ToolExposureAppOnly {
+				t.Errorf("manifest %s exposure=%q, want app_only", name, manifestTool.Exposure)
+			}
+		}
+		if !foundManifest {
+			t.Errorf("manifest compatibility tool %s is not registered", name)
+		}
+	}
+}
+
 func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	app := &App{}
 	for _, tool := range app.MCPTools() {
@@ -1234,6 +1309,8 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	if !strings.Contains(tool.Description, "Ordinary open: pass only") ||
 		!strings.Contains(tool.Description, "never populate optional fields") ||
 		!strings.Contains(tool.Description, "Never send environment for normal navigation") ||
+		!strings.Contains(tool.Description, "not a page-load, action, or task timeout") ||
+		!strings.Contains(tool.Description, "Omit timeout unless") ||
 		!strings.Contains(tool.Description, "https://example.com") {
 		t.Fatalf("browser_session must teach agents the minimal default call:\n%s", tool.Description)
 	}
@@ -1263,6 +1340,14 @@ func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
 	maximum, maxOK := numericArg(scale["maximum"])
 	if !ok || !minOK || !maxOK || minimum != 0.5 || maximum != 4 {
 		t.Fatalf("browser_session device scale bounds are unsafe: %#v", scale)
+	}
+	timeoutSchema, ok := props["timeout"].(map[string]any)
+	defaultTimeout, defaultOK := numericArg(timeoutSchema["default"])
+	if !ok || !defaultOK || defaultTimeout != defaultCloudSessionTimeoutSeconds {
+		t.Fatalf("browser_session timeout schema must declare the 1800-second default: %#v", timeoutSchema)
+	}
+	if description, _ := timeoutSchema["description"].(string); !strings.Contains(strings.ToLower(description), "entire cloud browser session") || !strings.Contains(description, "not a page-load") {
+		t.Fatalf("browser_session timeout schema must distinguish lifetime from waits: %q", description)
 	}
 	presentationMode, ok := props["presentation_mode"].(map[string]any)
 	if !ok {
@@ -2566,12 +2651,12 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	t.Cleanup(func() { globalCtx = nil })
 
 	openBody := map[string]any{
-		"action":     "open",
-		"backend":    "local",
-		"url":        "https://example.test/app",
-		"context_id": "ctx-login",
-		"persist":    false,
-		"proxy":      proxy,
+		"action":              "open",
+		"backend":             "local",
+		"url":                 "https://example.test/app",
+		"provider_context_id": "ctx-login",
+		"persist":             false,
+		"proxy":               proxy,
 		"viewport": map[string]any{
 			"width":  1200,
 			"height": 700,
@@ -2733,6 +2818,106 @@ func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	}
 	if fake.openPersist {
 		t.Errorf("persist should use context default false")
+	}
+}
+
+func TestBrowserSessionSavedContextOpenPreservesProviderEnvironment(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name": "Alexa Patreon", "backend": "local", "persist_default": true,
+	})
+	if err != nil {
+		t.Fatalf("create saved context: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	// Exact production acceptance request: environment is truly omitted.
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+	})
+	if err != nil {
+		t.Fatalf("saved-context open with omitted environment: %v", err)
+	}
+	opened := out.(map[string]any)
+	if opened["app_context_id"] != contextRow.ID || fake.openContextID != contextRow.ProviderContextID {
+		t.Fatalf("saved context was not reused: result=%#v provider_context=%q", opened, fake.openContextID)
+	}
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("omitted environment became an override: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": opened["session_id"]})
+
+	// Reproduce the defect shape after schema serialization. These values are
+	// generated defaults, so the provider context must remain authoritative.
+	fake = &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	out, err = app.openBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{
+			"timezone": "UTC", "device_scale_factor": 0.5, "mobile": false, "touch": false,
+			"geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+		},
+	}, false)
+	if err != nil {
+		t.Fatalf("saved-context open with generated environment defaults: %v", err)
+	}
+	opened = out.(map[string]any)
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("generated defaults replaced saved environment: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": opened["session_id"]})
+
+	// A genuinely different requested environment remains fail-closed without
+	// the explicit authorization bit.
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{"timezone": "Europe/Paris"},
+	}); err == nil || !strings.Contains(err.Error(), "environment_override_required") {
+		t.Fatalf("material environment without override authorization should fail: %v", err)
+	}
+}
+
+func TestBrowserOpenCompatibilityAliasUsesCanonicalSavedContextNormalization(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	newBackend = func(backends.Config) (backends.Computer, error) { return fake, nil }
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name": "Alexa Patreon", "backend": "local", "persist_default": true,
+	})
+	if err != nil {
+		t.Fatalf("create saved context: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	out, err := app.toolBrowserOpen(ctx, map[string]any{
+		"context_name": "Alexa Patreon", "url": "https://www.patreon.com/c/alexaentranced",
+		"environment": map[string]any{
+			"timezone": "UTC", "device_scale_factor": 0.5, "mobile": false, "touch": false,
+			"geolocation": map[string]any{"latitude": 0.0, "longitude": 0.0, "accuracy": 0.0, "permission": "prompt"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("compatibility open with generated defaults: %v", err)
+	}
+	opened := out.(map[string]any)
+	if opened["app_context_id"] != contextRow.ID || fake.openContextID != contextRow.ProviderContextID {
+		t.Fatalf("compatibility alias did not reuse saved context: result=%#v provider_context=%q", opened, fake.openContextID)
+	}
+	if !fake.openEnvironment.IsEmpty() || opened["environment_applied"] != false {
+		t.Fatalf("compatibility alias applied generated environment: result=%#v backend=%+v", opened, fake.openEnvironment)
+	}
+	ignored, _ := opened["ignored_arguments"].([]string)
+	if !slices.Contains(ignored, "environment") {
+		t.Fatalf("compatibility alias did not use canonical normalization diagnostics: %#v", opened)
 	}
 }
 
@@ -3097,6 +3282,94 @@ func TestBrowserbaseOpenHidesAndDisablesKeepAlive(t *testing.T) {
 	}
 }
 
+func TestCloudSessionDefaultLifetimeAndDiagnostics(t *testing.T) {
+	previous := newBackend
+	t.Cleanup(func() { newBackend = previous })
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://example.com"}
+	var gotCfg backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotCfg = cfg
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	out, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if gotCfg.Timeout != 1800 || fake.openTimeout != 1800 || result["effective_timeout_seconds"] != 1800 {
+		t.Fatalf("30-minute default did not reach provider and output: cfg=%d open=%d result=%v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+	for _, key := range []string{"session_started_at", "expires_at", "session_age_seconds"} {
+		if _, ok := result[key]; !ok {
+			t.Fatalf("missing lifetime diagnostic %q: %v", key, result)
+		}
+	}
+}
+
+func TestAgents0412GeneratedAlexaOpenUsesDefaultCloudLifetime(t *testing.T) {
+	previous := newBackend
+	t.Cleanup(func() { newBackend = previous })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://www.patreon.com/c/alexaentranced"}
+	var gotCfg backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotCfg = cfg
+		return fake, nil
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{"default_backend": "browserbase"}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+
+	if _, err := dbCreateContext(ctx.AppDB(), contextCreateInput{Name: "Alexa Patreon", Backend: "browserbase", ProviderContextID: "saved-alexa", PersistDefault: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolBrowserSession(ctx, agents0412GeneratedAlexaOpenArgs())
+	if err != nil {
+		t.Fatalf("generated Alexa open: %v", err)
+	}
+	result := out.(map[string]any)
+	if gotCfg.Timeout != defaultCloudSessionTimeoutSeconds || fake.openTimeout != defaultCloudSessionTimeoutSeconds || result["effective_timeout_seconds"] != defaultCloudSessionTimeoutSeconds {
+		t.Fatalf("generated timeout did not fall back to 1800: cfg=%d open=%d result=%#v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+	ignored, _ := result["ignored_arguments"].([]string)
+	for _, key := range []string{"backend", "environment", "environment_override", "proxy_mode", "timeout", "viewport"} {
+		if !slices.Contains(ignored, key) {
+			t.Errorf("ignored arguments %v missing %q", ignored, key)
+		}
+	}
+	_, _ = app.toolBrowserClose(ctx, map[string]any{"session_id": result["session_id"]})
+
+	fake = &fakeComp{display: backends.DisplaySize{Width: 1600, Height: 800}, url: "https://example.com"}
+	out, err = app.toolBrowserSession(ctx, map[string]any{
+		"action": "open", "backend": "browserbase", "timeout": 60, "url": "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("explicit one-minute session: %v", err)
+	}
+	result = out.(map[string]any)
+	if gotCfg.Timeout != 60 || fake.openTimeout != 60 || result["effective_timeout_seconds"] != 60 {
+		t.Fatalf("independent explicit timeout was not preserved: cfg=%d open=%d result=%#v", gotCfg.Timeout, fake.openTimeout, result)
+	}
+}
+
+func TestComputerSkillDistinguishesSessionLifetimeFromActionWaits(t *testing.T) {
+	raw, err := os.ReadFile("skills/how-to-use-computer.md")
+	if err != nil {
+		t.Fatalf("read Computer skill: %v", err)
+	}
+	guide := string(raw)
+	for _, want := range []string{"Session lifetime is not an action timeout", "omit `timeout`", "1,800 seconds", "even if the agent is actively browsing", "timeout_ms"} {
+		if !strings.Contains(guide, want) {
+			t.Errorf("Computer skill missing %q", want)
+		}
+	}
+}
+
 func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 	app := &App{}
 	var desc string
@@ -3404,6 +3677,11 @@ func (f *fakeComp) ExecuteAction(action backends.Action) error {
 	f.mu.Unlock()
 	if f.executeActionHook != nil {
 		if err := f.executeActionHook(action); err != nil {
+			return err
+		}
+	}
+	if f.executeActionHook == nil && f.executeHook != nil {
+		if err := f.executeHook(action); err != nil {
 			return err
 		}
 	}

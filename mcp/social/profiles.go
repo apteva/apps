@@ -79,8 +79,7 @@ func makeUniqueSlug(db *sql.DB, projectID, base string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		n++
-		candidate = fmt.Sprintf("%s-%d", base, n)
+		candidate = fmt.Sprintf("%s-%d", base, n+1)
 	}
 	return "", errors.New("could not derive unique slug after 1000 attempts")
 }
@@ -215,6 +214,9 @@ func (a *App) profileTools() []sdk.Tool {
 }
 
 func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
+	unlock := lockSocialPost(ctx, -1)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	name, _ := args["name"].(string)
 	name = strings.TrimSpace(name)
@@ -241,17 +243,27 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 	}
 
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if isDefault {
 		// Promote-to-default demotes any prior default.
-		_, _ = ctx.AppDB().Exec(`UPDATE profiles SET is_default=0 WHERE project_id=?`, pid)
+		if _, err := tx.Exec(`UPDATE profiles SET is_default=0 WHERE project_id=?`, pid); err != nil {
+			return nil, err
+		}
 	}
-	res, err := ctx.AppDB().Exec(
+	res, err := tx.Exec(
 		`INSERT INTO profiles (project_id, name, slug, description, color, is_default)
 		 VALUES (?, ?, ?, ?, ?, ?)`,
 		pid, name, slug, desc, color, boolToInt(isDefault),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert profile: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	p, err := loadProfile(ctx.AppDB(), pid, id)
@@ -267,6 +279,7 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	// First pass: gather row data + close the cursor BEFORE issuing
 	// the per-row count queries. Holding a Rows open while running
@@ -306,6 +319,7 @@ func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
@@ -360,6 +374,9 @@ func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
+	unlock := lockSocialPost(ctx, -1)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
@@ -395,10 +412,17 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		sets = append(sets, "color=?")
 		vals = append(vals, color)
 	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	if v, ok := args["is_default"]; ok {
 		want := boolFromAny(v)
 		if want {
-			_, _ = ctx.AppDB().Exec(`UPDATE profiles SET is_default=0 WHERE project_id=?`, pid)
+			if _, err := tx.Exec(`UPDATE profiles SET is_default=0 WHERE project_id=?`, pid); err != nil {
+				return nil, err
+			}
 		}
 		sets = append(sets, "is_default=?")
 		vals = append(vals, boolToInt(want))
@@ -407,12 +431,15 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return map[string]any{"profile": current}, nil
 	}
 	vals = append(vals, id, pid)
-	_, err = ctx.AppDB().Exec(
+	_, err = tx.Exec(
 		`UPDATE profiles SET `+strings.Join(sets, ", ")+` WHERE id=? AND project_id=?`,
 		vals...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update profile: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	updated, _ := loadProfile(ctx.AppDB(), pid, id)
 	ctx.Emit("profile.updated", map[string]any{"profile_id": id, "slug": updated.Slug})
@@ -420,6 +447,9 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
+	unlock := lockSocialPost(ctx, -1)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
@@ -433,6 +463,9 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("profile not found"), nil
 	}
 	reassignTo := int64(intArg(args, "reassign_to", 0))
+	if reassignTo == id {
+		return mcpError("reassign_to must be a different profile"), nil
+	}
 	if reassignTo > 0 {
 		target, err := loadProfile(ctx.AppDB(), pid, reassignTo)
 		if err != nil || target == nil {
@@ -475,6 +508,9 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		reassignTo, pid, id,
 	); err != nil {
 		return nil, fmt.Errorf("reassign pending accounts: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE social_metric_points SET profile_id=? WHERE project_id=? AND profile_id=?`, reassignTo, pid, id); err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(
 		`DELETE FROM profiles WHERE id=? AND project_id=?`, id, pid,
@@ -660,12 +696,23 @@ func (a *App) bulkAssignAccounts(ctx *sdk.AppCtx, pid string, profileID int64, a
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
-	res, err := ctx.AppDB().Exec(
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE social_accounts SET profile_id=?
 		   WHERE project_id=? AND id IN (`+strings.Join(placeholders, ",")+`)`,
 		args...,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(`UPDATE social_metric_points SET profile_id=? WHERE project_id=? AND social_account_id IN (`+strings.Join(placeholders, ",")+`)`, args...); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	n, _ := res.RowsAffected()

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,7 +98,13 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, 200, out)
 	case action == "run" && r.Method == http.MethodPost:
-		out, err := runBacktestToEnd(run)
+		var out map[string]any
+		var err error
+		if run.RunKind == "strategy" {
+			out, err = runStrategyBacktestToEndContext(r.Context(), run)
+		} else {
+			out, err = runBacktestToEnd(run)
+		}
 		if err != nil {
 			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
 			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
@@ -152,16 +160,17 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		httpJSON(w, 200, map[string]any{"backtests": runs})
 	case http.MethodPost:
 		var body struct {
-			Name         string   `json:"name"`
-			AgentID      int64    `json:"agent_id"`
-			StrategyID   int64    `json:"strategy_id"`
-			Symbols      []string `json:"symbols"`
-			StartAt      string   `json:"start_at"`
-			EndAt        string   `json:"end_at"`
-			Interval     string   `json:"interval"`
-			StartingCash float64  `json:"starting_cash"`
-			FeeBps       float64  `json:"fee_bps"`
-			SlippageBps  float64  `json:"slippage_bps"`
+			Name           string   `json:"name"`
+			AgentID        int64    `json:"agent_id"`
+			StrategyID     int64    `json:"strategy_id"`
+			Symbols        []string `json:"symbols"`
+			StartAt        string   `json:"start_at"`
+			EndAt          string   `json:"end_at"`
+			Interval       string   `json:"interval"`
+			StartingCash   float64  `json:"starting_cash"`
+			FeeBps         float64  `json:"fee_bps"`
+			SlippageBps    float64  `json:"slippage_bps"`
+			AdjustmentMode string   `json:"adjustment_mode"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, 400, err.Error())
@@ -225,7 +234,12 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 400, err.Error())
 			return
 		}
-		marketBars, steps, marketSource, err := captureBacktestMarketBars(r.Context(), symbols, interval, startAt, endAt)
+		adjustmentMode, err := normalizeBacktestAdjustmentMode(body.AdjustmentMode)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(r.Context(), symbols, interval, startAt, endAt, adjustmentMode)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -247,26 +261,35 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			startingCash = pf.StartingCash
 		}
 		id, err := dbCreateBacktestRun(globalCtx.AppDB(), &BacktestRun{
-			ProjectID:       projectID,
-			PortfolioID:     pf.ID,
-			SourceAgentID:   agentID,
-			StrategyID:      body.StrategyID,
-			RunKind:         runKind,
-			StrategyVersion: strategyVersion,
-			Name:            name,
-			Status:          "queued",
-			Symbols:         symbols,
-			StartAt:         startAt.Format("2006-01-02"),
-			EndAt:           endAt.Format("2006-01-02"),
-			Interval:        interval,
-			StartingCash:    startingCash,
-			FeeBps:          body.FeeBps,
-			SlippageBps:     body.SlippageBps,
-			TotalSteps:      steps,
+			ProjectID:         projectID,
+			PortfolioID:       pf.ID,
+			SourceAgentID:     agentID,
+			StrategyID:        body.StrategyID,
+			RunKind:           runKind,
+			StrategyVersion:   strategyVersion,
+			Name:              name,
+			Status:            "queued",
+			Symbols:           symbols,
+			StartAt:           startAt.Format("2006-01-02"),
+			EndAt:             endAt.Format("2006-01-02"),
+			Interval:          interval,
+			StartingCash:      startingCash,
+			FeeBps:            body.FeeBps,
+			SlippageBps:       body.SlippageBps,
+			AdjustmentMode:    adjustmentMode,
+			ReferenceManifest: referenceManifest(globalCtx.AppDB(), symbols, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"), adjustmentMode),
+			TotalSteps:        steps,
 			Summary: map[string]any{
-				"portfolio_name": pf.Name,
-				"market_source":  marketSource,
-				"market_data":    summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
+				"portfolio_name":   pf.Name,
+				"market_source":    marketSource,
+				"market_data":      summarizeBacktestMarketCapture(marketBars, symbols, startAt, endAt),
+				"dataset_sha256":   backtestMarketBarsChecksum(marketBars),
+				"dataset_rows":     len(marketBars),
+				"price_adjustment": adjustmentMode,
+				"execution_model": map[string]any{
+					"fee_bps": body.FeeBps, "slippage_bps": body.SlippageBps,
+					"fill_model": "next_replay_mark", "lookahead": "disabled",
+				},
 				"strategy_name": func() string {
 					if strategy != nil {
 						return strategy.Name
@@ -703,6 +726,7 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		"_project_id":  run.ProjectID,
 		"portfolio_id": run.EnvironmentPortfolioID,
 		"run_id":       run.ID,
+		"replay_at":    backtestReplayTime(run, step).Format(time.RFC3339Nano),
 		"step":         step,
 		"prices":       prices,
 	}, &ignored); err != nil {
@@ -805,7 +829,7 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 	if perf.Entries == nil {
 		perf.Entries = []*JournalEntry{}
 	}
-	perf.Metrics = backtestPerformanceMetrics(run, perf.Series, perf.Current)
+	perf.Metrics = backtestPerformanceMetricsWithOrders(run, perf.Series, perf.Current, perf.Orders)
 	return perf, nil
 }
 
@@ -962,6 +986,10 @@ func backtestSeriesWithBaseline(run *BacktestRun, snapshots []*BacktestSnapshot)
 }
 
 func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot) map[string]float64 {
+	return backtestPerformanceMetricsWithOrders(run, series, current, nil)
+}
+
+func backtestPerformanceMetricsWithOrders(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot, orders []*Order) map[string]float64 {
 	metrics := map[string]float64{
 		"starting_cash": run.StartingCash,
 		"current_step":  float64(run.CurrentStep),
@@ -994,15 +1022,45 @@ func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, cu
 		}
 	}
 	metrics["max_drawdown_pct"] = maxDD
-	if sharpe, ok := backtestSharpeRatio(series, run.Interval); ok {
+	periods := backtestPeriodsPerYearForRun(run)
+	if sharpe, ok := backtestSharpeRatioWithPeriods(series, periods); ok {
 		metrics["sharpe_ratio"] = sharpe
+	}
+	returns := backtestEquityReturns(series)
+	if len(returns) > 1 {
+		mean, volatility, downside := returnMoments(returns)
+		metrics["annualized_return_pct"] = mean * periods * 100
+		metrics["annualized_volatility_pct"] = volatility * math.Sqrt(periods) * 100
+		if downside > 0 {
+			metrics["sortino_ratio"] = mean / downside * math.Sqrt(periods)
+		}
+	}
+	if current != nil && run.StartingCash > 0 && current.Equity > 0 && len(returns) > 0 {
+		years := float64(len(returns)) / periods
+		if years > 0 {
+			cagr := math.Pow(current.Equity/run.StartingCash, 1/years) - 1
+			metrics["cagr_pct"] = cagr * 100
+			if maxDD < 0 {
+				metrics["calmar_ratio"] = cagr / math.Abs(maxDD/100)
+			}
+		}
+	}
+	metrics["orders"] = float64(len(orders))
+	turnover := 0.0
+	for _, order := range orders {
+		if order != nil && order.FilledQty > 0 && order.AvgFillPrice > 0 {
+			turnover += order.FilledQty * order.AvgFillPrice
+		}
+	}
+	if run.StartingCash > 0 {
+		metrics["turnover_pct"] = turnover / run.StartingCash * 100
 	}
 	return metrics
 }
 
-func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
+func backtestEquityReturns(series []*BacktestSnapshot) []float64 {
 	returns := make([]float64, 0, len(series)-1)
-	var prev float64
+	prev := 0.0
 	for _, point := range series {
 		if point == nil || point.Equity <= 0 {
 			continue
@@ -1012,6 +1070,32 @@ func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, 
 		}
 		prev = point.Equity
 	}
+	return returns
+}
+
+func returnMoments(returns []float64) (mean, volatility, downside float64) {
+	for _, value := range returns {
+		mean += value
+	}
+	mean /= float64(len(returns))
+	for _, value := range returns {
+		delta := value - mean
+		volatility += delta * delta
+		if value < 0 {
+			downside += value * value
+		}
+	}
+	volatility = math.Sqrt(volatility / float64(len(returns)-1))
+	downside = math.Sqrt(downside / float64(len(returns)))
+	return
+}
+
+func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
+	return backtestSharpeRatioWithPeriods(series, backtestPeriodsPerYear(interval))
+}
+
+func backtestSharpeRatioWithPeriods(series []*BacktestSnapshot, periods float64) (float64, bool) {
+	returns := backtestEquityReturns(series)
 	if len(returns) < 2 {
 		return 0, false
 	}
@@ -1029,7 +1113,34 @@ func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, 
 	if variance <= 0 {
 		return 0, false
 	}
-	return mean / math.Sqrt(variance) * math.Sqrt(backtestPeriodsPerYear(interval)), true
+	return mean / math.Sqrt(variance) * math.Sqrt(periods), true
+}
+
+func backtestPeriodsPerYearForRun(run *BacktestRun) float64 {
+	cryptoOnly := len(run.Symbols) > 0
+	for _, symbol := range run.Symbols {
+		if inferAssetClass(symbol) != "crypto" {
+			cryptoOnly = false
+			break
+		}
+	}
+	if cryptoOnly {
+		return backtestPeriodsPerYear(run.Interval)
+	}
+	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
+	case "5m":
+		return 252 * 78
+	case "15m":
+		return 252 * 26
+	case "1h":
+		return 252 * 6.5
+	case "4h":
+		return 252 * 2
+	case "1w":
+		return 52
+	default:
+		return 252
+	}
 }
 
 func backtestPeriodsPerYear(interval string) float64 {
@@ -1067,58 +1178,87 @@ func backtestSummaryPrices(run *BacktestRun) []map[string]any {
 }
 
 func (a *App) toolBacktestMarketStep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if sdk.CurrentEnvironmentID() == "" {
+		return nil, errors.New("replay mutation requires isolated environment")
+	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	portfolioID := int64Arg(args, "portfolio_id", 0)
+	runID := int64Arg(args, "run_id", 0)
 	step := intArg(args, "step", 0)
-	raw, _ := args["prices"].([]any)
-	updated := []map[string]any{}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil || pf.Mode == "live" || !portfolioUsesBacktestPricing(ctx.AppDB(), portfolioID) {
+		return nil, errors.New("isolated replay portfolio required")
+	}
+	at, err := time.Parse(time.RFC3339Nano, strArg(args, "replay_at"))
+	if err != nil || step <= 0 || runID <= 0 {
+		return nil, errors.New("run_id, positive step and valid replay_at required")
+	}
+	raw, ok := args["prices"].([]any)
+	if !ok || len(raw) == 0 {
+		return nil, errors.New("replay prices required")
+	}
+	bytes, _ := json.Marshal(raw)
+	digest := fmt.Sprintf("%x", sha256.Sum256(bytes))
+	var marks []*Mark
+	seen := map[string]bool{}
 	for _, item := range raw {
 		row, ok := item.(map[string]any)
 		if !ok {
-			continue
+			return nil, errors.New("invalid replay row")
 		}
-		symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
-		if symbol == "" {
-			continue
-		}
+		symbol := canonicalSymbol(strArg(row, "symbol"))
 		price := anyFloat(row["price"])
-		if price <= 0 {
-			continue
+		if symbol == "" || seen[symbol] || !finite(price) || price <= 0 {
+			return nil, errors.New("invalid or duplicate replay price")
 		}
-		cls := strings.TrimSpace(fmt.Sprint(row["asset_class"]))
-		if cls == "" {
-			cls = inferAssetClass(symbol)
+		seen[symbol] = true
+		class := inferAssetClass(symbol)
+		m := &Mark{Symbol: symbol, AssetClass: class, Price: price, Source: "backtest", MarkedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		if class == "polymarket" {
+			m.NoPrice = ptr(1 - price)
 		}
-		prev := anyFloat(row["prev_close"])
-		if prev <= 0 {
-			prev = price
+		marks = append(marks, m)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var oldRun int64
+	var oldStep int
+	var oldDigest, oldAt string
+	err = tx.QueryRow(`SELECT run_id,step,digest,replay_at FROM replay_steps WHERE portfolio_id=?`, portfolioID).Scan(&oldRun, &oldStep, &oldDigest, &oldAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err == nil && oldRun == runID && oldStep == step && oldDigest == digest && oldAt == at.Format(time.RFC3339Nano) {
+		return map[string]any{"updated": 0, "replayed": true}, nil
+	}
+	if (oldRun != 0 && oldRun != runID) || step != oldStep+1 {
+		return nil, errors.New("replay sequence conflict")
+	}
+	if oldAt != "" {
+		previous, _ := time.Parse(time.RFC3339Nano, oldAt)
+		if !at.After(previous) {
+			return nil, errors.New("replay clock must advance")
 		}
-		mark := &Mark{
-			Symbol:     symbol,
-			AssetClass: cls,
-			Price:      price,
-			PrevClose:  &prev,
-			MarkedAt:   time.Now().UTC().Format(time.RFC3339),
-		}
-		if cls == "polymarket" {
-			no := 1 - price
-			mark.NoPrice = &no
-		}
-		if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+	}
+	for _, m := range marks {
+		if err := dbUpsertMarkExec(tx, m); err != nil {
 			return nil, err
 		}
-		updated = append(updated, map[string]any{"symbol": symbol, "price": price, "asset_class": cls})
 	}
-	if portfolioID > 0 {
-		_, _ = dbInsertJournal(ctx.AppDB(), pid, portfolioID, "note",
-			fmt.Sprintf("Backtest market step %d loaded %d mark(s).", step, len(updated)),
-			map[string]any{"source": "backtest_market_step", "step": step, "prices": updated})
+	if _, err := tx.Exec(`INSERT INTO replay_steps(portfolio_id,run_id,step,digest,replay_at) VALUES(?,?,?,?,?) ON CONFLICT(portfolio_id) DO UPDATE SET step=excluded.step,digest=excluded.digest,replay_at=excluded.replay_at`, portfolioID, runID, step, digest, at.Format(time.RFC3339Nano)); err != nil {
+		return nil, err
 	}
-	emit("trading.backtest.market_step", map[string]any{"portfolio_id": portfolioID, "step": step, "prices": updated})
-	return map[string]any{"updated": len(updated), "prices": updated}, nil
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	emit("trading.backtest.market_step", map[string]any{"portfolio_id": portfolioID, "step": step, "prices": raw})
+	return map[string]any{"updated": len(marks), "prices": raw}, nil
 }
 
 func backtestDirective(run *BacktestRun) string {
@@ -1145,6 +1285,10 @@ func backtestMarks(run *BacktestRun, step int) ([]map[string]any, error) {
 }
 
 func captureBacktestMarketBars(parent context.Context, symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
+	return captureBacktestMarketBarsAdjusted(parent, symbols, interval, startAt, endAt, "provider_adjusted")
+}
+
+func captureBacktestMarketBarsAdjusted(parent context.Context, symbols []string, interval string, startAt, endAt time.Time, adjustmentMode string) ([]*BacktestMarketBar, int, string, error) {
 	symbols = cleanSymbols(symbols)
 	if len(symbols) == 0 {
 		return nil, 0, "", errors.New("at least one symbol required")
@@ -1155,6 +1299,13 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 	provider, source, err := backtestBarsProviderForSymbols(symbols)
 	if err != nil {
 		return nil, 0, "", err
+	}
+	adjustmentMode, err = normalizeBacktestAdjustmentMode(adjustmentMode)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if _, ok := provider.(historicalAdjustedBacktestBarsProvider); !ok && adjustmentMode != "provider_adjusted" {
+		return nil, 0, "", fmt.Errorf("market source %s cannot guarantee adjustment mode %s", source, adjustmentMode)
 	}
 	limit := estimateBacktestBarsLimit(startAt, endAt, interval)
 	if limit <= 0 {
@@ -1192,7 +1343,13 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 				results <- fetchResult{symbol: symbol, err: ctx.Err()}
 				return
 			}
-			bars, err := provider.BacktestBarsContext(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+			var bars []Bar
+			var err error
+			if adjusted, ok := provider.(historicalAdjustedBacktestBarsProvider); ok {
+				bars, err = adjusted.BacktestBarsContextAdjustment(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit, adjustmentMode)
+			} else {
+				bars, err = provider.BacktestBarsContext(ctx, symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+			}
 			if err == nil {
 				bars, err = validateBacktestHistory(symbol, source, interval, startAt, endAt, bars, time.Now().UTC())
 			}
@@ -1276,40 +1433,46 @@ func captureBacktestMarketBars(parent context.Context, symbols []string, interva
 				Step: step + 1, Symbol: symbol, AssetClass: inferAssetClass(symbol), T: t,
 				O: nonZeroBarPrice(bar.O, bar.C), H: nonZeroBarPrice(bar.H, bar.C),
 				L: nonZeroBarPrice(bar.L, bar.C), C: bar.C, V: bar.V, Source: source,
+				VolumeUnit: historicalVolumeUnit(source, inferAssetClass(symbol)), TimestampKind: "exchange",
 			})
 		}
 	}
 	return out, len(times), source, nil
 }
 
+func normalizeBacktestAdjustmentMode(value string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "provider_adjusted":
+		return "provider_adjusted", nil
+	case "raw":
+		return "raw", nil
+	case "split_adjusted":
+		return "split_adjusted", nil
+	case "price_return":
+		return "price_return", nil
+	case "total_return":
+		return "total_return", nil
+	default:
+		return "", fmt.Errorf("adjustment_mode must be provider_adjusted|raw|split_adjusted|price_return|total_return")
+	}
+}
+
+func backtestMarketBarsChecksum(bars []*BacktestMarketBar) string {
+	h := sha256.New()
+	encoder := json.NewEncoder(h)
+	encoder.SetEscapeHTML(false)
+	for _, bar := range bars {
+		_ = encoder.Encode(bar)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
 type historicalBacktestBarsProvider interface {
 	BacktestBarsContext(ctx context.Context, symbol, interval string, start, end time.Time, limit int) ([]Bar, error)
 }
 
-func retryBacktestBars(ctx context.Context, fetch func() ([]Bar, error)) ([]Bar, error) {
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		bars, err := fetch()
-		if err == nil {
-			return bars, nil
-		}
-		lastErr = err
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if attempt == 2 {
-			break
-		}
-		delay := time.Duration(200*(1<<attempt)) * time.Millisecond
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, lastErr
+type historicalAdjustedBacktestBarsProvider interface {
+	BacktestBarsContextAdjustment(ctx context.Context, symbol, interval string, start, end time.Time, limit int, adjustmentMode string) ([]Bar, error)
 }
 
 func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsProvider, string, error) {
@@ -1334,6 +1497,11 @@ func backtestBarsProviderForSymbols(symbols []string) (historicalBacktestBarsPro
 	case "crypto":
 		return newBinancePublic(), "binance-public", nil
 	case "stocks":
+		if globalEngine != nil {
+			if live, ok := globalEngine.provider.(*liveProvider); ok && live.equity != nil && live.equity.available() {
+				return live.equity, alpacaMarketDataSlug, nil
+			}
+		}
 		return newYahooPublic(), "yahoo-finance", nil
 	default:
 		return nil, "", errors.New("no supported backtest symbols")
@@ -1386,18 +1554,10 @@ func validateBacktestHistory(symbol, source, interval string, startAt, endAt tim
 	if duration <= 0 {
 		return nil, fmt.Errorf("unsupported backtest interval %q", interval)
 	}
-	byTime := make(map[int64]Bar, len(bars))
-	for _, bar := range bars {
-		if bar.T <= 0 || bar.C <= 0 {
-			continue
-		}
-		byTime[bar.T] = bar
+	normalized, err := normalizeBars(symbol, source, bars)
+	if err != nil {
+		return nil, err
 	}
-	normalized := make([]Bar, 0, len(byTime))
-	for _, bar := range byTime {
-		normalized = append(normalized, bar)
-	}
-	sort.Slice(normalized, func(i, j int) bool { return normalized[i].T < normalized[j].T })
 	if source == "yahoo-finance" {
 		normalized = completedYahooStrategyBars(normalized, interval, now)
 	} else {

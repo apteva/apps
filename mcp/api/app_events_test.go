@@ -149,7 +149,13 @@ func TestGatewayAppEventsRequiresAuthentication(t *testing.T) {
 			"topics": []any{"row.*"},
 			"output": map[string]any{"type": "invalidate", "resource": "ventes"},
 		},
-	}); err != nil {
+	}); err == nil || !strings.Contains(err.Error(), "require api_key or auth_jwt") {
+		t.Fatalf("unsafe stream configuration accepted: %v", err)
+	}
+
+	api, _ := dbGetAPIBySlug(ctx.AppDB(), testProject, "public-events")
+	_, _, err := dbUpsertRoute(ctx.AppDB(), routeInput{ProjectID: testProject, APIID: api.ID, Method: "GET", PathPattern: "/changes", TargetKind: "app_events", TargetRef: "tables", EventsJSON: `{"topics":["row.*"],"output":{"type":"invalidate"}}`, Enabled: true})
+	if err != nil {
 		t.Fatal(err)
 	}
 	rr := httptest.NewRecorder()

@@ -32,7 +32,7 @@ func TestLLMChoosesOutcomeWaitAndSemanticDeltaLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required for the authenticated LLM regression")
 	}
 

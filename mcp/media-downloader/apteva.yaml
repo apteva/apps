@@ -2,14 +2,16 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.15
+version: 0.3.0
 description: |
   Media download sidecar for public and authenticated sources supported by
   yt-dlp. Downloads use bounded concurrency and guarded public-network
   egress, stream completed files to storage, and keep sensitive YouTube,
   Patreon, and Instagram cookie profiles encrypted in the app database.
-  Agents can search YouTube directly without a separate API key. v0.2.15
-  adds authenticated Instagram Post, Reel, and IGTV download profiles.
+  Agents can search YouTube directly without a separate API key. v0.3.0
+  adds complete source ingestion: normalized metadata, thumbnails, manual or
+  automatic captions, typed Storage artifacts, and Media/Deepgram transcript
+  fallback when source captions are unavailable.
 
 author: Apteva
 icon: /ui/icon.svg
@@ -25,6 +27,7 @@ requires:
     - platform.apps.call
   apps:
     - { name: storage, optional: false }
+    - { name: media, optional: false }
   binaries:
     - name: yt-dlp
       executables: [yt-dlp]
@@ -61,8 +64,8 @@ provides:
       description: Cancellation was requested for a running or queued download.
       payload: { id: string, status: string }
     - name: download.completed
-      description: A download completed and its output was stored.
-      payload: { id: string, status: string, stage: string, storage_file_id: integer, storage_url: string }
+      description: A download or ingestion completed and all outputs were stored.
+      payload: { id: string, status: string, stage: string, storage_file_id: integer, storage_file_ids: array, storage_url: string, artifacts: array, metadata: object, warnings: array }
     - name: download.failed
       description: A download failed.
       payload: { id: string, status: string, stage: string, error: string }
@@ -85,8 +88,10 @@ provides:
       description: Inspect a supported media URL with yt-dlp without downloading it.
     - name: download_media
       description: Start a yt-dlp download job and save the completed file into storage.
+    - name: ingest_media
+      description: Ingest one media URL with metadata, thumbnail, captions, media, and transcription fallback artifacts.
     - name: download_status
-      description: Get current status, progress, output file id, and recent logs for one download job.
+      description: Get current status, progress, typed artifacts, every Storage file ID, and recent logs for one download job.
     - name: download_list
       description: List recent download jobs.
     - name: download_cancel
@@ -176,5 +181,15 @@ config_schema:
     default: "localhost,127.0.0.1,::1"
     label: Blocked domains
     description: Comma-separated host suffix denylist applied before DNS/IP safety checks.
+  - name: ingest_media_index_timeout_seconds
+    type: number
+    default: 90
+    label: Media indexing timeout
+    description: Seconds an ingestion waits for its fallback audio file to appear in Media before failing.
+  - name: ingest_transcription_timeout_seconds
+    type: number
+    default: 900
+    label: Ingestion transcription timeout
+    description: Seconds an ingestion waits for Media/Deepgram transcription when source captions are unavailable.
 
 upgrade_policy: auto-patch

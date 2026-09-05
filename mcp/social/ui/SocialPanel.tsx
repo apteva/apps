@@ -12,16 +12,10 @@
 // The host React (19) + react-dom come from the dashboard's importmap;
 // this file uses the same useAppEvents pattern as media-studio.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { createRequestGate } from "./requestIdentity";
+import { scheduleInstant, localScheduleInput } from "./scheduleTime";
 import { File, FileAudio, Paperclip, X } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
@@ -57,6 +51,12 @@ const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
 const MEDIA_API = "/api/apps/media";
 const IMPORTABLE_PLATFORMS = new Set(["facebook", "instagram", "tiktok", "twitter", "youtube"]);
+
+type ProviderImportMode = "off" | "managed_only" | "full_history";
+
+function historyImportSupported(account: SocialAccount): boolean {
+  return account.provider_slug === "zernio" || IMPORTABLE_PLATFORMS.has(account.platform);
+}
 
 function appURL(path: string, projectId?: string | null): string {
   return scopedAppURL(API, path, projectId);
@@ -100,6 +100,7 @@ interface SocialAccount {
   provider_slug?: string;
   provider_account_id?: string;
   provider_profile_id?: string;
+  provider_import_mode?: ProviderImportMode;
   capabilities?: Record<string, unknown> | null;
   display_name: string;
   avatar_url: string;
@@ -587,7 +588,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "inbox" && (
-          <InboxView
+          <InboxView key={projectId || "global"}
             accounts={accounts}
             platforms={platforms}
             projectId={projectId}
@@ -596,7 +597,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "metrics" && (
-          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
+          <MetricsView key={projectId || "global"} posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
         )}
       </div>
 
@@ -1183,7 +1184,7 @@ function ImportHistoryDialog({
   onImported: () => void;
   setStatus: (s: string) => void;
 }) {
-  const importableAccounts = accounts.filter((a) => IMPORTABLE_PLATFORMS.has(a.platform));
+  const importableAccounts = accounts.filter(historyImportSupported);
   const allPlatforms = Array.from(new Set(accounts.map((a) => a.platform))).sort();
   const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(
     () => new Set(importableAccounts.map((a) => a.platform))
@@ -1211,7 +1212,7 @@ function ImportHistoryDialog({
         const accountNext = new Set(accountPrev);
         for (const account of accounts) {
           if (account.platform !== platform) continue;
-          if (next.has(platform) && IMPORTABLE_PLATFORMS.has(platform)) accountNext.add(account.id);
+          if (next.has(platform) && historyImportSupported(account)) accountNext.add(account.id);
           else accountNext.delete(account.id);
         }
         return accountNext;
@@ -1297,7 +1298,7 @@ function ImportHistoryDialog({
               <label className="text-xs uppercase tracking-wide text-text-dim">Networks</label>
               <div className="flex flex-wrap gap-2">
                 {allPlatforms.map((platform) => {
-                  const supported = IMPORTABLE_PLATFORMS.has(platform);
+                  const supported = accounts.some((account) => account.platform === platform && historyImportSupported(account));
                   return (
                     <button
                       key={platform}
@@ -1329,7 +1330,7 @@ function ImportHistoryDialog({
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {accounts.map((account) => {
-                  const supported = IMPORTABLE_PLATFORMS.has(account.platform);
+                  const supported = historyImportSupported(account);
                   const checked = selectedAccounts.has(account.id);
                   return (
                     <label
@@ -1437,7 +1438,10 @@ function InboxView({
   const [items, setItems] = useState<InboxItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selected, setSelected] = useState<InboxItem | null>(null);
-  const [thread, setThread] = useState<InboxItem[]>([]);
+  const [threadMore,setThreadMore]=useState(false);
+ const [threadBefore,setThreadBefore]=useState<number|undefined>();
+ const [loadingOlder,setLoadingOlder]=useState(false);
+ const [thread, setThread] = useState<InboxItem[]>([]);
   const [accountFilter, setAccountFilter] = useState("all");
   const [kindFilter, setKindFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("open");
@@ -1448,6 +1452,10 @@ function InboxView({
   const [replyAttachments, setReplyAttachments] = useState<StorageFile[]>([]);
   const [attachmentPickerOpen, setAttachmentPickerOpen] = useState(false);
 
+  const selectedIdRef = useRef(selectedId); selectedIdRef.current = selectedId;
+  const threadGate = useRef(createRequestGate());
+  const listGate = useRef(createRequestGate());
+  useEffect(() => () => { threadGate.current.invalidate(); listGate.current.invalidate(); }, []);
   const accountIDs = accounts.map((a) => a.id);
   const selectedAccountIDs =
     accountFilter === "all"
@@ -1455,6 +1463,7 @@ function InboxView({
       : accountFilter ? [Number(accountFilter)] : [];
 
   const loadItems = useCallback(async () => {
+    const current = listGate.current.begin();
     if (accounts.length === 0) {
       setItems([]);
       setSelectedId(null);
@@ -1482,21 +1491,24 @@ function InboxView({
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as { items?: InboxItem[]; count?: number };
+      if (!current()) return;
       const next = data.items || [];
       setItems(next);
-      onCountChange(next.filter((it) => it.status === "unread").length || next.length);
+      onCountChange(next.filter((it) => it.status === "unread").length);
       setSelectedId((prev) => {
         if (prev && next.some((it) => it.id === prev)) return prev;
         return next[0]?.id || null;
       });
     } catch (e) {
-      setStatus("Load inbox: " + (e as Error).message);
+      if(current()) setStatus("Load inbox: " + (e as Error).message);
     } finally {
-      setLoading(false);
+      if(current()) setLoading(false);
     }
   }, [accounts.length, accountFilter, kindFilter, statusFilter, projectId, setStatus, onCountChange, selectedAccountIDs.join(",")]);
 
   const loadThread = useCallback(async (id: number | null) => {
+    const current = threadGate.current.begin();
+    setSelected(null); setThread([]);setThreadMore(false);setThreadBefore(undefined);setLoadingOlder(false);
     if (!id) {
       setSelected(null);
       setThread([]);
@@ -1507,13 +1519,26 @@ function InboxView({
         credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as { item?: InboxItem; thread?: InboxItem[] };
-      setSelected(data.item || null);
+      const data = await res.json() as { item?: InboxItem; thread?: InboxItem[];thread_has_more?:boolean;thread_next_before?:number };
+      if (!current() || selectedIdRef.current !== id) return;
+      setSelected(data.item?.id === id ? data.item : null);setThreadMore(!!data.thread_has_more);setThreadBefore(data.thread_next_before);
       setThread(data.thread && data.thread.length > 0 ? data.thread : data.item ? [data.item] : []);
     } catch (e) {
-      setStatus("Load thread: " + (e as Error).message);
+      if(current() && selectedIdRef.current===id) setStatus("Load thread: " + (e as Error).message);
     }
   }, [projectId, setStatus]);
+
+ const loadOlder=async()=>{
+  const id=selectedId;if(!id||!threadBefore||loadingOlder)return;
+  const current=threadGate.current.begin();setLoadingOlder(true);
+  try{
+   const res=await fetch(appURL(`/inbox/${id}?with_thread=true&thread_before=${threadBefore}`,projectId),{credentials:"same-origin"});
+   if(!res.ok)throw new Error(await res.text());const data=await res.json();
+   if(!current()||selectedIdRef.current!==id)return;
+   setThread((prior)=>{const ids=new Set(prior.map(x=>x.id));return [...(data.thread||[]).filter((x:InboxItem)=>!ids.has(x.id)),...prior]});
+   setThreadMore(!!data.thread_has_more);setThreadBefore(data.thread_next_before);
+  }catch(e){if(current())setStatus("Load older messages: "+(e as Error).message)}finally{if(current())setLoadingOlder(false)}
+ };
 
   useEffect(() => {
     loadItems();
@@ -1524,13 +1549,14 @@ function InboxView({
   }, [selectedId, loadThread]);
 
   useEffect(() => {
+    setReplyBody("");
     setReplyMode("public");
     setReplyAttachments([]);
     setAttachmentPickerOpen(false);
   }, [selectedId]);
 
   const runAction = async (action: string, id = selectedId, body?: Record<string, unknown>) => {
-    if (!id) return;
+    if (!id || id !== selectedIdRef.current || selected?.id !== id || busy) return;
     setBusy(action);
     try {
       const res = await fetch(appURL(`/inbox/${id}/${action}`, projectId), {
@@ -1541,6 +1567,7 @@ function InboxView({
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
+      if (selectedIdRef.current !== id) return;
       const envelopeError = mcpEnvelopeError(data);
       if (envelopeError) {
         setStatus(envelopeError);
@@ -1568,7 +1595,7 @@ function InboxView({
         );
       }
       await loadItems();
-      await loadThread(id);
+      if (selectedIdRef.current === id) await loadThread(id);
     } catch (e) {
       setStatus(`Inbox ${action}: ` + (e as Error).message);
     } finally {
@@ -1600,7 +1627,7 @@ function InboxView({
   };
 
   const accountByID = new Map(accounts.map((a) => [a.id, a]));
-  const activeItem = selected || (selectedId ? items.find((it) => it.id === selectedId) || null : null);
+  const activeItem = selected?.id === selectedId ? selected : null;
   const activeAccount = activeItem ? accountByID.get(activeItem.social_account_id) : undefined;
   const platformInfo = activeItem ? platforms.find((platform) => platform.platform === activeItem.platform) : undefined;
   const attachmentCaps = inboxAttachmentCapabilities(
@@ -1761,7 +1788,8 @@ function InboxView({
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-3">
-                {thread.map((message) => {
+                {threadMore && <button disabled={loadingOlder} onClick={loadOlder} className="text-sm text-accent">{loadingOlder?"Loading…":"Load older messages"}</button>}
+ {thread.map((message) => {
                   const own = message.author_external_id === accountByID.get(message.social_account_id)?.external_account_id;
                   return (
                     <div
@@ -2319,6 +2347,7 @@ function AccountCard({
   const [hardDelete, setHardDelete] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [syncingProvider, setSyncingProvider] = useState(false);
   const doRemove = async (hard = false) => {
     try {
       const query = hard ? "?hard_delete=true&delete_posts=true" : "";
@@ -2331,7 +2360,34 @@ function AccountCard({
     }
   };
   const provider = account.provider_slug || "native";
-  const importSupported = provider === "zernio" || IMPORTABLE_PLATFORMS.has(account.platform);
+  const importSupported = historyImportSupported(account);
+  const providerImportMode = account.provider_import_mode || "managed_only";
+
+  const setProviderImportMode = async (mode: ProviderImportMode) => {
+    setSyncingProvider(true);
+    setStatus(`Updating provider synchronization for ${account.display_name}…`);
+    try {
+      const res = await fetch(appURL(`/accounts/${account.id}/provider-sync`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      setStatus(
+        mode === "full_history"
+          ? `${account.display_name} will automatically import provider history.`
+          : mode === "off"
+            ? `Automatic provider synchronization is off for ${account.display_name}; publishing is unchanged.`
+            : `${account.display_name} now reconciles Social-managed posts only.`
+      );
+      onChange();
+    } catch (e) {
+      setStatus("Provider synchronization update failed: " + (e as Error).message);
+    } finally {
+      setSyncingProvider(false);
+    }
+  };
   const doImport = async () => {
     setImporting(true);
     setStatus(`Importing recent posts from ${account.display_name}…`);
@@ -2406,6 +2462,19 @@ function AccountCard({
             <HealthPill account={account} />
           </div>
         </div>
+        {provider !== "native" && (
+          <select
+            value={providerImportMode}
+            disabled={syncingProvider}
+            onChange={(event) => setProviderImportMode(event.target.value as ProviderImportMode)}
+            className="max-w-[145px] bg-bg-input border border-border rounded px-2 py-1 text-xs text-text disabled:opacity-50"
+            title="Automatic provider synchronization. This does not change publishing or direct scheduling access."
+          >
+            <option value="managed_only">Managed only</option>
+            <option value="off">Sync off</option>
+            <option value="full_history">Full history</option>
+          </select>
+        )}
         <button
           onClick={doCheck}
           disabled={checking}
@@ -2842,9 +2911,10 @@ function PagePicker({
 // just reflects what the server says without hard-coding any
 // platform's schema in the panel.
 function OptionFieldInput({
-  field, value, onChange, projectId,
+  field, value, onChange, projectId, disabled=false,
 }: {
   field: OptionField;
+ disabled?:boolean;
   value: any;
   onChange: (v: any) => void;
   projectId?: string | null;
@@ -2942,6 +3012,7 @@ function OptionFieldInput({
       <label className="flex items-start gap-2 border border-border rounded px-2 py-2 bg-bg-input/50">
         <input
           type="checkbox"
+ disabled={disabled}
           checked={value === true}
           onChange={(e) => onChange(e.target.checked)}
           className="mt-0.5 w-4 h-4 accent-orange-500"
@@ -2963,7 +3034,7 @@ function OptionFieldInput({
           onChange={(e) => onChange(e.target.value)}
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         >
-          <option value="">Use default</option>
+          <option value="">{field.name === "privacy_level" ? "Choose privacy" : "Use default"}</option>
           {(field.options || []).map((opt) => (
             <option key={opt} value={opt}>{opt}</option>
           ))}
@@ -3050,9 +3121,24 @@ function ComposeDialog({
   // ObjectURL — cheap, but we revoke it on remove + unmount so the
   // browser doesn't keep the bytes around forever.
   const [media, setMedia] = useState<{ id: number; name: string; mime: string; previewURL: string }[]>([]);
+  const previews = useRef(new Set<string>());
+  const uploadController = useRef<AbortController | null>(null);
+  const mounted = useRef(true);
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [creatorInfo,setCreatorInfo] = useState<Record<number,{privacy_level_options:string[];comment_disabled:boolean;duet_disabled:boolean;stitch_disabled:boolean}>>({});
+  useEffect(() => {
+    const controller = new AbortController();
+    for (const account of accounts.filter(a => a.platform === "tiktok" && (!a.provider_slug || a.provider_slug === "native"))) {
+      fetch(appURL(`/accounts/${account.id}/creator-info`, projectId), {credentials:"same-origin",signal:controller.signal})
+        .then(async res => {if(!res.ok) throw new Error(await res.text()); return res.json();})
+        .then(info => {if(!controller.signal.aborted) setCreatorInfo(prev=>({...prev,[account.id]:info}));})
+        .catch(error => {if(!controller.signal.aborted) setStatus(`TikTok settings: ${error.message}`);});
+    }
+    return () => controller.abort();
+  }, [accounts,projectId]);
 
   // Quick lookup: option_fields by platform name. Empty array when the
   // platform has no per-target customisation today.
@@ -3091,8 +3177,12 @@ function ComposeDialog({
 
   // Revoke any object URLs we created when the modal closes.
   useEffect(() => {
+    mounted.current = true;
     return () => {
-      for (const m of media) URL.revokeObjectURL(m.previewURL);
+      mounted.current = false;
+      uploadController.current?.abort();
+      for (const url of previews.current) URL.revokeObjectURL(url);
+      previews.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -3112,6 +3202,7 @@ function ComposeDialog({
     setUploading(true);
     try {
       const uploaded: typeof media = [];
+      const controller = new AbortController(); uploadController.current = controller;
       let i = 0;
       for (const file of fileList) {
         i += 1;
@@ -3121,6 +3212,7 @@ function ComposeDialog({
         // the storage sidecar, and a network blip mid-upload
         // resumes from the server-known offset.
         const row = await uploadResumable(file, {
+          signal: controller.signal,
           folder: "social/",
           projectId,
           onProgress: (bytes, total) => {
@@ -3131,19 +3223,23 @@ function ComposeDialog({
         if (typeof row.id !== "number") {
           throw new Error("storage didn't return a file id");
         }
-        uploaded.push({
+        if (!mounted.current) return;
+        const previewURL = URL.createObjectURL(file); previews.current.add(previewURL);
+        const attached = {
           id: row.id,
           name: file.name,
           mime: file.type,
-          previewURL: URL.createObjectURL(file),
-        });
+          previewURL,
+        };
+        uploaded.push(attached);
+        setMedia((prev) => [...prev, attached]);
       }
-      setMedia((prev) => [...prev, ...uploaded]);
+
       setStatus(`Attached ${uploaded.length} file${uploaded.length !== 1 ? "s" : ""}.`);
     } catch (e) {
-      setStatus("Upload failed: " + (e as Error).message);
+      if (mounted.current) setStatus("Upload failed; completed attachments were kept: " + (e as Error).message);
     } finally {
-      setUploading(false);
+      if (mounted.current) setUploading(false);
       ev.target.value = "";
     }
   };
@@ -3151,7 +3247,7 @@ function ComposeDialog({
   const removeMedia = (id: number) => {
     setMedia((prev) => {
       const dropped = prev.find((m) => m.id === id);
-      if (dropped) URL.revokeObjectURL(dropped.previewURL);
+      if (dropped) { URL.revokeObjectURL(dropped.previewURL); previews.current.delete(dropped.previewURL); }
       return prev.filter((m) => m.id !== id);
     });
   };
@@ -3193,7 +3289,7 @@ function ComposeDialog({
       const payload: Record<string, any> = {
         mode,
         body,
-        schedule_at: mode === "schedule" ? scheduleAt : undefined,
+        schedule_at: mode === "schedule" ? scheduleInstant(scheduleAt) : undefined,
         media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
         media_project_id: media.length > 0 ? projectId : undefined,
         // When the panel is scoped to one profile, tag the post
@@ -3325,9 +3421,9 @@ function ComposeDialog({
           <div className="flex flex-col gap-2">
             {accounts.map((a) => {
               const isSelected = selected.has(a.id);
-              const fields = fieldsByPlatform[a.platform] || [];
+              const fields = (fieldsByPlatform[a.platform] || []).map(field => field.name === "privacy_level" ? {...field, options:creatorInfo[a.id]?.privacy_level_options || []} : field);
               const hasCustomization = fields.length > 0;
-              const isExpanded = expanded === a.id;
+              const isExpanded = expanded === a.id || (isSelected && a.platform === "tiktok" && (!a.provider_slug || a.provider_slug === "native"));
               const customized = isCustomized(a.id);
               return (
                 <div
@@ -3380,7 +3476,8 @@ function ComposeDialog({
                         <OptionFieldInput
                           key={f.name}
                           field={f}
-                          value={accountOptions[a.id]?.[f.name]}
+                          disabled={!!creatorInfo[a.id]?.[({disable_comment:"comment_disabled",disable_duet:"duet_disabled",disable_stitch:"stitch_disabled"} as Record<string,"comment_disabled"|"duet_disabled"|"stitch_disabled">)[f.name]]}
+ value={creatorInfo[a.id]?.[({disable_comment:"comment_disabled",disable_duet:"duet_disabled",disable_stitch:"stitch_disabled"} as Record<string,"comment_disabled"|"duet_disabled"|"stitch_disabled">)[f.name]] || accountOptions[a.id]?.[f.name]}
                           projectId={projectId}
                           onChange={(v) => setAccountOption(a.id, f.name, v)}
                         />
@@ -4481,6 +4578,7 @@ function PostListRow({
         </button>
         <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           {(post.status === "failed" || post.status === "partial") && (
             <button
               type="button"
@@ -4685,6 +4783,7 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
         <div className="flex items-center gap-1 text-[10px]">
           <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill compact />}
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
         {mobile && (
@@ -4831,6 +4930,7 @@ function PostDetailPanel({
             <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
           </div>
           <StatusPill status={post.status} />
+          {post.source === "provider" && <ProviderImportPill />}
           <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
         </div>
         <div className="flex-1 overflow-y-auto">
@@ -5377,7 +5477,7 @@ function RescheduleDialog({
   // Seed the input with the post's current schedule_at as a
   // datetime-local value (the input wants "YYYY-MM-DDTHH:MM",
   // sliced from the ISO/RFC3339 string the server stored).
-  const seed = (post.schedule_at || "").slice(0, 16);
+  const seed = localScheduleInput(post.schedule_at || "");
   const [when, setWhen] = useState(seed);
   const [busy, setBusy] = useState(false);
   const schedulingDraft = post.status === "draft" || post.status === "approved";
@@ -5391,8 +5491,8 @@ function RescheduleDialog({
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(schedulingDraft
-          ? { expected_revision: post.revision, mode: "schedule", schedule_at: when }
-          : { schedule_at: when }),
+          ? { expected_revision: post.revision, mode: "schedule", schedule_at: scheduleInstant(when) }
+          : { schedule_at: scheduleInstant(when) }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
@@ -5519,9 +5619,13 @@ interface TargetMetrics {
   error?: string;
   metrics?: {
     views: number;
+    reach?: number;
     likes: number;
     comments: number;
     shares: number;
+    saves?: number;
+    clicks?: number;
+    available?: string[];
     raw?: any;
   };
 }
@@ -5609,6 +5713,9 @@ function MetricsView({
   const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());
   const autoRefreshedAccounts = useRef<Set<string>>(new Set());
+  const queryIdentity = `${projectId}:${analyticsRange}:${breakdownDimension}`;
+  const queryRef = useRef(queryIdentity); queryRef.current = queryIdentity;
+  const requestVersions = useRef<Record<number,number>>({});
   const accountIds = accounts.map((a) => a.id).join(",");
 
   useEffect(() => {
@@ -5632,6 +5739,9 @@ function MetricsView({
   }, [accounts, activeAccountId]);
 
   const loadAccount = async (id: number, refresh = false, background = false) => {
+    const version = (requestVersions.current[id] || 0)+1; requestVersions.current[id]=version;
+    const query = queryIdentity;
+    const current = () => queryRef.current === query && requestVersions.current[id]===version;
     if (!background) setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
     if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: true }));
     try {
@@ -5643,13 +5753,13 @@ function MetricsView({
       const res = await fetch(appURL(`/accounts/${id}/metrics?${params}`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
-      setAccountFor((prev) => ({ ...prev, [id]: data }));
+      if (current()) setAccountFor((prev) => ({ ...prev, [id]: data }));
     } catch (e) {
-      if (!background) {
+      if (!background && current()) {
         setAccountFor((prev) => ({ ...prev, [id]: { error: (e as Error).message } }));
       }
     } finally {
-      if (refresh) setRefreshingFor((prev) => ({ ...prev, [id]: false }));
+      if (refresh && current()) setRefreshingFor((prev) => ({ ...prev, [id]: false }));
     }
   };
 
@@ -5874,7 +5984,7 @@ function MetricsView({
               {(activeMetrics as AccountMetrics).status === "ok" && (
                 <>
                   <div className="text-xs uppercase tracking-wide text-text-dim mt-1">Trends</div>
-                  <InsightCharts metrics={activeMetrics as AccountMetrics} />
+                  <Suspense fallback={<div>Loading charts…</div>}><InsightCharts metrics={activeMetrics as AccountMetrics} /></Suspense>
                   <BreakdownView breakdown={activeBreakdown} filter={breakdownFilter} />
                 </>
               )}
@@ -5882,7 +5992,7 @@ function MetricsView({
           ) : (
             <div className="text-text-dim text-sm">Waiting for metrics...</div>
           )}
-          {syncFor[activeAccount.id] && typeof syncFor[activeAccount.id] === "object" && "error" in syncFor[activeAccount.id] && (
+          {syncFor[activeAccount.id] && typeof syncFor[activeAccount.id] === "object" && "error" in (syncFor[activeAccount.id] as object) && (
             <div className="text-text-dim text-xs">{(syncFor[activeAccount.id] as { error: string }).error}</div>
           )}
         </section>
@@ -5922,7 +6032,7 @@ function MetricsView({
                         {p.body || <span className="text-text-dim italic">no body</span>}
                       </div>
                       <div className="text-text-dim text-xs mt-0.5">
-                        {new Date(p.created_at).toLocaleString()}
+						{new Date(p.published_at || p.created_at).toLocaleString()}
                         {p.targets && p.targets.length > 0 && (
                           <span className="ml-2">
                             · {p.targets.length} target{p.targets.length !== 1 ? "s" : ""}
@@ -6050,14 +6160,17 @@ function AccountBreakdownComparison({
     if (!breakdown) return [];
     const matching = (breakdown.rows || []).filter((row) => filter === "all" || row.dimensions[dimension] === filter);
     const value = matching.reduce((total, row) => total + breakdownMetric(row.metrics).value, 0);
-    return [{ account, value }];
+    const names = new Set(matching.map(row => breakdownMetric(row.metrics).name));
+    if (names.size !== 1) return [];
+    return [{ account, value, metric: [...names][0] }];
   }).sort((a, b) => b.value - a.value);
   if (rows.length < 2) return null;
+  if (new Set(rows.map(row => row.metric)).size > 1) return <div className="text-text-dim text-sm">These accounts report different metrics. Compare accounts with the same metric and date range.</div>;
   const max = Math.max(...rows.map((row) => row.value), 1);
   return (
     <section className="flex flex-col gap-3 border-t border-border pt-4">
       <div>
-        <h2 className="text-sm uppercase tracking-wide text-text-dim">Account comparison</h2>
+        <h2 className="text-sm uppercase tracking-wide text-text-dim">Account comparison · {analyticsLabel(rows[0].metric)}</h2>
         <div className="text-text-dim text-xs mt-1">
           {filter === "all" ? `All ${analyticsLabel(dimension)} values` : analyticsLabel(filter)}
         </div>
@@ -6135,87 +6248,17 @@ function analyticsLabel(value: string): string {
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function InsightCharts({ metrics }: { metrics: AccountMetrics }) {
-  const entries = metricTrendEntries(metrics.insights);
-  if (entries.length === 0) {
-    return <div className="py-6 text-center text-text-dim text-sm">No trend data yet.</div>;
-  }
-  return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-      {entries.map(({ name, points }) => {
-        const latest = points[points.length - 1];
-        return (
-          <div key={name} className="border border-border rounded px-3 py-2 bg-bg">
-            <div className="flex items-center justify-between gap-3">
-              <span className="text-text text-sm">{name.replace(/_/g, " ")}</span>
-              <span className="text-text font-medium">{formatNumber(latest.value)}</span>
-            </div>
-            <Sparkline points={points} gradientId={`socialMetricFill-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`} />
-            <div className="text-text-dim text-xs mt-1">
-              {points.length} point{points.length !== 1 ? "s" : ""}
-              {latest.time ? ` · latest ${new Date(latest.time).toLocaleDateString()}` : ""}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+const InsightCharts = lazy(() => import("./SocialCharts"));
 
-function Sparkline({ points, gradientId }: { points: { time?: string; value: number }[]; gradientId: string }) {
-  const data = points.map((point, index) => ({
-    index,
-    label: point.time ? new Date(point.time).toLocaleDateString() : String(index + 1),
-    value: Number(point.value) || 0,
-  }));
-  if (data.length === 0) return null;
-  return (
-    <div className="mt-2 h-16 w-full" role="img" aria-hidden="true">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#f97316" stopOpacity={0.28} />
-              <stop offset="100%" stopColor="#f97316" stopOpacity={0.02} />
-            </linearGradient>
-          </defs>
-          <XAxis dataKey="index" hide />
-          <YAxis hide domain={["dataMin", "dataMax"]} />
-          <Tooltip
-            cursor={{ stroke: "#3a3a3a", strokeWidth: 1 }}
-            contentStyle={{
-              background: "#111",
-              border: "1px solid #333",
-              borderRadius: 4,
-              color: "#e5e5e5",
-              fontSize: 12,
-            }}
-            labelFormatter={(_, payload) => payload?.[0]?.payload?.label || ""}
-            formatter={(value) => [formatNumber(Number(value) || 0), "value"]}
-          />
-          <Area
-            type="monotone"
-            dataKey="value"
-            stroke="#f97316"
-            strokeWidth={2}
-            fill={`url(#${gradientId})`}
-            dot={false}
-            activeDot={{ r: 3, stroke: "#f97316", strokeWidth: 1, fill: "#111" }}
-            isAnimationActive={false}
-          />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number } }) {
+function MetricsRow({ totals }: { totals: { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } }) {
   return (
     <div className="flex items-center gap-3 text-xs text-text-dim flex-shrink-0">
       <Stat label="views" value={totals.views} />
       <Stat label="likes" value={totals.likes} />
       <Stat label="comments" value={totals.comments} />
       <Stat label="shares" value={totals.shares} />
+      {totals.saves > 0 && <Stat label="saves" value={totals.saves} />}
+      {totals.clicks > 0 && <Stat label="clicks" value={totals.clicks} />}
     </div>
   );
 }
@@ -6249,17 +6292,16 @@ function TargetMetricsBlock({ target }: { target: TargetMetrics }) {
       </div>
       {target.metrics && (
         <div className="mt-2 flex items-center gap-4 text-xs">
-          <Stat label="views" value={target.metrics.views} />
-          <Stat label="likes" value={target.metrics.likes} />
-          <Stat label="comments" value={target.metrics.comments} />
-          <Stat label="shares" value={target.metrics.shares} />
+          {(target.metrics.available || ["views", "likes", "comments", "shares"]).map((name) => (
+            <Stat key={name} label={name} value={Number(target.metrics?.[name as keyof typeof target.metrics]) || 0} />
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number } {
+function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: number; comments: number; shares: number; saves: number; clicks: number } {
   return targets.reduce(
     (acc, t) => {
       if (t.metrics) {
@@ -6267,10 +6309,12 @@ function aggregateTotals(targets: TargetMetrics[]): { views: number; likes: numb
         acc.likes += t.metrics.likes;
         acc.comments += t.metrics.comments;
         acc.shares += t.metrics.shares;
+        acc.saves += t.metrics.saves || 0;
+        acc.clicks += t.metrics.clicks || 0;
       }
       return acc;
     },
-    { views: 0, likes: 0, comments: 0, shares: 0 }
+    { views: 0, likes: 0, comments: 0, shares: 0, saves: 0, clicks: 0 }
   );
 }
 
@@ -6406,6 +6450,17 @@ function StatusPill({ status }: { status: string }) {
     status === "rejected" ? "text-error" :
     "text-text-dim";
   return <span className={"text-xs uppercase " + tone}>{status}</span>;
+}
+
+function ProviderImportPill({ compact = false }: { compact?: boolean }) {
+  return (
+    <span
+      className="inline-flex items-center rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] uppercase text-accent"
+      title="Imported from a connected social provider; not created by this Social agent"
+    >
+      {compact ? "imported" : "provider import"}
+    </span>
+  );
 }
 
 function TargetChip({ target }: { target: PostTarget }) {

@@ -12,17 +12,11 @@ export default async function handler(event, context) {
   const email = event?.email?.trim();
   if (!email) throw new Error("payload must include an email");
 
-  // Already have this lead? Skip the insert.
-  const { count } = await context.call("tables", "rows_count", {
+  // Atomic deduplication by email also handles concurrent webhook deliveries.
+  // A repeat delivery updates source/captured_at to the latest values.
+  const { ids, inserted } = await context.call("tables", "rows_upsert", {
     table: "leads",
-    where: [{ col: "email", op: "eq", value: email }],
-  });
-  if (count > 0) {
-    return { captured: false, reason: "already exists" };
-  }
-
-  const { ids } = await context.call("tables", "rows_insert", {
-    table: "leads",
+    key: ["email"],
     rows: [{
       email,
       source: event?.source ?? "function",
@@ -31,5 +25,5 @@ export default async function handler(event, context) {
   });
 
   context.log("captured lead", email);
-  return { captured: true, id: ids?.[0] };
+  return { captured: inserted > 0, id: ids?.[0] };
 }

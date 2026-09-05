@@ -1,0 +1,23 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "games",
+  "version": "0.1.0",
+  "description": "Games tools and operating guidance for players, bans, player data, statistics, leaderboards, and achievements.",
+  "author": {
+    "name": "Apteva",
+    "url": "https://apteva.com"
+  },
+  "homepage": "https://github.com/apteva/apps/tree/main/mcp/games",
+  "repository": "https://github.com/apteva/apps",
+  "keywords": [
+    "games",
+    "players",
+    "leaderboards",
+    "progression"
+  ],
+  "extensions": {
+    "com.apteva": {
+      "manifest": "apteva.yaml"
+    }
+  }
+}

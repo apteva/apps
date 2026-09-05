@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.80
+version: 0.7.88
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.80 adds semantic
-  scroll identities and atomic consequence confirmation while preserving all
-  previous browser, proxy, extraction, session, and input safeguards.
+  Watch, steer, and replay hosted browser sessions. v0.7.88 improves stable
+  control targeting, framework input state, tab activation, session cleanup,
+  and observation efficiency, with expanded live LLM regression coverage.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -57,7 +57,8 @@ provides:
         never populate optional fields with guessed or schema-default values.
         Computer ignores mechanically populated empty/default arguments and
         reports what it ignored. environment is an advanced
-        QA/device-emulation override only for a specifically requested user
+        QA/device-emulation override that requires environment_override=true
+        and is only for a specifically requested user
         agent, locale/languages, timezone, geolocation, device scale, mobile,
         or touch profile. Never send environment for normal navigation,
         read-only audits, or saved-login contexts. Proxy overrides are opt-in:
@@ -78,7 +79,15 @@ provides:
         open tabs, then browser_session(action=switch_tab, tab_id=...) or
         browser_session(action=close_tab, tab_id=...). Do not use keyboard
         shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch
-        browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id returned by computer_context_list
+        browser tabs. Omitted timeout gives cloud sessions a 1800-second maximum
+        lifetime. timeout is not a page-load, action, or task timeout: it
+        terminates the entire cloud browser on wall-clock expiry even while the
+        agent is active. Omit timeout unless the user explicitly requests that
+        exact provider session lifetime. Never derive timeout from estimated
+        task duration; a task expected to take one minute still omits timeout.
+        Use computer_use timeout_ms for action waits.
+        Results expose effective timeout, started/expires/age, provider status,
+        and browser-observed locale/timezone. Prefer context_id returned by computer_context_list
         to reopen saved browser state; context_name works across providers when
         unique. For a reusable saved context, pass context_name with
         auto_create_context=true; omitted names are only a fallback and are
@@ -116,8 +125,13 @@ provides:
         rejected before mouse dispatch. Omit both consequence fields for
         ordinary clicks. Coordinates receive the same consequence guard. For an
         operation outcome, prefer action=wait_for with declarative URL, text,
-        selector, or semantic-target conditions. It ignores unrelated
-        background requests and embedded frames. To verify navigation away
+        selector, semantic-target, or media conditions. target_state can wait for
+        ready/loading/enabled/disabled/checked/unchecked while ignoring unrelated
+        background requests and embedded frames. For a video/audio embed, wait
+        on conditions=[{"type":"media_present"},{"type":"media_error"}]
+        with match="any" instead of waiting only for an error string. Computer
+        reports browser-visible media state and provider/source evidence, but
+        does not decide whether the rendered asset is the intended one. To verify navigation away
         from a known current URL, use type=url_changed with that pre-action
         URL; use url_equals only when the destination URL is known. Use
         action=wait_for_stable only when the whole page must become quiet.
@@ -177,8 +191,23 @@ provides:
         duration?, steps? (batch only), annotate? (screenshot/batch, default true), include_som?
         (screenshot/batch, default false). Ordinary actions return a compact
         summary and screenshot_url without embedding duplicate image bytes.
+        Screenshot and wait observations include media_embed_status
+        (loading/loaded/rejected/unknown), visible player/iframe, thumbnail,
+        duration, media-configuration controls, explicit error text, normalized
+        provider/source when available, and draft_save_state. If requested text
+        is absent but a media block rendered, Computer highlights that evidence
+        so the agent verifies the player rather than blindly retrying.
         They also include compact safety_targets for loading, disabled, or
         consequential controls; full structured som is returned with include_som=true.
+    - name: browser_download
+      description: |
+        List, wait for, or export files captured by an active browser session.
+        A successful click does not prove that a download completed. If
+        computer_use returns downloads_started, call action=wait with that
+        dl_* id until the browser reports completed, failed, or cancelled;
+        then call action=get. get returns the browser-captured bytes through
+        Core's blobref mechanism and never refetches the source URL. Computer
+        does not unzip or interpret downloaded files. Actions: list, wait, get.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,
@@ -208,6 +237,7 @@ provides:
         sessions. Returns only safe routing metadata and never proxy URLs or
         credentials.
     - name: browser_open
+      exposure: app_only
       description: |
         Compatibility alias for browser_session(action=open). For ordinary
         browsing pass only url or context_id/context_name. Omit every advanced
@@ -236,6 +266,7 @@ provides:
         status=processing. Returns app-owned playlist URLs and never provider
         credentials or provider API URLs. Args: session_id.
     - name: browser_close
+      exposure: app_only
       description: |
         Close a session opened by this app and release browser/provider
         resources. Use this when finished unless the user explicitly wants the

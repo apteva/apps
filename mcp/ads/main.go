@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.43
+version: 0.1.45
 scopes: [project, global]
 requires:
   permissions:
@@ -806,13 +806,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "adset_create",
 			Description: "Create an ad set under a campaign. " +
-				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; Meta requires geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options.",
+				"Unified args: ad_account_id, campaign_id, name, optimization_goal (link_clicks|conversions|leads|reach|impressions|page_likes|post_engagement|thruplay), billing_event? (impressions|link_clicks; default impressions), daily_budget_cents?, lifetime_budget_cents?, bid_strategy?, bid_amount_cents?, start_time?, end_time?, status?, targeting? (object — passthrough; Meta requires geo_locations + targeting_automation), promoted_object? (object — passthrough), destination_type?, dsa_beneficiary?, dsa_payor?, platform_options. Meta requests are preflighted against the parent campaign objective. For video views, use optimization_goal=thruplay with billing_event=impressions; THRUPLAY billing is account-restricted and is not exposed.",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id":         map[string]any{"type": "integer"},
 				"campaign_id":           map[string]any{"type": "string"},
 				"name":                  map[string]any{"type": "string"},
 				"optimization_goal":     map[string]any{"type": "string", "enum": []string{"link_clicks", "conversions", "leads", "reach", "impressions", "page_likes", "post_engagement", "thruplay", "app_installs", "value", "landing_page_views"}},
-				"billing_event":         map[string]any{"type": "string", "enum": []string{"impressions", "link_clicks", "thruplay"}, "default": "impressions"},
+				"billing_event":         map[string]any{"type": "string", "enum": []string{"impressions", "link_clicks"}, "default": "impressions", "description": "Meta video-view campaigns should use impressions billing with thruplay optimization. Account-restricted THRUPLAY billing is not accepted by this app."},
 				"daily_budget_cents":    map[string]any{"type": "integer"},
 				"lifetime_budget_cents": map[string]any{"type": "integer"},
 				"bid_strategy":          map[string]any{"type": "string", "enum": []string{"lowest_cost", "lowest_cost_with_bid_cap", "cost_cap"}},
@@ -1901,6 +1901,10 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 		"videoId": true, "asset_id": true,
 		"creative":     true,
 		"resourceName": true,
+		// These fields are normalized and compatibility-checked by Ads.
+		// Native overrides must not bypass those checks after validation.
+		"optimization_goal": true,
+		"billing_event":     true,
 	}
 	for k, v := range opts {
 		if protected[k] {
@@ -2298,7 +2302,15 @@ var metaOptimizationGoal = map[string]string{
 var metaBillingEvent = map[string]string{
 	"impressions": "IMPRESSIONS",
 	"link_clicks": "LINK_CLICKS",
-	"thruplay":    "THRUPLAY",
+}
+
+var metaOptimizationGoalsByObjective = map[string][]string{
+	"OUTCOME_AWARENESS":     {"REACH", "IMPRESSIONS", "THRUPLAY"},
+	"OUTCOME_TRAFFIC":       {"LINK_CLICKS", "LANDING_PAGE_VIEWS", "OFFSITE_CONVERSIONS", "IMPRESSIONS", "POST_ENGAGEMENT", "REACH", "THRUPLAY"},
+	"OUTCOME_ENGAGEMENT":    {"THRUPLAY", "POST_ENGAGEMENT", "PAGE_LIKES", "IMPRESSIONS", "REACH", "LINK_CLICKS", "OFFSITE_CONVERSIONS", "LANDING_PAGE_VIEWS"},
+	"OUTCOME_LEADS":         {"OFFSITE_CONVERSIONS", "LEAD_GENERATION", "LANDING_PAGE_VIEWS", "LINK_CLICKS", "IMPRESSIONS", "REACH", "VALUE"},
+	"OUTCOME_SALES":         {"OFFSITE_CONVERSIONS", "VALUE", "LANDING_PAGE_VIEWS", "IMPRESSIONS", "POST_ENGAGEMENT", "REACH", "LINK_CLICKS"},
+	"OUTCOME_APP_PROMOTION": {"APP_INSTALLS", "OFFSITE_CONVERSIONS", "IMPRESSIONS", "LINK_CLICKS", "REACH", "VALUE"},
 }
 
 const (
@@ -2523,6 +2535,85 @@ func (metaAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 	return a.execOrErr(ctx, acct, def.CampaignDeleteTool, map[string]any{"campaignId": cid})
 }
 
+func (a *App) metaCampaignObjective(ctx *sdk.AppCtx, acct *adAccount, tool, campaignID string) (string, map[string]any) {
+	after := ""
+	for page := 0; page < 20; page++ {
+		input := map[string]any{
+			"adAccountId": acct.NativeAccountID,
+			"fields":      "id,objective",
+			"limit":       100,
+		}
+		if after != "" {
+			input["after"] = after
+		}
+		parsed, errOut := a.execIntegrationTool(ctx, acct, tool, input)
+		if errOut != nil {
+			errOut["code"] = "campaign_preflight_failed"
+			return "", errOut
+		}
+		for _, campaign := range resultRows(parsed) {
+			if firstString(campaign, "id") != campaignID {
+				continue
+			}
+			objective := strings.ToUpper(firstString(campaign, "objective"))
+			if objective == "" {
+				out := mcpError("Meta omitted the parent campaign objective; the ad set was not created because optimization compatibility could not be checked")
+				out["code"] = "campaign_preflight_failed"
+				return "", out
+			}
+			return objective, nil
+		}
+		payload := asMap(parsed)
+		paging := asMap(payload["paging"])
+		cursors := asMap(paging["cursors"])
+		next := firstString(cursors, "after")
+		if next == "" || next == after {
+			break
+		}
+		after = next
+	}
+	out := mcpError("campaign does not belong to the selected Meta ad account")
+	out["code"] = "campaign_preflight_failed"
+	return "", out
+}
+
+func metaAdSetCompatibilityError(campaignObjective string, input map[string]any) map[string]any {
+	goal := strings.ToUpper(strings.TrimSpace(toString(input["optimization_goal"])))
+	billing := strings.ToUpper(strings.TrimSpace(toString(input["billing_event"])))
+	if billing == "THRUPLAY" {
+		out := mcpError("billing_event=THRUPLAY is account-restricted by Meta. Use billing_event=IMPRESSIONS; keep optimization_goal=THRUPLAY for ThruPlay delivery.")
+		out["code"] = "invalid_billing_event"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "IMPRESSIONS"
+		return out
+	}
+	if goal == "THRUPLAY" && billing != "IMPRESSIONS" {
+		out := mcpError("optimization_goal=THRUPLAY requires billing_event=IMPRESSIONS in the Ads app")
+		out["code"] = "incompatible_optimization_and_billing"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "IMPRESSIONS"
+		return out
+	}
+	allowed, knownObjective := metaOptimizationGoalsByObjective[campaignObjective]
+	if !knownObjective {
+		return nil
+	}
+	for _, candidate := range allowed {
+		if candidate == goal {
+			return nil
+		}
+	}
+	out := mcpError(fmt.Sprintf(
+		"optimization_goal=%s is not compatible with campaign objective %s. Allowed goals: %s",
+		goal, campaignObjective, strings.Join(allowed, ", "),
+	))
+	out["code"] = "incompatible_campaign_optimization"
+	out["field"] = "optimization_goal"
+	out["campaign_objective"] = campaignObjective
+	out["allowed_values"] = allowed
+	return out
+}
+
 func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	cid, _ := args["campaign_id"].(string)
@@ -2539,12 +2630,33 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 	if be == "" {
 		be = "impressions"
 	}
+	if be == "thruplay" {
+		out := mcpError("billing_event=thruplay is account-restricted by Meta and cannot be used safely. Use billing_event=impressions; keep optimization_goal=thruplay for ThruPlay video delivery.")
+		out["code"] = "invalid_billing_event"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "impressions"
+		return out, nil
+	}
+	mappedBE, ok := metaBillingEvent[be]
+	if !ok {
+		out := mcpError("unsupported billing_event: " + be + ". Use impressions (recommended) or link_clicks.")
+		out["code"] = "invalid_billing_event"
+		out["field"] = "billing_event"
+		return out, nil
+	}
+	if og == "thruplay" && be != "impressions" {
+		out := mcpError("optimization_goal=thruplay requires billing_event=impressions in the Ads app. This avoids Meta account-level billing eligibility failures.")
+		out["code"] = "incompatible_optimization_and_billing"
+		out["field"] = "billing_event"
+		out["suggested_value"] = "impressions"
+		return out, nil
+	}
 	input := map[string]any{
 		def.AccountIDInputField: acct.NativeAccountID,
 		"campaign_id":           cid,
 		"name":                  name,
 		"optimization_goal":     mappedOG,
-		"billing_event":         metaBillingEvent[be],
+		"billing_event":         mappedBE,
 		"targeting":             targeting,
 	}
 	if v := intArg(args, "daily_budget_cents", 0); v > 0 {
@@ -2598,7 +2710,23 @@ func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 		input["dsa_payor"] = v
 	}
 	mergeOptions(input, args)
-	return a.execOrErr(ctx, acct, def.AdSetCreateTool, input)
+	campaignObjective, errOut := a.metaCampaignObjective(ctx, acct, def.CampaignListTool, cid)
+	if errOut != nil {
+		return errOut, nil
+	}
+	if errOut := metaAdSetCompatibilityError(campaignObjective, input); errOut != nil {
+		return errOut, nil
+	}
+	out, err := a.execOrErr(ctx, acct, def.AdSetCreateTool, input)
+	if result := asMap(out); result != nil && result["isError"] == true {
+		requestContext := asMap(result["request_context"])
+		if requestContext == nil {
+			requestContext = map[string]any{}
+		}
+		requestContext["campaign_objective"] = campaignObjective
+		result["request_context"] = requestContext
+	}
+	return out, err
 }
 
 func (metaAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {

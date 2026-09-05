@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.25
+version: 0.4.41
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Contabo, Scaleway (virtual instances and Apple silicon Mac minis), Huawei Cloud,
+  Contabo, Scaleway (virtual instances, Elastic Metal, Dedibox, and Apple silicon Mac minis), Huawei Cloud,
   Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
@@ -30,7 +30,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/instances
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [instances, hosts, vps, compute, infrastructure]
+tags: [instances, hosts, vps, compute, infrastructure, object-storage, s3]
 
 scopes: [global]
 min_apteva_version: "0.10.0"
@@ -40,33 +40,82 @@ requires:
     - db.write.app
     - net.egress
     - platform.connections.execute
+    - platform.connections.read_public_config
   integrations:
     - role: provider
       kind: integration
+      mode: multiple
       required: false
       compatible_slugs: [hetzner, digitalocean, contabo, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
-      label: VPS provider
+      label: VPS providers
       hint: |
-        Optional — local instance always available. Bind a VPS
-        integration to provision remote instances through the generic
+        Optional — local instance always available. Bind one or more VPS
+        integrations to provision remote instances through the generic
         Instances interface. Every compatible provider has catalog,
         provisioning, readiness, and recovery adapters. Immediate
         destroy is available except on Contabo, whose API only schedules
-        contract cancellation. Scaleway macOS hosts have Apple's mandatory
+        contract cancellation. Scaleway Dedibox orders physical hardware and
+        installs Linux after delivery; macOS hosts have Apple's mandatory
         24-hour minimum allocation before Destroy becomes available.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: instance_list_providers
+      description: List the VPS provider connections bound to this Instances install and identify the default provider.
     - name: instance_create
-      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Contabo, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod.
+      description: Provision a new instance via a bound VPS provider. The provider argument selects a binding; when omitted, the configured default is used.
+    - name: instance_storage_capabilities
+      description: Describe provider support for configurable boot disks and managed data volumes.
+    - name: instance_list_storage_types
+      description: List provider-neutral storage classes and tiers with native provider mappings.
+    - name: instance_volume_create
+      description: Create a managed data volume and optionally attach and prepare it inside the guest.
+    - name: instance_volume_get
+      description: Fetch one managed volume.
+    - name: instance_volume_list
+      description: List volumes tracked by Instances.
+    - name: instance_volume_attach
+      description: Attach an available managed volume to an existing instance and optionally prepare it inside the guest.
+    - name: instance_volume_prepare
+      description: Safely format-if-blank, persist, mount, and verify an attached Linux data volume over SSH.
+    - name: instance_volume_detach
+      description: Detach a managed data volume without deleting it.
+    - name: instance_volume_resize
+      description: Increase a managed volume size; shrinking is refused.
+    - name: instance_volume_delete
+      description: Permanently delete a detached app-managed data volume with explicit confirmation.
+    - name: object_storage_list_providers
+      description: List bound provider accounts capable of provisioning object storage.
+    - name: object_storage_list_plans
+      description: List object-storage regions/clusters and plans/tiers for a provider.
+    - name: object_storage_preflight
+      description: Read-only credential, project, IAM, region, and optional bucket-name availability checks before creation.
+    - name: object_storage_create
+      description: Provision object storage and return its S3 credentials once without creating a Connection or persisting the secret.
+    - name: object_storage_get
+      description: Fetch one provisioned object-storage resource without its secret.
+    - name: object_storage_list
+      description: List object-storage resources tracked by Instances.
+    - name: object_storage_rotate_credentials
+      description: Rotate object-storage credentials and return the new secret once.
+    - name: object_storage_destroy
+      description: Permanently delete a managed object-storage resource with explicit confirmation.
+    - name: instance_register
+      description: Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key and returns the public key to authorize on that host.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
       description: List instances, optionally filtered by provider or status.
     - name: instance_destroy
-      description: Terminate the provider-managed resource and remove its row where immediate deletion is supported. Refused for local (id 0) and Contabo.
+      description: Terminate a managed upstream resource and remove its row, or forget an externally registered host without modifying it. Refused for local (id 0) and Contabo.
+    - name: instance_compare_provider
+      description: Compare tracked server, IP, status, and volume state with the provider without making changes.
+    - name: instance_provider_inventory
+      description: Read provider resources, including Scaleway virtual Instances, Elastic Metal servers, and Flexible IPs.
+    - name: instance_storage_benchmark
+      description: Run an optional bounded 256 MiB storage benchmark and save its result.
     - name: instance_upgrade
       description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today and the operation always waits for SSH readiness.
     - name: instance_run_command
@@ -173,7 +222,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.25
+    ref: instances/v0.4.41
     entry: mcp/instances
   port: 8080
   health_check: /health

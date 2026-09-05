@@ -1,0 +1,59 @@
+=== RUN   TestAuditGlobalHTTPEventProject
+    audit_repro_test.go:33: global HTTP list event routed to project "" instead of project-a
+--- FAIL: TestAuditGlobalHTTPEventProject (0.02s)
+=== RUN   TestAuditMembershipEventsAreIdempotent
+    audit_repro_test.go:52: idempotent repeated membership add emitted 2 events
+--- FAIL: TestAuditMembershipEventsAreIdempotent (0.01s)
+=== RUN   TestAuditFullMessageBody
+    audit_repro_test.go:71: conversation API returns only 4003 of 4528 body bytes, without truncation metadata
+--- FAIL: TestAuditFullMessageBody (0.01s)
+=== RUN   TestAuditSystemAttributeSeeding
+    audit_repro_test.go:83: first contact creation did not seed any of the ten system attribute templates
+--- FAIL: TestAuditSystemAttributeSeeding (0.01s)
+=== RUN   TestAuditDiagnosticsInboxQueryPlan
+    audit_repro_test.go:100: SCAN a USING INDEX ix_act_conv
+    audit_repro_test.go:100: USE TEMP B-TREE FOR ORDER BY
+--- PASS: TestAuditDiagnosticsInboxQueryPlan (0.01s)
+=== RUN   TestAuditMergePersistentConversations
+    audit_repro_test.go:127: merging two contacts with SMS history must consolidate conversations: constraint failed: UNIQUE constraint failed: contact_conversations.project_id, contact_conversations.contact_id, contact_conversations.channel (2067)
+--- FAIL: TestAuditMergePersistentConversations (0.02s)
+=== RUN   TestAuditMergeLookupAndPrimary
+    audit_repro_test.go:143: merged address lookup returned &{ID:1 ProjectID:test-proj FirstName: LastName: DisplayName: Pronouns: PrimaryEmail:old@example.test PrimaryPhone: Company: JobTitle: OwnerUserID:<nil> Status:merged Source: FirstContactAt: LastContactAt: CreatedAt:2026-09-05T10:05:57Z UpdatedAt:2026-09-05T10:05:57Z Channels:[] Tags:[] Attributes:[]}, want surviving contact 2
+    audit_repro_test.go:150: winner primary overwritten: "old@example.test"
+    audit_repro_test.go:157: merged contact has 2 primary email channels
+--- FAIL: TestAuditMergeLookupAndPrimary (0.02s)
+=== RUN   TestAuditArchivedContactRecovery
+    audit_repro_test.go:176: Status=archived cannot retrieve archived contact; rows=0
+    audit_repro_test.go:180: archived address is permanently reserved but unresolvable: constraint failed: UNIQUE constraint failed: contact_channels.project_id, contact_channels.kind, contact_channels.value (2067)
+--- FAIL: TestAuditArchivedContactRecovery (0.03s)
+=== RUN   TestAuditActivityProjectOwnership
+    audit_repro_test.go:192: test-proj successfully wrote an activity referencing another project's contact
+--- FAIL: TestAuditActivityProjectOwnership (0.03s)
+=== RUN   TestAuditReplyUsesThreadAddress
+    audit_repro_test.go:213: reply sent to work@example.test instead of thread sender private@example.test
+--- FAIL: TestAuditReplyUsesThreadAddress (0.06s)
+=== RUN   TestAuditCrossContactThreadLink
+    audit_repro_test.go:232: B's activity attached to A's contact-owned conversation: map[activity_id:3 contact_id:2 conversation_id:1 ok:true stub_created:true]
+--- FAIL: TestAuditCrossContactThreadLink (0.02s)
+=== RUN   TestAuditDateSegmentExecutes
+    audit_repro_test.go:245: accepted date segment fails during evaluation: SQL logic error: near "(": syntax error (1)
+--- FAIL: TestAuditDateSegmentExecutes (0.02s)
+=== RUN   TestAuditTypedAttributeFilters
+    audit_repro_test.go:263: stored date does not match date filter: []
+    audit_repro_test.go:270: is_null returned [0x1400019c420]; want missing-value contact 2, not populated 1
+--- FAIL: TestAuditTypedAttributeFilters (0.04s)
+=== RUN   TestAuditReconcilePreservesDeliveryEvidence
+    audit_repro_test.go:287: empty suppression snapshot erased hard-bounce evidence: {Transport:email Status:active ConsecutiveSoftBounces:0 LastBounceAt:2026-09-01T10:00:00Z LastDeliveredAt: StatusReason: StatusUpdatedAt:2026-09-01T10:00:00Z Quarantined:false QuarantinedAt: Suppressed:false SuppressionKind: SuppressionMatch: SuppressionReason: SuppressionSource: SuppressedAt: SuppressionCheckedAt:2026-09-05T10:05:57.461526Z Messageable:true MessageabilityReason:}
+--- FAIL: TestAuditReconcilePreservesDeliveryEvidence (0.03s)
+=== RUN   TestAuditRecencyDoesNotRegress
+    audit_repro_test.go:304: late historical activity moved recency backwards: 2026-09-01T12:00:00Z
+--- FAIL: TestAuditRecencyDoesNotRegress (0.02s)
+=== RUN   TestAuditPrimaryScalarMaintainsChannels
+    audit_repro_test.go:324: UI/API says new@example.test but sending still targets old@example.test
+--- FAIL: TestAuditPrimaryScalarMaintainsChannels (0.03s)
+=== RUN   TestAuditAttributeWriteUpdatesContactTimestamp
+    audit_repro_test.go:345: custom attribute write leaves contact updated_at unchanged
+--- FAIL: TestAuditAttributeWriteUpdatesContactTimestamp (0.01s)
+FAIL
+exit status 1
+FAIL	github.com/apteva/apps/mcp/crm	0.843s

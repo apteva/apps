@@ -123,7 +123,7 @@ func compilePredicate(cf *compiledFilter, pid string, e map[string]any) error {
 	if err != nil {
 		return err
 	}
-	cf.and("c."+clause, args...)
+	cf.and(strings.ReplaceAll(clause, field, "c."+field), args...)
 	return nil
 }
 
@@ -173,24 +173,11 @@ func compileSyntheticPredicate(cf *compiledFilter, pid, pred string, e map[strin
 		if op == "" {
 			op = "eq"
 		}
-		val := e["value"]
-		// We don't know the type at definition compile time, so the
-		// SQL handles all four value columns. The agent passes the
-		// natural JSON shape (string, number, bool, date-string).
-		col, casted, err := attrColumnForOp(op, val)
+		clause, args, err := buildAttributeFilterClause(pid, key, op, e["value"])
 		if err != nil {
 			return err
 		}
-		opSQL, opArgs, err := attrOpSQL(col, op, casted)
-		if err != nil {
-			return err
-		}
-		args := append([]any{pid, key}, opArgs...)
-		cf.and(`EXISTS (SELECT 1 FROM contact_attributes ca
-				JOIN contact_attribute_defs cad ON cad.id = ca.def_id
-				WHERE ca.contact_id = c.id AND ca.project_id = ?
-				  AND cad.key = ? AND `+opSQL+`)`,
-			args...)
+		cf.and(strings.ReplaceAll(clause, "contacts.id", "c.id"), args...)
 		return nil
 
 	case "last_activity_within":
@@ -300,6 +287,9 @@ func attrColumnForOp(op string, val any) (col string, casted any, err error) {
 
 func attrOpSQL(col, op string, val any) (string, []any, error) {
 	prefix := "ca." + col
+	if strings.HasPrefix(col, "(") {
+		prefix = col
+	}
 	switch op {
 	case "eq", "":
 		return prefix + " = ?", []any{val}, nil
@@ -326,6 +316,14 @@ func attrOpSQL(col, op string, val any) (string, []any, error) {
 // ─── DB helpers ───────────────────────────────────────────────────
 
 func dbSegmentCreate(db *sql.DB, pid string, s *Segment) (*Segment, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err = validateSegmentReferences(tx, pid, s.ListID, s.Definition); err != nil {
+		return nil, err
+	}
 	if s.Name == "" {
 		return nil, errors.New("name required")
 	}
@@ -347,7 +345,7 @@ func dbSegmentCreate(db *sql.DB, pid string, s *Segment) (*Segment, error) {
 	if s.ListID != nil && *s.ListID != 0 {
 		listIDArg = *s.ListID
 	}
-	res, err := db.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO contact_segments
 			(project_id, list_id, name, description, kind, definition_json,
 			 created_at, updated_at)
@@ -361,10 +359,23 @@ func dbSegmentCreate(db *sql.DB, pid string, s *Segment) (*Segment, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return dbSegmentGet(db, pid, id)
+	s.ID = id
+	if s.Kind == "static" {
+		if _, err = dbSegmentMaterialiseTx(tx, pid, s); err != nil {
+			return nil, err
+		}
+	}
+	out, err := dbSegmentGet(tx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
-func dbSegmentGet(db *sql.DB, pid string, id int64) (*Segment, error) {
+func dbSegmentGet(db sqlQueryExecer, pid string, id int64) (*Segment, error) {
 	row := db.QueryRow(
 		`SELECT id, list_id, name, COALESCE(description,''), kind, definition_json,
 				cached_count, COALESCE(cached_at,''),
@@ -420,7 +431,7 @@ func dbSegmentsAll(db *sql.DB, pid string, includeArchived bool) ([]*Segment, er
 		var defJSON string
 		if err := rows.Scan(&s.ID, &listID, &s.Name, &s.Description, &s.Kind, &defJSON,
 			&cached, &s.CachedAt, &s.ArchivedAt, &s.CreatedAt, &s.UpdatedAt); err != nil {
-			continue
+			return nil, err
 		}
 		if listID.Valid {
 			v := listID.Int64
@@ -433,10 +444,25 @@ func dbSegmentsAll(db *sql.DB, pid string, includeArchived bool) ([]*Segment, er
 		s.Definition = json.RawMessage(defJSON)
 		out = append(out, s)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbSegmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Segment, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	before, err := dbSegmentGet(tx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if before == nil {
+		return nil, errors.New("segment not found")
+	}
+	if kind, ok := patch["kind"]; ok && kind != "static" && kind != "dynamic" {
+		return nil, errors.New("kind must be static or dynamic")
+	}
 	allowed := map[string]bool{
 		"name": true, "description": true, "kind": true,
 		"list_id": true, "definition": true,
@@ -445,7 +471,7 @@ func dbSegmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*S
 	args := []any{}
 	for k, v := range patch {
 		if !allowed[k] {
-			continue
+			return nil, fmt.Errorf("unknown segment field %q", k)
 		}
 		switch k {
 		case "definition":
@@ -478,20 +504,41 @@ func dbSegmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*S
 		}
 	}
 	if len(sets) == 0 {
-		return dbSegmentGet(db, pid, id)
+		return dbSegmentGet(tx, pid, id)
 	}
 	sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
 	args = append(args, pid, id)
-	if _, err := db.Exec(
+	if _, err := tx.Exec(
 		`UPDATE contact_segments SET `+strings.Join(sets, ", ")+
 			` WHERE project_id = ? AND id = ?`,
 		args...,
 	); err != nil {
 		return nil, err
 	}
-	return dbSegmentGet(db, pid, id)
+	out, err := dbSegmentGet(tx, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateSegmentReferences(tx, pid, out.ListID, out.Definition); err != nil {
+		return nil, err
+	}
+	if out.Kind == "static" {
+		if _, err = dbSegmentMaterialiseTx(tx, pid, out); err != nil {
+			return nil, err
+		}
+		out, err = dbSegmentGet(tx, pid, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE contact_segments SET cached_count=NULL,cached_at=NULL WHERE project_id=? AND id=? AND kind='dynamic'`, pid, id); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
-
 func dbSegmentArchive(db *sql.DB, pid string, id int64) error {
 	_, err := db.Exec(
 		`UPDATE contact_segments SET archived_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -505,11 +552,17 @@ func dbSegmentArchive(db *sql.DB, pid string, id int64) error {
 // segments read the snapshot; dynamic segments compile and run the
 // definition.
 func dbSegmentEval(db *sql.DB, pid string, s *Segment, limit int) ([]int64, int64, error) {
+	return dbSegmentEvalPage(db, pid, s, limit, 0)
+}
+func dbSegmentEvalPage(db *sql.DB, pid string, s *Segment, limit int, afterID int64) ([]int64, int64, error) {
 	if s == nil {
 		return nil, 0, errors.New("segment required")
 	}
 	if s.Kind == "static" {
-		return dbSegmentReadSnapshot(db, pid, s.ID, limit)
+		return dbSegmentReadSnapshotPage(db, pid, s.ID, limit, afterID)
+	}
+	if err := validateSegmentReferences(db, pid, s.ListID, s.Definition); err != nil {
+		return nil, 0, err
 	}
 	cf, err := compileSegmentDefinition(pid, s.ListID, s.Definition)
 	if err != nil {
@@ -530,9 +583,12 @@ func dbSegmentEval(db *sql.DB, pid string, s *Segment, limit int) ([]int64, int6
 	if limit > 5000 {
 		limit = 5000
 	}
+	if limit > 5000 {
+		limit = 5000
+	}
 	rows, err := db.Query(
-		`SELECT c.id FROM contacts c `+whereSQL+` ORDER BY c.id LIMIT ?`,
-		append(cf.args, limit)...,
+		`SELECT c.id FROM contacts c `+whereSQL+` AND c.id>? ORDER BY c.id LIMIT ?`,
+		append(cf.args, afterID, limit)...,
 	)
 	if err != nil {
 		return nil, total, err
@@ -541,16 +597,23 @@ func dbSegmentEval(db *sql.DB, pid string, s *Segment, limit int) ([]int64, int6
 	out := []int64{}
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err == nil {
-			out = append(out, id)
+		if err := rows.Scan(&id); err != nil {
+			return nil, total, err
 		}
+		out = append(out, id)
 	}
-	return out, total, nil
+	return out, total, rows.Err()
 }
 
 func dbSegmentReadSnapshot(db *sql.DB, pid string, segID int64, limit int) ([]int64, int64, error) {
+	return dbSegmentReadSnapshotPage(db, pid, segID, limit, 0)
+}
+func dbSegmentReadSnapshotPage(db *sql.DB, pid string, segID int64, limit int, afterID int64) ([]int64, int64, error) {
 	if limit <= 0 {
 		limit = 200
+	}
+	if limit > 5000 {
+		limit = 5000
 	}
 	var total int64
 	row := db.QueryRow(
@@ -564,8 +627,8 @@ func dbSegmentReadSnapshot(db *sql.DB, pid string, segID int64, limit int) ([]in
 	rows, err := db.Query(
 		`SELECT contact_id FROM contact_segment_snapshots
 		 WHERE project_id = ? AND segment_id = ?
-		 ORDER BY contact_id LIMIT ?`,
-		pid, segID, limit,
+		 AND contact_id>? ORDER BY contact_id LIMIT ?`,
+		pid, segID, afterID, limit,
 	)
 	if err != nil {
 		return nil, total, err
@@ -574,11 +637,12 @@ func dbSegmentReadSnapshot(db *sql.DB, pid string, segID int64, limit int) ([]in
 	out := []int64{}
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err == nil {
-			out = append(out, id)
+		if err := rows.Scan(&id); err != nil {
+			return nil, total, err
 		}
+		out = append(out, id)
 	}
-	return out, total, nil
+	return out, total, rows.Err()
 }
 
 // dbSegmentMaterialise freezes a segment's current dynamic membership
@@ -586,6 +650,22 @@ func dbSegmentReadSnapshot(db *sql.DB, pid string, segID int64, limit int) ([]in
 // the audience doesn't shift mid-send. Idempotent: clears existing
 // snapshot rows first, then re-inserts.
 func dbSegmentMaterialise(db *sql.DB, pid string, s *Segment) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if err = validateSegmentReferences(tx, pid, s.ListID, s.Definition); err != nil {
+		return 0, err
+	}
+	n, err := dbSegmentMaterialiseTx(tx, pid, s)
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+func dbSegmentMaterialiseTx(tx *sql.Tx, pid string, s *Segment) (int64, error) {
 	if s == nil {
 		return 0, errors.New("segment required")
 	}
@@ -594,11 +674,6 @@ func dbSegmentMaterialise(db *sql.DB, pid string, s *Segment) (int64, error) {
 		return 0, err
 	}
 	whereSQL := "WHERE " + strings.Join(cf.where, " AND ")
-	tx, err := db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`DELETE FROM contact_segment_snapshots WHERE project_id = ? AND segment_id = ?`,
 		pid, s.ID,
@@ -620,9 +695,6 @@ func dbSegmentMaterialise(db *sql.DB, pid string, s *Segment) (int64, error) {
 		 WHERE project_id = ? AND id = ?`,
 		n, pid, s.ID,
 	); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -712,11 +784,15 @@ func dbSegmentMembersFull(db *sql.DB, pid string, s *Segment, limit int) ([]*Con
 	for rows.Next() {
 		c := &Contact{}
 		if err := rows.Scan(&c.ID, &c.FirstName, &c.LastName, &c.DisplayName,
-			&c.PrimaryEmail, &c.PrimaryPhone, &c.Company, &c.JobTitle, &c.Status); err == nil {
+			&c.PrimaryEmail, &c.PrimaryPhone, &c.Company, &c.JobTitle, &c.Status); err != nil {
+			rows.Close()
+			return nil, 0, err
+		}
+		{
 			out = append(out, c)
 		}
 	}
-	return out, total, nil
+	return out, total, rows.Err()
 }
 
 // ─── MCP tools ────────────────────────────────────────────────────
@@ -742,7 +818,7 @@ func (a *App) toolSegmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(ctx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
 	return map[string]any{"segment": out}, nil
 }
 
@@ -795,7 +871,7 @@ func (a *App) toolSegmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("segment.updated", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.updated", map[string]any{"id": id})
 	return map[string]any{"segment": out}, nil
 }
 
@@ -811,7 +887,7 @@ func (a *App) toolSegmentsDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err := dbSegmentArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	ctx.Emit("segment.archived", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.archived", map[string]any{"id": id})
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -832,11 +908,11 @@ func (a *App) toolSegmentsEval(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, errors.New("segment not found")
 	}
 	limit := intArg(args, "limit", 200)
-	ids, total, err := dbSegmentEval(ctx.AppDB(), pid, s, limit)
+	ids, total, err := dbSegmentEvalPage(ctx.AppDB(), pid, s, limit, int64Arg(args, "after_contact_id"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"contact_ids": ids, "count": total, "kind": s.Kind}, nil
+	return map[string]any{"contact_ids": ids, "count": total, "kind": s.Kind, "next_after_contact_id": lastContactID(ids)}, nil
 }
 
 func (a *App) toolSegmentsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -883,7 +959,7 @@ func (a *App) toolSegmentsMaterialise(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(ctx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
 	return map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"}, nil
 }
 
@@ -976,7 +1052,7 @@ func (a *App) handleHTTPSegmentsCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(globalCtx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1014,7 +1090,7 @@ func (a *App) handleHTTPSegmentUpdate(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("segment.updated", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.updated", map[string]any{"id": id})
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1028,7 +1104,7 @@ func (a *App) handleHTTPSegmentDelete(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("segment.archived", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.archived", map[string]any{"id": id})
 	httpJSON(w, map[string]any{"archived": true, "id": id})
 }
 
@@ -1044,12 +1120,12 @@ func (a *App) handleHTTPSegmentEval(w http.ResponseWriter, r *http.Request, id i
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	ids, total, err := dbSegmentEval(globalCtx.AppDB(), pid, s, limit)
+	ids, total, err := dbSegmentEvalPage(globalCtx.AppDB(), pid, s, limit, int64FromAny(r.URL.Query().Get("after_contact_id")))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"contact_ids": ids, "count": total, "kind": s.Kind})
+	httpJSON(w, map[string]any{"contact_ids": ids, "count": total, "kind": s.Kind, "next_after_contact_id": lastContactID(ids)})
 }
 
 func (a *App) handleHTTPSegmentMembers(w http.ResponseWriter, r *http.Request, id int64) {
@@ -1092,7 +1168,7 @@ func (a *App) handleHTTPSegmentMaterialise(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	globalCtx.Emit("segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(globalCtx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
 	httpJSON(w, map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"})
 }
 
@@ -1128,17 +1204,73 @@ func intFromAny(v any) int {
 	return 0
 }
 
-func int64FromAny(v any) int64 {
-	switch x := v.(type) {
-	case float64:
-		return int64(x)
-	case int:
-		return int64(x)
-	case int64:
-		return x
-	case string:
-		n, _ := strconv.ParseInt(x, 10, 64)
-		return n
+func int64FromAny(v any) int64 { return int64Arg(map[string]any{"value": v}, "value") }
+
+// References are validated in the same transaction as definition writes.
+// Dynamic exclusions require recursive semantics; reject them explicitly.
+func validateSegmentReferences(db sqlQueryExecer, pid string, listID *int64, raw json.RawMessage) error {
+	if listID != nil {
+		l, err := dbListGet(db, pid, *listID)
+		if err != nil {
+			return err
+		}
+		if l == nil || l.ArchivedAt != "" {
+			return errors.New("segment list not found in this project")
+		}
 	}
-	return 0
+	var predicates []map[string]any
+	if len(raw) > 0 && string(raw) != "null" {
+		if err := json.Unmarshal(raw, &predicates); err != nil {
+			var one map[string]any
+			if err = json.Unmarshal(raw, &one); err != nil {
+				return err
+			}
+			predicates = []map[string]any{one}
+		}
+	}
+	if len(predicates) > 100 {
+		return errors.New("at most 100 segment conditions")
+	}
+	for _, p := range predicates {
+		switch strArg(p, "predicate") {
+		case "in_list", "not_in_list":
+			id := int64Arg(p, "list_id")
+			l, err := dbListGet(db, pid, id)
+			if err != nil {
+				return err
+			}
+			if l == nil || l.ArchivedAt != "" {
+				return errors.New("referenced list not found in this project")
+			}
+		case "not_in_segment":
+			other, err := dbSegmentGet(db, pid, int64Arg(p, "segment_id"))
+			if err != nil {
+				return err
+			}
+			if other == nil || other.ArchivedAt != "" || other.Kind != "static" {
+				return errors.New("not_in_segment requires an active static segment in this project")
+			}
+		case "attribute":
+			def, err := resolveAttributeDefinition(db, pid, strArg(p, "key"))
+			if err != nil {
+				return err
+			}
+			op := strArg(p, "op")
+			if op != "is_null" && op != "is_not_null" {
+				value := p["value"]
+				if def.Type == "multi_select" && op == "contains" {
+					value = []any{value}
+				}
+				if err = validateAttributeValue(strArg(p, "key"), def.Type, def.EnumJSON, value); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	cf, err := compileSegmentDefinition(pid, listID, raw)
+	if err != nil {
+		return err
+	}
+	var count int
+	return db.QueryRow(`SELECT COUNT(*) FROM contacts c WHERE `+strings.Join(cf.where, " AND ")+` AND 0`, cf.args...).Scan(&count)
 }

@@ -83,6 +83,9 @@ func (a *App) toolOrgsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if v, ok := args["policy_overrides"].(string); ok {
 		policy = &v
 	}
+	if err := validatePolicyJSON(policy); err != nil {
+		return nil, err
+	}
 	if err := dbUpdateOrg(ctx.AppDB(), pid, org.ID, name, color, policy); err != nil {
 		return nil, err
 	}
@@ -117,29 +120,47 @@ func (a *App) toolUsersSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	orgID := orgIDFromArgsOptional(ctx, pid, args)
+	orgID, err := orgIDFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	q, _ := args["q"].(string)
 	status, _ := args["status"].(string)
 	createdAfter, _ := args["created_after"].(string)
 	limit := intArg(args, "limit", 50, 1, 200)
 
-	users, err := dbSearchUsers(ctx.AppDB(), pid, orgID, q, status, createdAfter, limit)
+	var mfa *bool
+	if v, exists := args["mfa"]; exists {
+		b, ok := v.(bool)
+		if !ok {
+			return nil, errors.New("mfa must be boolean")
+		}
+		mfa = &b
+	}
+	var before int64
+	if v, exists := args["cursor"]; exists {
+		s, ok := v.(string)
+		if !ok {
+			return nil, errors.New("invalid cursor")
+		}
+		n, ok := parseUint(s)
+		if !ok {
+			return nil, errors.New("invalid cursor")
+		}
+		before = n
+	}
+	users, err := dbSearchUsersPage(ctx.AppDB(), pid, orgID, q, status, createdAfter, limit+1, mfa, before)
 	if err != nil {
 		return nil, err
 	}
-	if mfaFilter, ok := args["mfa"].(bool); ok {
-		filtered := users[:0]
-		for _, u := range users {
-			if u.MFAEnabled == mfaFilter {
-				filtered = append(filtered, u)
-			}
-		}
-		users = filtered
+	more := len(users) > limit
+	cursor := ""
+	if more {
+		users = users[:limit]
+		cursor = uintToStr(users[len(users)-1].ID)
 	}
-	return map[string]any{"users": users, "count": len(users)}, nil
-}
-
-// toolUsersCreate — MCP twin of POST /admin/users. Built for bulk
+	return map[string]any{"users": users, "count": len(users), "has_more": more, "next_cursor": cursor}, nil
+} // toolUsersCreate — MCP twin of POST /admin/users. Built for bulk
 // email import: an agent can provision N users from a list of emails
 // without firing a reset email at each (send_password_reset defaults
 // false). Set a password for service accounts, or send_password_reset
@@ -173,6 +194,12 @@ func (a *App) toolUsersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, cErr
 	}
 	out := map[string]any{"user": user}
+	if boolArg(args, "send_password_reset", false) {
+		out["password_reset_sent"] = resetSent
+		if !resetSent {
+			out["delivery_error"] = "User created; password reset email was not delivered. Configure messaging and retry."
+		}
+	}
 	if resetSent {
 		out["password_reset_sent"] = true
 	}
@@ -382,7 +409,10 @@ func (a *App) toolAuditSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	orgID := orgIDFromArgsOptional(ctx, pid, args)
+	orgID, err := orgIDFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	uid, _ := intReq(args, "user_id")
 	event, _ := args["event"].(string)
 	since, _ := args["since"].(string)
@@ -400,7 +430,10 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	orgID := orgIDFromArgsOptional(ctx, pid, args)
+	orgID, err := orgIDFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	stats, err := dbStats(ctx.AppDB(), pid, orgID)
 	if err != nil {
 		return nil, err
@@ -415,7 +448,10 @@ func (a *App) toolClientsList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	orgID := orgIDFromArgsOptional(ctx, pid, args)
+	orgID, err := orgIDFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	includeDisabled, _ := args["include_disabled"].(bool)
 	cs, err := dbListClients(ctx.AppDB(), pid, orgID, includeDisabled)
 	if err != nil {
@@ -425,6 +461,17 @@ func (a *App) toolClientsList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
+	if _, err := strictStrings(args, "allowed_origins"); err != nil {
+		return nil, err
+	}
+	if _, err := strictStrings(args, "redirect_uris"); err != nil {
+		return nil, err
+	}
+	if _, err := strictStrings(args, "allowed_grant_types"); err != nil {
+		return nil, err
+	}
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -432,7 +479,10 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	// Optional: organization_id/_slug = single-org client (default);
 	// omitted = multi-organization client (one SaaS deployment serves
 	// many orgs, with org_slug supplied on every public call).
-	org, _ := orgFromArgsOptional(ctx, pid, args)
+	org, err := orgFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
 	name, _ := args["name"].(string)
 	typ, _ := args["type"].(string)
 	if name == "" || typ == "" {
@@ -471,6 +521,7 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if org != nil {
 		oid = org.ID
 	}
+	c.OrganizationID = oid
 	if _, err := dbCreateClient(ctx.AppDB(), pid, oid, c, secretHash); err != nil {
 		return nil, err
 	}
@@ -497,6 +548,14 @@ func (a *App) toolClientsCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolClientsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if _, err := strictStrings(args, "add_allowed_origins"); err != nil {
+		return nil, err
+	}
+	if _, err := strictStrings(args, "remove_allowed_origins"); err != nil {
+		return nil, err
+	}
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -508,6 +567,9 @@ func (a *App) toolClientsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	client, err := dbGetClientByClientID(ctx.AppDB(), pid, clientID)
 	if err != nil {
 		return nil, err
+	}
+	if client.DisabledAt != "" {
+		return nil, errors.New("client disabled")
 	}
 	add, err := normalizeClientOrigins(stringArrArg(args, "add_allowed_origins"))
 	if err != nil {
@@ -609,6 +671,8 @@ func (a *App) toolClientsRotateSecret(ctx *sdk.AppCtx, args map[string]any) (any
 }
 
 func (a *App) toolClientsDisable(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -651,6 +715,8 @@ func (a *App) toolPublicSignup(ctx *sdk.AppCtx, args map[string]any) (any, error
 		Password:         stringArg(args, "password", ""),
 		DisplayName:      stringArg(args, "display_name", ""),
 		ClientID:         stringArg(args, "client_id", ""),
+		ClientSecret:     stringArg(args, "client_secret", ""),
+		ContinueURL:      stringArg(args, "continue_url", ""),
 		OrganizationSlug: stringArg(args, "organization_slug", ""),
 		IP:               stringArg(args, "ip", ""),
 		UserAgent:        stringArg(args, "user_agent", "mcp:auth_public_signup"),
@@ -685,105 +751,70 @@ func lookupUserByArgs(ctx *sdk.AppCtx, projectID string, orgID int64, args map[s
 // (nil, nil) when neither id nor slug is supplied. Used by client
 // creation where the absence of an org means "this is a multi-org
 // client". An *invalid* org id/slug still errors.
-func orgFromArgsOptional(ctx *sdk.AppCtx, projectID string, args map[string]any) (*Organization, error) {
-	if slug, _ := args["organization_slug"].(string); slug != "" {
-		o, err := dbGetOrgBySlug(ctx.AppDB(), projectID, slug)
+func orgFromArgsOptional(ctx *sdk.AppCtx, pid string, args map[string]any) (*Organization, error) {
+	var bySlug, byID *Organization
+	if v, exists := args["organization_slug"]; exists {
+		slug, ok := v.(string)
+		if !ok || strings.TrimSpace(slug) == "" {
+			return nil, errors.New("invalid organization_slug")
+		}
+		var err error
+		bySlug, err = dbGetOrgBySlug(ctx.AppDB(), pid, strings.TrimSpace(slug))
 		if err != nil {
 			return nil, errors.New("unknown organization_slug")
 		}
-		return o, nil
 	}
-	if id, ok := intReq(args, "organization_id"); ok {
-		o, err := dbGetOrgByID(ctx.AppDB(), projectID, id)
+	if v, exists := args["organization_id"]; exists {
+		id, ok := strictID(v, true)
+		if !ok {
+			return nil, errors.New("invalid organization_id")
+		}
+		var err error
+		byID, err = dbGetOrgByID(ctx.AppDB(), pid, id)
 		if err != nil {
 			return nil, errors.New("unknown organization_id")
 		}
-		return o, nil
 	}
-	return nil, nil
+	if bySlug != nil && byID != nil && bySlug.ID != byID.ID {
+		return nil, errors.New("conflicting organization selectors")
+	}
+	if bySlug != nil {
+		return bySlug, nil
+	}
+	return byID, nil
 }
-
-// orgFromArgs — required-org resolver. Accepts organization_id or
-// organization_slug. Returns an error if neither was supplied — used
-// by every mutation tool.
-func orgFromArgs(ctx *sdk.AppCtx, projectID string, args map[string]any) (*Organization, error) {
-	if slug, _ := args["organization_slug"].(string); slug != "" {
-		o, err := dbGetOrgBySlug(ctx.AppDB(), projectID, slug)
-		if err != nil {
-			return nil, errors.New("unknown organization_slug")
-		}
-		return o, nil
+func orgFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Organization, error) {
+	org, err := orgFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return nil, err
 	}
-	if id, ok := intReq(args, "organization_id"); ok {
-		o, err := dbGetOrgByID(ctx.AppDB(), projectID, id)
-		if err != nil {
-			return nil, errors.New("unknown organization_id")
-		}
-		return o, nil
+	if org == nil {
+		return nil, errors.New("organization_id or organization_slug required")
 	}
-	return nil, errors.New("organization_id or organization_slug required")
+	return org, nil
 }
-
-// orgIDFromArgsOptional — optional-org resolver. Returns 0 (= roll up
-// project-wide) when neither id nor slug is supplied. Used by read
-// tools where omitting org means "across the whole project".
-func orgIDFromArgsOptional(ctx *sdk.AppCtx, projectID string, args map[string]any) int64 {
-	if slug, _ := args["organization_slug"].(string); slug != "" {
-		if o, err := dbGetOrgBySlug(ctx.AppDB(), projectID, slug); err == nil {
-			return o.ID
-		}
+func orgIDFromArgsOptional(ctx *sdk.AppCtx, pid string, args map[string]any) (int64, error) {
+	org, err := orgFromArgsOptional(ctx, pid, args)
+	if err != nil {
+		return 0, err
 	}
-	if id, ok := intReq(args, "organization_id"); ok {
-		return id
-	}
-	return 0
+	return orgID(org), nil
 }
 
 func intArg(args map[string]any, key string, dflt, min, max int) int {
-	if v, ok := args[key]; ok {
-		switch x := v.(type) {
-		case float64:
-			n := int(x)
-			if n < min {
-				return min
-			}
-			if n > max {
-				return max
-			}
-			return n
-		case int:
-			if x < min {
-				return min
-			}
-			if x > max {
-				return max
-			}
-			return x
-		}
+	n, ok := strictID(args[key], false)
+	if !ok {
+		return dflt
 	}
-	return dflt
-}
-
-func intReq(args map[string]any, key string) (int64, bool) {
-	switch x := args[key].(type) {
-	case float64:
-		if x <= 0 {
-			return 0, false
-		}
-		return int64(x), true
-	case int:
-		if x <= 0 {
-			return 0, false
-		}
-		return int64(x), true
-	case int64:
-		if x <= 0 {
-			return 0, false
-		}
-		return x, true
+	if n < int64(min) {
+		return min
 	}
-	return 0, false
+	if n > int64(max) {
+		return max
+	}
+	return int(n)
 }
+func intReq(args map[string]any, key string) (int64, bool) { return strictID(args[key], true) }
 
 func boolArg(args map[string]any, key string, dflt bool) bool {
 	if v, ok := args[key].(bool); ok {

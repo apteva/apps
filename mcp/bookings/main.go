@@ -10,13 +10,18 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
+	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	_ "time/tzdata"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -25,13 +30,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.1.2
-description: Calendly-style booking links for human and AI-agent meetings.
+version: 0.3.0
+description: Calendly-style booking links for client meetings.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
 icon: /ui/icon.svg
 icon_style: monochrome
-homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
-tags: [bookings, scheduling, calendar, meetings, agents]
+tags: [bookings, scheduling, calendar, meetings]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
 requires:
@@ -57,20 +62,12 @@ requires:
       capabilities: [contact.read, contact.write]
       required: false
       label: "CRM"
-    - role: jobs
-      kind: app
-      compatible_app_names: [jobs]
-      capabilities: [jobs.schedule]
-      required: false
-      label: "Jobs"
-    - role: messaging
-      kind: app
-      compatible_app_names: [messaging]
-      capabilities: [message.send]
-      required: false
-      label: "Messaging"
 provides:
   http_routes:
+    - prefix: /public/
+      no_auth: true
+    - prefix: /b/
+      no_auth: true
     - prefix: /
   mcp_tools:
     - { name: booking_types_list, description: "List booking types." }
@@ -93,6 +90,23 @@ provides:
       label: Bookings
       icon: calendar-plus
       entry: /ui/BookingsPanel.mjs
+  ui_components:
+    - name: booked-calls
+      label: Booked calls
+      description: Upcoming client calls with quick host access.
+      entry: /ui/BookedCallsWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [booking.created, booking.rescheduled, booking.cancelled, booking.completed, booking.no_show]
+      settings_schema:
+        type: object
+        properties:
+          horizon_days: { type: integer, title: "Days ahead", description: "Upcoming window to display. Use 0 for all future calls.", default: 30, minimum: 0, maximum: 365 }
+          max_items: { type: integer, title: "Maximum calls", default: 6, minimum: 1, maximum: 20 }
+          booking_type_id: { type: integer, title: "Booking type ID", description: "Show every Calls booking type when unset or 0.", default: 0, minimum: 0 }
 runtime:
   kind: source
   source: { repo: github.com/apteva/apps, ref: main, entry: mcp/bookings }
@@ -106,8 +120,10 @@ upgrade_policy: auto-patch
 `
 
 var (
-	globalCtx *sdk.AppCtx
-	slugRe    = regexp.MustCompile(`[^a-z0-9]+`)
+	globalCtx       *sdk.AppCtx
+	slugRe          = regexp.MustCompile(`[^a-z0-9]+`)
+	bookingWriteMu  sync.Mutex
+	publicRateLimit = newRequestLimiter()
 )
 
 type App struct{}
@@ -154,23 +170,28 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "booking_types_get", Description: "Fetch a booking type by id or slug. Args: id? or slug?.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolBookingTypesGet},
-		{Name: "booking_types_create", Description: "Create a booking type. Args: title, duration_minutes?, slug?, description?, calendar_ids?, target_kind?, location_kind?, location_value?, calls_enabled?, crm_enabled?, availability_rules?, intake_schema?.", InputSchema: schemaObject(map[string]any{
+		{Name: "booking_types_create", Description: "Create a booking type. Args: title, duration_minutes?, slug?, description?, timezone?, calendar_ids?, destination_calendar_id?, location_kind?, location_value?, calls_enabled?, crm_enabled?, availability_rules?, intake_schema?.", InputSchema: schemaObject(map[string]any{
 			"title": map[string]any{"type": "string"}, "duration_minutes": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
-			"calendar_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "target_kind": map[string]any{"type": "string"},
+			"timezone": map[string]any{"type": "string"}, "calendar_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "destination_calendar_id": map[string]any{"type": "integer"},
 			"location_kind": map[string]any{"type": "string"}, "location_value": map[string]any{"type": "string"}, "calls_enabled": map[string]any{"type": "boolean"}, "crm_enabled": map[string]any{"type": "boolean"},
-			"availability_rules": map[string]any{"type": "object"}, "intake_schema": map[string]any{"type": "array"},
+			"availability_rules": map[string]any{"type": "object"}, "intake_schema": map[string]any{"type": "array"}, "confirmation_policy": map[string]any{"type": "object"},
 		}, []string{"title"}), Handler: a.toolBookingTypesCreate},
-		{Name: "booking_types_update", Description: "Patch a booking type. Args: id plus any mutable fields.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolBookingTypesUpdate},
+		{Name: "booking_types_update", Description: "Patch a booking type. Args: id plus any mutable fields.", InputSchema: schemaObject(map[string]any{
+			"id": map[string]any{"type": "integer"}, "title": map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+			"duration_minutes": map[string]any{"type": "integer"}, "timezone": map[string]any{"type": "string"}, "calendar_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "destination_calendar_id": map[string]any{"type": "integer"},
+			"location_kind": map[string]any{"type": "string"}, "location_value": map[string]any{"type": "string"}, "calls_enabled": map[string]any{"type": "boolean"}, "crm_enabled": map[string]any{"type": "boolean"}, "active": map[string]any{"type": "boolean"},
+			"availability_rules": map[string]any{"type": "object"}, "intake_schema": map[string]any{"type": "array"}, "confirmation_policy": map[string]any{"type": "object"},
+		}, []string{"id"}), Handler: a.toolBookingTypesUpdate},
 		{Name: "booking_types_archive", Description: "Archive a booking type. Args: id.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolBookingTypesArchive},
 		{Name: "bookings_find_slots", Description: "Find available slots for a booking type. Args: booking_type_id? or slug?, window_start?, window_end?, limit?.", InputSchema: schemaObject(map[string]any{
 			"booking_type_id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "window_start": map[string]any{"type": "string"}, "window_end": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolBookingsFindSlots},
-		{Name: "bookings_create", Description: "Create a booking. Args: booking_type_id? or slug?, start_at, invitee_name?, invitee_email?, invitee_phone?, intake_answers?.", InputSchema: schemaObject(map[string]any{
-			"booking_type_id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "start_at": map[string]any{"type": "string"}, "invitee_name": map[string]any{"type": "string"}, "invitee_email": map[string]any{"type": "string"}, "invitee_phone": map[string]any{"type": "string"}, "intake_answers": map[string]any{"type": "object"}, "source": map[string]any{"type": "string"},
+		{Name: "bookings_create", Description: "Create a booking after revalidating availability. Args: booking_type_id? or slug?, start_at, invitee_name?, invitee_email, invitee_phone?, intake_answers?, idempotency_key?.", InputSchema: schemaObject(map[string]any{
+			"booking_type_id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "start_at": map[string]any{"type": "string"}, "invitee_name": map[string]any{"type": "string"}, "invitee_email": map[string]any{"type": "string"}, "invitee_phone": map[string]any{"type": "string"}, "intake_answers": map[string]any{"type": "object"}, "source": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"},
 		}, []string{"start_at"}), Handler: a.toolBookingsCreate},
 		{Name: "bookings_get", Description: "Fetch one booking. Args: id.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolBookingsGet},
-		{Name: "bookings_list", Description: "List bookings. Args: status?, booking_type_id?, from?, to?, limit?.", InputSchema: schemaObject(map[string]any{
-			"status": map[string]any{"type": "string"}, "booking_type_id": map[string]any{"type": "integer"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+		{Name: "bookings_list", Description: "List bookings. Args: status?, active?, calls_only?, booking_type_id?, from?, to?, ends_after?, order? (asc|desc), limit?.", InputSchema: schemaObject(map[string]any{
+			"status": map[string]any{"type": "string"}, "active": map[string]any{"type": "boolean"}, "calls_only": map[string]any{"type": "boolean"}, "booking_type_id": map[string]any{"type": "integer"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "ends_after": map[string]any{"type": "string"}, "order": map[string]any{"type": "string", "enum": []string{"asc", "desc"}}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolBookingsList},
 		{Name: "bookings_reschedule", Description: "Reschedule a booking. Args: id, start_at.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "start_at": map[string]any{"type": "string"}}, []string{"id", "start_at"}), Handler: a.toolBookingsReschedule},
 		{Name: "bookings_cancel", Description: "Cancel a booking and delete its Calendar event. Args: id, reason?.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolBookingsCancel},
@@ -184,27 +205,28 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 type BookingType struct {
-	ID                 int64           `json:"id"`
-	ProjectID          string          `json:"project_id,omitempty"`
-	Slug               string          `json:"slug"`
-	Title              string          `json:"title"`
-	Description        string          `json:"description"`
-	DurationMinutes    int             `json:"duration_minutes"`
-	Timezone           string          `json:"timezone"`
-	LocationKind       string          `json:"location_kind"`
-	LocationValue      string          `json:"location_value"`
-	TargetKind         string          `json:"target_kind"`
-	CalendarIDs        []int64         `json:"calendar_ids"`
-	AgentInstanceID    string          `json:"agent_instance_id"`
-	CallsEnabled       bool            `json:"calls_enabled"`
-	CRMEnabled         bool            `json:"crm_enabled"`
-	Active             bool            `json:"active"`
-	AvailabilityRules  json.RawMessage `json:"availability_rules"`
-	IntakeSchema       json.RawMessage `json:"intake_schema"`
-	ConfirmationPolicy json.RawMessage `json:"confirmation_policy"`
-	CreatedAt          string          `json:"created_at"`
-	UpdatedAt          string          `json:"updated_at"`
-	PublicURL          string          `json:"public_url,omitempty"`
+	ID                    int64           `json:"id"`
+	ProjectID             string          `json:"project_id,omitempty"`
+	Slug                  string          `json:"slug"`
+	Title                 string          `json:"title"`
+	Description           string          `json:"description"`
+	DurationMinutes       int             `json:"duration_minutes"`
+	Timezone              string          `json:"timezone"`
+	LocationKind          string          `json:"location_kind"`
+	LocationValue         string          `json:"location_value"`
+	TargetKind            string          `json:"target_kind"`
+	CalendarIDs           []int64         `json:"calendar_ids"`
+	DestinationCalendarID int64           `json:"destination_calendar_id,omitempty"`
+	AgentInstanceID       string          `json:"agent_instance_id"`
+	CallsEnabled          bool            `json:"calls_enabled"`
+	CRMEnabled            bool            `json:"crm_enabled"`
+	Active                bool            `json:"active"`
+	AvailabilityRules     json.RawMessage `json:"availability_rules"`
+	IntakeSchema          json.RawMessage `json:"intake_schema"`
+	ConfirmationPolicy    json.RawMessage `json:"confirmation_policy"`
+	CreatedAt             string          `json:"created_at"`
+	UpdatedAt             string          `json:"updated_at"`
+	PublicURL             string          `json:"public_url,omitempty"`
 }
 
 type Booking struct {
@@ -228,6 +250,7 @@ type Booking struct {
 	AssignedAgentInstanceID string          `json:"assigned_agent_instance_id,omitempty"`
 	CancellationToken       string          `json:"cancellation_token,omitempty"`
 	RescheduleToken         string          `json:"reschedule_token,omitempty"`
+	IdempotencyKey          string          `json:"-"`
 	Source                  string          `json:"source"`
 	CreatedAt               string          `json:"created_at"`
 	UpdatedAt               string          `json:"updated_at"`
@@ -240,6 +263,34 @@ type availabilityRules struct {
 	BufferAfterMinutes  int                          `json:"buffer_after_minutes"`
 	MinimumNoticeMins   int                          `json:"minimum_notice_minutes"`
 	BookingHorizonDays  int                          `json:"booking_horizon_days"`
+}
+
+type requestLimiter struct {
+	mu      sync.Mutex
+	buckets map[string][]time.Time
+}
+
+type publicBookingType struct {
+	Slug            string `json:"slug"`
+	Title           string `json:"title"`
+	Description     string `json:"description"`
+	DurationMinutes int    `json:"duration_minutes"`
+	Timezone        string `json:"timezone"`
+	LocationKind    string `json:"location_kind"`
+	LocationValue   string `json:"location_value,omitempty"`
+}
+
+type publicBooking struct {
+	ID              int64           `json:"id"`
+	Status          string          `json:"status"`
+	StartAt         string          `json:"start_at"`
+	EndAt           string          `json:"end_at"`
+	Timezone        string          `json:"timezone"`
+	InviteeName     string          `json:"invitee_name"`
+	InviteeEmail    string          `json:"invitee_email"`
+	IntakeAnswers   json.RawMessage `json:"intake_answers"`
+	GuestJoinURL    string          `json:"calls_guest_join_url,omitempty"`
+	PublicManageURL string          `json:"public_manage_url"`
 }
 
 // ─── Tools: booking types ─────────────────────────────────────────
@@ -260,18 +311,17 @@ func (a *App) toolBookingTypesList(ctx *sdk.AppCtx, args map[string]any) (any, e
 		where += " AND active=1"
 	}
 	qargs = append(qargs, limit)
-	rows, err := ctx.AppDB().Query(`SELECT id FROM booking_types WHERE `+where+` ORDER BY title LIMIT ?`, qargs...)
+	rows, err := ctx.AppDB().Query(`SELECT id, project_id, slug, title, description, duration_minutes, timezone, location_kind, location_value,
+		       target_kind, calendar_ids, destination_calendar_id, agent_instance_id, calls_enabled, crm_enabled, active,
+		       availability_rules, intake_schema, confirmation_policy, created_at, updated_at
+		  FROM booking_types WHERE `+where+` ORDER BY title LIMIT ?`, qargs...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []*BookingType{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		bt, err := loadBookingTypeByID(ctx, pid, id)
+		bt, err := scanBookingType(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -279,6 +329,9 @@ func (a *App) toolBookingTypesList(ctx *sdk.AppCtx, args map[string]any) (any, e
 			bt.PublicURL = publicBookingURL(ctx, pid, bt.Slug)
 			out = append(out, bt)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return map[string]any{"booking_types": out, "count": len(out)}, nil
 }
@@ -308,9 +361,15 @@ func (a *App) toolBookingTypesCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if title == "" {
 		return nil, errors.New("title required")
 	}
+	if len(title) > 200 {
+		return nil, errors.New("title must be at most 200 characters")
+	}
+	if len(strArg(args, "description")) > 10_000 {
+		return nil, errors.New("description must be at most 10000 characters")
+	}
 	duration := intArg(args, "duration_minutes", 30)
-	if duration <= 0 {
-		duration = 30
+	if duration < 5 || duration > 24*60 {
+		return nil, errors.New("duration_minutes must be between 5 and 1440")
 	}
 	slug := slugify(strArg(args, "slug"))
 	if strArg(args, "slug") == "" {
@@ -324,6 +383,9 @@ func (a *App) toolBookingTypesCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
+	if err := validateAvailabilityJSON(availability); err != nil {
+		return nil, err
+	}
 	intake, err := jsonStringArg(args, "intake_schema", "[]")
 	if err != nil {
 		return nil, err
@@ -332,21 +394,42 @@ func (a *App) toolBookingTypesCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	calIDs, err := json.Marshal(int64SliceArg(args, "calendar_ids"))
+	calendarIDs := int64SliceArg(args, "calendar_ids")
+	if err := validateCalendarIDs(calendarIDs, int64Arg(args, "destination_calendar_id")); err != nil {
+		return nil, err
+	}
+	calIDs, err := json.Marshal(calendarIDs)
 	if err != nil {
 		return nil, err
 	}
-	locationKind := enumArg(args, "location_kind", "calls", []string{"calls", "phone", "in_person", "external_url"})
-	targetKind := enumArg(args, "target_kind", "human", []string{"human", "ai_agent", "either", "team"})
+	allowedLocations := []string{"calls", "phone", "in_person", "external_url"}
+	if requested := strArg(args, "location_kind"); requested != "" && !containsString(allowedLocations, requested) {
+		return nil, fmt.Errorf("unsupported location_kind %q", requested)
+	}
+	locationKind := enumArg(args, "location_kind", "calls", allowedLocations)
+	if requested := strArg(args, "target_kind"); requested != "" && requested != "human" {
+		return nil, errors.New("target_kind currently supports only human")
+	}
+	timezone := strArgDefault(args, "timezone", "UTC")
+	if len(timezone) > 128 {
+		return nil, errors.New("timezone must be at most 128 characters")
+	}
+	if _, err := time.LoadLocation(timezone); err != nil {
+		return nil, fmt.Errorf("timezone must be a valid IANA timezone: %w", err)
+	}
+	callsEnabled := boolArg(args, "calls_enabled", locationKind == "calls")
+	if err := validateLocation(locationKind, strArg(args, "location_value"), callsEnabled); err != nil {
+		return nil, err
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO booking_types
 		   (project_id, slug, title, description, duration_minutes, timezone, location_kind, location_value,
-		    target_kind, calendar_ids, agent_instance_id, calls_enabled, crm_enabled, active,
+		    target_kind, calendar_ids, destination_calendar_id, agent_instance_id, calls_enabled, crm_enabled, active,
 		    availability_rules, intake_schema, confirmation_policy)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-		pid, slug, title, strArg(args, "description"), duration, strArgDefault(args, "timezone", "UTC"),
-		locationKind, strArg(args, "location_value"), targetKind, string(calIDs), "",
-		boolToInt(boolArg(args, "calls_enabled", locationKind == "calls")), boolToInt(boolArg(args, "crm_enabled", true)),
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'human', ?, ?, '', ?, ?, 1, ?, ?, ?)`,
+		pid, slug, title, strArg(args, "description"), duration, timezone,
+		locationKind, strArg(args, "location_value"), string(calIDs), int64Arg(args, "destination_calendar_id"),
+		boolToInt(callsEnabled), boolToInt(boolArg(args, "crm_enabled", true)),
 		availability, intake, policy,
 	)
 	if err != nil {
@@ -378,16 +461,56 @@ func (a *App) toolBookingTypesUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if bt == nil {
 		return nil, errors.New("booking type not found")
 	}
+	prospectiveLocationKind := bt.LocationKind
+	if _, ok := args["location_kind"]; ok {
+		allowedLocations := []string{"calls", "phone", "in_person", "external_url"}
+		requested := strArg(args, "location_kind")
+		if !containsString(allowedLocations, requested) {
+			return nil, fmt.Errorf("unsupported location_kind %q", requested)
+		}
+		prospectiveLocationKind = requested
+	}
+	prospectiveLocationValue := bt.LocationValue
+	if _, ok := args["location_value"]; ok {
+		prospectiveLocationValue = strArg(args, "location_value")
+	}
+	prospectiveCallsEnabled := bt.CallsEnabled
+	if _, ok := args["calls_enabled"]; ok {
+		prospectiveCallsEnabled = boolArg(args, "calls_enabled", false)
+	}
+	if err := validateLocation(prospectiveLocationKind, prospectiveLocationValue, prospectiveCallsEnabled); err != nil {
+		return nil, err
+	}
 	sets := []string{}
 	vals := []any{}
 	add := func(col string, val any) {
 		sets = append(sets, col+"=?")
 		vals = append(vals, val)
 	}
-	for _, key := range []string{"title", "description", "timezone", "location_value"} {
+	for _, key := range []string{"title", "description", "location_value"} {
 		if _, ok := args[key]; ok {
-			add(key, strArg(args, key))
+			value := strArg(args, key)
+			if key == "title" && value == "" {
+				return nil, errors.New("title cannot be empty")
+			}
+			if key == "title" && len(value) > 200 {
+				return nil, errors.New("title must be at most 200 characters")
+			}
+			if key == "description" && len(value) > 10_000 {
+				return nil, errors.New("description must be at most 10000 characters")
+			}
+			add(key, value)
 		}
+	}
+	if _, ok := args["timezone"]; ok {
+		tz := strArg(args, "timezone")
+		if len(tz) > 128 {
+			return nil, errors.New("timezone must be at most 128 characters")
+		}
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, fmt.Errorf("timezone must be a valid IANA timezone: %w", err)
+		}
+		add("timezone", tz)
 	}
 	if _, ok := args["slug"]; ok {
 		slug := slugify(strArg(args, "slug"))
@@ -402,8 +525,8 @@ func (a *App) toolBookingTypesUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	if _, ok := args["duration_minutes"]; ok {
 		duration := intArg(args, "duration_minutes", bt.DurationMinutes)
-		if duration <= 0 {
-			return nil, errors.New("duration_minutes must be positive")
+		if duration < 5 || duration > 24*60 {
+			return nil, errors.New("duration_minutes must be between 5 and 1440")
 		}
 		add("duration_minutes", duration)
 	}
@@ -411,11 +534,29 @@ func (a *App) toolBookingTypesUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 		add("location_kind", enumArg(args, "location_kind", bt.LocationKind, []string{"calls", "phone", "in_person", "external_url"}))
 	}
 	if _, ok := args["target_kind"]; ok {
-		add("target_kind", enumArg(args, "target_kind", bt.TargetKind, []string{"human", "ai_agent", "either", "team"}))
+		if strArg(args, "target_kind") != "human" {
+			return nil, errors.New("target_kind currently supports only human")
+		}
+		add("target_kind", "human")
 	}
 	if _, ok := args["calendar_ids"]; ok {
-		b, _ := json.Marshal(int64SliceArg(args, "calendar_ids"))
+		calendarIDs := int64SliceArg(args, "calendar_ids")
+		destinationID := bt.DestinationCalendarID
+		if _, exists := args["destination_calendar_id"]; exists {
+			destinationID = int64Arg(args, "destination_calendar_id")
+		}
+		if err := validateCalendarIDs(calendarIDs, destinationID); err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(calendarIDs)
 		add("calendar_ids", string(b))
+	}
+	if _, ok := args["destination_calendar_id"]; ok {
+		destinationID := int64Arg(args, "destination_calendar_id")
+		if err := validateCalendarIDs(bt.CalendarIDs, destinationID); err != nil {
+			return nil, err
+		}
+		add("destination_calendar_id", destinationID)
 	}
 	for _, key := range []string{"calls_enabled", "crm_enabled", "active"} {
 		if _, ok := args[key]; ok {
@@ -427,6 +568,11 @@ func (a *App) toolBookingTypesUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 			s, err := jsonStringArg(args, key, "{}")
 			if err != nil {
 				return nil, err
+			}
+			if key == "availability_rules" {
+				if err := validateAvailabilityJSON(s); err != nil {
+					return nil, err
+				}
 			}
 			add(key, s)
 		}
@@ -475,6 +621,9 @@ func (a *App) toolBookingsFindSlots(ctx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func (a *App) toolBookingsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookingWriteMu.Lock()
+	defer bookingWriteMu.Unlock()
+
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -486,54 +635,86 @@ func (a *App) toolBookingsCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if bt == nil || !bt.Active {
 		return nil, errors.New("active booking type not found")
 	}
+	if bt.TargetKind != "human" {
+		return nil, errors.New("this booking type uses an unsupported target_kind; change it to human")
+	}
+	if err := validateInvitee(args); err != nil {
+		return nil, err
+	}
+	if _, exists := args["end_at"]; exists {
+		return nil, errors.New("end_at is derived from the booking type and cannot be supplied")
+	}
+	idempotencyKey := strArg(args, "idempotency_key")
+	if len(idempotencyKey) > 128 {
+		return nil, errors.New("idempotency_key must be at most 128 characters")
+	}
+	if len(strArgDefault(args, "source", "manual")) > 80 {
+		return nil, errors.New("source must be at most 80 characters")
+	}
+	if idempotencyKey != "" {
+		existing, err := loadBookingByIdempotencyKey(ctx, pid, idempotencyKey)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return map[string]any{"booking": existing, "booking_type": bt, "idempotent_replay": true}, nil
+		}
+	}
 	start, err := parseTimeArg(args, "start_at")
 	if err != nil {
 		return nil, err
 	}
 	end := start.Add(time.Duration(bt.DurationMinutes) * time.Minute)
-	if _, ok := args["end_at"]; ok {
-		end, err = parseTimeArg(args, "end_at")
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !end.After(start) {
-		return nil, errors.New("end_at must be after start_at")
+	if err := validateRequestedSlot(ctx, pid, bt, start, 0); err != nil {
+		return nil, err
 	}
 	answers, err := jsonStringArg(args, "intake_answers", "{}")
 	if err != nil {
 		return nil, err
 	}
+	if len(answers) > 64*1024 {
+		return nil, errors.New("intake_answers must be at most 64 KiB")
+	}
 	cancelToken := randomToken()
 	rescheduleToken := randomToken()
-	assignedTarget := bt.TargetKind
-	if assignedTarget == "either" {
-		assignedTarget = "human"
-	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO bookings
 		   (project_id, booking_type_id, status, start_at, end_at, timezone, invitee_name, invitee_email,
 		    invitee_phone, intake_answers, assigned_target_kind, assigned_agent_instance_id,
-		    cancellation_token, reschedule_token, source)
-		 VALUES (?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		    cancellation_token, reschedule_token, source, idempotency_key)
+		 VALUES (?, ?, 'confirmed', ?, ?, ?, ?, ?, ?, ?, 'human', '', ?, ?, ?, ?)`,
 		pid, bt.ID, start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), bt.Timezone,
 		strArg(args, "invitee_name"), strArg(args, "invitee_email"), strArg(args, "invitee_phone"), answers,
-		assignedTarget, bt.AgentInstanceID, cancelToken, rescheduleToken, strArgDefault(args, "source", "manual"),
+		cancelToken, rescheduleToken, strArgDefault(args, "source", "manual"), idempotencyKey,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert booking: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	b, _ := loadBookingByID(ctx, pid, id)
-	if err := a.attachOptionalCRM(ctx, pid, bt, b); err != nil {
-		ctx.Logger().Warn("bookings crm attach failed", "err", err.Error(), "booking_id", id)
+	b, err := loadBookingByID(ctx, pid, id)
+	if err != nil || b == nil {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM bookings WHERE id=? AND project_id=?`, id, pid)
+		if err == nil {
+			err = errors.New("inserted booking could not be reloaded")
+		}
+		return nil, err
 	}
 	if err := a.attachOptionalCalls(ctx, pid, bt, b); err != nil {
-		ctx.Logger().Warn("bookings calls attach failed", "err", err.Error(), "booking_id", id)
+		_, _ = ctx.AppDB().Exec(`DELETE FROM bookings WHERE id=? AND project_id=?`, id, pid)
+		return nil, fmt.Errorf("create Calls room: %w", err)
 	}
-	if err := a.createCalendarEvent(ctx, pid, bt, b); err != nil {
-		_, _ = ctx.AppDB().Exec(`UPDATE bookings SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=?`, id)
+	eventID, err := a.createCalendarEvent(ctx, pid, bt, b)
+	if err != nil {
+		a.cleanupFailedBooking(ctx, pid, b, 0)
 		return nil, err
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET calendar_event_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, eventID, id, pid); err != nil {
+		a.cleanupFailedBooking(ctx, pid, b, eventID)
+		return nil, err
+	}
+	b.CalendarEventID = eventID
+	if err := a.attachOptionalCRM(ctx, pid, bt, b); err != nil {
+		ctx.Logger().Warn("bookings crm attach failed", "err", err.Error(), "booking_id", id)
 	}
 	b, err = loadBookingByID(ctx, pid, id)
 	if err != nil {
@@ -570,9 +751,14 @@ func (a *App) toolBookingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	where := []string{"project_id=?"}
 	qargs := []any{pid}
-	if status := strArg(args, "status"); status != "" {
+	if boolArg(args, "active", false) {
+		where = append(where, "status IN ('confirmed','rescheduled')")
+	} else if status := strArg(args, "status"); status != "" {
 		where = append(where, "status=?")
 		qargs = append(qargs, status)
+	}
+	if boolArg(args, "calls_only", false) {
+		where = append(where, "calls_room_id IS NOT NULL AND calls_room_id>0")
 	}
 	if tid := int64Arg(args, "booking_type_id"); tid > 0 {
 		where = append(where, "booking_type_id=?")
@@ -594,23 +780,33 @@ func (a *App) toolBookingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		where = append(where, "start_at<=?")
 		qargs = append(qargs, t.UTC().Format(time.RFC3339))
 	}
+	if endsAfter := strArg(args, "ends_after"); endsAfter != "" {
+		t, err := time.Parse(time.RFC3339, endsAfter)
+		if err != nil {
+			return nil, fmt.Errorf("ends_after: %w", err)
+		}
+		where = append(where, "end_at>=?")
+		qargs = append(qargs, t.UTC().Format(time.RFC3339))
+	}
 	limit := intArg(args, "limit", 100)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
+	order := strings.ToUpper(enumArg(args, "order", "desc", []string{"asc", "desc"}))
 	qargs = append(qargs, limit)
-	rows, err := ctx.AppDB().Query(`SELECT id FROM bookings WHERE `+strings.Join(where, " AND ")+` ORDER BY start_at DESC LIMIT ?`, qargs...)
+	rows, err := ctx.AppDB().Query(`SELECT id, project_id, booking_type_id, status, start_at, end_at, timezone,
+		       invitee_name, invitee_email, invitee_phone, intake_answers,
+		       calendar_event_id, calls_room_id, calls_guest_join_url, calls_host_join_url, crm_contact_id,
+		       assigned_target_kind, assigned_agent_instance_id, cancellation_token, reschedule_token,
+		       source, idempotency_key, created_at, updated_at
+		  FROM bookings WHERE `+strings.Join(where, " AND ")+` ORDER BY start_at `+order+`, id `+order+` LIMIT ?`, qargs...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []*Booking{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		b, err := loadBookingByID(ctx, pid, id)
+		b, err := scanBooking(ctx, rows)
 		if err != nil {
 			return nil, err
 		}
@@ -618,10 +814,16 @@ func (a *App) toolBookingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 			out = append(out, b)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return map[string]any{"bookings": out, "count": len(out)}, nil
 }
 
 func (a *App) toolBookingsReschedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookingWriteMu.Lock()
+	defer bookingWriteMu.Unlock()
+
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -636,6 +838,9 @@ func (a *App) toolBookingsReschedule(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	if b == nil {
 		return nil, errors.New("booking not found")
+	}
+	if b.Status != "confirmed" && b.Status != "rescheduled" {
+		return nil, fmt.Errorf("cannot reschedule a %s booking", b.Status)
 	}
 	bt, err := loadBookingTypeByID(ctx, pid, b.BookingTypeID)
 	if err != nil {
@@ -646,13 +851,33 @@ func (a *App) toolBookingsReschedule(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, err
 	}
 	end := start.Add(time.Duration(bt.DurationMinutes) * time.Minute)
+	if err := validateRequestedSlot(ctx, pid, bt, start, b.CalendarEventID); err != nil {
+		return nil, err
+	}
+	oldStart, _ := time.Parse(time.RFC3339, b.StartAt)
+	oldEnd, _ := time.Parse(time.RFC3339, b.EndAt)
+	createdEvent := false
 	if b.CalendarEventID > 0 {
 		if err := callCalendarUpdateEvent(ctx, pid, b.CalendarEventID, calendarTitle(bt, b), start, end, calendarLocation(bt, b), calendarDescription(ctx, bt, b)); err != nil {
 			return nil, err
 		}
+	} else {
+		b.StartAt = start.UTC().Format(time.RFC3339)
+		b.EndAt = end.UTC().Format(time.RFC3339)
+		eventID, err := a.createCalendarEvent(ctx, pid, bt, b)
+		if err != nil {
+			return nil, err
+		}
+		b.CalendarEventID = eventID
+		createdEvent = true
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET status='rescheduled', start_at=?, end_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`,
 		start.UTC().Format(time.RFC3339), end.UTC().Format(time.RFC3339), id, pid); err != nil {
+		if createdEvent {
+			_ = callCalendarDeleteEvent(ctx, pid, b.CalendarEventID)
+		} else if b.CalendarEventID > 0 {
+			_ = callCalendarUpdateEvent(ctx, pid, b.CalendarEventID, calendarTitle(bt, b), oldStart, oldEnd, calendarLocation(bt, b), calendarDescription(ctx, bt, b))
+		}
 		return nil, err
 	}
 	b, _ = loadBookingByID(ctx, pid, id)
@@ -662,6 +887,9 @@ func (a *App) toolBookingsReschedule(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolBookingsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	bookingWriteMu.Lock()
+	defer bookingWriteMu.Unlock()
+
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -677,8 +905,27 @@ func (a *App) toolBookingsCancel(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if b == nil {
 		return nil, errors.New("booking not found")
 	}
+	if b.Status == "cancelled" {
+		return map[string]any{"booking": b, "idempotent_replay": true}, nil
+	}
+	if b.Status != "confirmed" && b.Status != "rescheduled" {
+		return nil, fmt.Errorf("cannot cancel a %s booking", b.Status)
+	}
 	if b.CalendarEventID > 0 {
-		_ = callCalendarDeleteEvent(ctx, pid, b.CalendarEventID)
+		if err := callCalendarDeleteEvent(ctx, pid, b.CalendarEventID); err != nil && !crossAppNotFound(err) {
+			return nil, fmt.Errorf("delete Calendar event: %w", err)
+		}
+		if _, err := ctx.AppDB().Exec(`UPDATE bookings SET calendar_event_id=NULL WHERE id=? AND project_id=?`, id, pid); err != nil {
+			return nil, err
+		}
+	}
+	if b.CallsRoomID > 0 {
+		if err := endCallsRoom(ctx, pid, b.CallsRoomID); err != nil && !crossAppNotFound(err) {
+			return nil, fmt.Errorf("end Calls room: %w", err)
+		}
+		if _, err := ctx.AppDB().Exec(`UPDATE bookings SET calls_room_id=NULL, calls_guest_join_url='', calls_host_join_url='' WHERE id=? AND project_id=?`, id, pid); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, pid); err != nil {
 		return nil, err
@@ -749,6 +996,9 @@ func (a *App) toolBookingsPrepareAgentContext(ctx *sdk.AppCtx, args map[string]a
 }
 
 func (a *App) setBookingStatus(ctx *sdk.AppCtx, args map[string]any, status, topic string) (any, error) {
+	bookingWriteMu.Lock()
+	defer bookingWriteMu.Unlock()
+
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -757,15 +1007,25 @@ func (a *App) setBookingStatus(ctx *sdk.AppCtx, args map[string]any, status, top
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, status, id, pid); err != nil {
-		return nil, err
-	}
 	b, err := loadBookingByID(ctx, pid, id)
 	if err != nil {
 		return nil, err
 	}
 	if b == nil {
 		return nil, errors.New("booking not found")
+	}
+	if b.Status == status {
+		return map[string]any{"booking": b, "idempotent_replay": true}, nil
+	}
+	if b.Status != "confirmed" && b.Status != "rescheduled" {
+		return nil, fmt.Errorf("cannot mark a %s booking as %s", b.Status, status)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET status=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, status, id, pid); err != nil {
+		return nil, err
+	}
+	b, err = loadBookingByID(ctx, pid, id)
+	if err != nil {
+		return nil, err
 	}
 	a.recordEvent(ctx, pid, id, status, nil)
 	a.emitBooking(ctx, pid, topic, b)
@@ -777,54 +1037,216 @@ func (a *App) setBookingStatus(ctx *sdk.AppCtx, args map[string]any, status, top
 func findSlotsForType(ctx *sdk.AppCtx, pid string, bt *BookingType, args map[string]any) ([]map[string]string, error) {
 	rules := parseRules(bt.AvailabilityRules)
 	now := time.Now().UTC()
-	minNotice := rules.MinimumNoticeMins
-	if minNotice <= 0 {
-		minNotice = 120
-	}
-	horizon := rules.BookingHorizonDays
-	if horizon <= 0 {
-		horizon = 30
-	}
-	start := now.Add(time.Duration(minNotice) * time.Minute)
-	end := now.AddDate(0, 0, horizon)
+	startFloor := now.Add(time.Duration(rules.MinimumNoticeMins) * time.Minute)
+	endCeiling := now.AddDate(0, 0, rules.BookingHorizonDays)
+	start := startFloor
+	end := endCeiling
 	if s := strArg(args, "window_start"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
 			return nil, fmt.Errorf("window_start: %w", err)
 		}
-		start = t
+		if t.After(start) {
+			start = t
+		}
 	}
 	if s := strArg(args, "window_end"); s != "" {
 		t, err := time.Parse(time.RFC3339, s)
 		if err != nil {
 			return nil, fmt.Errorf("window_end: %w", err)
 		}
-		end = t
+		if t.Before(end) {
+			end = t
+		}
 	}
-	input := map[string]any{
-		"duration_minutes":      bt.DurationMinutes,
-		"window_start":          start.UTC().Format(time.RFC3339),
-		"window_end":            end.UTC().Format(time.RFC3339),
-		"limit":                 intArg(args, "limit", 20),
-		"buffer_before_minutes": rules.BufferBeforeMinutes,
-		"buffer_after_minutes":  rules.BufferAfterMinutes,
+	if !end.After(start) {
+		return []map[string]string{}, nil
 	}
-	if len(bt.CalendarIDs) > 0 {
-		input["calendar_ids"] = bt.CalendarIDs
+	limit := intArg(args, "limit", 20)
+	if limit <= 0 {
+		limit = 20
 	}
-	if len(rules.WorkingHours) > 0 {
-		input["working_hours"] = rules.WorkingHours
+	if limit > 100 {
+		limit = 100
 	}
-	var got struct {
-		Slots []map[string]string `json:"slots"`
+	loc, err := time.LoadLocation(bt.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("invalid booking timezone %q: %w", bt.Timezone, err)
 	}
+	duration := time.Duration(bt.DurationMinutes) * time.Minute
+	calendarIDs, err := availabilityCalendarIDs(ctx, pid, bt)
+	if err != nil {
+		return nil, err
+	}
+	busy, err := calendarBusyRanges(ctx, pid, calendarIDs, start, end, rules, 0)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]string, 0, limit)
+	for cursor := snapToQuarterHour(start); !cursor.Add(duration).After(end); cursor = cursor.Add(15 * time.Minute) {
+		candidateEnd := cursor.Add(duration)
+		if !withinWorkingHours(cursor, candidateEnd, loc, rules.WorkingHours) || overlapsRanges(cursor, candidateEnd, busy) {
+			continue
+		}
+		out = append(out, map[string]string{
+			"start": cursor.UTC().Format(time.RFC3339),
+			"end":   candidateEnd.UTC().Format(time.RFC3339),
+		})
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+type busyRange struct{ start, end time.Time }
+
+func validateRequestedSlot(ctx *sdk.AppCtx, pid string, bt *BookingType, start time.Time, excludeEventID int64) error {
+	rules := parseRules(bt.AvailabilityRules)
+	now := time.Now().UTC()
+	start = start.UTC()
+	end := start.Add(time.Duration(bt.DurationMinutes) * time.Minute)
+	if start.Before(now.Add(time.Duration(rules.MinimumNoticeMins) * time.Minute)) {
+		return errors.New("requested slot does not satisfy minimum notice")
+	}
+	if end.After(now.AddDate(0, 0, rules.BookingHorizonDays)) {
+		return errors.New("requested slot is beyond the booking horizon")
+	}
+	if start.Second() != 0 || start.Nanosecond() != 0 || start.Minute()%15 != 0 {
+		return errors.New("requested slot must start on a 15-minute boundary")
+	}
+	loc, err := time.LoadLocation(bt.Timezone)
+	if err != nil {
+		return fmt.Errorf("invalid booking timezone %q: %w", bt.Timezone, err)
+	}
+	if !withinWorkingHours(start, end, loc, rules.WorkingHours) {
+		return errors.New("requested slot is outside working hours")
+	}
+	calendarIDs, err := availabilityCalendarIDs(ctx, pid, bt)
+	if err != nil {
+		return err
+	}
+	busy, err := calendarBusyRanges(ctx, pid, calendarIDs, start, end, rules, excludeEventID)
+	if err != nil {
+		return err
+	}
+	if overlapsRanges(start, end, busy) {
+		return errors.New("requested slot is no longer available")
+	}
+	return nil
+}
+
+func calendarBusyRanges(ctx *sdk.AppCtx, pid string, calendarIDs []int64, start, end time.Time, rules availabilityRules, excludeEventID int64) ([]busyRange, error) {
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("calendar app call requires PlatformAPI")
 	}
-	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calendar", "events_find_slot", input, &got); err != nil {
-		return nil, fmt.Errorf("calendar.events_find_slot: %w", err)
+	queryStart := start.Add(-time.Duration(rules.BufferAfterMinutes) * time.Minute)
+	queryEnd := end.Add(time.Duration(rules.BufferBeforeMinutes) * time.Minute)
+	input := map[string]any{"from": queryStart.UTC().Format(time.RFC3339), "to": queryEnd.UTC().Format(time.RFC3339)}
+	if len(calendarIDs) > 0 {
+		input["calendar_ids"] = calendarIDs
 	}
-	return got.Slots, nil
+	var got struct {
+		Events []struct {
+			ID      int64  `json:"id"`
+			EventID int64  `json:"event_id"`
+			StartAt string `json:"start_at"`
+			EndAt   string `json:"end_at"`
+		} `json:"events"`
+	}
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calendar", "events_list", input, &got); err != nil {
+		return nil, fmt.Errorf("calendar.events_list: %w", err)
+	}
+	busy := make([]busyRange, 0, len(got.Events))
+	for _, event := range got.Events {
+		id := event.EventID
+		if id == 0 {
+			id = event.ID
+		}
+		if excludeEventID > 0 && id == excludeEventID {
+			continue
+		}
+		eventStart, err1 := time.Parse(time.RFC3339, event.StartAt)
+		eventEnd, err2 := time.Parse(time.RFC3339, event.EndAt)
+		if err1 != nil || err2 != nil || !eventEnd.After(eventStart) {
+			continue
+		}
+		busy = append(busy, busyRange{
+			start: eventStart.Add(-time.Duration(rules.BufferBeforeMinutes) * time.Minute),
+			end:   eventEnd.Add(time.Duration(rules.BufferAfterMinutes) * time.Minute),
+		})
+	}
+	return busy, nil
+}
+
+func snapToQuarterHour(t time.Time) time.Time {
+	rounded := t.UTC().Truncate(15 * time.Minute)
+	if rounded.Before(t.UTC()) {
+		rounded = rounded.Add(15 * time.Minute)
+	}
+	return rounded
+}
+
+func withinWorkingHours(start, end time.Time, loc *time.Location, hours map[string]map[string]string) bool {
+	localStart := start.In(loc)
+	localEnd := end.In(loc)
+	if localStart.Year() != localEnd.Year() || localStart.YearDay() != localEnd.YearDay() {
+		return false
+	}
+	day := []string{"sun", "mon", "tue", "wed", "thu", "fri", "sat"}[int(localStart.Weekday())]
+	rangeForDay, ok := hours[day]
+	if !ok {
+		return false
+	}
+	startMinute, okStart := hhmmMinutes(rangeForDay["start"])
+	endMinute, okEnd := hhmmMinutes(rangeForDay["end"])
+	if !okStart || !okEnd || startMinute >= endMinute {
+		return false
+	}
+	candidateStart := localStart.Hour()*60 + localStart.Minute()
+	candidateEnd := localEnd.Hour()*60 + localEnd.Minute()
+	return candidateStart >= startMinute && candidateEnd <= endMinute
+}
+
+func overlapsRanges(start, end time.Time, ranges []busyRange) bool {
+	for _, item := range ranges {
+		if start.Before(item.end) && item.start.Before(end) {
+			return true
+		}
+	}
+	return false
+}
+
+func availabilityCalendarIDs(ctx *sdk.AppCtx, pid string, bt *BookingType) ([]int64, error) {
+	if len(bt.CalendarIDs) == 0 {
+		return nil, nil // An omitted Calendar filter means every enabled calendar.
+	}
+	ids := append([]int64(nil), bt.CalendarIDs...)
+	destinationID := bt.DestinationCalendarID
+	if destinationID == 0 {
+		var err error
+		destinationID, err = getOrCreateBookingsCalendar(ctx, pid)
+		if err != nil {
+			return nil, err
+		}
+		bt.DestinationCalendarID = destinationID
+		if _, err := ctx.AppDB().Exec(`UPDATE booking_types SET destination_calendar_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, destinationID, bt.ID, pid); err != nil {
+			return nil, err
+		}
+	}
+	if destinationID > 0 {
+		found := false
+		for _, id := range ids {
+			if id == destinationID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			ids = append(ids, destinationID)
+		}
+	}
+	return ids, nil
 }
 
 func (a *App) attachOptionalCRM(ctx *sdk.AppCtx, pid string, bt *BookingType, b *Booking) error {
@@ -874,7 +1296,13 @@ func (a *App) attachOptionalCalls(ctx *sdk.AppCtx, pid string, bt *BookingType, 
 		} `json:"room"`
 		HostJoinURL string `json:"host_join_url"`
 	}
-	meta := map[string]any{"booking_id": b.ID, "booking_type_id": bt.ID, "target_kind": bt.TargetKind}
+	meta := map[string]any{
+		"booking_id":         b.ID,
+		"booking_type_id":    bt.ID,
+		"target_kind":        bt.TargetKind,
+		"scheduled_start_at": b.StartAt,
+		"scheduled_end_at":   b.EndAt,
+	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_create_room", map[string]any{
 		"title":    calendarTitle(bt, b),
 		"metadata": meta,
@@ -887,29 +1315,26 @@ func (a *App) attachOptionalCalls(ctx *sdk.AppCtx, pid string, bt *BookingType, 
 	var guestOut struct {
 		JoinURL string `json:"join_url"`
 	}
-	_ = ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_create_join_token", map[string]any{
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_create_join_token", map[string]any{
 		"room_id":          roomOut.Room.ID,
 		"participant_kind": "human",
 		"role":             "guest",
 		"display_name":     b.InviteeName,
 		"max_uses":         1,
 		"capabilities":     map[string]any{"audio": true, "video": true, "chat": true},
-	}, &guestOut)
-	if bt.TargetKind == "ai_agent" && bt.AgentInstanceID != "" {
-		var agentOut map[string]any
-		_ = ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_create_join_token", map[string]any{
-			"room_id":          roomOut.Room.ID,
-			"participant_kind": "agent",
-			"role":             "host",
-			"display_name":     "AI agent",
-			"max_uses":         1,
-			"capabilities":     map[string]any{"audio": true, "video": false, "chat": true, "transcript_read": true},
-		}, &agentOut)
+	}, &guestOut); err != nil {
+		_ = endCallsRoom(ctx, pid, roomOut.Room.ID)
+		return fmt.Errorf("calls.calls_create_join_token: %w", err)
+	}
+	if guestOut.JoinURL == "" {
+		_ = endCallsRoom(ctx, pid, roomOut.Room.ID)
+		return errors.New("calls.calls_create_join_token returned no guest join URL")
 	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE bookings SET calls_room_id=?, calls_guest_join_url=?, calls_host_join_url=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		roomOut.Room.ID, guestOut.JoinURL, roomOut.HostJoinURL, b.ID,
 	); err != nil {
+		_ = endCallsRoom(ctx, pid, roomOut.Room.ID)
 		return err
 	}
 	b.CallsRoomID = roomOut.Room.ID
@@ -918,37 +1343,60 @@ func (a *App) attachOptionalCalls(ctx *sdk.AppCtx, pid string, bt *BookingType, 
 	return nil
 }
 
-func (a *App) createCalendarEvent(ctx *sdk.AppCtx, pid string, bt *BookingType, b *Booking) error {
+func (a *App) createCalendarEvent(ctx *sdk.AppCtx, pid string, bt *BookingType, b *Booking) (int64, error) {
 	if ctx.PlatformAPI() == nil {
-		return errors.New("calendar app call requires PlatformAPI")
+		return 0, errors.New("calendar app call requires PlatformAPI")
 	}
-	calID := int64(0)
-	if len(bt.CalendarIDs) > 0 {
+	calID := bt.DestinationCalendarID
+	if calID == 0 && len(bt.CalendarIDs) > 0 {
 		calID = bt.CalendarIDs[0]
-	} else {
+	}
+	if calID == 0 {
 		id, err := getOrCreateBookingsCalendar(ctx, pid)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		calID = id
+		bt.DestinationCalendarID = id
+		if _, err := ctx.AppDB().Exec(`UPDATE booking_types SET destination_calendar_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, bt.ID, pid); err != nil {
+			return 0, err
+		}
 	}
 	start, _ := time.Parse(time.RFC3339, b.StartAt)
 	end, _ := time.Parse(time.RFC3339, b.EndAt)
 	eventID, err := callCalendarCreateEvent(ctx, pid, calID, calendarTitle(bt, b), start, end, calendarLocation(bt, b), calendarDescription(ctx, bt, b))
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := ctx.AppDB().Exec(`UPDATE bookings SET calendar_event_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, eventID, b.ID); err != nil {
-		return err
+	return eventID, nil
+}
+
+func (a *App) cleanupFailedBooking(ctx *sdk.AppCtx, pid string, b *Booking, eventID int64) {
+	if eventID > 0 {
+		_ = callCalendarDeleteEvent(ctx, pid, eventID)
 	}
-	return nil
+	if b != nil && b.CallsRoomID > 0 {
+		_ = endCallsRoom(ctx, pid, b.CallsRoomID)
+	}
+	if b != nil {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM bookings WHERE id=? AND project_id=?`, b.ID, pid)
+	}
+}
+
+func endCallsRoom(ctx *sdk.AppCtx, pid string, roomID int64) error {
+	if roomID == 0 || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	var out map[string]any
+	return ctx.WithProject(pid).PlatformAPI().CallAppResult("calls", "calls_end_room", map[string]any{"id": roomID}, &out)
 }
 
 func getOrCreateBookingsCalendar(ctx *sdk.AppCtx, pid string) (int64, error) {
 	var list struct {
 		Calendars []struct {
-			ID   int64  `json:"id"`
-			Name string `json:"name"`
+			ID      int64  `json:"id"`
+			Name    string `json:"name"`
+			Enabled bool   `json:"enabled"`
 		} `json:"calendars"`
 	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calendar", "calendars_list", map[string]any{}, &list); err != nil {
@@ -956,6 +1404,14 @@ func getOrCreateBookingsCalendar(ctx *sdk.AppCtx, pid string) (int64, error) {
 	}
 	for _, c := range list.Calendars {
 		if c.Name == "Bookings" {
+			if !c.Enabled {
+				var updated map[string]any
+				if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("calendar", "calendars_update", map[string]any{
+					"id": c.ID, "enabled": true,
+				}, &updated); err != nil {
+					return 0, fmt.Errorf("calendar.calendars_update: %w", err)
+				}
+			}
 			return c.ID, nil
 		}
 	}
@@ -1046,7 +1502,7 @@ func calendarDescription(ctx *sdk.AppCtx, bt *BookingType, b *Booking) string {
 	if b.AssignedAgentInstanceID != "" {
 		lines = append(lines, "Agent: "+b.AssignedAgentInstanceID)
 	}
-	lines = append(lines, "Manage: "+publicManageURL(ctx, b.CancellationToken))
+	lines = append(lines, "Manage: "+publicManageURL(ctx, b.ProjectID, b.CancellationToken))
 	return strings.Join(lines, "\n")
 }
 
@@ -1156,6 +1612,10 @@ func (a *App) handleBookingItem(w http.ResponseWriter, r *http.Request) {
 		writeToolOut(w, out, err)
 		return
 	}
+	if r.Method != http.MethodPost && r.Method != http.MethodPatch {
+		httpErr(w, http.StatusMethodNotAllowed, "POST or PATCH required")
+		return
+	}
 	switch parts[1] {
 	case "cancel":
 		out, err := a.toolBookingsCancel(globalCtx, args)
@@ -1175,6 +1635,9 @@ func (a *App) handleBookingItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/public/"), "/")
 	parts := strings.Split(rest, "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -1196,8 +1659,16 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	args["slug"] = slug
 	if len(parts) == 1 {
 		if r.Method == http.MethodGet && wantsJSON(r) {
-			out, err := a.toolBookingTypesGet(globalCtx, args)
-			writeToolOut(w, out, err)
+			bt, err := loadBookingTypeBySlug(globalCtx, pid, slug)
+			if err != nil || bt == nil || !bt.Active {
+				httpErr(w, http.StatusNotFound, "booking type not found")
+				return
+			}
+			writeToolOut(w, map[string]any{"booking_type": toPublicBookingType(bt)}, nil)
+			return
+		}
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET required")
 			return
 		}
 		a.writePublicPage(w, pid, slug)
@@ -1205,22 +1676,49 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	switch parts[1] {
 	case "slots":
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET required")
+			return
+		}
+		if !publicRateLimit.allow(clientAddress(r)+":slots", 60, time.Minute) {
+			httpErr(w, http.StatusTooManyRequests, "too many slot requests")
+			return
+		}
 		out, err := a.toolBookingsFindSlots(globalCtx, args)
-		writeToolOut(w, out, err)
+		if err != nil {
+			publicError(w, err)
+			return
+		}
+		result := out.(map[string]any)
+		bt := result["booking_type"].(*BookingType)
+		writeToolOut(w, map[string]any{"slots": result["slots"], "booking_type": toPublicBookingType(bt)}, nil)
 	case "book":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
+		if !publicRateLimit.allow(clientAddress(r)+":book", 10, time.Hour) {
+			httpErr(w, http.StatusTooManyRequests, "too many booking attempts")
+			return
+		}
 		args["source"] = "public"
 		out, err := a.toolBookingsCreate(globalCtx, args)
-		writeToolOut(w, out, err)
+		if err != nil {
+			publicError(w, err)
+			return
+		}
+		result := out.(map[string]any)
+		booking := result["booking"].(*Booking)
+		writeToolOut(w, map[string]any{"booking": toPublicBooking(booking), "booking_type": toPublicBookingType(result["booking_type"].(*BookingType))}, nil)
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 	}
 }
 
 func (a *App) handleTokenPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/b/"), "/")
 	if rest == "" {
 		httpErr(w, http.StatusNotFound, "token required")
@@ -1233,7 +1731,15 @@ func (a *App) handleTokenPage(w http.ResponseWriter, r *http.Request) {
 			a.handleTokenCancel(w, r, token)
 			return
 		}
+		if parts[1] == "reschedule" {
+			a.handleTokenReschedule(w, r, token)
+			return
+		}
 		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET required")
 		return
 	}
 	a.writeManagePage(w, token)
@@ -1247,7 +1753,62 @@ func (a *App) handleTokenCancel(w http.ResponseWriter, r *http.Request, token st
 	}
 	args := map[string]any{"_project_id": pid, "id": id}
 	out, err := a.toolBookingsCancel(globalCtx, args)
-	writeToolOut(w, out, err)
+	if err != nil {
+		publicError(w, err)
+		return
+	}
+	booking := out.(map[string]any)["booking"].(*Booking)
+	if !wantsJSON(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Booking cancelled</title></head><body style="font-family:system-ui;margin:32px;max-width:680px"><h1>Booking cancelled</h1><p>Your appointment has been cancelled.</p></body></html>`))
+		return
+	}
+	writeToolOut(w, map[string]any{"booking": toPublicBooking(booking)}, nil)
+}
+
+func (a *App) handleTokenReschedule(w http.ResponseWriter, r *http.Request, token string) {
+	pid, id, err := lookupBookingByToken(globalCtx, token, "reschedule_token")
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "booking not found")
+		return
+	}
+	b, err := loadBookingByID(globalCtx, pid, id)
+	if err != nil || b == nil {
+		httpErr(w, http.StatusNotFound, "booking not found")
+		return
+	}
+	bt, err := loadBookingTypeByID(globalCtx, pid, b.BookingTypeID)
+	if err != nil || bt == nil {
+		httpErr(w, http.StatusNotFound, "booking type not found")
+		return
+	}
+	if r.Method == http.MethodGet {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(reschedulePageHTML(pid, token, bt)))
+		return
+	}
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST required")
+		return
+	}
+	if !publicRateLimit.allow(clientAddress(r)+":reschedule", 10, time.Hour) {
+		httpErr(w, http.StatusTooManyRequests, "too many reschedule attempts")
+		return
+	}
+	args, err := argsFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	args["_project_id"] = pid
+	args["id"] = id
+	out, err := a.toolBookingsReschedule(globalCtx, args)
+	if err != nil {
+		publicError(w, err)
+		return
+	}
+	booking := out.(map[string]any)["booking"].(*Booking)
+	writeToolOut(w, map[string]any{"booking": toPublicBooking(booking)}, nil)
 }
 
 func (a *App) writePublicPage(w http.ResponseWriter, pid, slug string) {
@@ -1271,39 +1832,86 @@ func (a *App) writeManagePage(w http.ResponseWriter, token string) {
 		httpErr(w, http.StatusNotFound, "booking not found")
 		return
 	}
+	bt, err := loadBookingTypeByID(globalCtx, pid, b.BookingTypeID)
+	if err != nil || bt == nil {
+		httpErr(w, http.StatusNotFound, "booking type not found")
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(managePageHTML(b)))
+	_, _ = w.Write([]byte(managePageHTML(b, bt)))
 }
 
 func publicPageHTML(pid, slug string, bt *BookingType) string {
 	title := html.EscapeString(bt.Title)
 	desc := html.EscapeString(bt.Description)
+	location := html.EscapeString(publicLocationLabel(bt))
 	return `<!doctype html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>` + title + `</title>
 <style>
-body{font-family:Inter,ui-sans-serif,system-ui;margin:0;background:#f8fafc;color:#111827}.wrap{max-width:920px;margin:0 auto;padding:32px 18px}.grid{display:grid;grid-template-columns:1fr 1.2fr;gap:24px}@media(max-width:760px){.grid{grid-template-columns:1fr}}.panel{background:white;border:1px solid #e5e7eb;border-radius:8px;padding:18px}.muted{color:#6b7280}.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}.slot{border:1px solid #d1d5db;background:#fff;border-radius:6px;padding:10px;text-align:left;cursor:pointer}.slot.sel{border-color:#2563eb;background:#eff6ff}input,textarea{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:9px;margin-top:5px}label{display:block;font-size:13px;margin:10px 0}button.primary{background:#111827;color:white;border:0;border-radius:6px;padding:10px 14px;cursor:pointer}button.primary:disabled{opacity:.45}.err{color:#b91c1c}.ok{color:#047857;word-break:break-word}
-</style></head><body><div class="wrap"><div class="grid"><section><h1>` + title + `</h1><p class="muted">` + desc + `</p><p class="muted">` + strconv.Itoa(bt.DurationMinutes) + ` minutes</p></section><section class="panel"><h2>Select a time</h2><div id="status" class="muted">Loading slots...</div><div id="slots" class="slots"></div><form id="form" style="display:none"><h2>Your details</h2><label>Name<input name="invitee_name" required></label><label>Email<input name="invitee_email" type="email" required></label><label>Phone<input name="invitee_phone"></label><label>Notes<textarea name="notes" rows="3"></textarea></label><button class="primary" id="book" type="submit">Book meeting</button></form><div id="done"></div></section></div></div>
+body{font-family:Inter,ui-sans-serif,system-ui;margin:0;background:#f8fafc;color:#111827}.wrap{max-width:960px;margin:0 auto;padding:32px 18px}.grid{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr);gap:24px}@media(max-width:760px){.grid{grid-template-columns:1fr}.wrap{padding-top:18px}}.panel{background:white;border:1px solid #e5e7eb;border-radius:10px;padding:20px}.muted{color:#6b7280}.meta{display:grid;gap:5px;margin:18px 0}.day{margin-top:18px}.day h3{font-size:14px;margin:0 0 8px}.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:8px}.slot{border:1px solid #d1d5db;background:#fff;border-radius:6px;padding:10px;text-align:left;cursor:pointer}.slot:hover,.slot:focus-visible{border-color:#2563eb}.slot.sel{border-color:#2563eb;background:#eff6ff}input,textarea{width:100%;box-sizing:border-box;border:1px solid #d1d5db;border-radius:6px;padding:9px;margin-top:5px}label{display:block;font-size:13px;margin:10px 0}button.primary{background:#111827;color:white;border:0;border-radius:6px;padding:10px 14px;cursor:pointer}button.primary:disabled{opacity:.45}.err{color:#b91c1c}.ok{color:#047857;word-break:break-word}
+</style></head><body><main class="wrap"><div class="grid"><section><h1>` + title + `</h1><p class="muted">` + desc + `</p><div class="meta muted"><span>` + strconv.Itoa(bt.DurationMinutes) + ` minutes</span><span>` + location + `</span><span id="timezone"></span></div></section><section class="panel"><h2>Select a time</h2><div id="status" class="muted" aria-live="polite">Loading available times…</div><div id="slots"></div><form id="form" hidden><h2>Your details</h2><label>Name<input name="invitee_name" maxlength="200" autocomplete="name" required></label><label>Email<input name="invitee_email" type="email" maxlength="320" autocomplete="email" required></label><label>Phone<input name="invitee_phone" maxlength="80" autocomplete="tel"></label><label>Notes<textarea name="notes" maxlength="4000" rows="3"></textarea></label><button class="primary" id="book" type="submit">Book meeting</button></form><div id="done" aria-live="polite"></div></section></div></main>
 <script>
 const PID=` + jsString(pid) + `, SLUG=` + jsString(slug) + `;
-let selected=null;
+let selected=null,idempotencyKey=null;
 const statusEl=document.getElementById("status"), slotsEl=document.getElementById("slots"), form=document.getElementById("form"), done=document.getElementById("done");
-function fmt(s){return new Intl.DateTimeFormat(undefined,{weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}).format(new Date(s))}
-async function load(){try{const res=await fetch("/api/apps/bookings/public/"+encodeURIComponent(SLUG)+"/slots?project_id="+encodeURIComponent(PID)+"&limit=24"); if(!res.ok) throw new Error(await res.text()); const data=await res.json(); const slots=data.slots||[]; statusEl.textContent=slots.length? "Pick one available slot.":"No slots are currently available."; slotsEl.innerHTML=""; slots.forEach(slot=>{const b=document.createElement("button"); b.type="button"; b.className="slot"; b.textContent=fmt(slot.start); b.onclick=()=>{selected=slot; document.querySelectorAll(".slot").forEach(x=>x.classList.remove("sel")); b.classList.add("sel"); form.style.display="block"}; slotsEl.appendChild(b);});}catch(e){statusEl.innerHTML="<span class=err>"+e.message+"</span>"}}
-form.onsubmit=async e=>{e.preventDefault(); if(!selected) return; const fd=new FormData(form); const body={start_at:selected.start, invitee_name:fd.get("invitee_name"), invitee_email:fd.get("invitee_email"), invitee_phone:fd.get("invitee_phone"), intake_answers:{notes:fd.get("notes")}}; const btn=document.getElementById("book"); btn.disabled=true; try{const res=await fetch("/api/apps/bookings/public/"+encodeURIComponent(SLUG)+"/book?project_id="+encodeURIComponent(PID),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); if(!res.ok) throw new Error(await res.text()); const data=await res.json(); form.style.display="none"; slotsEl.style.display="none"; statusEl.textContent=""; done.innerHTML="<p class=ok>Booked for "+fmt(data.booking.start_at)+".</p>"+(data.booking.calls_guest_join_url? "<p><a href=\""+data.booking.calls_guest_join_url+"\">Join call</a></p>":"");}catch(e){done.innerHTML="<p class=err>"+e.message+"</p>"; btn.disabled=false;}};
+const browserZone=Intl.DateTimeFormat().resolvedOptions().timeZone;document.getElementById("timezone").textContent="Times shown in "+browserZone;
+const fmt=s=>new Intl.DateTimeFormat(undefined,{hour:"numeric",minute:"2-digit"}).format(new Date(s));
+const dayFmt=s=>new Intl.DateTimeFormat(undefined,{weekday:"long",month:"long",day:"numeric"}).format(new Date(s));
+function showError(target,message){target.replaceChildren();const p=document.createElement("p");p.className="err";p.textContent=message;target.appendChild(p)}
+async function load(){try{const res=await fetch("/api/apps/bookings/public/"+encodeURIComponent(SLUG)+"/slots?project_id="+encodeURIComponent(PID)+"&limit=40");if(!res.ok)throw new Error("Could not load available times.");const data=await res.json(),slots=data.slots||[];statusEl.textContent=slots.length?"Pick one available slot.":"No slots are currently available.";slotsEl.replaceChildren();const groups=new Map();for(const slot of slots){const key=dayFmt(slot.start);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(slot)}for(const [day,items] of groups){const section=document.createElement("section");section.className="day";const heading=document.createElement("h3");heading.textContent=day;section.appendChild(heading);const grid=document.createElement("div");grid.className="slots";for(const slot of items){const b=document.createElement("button");b.type="button";b.className="slot";b.textContent=fmt(slot.start);b.onclick=()=>{selected=slot;idempotencyKey=crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random();document.querySelectorAll(".slot").forEach(x=>x.classList.remove("sel"));b.classList.add("sel");form.hidden=false};grid.appendChild(b)}section.appendChild(grid);slotsEl.appendChild(section)}}catch(e){showError(statusEl,e.message)}}
+form.onsubmit=async e=>{e.preventDefault();if(!selected)return;const fd=new FormData(form),body={start_at:selected.start,invitee_name:fd.get("invitee_name"),invitee_email:fd.get("invitee_email"),invitee_phone:fd.get("invitee_phone"),intake_answers:{notes:fd.get("notes")},idempotency_key:idempotencyKey};const btn=document.getElementById("book");btn.disabled=true;done.replaceChildren();try{const res=await fetch("/api/apps/bookings/public/"+encodeURIComponent(SLUG)+"/book?project_id="+encodeURIComponent(PID),{method:"POST",headers:{"Content-Type":"application/json","Accept":"application/json"},body:JSON.stringify(body)});if(!res.ok)throw new Error((await res.text()).trim()||"Booking failed.");const data=await res.json();form.hidden=true;slotsEl.hidden=true;statusEl.textContent="";const confirmation=document.createElement("p");confirmation.className="ok";confirmation.textContent="Booked for "+dayFmt(data.booking.start_at)+" at "+fmt(data.booking.start_at)+".";done.appendChild(confirmation);if(data.booking.calls_guest_join_url){appendLink(done,data.booking.calls_guest_join_url,"Join call")}else if(data.booking_type.location_kind==="external_url"&&data.booking_type.location_value){appendLink(done,data.booking_type.location_value,"Open meeting link")}if(data.booking.public_manage_url){appendLink(done,data.booking.public_manage_url,"Manage or reschedule this booking")}}catch(e){showError(done,e.message);btn.disabled=false;}};
+function appendLink(target,href,label){const p=document.createElement("p"),a=document.createElement("a");a.href=href;a.rel="noreferrer";a.textContent=label;p.appendChild(a);target.appendChild(p)}
 load();
 </script></body></html>`
 }
 
-func managePageHTML(b *Booking) string {
-	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Booking</title><style>body{font-family:system-ui;margin:32px;max-width:680px}.muted{color:#6b7280}button{background:#991b1b;color:white;border:0;border-radius:6px;padding:10px 14px}</style></head><body><h1>Booking</h1><p>` + html.EscapeString(b.StartAt) + `</p><p class="muted">Status: ` + html.EscapeString(b.Status) + `</p>` + joinLinkHTML(b) + `<form method="post" action="/api/apps/bookings/b/` + url.PathEscape(b.CancellationToken) + `/cancel"><button type="submit">Cancel booking</button></form></body></html>`
+func publicLocationLabel(bt *BookingType) string {
+	switch bt.LocationKind {
+	case "calls":
+		return "Online call"
+	case "phone":
+		return "Phone call"
+	case "in_person":
+		if bt.LocationValue != "" {
+			return bt.LocationValue
+		}
+		return "In person"
+	case "external_url":
+		return "Online meeting"
+	default:
+		return "Meeting"
+	}
 }
 
-func joinLinkHTML(b *Booking) string {
+func managePageHTML(b *Booking, bt *BookingType) string {
+	reschedule := ""
+	cancel := ""
+	if b.Status == "confirmed" || b.Status == "rescheduled" {
+		projectQuery := "?project_id=" + url.QueryEscape(b.ProjectID)
+		reschedule = `<p><a href="/api/apps/bookings/b/` + url.PathEscape(b.RescheduleToken) + `/reschedule` + projectQuery + `">Choose a new time</a></p>`
+		cancel = `<form method="post" action="/api/apps/bookings/b/` + url.PathEscape(b.CancellationToken) + `/cancel` + projectQuery + `" onsubmit="return confirm('Cancel this booking?')"><button type="submit">Cancel booking</button></form>`
+	}
+	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Booking</title><style>body{font-family:system-ui;margin:32px;max-width:680px}.muted{color:#6b7280}button{background:#991b1b;color:white;border:0;border-radius:6px;padding:10px 14px}</style></head><body><h1>` + html.EscapeString(bt.Title) + `</h1><p id="time" data-time="` + html.EscapeString(b.StartAt) + `"></p><p class="muted">Status: ` + html.EscapeString(b.Status) + `</p>` + bookingLocationHTML(b, bt) + reschedule + cancel + `<script>const el=document.getElementById('time');el.textContent=new Intl.DateTimeFormat(undefined,{dateStyle:'full',timeStyle:'short'}).format(new Date(el.dataset.time));</script></body></html>`
+}
+
+func reschedulePageHTML(pid, token string, bt *BookingType) string {
+	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reschedule</title><style>body{font-family:system-ui;margin:32px;max-width:760px}.slots{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}.slot{padding:10px;border:1px solid #d1d5db;background:white;border-radius:6px;cursor:pointer}.error{color:#b91c1c}</style></head><body><h1>Choose a new time</h1><p id="zone"></p><div id="status">Loading available times…</div><div id="slots" class="slots"></div><script>const PID=` + jsString(pid) + `,SLUG=` + jsString(bt.Slug) + `,TOKEN=` + jsString(token) + `;const statusEl=document.getElementById('status'),slotsEl=document.getElementById('slots');document.getElementById('zone').textContent='Times shown in '+Intl.DateTimeFormat().resolvedOptions().timeZone;const fmt=s=>new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(new Date(s));async function load(){try{const res=await fetch('/api/apps/bookings/public/'+encodeURIComponent(SLUG)+'/slots?project_id='+encodeURIComponent(PID)+'&limit=40');if(!res.ok)throw new Error('Could not load available times');const data=await res.json();statusEl.textContent=data.slots.length?'Select a time:':'No times are currently available.';for(const slot of data.slots){const button=document.createElement('button');button.className='slot';button.textContent=fmt(slot.start);button.onclick=()=>choose(slot.start);slotsEl.appendChild(button)}}catch(error){statusEl.className='error';statusEl.textContent=error.message}}async function choose(start){if(!confirm('Move your appointment to '+fmt(start)+'?'))return;try{const res=await fetch('/api/apps/bookings/b/'+encodeURIComponent(TOKEN)+'/reschedule?project_id='+encodeURIComponent(PID),{method:'POST',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify({start_at:start})});if(!res.ok)throw new Error(await res.text());slotsEl.replaceChildren();statusEl.textContent='Your appointment was rescheduled to '+fmt(start)+'.'}catch(error){statusEl.className='error';statusEl.textContent=error.message}}load();</script></body></html>`
+}
+
+func bookingLocationHTML(b *Booking, bt *BookingType) string {
 	if b.CallsGuestJoinURL == "" {
+		switch bt.LocationKind {
+		case "external_url":
+			return `<p><a rel="noreferrer" href="` + html.EscapeString(bt.LocationValue) + `">Open meeting link</a></p>`
+		case "phone", "in_person":
+			if bt.LocationValue != "" {
+				return `<p>` + html.EscapeString(bt.LocationValue) + `</p>`
+			}
+		}
 		return ""
 	}
-	return `<p><a href="` + html.EscapeString(b.CallsGuestJoinURL) + `">Join call</a></p>`
+	return `<p><a rel="noreferrer" href="` + html.EscapeString(b.CallsGuestJoinURL) + `">Join call</a></p>`
 }
 
 // ─── Storage helpers ──────────────────────────────────────────────
@@ -1311,7 +1919,7 @@ func joinLinkHTML(b *Booking) string {
 func loadBookingTypeByID(ctx *sdk.AppCtx, pid string, id int64) (*BookingType, error) {
 	return scanBookingType(ctx.AppDB().QueryRow(
 		`SELECT id, project_id, slug, title, description, duration_minutes, timezone, location_kind, location_value,
-		        target_kind, calendar_ids, agent_instance_id, calls_enabled, crm_enabled, active,
+		        target_kind, calendar_ids, destination_calendar_id, agent_instance_id, calls_enabled, crm_enabled, active,
 		        availability_rules, intake_schema, confirmation_policy, created_at, updated_at
 		   FROM booking_types WHERE project_id=? AND id=?`, pid, id))
 }
@@ -1319,17 +1927,21 @@ func loadBookingTypeByID(ctx *sdk.AppCtx, pid string, id int64) (*BookingType, e
 func loadBookingTypeBySlug(ctx *sdk.AppCtx, pid, slug string) (*BookingType, error) {
 	return scanBookingType(ctx.AppDB().QueryRow(
 		`SELECT id, project_id, slug, title, description, duration_minutes, timezone, location_kind, location_value,
-		        target_kind, calendar_ids, agent_instance_id, calls_enabled, crm_enabled, active,
+		        target_kind, calendar_ids, destination_calendar_id, agent_instance_id, calls_enabled, crm_enabled, active,
 		        availability_rules, intake_schema, confirmation_policy, created_at, updated_at
 		   FROM booking_types WHERE project_id=? AND slug=?`, pid, slug))
 }
 
-func scanBookingType(row *sql.Row) (*BookingType, error) {
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanBookingType(row rowScanner) (*BookingType, error) {
 	var bt BookingType
 	var calendarIDs, availability, intake, policy string
 	var calls, crm, active int
 	err := row.Scan(&bt.ID, &bt.ProjectID, &bt.Slug, &bt.Title, &bt.Description, &bt.DurationMinutes, &bt.Timezone, &bt.LocationKind, &bt.LocationValue,
-		&bt.TargetKind, &calendarIDs, &bt.AgentInstanceID, &calls, &crm, &active, &availability, &intake, &policy, &bt.CreatedAt, &bt.UpdatedAt)
+		&bt.TargetKind, &calendarIDs, &bt.DestinationCalendarID, &bt.AgentInstanceID, &calls, &crm, &active, &availability, &intake, &policy, &bt.CreatedAt, &bt.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1347,21 +1959,36 @@ func scanBookingType(row *sql.Row) (*BookingType, error) {
 }
 
 func loadBookingByID(ctx *sdk.AppCtx, pid string, id int64) (*Booking, error) {
-	var b Booking
-	var answers string
-	var calID, roomID, crmID sql.NullInt64
-	err := ctx.AppDB().QueryRow(
+	return scanBooking(ctx, ctx.AppDB().QueryRow(
 		`SELECT id, project_id, booking_type_id, status, start_at, end_at, timezone,
 		        invitee_name, invitee_email, invitee_phone, intake_answers,
 		        calendar_event_id, calls_room_id, calls_guest_join_url, calls_host_join_url, crm_contact_id,
 		        assigned_target_kind, assigned_agent_instance_id, cancellation_token, reschedule_token,
-		        source, created_at, updated_at
+		        source, idempotency_key, created_at, updated_at
 		   FROM bookings WHERE project_id=? AND id=?`, pid, id,
-	).Scan(&b.ID, &b.ProjectID, &b.BookingTypeID, &b.Status, &b.StartAt, &b.EndAt, &b.Timezone,
+	))
+}
+
+func loadBookingByIdempotencyKey(ctx *sdk.AppCtx, pid, key string) (*Booking, error) {
+	return scanBooking(ctx, ctx.AppDB().QueryRow(
+		`SELECT id, project_id, booking_type_id, status, start_at, end_at, timezone,
+		        invitee_name, invitee_email, invitee_phone, intake_answers,
+		        calendar_event_id, calls_room_id, calls_guest_join_url, calls_host_join_url, crm_contact_id,
+		        assigned_target_kind, assigned_agent_instance_id, cancellation_token, reschedule_token,
+		        source, idempotency_key, created_at, updated_at
+		   FROM bookings WHERE project_id=? AND idempotency_key=?`, pid, key,
+	))
+}
+
+func scanBooking(ctx *sdk.AppCtx, row rowScanner) (*Booking, error) {
+	var b Booking
+	var answers string
+	var calID, roomID, crmID sql.NullInt64
+	err := row.Scan(&b.ID, &b.ProjectID, &b.BookingTypeID, &b.Status, &b.StartAt, &b.EndAt, &b.Timezone,
 		&b.InviteeName, &b.InviteeEmail, &b.InviteePhone, &answers,
 		&calID, &roomID, &b.CallsGuestJoinURL, &b.CallsHostJoinURL, &crmID,
 		&b.AssignedTargetKind, &b.AssignedAgentInstanceID, &b.CancellationToken, &b.RescheduleToken,
-		&b.Source, &b.CreatedAt, &b.UpdatedAt)
+		&b.Source, &b.IdempotencyKey, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -1378,7 +2005,7 @@ func loadBookingByID(ctx *sdk.AppCtx, pid string, id int64) (*Booking, error) {
 	if crmID.Valid {
 		b.CRMContactID = crmID.Int64
 	}
-	b.PublicManageURL = publicManageURL(ctx, b.CancellationToken)
+	b.PublicManageURL = publicManageURL(ctx, b.ProjectID, b.CancellationToken)
 	return &b, nil
 }
 
@@ -1492,7 +2119,9 @@ func argsFromRequest(r *http.Request) (map[string]any, error) {
 	if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPatch || r.Method == http.MethodPut) {
 		defer r.Body.Close()
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 			return nil, err
 		}
 		for k, v := range body {
@@ -1546,9 +2175,83 @@ func parseTimeArg(args map[string]any, key string) (time.Time, error) {
 }
 
 func parseRules(raw json.RawMessage) availabilityRules {
-	var r availabilityRules
-	_ = json.Unmarshal(raw, &r)
+	r := availabilityRules{
+		MinimumNoticeMins:  120,
+		BookingHorizonDays: 30,
+		WorkingHours: map[string]map[string]string{
+			"mon": {"start": "09:00", "end": "17:00"},
+			"tue": {"start": "09:00", "end": "17:00"},
+			"wed": {"start": "09:00", "end": "17:00"},
+			"thu": {"start": "09:00", "end": "17:00"},
+			"fri": {"start": "09:00", "end": "17:00"},
+		},
+	}
+	var decoded struct {
+		WorkingHours        map[string]map[string]string `json:"working_hours"`
+		BufferBeforeMinutes *int                         `json:"buffer_before_minutes"`
+		BufferAfterMinutes  *int                         `json:"buffer_after_minutes"`
+		MinimumNoticeMins   *int                         `json:"minimum_notice_minutes"`
+		BookingHorizonDays  *int                         `json:"booking_horizon_days"`
+	}
+	if json.Unmarshal(raw, &decoded) != nil {
+		return r
+	}
+	if decoded.WorkingHours != nil {
+		r.WorkingHours = decoded.WorkingHours
+	}
+	if decoded.BufferBeforeMinutes != nil {
+		r.BufferBeforeMinutes = *decoded.BufferBeforeMinutes
+	}
+	if decoded.BufferAfterMinutes != nil {
+		r.BufferAfterMinutes = *decoded.BufferAfterMinutes
+	}
+	if decoded.MinimumNoticeMins != nil {
+		r.MinimumNoticeMins = *decoded.MinimumNoticeMins
+	}
+	if decoded.BookingHorizonDays != nil {
+		r.BookingHorizonDays = *decoded.BookingHorizonDays
+	}
 	return r
+}
+
+func validateAvailabilityJSON(raw string) error {
+	if !json.Valid([]byte(raw)) {
+		return errors.New("availability_rules must be valid JSON")
+	}
+	rules := parseRules(json.RawMessage(raw))
+	if rules.MinimumNoticeMins < 0 || rules.MinimumNoticeMins > 365*24*60 {
+		return errors.New("minimum_notice_minutes must be between 0 and 525600")
+	}
+	if rules.BookingHorizonDays < 1 || rules.BookingHorizonDays > 365 {
+		return errors.New("booking_horizon_days must be between 1 and 365")
+	}
+	if rules.BufferBeforeMinutes < 0 || rules.BufferBeforeMinutes > 24*60 || rules.BufferAfterMinutes < 0 || rules.BufferAfterMinutes > 24*60 {
+		return errors.New("booking buffers must be between 0 and 1440 minutes")
+	}
+	for day, hours := range rules.WorkingHours {
+		if !containsString([]string{"mon", "tue", "wed", "thu", "fri", "sat", "sun"}, strings.ToLower(day)) {
+			return fmt.Errorf("invalid working-hours day %q", day)
+		}
+		start, okStart := hhmmMinutes(hours["start"])
+		end, okEnd := hhmmMinutes(hours["end"])
+		if !okStart || !okEnd || start >= end {
+			return fmt.Errorf("working hours for %s must contain valid start/end times", day)
+		}
+	}
+	return nil
+}
+
+func hhmmMinutes(value string) (int, bool) {
+	parts := strings.Split(value, ":")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	hour, errHour := strconv.Atoi(parts[0])
+	minute, errMinute := strconv.Atoi(parts[1])
+	if errHour != nil || errMinute != nil || hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	return hour*60 + minute, true
 }
 
 func defaultAvailabilityJSON() string {
@@ -1575,8 +2278,12 @@ func publicBookingURL(ctx *sdk.AppCtx, pid, slug string) string {
 	return u
 }
 
-func publicManageURL(ctx *sdk.AppCtx, token string) string {
-	return publicBase(ctx) + "/b/" + url.PathEscape(token)
+func publicManageURL(ctx *sdk.AppCtx, pid, token string) string {
+	u := publicBase(ctx) + "/b/" + url.PathEscape(token)
+	if pid != "" {
+		u += "?project_id=" + url.QueryEscape(pid)
+	}
+	return u
 }
 
 func randomToken() string {
@@ -1591,6 +2298,9 @@ func slugify(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = slugRe.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
+	if len(s) > 120 {
+		s = strings.TrimRight(s[:120], "-")
+	}
 	if s == "" {
 		return "booking"
 	}
@@ -1735,4 +2445,145 @@ func jsonStringArg(args map[string]any, key, def string) (string, error) {
 func jsString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func newRequestLimiter() *requestLimiter {
+	return &requestLimiter{buckets: map[string][]time.Time{}}
+}
+
+func (l *requestLimiter) allow(key string, max int, window time.Duration) bool {
+	now := time.Now()
+	cutoff := now.Add(-window)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	items := l.buckets[key]
+	kept := items[:0]
+	for _, item := range items {
+		if item.After(cutoff) {
+			kept = append(kept, item)
+		}
+	}
+	if len(kept) >= max {
+		l.buckets[key] = kept
+		return false
+	}
+	l.buckets[key] = append(kept, now)
+	return true
+}
+
+func clientAddress(r *http.Request) string {
+	if forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0]); forwarded != "" {
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil && host != "" {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func validateInvitee(args map[string]any) error {
+	name := strArg(args, "invitee_name")
+	email := strings.ToLower(strArg(args, "invitee_email"))
+	phone := strArg(args, "invitee_phone")
+	if strArg(args, "source") == "public" && name == "" {
+		return errors.New("invitee_name required")
+	}
+	if email == "" {
+		return errors.New("invitee_email required")
+	}
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || !strings.EqualFold(parsed.Address, email) {
+		return errors.New("invitee_email must be a valid email address")
+	}
+	if len(name) > 200 || len(email) > 320 || len(phone) > 80 {
+		return errors.New("invitee fields exceed their maximum length")
+	}
+	args["invitee_email"] = email
+	return nil
+}
+
+func validateLocation(kind, value string, callsEnabled bool) error {
+	if len(value) > 2048 {
+		return errors.New("location_value must be at most 2048 characters")
+	}
+	if kind == "calls" && !callsEnabled {
+		return errors.New("Calls locations require calls_enabled=true")
+	}
+	if kind != "calls" && callsEnabled {
+		return errors.New("calls_enabled can only be used with a Calls location")
+	}
+	if kind == "external_url" {
+		parsed, err := url.ParseRequestURI(value)
+		if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+			return errors.New("external_url locations require a valid http or https location_value")
+		}
+	}
+	return nil
+}
+
+func validateCalendarIDs(calendarIDs []int64, destinationID int64) error {
+	if destinationID < 0 {
+		return errors.New("destination_calendar_id cannot be negative")
+	}
+	for _, id := range calendarIDs {
+		if id <= 0 {
+			return errors.New("calendar_ids must contain only positive ids")
+		}
+	}
+	return nil
+}
+
+func toPublicBookingType(bt *BookingType) publicBookingType {
+	return publicBookingType{
+		Slug: bt.Slug, Title: bt.Title, Description: bt.Description,
+		DurationMinutes: bt.DurationMinutes, Timezone: bt.Timezone,
+		LocationKind: bt.LocationKind, LocationValue: bt.LocationValue,
+	}
+}
+
+func toPublicBooking(b *Booking) publicBooking {
+	return publicBooking{
+		ID: b.ID, Status: b.Status, StartAt: b.StartAt, EndAt: b.EndAt,
+		Timezone: b.Timezone, InviteeName: b.InviteeName, InviteeEmail: b.InviteeEmail,
+		IntakeAnswers: b.IntakeAnswers, GuestJoinURL: b.CallsGuestJoinURL,
+		PublicManageURL: b.PublicManageURL,
+	}
+}
+
+func publicError(w http.ResponseWriter, err error) {
+	message := err.Error()
+	code := http.StatusBadRequest
+	if strings.Contains(message, "no longer available") {
+		code = http.StatusConflict
+	}
+	allowed := []string{
+		"required", "valid email", "minimum notice", "booking horizon", "outside working hours",
+		"15-minute boundary", "no longer available", "unsupported target_kind", "active booking type not found",
+		"cannot cancel", "cannot reschedule", "maximum length", "must be at most",
+	}
+	for _, fragment := range allowed {
+		if strings.Contains(message, fragment) {
+			httpErr(w, code, message)
+			return
+		}
+	}
+	httpErr(w, http.StatusServiceUnavailable, "booking service is temporarily unavailable")
+}
+
+func crossAppNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") || strings.Contains(message, "no rows")
+}
+
+func containsString(values []string, value string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }

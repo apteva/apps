@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MicrophoneTestSession,
+  microphoneConstraints,
   SoftphoneSession,
   type MicrophoneAppliedSettings,
   type MicrophoneTestResult,
@@ -135,7 +136,10 @@ interface CarrierAudioDiagnostics {
   drop_events?: PersistedDropEvent[];
 }
 
+interface RingOffer {id:string;destination_id:string;name:string;kind:string;agent_id?:number;expires_at:string}
+
 interface Call {
+  ringOffers: RingOffer[];
   id: string;
   threadId: string;
   carrierSid: string;
@@ -162,6 +166,7 @@ interface Call {
   recordingStatus: string;
   direction: string;
   peerKind: string;
+  routingWaiting: boolean;
   terminationCause: string;
   terminationCode: string;
   terminationInitiator: string;
@@ -262,6 +267,8 @@ function normalizeCall(row: RawCall): Call {
     recordingCount: row.recording_count ?? row.RecordingCount ?? 0,
     recordingStatus: row.recording_status ?? row.RecordingStatus ?? "",
     direction: row.direction ?? row.Direction ?? "outbound",
+    routingWaiting: Boolean((row as RawCall & {routing_waiting?:boolean}).routing_waiting),
+    ringOffers: (row as RawCall & {ring_offers?:RingOffer[]}).ring_offers || [],
     peerKind: row.peer_kind ?? row.PeerKind ?? "realtime",
     terminationCause: row.termination_cause ?? row.TerminationCause ?? "",
     terminationCode: row.termination_code ?? row.TerminationCode ?? "",
@@ -304,7 +311,7 @@ function parseTime(iso: string): number {
 }
 
 function duration(call: Call, now: number): string {
-  const start = parseTime(call.placedAt);
+  const start = parseTime(call.answeredAt);
   if (!start) return "";
   const end = parseTime(call.endedAt) || now;
   const total = Math.max(0, Math.floor((end - start) / 1000));
@@ -570,6 +577,12 @@ function Dialer({ value, from, timeoutSec, fromNumbers, fromLoading, fromError, 
 
 // Audio level bar. RMS is compressed with a square root so ordinary speech
 // occupies most of the bar instead of hugging the low end.
+function LiveLevels({sink}:{sink:{current:((mic:number,speaker:number)=>void)|null}}) {
+ const [levels,setLevels]=useState({mic:0,speaker:0});
+ useEffect(()=>{sink.current=(mic,speaker)=>setLevels({mic,speaker});return()=>{sink.current=null};},[sink]);
+ return <><LevelMeter label="Mic" value={levels.mic}/><LevelMeter label="Speaker" value={levels.speaker}/></>;
+}
+
 function LevelMeter({ label, value }: { label: string; value: number }) {
   const percent = Math.min(100, Math.round(Math.sqrt(Math.max(0, value)) * 140));
   return (
@@ -591,6 +604,10 @@ function AudioProcessingSettings({
   disabled: boolean;
   onChange: (value: SoftphoneAudioOptions) => void;
 }) {
+  const [devices,setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [deviceError,setDeviceError] = useState("");
+  const refreshDevices = async () => {try {setDevices(await navigator.mediaDevices.enumerateDevices());setDeviceError("");} catch {setDeviceError("Device list unavailable. Check microphone permission.");}};
+  useEffect(()=>{void refreshDevices(); navigator.mediaDevices?.addEventListener?.("devicechange",refreshDevices); return ()=>navigator.mediaDevices?.removeEventListener?.("devicechange",refreshDevices);},[]);
   const options: { key: "echoCancellation" | "noiseSuppression" | "autoGainControl" | "highpassFilter"; label: string }[] = [
     { key: "echoCancellation", label: "Echo cancellation" },
     { key: "noiseSuppression", label: "Noise suppression" },
@@ -599,7 +616,15 @@ function AudioProcessingSettings({
   ];
   return (
     <div className="rounded border border-border/70 p-3">
-      <div className="text-xs font-medium">Browser audio processing</div>
+      <div className="text-xs font-medium">Audio devices and processing</div>
+      <div className="grid gap-2 mt-2 text-xs">
+        <label>Microphone <select disabled={disabled} value={value.inputDeviceId || ""} onChange={e=>onChange({...value,inputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audioinput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Microphone ${i+1}`}</option>)}</select></label>
+        {typeof AudioContext!=="undefined" && "setSinkId" in AudioContext.prototype ? <label>Speaker <select disabled={disabled} value={value.outputDeviceId || ""} onChange={e=>onChange({...value,outputDeviceId:e.target.value})} className="max-w-full border border-border bg-bg rounded p-2"><option value="">System default</option>{devices.filter(d=>d.kind==="audiooutput").map((d,i)=><option key={d.deviceId || i} value={d.deviceId}>{d.label || `Speaker ${i+1}`}</option>)}</select></label> : <span>Speaker output follows your system settings in this browser.</span>}
+        <label>Speaker volume <input type="range" min="0" max="1" step="0.05" disabled={disabled} value={value.outputVolume ?? 1} onChange={e=>onChange({...value,outputVolume:Number(e.target.value)})}/></label>
+        <button type="button" className="min-h-11 border border-border rounded" onClick={()=>void refreshDevices()}>Refresh audio devices</button>
+        <button type="button" disabled={disabled} className="min-h-11 border border-border rounded" onClick={()=>void (async()=>{const context=new AudioContext();try {if(value.outputDeviceId && "setSinkId" in context) await (context as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(value.outputDeviceId);await context.resume();const oscillator=context.createOscillator(),gain=context.createGain();gain.gain.value=0.05*(value.outputVolume??1);oscillator.frequency.value=440;oscillator.connect(gain).connect(context.destination);oscillator.start();oscillator.stop(context.currentTime+0.5);oscillator.onended=()=>void context.close();}catch{void context.close();setDeviceError("Speaker test failed. Check the selected output device.");}})()}>Test speaker</button>
+        {deviceError ? <span role="status">{deviceError}</span>:null}
+      </div>
       <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
         {options.map((option) => (
           <label key={option.key} className="flex items-center gap-2 text-xs text-text-muted">
@@ -614,7 +639,7 @@ function AudioProcessingSettings({
         ))}
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="text-text-dim">Output mode</span>
+        <span className="text-text-dim">Echo cancellation preset</span>
         <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: true })} className={`rounded border px-2 py-1 ${value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Speakers</button>
         <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: false })} className={`rounded border px-2 py-1 ${!value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Headset</button>
         <label className="ml-2 flex items-center gap-2 text-text-muted">
@@ -642,7 +667,7 @@ function appliedSetting(value: boolean | null): string {
 function microphoneLevelAssessment(result: MicrophoneTestResult): { label: string; className: string } {
   if (result.activeRmsDbfs === null) return { label: "No speech detected", className: "text-warn" };
   if (result.activeRmsDbfs < -35) return { label: "Very quiet — enable automatic gain or raise the input level", className: "text-error" };
-  if (result.postPeakDbfs !== null && result.postPeakDbfs > -2.8) return { label: "Limiter active — add more microphone headroom", className: "text-warn" };
+  if (result.limiterReductionDb > 0.5) return { label: "Limiter active — add more microphone headroom", className: "text-warn" };
   return { label: "Input level looks healthy", className: "text-success" };
 }
 
@@ -931,7 +956,7 @@ function useInboundRingtone(active: boolean) {
   return { ringtoneEnabled: enabled, enableRingtone: enable, disableRingtone: disable };
 }
 
-function CallsView({ projectId, installId }: NativePanelProps) {
+function CallsView({ projectId, installId, visible = true, showCalls }: NativePanelProps & {visible?:boolean; showCalls?:()=>void}) {
   const layout = usePanelWidth();
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState("");
@@ -956,11 +981,19 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
   const [softphoneDetail, setSoftphoneDetail] = useState("");
   const [muted, setMuted] = useState(false);
-  const [levels, setLevels] = useState<{ mic: number; speaker: number }>({ mic: 0, speaker: 0 });
+  const levelsSink=useRef<((mic:number,speaker:number)=>void)|null>(null);
+  const setLevels=({mic,speaker}:{mic:number;speaker:number})=>levelsSink.current?.(mic,speaker);
   const [audioOptions, setAudioOptions] = useState<SoftphoneAudioOptions>(loadAudioOptions);
   const [diagnostics, setDiagnostics] = useState<SoftphoneDiagnostics | null>(null);
   const [softphoneBusy, setSoftphoneBusy] = useState(false);
   const sessionRef = useRef<SoftphoneSession | null>(null);
+  const callsRequest = useRef<AbortController | null>(null);
+  const recordingsRequest = useRef<AbortController | null>(null);
+  const recordingsCall = useRef("");
+  const placementKey = useRef<{intent:string;key:string}|null>(null);
+  const lastSession = useRef<{call_id:string;media_url:string;session_token?:string}|null>(null);
+  const [keypadOpen, setKeypadOpen] = useState(false);
+  const [answerDestinations,setAnswerDestinations] = useState<Record<string,string>>({});
 
   const endSoftphone = useCallback(() => {
     sessionRef.current?.stop();
@@ -975,6 +1008,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     persistAudioOptions(audioOptions);
   }, [audioOptions]);
+  useEffect(()=>{if(!softphoneCallId)return;const warn=(event:BeforeUnloadEvent)=>{event.preventDefault();event.returnValue="";};window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);},[softphoneCallId]);
 
   // The audio session owns a microphone and an AudioContext; unmounting the
   // panel without releasing them would leave the mic indicator lit.
@@ -1046,19 +1080,23 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   }, [dialerOpen, loadOutboundNumbers]);
 
   const loadCalls = useCallback(async () => {
+    if (callsRequest.current) return;
+    const request = new AbortController(); callsRequest.current = request;
     setLoading(true);
     try {
-      const res = await fetch(withProject("/calls"), { credentials: "same-origin" });
+      const res = await fetch(withProject("/calls"), { credentials: "same-origin", signal:request.signal });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
       const list = ((data.calls ?? []) as RawCall[]).map(normalizeCall);
+      if (request.signal.aborted) return;
       setCalls(list);
       setSelectedId((current) => current && list.some((c) => c.id === current)
         ? current
         : list[0]?.id ?? "");
     } catch (e) {
-      setStatus((e as Error).message || "Load failed");
+      if (!request.signal.aborted) setStatus((e as Error).message || "Load failed");
     } finally {
+      if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
     }
   }, [withProject]);
@@ -1074,23 +1112,30 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   }, [withProject]);
 
   const loadRecordings = useCallback(async (callId: string) => {
+    if(recordingsRequest.current && recordingsCall.current===callId)return;
+    recordingsRequest.current?.abort(); recordingsCall.current=callId;
+    const request = new AbortController(); recordingsRequest.current = request;
     if (!callId) {
       setRecordings([]);
       return;
     }
     try {
       const path = `/recordings/?call_id=${encodeURIComponent(callId)}`;
-      const res = await fetch(withProject(path), { credentials: "same-origin" });
+      const res = await fetch(withProject(path), { credentials: "same-origin", signal:request.signal });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as { recordings?: Recording[] };
-      setRecordings(data.recordings ?? []);
+      if (!request.signal.aborted) setRecordings(data.recordings ?? []);
     } catch (e) {
+      if (request.signal.aborted) return;
       setRecordings([]);
       setStatus((e as Error).message || "Could not load recordings");
-    }
+    } finally {if(recordingsRequest.current===request)recordingsRequest.current=null;}
   }, [withProject]);
 
-  useEffect(() => { void Promise.all([loadCalls(), loadRecordingSettings()]); }, [loadCalls, loadRecordingSettings]);
+  useEffect(() => {
+    void Promise.all([loadCalls(), loadRecordingSettings()]);
+    return () => { callsRequest.current?.abort(); callsRequest.current = null; recordingsRequest.current?.abort(); };
+  }, [loadCalls, loadRecordingSettings]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -1106,7 +1151,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   );
 
   useEffect(() => {
-    const timer = window.setInterval(loadCalls, hasUrgentCall ? 2000 : 10000);
+    const timer = window.setInterval(loadCalls, 2000);
     return () => window.clearInterval(timer);
   }, [loadCalls, hasUrgentCall]);
 
@@ -1115,13 +1160,21 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     [calls, selectedId],
   );
 
+  const [detailCall,setDetailCall]=useState<Call|null>(null);
+  useEffect(()=>{
+    setDetailCall(null); if(!selected?.id)return;
+    const controller=new AbortController();
+    void fetch(withProject(`/calls?call_id=${encodeURIComponent(selected.id)}`),{credentials:"same-origin",signal:controller.signal}).then(r=>{if(!r.ok)throw new Error("Details unavailable");return r.json();}).then(data=>{if(!controller.signal.aborted && data.calls?.[0])setDetailCall(normalizeCall(data.calls[0]));}).catch(()=>{});
+    return()=>controller.abort();
+  },[selected?.id,withProject]);
   useEffect(() => { void loadRecordings(selected?.id ?? ""); }, [selected?.id, loadRecordings]);
 
   useEffect(() => {
     if (!selected?.id || selected.recordingMode !== "always") return;
+    if (TERMINAL_STATUSES.has(selected.status) && recordings.length > 0 && recordings.every(r => ["stored","absent","deleted"].includes(r.storage_status))) return;
     const timer = window.setInterval(() => void loadRecordings(selected.id), 5000);
     return () => window.clearInterval(timer);
-  }, [selected?.id, selected?.recordingMode, loadRecordings]);
+  }, [selected?.id, selected?.recordingMode, selected?.status, recordings, loadRecordings]);
 
   const activeCount = useMemo(
     () => calls.filter((call) => LIVE_STATUSES.has(call.status)).length,
@@ -1131,7 +1184,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   // Inbound softphone calls waiting for a person to pick up.
   const ringing = useMemo(
     () => calls.filter((call) =>
-      call.direction === "inbound" && call.peerKind === "human" && call.status === "pending"),
+      call.direction === "inbound" && call.peerKind === "human" && !call.routingWaiting && call.status === "pending"),
     [calls],
   );
   const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length > 0);
@@ -1162,7 +1215,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
     }
   }, [calls, softphoneCallId, endSoftphone]);
 
-  const hangup = async (call: Call) => {
+  const hangup = async (call: Pick<Call, "id" | "status">) => {
     // "pending" is included so an operator can decline a ringing inbound call.
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
     setEnding(call.id);
@@ -1172,6 +1225,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
         credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
+      if (softphoneCallId === call.id) endSoftphone();
       setStatus("call ended");
       await loadCalls();
     } catch (e) {
@@ -1190,6 +1244,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   const workerURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worker.js`;
 
   const startAudio = async (session: BrowserCallSession) => {
+    lastSession.current=session;
     sessionRef.current?.stop();
     const phone = new SoftphoneSession({
       onState: (state, detail) => {
@@ -1197,13 +1252,15 @@ function CallsView({ projectId, installId }: NativePanelProps) {
         setSoftphoneDetail(detail ?? "");
         if (state === "ended" || state === "error") {
           sessionRef.current = null;
-          setSoftphoneCallId("");
+          // Media errors do not end the carrier call. Keep its identity and
+          // controls so the operator can reconnect or hang up safely.
           setLevels({ mic: 0, speaker: 0 });
           void loadCalls();
         }
       },
       onLevels: (mic, speaker) => setLevels({ mic, speaker }),
       onDiagnostics: setDiagnostics,
+      onNotice:setStatus,
     });
     sessionRef.current = phone;
     setSoftphoneCallId(session.call_id);
@@ -1223,49 +1280,66 @@ function CallsView({ projectId, installId }: NativePanelProps) {
 
   const placeSoftphoneCall = async () => {
     const to = dialNumber.trim();
-    if (!to) return;
+    if (!to || softphoneCallId || softphoneBusy) return;
     setSoftphoneBusy(true);
     setStatus("");
+    let placed: BrowserCallSession | null = null;
     try {
+      // Permission/device failure must be discovered before a billable leg.
+      const preflight = await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(audioOptions)});
+      preflight.getTracks().forEach(track => track.stop());
+      const intent=JSON.stringify([to,fromNumber,dialTimeoutSec]);
+      if(placementKey.current?.intent!==intent) placementKey.current={intent,key:crypto.randomUUID()};
       const session = await postJSON<{ call_id: string; media_url: string }>(
-        withProject("/softphone/place"), { to, from: fromNumber, timeout_sec: dialTimeoutSec },
+        withProject("/softphone/place"), { to, from: fromNumber, timeout_sec: dialTimeoutSec, idempotency_key:placementKey.current.key },
       );
+      placed = session;
+      placementKey.current = null;
       await startAudio(session);
       setDialNumber("");
       setDialerOpen(false);
       setStatus(`calling ${to}`);
     } catch (e) {
-      setStatus((e as Error).message || "Call failed");
-      endSoftphone();
+      let detail = (e as Error).message || "Call failed";
+      if (placed) {
+        setSoftphoneCallId(placed.call_id);
+        try { await postJSON(withProject(`/calls/${encodeURIComponent(placed.call_id)}/hangup`),{}); endSoftphone(); }
+        catch { detail += " The carrier call may still be active. Retry Hang up."; }
+      }
+      setStatus(detail);
     } finally {
       setSoftphoneBusy(false);
     }
   };
 
   const answerSoftphoneCall = async (call: Call) => {
+    if (softphoneCallId || softphoneBusy) { setStatus("End the current call before answering another."); return; }
     setSoftphoneBusy(true);
     setStatus("");
     let session: BrowserCallSession | null = null;
     try {
       session = await postJSON<BrowserCallSession>(
-        withProject(`/softphone/answer/${encodeURIComponent(call.id)}`), {},
+        withProject(`/softphone/answer/${encodeURIComponent(call.id)}`), {destination_id:answerDestinations[call.id] || call.ringOffers.find(o=>o.kind==="browser")?.destination_id,rejoin:call.status!=="pending"},
       );
       await startAudio(session);
       setStatus(`connected to ${call.fromNumber || call.id}`);
     } catch (e) {
       console.error("Telephony softphone answer failed", e);
+      let released = !session;
       if (session?.session_token) {
         try {
           await postJSON(
             withProject(`/softphone/release/${encodeURIComponent(session.call_id)}`),
             { session_token: session.session_token },
           );
+          released=true;
         } catch {
           // A carrier event may have ended the call while browser setup failed.
         }
       }
       setStatus((e as Error).message || "Answer failed");
-      endSoftphone();
+      if(released)endSoftphone();
+      else if(session) setSoftphoneCallId(session.call_id);
       void loadCalls();
     } finally {
       setSoftphoneBusy(false);
@@ -1321,7 +1395,22 @@ function CallsView({ projectId, installId }: NativePanelProps) {
   };
 
   return (
-    <div ref={layout.ref} className="h-full min-h-0 flex flex-col bg-bg text-text">
+    <div ref={layout.ref} className={`${visible ? "h-full flex-1" : "shrink-0"} min-h-0 min-w-0 flex flex-col bg-bg text-text`}>
+      {softphoneCallId ? <div aria-label="Active call controls" className="shrink-0 sticky top-0 z-10 border-b border-border bg-bg p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="min-h-11 min-w-0 flex-1 text-left" onClick={() => {showCalls?.(); setSelectedId(softphoneCallId); setDialerOpen(false);}}>
+            <strong>{(() => {const call = calls.find(c=>c.id===softphoneCallId); return call ? (call.direction === "inbound" ? call.fromNumber : call.toNumber) : "Active call";})()}</strong>
+            <span className="block text-xs" role="status">{softphoneState === "live" ? "Audio connected" : softphoneDetail || "Connecting audio"}{muted ? " · Microphone muted" : ""}</span>
+          </button>
+          <button aria-pressed={muted} disabled={!sessionRef.current} className="min-h-11 px-3 border border-border rounded" onClick={() => {const value=!muted; sessionRef.current?.setMuted(value); setMuted(value);}}>{muted ? "Unmute" : "Mute"}</button>
+          {softphoneState !== "live" ? <button className="min-h-11 px-3 border border-border rounded" onClick={()=>{ if(sessionRef.current) void sessionRef.current.resumeAudio().catch(e=>setStatus(e.message)); else if(lastSession.current) void startAudio(lastSession.current).catch(e=>setStatus(e.message)); }}>Reconnect audio</button> : null}
+          <button className="min-h-11 px-3 border border-border rounded" aria-expanded={keypadOpen} onClick={()=>setKeypadOpen(v=>!v)}>Keypad</button>
+          <button disabled={ending===softphoneCallId} className="min-h-11 px-3 bg-error text-bg rounded" onClick={()=>void hangup({id:softphoneCallId,status:"answered"})}>Hang up</button>
+        </div>
+        {keypadOpen ? <div className="grid grid-cols-3 gap-1 mt-2" aria-label="In-call keypad">{"123456789*0#".split("").map(digit=><button key={digit} className="min-h-11 border border-border rounded" disabled={softphoneState!=="live"} onClick={()=>sessionRef.current?.sendDTMF(digit)}>{digit}</button>)}</div> : null}
+        {status ? <p role="status" className="text-xs mt-2">{status}</p> : null}
+      </div> : null}
+      <div className={`${visible ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
       <header className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
         <div className="flex-1" style={{ minWidth: "9rem" }}>
           <h1 className="text-sm font-semibold leading-5">Calls</h1>
@@ -1388,9 +1477,10 @@ function CallsView({ projectId, installId }: NativePanelProps) {
               <span className="text-sm tabular-nums font-semibold">{call.fromNumber || "unknown"}</span>
               <span className="text-xs text-text-muted min-w-0 truncate">→ {call.toNumber}</span>
               <span className="flex-1" />
+              {call.ringOffers.filter(o=>o.kind==="browser").length>1 ? <label className="text-xs">Answer for <select className="min-h-11 border border-border bg-bg rounded p-2" value={answerDestinations[call.id] || call.ringOffers.find(o=>o.kind==="browser")?.destination_id} onChange={e=>setAnswerDestinations(v=>({...v,[call.id]:e.target.value}))}>{call.ringOffers.filter(o=>o.kind==="browser").map(o=><option key={o.id} value={o.destination_id}>{o.name}</option>)}</select></label>:null}
               <button
                 type="button"
-                disabled={softphoneBusy}
+                disabled={softphoneBusy || Boolean(softphoneCallId)}
                 onClick={() => { setDialerOpen(false); void answerSoftphoneCall(call); }}
                 className="h-8 px-4 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
               >
@@ -1494,7 +1584,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
               <div className="border-t border-border p-4 space-y-4">
                 <AudioProcessingSettings
                   value={audioOptions}
-                  disabled={Boolean(softphoneCallId)}
+                  disabled={softphoneBusy || Boolean(softphoneCallId && sessionRef.current)}
                   onChange={setAudioOptions}
                 />
                 <MicrophoneTest
@@ -1509,26 +1599,26 @@ function CallsView({ projectId, installId }: NativePanelProps) {
               <div className="flex items-start gap-3">
                 <div className="min-w-0 flex-1">
                   <div className="text-xs text-text-dim">Selected call</div>
-                  <div className="mt-1 text-lg font-semibold truncate">{selected.toNumber || selected.id}</div>
+                  <div className="mt-1 text-lg font-semibold truncate">{(selected.direction === "inbound" ? selected.fromNumber : selected.toNumber) || selected.id}</div>
                   <div className="mt-1 text-xs text-text-muted truncate">{selected.threadId}</div>
                 </div>
                 {selected.peerKind === "human"
-                  && selected.direction === "inbound"
-                  && selected.status === "pending"
+                  && !selected.routingWaiting
+                  && ((selected.direction === "inbound" && selected.status === "pending") || LIVE_STATUSES.has(selected.status))
                   && softphoneCallId !== selected.id ? (
                   <button
                     type="button"
-                    disabled={softphoneBusy}
+                    disabled={softphoneBusy || Boolean(softphoneCallId)}
                     onClick={() => void answerSoftphoneCall(selected)}
                     className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-40"
                   >
-                    Answer
+                    {selected.status === "pending" ? "Answer" : "Join audio"}
                   </button>
                 ) : null}
                 <button
                   type="button"
                   disabled={!LIVE_STATUSES.has(selected.status) || ending === selected.id}
-                  onClick={() => { if (softphoneCallId === selected.id) endSoftphone(); void hangup(selected); }}
+                  onClick={() => void hangup(selected)}
                   className="h-8 px-3 rounded bg-error text-bg text-xs font-medium disabled:opacity-40"
                 >
                   Hang up
@@ -1544,7 +1634,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                       </span>
                       <div className="min-w-0">
                         <div className="text-xs font-medium truncate">
-                          {selected.status === "answered" || selected.status === "in-progress"
+                          {softphoneState !== "live" ? (softphoneState === "error" ? "Audio error" : "Audio reconnecting") : selected.status === "answered" || selected.status === "in-progress"
                             ? "Connected"
                             : selected.status === "ringing"
                               ? "Destination ringing"
@@ -1571,17 +1661,16 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                     <button
                       type="button"
                       onClick={toggleMute}
-                      disabled={softphoneState !== "live"}
+                      disabled={!sessionRef.current}
                       className={`h-8 px-3 rounded border text-xs disabled:opacity-40 ${muted ? "border-warn/40 bg-warn/10 text-warn" : "border-border hover:bg-bg-muted"}`}
                     >
                       {muted ? "Unmute" : "Mute"}
                     </button>
                   </div>
-                  <LevelMeter label="Mic" value={muted ? 0 : levels.mic} />
-                  <LevelMeter label="Caller" value={levels.speaker} />
+                  <LiveLevels sink={levelsSink} />
                   {diagnostics ? (
                     <div className="text-xs text-text-dim tabular-nums">
-                      RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
+                      Browser ↔ app RTT {diagnostics.rttMs === null ? "–" : `${diagnostics.rttMs} ms`}
                       {` · buffer ${diagnostics.queueMs}/${diagnostics.targetMs} ms (max ${diagnostics.maxQueueMs})`}
                       {` · underruns ${diagnostics.underruns}`}
                       {` · dropped ${diagnostics.droppedMs} ms`}
@@ -1601,7 +1690,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
 
               <AudioProcessingSettings
                 value={audioOptions}
-                disabled={Boolean(softphoneCallId)}
+                disabled={softphoneBusy || Boolean(softphoneCallId && sessionRef.current)}
                 onChange={setAudioOptions}
               />
 
@@ -1611,7 +1700,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
                 disabled={Boolean(softphoneCallId)}
               />
 
-              {selected.peerKind === "human" ? <PersistedAudioDiagnostics call={selected} /> : null}
+              {selected.peerKind === "human" ? <PersistedAudioDiagnostics call={detailCall?.id===selected.id ? detailCall : selected} /> : null}
 
               <dl className="grid gap-x-3 gap-y-3 text-sm" style={{ gridTemplateColumns: DETAILS_COLUMNS }}>
                 <dt className="text-text-dim">Status</dt>
@@ -1722,6 +1811,7 @@ function CallsView({ projectId, installId }: NativePanelProps) {
           )}
         </aside>
       </main>
+      </div>
     </div>
   );
 }
@@ -2098,7 +2188,7 @@ function NumbersView({ projectId }: NativePanelProps) {
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-bg text-text">
+    <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
       <main className="min-h-0 flex-1 overflow-auto">
         <section className="border-b border-border">
           <header className="px-4 py-3 flex flex-wrap items-center gap-3 border-b border-border">
@@ -2832,7 +2922,7 @@ function routingFlowSummary(flow?: RoutingFlow) {
   return flow.name || "Custom routing";
 }
 
-function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativePanelProps & { onOpenNumbers: () => void; onOpenAdvanced: () => void }) {
+function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: Pick<NativePanelProps,"projectId"> & { onOpenNumbers: () => void; onOpenAdvanced: () => void }) {
   const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
   const [routeIds, setRouteIds] = useState<string[]>([]);
   const [kind, setKind] = useState<GuidedRouteKind>("browser");
@@ -2880,7 +2970,7 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
   const selectedRoutes = snapshot.routes.filter((route) => routeIds.includes(route.id));
   const selectedRoute = selectedRoutes[0];
   const publishedFlows = snapshot.flows.filter((flow) => flow.published_version_id);
-  const selectableDestinations = snapshot.destinations.filter((destination) => destination.enabled && ["browser", "agent", "ai"].includes(destination.kind));
+  const selectableDestinations = snapshot.destinations.filter((destination) => destination.enabled && ["browser", "agent", "ai", "pstn", "sip"].includes(destination.kind));
   const selectedLabel = selectedRoutes.length === 1 ? selectedRoutes[0].phone_number : `${selectedRoutes.length} numbers`;
 
   useEffect(() => {
@@ -2922,8 +3012,8 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
     }
     if (kind === "team") {
       if (!teamMembers.length) throw new Error("Choose at least one team member.");
-      const members = await Promise.all(teamMembers.map(resolveDestination));
-      const group = await postJSON<RoutingGroup>(api("/routing/ring-groups/save"), { name: `${selectedLabel || "Numbers"} team`, strategy: teamStrategy, timeout_sec: 20, members: members.map((destination_id) => ({ destination_id, enabled: true })) });
+      const members = [...new Set(await Promise.all(teamMembers.map(resolveDestination)))];
+      const group = await postJSON<RoutingGroup>(api("/routing/ring-groups/save"), { name: `${selectedLabel || "Numbers"} team`, strategy: teamStrategy, timeout_sec: 20, members: members.map((destination_id,index) => ({ destination_id, enabled: true, priority:teamStrategy==="priority"?index:0 })) });
       return { entry: "team", nodes: [{ id: "team", type: "ring_group", label: "Ring the team", config: { ring_group_id: group.id } }] };
     }
     if (kind === "menu") {
@@ -3054,7 +3144,7 @@ function GuidedRoutingView({ projectId, onOpenNumbers, onOpenAdvanced }: NativeP
           <div className="mt-4 rounded-lg bg-bg-muted/30 p-4">
             {kind === "browser" ? <div className="max-w-md"><Field label="Operator group name" value={browserName} onChange={setBrowserName} /><p className="mt-2 text-xs text-text-muted">All eligible browser operators will see the incoming-call banner. The first person to answer gets the call.</p></div> : null}
             {kind === "ai" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><label className="block"><span className="mb-1 block text-xs text-text-muted">Existing AI destination</span><select value={aiDestination} onChange={(event) => setAIDestination(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="">Create from agent ID</option>{snapshot.destinations.filter((item) => item.kind === "ai").map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>{!aiDestination ? <Field label="Apteva agent ID" value={aiAgentID} onChange={setAIAgentID} type="number" /> : null}<label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Instructions</span><textarea rows={3} value={aiDirective} onChange={(event) => setAIDirective(event.target.value)} className="w-full rounded border border-border bg-bg px-3 py-2 text-sm" /></label></div> : null}
-            {kind === "team" ? <div className="max-w-2xl"><label className="block max-w-xs"><span className="mb-1 block text-xs text-text-muted">Ring order</span><select value={teamStrategy} onChange={(event) => setTeamStrategy(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="simultaneous">Everyone at once</option><option value="sequential">One after another</option><option value="priority">By priority</option></select></label><div className="mt-3"><span className="text-xs text-text-muted">Who should ring?</span><label className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes("__browser__")} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, "__browser__"] : teamMembers.filter((id) => id !== "__browser__"))} /> Browser operators</label>{selectableDestinations.filter((item) => item.kind !== "browser").map((item) => <label key={item.id} className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes(item.id)} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, item.id] : teamMembers.filter((id) => id !== item.id))} /> {item.name}<span className="ml-auto text-xs capitalize text-text-dim">{item.kind}</span></label>)}</div></div> : null}
+            {kind === "team" ? <div className="max-w-2xl"><label className="block max-w-xs"><span className="mb-1 block text-xs text-text-muted">Ring order</span><select value={teamStrategy} onChange={(event) => setTeamStrategy(event.target.value)} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="simultaneous">Everyone at once</option><option value="sequential">One after another</option><option value="round_robin">Rotate starting member</option><option value="priority">By priority</option></select></label><div className="mt-3"><span className="text-xs text-text-muted">Who should ring?</span><label className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes("__browser__")} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, "__browser__"] : teamMembers.filter((id) => id !== "__browser__"))} /> Browser operators</label>{selectableDestinations.filter((item) => item.kind !== "browser").map((item) => <label key={item.id} className="mt-1 flex items-center gap-2 rounded border border-border p-2 text-sm"><input type="checkbox" checked={teamMembers.includes(item.id)} onChange={(event) => setTeamMembers(event.target.checked ? [...teamMembers, item.id] : teamMembers.filter((id) => id !== item.id))} /> {item.name}<span className="ml-auto text-xs capitalize text-text-dim">{item.kind}</span></label>)}</div></div> : null}
             {kind === "menu" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">What callers hear</span><textarea rows={2} value={menuPrompt} onChange={(event) => setMenuPrompt(event.target.value)} className="w-full rounded border border-border bg-bg px-3 py-2 text-sm" /></label><DestinationSelect label="Press 1 routes to" value={menuOne} onChange={setMenuOne} destinations={selectableDestinations} /><DestinationSelect label="Press 2 routes to" value={menuTwo} onChange={setMenuTwo} destinations={selectableDestinations} /></div> : null}
             {kind === "hours" ? <div className="grid max-w-2xl gap-3 md:grid-cols-2"><Field label="Timezone" value={timezone} onChange={setTimezone} /><DestinationSelect label="During opening hours" value={hoursDestination} onChange={setHoursDestination} destinations={selectableDestinations} /><Field label="Opens" value={openAt} onChange={setOpenAt} type="time" /><Field label="Closes" value={closeAt} onChange={setCloseAt} type="time" /><p className="text-xs text-text-muted md:col-span-2">Monday–Friday. Outside these hours callers hear a closed message and the call ends.</p></div> : null}
           </div>
@@ -3081,11 +3171,11 @@ function DestinationSelect({ label, value, onChange, destinations }: { label: st
 
 function RoutingView({ projectId, onOpenNumbers }: NativePanelProps & { onOpenNumbers: () => void }) {
   const [advanced, setAdvanced] = useState(false);
-  if (advanced) return <div className="flex h-full min-h-0 flex-col"><div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4"><div><span className="text-sm font-semibold">Advanced flow editor</span><span className="ml-2 text-xs text-text-muted">Draft, simulate and publish custom IVRs.</span></div><button type="button" onClick={() => setAdvanced(false)} className="h-8 rounded border border-border px-3 text-xs">Back to guided setup</button></div><div className="min-h-0 flex-1"><AdvancedRoutingEditor projectId={projectId} /></div></div>;
+  if (advanced) return <div className="flex h-full min-h-0 flex-col"><div className="flex h-11 shrink-0 items-center justify-between border-b border-border px-4"><div><span className="text-sm font-semibold">Advanced flow editor</span><span className="ml-2 text-xs text-text-muted">Draft, simulate and publish IVRs and team ringing.</span></div><button type="button" onClick={() => setAdvanced(false)} className="h-8 rounded border border-border px-3 text-xs">Back to guided setup</button></div><div className="min-h-0 flex-1"><AdvancedRoutingEditor projectId={projectId} /></div></div>;
   return <GuidedRoutingView projectId={projectId} onOpenNumbers={onOpenNumbers} onOpenAdvanced={() => setAdvanced(true)} />;
 }
 
-function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
+function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">) {
   const [snapshot, setSnapshot] = useState<RoutingSnapshot>({ flows: [], destinations: [], ring_groups: [], routes: [], node_types: [] });
   const [selectedId, setSelectedId] = useState("");
   const [draft, setDraft] = useState<RoutingDraft>({ entry: "hangup", nodes: [{ id: "hangup", type: "hangup", label: "End call" }] });
@@ -3098,6 +3188,7 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
   const [routeIds, setRouteIds] = useState<string[]>([]);
   const [destinationForm, setDestinationForm] = useState({ name: "Browser operator", kind: "browser", target: "", directive: "" });
   const [groupForm, setGroupForm] = useState({ name: "Team", strategy: "simultaneous", timeout_sec: 20, members: [] as string[] });
+  const [memberSettings,setMemberSettings]=useState<Record<string,{timeout_sec?:number;priority?:number}>>({});
 
   const api = useCallback((path: string) => `${API}${path}${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`, [projectId]);
   const load = useCallback(async (preferred = "") => {
@@ -3190,7 +3281,7 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
   const saveGroup = async () => {
     setBusy(true);
     try {
-      await postJSON(api("/routing/ring-groups/save"), { name: groupForm.name, strategy: groupForm.strategy, timeout_sec: groupForm.timeout_sec, members: groupForm.members.map((destination_id) => ({ destination_id, enabled: true })) });
+      await postJSON(api("/routing/ring-groups/save"), { name: groupForm.name, strategy: groupForm.strategy, timeout_sec: groupForm.timeout_sec, members: groupForm.members.map((destination_id) => ({ destination_id, enabled: true,...memberSettings[destination_id] })) });
       setStatus("Ring group created"); await load(selectedId);
     } catch (error) { setStatus((error as Error).message || "Could not create ring group"); } finally { setBusy(false); }
   };
@@ -3275,8 +3366,10 @@ function AdvancedRoutingEditor({ projectId }: NativePanelProps) {
           <h3 className="text-sm font-semibold">New ring group</h3>
           <Field label="Name" value={groupForm.name} onChange={(name) => setGroupForm({ ...groupForm, name })} />
           <label className="block"><span className="mb-1 block text-xs text-text-muted">Strategy</span><select value={groupForm.strategy} onChange={(event) => setGroupForm({ ...groupForm, strategy: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="simultaneous">Simultaneous</option><option value="sequential">Sequential</option><option value="round_robin">Round robin</option><option value="priority">Priority</option></select></label>
-          <Field label="Ring timeout (seconds)" value={String(groupForm.timeout_sec)} onChange={(value) => setGroupForm({ ...groupForm, timeout_sec: Number(value) })} type="number" />
-          <div><span className="mb-1 block text-xs text-text-muted">Members</span>{snapshot.destinations.map((item) => <label key={item.id} className="flex items-center gap-2 py-1 text-xs"><input type="checkbox" checked={groupForm.members.includes(item.id)} onChange={(event) => setGroupForm({ ...groupForm, members: event.target.checked ? [...groupForm.members, item.id] : groupForm.members.filter((id) => id !== item.id) })} /> <span>{item.name}</span><span className="ml-auto text-text-dim">{item.kind}</span></label>)}</div>
+          <p className="text-xs text-text-muted">{groupForm.strategy==="simultaneous" ? "Ring every member; the first answer wins." : groupForm.strategy==="priority" ? "Ring one priority tier at a time, starting with the lowest number." : groupForm.strategy==="round_robin" ? "Rotate the starting member for each call, then try the others in order." : "Try members in the order below, advancing on decline or timeout."}</p>
+          <Field label="Default ring time per member (seconds)" value={String(groupForm.timeout_sec)} onChange={(value) => setGroupForm({ ...groupForm, timeout_sec: Number(value) })} type="number" />
+          <div><span className="mb-1 block text-xs text-text-muted">Members</span>{snapshot.destinations.filter(d=>d.enabled&&d.kind!=="voicemail").map((item) => <label key={item.id} className="flex items-center gap-2 py-1 text-xs"><input type="checkbox" checked={groupForm.members.includes(item.id)} onChange={(event) => setGroupForm({ ...groupForm, members: event.target.checked ? [...groupForm.members, item.id] : groupForm.members.filter((id) => id !== item.id) })} /> <span>{item.name}</span><span className="ml-auto text-text-dim">{item.kind}</span></label>)}</div>
+          {groupForm.members.map((id,index)=><div key={id} className="rounded border border-border p-2 text-xs space-y-2"><div className="flex items-center gap-2"><span className="flex-1">{index+1}. {snapshot.destinations.find(d=>d.id===id)?.name}</span><button aria-label={`Move ${snapshot.destinations.find(d=>d.id===id)?.name} up`} disabled={index===0} className="min-h-11 px-2 border border-border rounded" onClick={()=>setGroupForm(v=>{const members=[...v.members];[members[index-1],members[index]]=[members[index],members[index-1]];return {...v,members};})}>Up</button></div><div className="grid grid-cols-2 gap-2"><label className="block"><span className="mb-1 block text-text-muted">Ring seconds</span><input type="number" min="5" max="300" className="h-9 w-full bg-bg border border-border rounded px-2" value={memberSettings[id]?.timeout_sec??groupForm.timeout_sec} onChange={e=>setMemberSettings(v=>({...v,[id]:{...v[id],timeout_sec:Number(e.target.value)}}))}/></label>{groupForm.strategy==="priority"?<label className="block"><span className="mb-1 block text-text-muted">Priority</span><input type="number" min="0" className="h-9 w-full bg-bg border border-border rounded px-2" value={memberSettings[id]?.priority??0} onChange={e=>setMemberSettings(v=>({...v,[id]:{...v[id],priority:Number(e.target.value)}}))}/></label>:null}</div></div>)}
           <button type="button" onClick={saveGroup} disabled={busy || groupForm.members.length === 0} className="h-9 w-full rounded border border-border text-sm disabled:opacity-50">Create ring group</button>
         </section>
       </aside>
@@ -3297,6 +3390,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
       {node.type === "schedule" ? <><Field label="Timezone" value={String(node.config?.timezone || "Europe/Paris")} onChange={(value) => setConfig("timezone", value)} /><div className="grid grid-cols-2 gap-2"><Field label="Opens" value={String(node.config?.start || "09:00")} onChange={(value) => setConfig("start", value)} type="time" /><Field label="Closes" value={String(node.config?.end || "18:00")} onChange={(value) => setConfig("end", value)} type="time" /></div><NextSelect label="When open" value={node.branches?.open || ""} onChange={(value) => setBranch("open", value)} /><NextSelect label="When closed" value={node.branches?.closed || ""} onChange={(value) => setBranch("closed", value)} /></> : null}
       {node.type === "dtmf_menu" ? <><label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Prompt</span><textarea rows={2} value={String(node.config?.prompt || "")} onChange={(event) => setConfig("prompt", event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-1 text-sm" /></label>{Object.keys(node.branches || {}).map((digit) => <NextSelect key={digit} label={digit === "default" ? "Invalid key / timeout" : `Key ${digit}`} value={node.branches?.[digit] || ""} onChange={(value) => setBranch(digit, value)} />)}</> : null}
       {node.type === "caller_match" ? <><Field label="Caller prefixes (comma separated)" value={Array.isArray(node.config?.prefixes) ? (node.config?.prefixes as string[]).join(", ") : ""} onChange={(value) => setConfig("prefixes", value.split(",").map((item) => item.trim()).filter(Boolean))} /><span /><NextSelect label="Match" value={node.branches?.match || ""} onChange={(value) => setBranch("match", value)} /><NextSelect label="Otherwise" value={node.branches?.default || ""} onChange={(value) => setBranch("default", value)} /></> : null}
+      {node.type === "ring_group" || (node.type === "destination" && ["pstn","sip"].includes(destinations.find(d=>d.id===node.config?.destination_id)?.kind||"")) ? <NextSelect label="If no one answers (empty ends the call)" value={node.branches?.no_answer || node.next || ""} onChange={value=>setBranch("no_answer",value)} /> : null}
       {node.type === "announcement" ? <NextSelect /> : null}
       {!(["announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
     </div>
@@ -3306,8 +3400,8 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
 export default function CallsPanel(props: NativePanelProps) {
   const [view, setView] = useState<"calls" | "routing" | "numbers" | "addresses" | "bundles">("calls");
   return (
-    <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <nav className="shrink-0 h-11 border-b border-border px-4 flex items-center gap-1" aria-label="Telephony views">
+    <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
+      <nav className="shrink-0 min-h-11 max-w-full overflow-x-auto border-b border-border px-2 flex items-center gap-1" aria-label="Telephony views">
         <button
           type="button"
           onClick={() => setView("routing")}
@@ -3344,8 +3438,8 @@ export default function CallsPanel(props: NativePanelProps) {
           Compliance
         </button>
       </nav>
-      <div className="min-h-0 flex-1">
-        {view === "calls" ? <CallsView {...props} /> : null}
+      <div className="min-h-0 min-w-0 flex-1 flex flex-col">
+        <CallsView key={props.projectId} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
         {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}

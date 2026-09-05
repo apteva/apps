@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
 	"sync"
 	"time"
@@ -53,7 +54,7 @@ type Tracker struct {
 func New(ctx context.Context) (*Tracker, error) {
 	t := &Tracker{ctx: ctx, inflight: make(map[network.RequestID]struct{}), frames: make(map[cdp.FrameID]struct{}), lastActivity: time.Now()}
 	chromedp.ListenTarget(ctx, t.observe)
-	err := chromedp.Run(ctx, network.Enable(), page.Enable(), chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, network.Enable(), page.Enable(), chromedp.ActionFunc(func(ctx context.Context) error {
 		if _, err := page.AddScriptToEvaluateOnNewDocument(installScript).Do(ctx); err != nil {
 			return err
 		}
@@ -116,12 +117,21 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 	if timeoutMS < quietMS {
 		timeoutMS = quietMS
 	}
+	waitCtx, cancel := context.WithTimeout(t.ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
 	started := time.Now()
+	var last Result
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, err := readDOMState(t.ctx)
+		state, err := readDOMState(waitCtx)
 		if err != nil {
+			if waitCtx.Err() == context.DeadlineExceeded {
+				result := last
+				result.TimedOut = true
+				result.WaitedMS = int(time.Since(started) / time.Millisecond)
+				return result, &TimeoutError{Kind: "stable", Result: result}
+			}
 			return Result{}, err
 		}
 		t.mu.Lock()
@@ -129,6 +139,7 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 		activityQuiet := time.Since(t.lastActivity) >= time.Duration(quietMS)*time.Millisecond
 		t.mu.Unlock()
 		result := Result{WaitedMS: int(time.Since(started) / time.Millisecond), LoadingIndicators: state.LoadingIndicators, InflightRequests: inflight, LoadingFrames: frames}
+		last = result
 		if state.Ready && state.QuietForMS >= quietMS && state.LoadingIndicators == 0 && inflight == 0 && frames == 0 && activityQuiet {
 			result.Stable = true
 			return result, nil
@@ -146,9 +157,10 @@ func (t *Tracker) Wait(quietMS, timeoutMS int) (Result, error) {
 }
 
 type outcomeState struct {
-	URL     string `json:"url"`
-	Matches []bool `json:"matches"`
-	Error   string `json:"error,omitempty"`
+	URL     string                     `json:"url"`
+	Matches []bool                     `json:"matches"`
+	Error   string                     `json:"error,omitempty"`
+	Media   *computer.MediaObservation `json:"media,omitempty"`
 }
 
 // WaitForOutcome waits for explicit browser-visible evidence rather than
@@ -174,13 +186,22 @@ func (t *Tracker) WaitForOutcome(conditions []computer.WaitCondition, match stri
 	if timeoutMS < quietMS {
 		timeoutMS = quietMS
 	}
+	waitCtx, cancel := context.WithTimeout(t.ctx, time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
 	started := time.Now()
+	var last Result
 	var matchedSince time.Time
 	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		state, err := readOutcomeState(t.ctx, conditions)
+		state, err := readOutcomeState(waitCtx, conditions)
 		if err != nil {
+			if waitCtx.Err() == context.DeadlineExceeded {
+				result := last
+				result.TimedOut = true
+				result.WaitedMS = int(time.Since(started) / time.Millisecond)
+				return result, &TimeoutError{Kind: "outcome", Result: result}
+			}
 			return Result{}, err
 		}
 		if state.Error != "" {
@@ -201,8 +222,9 @@ func (t *Tracker) WaitForOutcome(conditions []computer.WaitCondition, match stri
 		}
 		result := Result{
 			Matched: matched, WaitedMS: int(time.Since(started) / time.Millisecond), Match: match,
-			CurrentURL: state.URL, Conditions: results,
+			CurrentURL: state.URL, Conditions: results, Media: state.Media,
 		}
+		last = result
 		if matched {
 			if matchedSince.IsZero() {
 				matchedSince = time.Now()
@@ -232,7 +254,7 @@ func readOutcomeState(ctx context.Context, conditions []computer.WaitCondition) 
 	}
 	var state outcomeState
 	expression := outcomeScript + "(" + string(rawConditions) + ")"
-	err = chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err = cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate(expression).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return err
@@ -250,7 +272,7 @@ func readOutcomeState(ctx context.Context, conditions []computer.WaitCondition) 
 
 func readDOMState(ctx context.Context) (domState, error) {
 	var state domState
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		value, exception, err := cdpruntime.Evaluate(snapshotScript).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return err
@@ -287,10 +309,16 @@ func WaitForOutcome(ctx context.Context, conditions []computer.WaitCondition, ma
 
 const outcomeScript = `(function(conditions){
   function norm(value, sensitive){value=String(value||'').replace(/\s+/g,' ').trim();return sensitive?value:value.toLowerCase();}
-  function visible(el){if(!el)return false;var r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>=2&&r.height>=2&&s.display!=='none'&&s.visibility!=='hidden'&&parseFloat(s.opacity||'1')>=0.1;}
+  function visible(el){if(!el)return false;var r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;try{if(el.checkVisibility&&!el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))return false;}catch(e){}for(var n=el;n&&n.nodeType===1;n=n.parentElement){var s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')<0.1)return false;}return true;}
   function role(el){var explicit=el.getAttribute('role');if(explicit)return explicit.toLowerCase();var tag=el.tagName.toLowerCase();if(tag==='button')return 'button';if(tag==='a'&&el.hasAttribute('href'))return 'link';if(tag==='textarea')return 'textbox';if(tag==='select')return 'combobox';if(tag==='input'){var type=(el.type||'text').toLowerCase();if(type==='checkbox')return 'checkbox';if(type==='radio')return 'radio';if(type==='button'||type==='submit')return 'button';return 'textbox';}return '';}
-  function name(el){var labelled=el.getAttribute('aria-labelledby'),text='';if(labelled){labelled.split(/\s+/).forEach(function(id){var n=document.getElementById(id);if(n)text+=' '+(n.innerText||n.textContent||'');});}return el.getAttribute('aria-label')||text||el.getAttribute('alt')||el.getAttribute('title')||el.getAttribute('placeholder')||el.innerText||el.textContent||el.value||'';}
-  function semanticPresent(condition){var wanted=norm(condition.name||condition.value,condition.case_sensitive),wantedRole=norm(condition.role,true);var nodes=document.querySelectorAll('button,a[href],input,textarea,select,[role],[tabindex]');for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!visible(el))continue;if(wantedRole&&role(el)!==wantedRole)continue;if(norm(name(el),condition.case_sensitive)===wanted)return true;}return false;}
+  function name(el){var labelled=el.getAttribute('aria-labelledby'),text='';if(labelled){labelled.split(/\s+/).forEach(function(id){var n=document.getElementById(id);if(n)text+=' '+(n.innerText||n.textContent||'');});}var direct=el.getAttribute('aria-label')||text||el.getAttribute('alt')||el.getAttribute('title')||el.getAttribute('placeholder')||el.innerText||el.textContent||el.value||'';if(String(direct||'').trim())return direct;var selector='input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';if(el.matches&&el.matches(selector)){for(var row=el.parentElement,depth=0;row&&depth<5;row=row.parentElement,depth++){var rect=row.getBoundingClientRect(),controls=row.querySelectorAll(selector),label=String(row.innerText||row.textContent||'').trim();if(rect.height>140||rect.width>Math.min(window.innerWidth,1200))break;if(controls.length===1&&controls[0]===el&&label&&label.length<=180)return label;}}return '';}
+  function semanticTarget(condition){if(condition.target_id){var state=window.__aptevaComputerSOM,saved=state&&state.targets&&state.targets[condition.target_id],live=saved&&saved.element;return live&&live.isConnected&&visible(live)?live:null;}var wanted=norm(condition.name||condition.value,condition.case_sensitive),wantedRole=norm(condition.role,true);var nodes=document.querySelectorAll('button,a[href],input,textarea,select,[role],[tabindex]');for(var i=0;i<nodes.length;i++){var el=nodes[i];if(!visible(el))continue;if(wantedRole&&role(el)!==wantedRole)continue;if(norm(name(el),condition.case_sensitive)===wanted)return el;}return null;}
+  function loadingMarker(el){if(!el||!el.getAttribute)return false;if(el.getAttribute('aria-busy')==='true'||el.getAttribute('data-loading')==='true'||el.getAttribute('data-state')==='loading')return true;return /(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(String(el.className||'').toLowerCase());}
+  function targetLoading(el){if(loadingMarker(el))return true;var query='[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]',nodes=el.querySelectorAll?el.querySelectorAll(query):[];for(var i=0;i<nodes.length;i++)if(visible(nodes[i]))return true;var selector='button,input,select,textarea,[role="button"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';for(var row=el.parentElement,depth=0;row&&depth<3;row=row.parentElement,depth++){var rect=row.getBoundingClientRect();if(rect.height>140||rect.width>Math.min(window.innerWidth,1200))break;var controls=row.querySelectorAll(selector);if(controls.length!==1||controls[0]!==el)continue;if(loadingMarker(row))return true;var rowNodes=row.querySelectorAll(query);for(var j=0;j<rowNodes.length;j++)if(visible(rowNodes[j]))return true;break;}return false;}
+  function disabled(el){return !!(el.disabled||(el.matches&&el.matches(':disabled'))||el.getAttribute('aria-disabled')==='true'||(el.closest&&el.closest('[inert]')));}
+  function checked(el){if(el.matches&&el.matches('input[type="checkbox"],input[type="radio"]'))return !!el.checked;var value=String(el.getAttribute('aria-checked')||'').toLowerCase();return value==='true'?true:(value==='false'?false:null);}
+  var observeMedia=` + mediaObservationFunction + `;
+  var media=observeMedia();
   var bodyText=(document.body&&document.body.innerText)||(document.documentElement&&document.documentElement.innerText)||'';
   var current=location.href;
   var matches=[];
@@ -305,12 +333,16 @@ const outcomeScript = `(function(conditions){
       else if(type==='selector_present'||type==='selector_absent'){
         var present=false,nodes=document.querySelectorAll(c.selector||'');for(var j=0;j<nodes.length;j++)if(visible(nodes[j])){present=true;break;}matched=type==='selector_present'?present:!present;
       } else if(type==='target_present'||type==='target_absent'){
-        var semantic=semanticPresent(c);matched=type==='target_present'?semantic:!semantic;
-      }
+        var semantic=!!semanticTarget(c);matched=type==='target_present'?semantic:!semantic;
+      } else if(type==='target_state'){
+        var target=semanticTarget(c),state=String(c.state||'').toLowerCase();
+        if(target){var busy=targetLoading(target),off=disabled(target),on=checked(target);matched=state==='ready'?!busy&&!off:state==='loading'?busy:state==='enabled'?!off:state==='disabled'?off:state==='checked'?on===true:state==='unchecked'?on===false:false;}
+      } else if(type==='media_present')matched=media.media_embed_status==='loaded';
+      else if(type==='media_error')matched=media.media_embed_status==='rejected';
       matches.push(matched);
     }
-    return {url:current,matches:matches};
-  }catch(error){return {url:current,matches:matches,error:String(error&&error.message||error)};}
+    return {url:current,matches:matches,media:media};
+  }catch(error){return {url:current,matches:matches,media:media,error:String(error&&error.message||error)};}
 })`
 
 const installScript = `(function(){
@@ -324,7 +356,7 @@ const installScript = `(function(){
 
 const snapshotScript = `(function(){
   if(!window.__aptevaComputerStability){` + installScript + `}
-  function visible(el){var r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>=2&&r.height>=2&&s.display!=='none'&&s.visibility!=='hidden'&&parseFloat(s.opacity||'1')>=0.1;}
+  function visible(el){if(!el)return false;var r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;try{if(el.checkVisibility&&!el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}))return false;}catch(e){}for(var n=el;n&&n.nodeType===1;n=n.parentElement){var s=getComputedStyle(n);if(s.display==='none'||s.visibility==='hidden'||parseFloat(s.opacity||'1')<0.1)return false;}return true;}
   var nodes=document.querySelectorAll('[aria-busy="true"],[data-loading="true"],[data-state="loading"],[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i]');
   var count=0;for(var i=0;i<nodes.length;i++)if(visible(nodes[i]))count++;
   var state=window.__aptevaComputerStability;

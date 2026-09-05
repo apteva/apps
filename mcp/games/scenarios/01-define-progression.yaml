@@ -1,0 +1,37 @@
+name: define-progression
+description: |
+  A designer asks the agent to set up a score stat, a weekly leaderboard,
+  and a first-win achievement. Verifies the agent uses the definition
+  tools rather than inventing structures.
+
+timeout: 120s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  We are launching an arcade game. Define a server-only "score" statistic
+  that keeps each player's best score, create a weekly leaderboard called
+  "weekly-top" over it, and define an achievement "first-win" that unlocks
+  when the "wins" statistic reaches 1. Then stop.
+
+assert:
+  - tool_called: stats_define
+  - tool_called: leaderboards_create
+  - tool_called: achievements_define
+  - http: GET /api/apps/games/admin/leaderboards
+    expect_status: 200
+    expect_count_at: leaderboards
+    expect_count: 1
+  - http: GET /api/apps/games/admin/achievements
+    expect_status: 200
+    expect_count_at: achievements
+    expect_count: 1
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 15000
+  cost_usd: 0.25

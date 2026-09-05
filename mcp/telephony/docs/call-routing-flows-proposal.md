@@ -3,9 +3,11 @@
 Status: MVP implemented (versioned flows, validation/simulation, legacy-route
 migration, schedules, caller rules, announcements, Twilio/Telnyx DTMF,
 browser/agent/AI destinations, ring-group offers, execution traces, events, and
-the Routing UI). External PSTN/SIP child-leg bridging, durable queues,
-decision webhooks, and non-Twilio voicemail remain later delivery phases and
-are rejected by route capability validation rather than failing during a call.
+the Routing UI). Simultaneous, sequential, round-robin and priority ring groups now use durable
+offers and first-answer claims. PSTN/SIP child legs are supported on Twilio,
+Telnyx and Plivo webhook routes. Durable queues, decision webhooks, named-user
+browser presence and non-Twilio voicemail remain later delivery phases. The
+longest-idle/weighted strategies below are proposals, not supported strategies.
 
 This document proposes a carrier-neutral call-routing engine inside the
 Telephony app. It is intentionally not an implementation plan for Core or the

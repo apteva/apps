@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.25
+version: 0.8.2
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,27 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.6.2 adds atomic human and agent issue claims so collaborators can
+  reserve work without path locks or workspace coupling.
+  v0.7.0 optionally links repositories to isolated Workspaces environments,
+  installs dependencies there, runs finite commands, previews generated source
+  changes, and applies an explicitly reviewed revision back without transferring
+  Git metadata or overwriting concurrent Code edits.
+  v0.7.1 adds explicit workspace teardown and a real-agent Tier 3 test covering
+  the complete Code → Workspaces → Code source round trip.
+  v0.8.0 stores an optional workspace image per repository, accepts safe
+  per-command overrides, and preserves the previous workspace while safely
+  provisioning a replacement after proving it has no unapplied source changes.
+  v0.8.1 adds monorepo-scoped workspaces: editable path globs and read-only
+  support inputs are transferred independently and only editable paths can be
+  applied back to Code.
+  v0.8.2 derives Workspaces resource names from repository slugs so Unicode
+  display names cannot violate the Workspaces naming contract.
+  v0.6.1 adds theme-aware syntax highlighting, sticky line numbers,
+  language and line metadata, copy feedback, and clearer editor typography.
+  v0.6.0 adds provider-neutral Git clone, connect, status, fetch,
+  fast-forward pull, commit, diff, history, branches, and push using
+  credentials from bound GitHub, GitLab, or Bitbucket connections.
   v0.5.24 adds live repository, source-file, and issue cards that
   agents can attach to chat messages and deep-link back into Code.
   v0.5.23 isolates global repository storage by repository id,
@@ -60,9 +81,29 @@ requires:
   permissions:
     - db.write.app
     - platform.connections.execute
+    - platform.connections.read_credentials
     - platform.apps.call
     - platform.ingress.write
+  apps:
+    - name: workspaces
+      version: ">=0.5.0"
+      optional: true
+      reason: Provides isolated, durable command execution and generic source transfer while Code remains the repository and Git authority.
+  binaries:
+    - name: git
+      executables: [git]
+      required: true
+      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
+      sources: {}
   integrations:
+    - role: git
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [github, gitlab, bitbucket]
+      label: Git provider
+      hint: Connect a Git provider to clone and synchronize private repositories. Public HTTPS remotes work without one.
+      capabilities: [git.clone, git.fetch, git.push]
     - role: github
       kind: integration
       required: false
@@ -96,14 +137,46 @@ provides:
       description: Archive a repository (files retained on disk).
     - name: repos_set_deploy_hints
       description: Set build_cmd / start_cmd / port / env_json on a repository.
+    - name: repos_set_workspace_image
+      description: Set or clear a repository's preferred workspace image; Workspaces enforces image policy when it is used.
     - name: repos_export
       description: Export a repo as a zip archive — base64-encoded bytes for cross-app calls (used by deploy).
     - name: repos_import_github
       description: Import a GitHub repository as a local repo (gzip tarball snapshot via the bound github connection).
+    - name: repos_git_import
+      description: Clone a standard HTTPS Git remote into a new Code repository with history and upstream tracking.
+    - name: repos_git_connect
+      description: Safely connect an existing Code repository to a Git remote without overwriting differing local files.
+    - name: repos_git_status
+      description: Get branch, HEAD, upstream, ahead/behind, and working-tree changes.
+    - name: repos_git_fetch
+      description: Fetch and prune origin tracking refs without changing checked-out files.
+    - name: repos_git_pull
+      description: Fetch and fast-forward the current clean branch.
+    - name: repos_git_commit
+      description: Commit selected or all visible Code changes locally.
+    - name: repos_git_push
+      description: Push the current branch without force.
+    - name: repos_git_diff
+      description: Return a bounded unified diff.
+    - name: repos_git_log
+      description: List recent Git commits.
+    - name: repos_git_branches
+      description: List local and origin-tracking branches.
+    - name: repos_git_branch_create
+      description: Create a local branch without switching to it.
+    - name: repos_git_switch
+      description: Switch to an existing clean local branch.
     - name: repos_dev_start
       description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
     - name: repos_run_command
-      description: Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics.
+      description: Run a finite repo command locally or in an optional isolated Workspaces environment, optionally selecting an image plus editable workspace_paths and read-only support_paths, and return exit-code semantics.
+    - name: repos_workspace_changes
+      description: Preview source changes produced in the linked execution workspace, including revision conflicts.
+    - name: repos_workspace_apply
+      description: Safely apply an explicitly previewed workspace source revision back to Code.
+    - name: repos_workspace_destroy
+      description: Permanently destroy and unlink a repository's execution workspace while retaining Code files.
     - name: repos_dev_stop
       description: Stop the dev process for a repo. Idempotent.
     - name: repos_dev_status
@@ -111,11 +184,15 @@ provides:
     - name: repos_dev_logs
       description: Tail the dev run's stdout/stderr log file.
     - name: issues_list
-      description: List native Code issues for a repository.
+      description: List native Code issues for a repository, including their current claims. Claim an unclaimed issue before starting work.
     - name: issues_search
-      description: Search native Code issues across all repositories in a project.
+      description: Search native Code issues and their current claims across all repositories in a project.
     - name: issues_get
       description: Get a native Code issue with comments, links, and activity.
+    - name: issues_claim
+      description: Atomically claim an open issue for the authenticated agent or user before starting work.
+    - name: issues_release
+      description: Release the authenticated caller's issue claim; closing an issue releases it automatically.
     - name: issues_create
       description: Create a native Code issue for bugs, feature requests, tasks, or chores.
     - name: issues_update

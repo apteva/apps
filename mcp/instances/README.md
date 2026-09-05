@@ -21,21 +21,36 @@ instance_metrics(host_id)
 ```
 
 `host_id=0` is the **local Apteva machine**, auto-seeded at app mount.
-Other ids are provider-managed compute provisioned through a bound cloud
-integration.
+Other ids are remote hosts provisioned via one of the bound cloud integrations or
+registered as externally managed SSH machines.
 
 ## Tools
 
 | Tool | Purpose |
 |---|---|
-| `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, and Scaleway Apple silicon. |
+| `instance_list_providers` | List bound provider connections and the configured default. |
+| `instance_create` | Provision compute through the bound provider, including VPS, GPU Pods, Scaleway Dedibox, and Apple silicon. |
+| `instance_register` | Register an existing SSH host, including a Mac, and generate its dedicated SSH key. |
 | `instance_get` | Fetch one instance row |
 | `instance_list` | List all instances; optional `provider` / `status` filters |
-| `instance_destroy` | Terminate the provider-managed resource and remove its row where supported (refused for local id 0) |
+| `instance_destroy` | Terminate managed upstream + remove row, or only forget an external host (refused for local id 0) |
 | `instance_run_command` | Shell command. Local: in-process exec. Remote: SSH. |
 | `instance_upload_file` | Write a file. Local: filesystem (path-allowlisted to `<dataDir>/local-files/`). Remote: SCP-equivalent over SSH. |
 | `instance_wait_ready` | Poll until SSH reachable. |
 | `instance_metrics` | CPU / mem / disk / network / load / uptime. 5s cache. |
+| `instance_storage_capabilities` | Describe boot/data support, storage classes, tiers, and lifecycle operations for a provider. |
+| `instance_list_storage_types` | List generic storage tiers and their provider-native mappings. |
+| `instance_volume_create` | Create a managed data volume, optionally attaching and preparing it inside the guest. |
+| `instance_volume_list` / `instance_volume_get` | Inspect volumes tracked by Instances. |
+| `instance_volume_attach` / `instance_volume_detach` | Attach or retain data storage independently of compute; detach safely unmounts prepared filesystems first. |
+| `instance_volume_prepare` | Safely format-if-blank, persist by UUID, mount, and verify an attached Linux data block volume over SSH. |
+| `instance_volume_resize` | Grow a provider volume; shrinking is refused. |
+| `instance_volume_delete` | Delete a detached app-managed data volume with explicit confirmation. |
+| `object_storage_list_providers`, `object_storage_list_plans` | Discover bound object-storage providers, locations, and tiers. |
+| `object_storage_create` | Provision object storage and return its S3 credentials once. |
+| `object_storage_get`, `object_storage_list` | Inspect managed object-storage resources without exposing secrets. |
+| `object_storage_rotate_credentials` | Rotate credentials and return the new secret once. |
+| `object_storage_destroy` | Delete provider storage and revoke its managed credentials with explicit confirmation. |
 
 ## Local instance (id=0)
 
@@ -49,10 +64,77 @@ with a 30s default timeout. `instance_upload_file` writes under
 
 ## Managed remote instances
 
-The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
+An install can bind multiple cloud providers at once and choose one per
+catalog or provisioning request; the configured default is used when no
+provider is specified. The app has provider adapters for Hetzner, DigitalOcean, Contabo, Vultr,
 AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Catalog,
 provisioning, SSH readiness, recovery, and deletion are normalized into the
 same instance contract.
+
+## Storage model
+
+Storage uses independent `role` and `storage_class` dimensions. `boot` versus
+`data` describes what the disk does; `local`, `block`, `network`, or
+`ephemeral` describes how the provider implements it. A Scaleway SBS boot disk
+is therefore `role=boot` and `storage_class=block`.
+
+Omitting `storage` from `instance_create` preserves the provider/image default.
+Providers that support configurable boot storage accept
+`storage.boot.size_gb`, `storage_class`, `tier`, and `delete_policy`.
+`provider_type` remains an advanced provider-native override. Provider/type
+catalog rows expose boot-storage constraints so unsupported combinations are
+rejected before provisioning. Data volumes default to
+`delete_policy=retain`; app-owned volumes can instead use `with_instance`.
+Destroy first detaches retained data volumes and only deletes managed volumes
+whose policy is `with_instance`. Existing/external volumes are never formatted
+or deleted implicitly.
+
+For Scaleway, `storage_class=local` maps to `l_ssd` and is offered only on
+server types with non-zero local-storage capacity, such as DEV1-L. Block-only
+types such as POP2 accept `storage_class=block`, which maps to `sbs_volume`.
+The chosen image must use a compatible local or SBS root snapshot. Readiness
+persists the provider-reported boot volume and verifies both its native type and
+size, then checks that the guest root filesystem expanded to use the requested
+space. Image-derived root-volume requests never send empty-volume fields. A
+full-capacity local request, such as DEV1-L with 80 GB, omits the volume map so
+Scaleway creates the marketplace image's maximum local root disk. Smaller local
+and explicit block roots send only `size` and `volume_type`.
+
+Scaleway server deletion snapshots the attached root-volume identity first,
+deletes the server, waits for the root volume to detach, and then deletes an
+app-managed boot volume whose policy is `with_instance`. Local `l_ssd` roots use
+the Instance API while SBS roots use the Block API. A retained boot volume is
+detached from the instance inventory instead of being silently discarded.
+
+Guest activation is provider-neutral. `instance_volume_prepare` discovers the
+attached device through stable `/dev/disk/by-id` identifiers and a strict size
+fallback. It refuses ambiguous devices, partitions, unsupported filesystems,
+and unknown signatures. With `format_if_blank=true`, a genuinely blank device
+can be formatted as ext4 or XFS, mounted at a dedicated path, recorded in
+`/etc/fstab` by filesystem UUID, assigned an owner/mode, and verified. The same
+`prepare` object can be passed to `instance_volume_create` or
+`instance_volume_attach`; create defaults `format_if_blank` to true because the
+volume was just created, while attach defaults it to false for retained data.
+
+For example, a media host can create usable storage in one call:
+
+```json
+{
+  "instance_id": 42,
+  "name": "media-data",
+  "size_gb": 80,
+  "delete_policy": "retain",
+  "prepare": {
+    "filesystem": "ext4",
+    "mount_path": "/srv/media",
+    "owner": "1000:1000"
+  }
+}
+```
+
+The returned volume reports `guest_ready=true` only after the mount is
+verified. Higher-level apps can use the persisted `mount_path` as their data
+directory or container bind-mount source.
 
 A normal VPS provision:
 
@@ -87,6 +169,77 @@ Mac is deleted. Provisioning uses a non-renewing 24-hour commitment. The
 mandatory minimum allocation is exposed as `deletable_at`; Destroy remains
 disabled until that timestamp. No account password is stored.
 
+### Scaleway Dedibox
+
+Dedibox offers are exposed as `dedibox/<offer-id>` server types and normalized
+as `bare_metal` Linux hosts. They reuse the bound Scaleway connection and its
+default project. Provisioning creates one project-scoped IAM SSH key, orders the
+physical server, follows the returned service until hardware delivery, selects
+the requested Linux release from the server-compatible OS catalog, installs it,
+and waits for SSH. The service and SSH-key IDs are retained privately so a
+restart can resume provisioning and Destroy terminates only the matching
+subscription and owned key.
+
+### Scaleway Elastic Metal
+
+Elastic Metal offers are exposed as `elastic-metal/<offer-id>` server types,
+separately from virtual Instances, Dedibox, and Apple silicon. Catalog discovery
+includes live stock, dedicated CPU/RAM, included local disks, hourly pricing,
+compatible cloud-init operating systems, and supported zones. Provisioning uses
+the hourly offer, validates Scaleway's default partitioning schema, optionally
+applies RAID, installs the selected OS, and waits for both SSH and cloud-init.
+
+Destroy uses provider APIs even when the guest is unreachable. Managed Flexible
+IPs are deleted by default and can be explicitly retained. Scaleway continues
+billing a powered-off Elastic Metal server until it is fully deleted.
+
+## Existing SSH hosts and Macs
+
+`instance_register(name, ssh_host, ssh_user, ssh_port?)` adds an existing
+machine without provisioning or otherwise changing it. Instances returns a
+new Ed25519 public key. Add that key to the selected user's
+`~/.ssh/authorized_keys`, then call `instance_wait_ready(id)` to verify access
+and mark the row ready.
+
+These hosts use the same command, file-transfer, and loopback tunnel tools as
+managed instances. `instance_destroy` only forgets an external row; it never
+shuts down, deletes, or reconfigures the machine. The current remote metrics
+collector requires a declared platform, so metrics are not advertised for
+external hosts by default.
+
+## Object storage
+
+Object storage is a provider resource, not a filesystem volume. Instances can
+provision it through a bound Scaleway or Vultr connection and return the S3
+endpoint, region, bucket where applicable, access key, and secret key. It does
+not create another Apteva Connection and does not mount or consume the storage.
+
+Secrets are deliberately never written to the Instances database. They are
+shown only in the create or rotate response and in the UI's one-time credential
+dialog. Scaleway resources use a dedicated project-scoped IAM application and
+policy; Vultr credentials are owned by its Object Storage subscription. Destroy
+verifies that the provider bucket is gone, then revokes the managed credentials. A partial IAM
+cleanup keeps the local record in an error state so the operation can be safely
+retried.
+
+`object_storage_preflight` performs read-only project, IAM-policy, region, and
+optional bucket-availability checks. Provider and S3 secrets remain write-only;
+the S3 secret is returned once and is never persisted by Instances.
+
+## Diagnostics and reconciliation
+
+Provisioning records explicit ProviderCreate, Boot, Network, SSH, CloudInit,
+Storage, Rollback, and Delete stages while preserving the primary failure and
+any later cleanup failure separately. Failed resources are retained for
+diagnosis by default.
+
+`instance_compare_provider` compares a tracked server with its live provider
+state. `instance_provider_inventory` lists Scaleway virtual Instances, Elastic
+Metal servers, volumes, Flexible IPs, and Object Storage buckets and reports
+untracked server, volume, and bucket IDs. `instance_storage_benchmark` performs
+a bounded 256 MiB write benchmark, removes its temporary file, and saves the
+result.
+
 ## Metrics
 
 Local: `gopsutil` for CPU / memory / disk / network / load / uptime.
@@ -108,8 +261,8 @@ the linguistic collision.
 
 ## Current limitations
 
-- Provider bindings are one-per-install; one Instances install cannot
-  provision from multiple cloud accounts simultaneously.
+- Multiple different providers and multiple accounts of the same provider can
+  be selected by connection ID for provisioning requests.
 - In-place resizing is currently available only for Hetzner.
 - Metrics are pull-only through `instance_metrics`, cached for 5 seconds.
 

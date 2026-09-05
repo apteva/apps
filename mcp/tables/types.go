@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,7 @@ var reservedColumns = map[string]bool{
 	"id":         true,
 	"created_at": true,
 	"updated_at": true,
+	"_revision":  true,
 }
 
 // validColumnTypes is the closed set of types user columns can take.
@@ -95,6 +97,8 @@ func coerceForStorage(col Column, v any) (any, error) {
 		return nil, nil
 	}
 	switch col.Type {
+	case "integer":
+		return exactInteger(v)
 	case "text":
 		s, ok := v.(string)
 		if !ok {
@@ -141,7 +145,7 @@ func coerceForStorage(col Column, v any) (any, error) {
 		if err != nil {
 			return nil, errf("column %q: invalid datetime %q: %w", col.Name, s, err)
 		}
-		return t.UTC().Format(time.RFC3339Nano), nil
+		return t.UTC().Format(timestampLayout), nil
 	case "json":
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -149,24 +153,11 @@ func coerceForStorage(col Column, v any) (any, error) {
 		}
 		return string(b), nil
 	case "file_id":
-		switch n := v.(type) {
-		case float64:
-			if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n || n < math.MinInt64 || n >= math.MaxInt64 {
-				return nil, errf("column %q: file_id must be an integer", col.Name)
-			}
-			return int64(n), nil
-		case int:
-			return int64(n), nil
-		case int64:
+		if n, err := exactInteger(v); err == nil && n > 0 {
 			return n, nil
-		case json.Number:
-			i, err := n.Int64()
-			if err != nil {
-				return nil, errf("column %q: %w", col.Name, err)
-			}
-			return i, nil
 		}
-		return nil, typeMismatch(col, "integer file_id", v)
+		return nil, errf("column %q: file_id must be a positive integer", col.Name)
+
 	}
 	return nil, errf("unknown column type %q on column %q", col.Type, col.Name)
 }
@@ -210,7 +201,9 @@ func hydrateForResult(col Column, raw any) any {
 		default:
 			return raw
 		}
-		if err := json.Unmarshal(b, &v); err != nil {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
 			return string(b)
 		}
 		return v
@@ -249,7 +242,10 @@ func boolArg(args map[string]any, key string) bool {
 func int64Arg(args map[string]any, key string) int64 {
 	switch v := args[key].(type) {
 	case float64:
-		return int64(v)
+		n, err := exactInteger(v)
+		if err == nil {
+			return n
+		}
 	case int:
 		return int64(v)
 	case int64:
@@ -271,6 +267,11 @@ func int64Arg(args map[string]any, key string) int64 {
 func intArg(args map[string]any, key string, def int) int {
 	switch v := args[key].(type) {
 	case float64:
+		n, err := exactInteger(v)
+		if err == nil {
+			return int(n)
+		}
+	case int64:
 		return int(v)
 	case int:
 		return v
@@ -365,7 +366,7 @@ func cfgInt64Range(ctx *sdk.AppCtx, key string, def, min, max int64) int64 {
 }
 
 func queryTimeoutContext(ctx *sdk.AppCtx) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+	return context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
 }
 
 func validateStoredValueSize(ctx *sdk.AppCtx, col Column, v any) error {
@@ -408,8 +409,13 @@ func valueSize(v any) int64 {
 // ─── HTTP small helpers ────────────────────────────────────────────
 
 func httpJSON(w http.ResponseWriter, v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "response encoding failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(b, '\n'))
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {
@@ -420,6 +426,8 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 
 // quote wraps an identifier for safe inline SQL. Only callers that
 // have already validated the identifier should use this.
+const timestampLayout = "2006-01-02T15:04:05.000000000Z"
+
 func quote(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
@@ -454,7 +462,9 @@ func jsonParse(s string) (any, error) {
 		return nil, nil
 	}
 	var v any
-	if err := json.Unmarshal([]byte(s), &v); err != nil {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return nil, err
 	}
 	return v, nil

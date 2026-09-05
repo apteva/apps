@@ -90,47 +90,89 @@ func (s *store) Inbox(projectID string, userID int64, limit int) ([]InboxItem, e
 }
 
 func (s *store) InboxForAgent(projectID string, userID, agentID int64, limit int) ([]InboxItem, error) {
+	page, err := s.InboxPage(projectID, userID, agentID, limit, "")
+	return page.Items, err
+}
+
+type InboxPage struct {
+	Items      []InboxItem    `json:"items"`
+	Total      int            `json:"total"`
+	NextCursor string         `json:"next_cursor"`
+	Attention  map[string]int `json:"attention"`
+}
+
+const inboxPrioritySQL = `CASE m.component_kind WHEN 'approval' THEN 0 WHEN 'alert' THEN CASE m.severity WHEN 'error' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END WHEN 'report' THEN 4 ELSE 9 END`
+
+func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cursor string) (InboxPage, error) {
+	out := InboxPage{Items: []InboxItem{}}
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`
-		SELECT `+prefixCols("m.", messageCols)+`
-		FROM messages m
-		JOIN conversations c ON c.id=m.conversation_id
-		LEFT JOIN participants p ON p.conversation_id=c.id AND p.user_id=?
-		WHERE c.project_id=? AND c.archived_at IS NULL
-		  AND (c.owner_user_id=? OR p.user_id=? OR c.owner_user_id=0)
-		  AND (? = 0 OR EXISTS (
-		      SELECT 1 FROM participants ap
-		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
-		  ))
-		  AND m.component_kind IN (?, ?, ?)
-		  AND (m.component_kind != ? OR m.action_status='pending')
-		  AND m.components_json NOT LIKE '%"dismissed":true%'
-		ORDER BY m.id DESC LIMIT ?`, userID, projectID, userID, userID, agentID, agentID,
-		kindApproval, kindAlert, kindReport, kindApproval, limit)
-	if err != nil {
-		return nil, err
+	priority, lastID := -1, int64(0)
+	if cursor != "" {
+		if _, err := fmt.Sscanf(cursor, "%d:%d", &priority, &lastID); err != nil || priority < 0 || lastID <= 0 {
+			return out, errors.New("invalid inbox cursor")
+		}
 	}
-	defer rows.Close()
-	items := []InboxItem{}
+	base := ` FROM messages m JOIN conversations c ON c.id=m.conversation_id
+ WHERE c.project_id=? AND c.archived_at IS NULL
+ AND (c.owner_user_id=0 OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
+ AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
+ AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0`
+	args := []any{projectID, userID, userID, agentID, agentID}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return out, err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRow(`SELECT COUNT(*)`+base, args...).Scan(&out.Total); err != nil {
+		return out, err
+	}
+	out.Attention = map[string]int{}
+	attentionRows, err := tx.Query(`SELECT c.id,MAX(CASE WHEN m.component_kind='alert' AND m.severity='error' THEN 4 WHEN m.component_kind='alert' AND m.severity='warn' THEN 3 WHEN m.component_kind='approval' THEN 2 WHEN m.component_kind='alert' THEN 1 ELSE 0 END)`+base+` GROUP BY c.id`, args...)
+	if err != nil {
+		return out, err
+	}
+	for attentionRows.Next() {
+		var id string
+		var rank int
+		if err := attentionRows.Scan(&id, &rank); err != nil {
+			attentionRows.Close()
+			return out, err
+		}
+		if rank > 0 {
+			out.Attention[id] = rank
+		}
+	}
+	err = attentionRows.Err()
+	attentionRows.Close()
+	if err != nil {
+		return out, err
+	}
+	paged := base + ` AND (?=-1 OR ` + inboxPrioritySQL + `>? OR (` + inboxPrioritySQL + `=? AND m.id<?)) ORDER BY ` + inboxPrioritySQL + `,m.id DESC LIMIT ?`
+	rows, err := tx.Query(`SELECT `+prefixCols("m.", messageCols)+paged, append(args, priority, priority, priority, lastID, limit+1)...)
+	if err != nil {
+		return out, err
+	}
 	for rows.Next() {
 		m, err := scanMessage(rows)
 		if err != nil {
-			return nil, err
+			rows.Close()
+			return out, err
 		}
-		// Dismissed / already-resolved approvals fall out of the
-		// pending view but stay in history.
-		if m.ComponentKind == kindApproval && cardStatus(m) != "pending" {
-			continue
-		}
-		if dismissed(m) {
-			continue
-		}
-		items = append(items, InboxItem{Message: *m, Priority: inboxPriority(m)})
+		out.Items = append(out.Items, InboxItem{Message: *m, Priority: inboxPriority(m)})
 	}
-	sortInbox(items)
-	return items, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return out, err
+	}
+	if len(out.Items) > limit {
+		out.Items = out.Items[:limit]
+		last := out.Items[limit-1]
+		out.NextCursor = fmt.Sprintf("%d:%d", last.Priority, last.Message.ID)
+	}
+	return out, tx.Commit()
 }
 
 // sortInbox: priority ascending, then newest first. Insertion sort —
@@ -280,7 +322,7 @@ func (a *App) resolveApprovalActor(app *sdk.AppCtx, m *Message, actionID, note s
 	if conv, err := a.store.GetConversation(updated.ConversationID); err == nil {
 		a.deliver(app, conv, updated)
 		if target != "" {
-			a.attemptDelivery(app, target, conv, updated)
+			a.dispatchOrQueue(app, target, conv, updated)
 		}
 	}
 	return updated, nil
@@ -353,6 +395,7 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 	msg := &Message{
 		ConversationID: conv.ID, Role: "system", Content: title,
 		SourceApp: sourceApp, CallbackTool: stringArg(args, "callback_tool"),
+		ClientID: inboxClientID(caller.AppInstallID, stringArg(args, "client_message_id")),
 		// InboxOnly is deliberately NOT set (0.5.1): an item must be
 		// visible in the transcript of the conversation it lives in —
 		// a "Reports" conversation whose reports are hidden from its
@@ -371,6 +414,9 @@ func (a *App) toolInboxPost(ctx context.Context, app *sdk.AppCtx, args map[strin
 		severity := stringArg(args, "severity")
 		if severity == "" {
 			severity = "info"
+		}
+		if severity != "info" && severity != "warn" && severity != "error" {
+			return nil, errors.New("severity must be info, warn, or error")
 		}
 		msg.ComponentKind = kindAlert
 		msg.Severity = severity

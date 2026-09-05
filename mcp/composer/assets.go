@@ -85,15 +85,21 @@ func storageSignedURL(app *sdk.AppCtx, id int64) (string, error) {
 
 func storageLocalPath(app *sdk.AppCtx, id int64) (string, error) {
 	var got struct {
-		StorageKey string `json:"storage_key"`
+		Found bool `json:"found"`
+		File  *struct {
+			StorageKey string `json:"storage_key"`
+		} `json:"file"`
 	}
 	if err := app.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": id}, &got); err != nil {
 		return "", err
 	}
-	if got.StorageKey == "" {
+	if !got.Found || got.File == nil {
+		return "", errors.New("storage file not found for id " + strconv.FormatInt(id, 10))
+	}
+	if got.File.StorageKey == "" {
 		return "", errors.New("storage returned empty storage_key for id " + strconv.FormatInt(id, 10))
 	}
-	return storageLocalPathForKey(app.DataDir(), got.StorageKey)
+	return storageLocalPathForKey(app.DataDir(), got.File.StorageKey)
 }
 
 func storageLocalPathForKey(appDataDir, storageKey string) (string, error) {

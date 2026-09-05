@@ -8,9 +8,8 @@
 //
 // At-least-once delivery with idempotency keys forwarded to HTTP
 // targets, exponential backoff on failure, configurable max_retries.
-// Single dispatcher goroutine driven by an SDK Worker (@every 5s);
-// SQLite row-level lease prevents double-dispatch if a tick crashes
-// mid-flight.
+// An installation-wide dispatcher fills a bounded worker pool; renewable
+// SQLite claims coordinate replicas and allow recovery after process failure.
 package main
 
 import (
@@ -18,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,89 +39,13 @@ import (
 // ─── Manifest (also lives in apteva.yaml; embedded so the running
 // binary is self-describing for `jobs --help` etc.) ────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: jobs
-display_name: Jobs
-version: 0.1.13
-description: |
-  Scheduled-job runner. Other apps and agents enqueue work; jobs
-  delivers it later via platform-mediated app tools, external HTTP,
-  or instance events.
-author: Apteva
-icon: /ui/icon.svg
-icon_style: monochrome
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.apps.call
-    - platform.instances.read
-    - platform.instances.write
-  dynamic_app_calls: true
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - name: jobs_schedule
-      description: Schedule a job with an app-tool, external HTTP, or event target.
-    - name: jobs_cancel
-      description: Cancel a scheduled job. Idempotent.
-    - name: jobs_list
-      description: List jobs filtered by owner_app, owner_instance, status.
-    - name: jobs_get
-      description: Fetch one job by id.
-    - name: jobs_runs
-      description: Fetch recent runs for a job.
-    - name: jobs_run_now
-      description: Trigger an immediate ad-hoc run of a scheduled job.
-    - name: jobs_preview
-      description: Preview deterministic randomized schedule occurrences.
-  ui_panels:
-    - slot: project.page
-      label: Jobs
-      icon: clock
-      entry: /ui/JobsPanel.mjs
-  workers:
-    - name: dispatcher
-      schedule: "@every 5s"
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/jobs
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/jobs.db
-  migrations: migrations/
-config_schema:
-  - name: history_retention_days
-    type: text
-    default: "30"
-    label: Run history retention (days)
-    description: How long to keep entries in job_runs before pruning. 0 disables pruning.
-  - name: dispatch_batch_size
-    type: text
-    default: "20"
-    label: Dispatch batch size
-    description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
-  - name: dispatch_concurrency
-    type: text
-    default: "8"
-    label: Dispatch concurrency
-    description: Maximum jobs executed concurrently within one dispatcher tick. Max 50.
-  - name: http_dispatch_timeout_seconds
-    type: text
-    default: "180"
-    label: HTTP dispatch timeout (seconds)
-    description: Default deadline for HTTP target calls. Per-job targets can override with timeout_seconds or timeout_ms. Max 300 seconds.
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
-type App struct{}
+type App struct {
+	dispatcher *dispatcher
+	requestCtx *sdk.AppCtx
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -135,13 +59,20 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("jobs requires a db block")
 	}
-	globalCtx = ctx
+	a.requestCtx = ctx
+	a.dispatcher = newDispatcher(ctx)
+	a.dispatcher.start()
 	ctx.Logger().Info("jobs mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.dispatcher != nil {
+		a.dispatcher.stop()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
@@ -153,7 +84,10 @@ func (a *App) Workers() []sdk.Worker {
 			Name:     "dispatcher",
 			Schedule: "@every 5s",
 			Run: func(ctx context.Context, app *sdk.AppCtx) error {
-				return dispatchTick(ctx, app)
+				if a.dispatcher != nil {
+					a.dispatcher.wake()
+				}
+				return nil
 			},
 		},
 	}
@@ -171,6 +105,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/jobs/", Handler: a.handleHTTPJobItem},
 		{Pattern: "/preview", Handler: a.handleHTTPPreview},
 		{Pattern: "/runs", Handler: a.handleHTTPRunsCollection},
+		{Pattern: "/scope", Handler: a.handleHTTPScope},
+		{Pattern: "/status", Handler: a.handleHTTPStatus},
 	}
 }
 
@@ -206,6 +142,10 @@ func (a *App) handleHTTPJobItem(w http.ResponseWriter, r *http.Request) {
 		a.handleHTTPRunNow(w, r, parts[0])
 		return
 	}
+	if len(parts) != 1 {
+		httpErr(w, http.StatusNotFound, "unknown job route")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		a.handleHTTPGet(w, r, parts[0])
@@ -217,41 +157,50 @@ func (a *App) handleHTTPJobItem(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHTTPRunsCollection(w http.ResponseWriter, r *http.Request) {
+	if err := validateListQuery(r, 200); err != nil {
+		writeError(w, err)
+		return
+	}
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ctx := getAppCtx(r)
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	rows, err := dbRecentRuns(ctx.AppDB(), pid, limit)
+	rows, err := dbRecentRunsContext(r.Context(), ctx.AppDB(), pid, limit+1, parseInt64(r.URL.Query().Get("before")))
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeError(w, err)
 		return
 	}
-	httpJSON(w, map[string]any{"runs": rows})
+	httpJSON(w, runsPage(rows, limit))
 }
 
 func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
-	ctx := getAppCtx(r)
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeRequest(w, r, &body); err != nil {
+		writeError(w, err)
 		return
 	}
-	normalizeTargetArgs(body, 0)
-	job, err := dbScheduleJob(ctx.AppDB(), pid, body)
+	delete(body, "owner_instance")
+	delete(body, "owner_app")
+	if err := normalizeTargetArgs(body, 0); err != nil {
+		writeError(w, err)
+		return
+	}
+	job, err := dbScheduleJob(ctx.AppDB(), pid, body, r.Context())
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
 	emitJob(ctx, "job.scheduled", job)
@@ -264,55 +213,62 @@ func (a *App) handleHTTPPreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	if err := decodeRequest(w, r, &body); err != nil {
+		writeError(w, err)
 		return
 	}
 	out, err := buildSchedulePreview(body, time.Now().UTC())
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
 	httpJSON(w, out)
 }
 
 func (a *App) handleHTTPList(w http.ResponseWriter, r *http.Request) {
-	ctx := getAppCtx(r)
+	if err := validateListQuery(r, 500); err != nil {
+		writeError(w, err)
+		return
+	}
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
 	q := r.URL.Query()
 	filter := JobFilter{
+		Page:          true,
+		BeforeID:      parseInt64(q.Get("before")),
+		Search:        q.Get("search"),
 		OwnerApp:      q.Get("owner_app"),
 		OwnerInstance: parseInt64(q.Get("owner_instance")),
 		Status:        q.Get("status"),
 		Limit:         atoiDefault(q.Get("limit"), 100, 500),
 	}
-	out, err := dbListJobs(ctx.AppDB(), pid, filter)
+	out, err := dbListJobs(ctx.AppDB(), pid, filter, r.Context())
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeError(w, err)
 		return
 	}
-	httpJSON(w, map[string]any{"jobs": out})
+	httpJSON(w, jobsPage(out, filter.Limit))
 }
 
 func (a *App) handleHTTPGet(w http.ResponseWriter, r *http.Request, idStr string) {
-	ctx := getAppCtx(r)
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
-	id, _ := strconv.ParseInt(idStr, 10, 64)
-	if id == 0 {
+	id, parseErr := strconv.ParseInt(idStr, 10, 64)
+	if parseErr != nil || id <= 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	job, err := dbGetJob(ctx.AppDB(), pid, id)
+	job, err := dbGetJob(ctx.AppDB(), pid, id, r.Context())
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeError(w, err)
 		return
 	}
 	if job == nil {
@@ -323,66 +279,70 @@ func (a *App) handleHTTPGet(w http.ResponseWriter, r *http.Request, idStr string
 }
 
 func (a *App) handleHTTPCancel(w http.ResponseWriter, r *http.Request, idStr string) {
-	ctx := getAppCtx(r)
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
-	id, _ := strconv.ParseInt(idStr, 10, 64)
-	if id == 0 {
+	id, parseErr := strconv.ParseInt(idStr, 10, 64)
+	if parseErr != nil || id <= 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	if err := dbCancelJob(ctx.AppDB(), pid, id); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+	if err := dbCancelJob(ctx.AppDB(), pid, id, r.Context()); err != nil {
+		writeError(w, err)
 		return
 	}
 	if ctx != nil {
-		ctx.Emit("job.cancelled", map[string]any{"id": id})
+		ctx.EmitWithProject("job.cancelled", pid, map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"cancelled": true, "id": id})
 }
 
 func (a *App) handleHTTPJobRuns(w http.ResponseWriter, r *http.Request, idStr string) {
-	ctx := getAppCtx(r)
-	pid, err := resolveProjectFromRequest(r)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+	if err := validateListQuery(r, 200); err != nil {
+		writeError(w, err)
 		return
 	}
-	id, _ := strconv.ParseInt(idStr, 10, 64)
-	if id == 0 {
+	ctx := a.httpContext(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	id, parseErr := strconv.ParseInt(idStr, 10, 64)
+	if parseErr != nil || id <= 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
 	limit := atoiDefault(r.URL.Query().Get("limit"), 50, 200)
-	runs, err := dbJobRuns(ctx.AppDB(), pid, id, limit)
+	runs, err := dbJobRunsContext(r.Context(), ctx.AppDB(), pid, id, limit+1, parseInt64(r.URL.Query().Get("before")))
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writeError(w, err)
 		return
 	}
-	httpJSON(w, map[string]any{"runs": runs})
+	httpJSON(w, runsPage(runs, limit))
 }
 
 func (a *App) handleHTTPRunNow(w http.ResponseWriter, r *http.Request, idStr string) {
-	ctx := getAppCtx(r)
+	ctx := a.httpContext(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		writeError(w, err)
 		return
 	}
-	id, _ := strconv.ParseInt(idStr, 10, 64)
-	if id == 0 {
+	id, parseErr := strconv.ParseInt(idStr, 10, 64)
+	if parseErr != nil || id <= 0 {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	if err := dbRunNow(ctx.AppDB(), pid, id); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+	if err := queueManualRun(ctx.AppDB(), pid, id, r.Context()); err != nil {
+		writeError(w, err)
 		return
 	}
 	if ctx != nil {
-		ctx.Emit("job.queued", map[string]any{"id": id})
+		ctx.EmitWithProject("job.queued", pid, map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"queued": true, "id": id})
 }
@@ -395,19 +355,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "jobs_schedule",
 			Description: "Schedule a job to run later (once, on an interval, on a cron expression, or at deterministic random times in a daily window). Use target.kind=event to wake an agent, target.kind=app_tool with {app, tool, input?} to invoke a sibling app through the platform, or target.kind=http with url=<absolute> for an external webhook. Functions use app_tool with app=functions, tool=functions_invoke, input={name,event}.",
 			InputSchema: schemaObject(map[string]any{
-				"name": map[string]any{"type": "string", "description": "Human-readable job name."},
+				"name": map[string]any{"type": "string", "minLength": 1, "maxLength": 200, "description": "Human-readable job name."},
 				"schedule": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
 						"kind":                map[string]any{"type": "string", "enum": []any{"once", "every", "cron", "random"}},
 						"run_at":              map[string]any{"type": "string", "description": "RFC3339 timestamp; required when kind=once."},
-						"every_seconds":       map[string]any{"type": "integer", "description": "Interval in seconds; required when kind=every."},
+						"every_seconds":       map[string]any{"type": "integer", "minimum": 1, "maximum": 31536000, "description": "Interval in seconds; required when kind=every."},
 						"cron":                map[string]any{"type": "string", "description": "5-field cron 'M H DOM MON DOW'; required when kind=cron."},
 						"period":              map[string]any{"type": "string", "enum": []any{"day"}, "description": "Calendar period for kind=random. Currently day."},
-						"runs_per_period":     map[string]any{"type": "integer", "description": "Number of randomized runs in each period."},
+						"runs_per_period":     map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Number of randomized runs in each period."},
 						"window_start":        map[string]any{"type": "string", "description": "Inclusive local-time window start in HH:MM."},
 						"window_end":          map[string]any{"type": "string", "description": "Inclusive local-time window end in HH:MM."},
-						"min_spacing_minutes": map[string]any{"type": "integer", "description": "Minimum minutes between randomized runs."},
+						"min_spacing_minutes": map[string]any{"type": "integer", "minimum": 0, "maximum": 1440, "description": "Minimum minutes between randomized runs."},
 					},
 					"required": []any{"kind"},
 				},
@@ -436,13 +396,13 @@ func (a *App) MCPTools() []sdk.Tool {
 					"required": []any{"kind"},
 				},
 				"idempotency_key": map[string]any{"type": "string"},
-				"max_retries":     map[string]any{"type": "integer"},
-				"backoff_seconds": map[string]any{"type": "integer"},
+				"max_retries":     map[string]any{"type": "integer", "minimum": 0, "maximum": 20},
+				"backoff_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 86400},
 				"timezone":        map[string]any{"type": "string", "description": "IANA tz name; cron is evaluated in this tz. Default UTC."},
 				"owner_app":       map[string]any{"type": "string"},
 				"schedule_seed":   map[string]any{"type": "string", "description": "Optional seed returned by jobs_preview so creation matches the preview."},
 			}, []string{"name", "schedule", "target"}),
-			Handler: a.toolSchedule,
+			HandlerCtx: a.toolScheduleTrusted,
 		},
 		{
 			Name:        "jobs_cancel",
@@ -450,7 +410,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
-			Handler: a.toolCancel,
+			HandlerCtx: a.scopedTool(a.toolCancel),
 		},
 		{
 			Name:        "jobs_list",
@@ -459,9 +419,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"owner_app":      map[string]any{"type": "string"},
 				"owner_instance": map[string]any{"type": "integer"},
 				"status":         map[string]any{"type": "string"},
-				"limit":          map[string]any{"type": "integer"},
+				"limit":          map[string]any{"type": "integer", "minimum": 1, "maximum": 500},
+				"before":         map[string]any{"type": "integer", "minimum": 1},
+				"search":         map[string]any{"type": "string", "maxLength": 200},
 			}, nil),
-			Handler: a.toolList,
+			HandlerCtx: a.scopedTool(a.toolList),
 		},
 		{
 			Name:        "jobs_get",
@@ -469,24 +431,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
-			Handler: a.toolGet,
+			HandlerCtx: a.scopedTool(a.toolGet),
 		},
 		{
 			Name:        "jobs_runs",
 			Description: "Fetch recent runs for a job. Args: id, limit (default 50, max 200).",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"limit": map[string]any{"type": "integer"},
+				"id":     map[string]any{"type": "integer"},
+				"limit":  map[string]any{"type": "integer", "minimum": 1, "maximum": 200},
+				"before": map[string]any{"type": "integer", "minimum": 1},
 			}, []string{"id"}),
-			Handler: a.toolRuns,
+			HandlerCtx: a.scopedTool(a.toolRuns),
 		},
 		{
 			Name:        "jobs_run_now",
-			Description: "Queue an immediate ad-hoc run of a scheduled job. Bumps next_run_at to now without changing the schedule.",
+			Description: "Queue an immediate ad-hoc run of a scheduled job. Creates a separate occurrence without changing the regular schedule.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
-			Handler: a.toolRunNow,
+			HandlerCtx: a.scopedTool(a.toolRunNow),
 		},
 		{
 			Name:        "jobs_preview",
@@ -497,7 +460,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"schedule_seed": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, []string{"schedule"}),
-			Handler: a.toolPreview,
+			HandlerCtx: a.scopedTool(a.toolPreview),
 		},
 	}
 }
@@ -527,19 +490,27 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 }
 
 func resolveProjectFromRequest(r *http.Request) (string, error) {
-	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
+	env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	if r.URL.Query().Get("scope") == "global" {
+		if env != "" || r.URL.Query().Get("project_id") != "" {
+			return "", badRequest("global scope requires a global install and no project_id")
+		}
+		return "", nil
+	}
+	if env != "" {
 		return env, nil
 	}
-	if v := r.URL.Query().Get("project_id"); v != "" {
-		return v, nil
+	if values, ok := r.URL.Query()["project_id"]; ok && len(values) == 1 {
+		return values[0], nil
 	}
-	return "", errors.New("project_id required in query string when install scope=global")
+	return "", badRequest("project_id required; use scope=global for global jobs")
 }
 
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Job struct {
 	ID             int64           `json:"id"`
+	ParentJobID    int64           `json:"parent_job_id,omitempty"`
 	ProjectID      string          `json:"project_id,omitempty"`
 	Name           string          `json:"name"`
 	OwnerApp       string          `json:"owner_app,omitempty"`
@@ -576,7 +547,7 @@ type JobRun struct {
 	DurationMS     int64  `json:"duration_ms"`
 	Status         string `json:"status"`
 	HTTPStatus     int    `json:"http_status,omitempty"`
-	ResponseBody   string `json:"response_body,omitempty"`
+	ResponseBody   string `json:"-"`
 	Error          string `json:"error,omitempty"`
 	Attempt        int    `json:"attempt"`
 	ScheduledFor   string `json:"scheduled_for,omitempty"`
@@ -584,6 +555,9 @@ type JobRun struct {
 }
 
 type JobFilter struct {
+	Page          bool
+	BeforeID      int64
+	Search        string
 	OwnerApp      string
 	OwnerInstance int64
 	Status        string
@@ -604,8 +578,10 @@ func (a *App) toolSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, has := args["owner_instance"]; !has && callerInstance != 0 {
 		args["owner_instance"] = callerInstance
 	}
-	normalizeTargetArgs(args, callerInstance)
-	job, err := dbScheduleJob(ctx.AppDB(), pid, args)
+	if err := normalizeTargetArgs(args, callerInstance); err != nil {
+		return nil, err
+	}
+	job, err := dbScheduleJob(ctx.AppDB(), pid, args, argsContext(args))
 	if err != nil {
 		return nil, err
 	}
@@ -615,30 +591,31 @@ func (a *App) toolSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // normalizeTargetArgs translates the LLM/UI-facing event target into the
 // stable wire shape shared by MCP and HTTP scheduling.
-func normalizeTargetArgs(args map[string]any, callerInstance int64) {
-	if t, ok := args["target"].(map[string]any); ok {
-		if strings.EqualFold(strKey(t, "kind"), "event") {
-			// Pull agent_id (preferred) or instance_id (legacy).
-			raw, has := t["agent_id"]
-			if !has {
-				raw = t["instance_id"]
-			}
-			needsSelf := raw == nil
-			if s, isStr := raw.(string); isStr && (s == "" || strings.EqualFold(s, "self") || s == "0") {
-				needsSelf = true
-			}
-			if !needsSelf && toInt64(raw) == 0 {
-				needsSelf = true
-			}
-			if needsSelf && callerInstance != 0 {
-				t["instance_id"] = callerInstance
-			} else if !needsSelf {
-				t["instance_id"] = toInt64(raw)
-			}
-			// Drop the agent_id surface — wire format is instance_id.
-			delete(t, "agent_id")
-		}
+func normalizeTargetArgs(args map[string]any, callerInstance int64) error {
+	t, ok := args["target"].(map[string]any)
+	if !ok {
+		return nil
 	}
+	if strings.EqualFold(strKey(t, "kind"), "event") {
+		raw, has := t["agent_id"]
+		if !has {
+			raw = t["instance_id"]
+		}
+		self := raw == nil || raw == "" || raw == "self" || raw == "0"
+		n, err := integer(raw)
+		if !self && (err != nil || n < 0) {
+			return badRequest("event agent_id must be a positive integer or self")
+		}
+		if self || n == 0 {
+			n = callerInstance
+		}
+		if n <= 0 {
+			return badRequest("event agent_id required; self requires a calling agent")
+		}
+		t["instance_id"] = n
+		delete(t, "agent_id")
+	}
+	return nil
 }
 
 func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -650,11 +627,11 @@ func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := dbCancelJob(ctx.AppDB(), pid, id); err != nil {
+	if err := dbCancelJob(ctx.AppDB(), pid, id, argsContext(args)); err != nil {
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("job.cancelled", map[string]any{"id": id})
+		ctx.EmitWithProject("job.cancelled", pid, map[string]any{"id": id})
 	}
 	return map[string]any{"cancelled": true, "id": id}, nil
 }
@@ -666,7 +643,7 @@ func emitJob(ctx *sdk.AppCtx, topic string, j *Job) {
 	if ctx == nil || j == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, j.ProjectID, map[string]any{
 		"id":             j.ID,
 		"name":           j.Name,
 		"status":         j.Status,
@@ -682,6 +659,9 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	filter := JobFilter{
+		Page:          true,
+		BeforeID:      int64Arg(args, "before"),
+		Search:        strArg(args, "search"),
 		OwnerApp:      strArg(args, "owner_app"),
 		OwnerInstance: int64Arg(args, "owner_instance"),
 		Status:        strArg(args, "status"),
@@ -690,11 +670,11 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if filter.Limit <= 0 || filter.Limit > 500 {
 		filter.Limit = 100
 	}
-	out, err := dbListJobs(ctx.AppDB(), pid, filter)
+	out, err := dbListJobs(ctx.AppDB(), pid, filter, argsContext(args))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"jobs": out, "count": len(out)}, nil
+	return jobsPage(out, filter.Limit), nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -706,7 +686,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	job, err := dbGetJob(ctx.AppDB(), pid, id)
+	job, err := dbGetJob(ctx.AppDB(), pid, id, argsContext(args))
 	if err != nil {
 		return nil, err
 	}
@@ -729,11 +709,11 @@ func (a *App) toolRuns(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	runs, err := dbJobRuns(ctx.AppDB(), pid, id, limit)
+	runs, err := dbJobRunsContext(argsContext(args), ctx.AppDB(), pid, id, limit+1, int64Arg(args, "before"))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"runs": runs}, nil
+	return runsPage(runs, limit), nil
 }
 
 func (a *App) toolRunNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -745,11 +725,11 @@ func (a *App) toolRunNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := dbRunNow(ctx.AppDB(), pid, id); err != nil {
+	if err := queueManualRun(ctx.AppDB(), pid, id, argsContext(args)); err != nil {
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("job.queued", map[string]any{"id": id})
+		ctx.EmitWithProject("job.queued", pid, map[string]any{"id": id})
 	}
 	return map[string]any{"queued": true, "id": id}, nil
 }
@@ -759,6 +739,17 @@ func (a *App) toolPreview(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func buildSchedulePreview(args map[string]any, now time.Time) (map[string]any, error) {
+	if err := boundedInteger(args, "limit", 1, 50); err != nil {
+		return nil, err
+	}
+	if schedule, ok := args["schedule"].(map[string]any); ok {
+		for k, b := range map[string][2]int64{"runs_per_period": {1, 100}, "min_spacing_minutes": {0, 1440}} {
+			if err := boundedInteger(schedule, k, b[0], b[1]); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	schedule, _ := args["schedule"].(map[string]any)
 	if schedule == nil {
 		return nil, errors.New("schedule required")
@@ -779,8 +770,13 @@ func buildSchedulePreview(args map[string]any, now time.Time) (map[string]any, e
 
 // ─── DB helpers ────────────────────────────────────────────────────
 
-func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
-	name := strArg(args, "name")
+func dbScheduleJob(db *sql.DB, pid string, args map[string]any, parents ...context.Context) (*Job, error) {
+	ctx, cancel := operationContext(parents)
+	defer cancel()
+	if err := validateScheduleArgs(args); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(strArg(args, "name"))
 	if name == "" {
 		return nil, errors.New("name required")
 	}
@@ -890,6 +886,9 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 	// First fire-time. Existing schedule kinds retain their established
 	// arithmetic; random schedules advance through logical occurrences.
 	next := computeNextRun(kind, runAt, everySeconds, cronExpr, loc, now)
+	if kind != "random" && next.IsZero() {
+		return nil, badRequest("schedule has no possible next occurrence")
+	}
 	if randomConfig != nil {
 		next, err = nextRandomRunAfter(*randomConfig, scheduleSeed, loc, now)
 		if err != nil {
@@ -905,16 +904,32 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 		randomConfigJSON = string(encoded)
 	}
 
-	res, err := db.Exec(
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var nextID int64
+	if err := tx.QueryRowContext(ctx, `UPDATE job_sequence SET value=MAX(value,(SELECT COALESCE(MAX(id),0) FROM jobs))+1 RETURNING value`).Scan(&nextID); err != nil {
+		return nil, err
+	}
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs WHERE project_id=? AND status IN ('pending','running')`, pid).Scan(&active); err != nil {
+		return nil, err
+	}
+	if active >= maxActiveJobs {
+		return nil, conflict("active job limit reached")
+	}
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO jobs (
-			project_id, name, owner_app, owner_instance,
+			id, project_id, name, owner_app, owner_instance,
 			schedule_kind, cron_expr, every_seconds, run_at, timezone, random_config_json, schedule_seed,
 			target_kind, target_json,
 			idempotency_key, max_retries, backoff_seconds,
 			status, next_run_at, scheduled_for,
 			created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
-		pid, name, strArg(args, "owner_app"), nullableInt64(int64Arg(args, "owner_instance")),
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+		nextID, pid, name, strArg(args, "owner_app"), nullableInt64(int64Arg(args, "owner_instance")),
 		kind, nullStr(cronExpr), nullableInt64Ptr(everySeconds), nullableTime(runAt), tz, nullStr(randomConfigJSON), nullStr(scheduleSeed),
 		targetKind, string(targetJSON),
 		nullStr(strArg(args, "idempotency_key")), maxRetries, backoff,
@@ -923,18 +938,23 @@ func dbScheduleJob(db *sql.DB, pid string, args map[string]any) (*Job, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return dbGetJob(db, pid, id)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbGetJob(db, pid, id, ctx)
 }
 
-func dbGetJob(db *sql.DB, pid string, id int64) (*Job, error) {
-	row := db.QueryRow(
+func dbGetJob(db *sql.DB, pid string, id int64, parents ...context.Context) (*Job, error) {
+	ctx, cancel := operationContext(parents)
+	defer cancel()
+	row := db.QueryRowContext(ctx,
 		`SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
 			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
 			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
 			target_json,
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
 			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
-			attempt, created_at, updated_at, cancelled_at
+			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0)
 		 FROM jobs WHERE id = ? AND project_id = ?`,
 		id, pid)
 	job, err := scanJob(row)
@@ -963,7 +983,7 @@ func scanJob(row scanRow) (*Job, error) {
 		&targetJSON,
 		&j.IdempotencyKey, &j.MaxRetries, &j.BackoffSeconds,
 		&j.Status, &nextRun, &scheduledFor, &lastRun, &j.LastStatus, &j.LastError,
-		&j.Attempt, &j.CreatedAt, &j.UpdatedAt, &cancelledAt)
+		&j.Attempt, &j.CreatedAt, &j.UpdatedAt, &cancelledAt, &j.ParentJobID)
 	if err != nil {
 		return nil, err
 	}
@@ -981,7 +1001,9 @@ func scanJob(row scanRow) (*Job, error) {
 	j.LastRunAt = lastRun.String
 	j.CancelledAt = cancelledAt.String
 	if targetJSON != "" {
-		_ = json.Unmarshal([]byte(targetJSON), &j.Target)
+		if err := json.Unmarshal([]byte(targetJSON), &j.Target); err != nil {
+			return nil, fmt.Errorf("decode target for job %d: %w", j.ID, err)
+		}
 	}
 	if randomConfigJSON != "" {
 		j.Random = &RandomSchedule{}
@@ -992,9 +1014,19 @@ func scanJob(row scanRow) (*Job, error) {
 	return j, nil
 }
 
-func dbListJobs(db *sql.DB, pid string, f JobFilter) ([]*Job, error) {
-	where := []string{"project_id = ?"}
+func dbListJobs(db *sql.DB, pid string, f JobFilter, parents ...context.Context) ([]*Job, error) {
+	ctx, cancel := operationContext(parents)
+	defer cancel()
+	where := []string{"project_id = ? AND parent_job_id IS NULL"}
 	args := []any{pid}
+	if f.BeforeID > 0 {
+		where = append(where, "id < ?")
+		args = append(args, f.BeforeID)
+	}
+	if f.Search != "" {
+		where = append(where, "(name LIKE ? ESCAPE '\\' OR CAST(id AS TEXT)=?)")
+		args = append(args, "%"+escapeLike(f.Search)+"%", f.Search)
+	}
 	if f.OwnerApp != "" {
 		where = append(where, "owner_app = ?")
 		args = append(args, f.OwnerApp)
@@ -1014,14 +1046,17 @@ func dbListJobs(db *sql.DB, pid string, f JobFilter) ([]*Job, error) {
 	q := `SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
 			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
 			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
-			target_json,
-			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
+			json_object('kind',target_kind),
+			'', max_retries, backoff_seconds,
 			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
-			attempt, created_at, updated_at, cancelled_at
+			attempt, created_at, updated_at, cancelled_at, COALESCE(parent_job_id,0)
 		 FROM jobs WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY COALESCE(next_run_at, '9999') ASC, id DESC LIMIT ?`
+		` ORDER BY id DESC LIMIT ?`
+	if f.Page {
+		limit++
+	}
 	args = append(args, limit)
-	rows, err := db.Query(q, args...)
+	rows, err := db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1030,57 +1065,42 @@ func dbListJobs(db *sql.DB, pid string, f JobFilter) ([]*Job, error) {
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err != nil {
-			continue
+			return nil, err
 		}
-		out = append(out, j)
+		out = append(out, publicJob(j))
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
-func dbCancelJob(db *sql.DB, pid string, id int64) error {
+func dbCancelJob(db *sql.DB, pid string, id int64, parents ...context.Context) error {
+	ctx, cancel := operationContext(parents)
+	defer cancel()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
+	_, err := db.ExecContext(ctx,
 		`UPDATE jobs SET status = 'cancelled',
 			cancelled_at = ?, updated_at = ?,
 			next_run_at = NULL
-		 WHERE id = ? AND project_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
-		now, now, id, pid)
+		 WHERE (id = ? OR parent_job_id = ?) AND project_id = ? AND status NOT IN ('done', 'failed', 'cancelled')`,
+		now, now, id, id, pid)
 	return err
 }
 
-func dbRunNow(db *sql.DB, pid string, id int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(
-		`UPDATE jobs SET next_run_at = ?, updated_at = ?
-		 WHERE id = ? AND project_id = ? AND status = 'pending'`,
-		now, now, id, pid)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return nil
-	}
-	var status string
-	if err := db.QueryRow(`SELECT status FROM jobs WHERE id = ? AND project_id = ?`, id, pid).Scan(&status); err == sql.ErrNoRows {
-		return errors.New("job not found")
-	} else if err != nil {
-		return err
-	}
-	if status == "running" {
-		return errors.New("job is already running")
-	}
-	return fmt.Errorf("cannot run job with terminal status %q", status)
-}
+func dbRunNow(db *sql.DB, pid string, id int64) error { return queueManualRun(db, pid, id) }
 
-func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int) ([]*JobRun, error) {
-	rows, err := db.Query(
+func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int, before ...int64) ([]*JobRun, error) {
+	return dbJobRunsContext(context.Background(), db, pid, jobID, limit, before...)
+}
+func dbJobRunsContext(parent context.Context, db *sql.DB, pid string, jobID int64, limit int, before ...int64) ([]*JobRun, error) {
+	ctx, cancel := operationContext([]context.Context{parent})
+	defer cancel()
+	rows, err := db.QueryContext(ctx,
 		`SELECT id, job_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(http_status,0),
 			COALESCE(response_body,''), COALESCE(error,''), attempt,
 			COALESCE(scheduled_for,''), COALESCE(idempotency_key,'')
-		 FROM job_runs WHERE project_id = ? AND job_id = ?
-		 ORDER BY started_at DESC LIMIT ?`,
-		pid, jobID, limit)
+		 FROM job_runs WHERE project_id = ? AND job_id = ? AND (?=0 OR id<?)
+		 ORDER BY id DESC LIMIT ?`,
+		pid, jobID, cursorValue(before), cursorValue(before), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1090,22 +1110,28 @@ func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int) ([]*JobRun, error
 		r := &JobRun{}
 		if err := rows.Scan(&r.ID, &r.JobID, &r.StartedAt, &r.FinishedAt,
 			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt,
-			&r.ScheduledFor, &r.IdempotencyKey); err == nil {
-			out = append(out, r)
+			&r.ScheduledFor, &r.IdempotencyKey); err != nil {
+			return nil, err
 		}
+		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
-func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
-	rows, err := db.Query(
+func dbRecentRuns(db *sql.DB, pid string, limit int, before ...int64) ([]*JobRun, error) {
+	return dbRecentRunsContext(context.Background(), db, pid, limit, before...)
+}
+func dbRecentRunsContext(parent context.Context, db *sql.DB, pid string, limit int, before ...int64) ([]*JobRun, error) {
+	ctx, cancel := operationContext([]context.Context{parent})
+	defer cancel()
+	rows, err := db.QueryContext(ctx,
 		`SELECT id, job_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(http_status,0),
 			COALESCE(response_body,''), COALESCE(error,''), attempt,
 			COALESCE(scheduled_for,''), COALESCE(idempotency_key,'')
-		 FROM job_runs WHERE project_id = ?
-		 ORDER BY started_at DESC LIMIT ?`,
-		pid, limit)
+		 FROM job_runs WHERE project_id = ? AND (?=0 OR id<?)
+		 ORDER BY id DESC LIMIT ?`,
+		pid, cursorValue(before), cursorValue(before), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1115,20 +1141,19 @@ func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
 		r := &JobRun{}
 		if err := rows.Scan(&r.ID, &r.JobID, &r.StartedAt, &r.FinishedAt,
 			&r.DurationMS, &r.Status, &r.HTTPStatus, &r.ResponseBody, &r.Error, &r.Attempt,
-			&r.ScheduledFor, &r.IdempotencyKey); err == nil {
-			out = append(out, r)
+			&r.ScheduledFor, &r.IdempotencyKey); err != nil {
+			return nil, err
 		}
+		out = append(out, r)
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // ─── Dispatcher ────────────────────────────────────────────────────
 //
-// One tick per worker schedule (default 5s). Picks every pending job
-// whose next_run_at is in the past, claims it (lease + status flip),
-// dispatches its target, records a job_run row, then either
-// reschedules (every/cron) or marks done/failed (once / retries
-// exhausted).
+// The dispatcher claims due jobs only when an execution slot is available.
+// Attempts are recorded before delivery and finalized with the schedule in
+// one transaction. Workers that lose ownership cannot overwrite a successor.
 //
 // Lease tokens make claims safe across replicas and let a later worker
 // reclaim rows whose prior owner crashed. The TTL exceeds every supported
@@ -1145,8 +1170,6 @@ const (
 // Package-level so tests can substitute a stub via setDispatchClient.
 var dispatchClient = &http.Client{}
 var dispatchClientMu sync.RWMutex
-var retentionMu sync.Mutex
-var retentionLastRun = map[string]time.Time{}
 
 func setDispatchClient(c *http.Client) {
 	dispatchClientMu.Lock()
@@ -1160,206 +1183,109 @@ func getDispatchClient() *http.Client {
 	return dispatchClient
 }
 
-func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
+// dispatchOne durably records the attempt before delivery. Lease loss cancels
+// the actual network request; stale owners cannot change the schedule.
+func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) error {
 	db := app.AppDB()
-	if db == nil {
-		return nil
-	}
-	now := time.Now().UTC()
-	pid := app.CurrentProject()
-	batch := atoiDefault(app.Config().Get("dispatch_batch_size"), 20, 200)
-	concurrency := atoiDefault(app.Config().Get("dispatch_concurrency"), 8, 50)
-	if err := maybePruneRunHistory(db, pid, app.Config(), now); err != nil {
-		app.Logger().Warn("prune run history", "project_id", pid, "err", err)
-	}
-
-	// A unique token distinguishes this claim from every other worker's
-	// claim, even when their lease timestamps happen to match.
-	leaseToken, err := newLeaseToken()
-	if err != nil {
-		return fmt.Errorf("lease token: %w", err)
-	}
-	leaseUntil := now.Add(leaseTTL).Format(time.RFC3339)
-	res, err := db.Exec(
-		`UPDATE jobs SET status = 'running', lease_until = ?, lease_token = ?, updated_at = ?
-		 WHERE id IN (
-			SELECT id FROM jobs
-			WHERE project_id = ? AND (
-				(status = 'pending' AND next_run_at <= ?)
-				OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
-			)
-			ORDER BY next_run_at ASC, id ASC LIMIT ?
-		 )`,
-		leaseUntil, leaseToken, now.Format(time.RFC3339),
-		pid, now.Format(time.RFC3339), now.Format(time.RFC3339), batch)
-	if err != nil {
-		return fmt.Errorf("claim: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil
-	}
-
-	// Reload claimed jobs.
-	rows, err := db.Query(
-		`SELECT id, project_id, name, COALESCE(owner_app,''), owner_instance,
-			schedule_kind, COALESCE(cron_expr,''), every_seconds, run_at, timezone,
-			COALESCE(random_config_json,''), COALESCE(schedule_seed,''),
-			target_json,
-			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
-			status, next_run_at, scheduled_for, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
-			attempt, created_at, updated_at, cancelled_at
-		 FROM jobs WHERE project_id = ? AND status = 'running' AND lease_token = ?`,
-		pid, leaseToken)
-	if err != nil {
-		return err
-	}
-	jobs := []*Job{}
-	for rows.Next() {
-		j, err := scanJob(rows)
-		if err == nil {
-			j.LeaseToken = leaseToken
-			jobs = append(jobs, j)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return err
-	}
-	rows.Close()
-
-	sem := make(chan struct{}, concurrency)
-	var wg sync.WaitGroup
-	for _, j := range jobs {
-		if ctx.Err() != nil {
-			break
-		}
-		sem <- struct{}{}
-		wg.Add(1)
-		go func(job *Job) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			dispatchOne(ctx, app, job)
-		}(j)
-	}
-	wg.Wait()
-	return ctx.Err()
-}
-
-// dispatchOne runs a single job target, records a run row, then
-// reschedules / retires the job. Errors here never propagate up — a
-// failure in one job must not break the tick for siblings.
-func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
-	db := app.AppDB()
-	attempt := j.Attempt + 1
 	started := time.Now().UTC()
-	scheduledTime := jobScheduledTime(j, started)
-	j.ScheduledFor = scheduledTime.Format(time.RFC3339)
-	effectiveIdempotencyKey := occurrenceIdempotencyKey(j)
-
-	status, httpCode, body, dispatchErr := runTarget(ctx, app, j)
-
-	finished := time.Now().UTC()
-	duration := finished.Sub(started).Milliseconds()
-	errStr := ""
-	if dispatchErr != nil {
-		errStr = truncate(dispatchErr.Error(), 1024)
+	scheduled := jobScheduledTime(j, started)
+	// Keep the exact existing identity across retries, including pre-migration offsets.
+	if j.ScheduledFor == "" {
+		j.ScheduledFor = scheduled.UTC().Format(time.RFC3339)
 	}
-	respBody := truncate(body, 2048)
-
-	loc, _ := time.LoadLocation(j.Timezone)
-	if loc == nil {
+	runID, err := beginAttempt(ctx, db, j, started)
+	if err != nil {
+		return fmt.Errorf("start attempt: %w", err)
+	}
+	if runID == 0 {
+		return nil
+	}
+	runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	leaseDone := make(chan struct{})
+	go renewLease(runCtx, db, j, cancel, leaseDone)
+	status, code, _, dispatchErr := runTarget(runCtx, app, j)
+	if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
+		status = "timeout"
+		dispatchErr = runCtx.Err()
+	}
+	if errors.Is(runCtx.Err(), context.Canceled) {
+		status = "interrupted"
+		dispatchErr = errors.New("Delivery interrupted; outcome may be unknown")
+	}
+	cancel()
+	<-leaseDone
+	finished := time.Now().UTC()
+	attempt := j.Attempt + 1
+	errStr := safeDispatchError(dispatchErr, j.Target)
+	loc, err := time.LoadLocation(j.Timezone)
+	if err != nil {
 		loc = time.UTC
 	}
-	nextStatus := "pending"
+	nextStatus, nextAttempt := "pending", 0
 	nextRun := time.Time{}
-	nextScheduled := scheduledTime
-	nextAttempt := 0
+	nextScheduled := j.ScheduledFor
+	advance := func() {
+		if j.ScheduleKind == "random" {
+			nextRun, err = computeNextRandomOccurrence(j, loc, scheduled)
+		} else {
+			nextRun = computeNextRunAfter(j, loc, finished)
+		}
+		if err != nil {
+			errStr = safeDispatchError(err, j.Target)
+		}
+		if nextRun.IsZero() {
+			if j.ScheduleKind == "once" && status == "ok" {
+				nextStatus = "done"
+			} else {
+				nextStatus = "failed"
+			}
+		} else {
+			nextScheduled = nextRun.UTC().Format(time.RFC3339)
+		}
+	}
+	if status == "ok" {
+		advance()
+	} else if status == "interrupted" || attempt <= j.MaxRetries {
+		nextRun = finished.Add(retryDelay(j.BackoffSeconds, attempt))
+		nextAttempt = attempt
+	} else {
+		advance()
+	}
 	lastStatus := "error"
 	if status == "ok" {
 		lastStatus = "ok"
-		if j.ScheduleKind == "random" {
-			nextRun, dispatchErr = computeNextRandomOccurrence(j, loc, scheduledTime)
-		} else {
-			// Preserve the established once/every/cron cadence semantics.
-			nextRun = computeNextRunAfter(j, loc, finished)
-		}
-		if nextRun.IsZero() {
-			if dispatchErr != nil {
-				nextStatus = "failed"
-			} else {
-				nextStatus = "done"
-			}
-		} else {
-			nextScheduled = nextRun
-		}
-	} else if attempt <= j.MaxRetries {
-		delay := time.Duration(j.BackoffSeconds) * time.Second
-		for i := 1; i < attempt; i++ {
-			delay *= 2
-		}
-		nextRun = finished.Add(delay)
-		nextAttempt = attempt
-	} else if j.ScheduleKind == "once" {
-		nextStatus = "failed"
-	} else {
-		if j.ScheduleKind == "random" {
-			nextRun, dispatchErr = computeNextRandomOccurrence(j, loc, scheduledTime)
-		} else {
-			nextRun = computeNextRunAfter(j, loc, finished)
-		}
-		if nextRun.IsZero() {
-			nextStatus = "failed"
-		} else {
-			nextScheduled = nextRun
-		}
 	}
-	if dispatchErr != nil && errStr == "" {
-		errStr = truncate(dispatchErr.Error(), 1024)
-	}
-
-	tx, err := db.BeginTx(ctx, nil)
+	// Shutdown must still finish the durable state transition. A bounded detached
+	// context prevents an already-cancelled request from discarding the audit log.
+	finalCtx, finalCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer finalCancel()
+	tx, err := db.BeginTx(finalCtx, nil)
 	if err != nil {
-		app.Logger().Warn("begin run transaction", "job_id", j.ID, "err", err)
-		return
+		return fmt.Errorf("finalize attempt: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(
-		`INSERT INTO job_runs (project_id, job_id, started_at, finished_at, duration_ms,
-			status, http_status, response_body, error, attempt, scheduled_for, idempotency_key)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ProjectID, j.ID,
-		started.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), duration,
-		status, httpCode, respBody, errStr, attempt, j.ScheduledFor, nullStr(effectiveIdempotencyKey)); err != nil {
-		app.Logger().Warn("record run", "job_id", j.ID, "err", err)
-		return
+	if _, err = tx.ExecContext(finalCtx, `UPDATE job_runs SET finished_at=?,duration_ms=?,status=?,http_status=?,response_body=NULL,error=? WHERE id=? AND lease_token=? AND status='running'`, finished.Format(time.RFC3339Nano), finished.Sub(started).Milliseconds(), status, code, nullStr(errStr), runID, j.LeaseToken); err != nil {
+		return fmt.Errorf("record outcome: %w", err)
 	}
-	var nextValue any
-	if !nextRun.IsZero() {
-		nextValue = nextRun.Format(time.RFC3339)
-	}
-	var lastError any
-	if errStr != "" {
-		lastError = errStr
-	}
-	res, err := tx.Exec(
-		`UPDATE jobs SET status = ?, last_run_at = ?, last_status = ?,
-			last_error = ?, attempt = ?, lease_until = NULL, lease_token = NULL,
-			next_run_at = ?, scheduled_for = ?, updated_at = ?
-		 WHERE id = ? AND project_id = ? AND status = 'running' AND lease_token = ?`,
-		nextStatus, finished.Format(time.RFC3339Nano), lastStatus,
-		lastError, nextAttempt, nextValue, nextScheduled.Format(time.RFC3339), finished.Format(time.RFC3339Nano),
-		j.ID, j.ProjectID, j.LeaseToken)
+	res, err := tx.ExecContext(finalCtx, `UPDATE jobs SET status=?,last_run_at=?,last_status=?,last_error=?,attempt=?,lease_until=NULL,lease_token=NULL,next_run_at=?,scheduled_for=?,updated_at=? WHERE id=? AND project_id=? AND status='running' AND lease_token=?`, nextStatus, finished.Format(time.RFC3339Nano), lastStatus, nullStr(errStr), nextAttempt, nullableTime(nextRun), nextScheduled, finished.Format(time.RFC3339Nano), j.ID, j.ProjectID, j.LeaseToken)
 	if err != nil {
-		app.Logger().Warn("finalize run", "job_id", j.ID, "err", err)
-		return
+		return fmt.Errorf("finalize schedule: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		app.Logger().Warn("commit run", "job_id", j.ID, "err", err)
-		return
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		app.Emit("job.updated", map[string]any{"id": j.ID, "status": nextStatus, "last_status": lastStatus})
+	if err = tx.Commit(); err != nil {
+		return fmt.Errorf("commit outcome: %w", err)
 	}
+	if n > 0 {
+		payload := map[string]any{"id": j.ID, "status": nextStatus, "last_status": lastStatus}
+		if j.ParentJobID != 0 {
+			payload = map[string]any{"id": j.ParentJobID, "manual_run_id": j.ID, "manual_run_status": nextStatus}
+		}
+		app.EmitWithProject("job.updated", j.ProjectID, payload)
+	}
+	return nil
 }
 
 func jobScheduledTime(j *Job, fallback time.Time) time.Time {
@@ -1394,36 +1320,50 @@ func newLeaseToken() (string, error) {
 }
 
 func pruneRunHistory(db *sql.DB, pid string, cfg sdk.Config, now time.Time) error {
-	days := 30
-	if raw := strings.TrimSpace(cfg.Get("history_retention_days")); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil {
-			return fmt.Errorf("history_retention_days: %w", err)
-		}
-		if n <= 0 {
-			return nil
-		}
-		days = n
-	}
-	_, err := db.Exec(`DELETE FROM job_runs WHERE project_id = ? AND started_at < ?`,
-		pid, now.AddDate(0, 0, -days).Format(time.RFC3339Nano))
-	return err
+	return pruneHistory(context.Background(), db, pid, true, cfg, now)
 }
-
-func maybePruneRunHistory(db *sql.DB, pid string, cfg sdk.Config, now time.Time) error {
-	retentionMu.Lock()
-	last := retentionLastRun[pid]
-	if now.Sub(last) < time.Hour {
-		retentionMu.Unlock()
-		return nil
-	}
-	retentionLastRun[pid] = now
-	retentionMu.Unlock()
-	if err := pruneRunHistory(db, pid, cfg, now); err != nil {
-		retentionMu.Lock()
-		delete(retentionLastRun, pid)
-		retentionMu.Unlock()
-		return err
+func pruneHistory(parent context.Context, db *sql.DB, pid string, scoped bool, cfg sdk.Config, now time.Time) error {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	for _, item := range []struct {
+		table, column, config string
+		days                  int
+		condition             string
+	}{
+		{"job_runs", "started_at", "history_retention_days", 30, "status <> 'running'"},
+		{"jobs", "updated_at", "terminal_job_retention_days", 90, "status IN ('done','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM jobs child WHERE child.parent_job_id=jobs.id AND child.status IN ('pending','running'))"},
+	} {
+		days := item.days
+		if raw := strings.TrimSpace(cfg.Get(item.config)); raw != "" {
+			n, err := strconv.Atoi(raw)
+			if err != nil || n < 0 || n > 36500 {
+				return fmt.Errorf("invalid %s", item.config)
+			}
+			days = n
+		}
+		if days == 0 {
+			continue
+		}
+		where := item.condition + " AND " + item.column + " < ?"
+		args := []any{now.AddDate(0, 0, -days).Format(time.RFC3339)}
+		if scoped {
+			where += " AND project_id=?"
+			args = append(args, pid)
+		}
+		// Bounded batches cap lock duration and memory even for a large backlog.
+		for batch := 0; batch < 10; batch++ {
+			res, err := db.ExecContext(ctx, "DELETE FROM "+item.table+" WHERE id IN (SELECT id FROM "+item.table+" WHERE "+where+" ORDER BY "+item.column+",id LIMIT 1000)", args...)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if n < 1000 {
+				break
+			}
+		}
 	}
 	return nil
 }
@@ -1431,16 +1371,22 @@ func maybePruneRunHistory(db *sql.DB, pid string, cfg sdk.Config, now time.Time)
 // runTarget dispatches one job's target. Returns (status, http_code,
 // body, err). status is "ok" / "error" / "timeout".
 func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, string, error) {
+	if err := authorizeDispatch(ctx, app, j); err != nil {
+		return "error", 0, "", err
+	}
+	if err := checkExecutionLease(ctx, app, j); err != nil {
+		return "interrupted", 0, "", err
+	}
 	switch strings.ToLower(strKey(j.Target, "kind")) {
 	case "http":
 		if target, ok := legacyFunctionsTarget(j.Target); ok {
-			return runAppToolTarget(app, j, target)
+			return runAppToolTargetContext(ctx, app, j, target)
 		}
 		return runHTTPTarget(ctx, j, app.Config())
 	case "app_tool":
-		return runAppToolTarget(app, j, j.Target)
+		return runAppToolTargetContext(ctx, app, j, j.Target)
 	case "event":
-		return runEventTarget(app, j)
+		return runEventTargetContext(ctx, app, j)
 	default:
 		return "error", 0, "", fmt.Errorf("unknown target kind %q", strKey(j.Target, "kind"))
 	}
@@ -1492,7 +1438,7 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 		req.Header.Set("X-Apteva-Job-Scheduled-For", j.ScheduledFor)
 	}
 
-	resp, err := getDispatchClient().Do(req)
+	resp, err := targetHTTPClient(cfg).Do(req)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "timeout", 0, "", err
@@ -1500,7 +1446,16 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 		return "error", 0, "", err
 	}
 	defer resp.Body.Close()
-	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+	respBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if readErr != nil {
+		if errors.Is(readErr, context.DeadlineExceeded) || errors.Is(reqCtx.Err(), context.DeadlineExceeded) {
+			return "timeout", resp.StatusCode, "", readErr
+		}
+		return "error", resp.StatusCode, "", readErr
+	}
+	if len(respBytes) > 1<<20 {
+		return "error", resp.StatusCode, "", errors.New("HTTP response exceeds 1 MiB")
+	}
 	if resp.StatusCode/100 != 2 {
 		return "error", resp.StatusCode, string(respBytes),
 			fmt.Errorf("non-2xx: %d", resp.StatusCode)
@@ -1509,6 +1464,9 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 }
 
 func runAppToolTarget(app *sdk.AppCtx, job *Job, target map[string]any) (string, int, string, error) {
+	return runAppToolTargetContext(context.Background(), app, job, target)
+}
+func runAppToolTargetContext(ctx context.Context, app *sdk.AppCtx, job *Job, target map[string]any) (string, int, string, error) {
 	appName := strKey(target, "app")
 	tool := strKey(target, "tool")
 	storedInput, _ := target["input"].(map[string]any)
@@ -1524,12 +1482,18 @@ func runAppToolTarget(app *sdk.AppCtx, job *Job, target map[string]any) (string,
 	if key := occurrenceIdempotencyKey(job); key != "" {
 		metadata["idempotency_key"] = key
 	}
+	for key := range input {
+		if reservedInputKey(key) {
+			delete(input, key)
+		}
+	}
+	input["_project_id"] = job.ProjectID
 	input["_job"] = metadata
 	if app == nil || app.PlatformAPI() == nil {
 		return "error", 0, "", errors.New("app_tool target requires platform API")
 	}
 	var out any
-	if err := app.PlatformAPI().CallAppResult(appName, tool, input, &out); err != nil {
+	if err := callAppContext(ctx, app, appName, tool, input, &out); err != nil {
 		return "error", 0, "", err
 	}
 	body, _ := json.Marshal(out)
@@ -1575,13 +1539,13 @@ func legacyFunctionsTarget(target map[string]any) (map[string]any, bool) {
 func httpTargetTimeout(target map[string]any, cfg sdk.Config) time.Duration {
 	timeout := defaultHTTPDispatchTimeout
 	if sec := atoiDefault(cfg.Get("http_dispatch_timeout_seconds"), int(defaultHTTPDispatchTimeout/time.Second), int(maxHTTPDispatchTimeout/time.Second)); sec > 0 {
-		timeout = time.Duration(sec) * time.Second
+		timeout = time.Duration(min(sec, int(maxHTTPDispatchTimeout/time.Second))) * time.Second
 	}
 	if sec := intArg(target, "timeout_seconds", 0); sec > 0 {
-		timeout = time.Duration(sec) * time.Second
+		timeout = time.Duration(min(sec, int(maxHTTPDispatchTimeout/time.Second))) * time.Second
 	}
 	if ms := intArg(target, "timeout_ms", 0); ms > 0 {
-		timeout = time.Duration(ms) * time.Millisecond
+		timeout = time.Duration(min(ms, int(maxHTTPDispatchTimeout/time.Millisecond))) * time.Millisecond
 	}
 	if timeout < minHTTPDispatchTimeout {
 		return minHTTPDispatchTimeout
@@ -1592,19 +1556,26 @@ func httpTargetTimeout(target map[string]any, cfg sdk.Config) time.Duration {
 	return timeout
 }
 
-// runEventTarget calls PlatformAPI.SendEvent. For unit tests where
-// app.PlatformAPI() returns nil, treat as a no-op success — the test
-// only cares that dispatch was attempted.
 func runEventTarget(app *sdk.AppCtx, j *Job) (string, int, string, error) {
-	instanceID := int64(toInt64(j.Target["instance_id"]))
+	return runEventTargetContext(context.Background(), app, j)
+}
+func runEventTargetContext(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, string, error) {
+	id := toInt64(j.Target["instance_id"])
 	message := strKey(j.Target, "message")
-	if instanceID == 0 || message == "" {
+	if id <= 0 || message == "" {
 		return "error", 0, "", errors.New("event target requires instance_id and message")
 	}
-	if app.PlatformAPI() == nil {
-		return "ok", 0, `{"sent":true,"mode":"test"}`, nil
+	agent, err := getInstanceContext(ctx, app, id)
+	if err != nil {
+		return "error", 0, "", err
 	}
-	if err := app.PlatformAPI().SendEvent(instanceID, message); err != nil {
+	if agent == nil || agent.ProjectID != j.ProjectID {
+		return "error", 0, "", errors.New("event target is outside the job project")
+	}
+	if err := checkExecutionLease(ctx, app, j); err != nil {
+		return "interrupted", 0, "", err
+	}
+	if err := sendEventContext(ctx, app, id, message); err != nil {
 		return "error", 0, "", err
 	}
 	return "ok", 0, "", nil
@@ -1631,7 +1602,7 @@ func computeNextRun(kind string, runAt time.Time, every *int64, cronExpr string,
 	case "once":
 		return runAt
 	case "every":
-		if every == nil || *every <= 0 {
+		if every == nil || *every <= 0 || *every > 31536000 {
 			return time.Time{}
 		}
 		return now.Add(time.Duration(*every) * time.Second)
@@ -1710,8 +1681,8 @@ func parseCron(expr string) (*cronExpr, error) {
 		sets[i] = s
 	}
 	out.min, out.hour, out.dom, out.mon, out.dow = sets[0], sets[1], sets[2], sets[3], sets[4]
-	out.domAny = fields[2] == "*"
-	out.dowAny = fields[4] == "*"
+	out.domAny = strings.HasPrefix(fields[2], "*")
+	out.dowAny = strings.HasPrefix(fields[4], "*")
 	return out, nil
 }
 
@@ -1721,7 +1692,7 @@ func parseCronField(f string, lo, hi int) ([]bool, error) {
 		step := 1
 		if i := strings.Index(part, "/"); i >= 0 {
 			s, err := strconv.Atoi(part[i+1:])
-			if err != nil || s < 1 {
+			if err != nil || s < 1 || s > hi-lo+1 {
 				return nil, fmt.Errorf("invalid step %q", part)
 			}
 			step = s
@@ -1757,31 +1728,24 @@ func parseCronField(f string, lo, hi int) ([]bool, error) {
 	return out, nil
 }
 
-// next finds the smallest minute-precision time strictly greater than
-// `from` that satisfies the cron expression. Capped at +366 days so
-// an impossible expression terminates instead of looping forever.
+// next advances through real instants on matching dates, including repeated
+// local hours. Eight calendar years cover leap-day gaps across non-leap centuries.
 func (c *cronExpr) next(from time.Time) time.Time {
 	t := from.Truncate(time.Minute).Add(time.Minute)
-	limit := t.Add(366 * 24 * time.Hour)
-	for t.Before(limit) {
-		if !c.mon[int(t.Month())] {
-			// Jump to the first day of the next month.
-			t = time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, t.Location())
+	limit := from.AddDate(8, 0, 0)
+	for !t.After(limit) {
+		if !c.mon[int(t.Month())] || !c.matchDay(t) {
+			next := time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, t.Location())
+			if !next.After(t) {
+				next = t.Add(time.Minute)
+			}
+			t = next
 			continue
 		}
-		if !c.matchDay(t) {
-			t = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()).Add(24 * time.Hour)
-			continue
+		if c.hour[t.Hour()] && c.min[t.Minute()] {
+			return t
 		}
-		if !c.hour[t.Hour()] {
-			t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour()+1, 0, 0, 0, t.Location())
-			continue
-		}
-		if !c.min[t.Minute()] {
-			t = t.Add(time.Minute)
-			continue
-		}
-		return t
+		t = t.Add(time.Minute)
 	}
 	return time.Time{}
 }
@@ -1789,17 +1753,10 @@ func (c *cronExpr) next(from time.Time) time.Time {
 func (c *cronExpr) matchDay(t time.Time) bool {
 	dom := c.dom[t.Day()]
 	dow := c.dow[int(t.Weekday())]
-	switch {
-	case c.domAny && c.dowAny:
-		return true
-	case c.domAny:
-		return dow
-	case c.dowAny:
-		return dom
-	default:
-		// Vixie semantics: OR.
-		return dom || dow
+	if c.domAny || c.dowAny {
+		return dom && dow
 	}
+	return dom || dow
 }
 
 // ─── Target validation ─────────────────────────────────────────────
@@ -1814,7 +1771,7 @@ func validateTarget(t map[string]any) error {
 		_, err := resolveTargetURL(t)
 		return err
 	case "app_tool":
-		if strKey(t, "app") == "" || strKey(t, "tool") == "" {
+		if !validIdentifier(strKey(t, "app")) || !validToolName(strKey(t, "tool")) {
 			return errors.New("app_tool target needs app and tool")
 		}
 		if input, ok := t["input"]; ok && input != nil {
@@ -1836,40 +1793,12 @@ func validateTarget(t map[string]any) error {
 // ─── Tiny utils ─────────────────────────────────────────────────────
 
 func intArg(args map[string]any, key string, def int) int {
-	if v, ok := args[key].(float64); ok {
-		return int(v)
-	}
-	if v, ok := args[key].(int); ok {
-		return v
-	}
-	if v, ok := args[key].(int64); ok {
-		return int(v)
-	}
-	if s, ok := args[key].(string); ok && s != "" {
-		if n, err := strconv.Atoi(s); err == nil {
-			return n
-		}
+	if n, err := integer(args[key]); err == nil {
+		return int(n)
 	}
 	return def
 }
-
-func int64Arg(args map[string]any, key string) int64 {
-	switch v := args[key].(type) {
-	case float64:
-		return int64(v)
-	case int:
-		return int64(v)
-	case int64:
-		return v
-	case string:
-		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-		if err != nil {
-			return 0
-		}
-		return n
-	}
-	return 0
-}
+func int64Arg(args map[string]any, key string) int64 { n, _ := integer(args[key]); return n }
 
 func strArg(args map[string]any, key string) string {
 	if v, ok := args[key].(string); ok {
@@ -1885,20 +1814,7 @@ func strKey(m map[string]any, key string) string {
 	return ""
 }
 
-func toInt64(v any) int64 {
-	switch x := v.(type) {
-	case float64:
-		return int64(x)
-	case int:
-		return int64(x)
-	case int64:
-		return x
-	case string:
-		n, _ := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
-		return n
-	}
-	return 0
-}
+func toInt64(v any) int64 { n, _ := integer(v); return n }
 
 func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: s != ""}
@@ -1982,10 +1898,3 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
-
-// getAppCtx fetches the AppCtx the SDK threaded into the request via
-// a stable global. The SDK does not currently expose a public hook
-// for HTTP handlers; we keep a pointer wired up at OnMount.
-var globalCtx *sdk.AppCtx
-
-func getAppCtx(_ *http.Request) *sdk.AppCtx { return globalCtx }

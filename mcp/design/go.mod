@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/design
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.55.0
+	github.com/apteva/app-sdk v0.73.0
 	modernc.org/sqlite v1.50.0
 )
 

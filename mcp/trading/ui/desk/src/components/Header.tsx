@@ -52,6 +52,18 @@ export function Header({
         {(["crypto", "polymarket", "equity"] as ProviderClass[]).map((c) => (
           <DataSourcePill key={c} health={health} cls={c} />
         ))}
+        {health?.streams?.market_data && (
+          <StreamPill label="Alpaca data" stream={health.streams.market_data} />
+        )}
+        {health?.streams?.trade_updates && (
+          <StreamPill label="Alpaca orders" stream={health.streams.trade_updates} />
+        )}
+        {health?.streams?.corporate_actions && (
+          <StreamPill label="Actions" stream={health.streams.corporate_actions} />
+        )}
+        {Object.entries(health?.venues ?? {}).filter(([,v]) => v.status !== "healthy").map(([venue,v]) => (
+          <StreamPill key={venue} label={venue} stream={{status:v.status,last_error:v.last_error}} />
+        ))}
         <span className="w-px h-5 bg-[var(--border)] mx-1" />
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium bg-up-soft tabular">
           <span className="status-dot" style={{ color: "var(--color-up)", background: "var(--color-up)" }} />
@@ -67,6 +79,21 @@ export function Header({
         </button>
       </div>
     </header>
+  );
+}
+
+function StreamPill({ label, stream }: { label: string; stream: { status: string; feed?: string; last_event_at?: string; last_error?: string } }) {
+  const connected = stream.status === "connected";
+  const color = connected ? "var(--color-up)" : stream.status === "unbound" ? "var(--text-tertiary)" : "var(--color-warn)";
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[10.5px] font-medium mono"
+      style={{ background: "var(--surface-inset)", color }}
+      title={[stream.status, stream.feed, stream.last_event_at, stream.last_error].filter(Boolean).join(" · ")}
+    >
+      <span className="inline-block w-1.5 h-1.5 rounded-full" style={{ background: color }} />
+      {label}{stream.feed ? ` · ${stream.feed}` : ""}
+    </span>
   );
 }
 

@@ -3,9 +3,9 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.5)
+## Schema (v0.7.0)
 
-Sixteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
+Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
 - `seo_locations` — provider/search-engine/language/location catalog used to
   make every paid refresh locale-explicit
@@ -31,13 +31,17 @@ Sixteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Mo
 - `search_serp_snapshots` — cached paid SERP searches by search engine,
   keyword, locale, provider, and timestamp
 - `search_serp_results` — ranked result rows linked to cached SERP snapshots
+- `serp_tracking_settings` — project-level scheduler and monthly budget controls
+- `serp_trackers` — opt-in keyword/target/device tracking configuration
+- `serp_refresh_jobs` — deduplicated DataForSEO Standard Queue task lifecycle
+- `serp_rank_observations` — durable scheduled rank or explicit not-found history
 
 Every snapshot table carries a `raw_json` column that stores the unflattened
 provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.5.1 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.7.0 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
@@ -58,9 +62,35 @@ Google and YouTube country/language rows. Domain, keyword-metric, and backlink
 refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
 explicit paid MCP actions.
 
+The panel opens on a project overview and separates the primary workspaces into
+Domains, Keywords, and Explorer. Domains are searchable and distinguish owned
+sites from discovered competitors; rankings and backlinks live in dedicated
+domain tabs. Provider selection, location catalogs, and activity are kept in
+Settings because they configure refreshes rather than represent SEO data.
+
+Cached backlink analytics use the provider-supplied `first_seen`, `last_seen`,
+and current `is_lost` values already stored on each backlink. The
+`backlink_movement` tool and domain panel derive daily gained/lost counts, net
+movement, current active/lost totals, and timestamp coverage without creating
+snapshots or calling the provider. For a lost link, `last_seen` is used as its
+loss marker; the coverage fields make incomplete provider timestamps explicit.
+
+The domain panel links to a paginated backlink detail view powered by the
+cached-only `backlinks_browse` tool. It supports URL/anchor search and
+active/lost and follow/nofollow filters without making provider requests.
+
 Google keyword metric refreshes are HTTP/UI-only bulk jobs. DataForSEO requests
 are grouped by locale and sent in batches of up to 1,000 keywords, with separate
 volume and difficulty phases. The app checks account credit before starting,
 retries rate limits with backoff, and resumes only missing fields after a
 partial or interrupted run. SERP/ranking refreshes stay separate because they
 have different provider costs.
+
+Automatic Google rank tracking is opt-in and uses DataForSEO's asynchronous
+Standard Queue. Each tracker can run daily, weekly, or monthly. The daily
+policy checks the top 20 each day and top 100 on Sunday; weekly and monthly
+trackers use the regular top-20 depth on each run. A configurable $5 monthly
+cap applies across all schedules. Identical keyword/locale/device checks share
+one provider task across targets. Full SERP snapshots remain bounded, while
+compact rank and not-found observations are retained for long-term history and
+charts.

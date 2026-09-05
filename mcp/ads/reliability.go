@@ -20,6 +20,9 @@ type metaErrorEnvelope struct {
 		Subcode     int    `json:"error_subcode"`
 		Type        string `json:"type"`
 		Message     string `json:"message"`
+		UserTitle   string `json:"error_user_title"`
+		UserMessage string `json:"error_user_msg"`
+		ErrorData   any    `json:"error_data"`
 		IsTransient bool   `json:"is_transient"`
 		TraceID     string `json:"fbtrace_id"`
 	} `json:"error"`
@@ -65,7 +68,11 @@ func (a *App) execIntegrationToolOnce(
 		return nil, mcpError(tool + ": " + err.Error())
 	}
 	if res == nil || !res.Success {
-		return nil, classifyProviderFailure(acct, tool, res)
+		errOut := classifyProviderFailure(acct, tool, res)
+		if requestContext := safeProviderRequestContext(tool, input); len(requestContext) > 0 {
+			errOut["request_context"] = requestContext
+		}
+		return nil, errOut
 	}
 	var parsed any
 	if len(res.Data) > 0 {
@@ -91,7 +98,17 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 		var envelope metaErrorEnvelope
 		if json.Unmarshal([]byte(body), &envelope) == nil && envelope.Error.Message != "" {
 			providerErr := envelope.Error
-			out = mcpError(tool + ": " + providerErr.Message)
+			displayMessage := providerErr.Message
+			if providerErr.UserTitle != "" {
+				displayMessage = providerErr.UserTitle
+			}
+			if providerErr.UserMessage != "" {
+				if displayMessage != "" {
+					displayMessage += ": "
+				}
+				displayMessage += providerErr.UserMessage
+			}
+			out = mcpError(tool + ": " + displayMessage)
 			out["provider_status"] = 0
 			if res != nil {
 				out["provider_status"] = res.Status
@@ -100,6 +117,15 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 			out["provider_type"] = providerErr.Type
 			out["provider_message"] = providerErr.Message
 			out["retryable"] = false
+			if providerErr.UserTitle != "" {
+				out["provider_user_title"] = providerErr.UserTitle
+			}
+			if providerErr.UserMessage != "" {
+				out["provider_user_message"] = providerErr.UserMessage
+			}
+			if providerErr.ErrorData != nil {
+				out["provider_error_data"] = providerErr.ErrorData
+			}
 			if providerErr.Subcode != 0 {
 				out["provider_subcode"] = providerErr.Subcode
 			}
@@ -109,6 +135,12 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 			switch {
 			case providerErr.Code == 190:
 				out["code"] = "provider_auth_error"
+			case providerErr.Subcode == 2446404:
+				out["code"] = "provider_billing_option_unavailable"
+				out["suggestion"] = "Use billing_event=impressions. For Meta video views, keep optimization_goal=thruplay."
+			case providerErr.Subcode == 2490408:
+				out["code"] = "provider_optimization_goal_unavailable"
+				out["suggestion"] = "Reload the parent campaign and select an optimization goal allowed by that objective. Do not recreate or activate the campaign based on this error alone."
 			case providerErr.IsTransient:
 				out["code"] = "provider_transient"
 				out["retryable"] = true
@@ -119,6 +151,35 @@ func classifyProviderFailure(acct *adAccount, tool string, res *sdk.ExecuteResul
 	if out["code"] != "provider_auth_error" && providerRateLimited(res, body) {
 		out["code"] = "provider_rate_limited"
 		out["retryable"] = true
+	}
+	return out
+}
+
+func safeProviderRequestContext(tool string, input map[string]any) map[string]any {
+	if tool != "adset_create" {
+		return nil
+	}
+	out := map[string]any{}
+	for _, key := range []string{
+		"campaign_id", "optimization_goal", "billing_event", "destination_type",
+		"daily_budget", "lifetime_budget", "bid_strategy", "start_time", "end_time", "status",
+	} {
+		if value, ok := input[key]; ok && value != nil && toString(value) != "" {
+			out[key] = value
+		}
+	}
+	if promotedObject := asMap(input["promoted_object"]); len(promotedObject) > 0 {
+		out["has_promoted_object"] = true
+	}
+	if targeting := asMap(input["targeting"]); len(targeting) > 0 {
+		if geo := asMap(targeting["geo_locations"]); len(geo) > 0 {
+			if countries, ok := geo["countries"]; ok {
+				out["target_countries"] = countries
+			}
+		}
+		if platforms, ok := targeting["publisher_platforms"]; ok {
+			out["publisher_platforms"] = platforms
+		}
 	}
 	return out
 }
@@ -173,6 +234,17 @@ func (a *App) sleepBeforeRetry(ctx *sdk.AppCtx, delay time.Duration) bool {
 }
 
 func providerFailureText(errOut map[string]any) string {
+	userTitle := stringArgAny(errOut, "provider_user_title")
+	userMessage := stringArgAny(errOut, "provider_user_message")
+	if userTitle != "" && userMessage != "" {
+		return userTitle + ": " + userMessage
+	}
+	if userMessage != "" {
+		return userMessage
+	}
+	if userTitle != "" {
+		return userTitle
+	}
 	if message := stringArgAny(errOut, "provider_message"); message != "" {
 		return message
 	}

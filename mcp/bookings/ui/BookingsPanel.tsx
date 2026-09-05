@@ -17,6 +17,7 @@ interface BookingType {
   location_value: string;
   target_kind: "human" | "ai_agent" | "either" | "team";
   calendar_ids: number[];
+  destination_calendar_id?: number;
   calls_enabled: boolean;
   crm_enabled: boolean;
   active: boolean;
@@ -37,6 +38,7 @@ interface Booking {
   calendar_event_id?: number;
   calls_room_id?: number;
   calls_guest_join_url?: string;
+  calls_host_join_url?: string;
   crm_contact_id?: number;
   assigned_target_kind: string;
 }
@@ -59,6 +61,7 @@ interface AvailabilityRules {
   buffer_before_minutes?: number;
   buffer_after_minutes?: number;
   working_hours?: Record<string, { start: string; end: string }>;
+  [key: string]: unknown;
 }
 
 type DraftType = {
@@ -66,18 +69,19 @@ type DraftType = {
   slug: string;
   description: string;
   duration_minutes: number;
-  target_kind: BookingType["target_kind"];
+  timezone: string;
   location_kind: BookingType["location_kind"];
   location_value: string;
   calendar_ids: number[];
+  destination_calendar_id: number;
   calls_enabled: boolean;
   crm_enabled: boolean;
   minimum_notice_minutes: number;
   booking_horizon_days: number;
   buffer_before_minutes: number;
   buffer_after_minutes: number;
-  weekday_start: string;
-  weekday_end: string;
+  working_hours: Record<string, { start: string; end: string }>;
+  availability_extra: Record<string, unknown>;
 };
 
 const emptyDraft: DraftType = {
@@ -85,19 +89,30 @@ const emptyDraft: DraftType = {
   slug: "",
   description: "",
   duration_minutes: 30,
-  target_kind: "human",
+  timezone: "Europe/Madrid",
   location_kind: "calls",
   location_value: "",
   calendar_ids: [],
+  destination_calendar_id: 0,
   calls_enabled: true,
   crm_enabled: true,
   minimum_notice_minutes: 120,
   booking_horizon_days: 30,
   buffer_before_minutes: 0,
   buffer_after_minutes: 0,
-  weekday_start: "09:00",
-  weekday_end: "17:00",
+  working_hours: {
+    mon: { start: "09:00", end: "17:00" }, tue: { start: "09:00", end: "17:00" },
+    wed: { start: "09:00", end: "17:00" }, thu: { start: "09:00", end: "17:00" }, fri: { start: "09:00", end: "17:00" },
+  },
+  availability_extra: {},
 };
+
+const newDraft = (): DraftType => ({
+  ...emptyDraft,
+  calendar_ids: [],
+  working_hours: Object.fromEntries(Object.entries(emptyDraft.working_hours).map(([day, hours]) => [day, { ...hours }])),
+  availability_extra: {},
+});
 
 export default function BookingsPanel({ projectId }: NativePanelProps) {
   const [types, setTypes] = useState<BookingType[]>([]);
@@ -106,13 +121,14 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   const [selectedId, setSelectedId] = useState(0);
   const [draft, setDraft] = useState<DraftType>(emptyDraft);
   const [editingId, setEditingId] = useState(0);
+  const [creating, setCreating] = useState(false);
   const [slots, setSlots] = useState<Slot[]>([]);
   const [manual, setManual] = useState({ start_at: "", invitee_name: "", invitee_email: "", invitee_phone: "", notes: "" });
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
 
   const selected = useMemo(
-    () => types.find((t) => t.id === selectedId) ?? types[0] ?? null,
+    () => types.find((t) => t.id === selectedId) ?? null,
     [types, selectedId],
   );
 
@@ -159,21 +175,24 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
       ]);
       setTypes(typeData.booking_types ?? []);
       setBookings(bookingData.bookings ?? []);
-      if (!selectedId && typeData.booking_types?.length) setSelectedId(typeData.booking_types[0].id);
       setStatus(`${typeData.booking_types?.length ?? 0} types · ${bookingData.bookings?.length ?? 0} bookings`);
     } catch (e) {
       setStatus((e as Error).message);
     }
-  }, [api, selectedId]);
+  }, [api]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadCalendars(); }, [loadCalendars]);
 
   useEffect(() => {
-    if (!selected) return;
+    if (!creating && !selectedId && types.length) setSelectedId(types[0].id);
+  }, [creating, selectedId, types]);
+
+  useEffect(() => {
+    if (!selected || creating) return;
     setDraft(typeToDraft(selected));
     setEditingId(selected.id);
-  }, [selected]);
+  }, [creating, selected]);
 
   const saveType = async () => {
     if (!draft.title.trim()) return;
@@ -185,6 +204,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
       } else {
         const data = await api<{ booking_type: BookingType }>("POST", "/booking-types", body);
         setSelectedId(data.booking_type.id);
+        setCreating(false);
       }
       await load();
     } catch (e) {
@@ -195,17 +215,20 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   };
 
   const newType = () => {
+    setCreating(true);
     setEditingId(0);
     setSelectedId(0);
-    setDraft(emptyDraft);
+    setDraft(newDraft());
     setSlots([]);
   };
 
   const archiveType = async () => {
     if (!editingId) return;
+    if (!window.confirm("Archive this booking type? Its public link will stop accepting bookings.")) return;
     setBusy(true);
     try {
       await api("DELETE", `/booking-types/${editingId}`);
+      setCreating(false);
       setSelectedId(0);
       await load();
     } catch (e) {
@@ -252,6 +275,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   };
 
   const cancelBooking = async (booking: Booking) => {
+    if (!window.confirm(`Cancel the booking for ${booking.invitee_name || booking.invitee_email || "this guest"}?`)) return;
     setBusy(true);
     try {
       await api("POST", `/bookings/${booking.id}/cancel`, { reason: "cancelled from panel" });
@@ -272,7 +296,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
         <span className="ml-auto text-xs text-text-dim truncate">{status}</span>
       </header>
 
-      <div className="flex-1 min-h-0 grid grid-cols-[280px_minmax(0,1fr)]">
+      <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[280px_minmax(0,1fr)]">
         <aside className="border-r border-border overflow-y-auto">
           {types.length === 0 ? (
             <div className="p-4 text-xs text-text-muted">No booking types yet.</div>
@@ -282,7 +306,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
                 <li key={type.id}>
                   <button
                     type="button"
-                    onClick={() => setSelectedId(type.id)}
+                    onClick={() => { setCreating(false); setSelectedId(type.id); }}
                     className={`w-full px-3 py-2 text-left border-b border-border hover:bg-bg-input/50 ${selected?.id === type.id ? "bg-bg-input" : ""}`}
                   >
                     <div className="flex items-center gap-2">
@@ -320,7 +344,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
                   <div className="text-xs text-text-dim mb-1">Public link</div>
                   <div className="flex gap-2">
                     <input readOnly value={selected.public_url} className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-xs text-text" />
-                    <button type="button" onClick={() => navigator.clipboard?.writeText(selected.public_url || "")} className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input">Copy</button>
+                    <button type="button" onClick={async () => { await navigator.clipboard?.writeText(selected.public_url || ""); setStatus("Public link copied"); }} className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input">Copy</button>
                   </div>
                 </div>
               )}
@@ -389,8 +413,10 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
                             <button type="button" onClick={() => cancelBooking(booking)} className="text-xs text-red hover:underline">Cancel</button>
                           )}
                         </div>
-                        {booking.calls_guest_join_url && (
-                          <a href={booking.calls_guest_join_url} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-accent hover:underline">Join link</a>
+                        {(booking.calls_host_join_url || booking.calls_guest_join_url) && (
+                          <a href={booking.calls_host_join_url || booking.calls_guest_join_url} target="_blank" rel="noreferrer" className="mt-1 inline-block text-xs text-accent hover:underline">
+                            {booking.calls_host_join_url ? "Join as host" : "Join call"}
+                          </a>
                         )}
                       </li>
                     ))}
@@ -426,21 +452,19 @@ function Editor({
     <PanelSection title="Booking Type">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         <Field label="Title">
-          <input value={draft.title} onChange={(e) => update({ title: e.target.value })} className="input" />
+          <input value={draft.title} maxLength={200} onChange={(e) => update({ title: e.target.value })} className="input" />
         </Field>
         <Field label="Slug">
-          <input value={draft.slug} onChange={(e) => update({ slug: e.target.value })} className="input" />
+          <input value={draft.slug} maxLength={120} onChange={(e) => update({ slug: e.target.value })} className="input" />
         </Field>
         <Field label="Duration">
           <input type="number" min={5} step={5} value={draft.duration_minutes} onChange={(e) => update({ duration_minutes: parseInt(e.target.value) || 30 })} className="input" />
         </Field>
-        <Field label="Target">
-          <select value={draft.target_kind} onChange={(e) => update({ target_kind: e.target.value as DraftType["target_kind"] })} className="input">
-            <option value="human">human</option>
-            <option value="ai_agent">ai agent</option>
-            <option value="either">either</option>
-            <option value="team">team</option>
-          </select>
+        <Field label="Timezone">
+          <input value={draft.timezone} onChange={(e) => update({ timezone: e.target.value })} list="booking-timezones" className="input" />
+          <datalist id="booking-timezones">
+            <option value="Europe/Madrid" /><option value="Europe/London" /><option value="America/New_York" /><option value="America/Los_Angeles" /><option value="UTC" />
+          </datalist>
         </Field>
         <Field label="Location">
           <select value={draft.location_kind} onChange={(e) => update({ location_kind: e.target.value as DraftType["location_kind"], calls_enabled: e.target.value === "calls" })} className="input">
@@ -451,13 +475,7 @@ function Editor({
           </select>
         </Field>
         <Field label="Location Value">
-          <input value={draft.location_value} onChange={(e) => update({ location_value: e.target.value })} className="input" />
-        </Field>
-        <Field label="Weekday Start">
-          <input type="time" value={draft.weekday_start} onChange={(e) => update({ weekday_start: e.target.value })} className="input" />
-        </Field>
-        <Field label="Weekday End">
-          <input type="time" value={draft.weekday_end} onChange={(e) => update({ weekday_end: e.target.value })} className="input" />
+          <input value={draft.location_value} maxLength={2048} onChange={(e) => update({ location_value: e.target.value })} className="input" />
         </Field>
         <Field label="Minimum Notice">
           <input type="number" min={0} value={draft.minimum_notice_minutes} onChange={(e) => update({ minimum_notice_minutes: parseInt(e.target.value) || 0 })} className="input" />
@@ -472,7 +490,7 @@ function Editor({
           <input type="number" min={0} value={draft.buffer_after_minutes} onChange={(e) => update({ buffer_after_minutes: parseInt(e.target.value) || 0 })} className="input" />
         </Field>
         <label className="flex items-center gap-2 text-xs text-text-muted">
-          <input type="checkbox" checked={draft.calls_enabled} onChange={(e) => update({ calls_enabled: e.target.checked })} />
+          <input type="checkbox" checked={draft.calls_enabled} disabled={draft.location_kind === "calls"} onChange={(e) => update({ calls_enabled: e.target.checked })} />
           Create Calls room
         </label>
         <label className="flex items-center gap-2 text-xs text-text-muted">
@@ -480,14 +498,38 @@ function Editor({
           Link CRM contact
         </label>
       </div>
-      <Field label="Calendars">
+      <Field label="Working Hours">
+        <div className="space-y-1.5">
+          {(["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const).map((day) => {
+            const hours = draft.working_hours[day];
+            return (
+              <div key={day} className="grid grid-cols-[70px_1fr_1fr] items-center gap-2">
+                <label className="flex items-center gap-2 capitalize"><input type="checkbox" checked={Boolean(hours)} onChange={(e) => {
+                  const next = { ...draft.working_hours };
+                  if (e.target.checked) next[day] = { start: "09:00", end: "17:00" }; else delete next[day];
+                  update({ working_hours: next });
+                }} />{day}</label>
+                <input type="time" disabled={!hours} value={hours?.start || "09:00"} onChange={(e) => update({ working_hours: { ...draft.working_hours, [day]: { ...(hours || { end: "17:00" }), start: e.target.value } } })} className="input" />
+                <input type="time" disabled={!hours} value={hours?.end || "17:00"} onChange={(e) => update({ working_hours: { ...draft.working_hours, [day]: { ...(hours || { start: "09:00" }), end: e.target.value } } })} className="input" />
+              </div>
+            );
+          })}
+        </div>
+      </Field>
+      <Field label="Destination Calendar">
+        <select value={draft.destination_calendar_id} onChange={(e) => update({ destination_calendar_id: Number(e.target.value) || 0 })} className="input">
+          <option value={0}>Shared Bookings calendar</option>
+          {calendars.filter((calendar) => calendar.enabled).map((calendar) => <option key={calendar.id} value={calendar.id}>{calendar.name}</option>)}
+        </select>
+      </Field>
+      <Field label="Calendars Checked for Conflicts">
         {calendars.length === 0 ? (
           <div className="border border-border rounded p-3 text-xs text-text-muted">No calendars loaded yet. Bookings will use its own Bookings calendar if none are selected.</div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
             {calendars.map((calendar) => (
               <label key={calendar.id} className="flex items-center gap-2 rounded border border-border px-2 py-1.5 text-sm">
-                <input type="checkbox" checked={draft.calendar_ids.includes(calendar.id)} onChange={() => toggleCalendar(calendar.id)} />
+                <input type="checkbox" disabled={!calendar.enabled} checked={draft.calendar_ids.includes(calendar.id)} onChange={() => toggleCalendar(calendar.id)} />
                 <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: calendar.color || "#3b82f6" }} />
                 <span className="truncate">{calendar.name}</span>
                 {!calendar.enabled && <span className="ml-auto text-[10px] text-text-dim">disabled</span>}
@@ -495,10 +537,10 @@ function Editor({
             ))}
           </div>
         )}
-        <div className="mt-1 text-[11px] text-text-dim">No selection means Bookings creates and uses a shared Bookings calendar.</div>
+        <div className="mt-1 text-[11px] text-text-dim">No selection checks every enabled calendar. The destination calendar is configured separately above.</div>
       </Field>
       <Field label="Description">
-        <textarea value={draft.description} onChange={(e) => update({ description: e.target.value })} rows={3} className="input" />
+        <textarea value={draft.description} maxLength={10000} onChange={(e) => update({ description: e.target.value })} rows={3} className="input" />
       </Field>
     </PanelSection>
   );
@@ -506,49 +548,49 @@ function Editor({
 
 function typeToDraft(type: BookingType): DraftType {
   const rules = type.availability_rules || {};
-  const wh = rules.working_hours?.mon || { start: "09:00", end: "17:00" };
+  const { working_hours: _workingHours, minimum_notice_minutes: _notice, booking_horizon_days: _horizon, buffer_before_minutes: _before, buffer_after_minutes: _after, ...extra } = rules;
   return {
     title: type.title,
     slug: type.slug,
     description: type.description || "",
     duration_minutes: type.duration_minutes || 30,
-    target_kind: type.target_kind || "human",
+    timezone: type.timezone || "UTC",
     location_kind: type.location_kind || "calls",
     location_value: type.location_value || "",
     calendar_ids: type.calendar_ids || [],
+    destination_calendar_id: type.destination_calendar_id || 0,
     calls_enabled: Boolean(type.calls_enabled),
     crm_enabled: Boolean(type.crm_enabled),
     minimum_notice_minutes: rules.minimum_notice_minutes ?? 120,
     booking_horizon_days: rules.booking_horizon_days ?? 30,
     buffer_before_minutes: rules.buffer_before_minutes ?? 0,
     buffer_after_minutes: rules.buffer_after_minutes ?? 0,
-    weekday_start: wh.start || "09:00",
-    weekday_end: wh.end || "17:00",
+    working_hours: Object.fromEntries(Object.entries(rules.working_hours || {}).map(([day, hours]) => [day, { ...hours }])),
+    availability_extra: extra,
   };
 }
 
 function draftToPayload(draft: DraftType) {
-  const workingHours = ["mon", "tue", "wed", "thu", "fri"].reduce<Record<string, { start: string; end: string }>>((acc, day) => {
-    acc[day] = { start: draft.weekday_start, end: draft.weekday_end };
-    return acc;
-  }, {});
   return {
     title: draft.title.trim(),
     slug: draft.slug.trim(),
     description: draft.description,
     duration_minutes: draft.duration_minutes,
-    target_kind: draft.target_kind,
+    target_kind: "human",
+    timezone: draft.timezone.trim(),
     location_kind: draft.location_kind,
     location_value: draft.location_value,
     calendar_ids: draft.calendar_ids,
+    destination_calendar_id: draft.destination_calendar_id,
     calls_enabled: draft.calls_enabled,
     crm_enabled: draft.crm_enabled,
     availability_rules: {
+      ...draft.availability_extra,
       minimum_notice_minutes: draft.minimum_notice_minutes,
       booking_horizon_days: draft.booking_horizon_days,
       buffer_before_minutes: draft.buffer_before_minutes,
       buffer_after_minutes: draft.buffer_after_minutes,
-      working_hours: workingHours,
+      working_hours: draft.working_hours,
     },
   };
 }

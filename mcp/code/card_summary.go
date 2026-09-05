@@ -42,6 +42,9 @@ type IssueCardData struct {
 	StateReason   string `json:"state_reason,omitempty"`
 	Priority      string `json:"priority"`
 	Assignee      string `json:"assignee,omitempty"`
+	ClaimOwner    string `json:"claim_owner,omitempty"`
+	ClaimLabel    string `json:"claim_label,omitempty"`
+	ClaimedAt     string `json:"claimed_at,omitempty"`
 	CommentsCount int    `json:"comments_count"`
 	UpdatedAt     string `json:"updated_at,omitempty"`
 }
@@ -65,6 +68,9 @@ func issueCardData(issue *Issue) *IssueCardData {
 		StateReason:   issue.StateReason,
 		Priority:      issue.Priority,
 		Assignee:      issue.Assignee,
+		ClaimOwner:    issue.ClaimOwner,
+		ClaimLabel:    issue.ClaimLabel,
+		ClaimedAt:     issue.ClaimedAt,
 		CommentsCount: issue.CommentsCount,
 		UpdatedAt:     issue.UpdatedAt,
 	}

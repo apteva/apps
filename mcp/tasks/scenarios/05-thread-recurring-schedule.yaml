@@ -1,0 +1,70 @@
+name: request-thread-creates-recurring-schedule
+description: |
+  A named Core request thread creates one authoritative recurring task. Tasks
+  assigns it to the durable default thread and leaves it waiting for its first
+  occurrence instead of executing setup work.
+
+timeout: 2m
+settle_for: 8s
+max_iterations: 10
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: request-recurring
+    mcp: [tasks]
+    directive: |
+      Convert the request into exactly one recurring task by calling
+      tasks_create directly. Tasks tools are already loaded in this thread;
+      do not call search_tools to rediscover them. Represent one recurring outcome as one logical
+      task. Use the interval schedule form specifically: kind="interval" and
+      every="15m"; do not translate the interval into cron. Do not spawn a
+      worker and do not execute a future occurrence during schedule creation.
+      Set assigned_thread_id exactly to "main" in the single tasks_create
+      call. Confirm the saved title in your response and stop.
+  app:
+    path: ./
+
+directive: |
+  You are only the durable default executor for scheduled Tasks events. Before
+  a task.ready event addressed to main, immediately pace: do not inspect,
+  message, or kill request threads, and do not create recurring work. The
+  request thread owns schedule creation.
+
+prompt: |
+  Every 15 minutes, review newly active leads. Name the recurring work "New lead review".
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      thread_id: request-recurring
+      count: 1
+  - tool_not_called: tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete | spawn
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.title
+    expect_field_contains: New lead review
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.created_by_thread_id
+    expect_field_eq: request-recurring
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.assigned_thread_id
+    expect_field_eq: main
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_kind
+    expect_field_eq: interval
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_expression
+    expect_field_eq: 15m0s
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: waiting
+  - iterations_at_most: 10
+
+budget:
+  total_tokens: 150000
+  cost_usd: 1.50

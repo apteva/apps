@@ -197,6 +197,53 @@ mappings because there would be no durable response available to resume the
 mapping after an interrupted call. Sensitive output values cannot be mapped
 into account metadata.
 
+### Integration-backed fulfillment
+
+`saas_connection_ensure` is the one-time credential-ingestion boundary. It
+sends supplied fields directly to Server's encrypted, app-owned connection
+store. With `account_id`, SaaS writes only the resulting numeric connection ID
+to account metadata. Without `account_id`, it creates a project-wide provider
+connection and returns its ID. Raw credentials must never be placed in plan
+action arguments.
+
+An action with `execution_kind: integration_execute` reads that numeric ID and
+calls the configured integration tool. An optional `managed` block describes
+restricted provider grants and a remote app bundle. Grant delivery tokens are
+assembled only in memory and are excluded from persisted fulfillment input and
+output.
+
+```json
+{
+  "plan_key": "phone",
+  "event": "account_active",
+  "execution_kind": "integration_execute",
+  "tool_name": "provision_apply",
+  "args": {
+    "connection_id": "{{account.metadata.instance_connection_id}}",
+    "managed": {
+      "tenant_id": "{{account.id}}",
+      "grants": [{
+        "grant_id": "phone",
+        "provider_connection_id": 72,
+        "app_slug": "twilio",
+        "allowed_tools": ["calls_create"]
+      }],
+      "bundle": {
+        "bundle_id": "phone",
+        "apps": [{
+          "key": "telephony",
+          "manifest_url": "https://example.com/telephony/apteva.yaml"
+        }]
+      }
+    }
+  }
+}
+```
+
+The fulfillment run supplies the remote request ID and bundle revision. A
+retry reuses the same desired-state operation, while a later lifecycle
+transition receives a newer revision.
+
 ## Live Usage
 
 Plan usage sources point at app tools and tell SaaS where to read the

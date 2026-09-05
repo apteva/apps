@@ -44,6 +44,15 @@ func tenantDataDirForHost(slug string, h fleetHost) (string, error) {
 }
 
 func (a *App) pickTenantPort(ctx *sdk.AppCtx, h fleetHost, override int) (int, error) {
+	if override > 0 && h.IsLocal() {
+		var count int
+		if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM fleet_port_reservations WHERE instance_id=0 AND port=?`, override).Scan(&count); err != nil {
+			return 0, err
+		}
+		if count > 0 {
+			return 0, fmt.Errorf("port %d is reserved", override)
+		}
+	}
 	if override > 0 {
 		if err := validateTenantPort(override); err != nil {
 			return 0, err
@@ -57,7 +66,29 @@ func (a *App) pickTenantPort(ctx *sdk.AppCtx, h fleetHost, override int) (int, e
 		return override, nil
 	}
 	if h.IsLocal() {
-		return allocatePort()
+		tenants, err := a.store.list(map[string]string{"kind": KindLocal})
+		if err != nil {
+			return 0, err
+		}
+		for attempt := 0; attempt < 128; attempt++ {
+			port, err := allocatePort()
+			if err != nil {
+				return 0, err
+			}
+			var count int
+			if err = a.store.db.QueryRow(`SELECT (SELECT COUNT(*) FROM fleet_port_reservations WHERE instance_id=0 AND port=?)+(SELECT COUNT(*) FROM fleet_app_port_blocks WHERE instance_id=0 AND ? BETWEEN base AND base+999)`, port, port).Scan(&count); err != nil {
+				return 0, err
+			}
+			for _, t := range tenants {
+				if !t.IsHosted() && portFromTenant(t) == port {
+					count++
+				}
+			}
+			if count == 0 {
+				return port, nil
+			}
+		}
+		return 0, errors.New("no unreserved local management port available")
 	}
 	return a.pickHostedPort(ctx, h.InstanceID, 0)
 }
@@ -278,13 +309,7 @@ func extractTenantArchiveRemote(ctx *sdk.AppCtx, instanceID int64, raw []byte, d
 	}, nil); err != nil {
 		return err
 	}
-	cmd := fmt.Sprintf(`
-set -eu
-test ! -e %s
-mkdir -p %s
-tar xzf %s -C %s
-rm -f %s
-`, sh(dstDir), sh(dstDir), sh(remoteTar), sh(dstDir), sh(remoteTar))
+	cmd := "set -eu\n" + remoteExtractCommand(remoteTar, dstDir) + "\nrm -f " + sh(remoteTar) + "\n"
 	if out, code, err := instanceRunCommand(ctx, instanceID, cmd, 120); err != nil || code != 0 {
 		_, _, _ = instanceRunCommand(ctx, instanceID, fmt.Sprintf(`rm -f %s`, sh(remoteTar)), 10)
 		return fmt.Errorf("remote extract: %w (exit %d): %s", err, code, strings.TrimSpace(out))
@@ -329,6 +354,9 @@ func copyDirReadOnly(src, dst string) error {
 		}
 		if filepath.Ext(path) == ".db" {
 			return cloneSQLiteDB(path, target)
+		}
+		if tryCloneFile(path, target) {
+			return nil
 		}
 		in, err := os.Open(path)
 		if err != nil {

@@ -52,7 +52,7 @@ func TestLLMSemanticNavigationWorkflowLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required for the authenticated LLM regression")
 	}
 
@@ -71,7 +71,7 @@ func TestLLMSemanticNavigationWorkflowLive(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	shot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,
@@ -170,7 +170,7 @@ Current SoM: %s`, mustJSON(mapsFromAny(scrollOut["som_delta"].(map[string]any)["
 	}
 	var assessment semanticProgressAssessment
 	callComputerLLM(t, nil,
-		"Assess whether the intended Settings inspection advanced. Input is Computer's observed scroll result, not merely event delivery: "+mustJSON(boundary),
+		"Assess whether this last scroll advanced the Settings viewport to reveal new content. Evaluate only this scroll, not cumulative task completion or the value of content already visible. Input is Computer's observed scroll result, not merely event delivery: "+mustJSON(boundary),
 		`{"type":"object","additionalProperties":false,"properties":{"progress":{"type":"boolean"},"inspected_target":{"type":"string"},"next_action":{"type":"string"},"reason":{"type":"string"}},"required":["progress","inspected_target","next_action","reason"]}`,
 		&assessment)
 	if assessment.Progress || !strings.Contains(strings.ToLower(assessment.InspectedTarget), "settings") {
@@ -189,8 +189,9 @@ func callComputerLLM(t *testing.T, frame []byte, prompt, schema string, out any)
 	}
 	model := strings.TrimSpace(os.Getenv("COMPUTER_LLM_TEST_MODEL"))
 	if model == "" {
-		model = "gpt-5.5"
+		model = "gpt-5.6-terra"
 	}
+	t.Logf("LLM regression model: %s", model)
 	args := []string{"exec", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "-s", "read-only", "-m", model}
 	if len(frame) > 0 {
 		imagePath := filepath.Join(tmp, "frame.jpg")
@@ -202,10 +203,10 @@ func callComputerLLM(t *testing.T, frame []byte, prompt, schema string, out any)
 	args = append(args, "--output-schema", schemaPath, "--output-last-message", resultPath, prompt)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "codex", args...)
+	cmd := exec.CommandContext(ctx, computerLLMBinary(), args...)
 	cmd.Dir = tmp
 	if raw, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("LLM semantic decision failed: %v\n%s", err, raw)
+		t.Fatalf("LLM semantic decision failed: %v\n%s", err, conciseLLMLog(raw))
 	}
 	raw, err := os.ReadFile(resultPath)
 	if err != nil {
@@ -285,3 +286,25 @@ html,body{margin:0;height:100%;overflow:hidden;font-family:system-ui}.top{height
 <main id="editor" class="pane" contenteditable="true" role="textbox" aria-label="Post body"><p>Draft introduction</p><div class="spacer"></div><p>Editor footer</p></main>
 <aside id="settings" class="pane" role="region" aria-label="Settings"><h2>Settings</h2><label>Audience <select><option>Everyone</option></select></label><div class="spacer"></div><button id="schedule">Set publish date</button></aside>
 </div>`
+
+func computerLLMBinary() string {
+	if binary := strings.TrimSpace(os.Getenv("COMPUTER_LLM_CODEX_BIN")); binary != "" {
+		return binary
+	}
+	return "codex"
+}
+
+func conciseLLMLog(raw []byte) string {
+	lines := strings.Split(string(raw), "\n")
+	var out []string
+	for _, line := range lines {
+		if len(line) > 1000 {
+			line = line[:1000] + " [truncated]"
+		}
+		out = append(out, line)
+	}
+	if len(out) > 50 {
+		out = out[len(out)-50:]
+	}
+	return strings.Join(out, "\n")
+}

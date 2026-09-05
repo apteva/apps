@@ -1,0 +1,92 @@
+name: request-thread-multisource-review-creates-task
+description: |
+  A named Core request thread combines three independent domain reads into one
+  outcome. It creates and completes exactly one durable task even though the
+  request does not use task-oriented wording.
+
+timeout: 2m
+settle_for: 6s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  interaction: thread
+  thread:
+    id: request-review
+    mcp: [tasks, crm-snapshot]
+    directive: |
+      A multi-source review is durable task work. Before any domain read,
+      create exactly one task named "Review CRM health snapshot". Then call
+      each of the three crm-snapshot tools exactly once, synthesize their
+      authoritative values, and complete the same task with a concrete result.
+      This is immediate work: omit the schedule argument entirely and set
+      assigned_thread_id exactly to "request-review". Call tasks_create only
+      once; retain the returned task ID. Do not delegate. Report the final
+      counts in your response and stop.
+  app:
+    path: ./
+  fake_mcp_servers:
+    - name: crm-snapshot
+      tools:
+        - name: accounts_status
+          description: Return the authoritative number of open CRM accounts requiring review.
+          result: '{"open_accounts":0}'
+        - name: contact_activity
+          description: Return the authoritative number of active contacts with no activity in the last 24 hours.
+          result: '{"inactive_active_contacts":19}'
+        - name: opportunities_status
+          description: Return the authoritative number of open opportunities.
+          result: '{"open_opportunities":0}'
+
+directive: |
+  Wait for task.ready events addressed to main. Do not take ownership of
+  another thread's immediate review request.
+
+prompt: |
+  Review CRM health across account status, recent contact activity, and open opportunities. Give me a concise summary.
+
+assert:
+  - tool_called_with:
+      tool: tasks_create
+      thread_id: request-review
+      args:
+        title: Review CRM health snapshot
+      count: 1
+      before: crm-snapshot_accounts_status
+  - tool_called_with:
+      tool: crm-snapshot_accounts_status
+      exact: true
+      thread_id: request-review
+      count: 1
+  - tool_called_with:
+      tool: crm-snapshot_contact_activity
+      exact: true
+      thread_id: request-review
+      count: 1
+  - tool_called_with:
+      tool: crm-snapshot_opportunities_status
+      exact: true
+      thread_id: request-review
+      count: 1
+  - tool_called_with:
+      tool: tasks_complete
+      thread_id: request-review
+      count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_status: 200
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.state
+    expect_field_eq: completed
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.created_by_thread_id
+    expect_field_eq: request-review
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.assigned_thread_id
+    expect_field_eq: request-review
+  - iterations_at_most: 12
+
+budget:
+  total_tokens: 200000
+  cost_usd: 1.75

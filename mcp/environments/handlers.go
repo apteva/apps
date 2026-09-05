@@ -155,17 +155,11 @@ func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		var in struct {
-			Kind string          `json:"kind"`
-			Spec EnvironmentSpec `json:"spec"`
-		}
-		if !decodeBody(w, r, &in) {
+		var args map[string]any
+		if !decodeBody(w, r, &args) {
 			return
 		}
-		if in.Kind == "" {
-			in.Kind = "eval"
-		}
-		run, err := a.svc.start("", in.Kind, in.Spec)
+		run, err := a.toolRunCreate(nil, args)
 		if err != nil {
 			httpError(w, 400, err)
 			return

@@ -29,23 +29,24 @@ import (
 // tests are non-nil; everything else panics so failures are loud.
 type stubPlatform struct {
 	tk.BasePlatformClient
-	mu               sync.Mutex
-	executeCalls     []executeCall
-	callAppCalls     []callAppCall
-	executeReply     *sdk.ExecuteResult
-	replyByTool      map[string]*sdk.ExecuteResult
-	executeErr       error
-	callAppReply     json.RawMessage
-	callAppErr       error
-	callAppResultErr error
-	connectionCreds  map[int64]map[string]string
-	domainGrants     []sdk.DomainGrant
-	domainGrantsErr  error
-	dnsRequests      []sdk.DNSRecordRequest
-	dnsResult        *sdk.DNSRecordResult
-	dnsErr           error
-	bindingsOverride map[string]any       // when non-nil, replaces the default email_provider binding
-	whoAmIOverride   *sdk.InstallIdentity // when non-nil, replaces the default identity
+	mu                 sync.Mutex
+	executeCalls       []executeCall
+	callAppCalls       []callAppCall
+	executeReply       *sdk.ExecuteResult
+	replyByTool        map[string]*sdk.ExecuteResult
+	executeErr         error
+	callAppReply       json.RawMessage
+	callAppReplyByTool map[string]json.RawMessage
+	callAppErr         error
+	callAppResultErr   error
+	connectionCreds    map[int64]map[string]string
+	domainGrants       []sdk.DomainGrant
+	domainGrantsErr    error
+	dnsRequests        []sdk.DNSRecordRequest
+	dnsResult          *sdk.DNSRecordResult
+	dnsErr             error
+	bindingsOverride   map[string]any       // when non-nil, replaces the default email_provider binding
+	whoAmIOverride     *sdk.InstallIdentity // when non-nil, replaces the default identity
 	// executeOverride: when non-nil, called per ExecuteIntegrationTool
 	// invocation BEFORE replyByTool / defaults. The int is the
 	// 0-indexed count of prior calls for that tool — lets a test
@@ -99,6 +100,8 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 		return s.executeReply, nil
 	}
 	switch tool {
+	case "get_bucket_policy":
+		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"Code":"NoSuchBucketPolicy"}`)}, nil
 	case "send_email":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
 	case "send_raw_email":
@@ -117,6 +120,12 @@ func (s *stubPlatform) CallApp(app, tool string, input map[string]any) (json.Raw
 	s.mu.Unlock()
 	if s.callAppErr != nil {
 		return nil, s.callAppErr
+	}
+	if raw, ok := s.callAppReplyByTool[tool]; ok {
+		return raw, nil
+	}
+	if app == "domains" && tool == "domain_records_list" && len(s.callAppReply) == 0 {
+		return json.RawMessage(`{"records":[]}`), nil
 	}
 	return s.callAppReply, nil
 }
@@ -254,7 +263,7 @@ func TestDispatchInbound_GenericRouteIncludesStableAttachmentMetadata(t *testing
 	}
 	var firstID int64
 	for i, call := range plat.callAppCalls {
-		if call.App != "support" || call.Tool != "/receive" {
+		if call.App != "support" || call.Tool != "receive" {
 			t.Fatalf("call=%+v", call)
 		}
 		attachments, ok := call.Input["attachments"].([]MessageAttachment)
@@ -370,7 +379,7 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 }
 func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
 	if s.connectionCreds == nil {
-		return nil, tk.ErrNotImplemented
+		return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "aws-ses", Fields: map[string]string{"region": "eu-west-1"}}, nil
 	}
 	fields, ok := s.connectionCreds[id]
 	if !ok {
@@ -627,20 +636,18 @@ func TestValidatePublicHTTPURLRejectsLocalTargets(t *testing.T) {
 }
 
 func TestBootstrapPublishDNSRecordUsesPlatformGrant(t *testing.T) {
-	plat := &stubPlatform{
-		domainGrants: []sdk.DomainGrant{{Domain: "example.com", Status: "active"}},
-		dnsResult:    &sdk.DNSRecordResult{OK: true, Action: "updated"},
-	}
+	plat := &stubPlatform{domainGrants: []sdk.DomainGrant{{Domain: "example.com", Status: "active"}}, dnsResult: &sdk.DNSRecordResult{OK: true, Action: "updated"}}
 	ctx := newTestCtx(t, plat)
 	step := bootstrapPublishDNSRecord(ctx, "test-proj", "publish_dmarc", "example.com", "_dmarc", "TXT", "v=DMARC1; p=none")
-	if !step.OK || step.Detail != "updated" {
-		t.Fatalf("step=%+v", step)
+	if step.OK || len(plat.dnsRequests) != 0 || !strings.Contains(step.Error, "inventory unavailable") {
+		t.Fatalf("must not overwrite unknown DMARC: %+v", step)
 	}
-	if len(plat.dnsRequests) != 1 {
-		t.Fatalf("DNS requests=%d", len(plat.dnsRequests))
+	step = bootstrapPublishDNSRecord(ctx, "test-proj", "publish_dkim", "example.com", "token._domainkey", "CNAME", "token.dkim.amazonses.com")
+	if !step.OK || len(plat.dnsRequests) != 1 {
+		t.Fatalf("DKIM with platform grant: %+v", step)
 	}
 	req := plat.dnsRequests[0]
-	if req.ProjectID != "test-proj" || req.Domain != "example.com" || req.Name != "_dmarc" || req.Type != "TXT" {
+	if req.ProjectID != "test-proj" || req.Type != "CNAME" || req.Name != "token._domainkey" {
 		t.Fatalf("request=%+v", req)
 	}
 }
@@ -1076,6 +1083,39 @@ func TestSendMessage_SMSURLAttachmentMapsToTwilioMediaURL(t *testing.T) {
 	}
 }
 
+func TestSendMessage_SMSMultipleAttachmentsMapToRepeatedTwilioMediaURLs(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "sms",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "two files",
+		"attachments": []any{
+			map[string]any{"url": "https://files.example.test/one.jpg", "content_type": "image/jpeg"},
+			map[string]any{"url": "https://files.example.test/two.pdf", "content_type": "application/pdf"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_sms" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_sms was not called")
+	}
+	urls, ok := sendCall.Input["MediaUrl"].([]string)
+	if !ok || len(urls) != 2 || urls[0] != "https://files.example.test/one.jpg" || urls[1] != "https://files.example.test/two.pdf" {
+		t.Fatalf("MediaUrl=%T %+v", sendCall.Input["MediaUrl"], sendCall.Input["MediaUrl"])
+	}
+}
+
 func TestSendMessage_RequiresBodyOrTemplate(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)
@@ -1471,6 +1511,174 @@ func TestSuppression_AddRemove(t *testing.T) {
 	out, _ = app.toolSuppressionList(ctx, map[string]any{})
 	if out.(map[string]any)["count"].(int) != 0 {
 		t.Errorf("expected 0 after remove, got %v", out)
+	}
+}
+
+func TestSuppressionChangedEvent_AddAndRemove(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	app := &App{}
+
+	if _, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "blocked@example.com",
+		"reason":  "user-requested",
+		"source":  "crm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{"address": "blocked@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	// Removing a missing row is an idempotent no-op and must not invent a
+	// third change event.
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{"address": "blocked@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := recorder.EventsByTopic("suppression.changed")
+	if len(events) != 2 {
+		t.Fatalf("suppression.changed events=%d, want 2", len(events))
+	}
+	for i, operation := range []string{"add", "remove"} {
+		event := events[i]
+		payload, ok := event.Data.(map[string]any)
+		if !ok {
+			t.Fatalf("event %d data=%T, want map", i, event.Data)
+		}
+		if event.ProjectID != "test-proj" {
+			t.Fatalf("event %d project=%q", i, event.ProjectID)
+		}
+		if payload["operation"] != operation ||
+			payload["address"] != "blocked@example.com" ||
+			payload["channel"] != channelEmail ||
+			payload["kind"] != "address" ||
+			payload["reason"] != "user-requested" ||
+			payload["source"] != "crm" {
+			t.Fatalf("event %d payload=%#v", i, payload)
+		}
+	}
+	addPayload := events[0].Data.(map[string]any)
+	removePayload := events[1].Data.(map[string]any)
+	if addPayload["suppressed"] != true || removePayload["suppressed"] != false {
+		t.Fatalf("suppressed flags add=%#v remove=%#v", addPayload, removePayload)
+	}
+	added := recorder.EventsByTopic("suppression.added")
+	removed := recorder.EventsByTopic("suppression.removed")
+	if len(added) != 1 || len(removed) != 1 {
+		t.Fatalf("explicit suppression events added=%d removed=%d", len(added), len(removed))
+	}
+	if added[0].Data.(map[string]any)["operation"] != "add" ||
+		removed[0].Data.(map[string]any)["operation"] != "remove" {
+		t.Fatalf("explicit payloads added=%#v removed=%#v", added[0].Data, removed[0].Data)
+	}
+}
+
+func TestDomainSuppressionEmitsExplicitAddedAndRemovedEvents(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, nil, tk.WithEmitter(recorder))
+	app := &App{}
+
+	if _, err := app.toolSuppressionAdd(ctx, map[string]any{
+		"address": "blocked.test",
+		"kind":    "domain",
+		"reason":  "policy",
+		"source":  "crm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSuppressionRemove(ctx, map[string]any{
+		"address": "blocked.test",
+		"kind":    "domain",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, topic := range []string{"suppression.added", "suppression.removed"} {
+		events := recorder.EventsByTopic(topic)
+		if len(events) != 1 {
+			t.Fatalf("%s events=%d, want 1", topic, len(events))
+		}
+		payload := events[0].Data.(map[string]any)
+		if payload["kind"] != "domain" || payload["channel"] != channelEmail || payload["address"] != "blocked.test" {
+			t.Fatalf("%s payload=%#v", topic, payload)
+		}
+	}
+}
+
+func TestSuppressionListPaginationReturnsFilteredTotal(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	for _, row := range []struct {
+		channel string
+		address string
+	}{
+		{channelEmail, "a@example.com"},
+		{channelEmail, "b@example.com"},
+		{channelEmail, "c@example.com"},
+		{channelSMS, "+12025550101"},
+		{channelWhatsApp, "+12025550102"},
+	} {
+		if err := dbSuppressionUpsert(ctx.AppDB(), "test-proj", row.channel, row.address, "test", "manual"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE suppressions SET last_seen='2026-08-26T10:00:00Z' WHERE project_id='test-proj'`); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolSuppressionList(ctx, map[string]any{
+		"channel": channelEmail,
+		"limit":   2,
+		"offset":  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := out.(map[string]any)
+	if page["count"] != 2 || page["total"] != 3 || page["limit"] != 2 || page["offset"] != 1 || page["has_more"] != false {
+		t.Fatalf("page metadata=%#v", page)
+	}
+	rows := page["suppressions"].([]Suppression)
+	if len(rows) != 2 || rows[0].Address != "b@example.com" || rows[1].Address != "c@example.com" {
+		t.Fatalf("stable page rows=%#v", rows)
+	}
+}
+
+func TestSendMessage_FinalSuppressionCheckStopsConcurrentOptOut(t *testing.T) {
+	platform := &stubPlatform{}
+	ctx := newTestCtx(t, platform)
+	_, err := ctx.AppDB().Exec(`CREATE TRIGGER add_suppression_after_outbound_insert
+		AFTER INSERT ON messages
+		WHEN NEW.direction = 'out'
+		BEGIN
+			INSERT INTO suppressions
+				(project_id, channel, kind, address, reason, source, first_seen, last_seen)
+			VALUES
+				(NEW.project_id, NEW.channel, 'address', 'race@example.com', 'concurrent-opt-out', 'auto', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+		END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel": channelEmail,
+		"from":    fromAcme,
+		"to":      "race@example.com",
+		"subject": "must not send",
+		"body":    "blocked at final check",
+	})
+	var suppressedErr *recipientSuppressedError
+	if !errors.As(err, &suppressedErr) {
+		t.Fatalf("error=%v, want final recipient suppression", err)
+	}
+	if len(platform.executeCalls) != 0 {
+		t.Fatalf("provider calls=%#v, want none", platform.executeCalls)
+	}
+	var status string
+	if err := ctx.AppDB().QueryRow(`SELECT status FROM messages WHERE direction='out' ORDER BY id DESC LIMIT 1`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suppressed" {
+		t.Fatalf("persisted status=%q, want suppressed", status)
 	}
 }
 
@@ -2542,7 +2750,7 @@ func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T)
 	for _, want := range []string{
 		"/api/apps/messaging/webhooks/ses-bounces?",
 		"/api/apps/messaging/webhooks/ses-inbound?",
-		"api_key=dev-47",
+		"install_id=47",
 		"project_id=test-proj",
 	} {
 		if !strings.Contains(joined, want) {
@@ -2597,8 +2805,8 @@ func TestSendersCreate_Domain_GlobalInstallWebhookURLsOmitProject(t *testing.T) 
 		}
 	}
 	joined := strings.Join(endpoints, "\n")
-	if !strings.Contains(joined, "api_key=dev-47") {
-		t.Fatalf("subscribe endpoints missing api key:\n%s", joined)
+	if strings.Contains(joined, "api_key=") || !strings.Contains(joined, "install_id=47") {
+		t.Fatalf("subscribe endpoints exposed app token:\n%s", joined)
 	}
 	if strings.Contains(joined, "project_id=") {
 		t.Fatalf("global install webhook endpoints should omit project_id:\n%s", joined)
@@ -2683,115 +2891,22 @@ func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
 // describe → merge → delete → recreate-with-both, not the pre-v0.12.5
 // silent no-op.
 func TestSendersCreate_Domain_AlreadyExists_MergesRecipients(t *testing.T) {
-	const describeReply = `{
-		"DescribeActiveReceiptRuleSetResponse": {
-			"DescribeActiveReceiptRuleSetResult": {
-				"Metadata": {"Name":"apteva-default"},
-				"Rules": {"member":[
-					{"Name":"messaging-inbound-47","Recipients":{"member":["schwartzindustries.com"]}}
-				]}
-			}
-		}
-	}`
-	plat := &stubPlatform{
-		bindingsOverride: map[string]any{
-			"email_provider":        float64(1),
-			"inbound_storage":       float64(2),
-			"inbound_notifications": float64(3),
-		},
-		whoAmIOverride: &sdk.InstallIdentity{
-			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
-		},
-		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
-			"set_topic_attributes":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"create_s3_bucket":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"put_s3_bucket_policy":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"verify_domain":           {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
-			"create_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			// First create_receipt_rule call (for the new domain) fails
-			// AlreadyExists; merge path then describes, deletes, recreates.
-			"set_active_receipt_rule_set":      {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"subscribe":                        {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
-			"delete_receipt_rule":              {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"describe_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(describeReply)},
-		},
-		// create_receipt_rule needs a per-call switch: first AlreadyExists,
-		// second (recreate) success. Use a tiny dispatcher.
-		executeOverride: func(tool string, calls int) *sdk.ExecuteResult {
-			if tool == "create_receipt_rule" {
-				if calls == 0 {
-					return &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"Error":{"Code":"AlreadyExists","Message":"Rule already exists"}}`)}
-				}
-				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
-			}
-			return nil
-		},
-	}
-	t.Setenv("APTEVA_PUBLIC_URL", "https://test.public.example")
+	plat := &stubPlatform{replyByTool: map[string]*sdk.ExecuteResult{
+		"describe_receipt_rule": {Success: true, Data: json.RawMessage(`{"DescribeReceiptRuleResponse":{"DescribeReceiptRuleResult":{"Rule":{"Name":"messaging-inbound-47","Recipients":{"member":"schwartzindustries.com"},"Enabled":true,"ScanEnabled":true,"TlsPolicy":"Require","Actions":{"member":{"S3Action":{"BucketName":"existing-bucket","ObjectKeyPrefix":"mail/"}}}}}}}`)},
+	}}
 	ctx := newTestCtx(t, plat)
-	app := &App{}
-
-	if _, err := app.toolSendersCreate(ctx, map[string]any{
-		"address": "hypnofans.com",
-		"inbound": "true",
-	}); err != nil {
+	if err := mergeReceiptRuleRecipient(ctx, 1, "existing-set", "messaging-inbound-47", "hypnofans.com", "unused", "unused"); err != nil {
 		t.Fatal(err)
 	}
-
-	// Confirm the dispatch order: create → describe → delete → create.
-	var seq []string
-	for _, c := range plat.executeCalls {
-		switch c.Tool {
-		case "create_receipt_rule", "describe_active_receipt_rule_set", "delete_receipt_rule":
-			seq = append(seq, c.Tool)
-		}
+	if len(plat.executeCalls) != 2 || plat.executeCalls[0].Tool != "describe_receipt_rule" || plat.executeCalls[1].Tool != "update_receipt_rule" {
+		t.Fatalf("unexpected mutations: %+v", plat.executeCalls)
 	}
-	if len(seq) != 4 ||
-		seq[0] != "create_receipt_rule" ||
-		seq[1] != "describe_active_receipt_rule_set" ||
-		seq[2] != "delete_receipt_rule" ||
-		seq[3] != "create_receipt_rule" {
-		t.Fatalf("expected create→describe→delete→create dispatch, got %v", seq)
+	got := plat.executeCalls[1].Input
+	if got["Rule.Recipients.member.1"] != "schwartzindustries.com" || got["Rule.Recipients.member.2"] != "hypnofans.com" {
+		t.Fatalf("recipients=%+v", got)
 	}
-
-	// The recreate (2nd create_receipt_rule call) must carry BOTH the
-	// existing (schwartzindustries.com) and the new (hypnofans.com)
-	// recipient. Pre-v0.12.5 the bug was the silent no-op; this
-	// assertion is the actual fix.
-	var recreate *executeCall
-	createSeen := 0
-	for i := range plat.executeCalls {
-		if plat.executeCalls[i].Tool == "create_receipt_rule" {
-			createSeen++
-			if createSeen == 2 {
-				recreate = &plat.executeCalls[i]
-				break
-			}
-		}
-	}
-	if recreate == nil {
-		t.Fatal("no 2nd create_receipt_rule call (the recreate after delete)")
-	}
-	for _, key := range []string{"Rule.Recipients.member.1", "Rule.Recipients.member.2"} {
-		if recreate.Input[key] == nil {
-			t.Errorf("recreate missing %s: %+v", key, recreate.Input)
-		}
-	}
-	got := []string{
-		fmt.Sprint(recreate.Input["Rule.Recipients.member.1"]),
-		fmt.Sprint(recreate.Input["Rule.Recipients.member.2"]),
-	}
-	want := map[string]bool{"schwartzindustries.com": false, "hypnofans.com": false}
-	for _, r := range got {
-		if _, ok := want[r]; ok {
-			want[r] = true
-		}
-	}
-	for r, seen := range want {
-		if !seen {
-			t.Errorf("merged recipients missing %q (got %v)", r, got)
-		}
+	if got["Rule.Actions.member.1.S3Action.BucketName"] != "existing-bucket" || got["Rule.TlsPolicy"] != "Require" || got["RuleSetName"] != "existing-set" {
+		t.Fatalf("existing settings lost: %+v", got)
 	}
 }
 
@@ -3256,6 +3371,19 @@ func newPhoneStub(reply *sdk.ExecuteResult) *stubPlatform {
 	return p
 }
 
+func seedWhatsAppSession(t *testing.T, ctx *sdk.AppCtx) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO messages
+			(project_id, channel, direction, from_addr, to_addrs, status, body_text, received_at, created_at)
+		 VALUES ('test-proj', 'whatsapp', 'in', '+15553334444', '["+15551112222"]', 'received', 'hi', ?, ?)`,
+		now, now,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSendMessageWhatsAppFreeformRequiresRecentInbound(t *testing.T) {
 	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat)
@@ -3311,6 +3439,249 @@ func TestSendMessageWhatsAppFreeformAllowedAfterInbound(t *testing.T) {
 	}
 	if sendCall.Input["Body"] != "hello" {
 		t.Errorf("Body=%v", sendCall.Input["Body"])
+	}
+}
+
+func TestSendMessageWhatsAppAllowsMediaOnlyAndNormalisesLegacyMediaURL(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":   "whatsapp",
+		"from":      "+15551112222",
+		"to":        "+15553334444",
+		"media_url": "https://files.example.test/voice.ogg",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_whatsapp" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_whatsapp was not called")
+	}
+	if sendCall.Input["MediaUrl"] != "https://files.example.test/voice.ogg" {
+		t.Fatalf("MediaUrl=%v", sendCall.Input["MediaUrl"])
+	}
+	if _, present := sendCall.Input["Body"]; present {
+		t.Fatalf("media-only send included Body: %+v", sendCall.Input)
+	}
+	attachments := out.(map[string]any)["attachments"].([]MessageAttachment)
+	if len(attachments) != 1 || attachments[0].URL != "https://files.example.test/voice.ogg" {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+}
+
+func TestSendMessageWhatsAppImageAllowsCaption(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	if _, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "caption",
+		"attachments": []any{map[string]any{
+			"url": "https://files.example.test/photo.jpg", "content_type": "image/jpeg", "size_bytes": float64(1024),
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	call := plat.executeCalls[len(plat.executeCalls)-1]
+	if call.Tool != "send_whatsapp" || call.Input["Body"] != "caption" || call.Input["MediaUrl"] != "https://files.example.test/photo.jpg" {
+		t.Fatalf("send call=%+v", call)
+	}
+}
+
+func TestSendMessageWhatsAppSupportsDocumentAudioAndVideoMediaOnly(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		url         string
+	}{
+		{name: "document", contentType: "application/pdf", url: "https://files.example.test/document.pdf"},
+		{name: "voice note", contentType: "audio/ogg; codecs=opus", url: "https://files.example.test/voice.ogg"},
+		{name: "video", contentType: "video/mp4", url: "https://files.example.test/video.mp4"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plat := newPhoneStub(nil)
+			ctx := newTestCtx(t, plat)
+			seedWhatsAppSession(t, ctx)
+			if _, err := (&App{}).toolSendMessage(ctx, map[string]any{
+				"channel": "whatsapp",
+				"from":    "+15551112222",
+				"to":      "+15553334444",
+				"attachments": []any{map[string]any{
+					"url": tc.url, "content_type": tc.contentType, "size_bytes": float64(2048),
+				}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			call := plat.executeCalls[len(plat.executeCalls)-1]
+			if call.Input["MediaUrl"] != tc.url {
+				t.Fatalf("send call=%+v", call)
+			}
+			if _, present := call.Input["Body"]; present {
+				t.Fatalf("media-only send included Body: %+v", call.Input)
+			}
+		})
+	}
+}
+
+func TestSendMessageWhatsAppAudioRejectsBodyBeforePersist(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "listen",
+		"attachments": []any{map[string]any{
+			"url": "https://files.example.test/voice.ogg", "content_type": "audio/ogg", "size_bytes": float64(1024),
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "send the text as a separate message") {
+		t.Fatalf("expected audio/body error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM messages WHERE direction='out'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid request persisted count=%d err=%v", count, err)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsMultipleMediaBeforeResolution(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "whatsapp",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"attachments": []any{
+			map[string]any{"url": "https://files.example.test/one.jpg", "content_type": "image/jpeg"},
+			map[string]any{"url": "https://files.example.test/two.jpg", "content_type": "image/jpeg"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one media attachment") {
+		t.Fatalf("expected one-media error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 || len(plat.callAppCalls) != 0 {
+		t.Fatalf("invalid request reached a provider: integration=%+v apps=%+v", plat.executeCalls, plat.callAppCalls)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsContentSidWithMedia(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"content_sid": "HXapproved",
+		"media_url":   "https://files.example.test/photo.jpg",
+	})
+	if err == nil || !strings.Contains(err.Error(), "content_sid cannot be combined") {
+		t.Fatalf("expected template/media error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+}
+
+func TestSendMessageWhatsAppRejectsContentSidWithBody(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+
+	_, err := (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel":     "whatsapp",
+		"from":        "+15551112222",
+		"to":          "+15553334444",
+		"content_sid": "HXapproved",
+		"body":        "must not be sent",
+	})
+	if err == nil || !strings.Contains(err.Error(), "content_sid cannot be combined") {
+		t.Fatalf("expected template/body error, got %v", err)
+	}
+	if len(plat.executeCalls) != 0 {
+		t.Fatalf("provider called for invalid request: %+v", plat.executeCalls)
+	}
+}
+
+func TestSendMessageWhatsAppValidatesKnownTypeAndSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		size        int64
+		want        string
+	}{
+		{name: "unsupported", contentType: "text/plain", size: 10, want: "does not support"},
+		{name: "oversized image", contentType: "image/png", size: whatsAppImageMaxBytes + 1, want: "exceeds"},
+		{name: "oversized audio", contentType: "audio/ogg", size: whatsAppMediaMaxBytes + 1, want: "exceeds"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			plat := newPhoneStub(nil)
+			ctx := newTestCtx(t, plat)
+			seedWhatsAppSession(t, ctx)
+			_, err := (&App{}).toolSendMessage(ctx, map[string]any{
+				"channel": "whatsapp",
+				"from":    "+15551112222",
+				"to":      "+15553334444",
+				"attachments": []any{map[string]any{
+					"url": "https://files.example.test/file", "content_type": tc.contentType, "size_bytes": float64(tc.size),
+				}},
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q error, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestSendMessageWhatsAppStorageAttachmentUsesStoredMetadata(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.bindingsOverride["storage"] = float64(3)
+	plat.callAppReplyByTool = map[string]json.RawMessage{
+		"files_get":     json.RawMessage(`{"found":true,"file":{"name":"voice.ogg","content_type":"audio/ogg","size_bytes":2048}}`),
+		"files_get_url": json.RawMessage(`{"url":"https://files.example.test/voice.ogg"}`),
+	}
+	ctx := newTestCtx(t, plat)
+	seedWhatsAppSession(t, ctx)
+
+	out, err := (&App{}).toolSendMessage(ctx, map[string]any{
+		"channel":                "whatsapp",
+		"from":                   "+15551112222",
+		"to":                     "+15553334444",
+		"attachment_storage_ids": []any{float64(77)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachments := out.(map[string]any)["attachments"].([]MessageAttachment)
+	if len(attachments) != 1 || attachments[0].Filename != "voice.ogg" || attachments[0].ContentType != "audio/ogg" || attachments[0].SizeBytes != 2048 {
+		t.Fatalf("attachments=%+v", attachments)
+	}
+	if call := plat.executeCalls[len(plat.executeCalls)-1]; call.Input["MediaUrl"] != "https://files.example.test/voice.ogg" {
+		t.Fatalf("send call=%+v", call)
 	}
 }
 
@@ -4012,7 +4383,7 @@ func TestSendMessageSMS_UsesDefaultSenderAndStatusCallback(t *testing.T) {
 	cb, _ := sendCall.Input["StatusCallback"].(string)
 	if !strings.Contains(cb, "/api/apps/messaging/webhooks/twilio-status") ||
 		!strings.Contains(cb, "project_id=test-proj") ||
-		!strings.Contains(cb, "api_key=tok") {
+		strings.Contains(cb, "api_key=") {
 		t.Errorf("StatusCallback=%q", cb)
 	}
 }
@@ -4258,7 +4629,7 @@ func TestTwilioInboundWebhook_PersistsSMSAndDispatches(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -4311,7 +4682,7 @@ func TestTwilioInboundWebhook_UsesBoundConnectionCredentials(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -4335,7 +4706,7 @@ func TestTwilioInboundWebhook_FailsClosedWithoutAuthToken(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", "forged")
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -4377,7 +4748,7 @@ func TestTwilioInboundWebhook_DeduplicatesMessageSid(t *testing.T) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		r.Header.Set("X-Twilio-Signature", signature)
 		w := httptest.NewRecorder()
-		app.handleTwilioInboundWebhook(w, r)
+		app.handleTwilioInboundAndProcessForTest(w, r)
 		if w.Code != http.StatusOK {
 			t.Fatalf("attempt %d status=%d body=%s", i+1, w.Code, w.Body.String())
 		}
@@ -4424,7 +4795,7 @@ func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -4440,9 +4811,10 @@ func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
 
 func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	plat := newPhoneStub(nil)
+	recorder := tk.NewEmitRecorder()
 	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
 		"twilio_auth_token": "secret",
-	}))
+	}), tk.WithEmitter(recorder))
 	app := &App{}
 
 	form := url.Values{
@@ -4471,7 +4843,7 @@ func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)
@@ -4482,6 +4854,14 @@ func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	}
 	if supps[0].Address != "+15551112222" || supps[0].Reason != "stop-keyword" {
 		t.Errorf("suppression: %+v", supps[0])
+	}
+	changes := recorder.EventsByTopic("suppression.changed")
+	if len(changes) != 1 {
+		t.Fatalf("suppression.changed=%#v", changes)
+	}
+	payload := changes[0].Data.(map[string]any)
+	if payload["operation"] != "add" || payload["channel"] != channelSMS || payload["address"] != "+15551112222" {
+		t.Fatalf("suppression.changed payload=%#v", payload)
 	}
 }
 
@@ -4501,7 +4881,7 @@ func TestTwilioInboundWebhook_RejectsBadSignature(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", "AAAA")
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -4693,7 +5073,7 @@ func TestSESInbound_PersistsVerdicts(t *testing.T) {
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
 	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
-	app.handleInboundWebhook(w, r)
+	app.handleInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)

@@ -391,10 +391,10 @@ func dbConversationActivities(db *sql.DB, pid string, conversationID int64, limi
 				COALESCE(messaging_id, 0) AS messaging_id
 		 FROM contact_activities
 		 WHERE project_id = ? AND conversation_id = ?
-		 ORDER BY occurred_at DESC, id DESC
+		 ORDER BY julianday(occurred_at) DESC, id DESC
 		 LIMIT ? OFFSET ?
 		 ) recent
-		 ORDER BY occurred_at ASC, id ASC`,
+		 ORDER BY julianday(occurred_at) ASC, id ASC`,
 		pid, conversationID, limit, offset,
 	)
 	if err != nil {
@@ -405,7 +405,9 @@ func dbConversationActivities(db *sql.DB, pid string, conversationID int64, limi
 	for rows.Next() {
 		a := &Activity{}
 		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source,
-			&a.SourceDetail, &a.ConversationID, &a.MessageIDHeader, &a.MessagingID); err == nil {
+			&a.SourceDetail, &a.ConversationID, &a.MessageIDHeader, &a.MessagingID); err != nil {
+			return nil, err
+		} else {
 			if a.MessagingID == 0 {
 				a.MessagingID = messagingIDFromSourceDetail(a.SourceDetail)
 			}
@@ -463,10 +465,23 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 	if ctx == nil || messagingBound(ctx) == nil || len(activities) == 0 {
 		return
 	}
+	boundID := messagingInstallID(ctx)
+	eligible := func(a *Activity) bool {
+		if a == nil || a.MessagingID == 0 {
+			return false
+		}
+		var detail map[string]any
+		if json.Unmarshal([]byte(a.SourceDetail), &detail) != nil {
+			return false
+		}
+		// Unknown legacy provenance cannot safely be assigned to a newly bound install.
+		source := int64FromAny(detail["source_install_id"])
+		return source > 0 && source == boundID
+	}
 	ids := []int64{}
 	seen := map[int64]bool{}
 	for _, a := range activities {
-		if a == nil || a.MessagingID == 0 || seen[a.MessagingID] {
+		if !eligible(a) || seen[a.MessagingID] {
 			continue
 		}
 		seen[a.MessagingID] = true
@@ -489,11 +504,7 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 		go func() {
 			defer workers.Done()
 			for id := range jobs {
-				var out messagingMessageGetResponse
-				err := callMessagingTool(ctx, "message_get", map[string]any{
-					"_project_id": pid,
-					"id":          id,
-				}, &out)
+				out, err := cachedMessagingMessage(ctx, pid, id)
 				if err != nil || !out.Found || out.Message == nil {
 					continue
 				}
@@ -532,7 +543,7 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 	close(jobs)
 	workers.Wait()
 	for _, a := range activities {
-		if a != nil && a.MessagingID != 0 {
+		if eligible(a) {
 			a.MessageStatus = statuses[a.MessagingID]
 			if len(a.Attachments) == 0 && len(attachments[a.MessagingID]) > 0 {
 				if err := upsertActivityAttachments(ctx.AppDB(), pid, a.ID, attachments[a.MessagingID]); err != nil {
@@ -547,33 +558,56 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 // ─── Atomic activity insert with conversation linkage ──────────────
 
 type logMessageActivityInput struct {
-	ProjectID       string
-	ContactID       int64
-	Kind            string
-	Body            string
-	OccurredAt      string
-	Source          string
-	SourceDetail    map[string]any
-	ConversationID  int64
-	MessageIDHeader string // outbound: Message-Id we sent; inbound: Message-Id we received
-	MessagingID     int64  // messaging-app row id; used for inbound dedup
-	IdempotencyKey  string // outbound caller key or CRM-generated short-window key
-	Attachments     []messagingAttachment
+	ProjectID          string
+	ContactID          int64
+	Kind               string
+	Body               string
+	OccurredAt         string
+	Source             string
+	SourceDetail       map[string]any
+	ConversationID     int64
+	MessageIDHeader    string // outbound: Message-Id we sent; inbound: Message-Id we received
+	MessagingInstallID int64
+	MessagingID        int64  // messaging-app row id; used for inbound dedup
+	IdempotencyKey     string // outbound caller key or CRM-generated short-window key
+	Attachments        []messagingAttachment
 }
 
 func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, error) {
-	if in.OccurredAt == "" {
-		in.OccurredAt = time.Now().UTC().Format(time.RFC3339)
-	}
-	var sdJSON []byte
-	if len(in.SourceDetail) > 0 {
-		sdJSON, _ = json.Marshal(in.SourceDetail)
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	activity, err := logMessageActivityTx(tx, in)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	if err = loadActivityAttachments(db, in.ProjectID, []*Activity{activity}); err != nil {
+		return nil, err
+	}
+	return activity, nil
+}
+func logMessageActivityTx(tx *sql.Tx, in logMessageActivityInput) (*Activity, error) {
+	if in.OccurredAt == "" {
+		in.OccurredAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	if in.MessagingInstallID > 0 {
+		detail := map[string]any{}
+		for k, v := range in.SourceDetail {
+			detail[k] = v
+		}
+		detail["source_install_id"] = in.MessagingInstallID
+		in.SourceDetail = detail
+	}
+	var sdJSON []byte
+	if len(in.SourceDetail) > 0 {
+		sdJSON, _ = json.Marshal(in.SourceDetail)
+	}
 
 	var convoArg, sdArg, msgIDArg, messagingIDArg, idempotencyKeyArg any
 	if in.ConversationID > 0 {
@@ -596,10 +630,10 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 		`INSERT INTO contact_activities
 			(project_id, contact_id, kind, body, occurred_at, source,
 			 source_detail, conversation_id, message_id_header, messaging_id,
-			 idempotency_key)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 idempotency_key, messaging_install_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.ProjectID, in.ContactID, in.Kind, in.Body, in.OccurredAt, in.Source,
-		sdArg, convoArg, msgIDArg, messagingIDArg, idempotencyKeyArg,
+		sdArg, convoArg, msgIDArg, messagingIDArg, idempotencyKeyArg, in.MessagingInstallID,
 	)
 	if err != nil {
 		// Inbound dedup: messaging may retry the same delivery. The
@@ -616,23 +650,20 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 		return nil, err
 	}
 	if _, err := tx.Exec(
-		`UPDATE contacts SET last_contact_at = ?, updated_at = CURRENT_TIMESTAMP
+		`UPDATE contacts SET last_contact_at = CASE WHEN last_contact_at IS NULL OR julianday(?) > julianday(last_contact_at) THEN ? ELSE last_contact_at END, first_contact_at=CASE WHEN first_contact_at IS NULL OR julianday(?) < julianday(first_contact_at) THEN ? ELSE first_contact_at END, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		 WHERE id = ? AND project_id = ?`,
-		in.OccurredAt, in.ContactID, in.ProjectID,
+		in.OccurredAt, in.OccurredAt, in.OccurredAt, in.OccurredAt, in.ContactID, in.ProjectID,
 	); err != nil {
 		return nil, err
 	}
 	if in.ConversationID > 0 {
 		if _, err := tx.Exec(
-			`UPDATE contact_conversations SET last_activity_at = ?
+			`UPDATE contact_conversations SET last_activity_at = CASE WHEN last_activity_at IS NULL OR julianday(?) > julianday(last_activity_at) THEN ? ELSE last_activity_at END
 			 WHERE id = ? AND project_id = ?`,
-			in.OccurredAt, in.ConversationID, in.ProjectID,
+			in.OccurredAt, in.OccurredAt, in.ConversationID, in.ProjectID,
 		); err != nil {
 			return nil, err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
 	}
 	activity := &Activity{
 		ID: aid, ContactID: in.ContactID, Kind: in.Kind, Body: in.Body,
@@ -643,15 +674,16 @@ func logMessageActivity(db *sql.DB, in logMessageActivityInput) (*Activity, erro
 		MessagingID:     in.MessagingID,
 		IdempotencyKey:  in.IdempotencyKey,
 	}
-	if err := loadActivityAttachments(db, in.ProjectID, []*Activity{activity}); err != nil {
-		return nil, err
-	}
 	return activity, nil
 }
 
 var errDuplicateMessagingID = errors.New("duplicate messaging_id (inbound already logged)")
 
-func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64) (*Activity, error) {
+func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64, sourceIDs ...int64) (*Activity, error) {
+	sourceID := int64(0)
+	if len(sourceIDs) > 0 {
+		sourceID = sourceIDs[0]
+	}
 	if messagingID <= 0 {
 		return nil, nil
 	}
@@ -661,8 +693,8 @@ func dbActivityByMessagingID(db *sql.DB, pid string, messagingID int64) (*Activi
 		        COALESCE(message_id_header,''), COALESCE(messaging_id,0),
 		        COALESCE(idempotency_key,'')
 		 FROM contact_activities
-		 WHERE project_id = ? AND messaging_id = ?`,
-		pid, messagingID,
+		 WHERE project_id = ? AND messaging_id = ? AND messaging_install_id=?`,
+		pid, messagingID, sourceID,
 	))
 	if err == nil && a != nil {
 		err = loadActivityAttachments(db, pid, []*Activity{a})
@@ -722,8 +754,9 @@ func isUniqueViolation(err error) bool {
 // ─── Address resolution ───────────────────────────────────────────
 
 type resolvedAddress struct {
-	Channel string
-	Address string
+	Channel   string
+	Address   string
+	ChannelID int64
 }
 
 // resolveContactAddress picks (channel, address) for a send.
@@ -738,38 +771,35 @@ func resolveContactAddress(db *sql.DB, pid string, c *Contact, preferChannel str
 	if c == nil {
 		return nil, errors.New("contact required")
 	}
-	pickFromChannels := func(channel string) string {
-		switch channel {
-		case channelEmail:
-			if c.PrimaryEmail != "" {
-				return c.PrimaryEmail
-			}
-		case channelSMS, channelWhatsApp:
-			if c.PrimaryPhone != "" {
-				return c.PrimaryPhone
-			}
-		}
+	pickFromChannels := func(channel string) (int64, string) {
 		kind := contactChannelKindFor(channel)
 		if kind == "" {
-			return ""
+			return 0, ""
 		}
+		var id int64
 		var v string
 		row := db.QueryRow(
-			`SELECT value FROM contact_channels
-			 WHERE project_id = ? AND contact_id = ? AND kind = ?
+			`SELECT c.id, c.value FROM contact_channels c
+			 WHERE c.project_id = ? AND c.contact_id = ? AND c.kind = ?
+			   AND NOT EXISTS (
+				 SELECT 1 FROM contact_channel_delivery_state s
+				 WHERE s.project_id = c.project_id AND s.channel_id = c.id AND s.transport = ?
+				   AND (s.suppressed = 1 OR s.quarantined = 1
+					OR s.status IN ('hard_bounced','complained','unsubscribed'))
+			   )
 			 ORDER BY is_primary DESC, id ASC LIMIT 1`,
-			pid, c.ID, kind,
+			pid, c.ID, kind, channel,
 		)
-		_ = row.Scan(&v)
-		return v
+		_ = row.Scan(&id, &v)
+		return id, v
 	}
 
 	if preferChannel != "" {
-		addr := pickFromChannels(preferChannel)
+		id, addr := pickFromChannels(preferChannel)
 		if addr == "" {
-			return nil, fmt.Errorf("contact has no %s address", preferChannel)
+			return nil, fmt.Errorf("contact has no messageable %s address", preferChannel)
 		}
-		return &resolvedAddress{Channel: preferChannel, Address: addr}, nil
+		return &resolvedAddress{Channel: preferChannel, Address: addr, ChannelID: id}, nil
 	}
 
 	row := db.QueryRow(
@@ -778,7 +808,7 @@ func resolveContactAddress(db *sql.DB, pid string, c *Contact, preferChannel str
 		   AND kind IN ('email_sent','email_received',
 						'sms_sent','sms_received',
 						'whatsapp_sent','whatsapp_received')
-		 ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+		 ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 1`,
 		pid, c.ID,
 	)
 	var kind string
@@ -794,22 +824,23 @@ func resolveContactAddress(db *sql.DB, pid string, c *Contact, preferChannel str
 		}
 	}
 	if lastChannel != "" {
-		if addr := pickFromChannels(lastChannel); addr != "" {
-			return &resolvedAddress{Channel: lastChannel, Address: addr}, nil
+		if id, addr := pickFromChannels(lastChannel); addr != "" {
+			return &resolvedAddress{Channel: lastChannel, Address: addr, ChannelID: id}, nil
 		}
 	}
 
 	available := []string{}
 	for _, ch := range []string{channelEmail, channelSMS, channelWhatsApp} {
-		if pickFromChannels(ch) != "" {
+		if _, addr := pickFromChannels(ch); addr != "" {
 			available = append(available, ch)
 		}
 	}
 	switch len(available) {
 	case 0:
-		return nil, errors.New("contact has no email or phone address")
+		return nil, errors.New("contact has no messageable email, SMS, or WhatsApp address")
 	case 1:
-		return &resolvedAddress{Channel: available[0], Address: pickFromChannels(available[0])}, nil
+		id, addr := pickFromChannels(available[0])
+		return &resolvedAddress{Channel: available[0], Address: addr, ChannelID: id}, nil
 	default:
 		return nil, fmt.Errorf("channel required: contact has %s — pass channel arg", strings.Join(available, " and "))
 	}
@@ -1231,10 +1262,22 @@ func emitCRMEvent(ctx *sdk.AppCtx, pid, topic string, payload map[string]any) {
 	}
 	if strings.TrimSpace(pid) == "" {
 		ctx.Logger().Warn("crm emit without project", "topic", topic)
-		ctx.Emit(topic, payload)
 		return
 	}
-	ctx.EmitWithProject(topic, pid, payload)
+	if topic != "list.member.added" && topic != "list.member.removed" {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			ctx.Logger().Warn("crm event encode failed", "err", err)
+			return
+		}
+		if _, err = ctx.AppDB().Exec(`INSERT INTO crm_event_outbox(project_id,topic,payload) VALUES(?,?,?)`, pid, topic, string(raw)); err != nil {
+			ctx.Logger().Warn("crm event enqueue failed", "err", err)
+			return
+		}
+	}
+	if err := deliverQueuedCRMEvents(ctx); err != nil {
+		ctx.Logger().Warn("crm event delivery pending", "err", err)
+	}
 }
 
 // ─── Tool: contacts_send_message ──────────────────────────────────
@@ -1446,6 +1489,11 @@ func outboundSendResult(
 }
 
 func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool) (any, error) {
+	input := make(map[string]any, len(args))
+	for k, v := range args {
+		input[k] = v
+	}
+	args = input
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -1463,25 +1511,87 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		return nil, errors.New("contact not found")
 	}
 
-	preferChannel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
-	addr, err := resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
-	if err != nil {
+	if c.Status != "active" {
+		return nil, errors.New("contact must be active to send messages")
+	}
+	var dnc int
+	if err := ctx.AppDB().QueryRow(`SELECT EXISTS(SELECT 1 FROM contact_attributes a JOIN contact_attribute_defs d ON d.id=a.def_id WHERE a.project_id=? AND a.contact_id=? AND d.key='do_not_contact' AND a.value_bool=1)`, pid, cid).Scan(&dnc); err != nil {
 		return nil, err
 	}
+	if dnc != 0 {
+		return nil, errors.New("contact is marked do_not_contact")
+	}
+
+	preferChannel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
+	convoID := int64Arg(args, "conversation_id")
+	var addr *resolvedAddress
+	if convoID > 0 {
+		convo, err := dbConversationGet(ctx.AppDB(), pid, convoID)
+		if err != nil {
+			return nil, err
+		}
+		if convo == nil || convo.ContactID != cid || (preferChannel != "" && preferChannel != convo.Channel) {
+			return nil, errors.New("conversation does not match contact and transport")
+		}
+		preferChannel = convo.Channel
+		route, sender, err := replyRoute(ctx.AppDB(), pid, cid, convoID, convo.Channel, int64Arg(args, "reply_to_activity_id"))
+		if err != nil {
+			return nil, err
+		}
+		if route != "" {
+			addr = &resolvedAddress{Channel: convo.Channel, Address: route}
+			var blocked int
+			err = ctx.AppDB().QueryRow(`SELECT ch.id,EXISTS(SELECT 1 FROM contact_channel_delivery_state ds WHERE ds.project_id=ch.project_id AND ds.channel_id=ch.id AND ds.transport=? AND (ds.suppressed=1 OR ds.quarantined=1 OR ds.status IN ('hard_bounced','complained','unsubscribed'))) FROM contact_channels ch WHERE ch.project_id=? AND ch.contact_id=? AND ch.kind=? AND ch.value=?`, convo.Channel, pid, cid, contactChannelKindFor(convo.Channel), route).Scan(&addr.ChannelID, &blocked)
+			if err != nil && err != sql.ErrNoRows {
+				return nil, err
+			}
+			if blocked != 0 {
+				return nil, errors.New("reply address is not messageable")
+			}
+			if strArg(args, "from") == "" && sender != "" {
+				args["from"] = sender
+			}
+		}
+	}
+	if addr == nil || addr.Address == "" {
+		addr, err = resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
 		return nil, err
 	}
 	if messagingBound(ctx) == nil {
 		return nil, errors.New("messaging app not bound to CRM: open CRM in the dashboard → Bindings → bind the messaging install to the 'messaging' role. (The app may already be installed in the project; binding is a separate explicit step.)")
 	}
-	if err := ensureMessagingInboundRoutes(ctx, pid); err != nil {
-		ctx.Logger().Warn("crm messaging inbound route auto-wire failed", "project_id", pid, "err", err)
-	}
-
 	if !isTest {
-		if suppressed, reason := suppressionCheck(ctx, addr.Channel, addr.Address); suppressed {
-			return nil, fmt.Errorf("address suppressed (%s): %s", reason, addr.Address)
+		for attempts := 0; attempts < 20; attempts++ {
+			check, checkErr := suppressionCheckDetailed(ctx, pid, addr.Channel, addr.Address)
+			if checkErr != nil {
+				// Messaging remains the final enforcement point. A transient
+				// preflight read failure must not make the optional CRM cache a
+				// second source of truth.
+				break
+			}
+			recordSuppressionPreflight(ctx.AppDB(), pid, addr.ChannelID, addr.Channel, check)
+			if !check.Suppressed {
+				break
+			}
+			blockedAddress := addr.Address
+			if convoID > 0 {
+				return nil, fmt.Errorf("reply address suppressed (%s): %s", check.Reason, blockedAddress)
+			}
+			next, resolveErr := resolveContactAddress(ctx.AppDB(), pid, c, preferChannel)
+			if resolveErr != nil || next.Address == blockedAddress {
+				return nil, fmt.Errorf("address suppressed (%s): %s", check.Reason, blockedAddress)
+			}
+			addr = next
 		}
+	}
+	if err := validateStandaloneEmailArgs(args, addr.Channel, templateID); err != nil {
+		return nil, err
 	}
 
 	// Sender resolution precedence: explicit `from` arg > list default
@@ -1594,7 +1704,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	// for sms/whatsapp use the persistent per-channel conversation; for
 	// email new sends, a fresh conversation is created post-send when we
 	// know the outbound Message-Id.
-	convoID := int64Arg(args, "conversation_id")
+	convoID = int64Arg(args, "conversation_id")
 	var convo *Conversation
 	if convoID > 0 {
 		convo, err = dbConversationGet(ctx.AppDB(), pid, convoID)
@@ -1660,20 +1770,22 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 				ProjectID: pid,
 				ContactID: cid,
 				Kind:      failedKindForChannel(addr.Channel),
-				Body:      truncate(body, 4000),
+				Body:      body,
 				Source:    "messaging",
 				SourceDetail: map[string]any{
 					"to":                  addr.Address,
 					"error":               sendErr.Error(),
 					"messaging_id":        msgID,
+					"source_install_id":   messagingInstallID(ctx),
 					"provider_message_id": providerMsgID,
 					"status":              status,
 					"status_reason":       statusReason,
 				},
-				ConversationID:  convoID,
-				MessageIDHeader: providerMsgID,
-				MessagingID:     msgID,
-				Attachments:     attachments,
+				ConversationID:     convoID,
+				MessageIDHeader:    providerMsgID,
+				MessagingID:        msgID,
+				MessagingInstallID: messagingInstallID(ctx),
+				Attachments:        attachments,
 			})
 		}
 		return nil, fmt.Errorf("messaging.send_message: %w", sendErr)
@@ -1684,7 +1796,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if msgID <= 0 {
 		return nil, errors.New("messaging.send_message returned no message id")
 	}
-	existingActivity, err = dbActivityByMessagingID(ctx.AppDB(), pid, msgID)
+	existingActivity, err = dbActivityByMessagingID(ctx.AppDB(), pid, msgID, messagingInstallID(ctx))
 	if err != nil {
 		return nil, fmt.Errorf("messaging activity lookup: %w", err)
 	}
@@ -1745,21 +1857,23 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		ProjectID: pid,
 		ContactID: cid,
 		Kind:      kind,
-		Body:      truncate(activityBody, 4000),
+		Body:      activityBody,
 		Source:    "messaging",
 		SourceDetail: map[string]any{
 			"messaging_id":        msgID,
+			"source_install_id":   messagingInstallID(ctx),
 			"provider_message_id": providerMsgID,
 			"from":                from,
 			"to":                  addr.Address,
 			"test":                isTest,
 			"idempotency_key":     idempotencyKey,
 		},
-		ConversationID:  convoIDForLog,
-		MessageIDHeader: providerMsgID,
-		MessagingID:     msgID,
-		IdempotencyKey:  idempotencyKey,
-		Attachments:     attachments,
+		ConversationID:     convoIDForLog,
+		MessageIDHeader:    providerMsgID,
+		MessagingID:        msgID,
+		MessagingInstallID: messagingInstallID(ctx),
+		IdempotencyKey:     idempotencyKey,
+		Attachments:        attachments,
 	})
 	if errors.Is(err, errDuplicateMessagingID) {
 		if createdConversationID > 0 {
@@ -1773,7 +1887,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 				pid, createdConversationID, pid, createdConversationID,
 			)
 		}
-		existingActivity, lookupErr := dbActivityByMessagingID(ctx.AppDB(), pid, msgID)
+		existingActivity, lookupErr := dbActivityByMessagingID(ctx.AppDB(), pid, msgID, messagingInstallID(ctx))
 		if lookupErr != nil {
 			return nil, lookupErr
 		}
@@ -1818,7 +1932,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			})
 		}
 	}
-	ctx.Emit("contact.activity.added", map[string]any{
+	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
 		"contact_id":       cid,
 		"activity_id":      act.ID,
 		"conversation_id":  act.ConversationID,
@@ -1865,7 +1979,7 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			 WHERE project_id = ? AND contact_id = ?
 			   AND kind IN ('email_received','sms_received','whatsapp_received')
 			   AND conversation_id IS NOT NULL
-			 ORDER BY occurred_at DESC, id DESC LIMIT 1`,
+			 ORDER BY julianday(occurred_at) DESC, id DESC LIMIT 1`,
 			pid, cid,
 		)
 		var lastConvoID int64
@@ -1887,6 +2001,10 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"body":            body,
 		"conversation_id": convo.ID,
 	}
+	if id := int64Arg(args, "reply_to_activity_id"); id > 0 {
+		sendArgs["reply_to_activity_id"] = id
+	}
+
 	if from := strArg(args, "from"); from != "" {
 		sendArgs["from"] = from
 	}
@@ -1929,26 +2047,51 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // ─── Tool: contacts_list_messageable ──────────────────────────────
 
+type MessageableContact struct {
+	ID                   int64             `json:"id"`
+	DisplayName          string            `json:"display_name,omitempty"`
+	PrimaryEmail         string            `json:"primary_email,omitempty"`
+	PrimaryPhone         string            `json:"primary_phone,omitempty"`
+	MessageableAddresses map[string]string `json:"messageable_addresses"`
+}
+
 func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
+	if channel != "" && channel != channelEmail && channel != channelSMS && channel != channelWhatsApp {
+		return nil, fmt.Errorf("invalid channel %q (email|sms|whatsapp)", channel)
+	}
 	limit := intArg(args, "limit", 100)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
 
-	where := []string{"project_id = ?", "deleted_at IS NULL", "(status IS NULL OR status = 'active')"}
+	where := []string{"project_id = ?", "deleted_at IS NULL", "(status IS NULL OR status = 'active')", `NOT EXISTS(SELECT 1 FROM contact_attributes a JOIN contact_attribute_defs d ON d.id=a.def_id WHERE a.contact_id=contacts.id AND a.project_id=contacts.project_id AND d.key='do_not_contact' AND a.value_bool=1)`}
 	qargs := []any{pid}
+	messageableExists := func(transport string) string {
+		qargs = append(qargs, transport)
+		return `EXISTS (
+			SELECT 1 FROM contact_channels cc
+			JOIN contact_channel_delivery_state ds
+			  ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+			WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+			  AND ds.transport = ? AND ds.suppressed = 0 AND ds.quarantined = 0
+			  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+		)`
+	}
 	switch channel {
 	case channelEmail:
-		where = append(where, "primary_email IS NOT NULL AND primary_email <> ''")
+		where = append(where, messageableExists(channelEmail))
 	case channelSMS, channelWhatsApp:
-		where = append(where, "primary_phone IS NOT NULL AND primary_phone <> ''")
+		where = append(where, messageableExists(channel))
 	case "":
-		where = append(where, "((primary_email IS NOT NULL AND primary_email <> '') OR (primary_phone IS NOT NULL AND primary_phone <> ''))")
+		emailExists := messageableExists(channelEmail)
+		smsExists := messageableExists(channelSMS)
+		whatsAppExists := messageableExists(channelWhatsApp)
+		where = append(where, "("+emailExists+" OR "+smsExists+" OR "+whatsAppExists+")")
 	}
 	// Exclude automated / no-reply senders from bulk-message audiences by
 	// default — you rarely want to blast noreply@…. Individual sends and
@@ -1961,8 +2104,26 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, COALESCE(display_name,''), COALESCE(primary_email,''),
-				COALESCE(primary_phone,'')
+		`SELECT contacts.id, COALESCE(display_name,''), COALESCE(primary_email,''),
+				COALESCE(primary_phone,''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'email' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), ''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'sms' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), ''),
+				COALESCE((SELECT cc.value FROM contact_channels cc
+					JOIN contact_channel_delivery_state ds ON ds.project_id = cc.project_id AND ds.channel_id = cc.id
+					WHERE cc.project_id = contacts.project_id AND cc.contact_id = contacts.id
+					  AND ds.transport = 'whatsapp' AND ds.suppressed = 0 AND ds.quarantined = 0
+					  AND ds.status NOT IN ('hard_bounced','complained','unsubscribed')
+					ORDER BY cc.is_primary DESC, cc.id ASC LIMIT 1), '')
 		 FROM contacts WHERE `+strings.Join(where, " AND ")+`
 		 ORDER BY updated_at DESC LIMIT ?`,
 		qargs...,
@@ -1971,16 +2132,21 @@ func (a *App) toolListMessageable(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	defer rows.Close()
-	type listRow struct {
-		ID           int64  `json:"id"`
-		DisplayName  string `json:"display_name,omitempty"`
-		PrimaryEmail string `json:"primary_email,omitempty"`
-		PrimaryPhone string `json:"primary_phone,omitempty"`
-	}
-	out := []listRow{}
+	out := []MessageableContact{}
 	for rows.Next() {
-		var r listRow
-		if err := rows.Scan(&r.ID, &r.DisplayName, &r.PrimaryEmail, &r.PrimaryPhone); err == nil {
+		var r MessageableContact
+		var email, sms, whatsApp string
+		if err := rows.Scan(&r.ID, &r.DisplayName, &r.PrimaryEmail, &r.PrimaryPhone, &email, &sms, &whatsApp); err == nil {
+			r.MessageableAddresses = map[string]string{}
+			if email != "" {
+				r.MessageableAddresses[channelEmail] = email
+			}
+			if sms != "" {
+				r.MessageableAddresses[channelSMS] = sms
+			}
+			if whatsApp != "" {
+				r.MessageableAddresses[channelWhatsApp] = whatsApp
+			}
 			out = append(out, r)
 		}
 	}
@@ -2064,7 +2230,7 @@ func (a *App) toolSetConversationStatus(ctx *sdk.AppCtx, args map[string]any) (a
 	if status == "spam" {
 		suppression = applyConversationSpam(ctx, pid, updated, strArg(args, "spam_scope"), boolArg(args, "force", false))
 	}
-	ctx.Emit("conversation.status.changed", map[string]any{
+	emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
 		"conversation_id": convoID,
 		"contact_id":      updated.ContactID,
 		"status":          updated.Status,
@@ -2129,7 +2295,9 @@ type conversationParticipant struct {
 	ContactID int64
 }
 
-func dbConversationParticipantsAdd(db *sql.DB, pid string, conversationID int64, channel string, parts []conversationParticipant) error {
+func dbConversationParticipantsAdd(db interface {
+	Prepare(string) (*sql.Stmt, error)
+}, pid string, conversationID int64, channel string, parts []conversationParticipant) error {
 	if conversationID == 0 || len(parts) == 0 {
 		return nil
 	}
@@ -2491,14 +2659,14 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, fil
 				cc.channel, COALESCE(cc.subject,''), COALESCE(cc.status,'open'),
 				COALESCE(cc.priority,'normal'), cc.last_activity_at,
 				COALESCE((SELECT a.body FROM contact_activities a
-						  WHERE a.conversation_id = cc.id
-						  ORDER BY a.occurred_at DESC, a.id DESC LIMIT 1), ''),
+						  WHERE a.project_id = cc.project_id AND a.conversation_id = cc.id
+						  ORDER BY julianday(a.occurred_at) DESC, a.id DESC LIMIT 1), ''),
 				EXISTS (SELECT 1 FROM contact_tags t
 						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?)
 		 FROM contact_conversations cc
 		 JOIN contacts c ON c.id = cc.contact_id AND c.project_id = cc.project_id
 		 WHERE `+where+`
-		 ORDER BY cc.last_activity_at DESC LIMIT ? OFFSET ?`,
+		 ORDER BY julianday(cc.last_activity_at) DESC, cc.id DESC LIMIT ? OFFSET ?`,
 		append([]any{tagAutomated}, args...)...,
 	)
 	if err != nil {
@@ -2710,259 +2878,6 @@ func stringSliceArg(args map[string]any, key string) []string {
 	}
 }
 
-func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string]any, error) {
-	if ctx == nil {
-		return nil, errors.New("crm context not initialized")
-	}
-	if body.Channel == "" || body.From == "" {
-		return nil, errors.New("channel and from required")
-	}
-	body.From = canonicalAddress(body.Channel, body.From)
-
-	db := ctx.AppDB()
-	if body.MessageID != 0 {
-		var activityID, contactID, conversationID int64
-		err := db.QueryRow(
-			`SELECT id, contact_id, COALESCE(conversation_id,0)
-			 FROM contact_activities
-			 WHERE project_id = ? AND messaging_id = ?`,
-			pid, body.MessageID,
-		).Scan(&activityID, &contactID, &conversationID)
-		if err == nil {
-			if err := upsertActivityAttachments(db, pid, activityID, body.Attachments); err != nil {
-				return nil, fmt.Errorf("attachment dedup reconciliation: %w", err)
-			}
-			return map[string]any{
-				"ok":              true,
-				"deduped":         true,
-				"activity_id":     activityID,
-				"contact_id":      contactID,
-				"conversation_id": conversationID,
-			}, nil
-		}
-		if err != sql.ErrNoRows {
-			return nil, fmt.Errorf("dedup lookup: %w", err)
-		}
-	}
-
-	// Delivery failures and other machine-generated provider mail should
-	// not materialise CRM leads. Classify before contact or thread creation.
-	automated, autoReason := isAutomatedSender(body.Channel, body.From, body.Headers)
-	if automated {
-		return map[string]any{
-			"ok":      true,
-			"ignored": true,
-			"reason":  autoReason,
-		}, nil
-	}
-
-	contact, fuzzyCandidates, err := matchInboundContact(db, pid, body.Channel, body.From)
-	if err != nil {
-		return nil, fmt.Errorf("match: %w", err)
-	}
-	stubCreated := false
-	if contact == nil {
-		defaults := map[string]any{
-			"display_name": parseFromName(body.From, body.Headers),
-			"source":       "messaging:inbound",
-		}
-		contact, _, err = dbUpsertByChannel(db, pid, contactChannelKindFor(body.Channel), body.From, defaults, "messaging:inbound")
-		if err != nil {
-			return nil, fmt.Errorf("upsert: %w", err)
-		}
-		stubCreated = true
-		if len(fuzzyCandidates) > 0 {
-			// Surface possible duplicates as a system activity so the
-			// panel can render a "merge?" banner without a new column.
-			_, _ = logMessageActivity(db, logMessageActivityInput{
-				ProjectID: pid,
-				ContactID: contact.ID,
-				Kind:      ActivityKindSystem,
-				Body:      "stub contact created from inbound; possible duplicates flagged",
-				Source:    "crm",
-				SourceDetail: map[string]any{
-					"possible_match_ids": fuzzyCandidates,
-				},
-			})
-		}
-	}
-
-	// Routing rules: match on recipient (which of our addresses it hit)
-	// and/or sender, then apply add-to-list / add-tag actions. Generalizes
-	// the legacy list.inbound_route_pattern coupling below.
-	routeRecipients := append([]string{body.MatchedRecipient}, body.To...)
-	routed, err := applyRoutingRules(db, pid, contact.ID, routeRecipients, body.From)
-	if err != nil {
-		ctx.Logger().Warn("routing rules", "contact_id", contact.ID, "err", err)
-	}
-	for _, lid := range routed.Lists {
-		emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": lid, "contact_id": contact.ID})
-	}
-
-	convoID, threadCreated, err := resolveInboundConversation(db, pid, contact.ID, body)
-	if err != nil {
-		return nil, fmt.Errorf("convo: %w", err)
-	}
-
-	reopened := false
-	contactSpam, err := dbContactIsSpam(db, pid, contact.ID)
-	if err != nil {
-		return nil, fmt.Errorf("spam contact check: %w", err)
-	}
-	if contactSpam {
-		if _, err := dbConversationSetStatus(db, pid, convoID, "spam", ""); err != nil {
-			return nil, fmt.Errorf("mark spam conversation: %w", err)
-		}
-	} else {
-		// Auto-reopen: a reply on a pending/closed thread puts the ball back
-		// in our court. No-op when the conversation is already open (or was
-		// just created above). Spam conversations are intentionally excluded.
-		reopened, err = dbConversationReopenIfClosed(db, pid, convoID)
-		if err != nil {
-			return nil, fmt.Errorf("reopen: %w", err)
-		}
-	}
-
-	occurred := body.ReceivedAt
-	if occurred == "" {
-		occurred = time.Now().UTC().Format(time.RFC3339)
-	}
-	activityBody := body.BodyText
-	if body.Channel == channelEmail && body.Subject != "" {
-		activityBody = body.Subject + "\n\n" + body.BodyText
-	}
-
-	act, err := logMessageActivity(db, logMessageActivityInput{
-		ProjectID:  pid,
-		ContactID:  contact.ID,
-		Kind:       receivedKindForChannel(body.Channel),
-		Body:       truncate(activityBody, 4000),
-		OccurredAt: occurred,
-		Source:     "messaging",
-		SourceDetail: map[string]any{
-			"messaging_id":      body.MessageID,
-			"message_id_header": body.MessageIDHeader,
-			"in_reply_to":       body.InReplyTo,
-			"matched_pattern":   body.MatchedPattern,
-			"to":                body.To,
-			"sender_automated":  automated,
-			"sender_class":      autoReason,
-		},
-		ConversationID:  convoID,
-		MessageIDHeader: body.MessageIDHeader,
-		MessagingID:     body.MessageID,
-		Attachments:     body.Attachments,
-	})
-	if errors.Is(err, errDuplicateMessagingID) {
-		// Idempotent re-delivery — already logged. Return ok so messaging
-		// stops retrying.
-		existing, lookupErr := dbActivityByMessagingID(db, pid, body.MessageID)
-		if lookupErr != nil {
-			return nil, lookupErr
-		}
-		if existing != nil {
-			if err := upsertActivityAttachments(db, pid, existing.ID, body.Attachments); err != nil {
-				return nil, err
-			}
-			return map[string]any{"ok": true, "deduped": true, "activity_id": existing.ID, "contact_id": existing.ContactID, "conversation_id": existing.ConversationID}, nil
-		}
-		return map[string]any{"ok": true, "deduped": true}, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("log: %w", err)
-	}
-	parts := []conversationParticipant{{Role: "from", Address: body.From, ContactID: contact.ID}}
-	seenTo := map[string]bool{}
-	for _, to := range body.To {
-		key := canonicalParticipantAddress(body.Channel, to)
-		if key == "" || seenTo[key] {
-			continue
-		}
-		seenTo[key] = true
-		parts = append(parts, conversationParticipant{Role: "to", Address: to})
-	}
-	if mr := canonicalParticipantAddress(body.Channel, body.MatchedRecipient); mr != "" && !seenTo[mr] {
-		parts = append(parts, conversationParticipant{Role: "to", Address: body.MatchedRecipient})
-	}
-	for _, cc := range body.CC {
-		parts = append(parts, conversationParticipant{Role: "cc", Address: cc})
-	}
-	_ = dbConversationParticipantsAdd(db, pid, convoID, body.Channel, parts)
-
-	// List auto-attach. If messaging's matched_pattern matches a list's
-	// inbound_route_pattern, add this contact to that list. Idempotent
-	// (INSERT OR IGNORE), so repeat inbound from the same address is a
-	// no-op for an already-attached contact.
-	var listID int64
-	if body.MatchedPattern != "" {
-		if l, _ := dbListByInboundPattern(db, pid, body.MatchedPattern); l != nil {
-			listID = l.ID
-			if err := dbListAddContact(db, pid, l.ID, contact.ID, "messaging:inbound"); err != nil {
-				ctx.Logger().Warn("inbound list auto-attach failed", "list_id", l.ID, "contact_id", contact.ID, "err", err)
-			} else {
-				emitCRMEvent(ctx, pid, "list.member.added", map[string]any{"list_id": l.ID, "contact_id": contact.ID})
-			}
-		}
-	}
-
-	if stubCreated {
-		emitCRMEvent(ctx, pid, "contact.added", map[string]any{
-			"id": contact.ID, "display_name": contact.DisplayName,
-		})
-	}
-	if reopened {
-		emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
-			"conversation_id": convoID,
-			"contact_id":      contact.ID,
-			"status":          "open",
-			"reason":          "inbound_reply",
-		})
-	} else if contactSpam {
-		emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
-			"conversation_id": convoID,
-			"contact_id":      contact.ID,
-			"status":          "spam",
-			"reason":          "spam_contact_inbound",
-		})
-	}
-	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
-		"contact_id":       contact.ID,
-		"activity_id":      act.ID,
-		"conversation_id":  act.ConversationID,
-		"kind":             act.Kind,
-		"source":           act.Source,
-		"attachment_count": len(act.Attachments),
-	})
-	threadState := "existing"
-	if threadCreated {
-		threadState = "new"
-	}
-	emitCRMEvent(ctx, pid, "conversation.message.received", map[string]any{
-		"contact_id":       contact.ID,
-		"conversation_id":  convoID,
-		"activity_id":      act.ID,
-		"kind":             act.Kind,
-		"channel":          body.Channel,
-		"source":           act.Source,
-		"thread_state":     threadState,
-		"thread_created":   threadCreated,
-		"messaging_id":     body.MessageID,
-		"attachment_count": len(act.Attachments),
-	})
-
-	out := map[string]any{
-		"ok":              true,
-		"contact_id":      contact.ID,
-		"stub_created":    stubCreated,
-		"activity_id":     act.ID,
-		"conversation_id": convoID,
-	}
-	if listID != 0 {
-		out["list_id"] = listID
-	}
-	return out, nil
-}
-
 func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inboundPayload) (int64, bool, error) {
 	if p.Channel == channelSMS || p.Channel == channelWhatsApp {
 		existing, err := dbConversationForChannel(db, pid, contactID, p.Channel)
@@ -3001,12 +2916,12 @@ func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inbou
 		if id, err := dbConversationByActivityMsgID(db, pid, contactID, p.InReplyTo); err == nil && id != 0 {
 			return id, false, nil
 		}
-		if c, err := dbConversationByRootMsgID(db, pid, p.InReplyTo); err == nil && c != nil {
+		if c, err := dbConversationByRootMsgID(db, pid, p.InReplyTo); err == nil && c != nil && c.ContactID == contactID {
 			return c.ID, false, nil
 		}
 	}
 	for _, ref := range p.References {
-		if c, err := dbConversationByRootMsgID(db, pid, ref); err == nil && c != nil {
+		if c, err := dbConversationByRootMsgID(db, pid, ref); err == nil && c != nil && c.ContactID == contactID {
 			return c.ID, false, nil
 		}
 	}
@@ -3622,4 +3537,114 @@ func mustReadJSONArgsLimit(w http.ResponseWriter, r *http.Request, limit int64) 
 		out = map[string]any{}
 	}
 	return out, nil
+}
+
+// replyRoute reads immutable message-level addressing, with a legacy participant fallback.
+func replyRoute(db *sql.DB, pid string, cid, convoID int64, transport string, activityIDs ...int64) (string, string, error) {
+	activityID := int64(0)
+	if len(activityIDs) > 0 {
+		activityID = activityIDs[0]
+	}
+
+	var raw string
+	err := db.QueryRow(`SELECT COALESCE(source_detail,'{}') FROM contact_activities WHERE project_id=? AND contact_id=? AND conversation_id=? AND (?=0 OR id=?) AND kind IN ('email_received','sms_received','whatsapp_received') ORDER BY julianday(occurred_at) DESC,id DESC LIMIT 1`, pid, cid, convoID, activityID, activityID).Scan(&raw)
+	if err == sql.ErrNoRows {
+		if activityID > 0 {
+			return "", "", errors.New("reply_to_activity_id must identify an inbound message in this conversation")
+		}
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	var detail map[string]any
+	if err = json.Unmarshal([]byte(raw), &detail); err != nil {
+		return "", "", err
+	}
+	to := anyString(detail["reply_to"])
+	if to == "" {
+		to = anyString(detail["from"])
+	}
+	if to == "" {
+		err = db.QueryRow(`SELECT address FROM conversation_participants WHERE project_id=? AND conversation_id=? AND role='from' AND contact_id=? ORDER BY id DESC LIMIT 1`, pid, convoID, cid).Scan(&to)
+		if err != nil && err != sql.ErrNoRows {
+			return "", "", err
+		}
+	}
+	from := anyString(detail["receiving_identity"])
+	if from == "" {
+		if recipients, ok := detail["to"].([]any); ok && len(recipients) == 1 {
+			from = anyString(recipients[0])
+		}
+	}
+	return canonicalParticipantAddress(transport, to), canonicalParticipantAddress(transport, from), nil
+}
+
+func (a *App) handleHTTPMessagingRoutes(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if r.Method == http.MethodGet {
+		var out map[string]any
+		err = callMessagingTool(globalCtx.WithProject(pid), "inbound_route_list", map[string]any{"_project_id": pid}, &out)
+		if err != nil {
+			httpErr(w, 502, err.Error())
+			return
+		}
+		httpJSON(w, out)
+		return
+	}
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "GET or POST only")
+		return
+	}
+	var body map[string]any
+	if err = decodeJSONBody(w, r, &body); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	channel := strArg(body, "channel")
+	if channel != "email" && channel != "sms" && channel != "whatsapp" {
+		httpErr(w, 400, "invalid channel")
+		return
+	}
+	var out map[string]any
+	err = callMessagingTool(globalCtx.WithProject(pid), "inbound_route_set", map[string]any{"_project_id": pid, "channel": channel, "pattern": "*", "target_app": "crm", "target_route": "messaging_inbound_receive", "priority": 0}, &out)
+	if err != nil {
+		httpErr(w, 502, err.Error())
+		return
+	}
+	httpJSON(w, out)
+}
+
+func (a *App) handleHTTPReplyRoute(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	cid, _ := strconv.ParseInt(r.URL.Query().Get("contact_id"), 10, 64)
+	convoID, _ := strconv.ParseInt(r.URL.Query().Get("conversation_id"), 10, 64)
+	activityID, _ := strconv.ParseInt(r.URL.Query().Get("activity_id"), 10, 64)
+	convo, err := dbConversationGet(globalCtx.AppDB(), pid, convoID)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if convo == nil || convo.ContactID != cid {
+		httpErr(w, 404, "conversation not found")
+		return
+	}
+	to, from, err := replyRoute(globalCtx.AppDB(), pid, cid, convoID, convo.Channel, activityID)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"to": to, "from": from, "channel": convo.Channel})
 }

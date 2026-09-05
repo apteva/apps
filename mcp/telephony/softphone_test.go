@@ -126,7 +126,7 @@ func insertSoftphoneCall(t *testing.T, app *App, status string) callRow {
 		ID: "call-soft-1", Direction: "outbound", CarrierSlug: "twilio",
 		CarrierConnectionID: 10, CallbackSecret: "cb-secret",
 		ToNumber: "+13334445555", FromNumber: "+13502231050",
-		IngressPath: "outbound", AudioBridgeURL: "ws://127.0.0.1:8080/peer/call-soft-1/peer-secret",
+		IngressPath: "outbound", AudioBridgeURL: "ws://127.0.0.1:8080/peer/call-soft-1/cb-secret",
 		Status: status, PlacedAt: time.Now().UTC().Format(time.RFC3339),
 		ProjectID: "project-a", PeerKind: peerKindHuman, PeerToken: "peer-secret",
 	}
@@ -145,7 +145,7 @@ func TestSoftphoneHubBridgesAudioBothDirections(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 
 	callerAudio := pcm16ToBytes([]int16{100, -100, 2000, -2000})
@@ -171,7 +171,7 @@ func TestOutboundSoftphoneHoldsMicrophoneUntilCarrierAnswers(t *testing.T) {
 	insertSoftphoneCall(t, app, "initiated")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 
@@ -296,7 +296,7 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 
 	for _, kind := range []string{"input.speech_started", "playback.progress", "playback.overflow"} {
@@ -340,7 +340,7 @@ func TestSoftphoneHubForwardsOnlyInterruptFromBrowser(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 
 	for _, payload := range []string{
@@ -379,7 +379,7 @@ func TestSoftphoneBrowserPingReportsRoundTripWithoutReachingPeer(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	if err := wsutil.WriteClientText(browser, []byte(`{"type":"ping","nonce":123.5}`)); err != nil {
 		t.Fatal(err)
@@ -419,7 +419,7 @@ func TestSoftphoneBrowserReconnectResumesAudio(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	peer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	first := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	_ = first.Close()
 
@@ -442,7 +442,7 @@ func TestSoftphonePeerReconnectKeepsBrowserAttached(t *testing.T) {
 	insertSoftphoneCall(t, app, "in-progress")
 	server := softphoneTestServer(t, app)
 
-	firstPeer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	firstPeer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
 
@@ -451,7 +451,7 @@ func TestSoftphonePeerReconnectKeepsBrowserAttached(t *testing.T) {
 	}
 	readSoftphoneEventWithin(t, browser, "peer.disconnected", 3*time.Second)
 
-	secondPeer := dialWS(t, server.URL+"/peer/call-soft-1/peer-secret")
+	secondPeer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
 	readSoftphoneEventWithin(t, browser, "peer.connected", 3*time.Second)
 	audio := pcm16ToBytes([]int16{41, 42, 43})
 	if err := wsutil.WriteClientBinary(secondPeer, audio); err != nil {
@@ -519,18 +519,18 @@ func TestMediaBridgeURLRoutesHumanCallsToLoopback(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
 
-	human := &callRow{ID: "c1", PeerKind: peerKindHuman, PeerToken: "tok", MediaStatus: "idle"}
+	human := &callRow{ID: "c1", PeerKind: peerKindHuman, PeerToken: "tok", CallbackSecret: "internal", MediaStatus: "idle"}
 	got, err := app.mediaBridgeURL(human)
 	if err != nil {
 		t.Fatalf("human bridge url: %v", err)
 	}
-	if !strings.HasPrefix(got, "ws://127.0.0.1:") || !strings.HasSuffix(got, "/peer/c1/tok") {
-		t.Fatalf("human bridge url = %q, want loopback /peer/c1/tok", got)
+	if !strings.HasPrefix(got, "ws://127.0.0.1:") || !strings.HasSuffix(got, "/peer/c1/internal") {
+		t.Fatalf("human bridge url = %q, want loopback /peer/c1/internal", got)
 	}
 
 	// A disconnected human call must NOT attempt a Core renewal — that path
 	// would call the platform for a thread that does not exist.
-	humanDisconnected := &callRow{ID: "c1", PeerKind: peerKindHuman, PeerToken: "tok", MediaStatus: "disconnected"}
+	humanDisconnected := &callRow{ID: "c1", PeerKind: peerKindHuman, PeerToken: "tok", CallbackSecret: "internal", MediaStatus: "disconnected"}
 	if _, err := app.mediaBridgeURL(humanDisconnected); err != nil {
 		t.Fatalf("disconnected human call attempted realtime renewal: %v", err)
 	}
@@ -858,7 +858,7 @@ func TestSoftphoneUsesAdaptiveJitterAndVisibleDiagnostics(t *testing.T) {
 			t.Fatalf("softphone diagnostics/audio controls missing %q", required)
 		}
 	}
-	for _, required := range []string{"Browser audio processing", "underruns", "buffer"} {
+	for _, required := range []string{"Audio devices and processing", "underruns", "buffer"} {
 		if !strings.Contains(string(panel), required) {
 			t.Fatalf("panel diagnostics missing %q", required)
 		}

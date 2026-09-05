@@ -127,7 +127,12 @@ interface AudienceInfo {
   kind?: string;
   id?: number;
   count?: number;
+  raw_count?: number;
+  eligible_count?: number;
+  excluded_count?: number;
+  excluded_by_reason?: Record<string, number>;
   contact_ids?: number[];
+  recipients?: Array<{ contact_id: number; address: string }>;
   error?: string;
 }
 
@@ -262,6 +267,9 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
       case "campaign.unsubscribed":
         refreshSelected();
         break;
+      case "campaign.audience_changed":
+        refreshSelected();
+        break;
       default:
         loadList();
         refreshSelected();
@@ -276,34 +284,16 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
       ]);
       setDetail(c.campaign);
       setRecipients(rs.recipients || []);
-      setAudiencePreview(null);
       const campaign = c.campaign;
-      const audiencePath = campaign.segment_id != null
-        ? `/segments/${campaign.segment_id}/members`
-        : campaign.list_id != null
-          ? `/lists/${campaign.list_id}/members`
-          : "";
-      if (audiencePath) {
-        try {
-          const preview = await api<{ count?: number; contacts?: AudienceContact[] }>(
-            "GET",
-            audiencePath,
-            undefined,
-            CRM_API,
-            { limit: "8" },
-          );
-          setAudiencePreview({
-            count: preview.count ?? preview.contacts?.length ?? 0,
-            contacts: preview.contacts || [],
-          });
-        } catch (previewErr) {
-          setAudiencePreview({
-            count: campaign.audience?.count ?? 0,
-            contacts: [],
-            error: (previewErr as Error).message,
-          });
-        }
-      }
+      setAudiencePreview({
+        count: campaign.audience?.eligible_count ?? campaign.audience?.count ?? 0,
+        contacts: (campaign.audience?.recipients || []).map((recipient) => ({
+          id: recipient.contact_id,
+          primary_email: campaign.channel === "email" ? recipient.address : undefined,
+          primary_phone: campaign.channel !== "email" ? recipient.address : undefined,
+        })),
+        error: campaign.audience?.error,
+      });
     } catch (e) {
       setErrorToast("Detail error: " + (e as Error).message);
     }
@@ -544,6 +534,11 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
           editing={editorOpen === "new" ? null : (campaigns.find((c) => c.id === editorOpen) || null)}
           lists={lists}
           segments={segments}
+          resolveAudience={async (channel, kind, id) => {
+            const query = { channel, [kind === "segment" ? "segment_id" : "list_id"]: String(id) };
+            const result = await api<{ audience: AudienceInfo }>("GET", "/audience", undefined, API, query);
+            return result.audience;
+          }}
           onCancel={() => setEditorOpen(null)}
           onSubmit={(body) => handleSaveCampaign(editorOpen, body)}
         />
@@ -685,7 +680,9 @@ function AudienceSummary({
   apiAudience?: AudienceInfo;
   preview: AudiencePreview | null;
 }) {
-  const count = preview?.count ?? apiAudience?.count;
+  const eligible = apiAudience?.eligible_count ?? preview?.count ?? apiAudience?.count;
+  const raw = apiAudience?.raw_count;
+  const excluded = apiAudience?.excluded_count;
   const contacts = preview?.contacts || [];
   return (
     <div className="space-y-2">
@@ -694,17 +691,26 @@ function AudienceSummary({
           <span className="text-text-muted">{label}: </span>
           <span className="text-text">{name}</span>
         </div>
-        {typeof count === "number" && (
+        {typeof eligible === "number" && (
           <span className="text-xs text-accent border border-accent/40 rounded px-1.5 py-0.5">
-            {count} recipient{count === 1 ? "" : "s"}
+            {eligible} eligible
           </span>
         )}
+        {typeof raw === "number" && <span className="text-xs text-text-muted">of {raw} members</span>}
+        {!!excluded && <span className="text-xs text-amber">{excluded} excluded</span>}
       </div>
       {apiAudience?.error && (
         <div className="text-xs text-red">Audience check failed: {apiAudience.error}</div>
       )}
       {preview?.error && (
         <div className="text-xs text-amber">Could not load contact preview: {preview.error}</div>
+      )}
+      {apiAudience?.excluded_by_reason && Object.keys(apiAudience.excluded_by_reason).length > 0 && (
+        <div className="flex flex-wrap gap-1.5 text-[10px] text-text-dim">
+          {Object.entries(apiAudience.excluded_by_reason).map(([reason, value]) => (
+            <span key={reason} className="border border-border rounded px-1.5 py-0.5">{reason.replaceAll("_", " ")}: {value}</span>
+          ))}
+        </div>
       )}
       {contacts.length > 0 && (
         <ul className="divide-y divide-border border border-border rounded">
@@ -719,8 +725,8 @@ function AudienceSummary({
           ))}
         </ul>
       )}
-      {typeof count === "number" && contacts.length > 0 && count > contacts.length && (
-        <div className="text-xs text-text-dim">Showing {contacts.length} of {count} matching contacts.</div>
+      {typeof eligible === "number" && contacts.length > 0 && eligible > contacts.length && (
+        <div className="text-xs text-text-dim">Showing {contacts.length} of {eligible} eligible contacts.</div>
       )}
     </div>
   );
@@ -773,10 +779,11 @@ function ActBtn({ children, onClick, primary, destructive }: { children: React.R
 
 // ─── Editor modal ──────────────────────────────────────────────────
 
-function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
+function CampaignEditorModal({ editing, lists, segments, resolveAudience, onCancel, onSubmit }: {
   editing?: Campaign | null;
   lists: List[];
   segments: Segment[];
+  resolveAudience: (channel: string, kind: "segment" | "list", id: number) => Promise<AudienceInfo>;
   onCancel: () => void;
   onSubmit: (body: Partial<Campaign>) => void | Promise<void>;
 }) {
@@ -796,6 +803,29 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
   const [openTracking, setOpenTracking] = useState<boolean>(editing ? !!editing.open_tracking : true);
   const [clickTracking, setClickTracking] = useState<boolean>(editing ? !!editing.click_tracking : true);
   const [busy, setBusy] = useState(false);
+  const [audienceInfo, setAudienceInfo] = useState<AudienceInfo | null>(null);
+  const [audienceBusy, setAudienceBusy] = useState(false);
+
+  useEffect(() => {
+    const id = audienceKind === "segment" ? segmentID : listID;
+    if (!id) {
+      setAudienceInfo(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setAudienceBusy(true);
+      try {
+        const info = await resolveAudience(channel, audienceKind, Number(id));
+        if (!cancelled) setAudienceInfo(info);
+      } catch (error) {
+        if (!cancelled) setAudienceInfo({ error: (error as Error).message });
+      } finally {
+        if (!cancelled) setAudienceBusy(false);
+      }
+    }, 150);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [audienceKind, channel, listID, segmentID, resolveAudience]);
 
   const submit = async () => {
     if (!name.trim()) return;
@@ -917,6 +947,15 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
             ))}
           </select>
         )}
+        {audienceBusy && <div className="text-xs text-text-dim">Checking {channel} eligibility…</div>}
+        {!audienceBusy && audienceInfo && !audienceInfo.error && (
+          <div className="text-xs flex flex-wrap gap-2">
+            <span className="text-accent">{audienceInfo.eligible_count ?? audienceInfo.count ?? 0} eligible</span>
+            <span className="text-text-muted">of {audienceInfo.raw_count ?? 0} members</span>
+            {!!audienceInfo.excluded_count && <span className="text-amber">{audienceInfo.excluded_count} excluded</span>}
+          </div>
+        )}
+        {audienceInfo?.error && <div className="text-xs text-red">Audience check failed: {audienceInfo.error}</div>}
       </div>
       <hr className="border-border my-3" />
       <div className="grid grid-cols-[120px_1fr] gap-2 items-center text-xs">

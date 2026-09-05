@@ -116,7 +116,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	currentIsV2 := isV2EditJSON(editJSON)
 	if currentIsV2 && !composerV2Enabled() {
-		return nil, errors.New("composer/v2 is disabled in this public release")
+		return nil, errors.New("composer/v2 is disabled by COMPOSER_V2_ENABLED")
 	}
 	if v := strArg(patch, "name", ""); v != "" {
 		name = v
@@ -158,7 +158,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	_ = json.Unmarshal([]byte(outputJSON), &output)
 
 	// Apply patch — only the fields the validator knows.
-	if _, ok := patch["tracks"]; ok || patch["soundtrack"] != nil || patch["background"] != nil {
+	if _, ok := patch["tracks"]; ok || patch["soundtrack"] != nil || patch["background"] != nil || patch["markers"] != nil {
 		// Compose a new edit from the supplied subset, falling back to
 		// the current values for missing fields.
 		next := map[string]any{}
@@ -176,6 +176,11 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 			next["background"] = v
 		} else if edit.Timeline.Background != "" {
 			next["background"] = edit.Timeline.Background
+		}
+		if v, ok := patch["markers"]; ok {
+			next["markers"] = v
+		} else if len(edit.Timeline.Markers) > 0 {
+			next["markers"] = edit.Timeline.Markers
 		}
 		newEdit, err := editFromArgs(next)
 		if err != nil {
@@ -227,7 +232,7 @@ func compositionPayloadFromV2Args(args map[string]any) (editJSON string, outputJ
 		return "", "", 0, "", false, nil
 	}
 	if !composerV2Enabled() {
-		return "", "", 0, composerV2Version, true, errors.New("composer/v2 is disabled in this public release")
+		return "", "", 0, composerV2Version, true, errors.New("composer/v2 is disabled by COMPOSER_V2_ENABLED")
 	}
 	if err != nil {
 		return "", "", 0, composerV2Version, true, err
@@ -422,7 +427,7 @@ func (a *App) toolCompositionValidate(ctx *sdk.AppCtx, args map[string]any) (any
 			Valid:    false,
 			Version:  composerV2Version,
 			Renderer: "disabled",
-			Errors:   []string{"composer/v2 is disabled in this public release"},
+			Errors:   []string{"composer/v2 is disabled by COMPOSER_V2_ENABLED"},
 		}, nil
 	}
 	return validateCompositionJSON(editJSON), nil
@@ -432,7 +437,7 @@ func (a *App) toolCompositionExamples(ctx *sdk.AppCtx, args map[string]any) (any
 	if !composerV2Enabled() {
 		return map[string]any{
 			"examples": []map[string]any{},
-			"note":     "Experimental composer/v2 examples are hidden in this public release.",
+			"note":     "Composer V2 examples are hidden because COMPOSER_V2_ENABLED is disabled.",
 		}, nil
 	}
 	return map[string]any{"examples": composerV2Examples()}, nil
@@ -572,7 +577,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	if isV2EditJSON(rawEditJSON) {
 		if !composerV2Enabled() {
-			err := errors.New("composer/v2 rendering is disabled in this public release")
+			err := errors.New("composer/v2 rendering is disabled by COMPOSER_V2_ENABLED")
 			failRender(ctx, renderID, id, pid, err, "")
 			return nil, err
 		}
@@ -589,6 +594,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 				setRenderProgress(ctx, renderID, id, pid, "rendering", "rendering", 50, map[string]any{"message": "Rendering composition", "executor": executorName})
 				rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer cancel()
+				rctx = withJobRenderProgress(rctx, ctx, renderID, id, pid, executorName)
 				result, nativeWarnings, err := renderFn(rctx, ctx.WithProject(pid), spec, pid)
 				if err != nil {
 					failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
@@ -697,6 +703,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 
 	rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
+	rctx = withJobRenderProgress(rctx, ctx, renderID, id, pid, exec.Name())
 	result, err := exec.Render(rctx, ctx, edit, output, pid)
 	if err != nil {
 		failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
@@ -711,7 +718,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	var storageID int64
 	qa := RenderQA{Warnings: timelineWarnings(edit)}
 	if len(renderWarnings) > 0 {
-		qa.Warnings = append(qa.Warnings, renderWarnings...)
+		qa.Warnings = appendUniqueStrings(qa.Warnings, renderWarnings...)
 	}
 	setRenderProgress(ctx, renderID, id, pid, "rendering", "quality_checks", 82, map[string]any{"message": "Checking render output"})
 	if result.Sync && strings.HasPrefix(result.LocalPath, "storage://files/") {
@@ -757,6 +764,40 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"cost_usd":    result.CostUSD,
 		"qa":          qa,
 	}, nil
+}
+
+func withJobRenderProgress(rctx context.Context, appCtx *sdk.AppCtx, renderID, compositionID int64, projectID, executorName string) context.Context {
+	lastProgressPct := 49.0
+	return withRenderProgress(rctx, func(progress RenderProgress) {
+		pct := 50 + clampFloat(progress.Fraction, 0, 1)*30
+		if pct < lastProgressPct+0.5 && progress.Fraction < 1 {
+			return
+		}
+		lastProgressPct = pct
+		detail := map[string]any{
+			"message":          "Rendering composition",
+			"executor":         executorName,
+			"out_time_seconds": progress.OutTimeSeconds,
+			"frame":            progress.Frame,
+			"speed":            progress.Speed,
+		}
+		setRenderProgress(appCtx, renderID, compositionID, projectID, "rendering", "rendering", pct, detail)
+	})
+}
+
+func appendUniqueStrings(dst []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(dst)+len(values))
+	for _, value := range dst {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		dst = append(dst, value)
+	}
+	return dst
 }
 
 func renderEditFromStoredJSON(editJSON, outputJSON string) (*Edit, Output, string, []string, error) {
@@ -894,7 +935,7 @@ func (a *App) toolAssetInspect(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if src == "" {
 		return nil, errors.New("src required")
 	}
-	url, err := resolveAssetURL(ctx, src)
+	url, err := resolveAssetLocal(ctx, src)
 	if err != nil {
 		return nil, fmt.Errorf("resolve: %w", err)
 	}
@@ -1245,7 +1286,7 @@ func (a *App) handleExamples(w http.ResponseWriter, r *http.Request) {
 	if !composerV2Enabled() {
 		jsonResp(w, map[string]any{
 			"examples": []map[string]any{},
-			"note":     "Experimental composer/v2 examples are hidden in this public release.",
+			"note":     "Composer V2 examples are hidden because COMPOSER_V2_ENABLED is disabled.",
 		})
 		return
 	}

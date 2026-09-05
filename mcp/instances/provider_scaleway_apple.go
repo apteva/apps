@@ -30,7 +30,7 @@ func scalewayAppleID(value string) string {
 
 func isScalewayAppleInstance(inst *Instance) bool {
 	return inst != nil && normalizeProvider(inst.Provider) == "scaleway" &&
-		(isScalewayAppleSize(inst.Size) || inst.ResourceClass == "bare_metal")
+		(isScalewayAppleSize(inst.Size) || (inst.ResourceClass == "bare_metal" && inst.Platform == "macos"))
 }
 
 func parseScalewayAppleProducts(data json.RawMessage) ([]ServerType, error) {
@@ -225,11 +225,19 @@ func scalewayAppleResources(serverType ServerType) string {
 }
 
 func registerScalewayAppleSSHKey(ctx *sdk.AppCtx, instanceID int64, name, publicKey string) (scalewayAppleProviderMetadata, error) {
-	projectID, err := scalewayDefaultProject(ctx)
+	return registerScalewaySSHKeyOnConnection(ctx, 0, instanceID, name, publicKey)
+}
+
+func registerScalewaySSHKeyOnConnection(ctx *sdk.AppCtx, connectionID, instanceID int64, name, publicKey string) (scalewayAppleProviderMetadata, error) {
+	projectID, err := scalewayDefaultProjectForConnection(ctx, connectionID)
 	if err != nil {
 		return scalewayAppleProviderMetadata{}, err
 	}
-	data, err := executeProviderTool(ctx, "scaleway", "ssh_key_create", map[string]any{
+	bound, err := storageBinding(ctx, "scaleway", connectionID)
+	if err != nil {
+		return scalewayAppleProviderMetadata{}, err
+	}
+	data, err := executeProviderToolOnConnection(ctx, bound.ConnectionID, "scaleway", "ssh_key_create", map[string]any{
 		"name":       fmt.Sprintf("apteva-instance-%d-%s", instanceID, name),
 		"public_key": publicKey,
 		"project_id": projectID,
@@ -266,7 +274,7 @@ func scalewayAppleResponseFields(data json.RawMessage) map[string]any {
 }
 
 func scalewayAppleDestroy(ctx *sdk.AppCtx, inst *Instance) error {
-	bound, err := apiProviderBound(ctx, "scaleway")
+	bound, err := storageBinding(ctx, "scaleway", inst.ProviderConnectionID)
 	if err != nil {
 		return err
 	}
@@ -286,10 +294,14 @@ func scalewayAppleDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 }
 
 func deleteScalewayAppleSSHKey(ctx *sdk.AppCtx, keyID string) error {
+	return deleteScalewaySSHKeyOnConnection(ctx, 0, keyID)
+}
+
+func deleteScalewaySSHKeyOnConnection(ctx *sdk.AppCtx, connectionID int64, keyID string) error {
 	if keyID == "" {
 		return nil
 	}
-	bound, err := apiProviderBound(ctx, "scaleway")
+	bound, err := storageBinding(ctx, "scaleway", connectionID)
 	if err != nil {
 		return err
 	}

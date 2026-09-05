@@ -1,75 +1,33 @@
 package main
 
 import (
+	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: api
-display_name: API Gateway
-version: 0.5.0
-description: Lightweight API gateway with streaming Function targets, safe authenticated AppBus invalidation feeds, and platform-managed browser-origin policies.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.ingress.write
-    - net.egress
-  apps:
-    - { name: functions, optional: true }
-    - { name: domains, optional: true }
-    - { name: auth, optional: true }
-provides:
-  http_routes:
-    - prefix: /
-    - prefix: /gw/
-      no_auth: true
-  mcp_tools:
-    - { name: api_create, description: "Create an API." }
-    - { name: api_get, description: "Fetch one API by id or slug." }
-    - { name: api_list, description: "List APIs." }
-    - { name: api_update, description: "Update an API." }
-    - { name: api_delete, description: "Delete an API." }
-    - { name: api_route_add, description: "Add or update an API route." }
-    - { name: api_route_list, description: "List API routes." }
-    - { name: api_route_delete, description: "Delete an API route." }
-    - { name: api_key_create, description: "Create an API key." }
-    - { name: api_key_list, description: "List API keys." }
-    - { name: api_key_revoke, description: "Revoke an API key." }
-    - { name: api_logs, description: "List API request logs." }
-  ui_panels:
-    - { slot: project.page, label: "API Gateway", icon: network, entry: /ui/ApiPanel.mjs }
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/api
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/api.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct {
-	httpClient *http.Client
-	eventHubs  *appEventHubManager
+	httpClient        *http.Client
+	eventHubs         *appEventHubManager
+	ctx               *sdk.AppCtx
+	mutationMu        sync.Mutex
+	streams           streamRegistry
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	requestSlots      chan struct{}
 }
-
-var globalCtx *sdk.AppCtx
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -83,9 +41,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("api requires a db block")
 	}
-	globalCtx = ctx
+	a.ctx = ctx
+	a.requestSlots = make(chan struct{}, 256)
 	if a.httpClient == nil {
-		a.httpClient = http.DefaultClient
+		a.httpClient = gatewayHTTPClient()
 	}
 	a.eventHubs = newAppEventHubManager(os.Getenv("APTEVA_GATEWAY_URL"), outboundAppToken(), a.httpClient)
 	if err := reconcileBrowserOriginPolicies(ctx); err != nil {
@@ -94,11 +53,21 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		// the platform policy endpoint is temporarily unavailable.
 		ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
 	}
+	a.startMaintenance(ctx)
 	ctx.Logger().Info("api mounted", "project_id", ctx.CurrentProject())
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.maintenanceCancel != nil {
+		a.maintenanceCancel()
+		<-a.maintenanceDone
+	}
+	a.streams.closeAll()
+	if a.ctx != nil {
+		stopLogSink(a.ctx.AppDB())
+		releaseRouteCache(a.ctx.AppDB())
+	}
 	if a.eventHubs != nil {
 		a.eventHubs.close()
 	}
@@ -120,29 +89,56 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func main() { sdk.Run(&App{}) }
 
 func projectFromArgs(ctx *sdk.AppCtx, args map[string]any) (string, error) {
-	if s := strings.TrimSpace(stringArg(args, "project_id", "")); s != "" {
-		return s, nil
+	trusted := strings.TrimSpace(ctx.CurrentProject())
+	if trusted == "" {
+		return "", errors.New("authenticated project context required")
 	}
-	if ctx != nil && strings.TrimSpace(ctx.CurrentProject()) != "" {
-		return ctx.CurrentProject(), nil
+	for _, key := range []string{"project_id", "_project_id"} {
+		if value, exists := args[key]; exists {
+			s, ok := value.(string)
+			if !ok || (strings.TrimSpace(s) != "" && strings.TrimSpace(s) != trusted) {
+				return "", errors.New("project_id does not match authenticated scope")
+			}
+		}
 	}
-	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
-		return env, nil
+	return trusted, nil
+}
+
+// Management calls arrive through the token-authenticated platform proxy.
+// Public gateway URLs may select a project, but cannot override a pinned install.
+func (a *App) projectFromRequest(r *http.Request) (string, error) {
+	pinned := strings.TrimSpace(a.ctx.CurrentProject())
+	trusted := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
+	requested := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if pinned != "" {
+		if trusted != "" && trusted != pinned || requested != "" && requested != pinned {
+			return "", errors.New("project_id does not match install")
+		}
+		return pinned, nil
+	}
+	if trusted != "" {
+		if requested != "" && requested != trusted {
+			return "", errors.New("project_id does not match authenticated scope")
+		}
+		return trusted, nil
+	}
+	if requested != "" {
+		return requested, nil
 	}
 	return "", errors.New("project_id required")
 }
 
-func projectFromRequest(r *http.Request) (string, error) {
-	if s := strings.TrimSpace(r.URL.Query().Get("project_id")); s != "" {
-		return s, nil
+func (a *App) managementContext(r *http.Request, args map[string]any) (*sdk.AppCtx, error) {
+	pid, err := a.projectFromRequest(r)
+	if err != nil {
+		return nil, err
 	}
-	if globalCtx != nil && strings.TrimSpace(globalCtx.CurrentProject()) != "" {
-		return globalCtx.CurrentProject(), nil
+	ctx := a.ctx.WithProject(pid)
+	if _, err := projectFromArgs(ctx, args); err != nil {
+		return nil, err
 	}
-	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
-		return env, nil
-	}
-	return "", errors.New("project_id required")
+	args["project_id"] = pid
+	return ctx, nil
 }
 
 func httpJSON(w http.ResponseWriter, v any) {
@@ -219,8 +215,11 @@ func intArg(args map[string]any, key string, def int) int {
 
 func jsonTextArg(args map[string]any, key string, def string) (string, error) {
 	v, ok := args[key]
-	if !ok || v == nil {
+	if !ok {
 		return def, nil
+	}
+	if v == nil {
+		return "", fmt.Errorf("%s must not be null", key)
 	}
 	if s, ok := v.(string); ok {
 		s = strings.TrimSpace(s)

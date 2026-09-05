@@ -28,5 +28,7 @@ assert:
   - iterations_at_most: 8
 
 budget:
-  total_tokens: 12000
+  # Current core/tool context uses about 10k input tokens per iteration.
+  # Baseline: ~21k for two turns; ~31k for three. Cost caps stay unchanged.
+  total_tokens: 32000
   cost_usd: 0.20

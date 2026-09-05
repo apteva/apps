@@ -52,6 +52,8 @@ type Element struct {
 	AccessibleName    string                  `json:"accessible_name,omitempty"`
 	Type              string                  `json:"type,omitempty"`
 	Placeholder       string                  `json:"placeholder,omitempty"`
+	Checked           *bool                   `json:"checked,omitempty"`
+	Indeterminate     bool                    `json:"indeterminate,omitempty"`
 	CurrentValue      *string                 `json:"current_value,omitempty"`
 	Pattern           string                  `json:"pattern,omitempty"`
 	FormatHint        string                  `json:"format_hint,omitempty"`
@@ -59,7 +61,11 @@ type Element struct {
 	Validity          *computer.FieldValidity `json:"validity,omitempty"`
 	Disabled          bool                    `json:"disabled"`
 	Loading           bool                    `json:"loading"`
+	TargetLoading     bool                    `json:"target_loading"`
+	ContainerLoading  bool                    `json:"container_loading"`
+	PageLoadingCount  int                     `json:"page_loading_indicators"`
 	Dangerous         bool                    `json:"dangerous"`
+	Effect            string                  `json:"effect,omitempty"`
 	DestructiveEffect string                  `json:"destructive_effect,omitempty"`
 }
 
@@ -121,10 +127,11 @@ const EnumScript = `
 
   var somState = window.__aptevaComputerSOM;
   if (!somState) {
-    somState = {names: Object.create(null)};
+    somState = {names: Object.create(null), targets: Object.create(null)};
     try { Object.defineProperty(window, '__aptevaComputerSOM', {value: somState, configurable: true}); }
     catch (e) { window.__aptevaComputerSOM = somState; }
   }
+  somState.targets = Object.create(null);
 
   function clean(v) { return String(v || '').replace(/\s+/g, ' ').trim(); }
 
@@ -178,9 +185,23 @@ const EnumScript = `
     var closest = el.closest && el.closest('label');
     return closest ? clean(closest.innerText || closest.textContent) : '';
   }
+  function adjacentRowLabel(el) {
+    if (!el || !el.matches || !el.matches('input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]')) return '';
+    var selector = 'input[type="checkbox"],input[type="radio"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    var best = '';
+    for (var row = el.parentElement, depth = 0; row && depth < 5; row = row.parentElement, depth++) {
+      var rect = row.getBoundingClientRect();
+      if (rect.height > 140 || rect.width > Math.min(window.innerWidth, 1200)) break;
+      var controls = row.querySelectorAll(selector);
+      if (controls.length !== 1 || controls[0] !== el) continue;
+      var label = clean(row.innerText || row.textContent || '');
+      if (label && label.length <= 180) { best = label; break; }
+    }
+    return best;
+  }
   function accessibleName(el) {
     return clean((el.getAttribute && el.getAttribute('aria-label')) || labelledBy(el) ||
-      associatedLabel(el) || (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
+      associatedLabel(el) || adjacentRowLabel(el) || (el.getAttribute && el.getAttribute('title')) || el.innerText || el.textContent ||
       el.value || (el.getAttribute && el.getAttribute('alt')) ||
       (el.getAttribute && el.getAttribute('aria-placeholder')) ||
       (el.getAttribute && el.getAttribute('placeholder')) ||
@@ -198,7 +219,8 @@ const EnumScript = `
   }
   function fieldMetadata(el, name) {
     var tag = String(el.tagName || '').toLowerCase();
-    if (tag !== 'input' && tag !== 'textarea') return null;
+    if (tag !== 'input' && tag !== 'textarea' && tag !== 'select') return null;
+    if (String(el.type || '').toLowerCase() === 'password') return null;
     var type = clean(el.type).toLowerCase();
     var placeholder = clean(el.getAttribute('placeholder'));
     var pattern = clean(el.getAttribute('pattern'));
@@ -214,7 +236,7 @@ const EnumScript = `
     var semantic = clean(name + ' ' + placeholder + ' ' + pattern).toLowerCase();
     var dateLike = type === 'date' || type === 'datetime-local' ||
       (/^(text|search|tel|)$/.test(type) && (!!hint || /\b(date|day|month|year|datum|fecha|data)\b/.test(semantic) || /[mdy]{1,4}\s*[\/.\-]\s*[mdy]{1,4}/i.test(semantic)));
-    if (!dateLike) return null;
+    if (!dateLike) return {placeholder:placeholder,current_value:current.slice(0,4096),pattern:pattern,format_hint:type === 'time' ? 'HH:mm' : '',date_like:false};
     if (!hint) {
       var lang = String(el.lang || document.documentElement.lang || navigator.language || '').toLowerCase();
       if (lang) hint = lang === 'en-us' || lang.indexOf('en-us-') === 0 ? 'mm/dd/yyyy' : 'dd/mm/yyyy';
@@ -232,19 +254,49 @@ const EnumScript = `
     if (!el || !el.getBoundingClientRect) return false;
     var r = el.getBoundingClientRect(), s;
     try { s = styleWin.getComputedStyle(el); } catch (e) { return false; }
-    return r.width >= 2 && r.height >= 2 && s.display !== 'none' &&
-      s.visibility !== 'hidden' && parseFloat(s.opacity || '1') >= 0.1;
-  }
-  function isLoading(el, styleWin) {
-    for (var node = el; node && node !== node.ownerDocument.documentElement; node = node.parentElement) {
-      if (node.getAttribute && (node.getAttribute('aria-busy') === 'true' ||
-          node.getAttribute('data-loading') === 'true' || node.getAttribute('data-state') === 'loading')) return true;
-      var cls = clean(node.className).toLowerCase();
-      if (/(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls)) return true;
+    if (r.width < 2 || r.height < 2) return false;
+    try {
+      if (el.checkVisibility && !el.checkVisibility({checkOpacity:true, checkVisibilityCSS:true})) return false;
+    } catch (e) {}
+    for (var node = el; node && node.nodeType === 1; node = node.parentElement) {
+      try { s = styleWin.getComputedStyle(node); } catch (e) { return false; }
+      if (s.display === 'none' || s.visibility === 'hidden' || parseFloat(s.opacity || '1') < 0.1) return false;
     }
+    return true;
+  }
+  function loadingMarker(node) {
+    if (!node || !node.getAttribute) return false;
+    if (node.getAttribute('aria-busy') === 'true' || node.getAttribute('data-loading') === 'true' || node.getAttribute('data-state') === 'loading') return true;
+    var cls = clean(node.className).toLowerCase();
+    return /(^|[-_\s])(loading|is-loading|pending)([-_\s]|$)/.test(cls);
+  }
+  function targetLoading(el, styleWin) {
+    if (loadingMarker(el)) return true;
     var indicators = el.querySelectorAll ? el.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]') : [];
     for (var i = 0; i < indicators.length; i++) if (isVisible(indicators[i], styleWin)) return true;
+    var selector = 'button,input,select,textarea,[role="button"],[role="checkbox"],[role="radio"],[role="switch"],[aria-checked]';
+    for (var row = el.parentElement, depth = 0; row && depth < 3; row = row.parentElement, depth++) {
+      var rect = row.getBoundingClientRect();
+      if (rect.height > 140 || rect.width > Math.min(window.innerWidth, 1200)) break;
+      var controls = row.querySelectorAll(selector);
+      if (controls.length !== 1 || controls[0] !== el) continue;
+      if (loadingMarker(row)) return true;
+      var rowIndicators = row.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"]');
+      for (var j = 0; j < rowIndicators.length; j++) if (isVisible(rowIndicators[j], styleWin)) return true;
+      break;
+    }
     return false;
+  }
+  function containerLoading(el) {
+    for (var node = el && el.parentElement; node && node !== node.ownerDocument.documentElement; node = node.parentElement) {
+      if (loadingMarker(node)) return true;
+    }
+    return false;
+  }
+  function pageLoadingIndicators(doc, styleWin) {
+    var nodes = doc.querySelectorAll('[role="progressbar"],[aria-label*="loading" i],[aria-label*="saving" i],[class*="spinner" i],[data-loading="true"],[aria-busy="true"]'), count = 0;
+    for (var i = 0; i < nodes.length; i++) if (isVisible(nodes[i], styleWin)) count++;
+    return count;
   }
   function destructiveEffect(name, text, tag, role, el) {
     var inputType = clean(el && el.type).toLowerCase();
@@ -254,16 +306,28 @@ const EnumScript = `
     // message", etc. Risk describes activating a consequential control, not
     // editing a draft, so editable targets are never classified here.
     if (!actionable || (el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return '';
-    var semantic = clean(name + ' ' + text).toLowerCase();
-	    if (/\b(set|choose|select|edit|change)\s+(the\s+)?(publish\s+)?(date|time)\b/.test(semantic)) return '';
-	    if (/\b(schedule (post|publication|publish)|confirm schedule|publish later)\b/.test(semantic) || /^schedule(?:\s+schedule)?$/.test(semantic)) return 'schedule_publish';
-	    if (/\bpublish\b/.test(semantic)) return 'immediate_publish';
-	    if (/\b(delete|destroy|erase)\b/.test(semantic)) return 'destructive_delete';
-	    if (/\b(send|post)\b/.test(semantic)) return 'immediate_send';
-	    if (/\b(pay|payout|purchase|buy|checkout|place order)\b/.test(semantic)) return 'financial_action';
-	    if (/\b(withdraw|withdrawal)\b/.test(semantic)) return 'financial_action';
-	    if (/\b(grant access|revoke access|change permissions|make admin|remove admin)\b/.test(semantic)) return 'permission_change';
-	    if (/\b(deactivate account|close account|transfer account)\b/.test(semantic)) return 'account_change';
+    // Consequence belongs to the control's own accessible name. Descendant or
+    // surrounding editor copy ("post", "publish date", help text) must not
+    // turn a navigation/configuration control into an external commit.
+    var semantic = clean(name).toLowerCase();
+    if (/^(create|new|edit|view|open)\s+(a\s+)?post\b/.test(semantic) || /^(publish|schedule)\s+(date|time)\b/.test(semantic)) return '';
+    if (/^(schedule|confirm schedule|schedule post|schedule publication|publish later)(\b|$)/.test(semantic)) return 'schedule_publish';
+    if (/^(publish|publish now|post now)(\b|$)/.test(semantic)) return 'immediate_publish';
+    if (/^(delete|destroy|erase|remove permanently)(\b|$)/.test(semantic)) return 'destructive_delete';
+    if (/^(send|send now)(\b|$)/.test(semantic)) return 'immediate_send';
+    if (/^(pay|payout|purchase|buy|checkout|place order|withdraw)(\b|$)/.test(semantic)) return 'financial_action';
+    if (/^(grant access|revoke access|change permissions|make admin|remove admin)(\b|$)/.test(semantic)) return 'permission_change';
+    if (/^(deactivate account|close account|transfer account)(\b|$)/.test(semantic)) return 'account_change';
+    return '';
+  }
+  function semanticEffect(name, text, tag, role, el) {
+    var dangerous = destructiveEffect(name, text, tag, role, el);
+    if (dangerous) return dangerous;
+    var semantic = clean(name).toLowerCase();
+    if ((el && el.isContentEditable) || role === 'textbox' || role === 'searchbox') return 'edit_draft';
+    if ((el && (el.getAttribute('aria-haspopup') || el.getAttribute('aria-controls'))) || /^(free access|paid access|more options|action menu)\b/.test(semantic)) return 'open_configuration';
+    if (/^(create|new|view|open)\s+(a\s+)?post\b/.test(semantic) || /^(publish|schedule)\s+(date|time)\b/.test(semantic)) return 'navigation_only';
+    if (tag === 'button' || tag === 'a' || role === 'button' || role === 'link' || role === 'menuitem') return 'navigation_only';
     return '';
   }
 
@@ -333,7 +397,8 @@ const EnumScript = `
         var key = targetKey(el);
         var stableID = compactID(key);
         var name = accessibleName(el);
-        var text = (el.innerText || el.value || name ||
+        var password = String(el.type || '').toLowerCase() === 'password';
+        var text = (el.innerText || (!password && el.value) || name ||
                     el.getAttribute('aria-placeholder') ||
                     el.getAttribute('placeholder') ||
                     el.getAttribute('data-placeholder') ||
@@ -363,22 +428,31 @@ const EnumScript = `
         var tag = el.tagName.toLowerCase();
         var role = el.getAttribute('role') || '';
         var field = fieldMetadata(el, name);
+        var ariaChecked = el.getAttribute('aria-checked');
+        var nativeCheck = tag === 'input' && /^(checkbox|radio)$/.test(el.type);
+        var mixed = !!el.indeterminate || ariaChecked === 'mixed';
+        var checked = mixed ? null : (nativeCheck ? !!el.checked : (ariaChecked === 'true' ? true : (ariaChecked === 'false' ? false : null)));
         var disabled = !!(el.disabled || (el.matches && el.matches(':disabled')) ||
           el.getAttribute('aria-disabled') === 'true' || (el.closest && el.closest('[inert]')));
-        var loading = isLoading(el, styleWin);
+        var targetBusy = targetLoading(el, styleWin);
+        var containerBusy = containerLoading(el);
+        var pageBusy = pageLoadingIndicators(el.ownerDocument || document, styleWin);
 		// Spinners commonly replace the visible text while autosave is active.
 		// Preserve the last stable semantic name for the same logical control.
-		if (loading && !name && somState.names[stableID]) name = somState.names[stableID];
-		if (!loading && name) somState.names[stableID] = name;
+		if (targetBusy && !name && somState.names[stableID]) name = somState.names[stableID];
+		if (!targetBusy && name) somState.names[stableID] = name;
         var effect = destructiveEffect(name, text, tag, role, el);
+        var semantic = semanticEffect(name, text, tag, role, el);
         candidates.push({
           el: el, id: stableID, x: x, y: y, w: w, h: h,
           tag: tag, role: role, text: text, accessible_name: name,
           type: el.type || '',
           placeholder: field ? field.placeholder : '', current_value: field ? field.current_value : null,
           pattern: field ? field.pattern : '', format_hint: field ? field.format_hint : '',
-          date_like: !!field, validity: field ? field.validity : null,
-          disabled: disabled, loading: loading, dangerous: effect !== '', destructive_effect: effect,
+          checked: checked, indeterminate: mixed, date_like: !!(field && field.date_like), validity: field ? field.validity : null,
+          disabled: disabled, loading: targetBusy, target_loading: targetBusy,
+          container_loading: containerBusy, page_loading_indicators: pageBusy,
+          dangerous: effect !== '', effect: semantic, destructive_effect: effect,
           prio: priority(tag, role, el)
         });
       }
@@ -518,35 +592,19 @@ const EnumScript = `
     if (!dominated) keep.push(ci);
   }
 
-  // ─── Pass 3: occlusion check (lenient — false positives hurt) ─
-  // Modal overlays cover elements; the DOM still lists them, but
-  // they're not clickable. We sample elementFromPoint at three
-  // points along the candidate's horizontal centerline.
-  //
-  // CRITICAL: cost asymmetry. A false-positive (pruning a real
-  // clickable) is much worse than a false-negative (keeping an
-  // un-clickable one). The agent loops and gets stuck on the first;
-  // recovers by trying another label on the second. So this check
-  // is intentionally LENIENT.
-  //
-  // We only prune a candidate when the topmost element at its
-  // center sample IS ITSELF a meaningful interactive (button,
-  // input, [role=button], onclick handler, etc.) AND is not the
-  // candidate's ancestor/descendant. A non-interactive wrapper
-  // div (decorative dimmer, layout container) lets the candidate
-  // through — clicks reach the candidate via pointer-events
-  // bubbling in most cases. We bias toward labeling, not toward
-  // pruning.
-  function isUsefulInteractive(el) {
-    if (!el) return false;
-    var t = el.tagName;
-    if (t === 'A' || t === 'BUTTON' || t === 'INPUT' ||
-        t === 'TEXTAREA' || t === 'SELECT') return true;
-    if (el.getAttribute('role')) return true;
-    if (el.hasAttribute('onclick') || el.hasAttribute('data-trigger')) return true;
-    var ti = el.getAttribute('tabindex');
-    if (ti !== null && ti !== '-1') return true;
-    return false;
+  // ─── Pass 3: hit testing ────────────────────────────────────
+  // elementFromPoint already ignores pointer-events:none decorations. An
+  // unrelated div that wins hit testing blocks input just like a button does;
+  // its events do not bubble to a covered sibling. Keep partially exposed
+  // targets if any sample is reachable, including same-origin frame/shadow UI.
+  function deepestHit(doc, x, y) {
+    var top = doc.elementFromPoint(x, y);
+    for (var depth=0; top && top.shadowRoot && top.shadowRoot.elementFromPoint && depth<8; depth++) {
+      var inner=top.shadowRoot.elementFromPoint(x,y);
+      if (!inner || inner===top) break;
+      top=inner;
+    }
+    return top;
   }
   var visible = [];
   for (var i = 0; i < keep.length; i++) {
@@ -556,25 +614,23 @@ const EnumScript = `
       [c.x + Math.max(2, Math.min(c.w - 2, c.w * 0.25)), c.y + c.h / 2],
       [c.x + Math.max(2, Math.min(c.w - 2, c.w * 0.75)), c.y + c.h / 2]
     ];
-    var pruned = false;
-    for (var p = 0; p < probes.length && !pruned; p++) {
+    var reachable = false;
+    for (var p = 0; p < probes.length && !reachable; p++) {
       var px = probes[p][0], py = probes[p][1];
       if (px < 0 || py < 0 || px >= vw || py >= vh) continue;
-      var top = document.elementFromPoint(px, py);
+      var top = deepestHit(document, px, py);
+      var owner = c.el.ownerDocument;
+      if (owner && owner !== document) {
+        var frame = owner.defaultView && owner.defaultView.frameElement;
+        if (frame && top === frame) {
+          var rect = frame.getBoundingClientRect();
+          top = deepestHit(owner, px-rect.left, py-rect.top);
+        }
+      }
       if (!top) continue;
-      // Topmost relates to the candidate (self/descendant/ancestor)
-      // → not occluded.
-      if (top === c.el || c.el.contains(top) || top.contains(c.el)) {
-        continue;
-      }
-      // Topmost is unrelated. Only prune if it's a real interactive
-      // — otherwise treat as decorative pass-through and KEEP the
-      // candidate.
-      if (isUsefulInteractive(top)) {
-        pruned = true;
-      }
+      if (top === c.el || c.el.contains(top) || top.contains(c.el) || (top.tagName==='LABEL' && top.control===c.el)) reachable = true;
     }
-    if (!pruned) visible.push(c);
+    if (reachable) visible.push(c);
   }
 
   // ─── Pass 4: rank, cap, label ────────────────────────────────
@@ -604,12 +660,16 @@ const EnumScript = `
   var out = [];
   for (var k = 0; k < visible.length; k++) {
     var c = visible[k];
+    somState.targets[c.id] = {element:c.el, x:c.x + c.w/2, y:c.y + c.h/2, name:c.accessible_name, role:c.role};
     out.push({
       id: c.id, x: c.x, y: c.y, w: c.w, h: c.h,
       tag: c.tag, role: c.role, text: c.text, accessible_name: c.accessible_name, type: c.type,
       placeholder: c.placeholder, current_value: c.current_value, pattern: c.pattern,
       format_hint: c.format_hint, date_like: c.date_like, validity: c.validity,
-      disabled: c.disabled, loading: c.loading, dangerous: c.dangerous, destructive_effect: c.destructive_effect,
+      checked: c.checked, indeterminate: c.indeterminate,
+      disabled: c.disabled, loading: c.loading, target_loading: c.target_loading,
+      container_loading: c.container_loading, page_loading_indicators: c.page_loading_indicators,
+      dangerous: c.dangerous, effect: c.effect, destructive_effect: c.destructive_effect,
       label: k + 1
     });
   }

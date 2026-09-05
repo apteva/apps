@@ -1,0 +1,6 @@
+{"check":"typed segment round-trip","before":{"predicate":"attribute","key":"example","op":"eq","value":42},"after":{"predicate":"attribute","key":"example","op":"eq","value":42}}
+{"check":"typed segment round-trip","before":{"predicate":"attribute","key":"example","op":"eq","value":true},"after":{"predicate":"attribute","key":"example","op":"eq","value":true}}
+{"check":"typed segment round-trip","before":{"predicate":"attribute","key":"example","op":"eq","value":"2026-09-05"},"after":{"predicate":"attribute","key":"example","op":"eq","value":"2026-09-05"}}
+{"check":"typed segment round-trip","before":{"predicate":"attribute","key":"example","op":"eq","value":["a","b"]},"after":{"predicate":"attribute","key":"example","op":"eq","value":["a","b"]}}
+{"issue":"out-of-order contact loads","selected":"B","displayed":{"id":"B"}}
+{"check":"typed null predicates and custom discard dialog callback","passed":true}

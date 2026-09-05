@@ -100,18 +100,22 @@ func failRender(ctx *sdk.AppCtx, renderID, compositionID int64, projectID string
 	if err == nil {
 		err = fmt.Errorf("render failed")
 	}
+	var executor, phase string
+	_ = ctx.AppDB().QueryRow(`SELECT executor, COALESCE(phase,'') FROM renders WHERE id=?`, renderID).Scan(&executor, &phase)
+	message, diagnosticJSON := renderFailureDetail(err, executor, phase)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE renders
-		 SET status='failed', phase='failed', error=?, ffmpeg_command=?,
+		 SET status='failed', phase='failed', error=?, ffmpeg_command=?, progress_json=?,
 		     progress_pct=100, finished_at=CURRENT_TIMESTAMP, next_attempt_at=NULL,
 		     updated_at=CURRENT_TIMESTAMP
 		 WHERE id=?`,
-		err.Error(), ffmpegCommand, renderID,
+		message, redactSecrets(ffmpegCommand), diagnosticJSON, renderID,
 	)
 	ctx.EmitWithProject("composition.failed", projectID, map[string]any{
 		"composition_id": compositionID,
 		"render_id":      renderID,
-		"error":          err.Error(),
+		"error":          message,
+		"diagnostic":     decodeJSONMap(diagnosticJSON),
 	})
 }
 

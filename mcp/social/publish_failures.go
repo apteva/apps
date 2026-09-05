@@ -50,6 +50,18 @@ func classifyPublishFailure(err error) publishFailure {
 		return failure
 	}
 	lower := strings.ToLower(err.Error())
+	if mediaValidationError(lower) {
+		failure.Code = "validation_error"
+		failure.Retryable = false
+		return failure
+	}
+	for _, fragment := range []string{"timeout", "deadline exceeded", "connection reset", "unexpected eof"} {
+		if strings.Contains(lower, fragment) {
+			failure.Code = "outcome_unknown"
+			failure.Retryable = false
+			return failure
+		}
+	}
 	if strings.Contains(lower, "duplicate") && (strings.Contains(lower, "409") || strings.Contains(lower, "existingpost")) {
 		failure.Code = "duplicate_content"
 		failure.Retryable = false

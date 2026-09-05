@@ -16,8 +16,8 @@ test("social card URLs retain query parameters and project scope", () => {
 test("post presentation is compact and status-aware", () => {
   expect(postTitle({ body: "\n First line\nSecond line" })).toBe("First line");
   expect(postTitle({ body: "" })).toBe("Untitled post");
-  expect(postStatusVariant("published")).toBe("ok");
-  expect(postStatusVariant("failed")).toBe("err");
+  expect(postStatusVariant("published")).toBe("live");
+  expect(postStatusVariant("failed")).toBe("error");
   expect(postStatusVariant("scheduled")).toBe("muted");
 });
 

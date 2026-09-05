@@ -11,6 +11,25 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+const (
+	providerImportModeOff         = "off"
+	providerImportModeManaged     = "managed_only"
+	providerImportModeFullHistory = "full_history"
+)
+
+func normalizeProviderImportMode(value string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(value))
+	if mode == "" {
+		mode = providerImportModeManaged
+	}
+	switch mode {
+	case providerImportModeOff, providerImportModeManaged, providerImportModeFullHistory:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("provider import mode must be off, managed_only, or full_history")
+	}
+}
+
 // providerLifecycleCapabilities keeps the Social workflow provider-neutral.
 // A future provider can opt into any subset without changing the draft tools.
 type providerLifecycleCapabilities struct {
@@ -206,29 +225,59 @@ func (a *App) syncProviderWorkflow(ctx *sdk.AppCtx, postID int64, intent, schedu
 	return results
 }
 
-func zernioWorkflowStatus(item map[string]any) (status, requestedMode, scheduleAt string) {
-	raw := strings.ToLower(strings.TrimSpace(firstString(item, "status", "state", "postStatus")))
-	isDraft, _ := item["isDraft"].(bool)
-	scheduleAt = firstString(item, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+func zernioWorkflowStatus(item, platformItem map[string]any) (status, requestedMode, scheduleAt string) {
+	raw := strings.ToLower(strings.TrimSpace(firstString(platformItem, "status", "state", "postStatus")))
+	if raw == "" {
+		raw = strings.ToLower(strings.TrimSpace(firstString(item, "status", "state", "postStatus")))
+	}
+	isDraft, _ := platformItem["isDraft"].(bool)
+	if !isDraft {
+		isDraft, _ = item["isDraft"].(bool)
+	}
+	scheduleAt = firstString(platformItem, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+	if scheduleAt == "" {
+		scheduleAt = firstString(item, "scheduledFor", "scheduled_for", "scheduleAt", "schedule_at")
+	}
+	publishedEvidence := firstString(platformItem,
+		"publishedAt", "published_at", "platformPostId", "platform_post_id", "platformPostUrl", "platform_post_url")
+	if publishedEvidence == "" {
+		publishedEvidence = firstString(item, "publishedAt", "published_at", "platformPostId", "platform_post_id")
+	}
 	switch {
 	case isDraft || strings.Contains(raw, "draft"):
 		return "draft", postModeDraft, ""
-	case scheduleAt != "" || strings.Contains(raw, "schedul") || strings.Contains(raw, "queue"):
-		return "scheduled", postModeSchedule, scheduleAt
 	case strings.Contains(raw, "fail") || strings.Contains(raw, "error"):
 		return "failed", postModePublish, scheduleAt
-	default:
+	case raw == "published" || raw == "completed" || (raw == "" && publishedEvidence != ""):
 		return "published", postModePublish, scheduleAt
+	case raw == "publishing" || raw == "processing":
+		return "publishing", postModePublish, scheduleAt
+	case scheduleAt != "" || strings.Contains(raw, "schedul") || strings.Contains(raw, "queue"):
+		return "scheduled", postModeSchedule, scheduleAt
+	default:
+		return "publishing", postModePublish, scheduleAt
 	}
 }
 
 func (a *App) reconcileImportedProviderPost(
 	ctx *sdk.AppCtx, pid string, accountID, profileID int64,
-	body, providerPostID, platformPostID, platformURL, status, requestedMode, scheduleAt, occurredAt string,
-	mediaURLs []string, raw map[string]any,
+	body, providerPostID, platformPostID, platformURL, status, requestedMode, scheduleAt string,
+	createdAt, publishedAt string, mediaURLs []string, raw map[string]any,
 ) (bool, error) {
 	if providerPostID == "" {
 		return false, errors.New("provider post id required")
+	}
+	var suppressed int
+	tombstoneErr := ctx.AppDB().QueryRow(
+		`SELECT 1 FROM provider_import_tombstones
+		  WHERE social_account_id=? AND provider_slug=? AND provider_post_id=?`,
+		accountID, zernioProviderSlug, providerPostID,
+	).Scan(&suppressed)
+	if tombstoneErr == nil {
+		return false, nil
+	}
+	if tombstoneErr != sql.ErrNoRows {
+		return false, tombstoneErr
 	}
 	rawJSON, _ := json.Marshal(raw)
 	mediaJSON, _ := json.Marshal(mediaURLs)
@@ -238,27 +287,50 @@ func (a *App) reconcileImportedProviderPost(
 		accountID, providerPostID,
 	).Scan(&targetID, &postID)
 	if err == nil {
-		publishedAt := any(nil)
-		if status == "published" {
-			publishedAt = nullable(occurredAt)
+		unlock := lockSocialPost(ctx, postID)
+		defer unlock()
+		var source, localStatus string
+		var priorRevision int64
+		if err := ctx.AppDB().QueryRow(`SELECT source,status,revision FROM posts WHERE id=? AND project_id=?`, postID, pid).Scan(&source, &localStatus, &priorRevision); err != nil {
+			return false, err
 		}
-		_, err = ctx.AppDB().Exec(
-			`UPDATE posts SET body=?, status=?, requested_mode=?, schedule_at=?, external_media_urls=?,
-			        published_at=?, provider_sync_mode='mirror', source='provider', updated_at=CURRENT_TIMESTAMP
-			  WHERE id=? AND project_id=?`,
-			body, status, requestedMode, nullable(scheduleAt), string(mediaJSON), publishedAt, postID, pid,
-		)
+		tx, err := ctx.AppDB().Begin()
 		if err != nil {
 			return false, err
 		}
-		_, err = ctx.AppDB().Exec(
-			`UPDATE post_targets SET status=?, platform_post_id=?, platform_url=?, provider_data=?,
-			        provider_sync_status=?, provider_updated_at=CURRENT_TIMESTAMP,
-			        published_at=CASE WHEN ?='published' THEN ? ELSE NULL END
-			  WHERE id=?`,
-			status, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(occurredAt), targetID,
-		)
-		return false, err
+		defer tx.Rollback()
+		targetStatus := status
+		reviewing := localStatus == "draft" || localStatus == "approved" || localStatus == "in_review" || localStatus == "rejected"
+		if source != "provider" && reviewing {
+			targetStatus = "draft"
+		}
+		if source == "provider" && !reviewing {
+			_, err = tx.Exec(`UPDATE posts SET created_at=COALESCE(NULLIF(?,''),created_at),published_at=CASE WHEN ?='published' THEN NULLIF(?,'') ELSE NULL END,body=?,requested_mode=?,schedule_at=?,external_media_urls=?,revision=revision+CASE WHEN body<>? THEN 1 ELSE 0 END,approved_revision=CASE WHEN body<>? THEN 0 ELSE approved_revision END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, createdAt, status, publishedAt, body, requestedMode, nullable(scheduleAt), string(mediaJSON), body, body, postID, pid)
+			if err != nil {
+				return false, err
+			}
+		}
+		_, err = tx.Exec(`UPDATE post_targets SET status=?,platform_post_id=?,platform_url=?,provider_data=?,provider_sync_status=?,provider_updated_at=CURRENT_TIMESTAMP,published_at=CASE WHEN ?='published' THEN ? ELSE NULL END WHERE id=?`, targetStatus, nullable(platformPostID), nullable(platformURL), string(rawJSON), status, status, nullable(publishedAt), targetID)
+		if err != nil {
+			return false, err
+		}
+
+		var currentRevision int64
+		if err = tx.QueryRow(`SELECT revision FROM posts WHERE id=?`, postID).Scan(&currentRevision); err != nil {
+			return false, err
+		}
+		if currentRevision != priorRevision {
+			if err = recordPostRevisionTx(tx, postID, currentRevision, "provider:zernio"); err != nil {
+				return false, err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return false, err
+		}
+		if !reviewing {
+			a.rollupPostStatus(ctx, postID)
+		}
+		return false, nil
 	}
 	if err != sql.ErrNoRows {
 		return false, err
@@ -268,16 +340,17 @@ func (a *App) reconcileImportedProviderPost(
 		return false, err
 	}
 	defer tx.Rollback()
-	publishedAt := any(nil)
+	storedPublishedAt := any(nil)
 	if status == "published" {
-		publishedAt = nullable(occurredAt)
+		storedPublishedAt = nullable(publishedAt)
 	}
 	postResult, err := tx.Exec(
 		`INSERT INTO posts
 		 (project_id, body, media_storage_ids, external_media_urls, schedule_at, status, profile_id,
-		  imported_at, published_at, revision, approval_status, requested_mode, provider_sync_mode, source, updated_at)
-		 VALUES (?, ?, '[]', ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, 1, 'not_requested', ?, 'mirror', 'provider', CURRENT_TIMESTAMP)`,
-		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID, publishedAt, requestedMode,
+		  created_at, imported_at, published_at, revision, approval_status, requested_mode, provider_sync_mode, source, updated_at)
+		 VALUES (?, ?, '[]', ?, ?, ?, ?, COALESCE(NULLIF(?,''),CURRENT_TIMESTAMP), CURRENT_TIMESTAMP,
+		         ?, 1, 'not_requested', ?, 'mirror', 'provider', CURRENT_TIMESTAMP)`,
+		pid, body, string(mediaJSON), nullable(scheduleAt), status, profileID, createdAt, storedPublishedAt, requestedMode,
 	)
 	if err != nil {
 		return false, err
@@ -290,7 +363,7 @@ func (a *App) reconcileImportedProviderPost(
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP,
 		         CASE WHEN ?='published' THEN ? ELSE NULL END)`,
 		postID, accountID, status, nullable(platformPostID), nullable(platformURL), providerPostID,
-		string(rawJSON), status, status, nullable(occurredAt),
+		string(rawJSON), status, status, nullable(publishedAt),
 	)
 	if err != nil {
 		return false, err
@@ -301,22 +374,55 @@ func (a *App) reconcileImportedProviderPost(
 	return true, tx.Commit()
 }
 
-// runProviderReconciler imports and reconciles provider-native drafts,
-// schedules, and published posts. Native accounts remain untouched.
+func (a *App) toolAccountProviderSyncUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
+	accountID := int64(intArg(args, "social_account_id", intArg(args, "id", 0)))
+	if accountID <= 0 {
+		return mcpError("social_account_id required"), nil
+	}
+	mode, err := normalizeProviderImportMode(toString(args["mode"]))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	pid := projectScope(ctx, args)
+	result, err := ctx.AppDB().Exec(
+		`UPDATE social_accounts SET provider_import_mode=?
+		  WHERE id=? AND project_id=? AND provider_slug!=?`,
+		mode, accountID, pid, "native",
+	)
+	if err != nil {
+		return nil, err
+	}
+	affected, _ := result.RowsAffected()
+	if affected != 1 {
+		return mcpError("provider-backed account not found"), nil
+	}
+	return map[string]any{
+		"social_account_id":    accountID,
+		"provider_import_mode": mode,
+		"publishing_unchanged": true,
+	}, nil
+}
+
+// runProviderReconciler keeps provider-native posts already managed by Social
+// current by default. A provider account must be explicitly switched to
+// full_history before the worker may discover and import unrelated posts.
+// Native accounts and accounts with synchronization turned off remain untouched.
 func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) error {
 	pid := projectScope(ctx)
 	if pid == "" {
 		return nil
 	}
 	type account struct {
-		id, connectionID, profileID int64
-		providerAccountID           string
+		id, connectionID, profileID   int64
+		providerAccountID, importMode string
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, connection_id, COALESCE(provider_account_id,''), COALESCE(profile_id,0)
+		`SELECT id, connection_id, COALESCE(provider_account_id,''), COALESCE(profile_id,0),
+		        COALESCE(provider_import_mode,?)
 		   FROM social_accounts
 		  WHERE project_id=? AND status='active' AND provider_slug=?
-		  ORDER BY id`, pid, zernioProviderSlug,
+		  ORDER BY id`, providerImportModeManaged, pid, zernioProviderSlug,
 	)
 	if err != nil {
 		return err
@@ -324,7 +430,7 @@ func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) err
 	accounts := []account{}
 	for rows.Next() {
 		var item account
-		if rows.Scan(&item.id, &item.connectionID, &item.providerAccountID, &item.profileID) == nil {
+		if rows.Scan(&item.id, &item.connectionID, &item.providerAccountID, &item.profileID, &item.importMode) == nil {
 			accounts = append(accounts, item)
 		}
 	}
@@ -333,7 +439,20 @@ func (a *App) runProviderReconciler(runCtx context.Context, ctx *sdk.AppCtx) err
 		if err := runCtx.Err(); err != nil {
 			return err
 		}
-		result := a.importZernioPosts(ctx, pid, importResult{}, item.id, item.connectionID, item.providerAccountID, item.profileID, 200)
+		mode, err := normalizeProviderImportMode(item.importMode)
+		if err != nil {
+			ctx.Logger().Warn("provider reconciliation skipped invalid mode", "account", item.id, "mode", item.importMode)
+			continue
+		}
+		if mode == providerImportModeOff {
+			continue
+		}
+		var result importResult
+		if mode == providerImportModeFullHistory {
+			result = a.importZernioPosts(ctx, pid, importResult{}, item.id, item.connectionID, item.providerAccountID, item.profileID, 200)
+		} else {
+			result = a.reconcileManagedZernioPosts(ctx, pid, item.id, item.connectionID, item.providerAccountID, item.profileID)
+		}
 		if result.Status == "failed" {
 			ctx.Logger().Warn("provider reconciliation failed", "account", item.id, "error", result.Error)
 		}

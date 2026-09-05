@@ -24,6 +24,7 @@ type recordingPlatform struct {
 	tk.BasePlatformClient
 	events                 []capturedEvent
 	threadEvents           []capturedThreadEvent
+	trackedEvents          []sdk.AgentEventRequest
 	appCalls               []capturedAppCall
 	spawns                 []sdk.ThreadSpawnRequest
 	ensures                []sdk.ThreadEnsureRequest
@@ -39,6 +40,7 @@ type recordingPlatform struct {
 	omitEnsureReceipt      bool
 	duplicateSpawnReceipt  bool
 	omitSpawnReceipt       bool
+	killed                 []sdk.ThreadRef
 }
 
 type capturedEvent struct {
@@ -102,6 +104,13 @@ func (p *recordingPlatform) SendEvent(instanceID int64, message string) error {
 	return nil
 }
 
+func (p *recordingPlatform) SendTrackedAgentEvent(req sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {
+	if p.failSend {
+		return nil, fmt.Errorf("agent offline")
+	}
+	p.trackedEvents = append(p.trackedEvents, req)
+	return &sdk.AgentEventReceipt{SourceEventID: req.SourceEventID, ThreadID: req.ThreadID, Accepted: true}, nil
+}
 func (p *recordingPlatform) SendThreadEvent(target sdk.ThreadRef, message any) error {
 	text, _ := message.(string)
 	p.threadEvents = append(p.threadEvents, capturedThreadEvent{Ref: target, Message: text})
@@ -146,7 +155,10 @@ func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.Thre
 	return result, nil
 }
 
-func (p *recordingPlatform) KillThread(agentID int64, threadID string) error { return nil }
+func (p *recordingPlatform) KillThread(agentID int64, threadID string) error {
+	p.killed = append(p.killed, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
+	return nil
+}
 
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
 	p.appCalls = append(p.appCalls, capturedAppCall{App: app, Tool: tool, Input: input})
@@ -565,16 +577,17 @@ func TestApprovalRoundTripForwardsToAgentThread(t *testing.T) {
 	if cardStatus(updated) != "approve" {
 		t.Fatalf("card status = %q, want approve", cardStatus(updated))
 	}
-	// The verdict must land on the thread that asked.
-	if len(platform.threadEvents) != 1 {
-		t.Fatalf("thread events = %d, want 1", len(platform.threadEvents))
+	// The verdict must land on the original thread with a stable receipt id.
+	if len(platform.trackedEvents) != 1 {
+		t.Fatalf("approval dispatches=%+v", platform.trackedEvents)
 	}
-	ev := platform.threadEvents[0]
-	if ev.Ref.AgentID != 41 || ev.Ref.ThreadID != "thread-9" {
-		t.Fatalf("forwarded to %+v, want agent 41 thread-9", ev.Ref)
+	ev := platform.trackedEvents[0]
+	if ev.AgentID != 41 || ev.ThreadID != "thread-9" {
+		t.Fatalf("wrong target %+v", ev)
 	}
-	if !strings.Contains(ev.Message, "action=approve") || !strings.Contains(ev.Message, "go ahead") {
-		t.Fatalf("event payload missing verdict/note: %q", ev.Message)
+	text, _ := ev.Message.(string)
+	if !strings.Contains(text, "action=approve") || !strings.Contains(text, "go ahead") || !strings.Contains(text, msg.ConversationID) || ev.SourceEventID == "" {
+		t.Fatalf("missing stable verdict: %+v", ev)
 	}
 
 	// Second action on a resolved card must be refused, not re-forwarded.
@@ -701,6 +714,142 @@ func TestUserMessageForwardFailureIsDurablyQueued(t *testing.T) {
 	}
 }
 
+func TestSoftBreakIsDurableIdempotentAndDoesNotStopTheAgent(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	var streamFrames []StreamFrame
+	app.streamer.onFrame = func(frame StreamFrame) { streamFrames = append(streamFrames, frame) }
+	if err := app.store.AddAgentParticipant(conv.ID, 43); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"content":"Pause here and reconsider before continuing.","intent":"soft_break","target_call_id":"call-active-7","target_agent_ids":[43],"client_message_id":"break-1"}`
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/messages?chat_id="+conv.ID, strings.NewReader(body))
+		authorizeTestRequest(req)
+		rec := httptest.NewRecorder()
+		app.handleMessages(rec, req)
+		return rec
+	}
+
+	rec := post()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("soft break status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var response Message
+	if err := json.NewDecoder(rec.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if messageIntent(&response) != messageIntentSoftBreak || response.Metadata["target_call_id"] != "call-active-7" {
+		t.Fatalf("soft break metadata=%v", response.Metadata)
+	}
+	if got := messageTargetAgentIDs(&response); !reflect.DeepEqual(got, []int64{43}) {
+		t.Fatalf("soft break targets=%v, want [43]", got)
+	}
+	if len(platform.ensures) != 1 || platform.ensures[0].AgentID != 43 {
+		t.Fatalf("ensures=%+v, want one event for responding agent 43", platform.ensures)
+	}
+	ensure := platform.ensures[0]
+	if ensure.ThreadID != conversationThreadID(conv.ID) || len(ensure.Events) != 1 {
+		t.Fatalf("soft break ensure=%+v", ensure)
+	}
+	eventText, _ := ensure.Events[0].Message.(string)
+	for _, required := range []string{"[chat soft break]", "new advisory event", "no model call, tool, or thread was canceled", "User request: Pause here"} {
+		if !strings.Contains(eventText, required) {
+			t.Fatalf("soft break event missing %q: %s", required, eventText)
+		}
+	}
+	if len(platform.killed) != 0 || len(platform.events) != 0 || len(platform.threadEvents) != 0 {
+		t.Fatalf("soft break used a stop/non-atomic path: killed=%v events=%v thread_events=%v", platform.killed, platform.events, platform.threadEvents)
+	}
+	if len(streamFrames) != 0 {
+		t.Fatalf("soft break replaced the active response with a synthetic ack: %+v", streamFrames)
+	}
+
+	// A transport retry reuses the durable row and must not queue another turn.
+	retry := post()
+	if retry.Code != http.StatusOK {
+		t.Fatalf("soft break retry status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 1 || transcript[0].ID != response.ID {
+		t.Fatalf("soft break transcript=%+v err=%v", transcript, err)
+	}
+	if len(platform.ensures) != 1 {
+		t.Fatalf("soft break retry queued %d events, want one", len(platform.ensures))
+	}
+}
+
+func TestSoftBreakInputValidationFailsBeforeDelivery(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+
+	for name, body := range map[string]string{
+		"unknown intent":        `{"content":"hello","intent":"hard_stop"}`,
+		"call id without break": `{"content":"hello","target_call_id":"call-1"}`,
+		"attachment":            `{"content":"pause","intent":"soft_break","attachments":[{"type":"image","data_url":"data:image/png;base64,AA=="}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/messages?chat_id="+conv.ID, strings.NewReader(body))
+			authorizeTestRequest(req)
+			rec := httptest.NewRecorder()
+			app.handleMessages(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+	transcript, err := app.store.Transcript(conv.ID, 0, 10)
+	if err != nil || len(transcript) != 0 || len(platform.ensures) != 0 || len(platform.killed) != 0 {
+		t.Fatalf("invalid soft break escaped: transcript=%v ensures=%v killed=%v err=%v", transcript, platform.ensures, platform.killed, err)
+	}
+}
+
+func TestSoftBreakDoesNotLeakToBoundExternalTransport(t *testing.T) {
+	app, _, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	if err := app.store.UpsertTelegramConnection(TelegramConnectionConfig{
+		ConnectionID: 9, WebhookKey: "soft-break-key", WebhookSecret: "soft-break-secret",
+		BotID: "99", BotUsername: "soft_break_bot", ResponseFeedback: "typing",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.CreateTelegramBinding(TelegramBinding{
+		ID: "tgb-soft-break", ConnectionID: 9, ProjectID: conv.ProjectID,
+		ConversationID: conv.ID, ChatID: "777", ChatType: "private",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	softTargets, err := app.deliveryTargets(conv, &Message{
+		ConversationID: conv.ID, Role: "user",
+		Metadata: map[string]any{"intent": messageIntentSoftBreak, "target_agent_ids": []int64{41}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range softTargets {
+		if strings.HasPrefix(target, "telegram:") {
+			t.Fatalf("soft break leaked to Telegram target %q", target)
+		}
+	}
+	if !slices.Contains(softTargets, "web:conv") || !slices.Contains(softTargets, "agent-inbound:41") {
+		t.Fatalf("soft break targets=%v, want durable web+agent delivery", softTargets)
+	}
+
+	normalTargets, err := app.deliveryTargets(conv, &Message{
+		ConversationID: conv.ID, Role: "user",
+		Metadata: map[string]any{"target_agent_ids": []int64{41}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(normalTargets, "telegram:tgb-soft-break") {
+		t.Fatalf("ordinary message lost Telegram delivery: %v", normalTargets)
+	}
+}
+
 // ─── thread-per-conversation (channel-chat parity) ───────────────────
 
 func postUserMessage(t *testing.T, app *App, conv *Conversation, content string) {
@@ -712,6 +861,20 @@ func postUserMessage(t *testing.T, app *App, conv *Conversation, content string)
 	app.handleMessages(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("post status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConversationThreadFailsClosedWithoutProject(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	conv.ProjectID = "  "
+
+	if _, _, err := app.ensureConversationThreadForAgent(ctx, conv, 41, nil); err == nil ||
+		!strings.Contains(err.Error(), "conversation project id required") {
+		t.Fatalf("missing-project error=%v", err)
+	}
+	if len(platform.ensures) != 0 || len(platform.spawns) != 0 {
+		t.Fatalf("missing-project request escaped: ensures=%d spawns=%d", len(platform.ensures), len(platform.spawns))
 	}
 }
 
@@ -730,6 +893,9 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 	// eventual data migration.
 	if ensure.ThreadID != "chat-"+conv.ID || ensure.AgentID != 41 {
 		t.Fatalf("ensured %s on agent %d, want chat-%s on 41", ensure.ThreadID, ensure.AgentID, conv.ID)
+	}
+	if ensure.ProjectID != conv.ProjectID {
+		t.Fatalf("ensure project_id=%q, want %q", ensure.ProjectID, conv.ProjectID)
 	}
 	// The suffix must carry the reply contract and the conversation id;
 	// composition with main's directive happens core-side.
@@ -752,7 +918,7 @@ func TestFirstMessageAtomicallyEnsuresConversationThread(t *testing.T) {
 			t.Fatalf("conversation preload contains global/app-only tool %q: %v", forbidden, ensure.Tools)
 		}
 	}
-	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools"} {
+	for _, required := range []string{"bound only to conversation " + conv.ID, "never send, read, approve, or alert against another conversation id", "do not grant the child Conversations tools", "A [chat soft break] is an advisory user event"} {
 		if !strings.Contains(ensure.DirectiveSuffix, required) {
 			t.Fatalf("conversation directive missing %q: %s", required, ensure.DirectiveSuffix)
 		}
@@ -986,6 +1152,9 @@ func TestEnsureFailureNeverFallsBackAndRetryKeepsEventID(t *testing.T) {
 	}
 	// Retry the same durable row after the agent returns.
 	platform.ensureErr = nil
+	if _, err := app.store.db.Exec(`UPDATE deliveries SET next_attempt_at=CURRENT_TIMESTAMP WHERE message_id=?`, transcript[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	app.attemptDelivery(ctx, "agent-inbound:41", conv, &transcript[0])
 	if len(platform.ensures) != 2 || len(platform.ensures[1].Events) != 1 || len(platform.spawns) != 0 {
 		t.Fatalf("recovery ensures=%+v spawns=%+v", platform.ensures, platform.spawns)
@@ -1011,6 +1180,9 @@ func TestUnsupportedEnsureFallsBackToLegacySpawnOnly(t *testing.T) {
 			len(platform.ensures), len(platform.spawns))
 	}
 	for i, spawn := range platform.spawns {
+		if spawn.ProjectID != conv.ProjectID {
+			t.Fatalf("legacy spawn %d project_id=%q, want %q", i, spawn.ProjectID, conv.ProjectID)
+		}
 		if len(spawn.Events) != 1 {
 			t.Fatalf("spawn %d events=%+v", i, spawn.Events)
 		}
@@ -1234,8 +1406,8 @@ func TestBackgroundApprovalRoundTrip(t *testing.T) {
 	if _, err := app.resolveApproval(ctx, msg, "approve", "", 1); err != nil {
 		t.Fatal(err)
 	}
-	if len(platform.threadEvents) != 1 || platform.threadEvents[0].Ref.ThreadID != "main" {
-		t.Fatalf("verdict routing = %+v, want thread main", platform.threadEvents)
+	if len(platform.trackedEvents) != 1 || platform.trackedEvents[0].ThreadID != "main" || platform.trackedEvents[0].SourceEventID == "" {
+		t.Fatalf("verdict routing=%+v", platform.trackedEvents)
 	}
 }
 
@@ -1460,6 +1632,10 @@ func TestAgentScopedPanelEndpoints(t *testing.T) {
 		target  string
 	}{
 		{app.handleChats, "/chats?agent_id=nope"},
+		{app.handleChats, "/chats?lead_agent_id=nope"},
+		{app.handleChats, "/chats?agent_id=41&lead_agent_id=41"},
+		{app.handleChats, "/chats?limit=0"},
+		{app.handleChats, "/chats?limit=201"},
 		{app.handleUnreadSummary, "/unread-summary?agent_id=0"},
 		{app.handleInbox, "/inbox?agent_id=-1"},
 	} {
@@ -1469,6 +1645,90 @@ func TestAgentScopedPanelEndpoints(t *testing.T) {
 	}
 	if rec := get(app.handleChats, "/chats?agent_id=41", false); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated scoped list status=%d want 401", rec.Code)
+	}
+}
+
+func TestLeadAgentScopedConversationListing(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	mountedCtx = ctx
+
+	create := func(projectID string, ownerUserID, leadAgentID int64, title, updatedAt string) *Conversation {
+		t.Helper()
+		conv, err := app.store.CreateConversation(CreateConversationInput{
+			ProjectID: projectID, OwnerUserID: ownerUserID, LeadAgentID: leadAgentID, Title: title,
+		})
+		if err != nil {
+			t.Fatalf("create %s: %v", title, err)
+		}
+		if _, err := app.store.db.Exec(`UPDATE conversations SET updated_at=? WHERE id=?`, updatedAt, conv.ID); err != nil {
+			t.Fatalf("timestamp %s: %v", title, err)
+		}
+		return conv
+	}
+
+	older := create(testProject, 1, 41, "Older helper chat", "2026-01-01 10:00:00")
+	newest := create(testProject, 1, 41, "Newest helper chat", "2026-01-02 10:00:00")
+	participantOnly := create(testProject, 1, 42, "Room led elsewhere", "2026-01-03 10:00:00")
+	if err := app.store.AddAgentParticipant(participantOnly.ID, 41); err != nil {
+		t.Fatal(err)
+	}
+	staleLead := create(testProject, 1, 41, "Removed helper", "2026-01-04 10:00:00")
+	if _, err := app.store.db.Exec(`DELETE FROM participants WHERE conversation_id=? AND agent_id=?`, staleLead.ID, 41); err != nil {
+		t.Fatal(err)
+	}
+	otherUser := create(testProject, 2, 41, "Private to another user", "2026-01-05 10:00:00")
+	otherProject := create("proj-other", 1, 41, "Other project", "2026-01-06 10:00:00")
+	archived := create(testProject, 1, 41, "Archived helper chat", "2026-01-07 10:00:00")
+	if _, err := app.store.SetConversationArchived(archived.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	_ = otherUser
+	_ = otherProject
+
+	get := func(target string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		authorizeTestRequest(req)
+		rec := httptest.NewRecorder()
+		app.handleChats(rec, req)
+		return rec
+	}
+	decode := func(rec *httptest.ResponseRecorder) []chatListEntry {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		var entries []chatListEntry
+		if err := json.Unmarshal(rec.Body.Bytes(), &entries); err != nil {
+			t.Fatal(err)
+		}
+		return entries
+	}
+
+	latest := decode(get("/chats?lead_agent_id=41&limit=1"))
+	if len(latest) != 1 || latest[0].ID != newest.ID {
+		t.Fatalf("latest=%+v, want %s", latest, newest.ID)
+	}
+	all := decode(get("/chats?lead_agent_id=41&limit=50"))
+	if len(all) != 2 || all[0].ID != newest.ID || all[1].ID != older.ID {
+		t.Fatalf("lead scoped=%+v, want newest then older only", all)
+	}
+	for _, excluded := range []*Conversation{participantOnly, staleLead, otherUser, otherProject, archived} {
+		for _, entry := range all {
+			if entry.ID == excluded.ID {
+				t.Fatalf("lead scope leaked %s", excluded.Title)
+			}
+		}
+	}
+
+	if rows := decode(get("/chats?agent_id=41&limit=50")); len(rows) != 3 {
+		t.Fatalf("participant scope changed: got %d rows, want older, newest, and participant-only room", len(rows))
+	}
+	if rows := decode(get("/chats?limit=1")); len(rows) != 1 {
+		t.Fatalf("unfiltered limit returned %d rows, want 1", len(rows))
+	}
+	if rec := get("/chats?archived=1&lead_agent_id=41"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("archived lead scope status=%d, want 400", rec.Code)
 	}
 }
 

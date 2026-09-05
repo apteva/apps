@@ -1,32 +1,18 @@
-// Email Checker v0.1 — stateless email validation.
+// Email Checker — stateless email validation.
 //
-// Three live signals + three list lookups:
-//
-//	live:
-//	  - syntax (net/mail.ParseAddress, RFC 5322)
-//	  - DNS MX records (3s timeout)
-//	  - optional SMTP RCPT TO probe (slow + unreliable)
-//
-//	lists:
-//	  - disposable provider (mailinator etc.)
-//	  - free provider (gmail/outlook/yahoo etc.)
-//	  - role account local-part (info@, support@, …)
-//
-// No DB. Every call resolves fresh. The SMTP probe is opt-in because
-// it is slow and only trustworthy for self-hosted servers — Google/MS
-// accept every RCPT and decide at DATA time, so we explicitly mark
-// when the response is informative versus not.
+// Local checks cover syntax, RFC-correct MX/A/AAAA routing, Null MX,
+// disposable/free/role classification, common domain typos, and an optional
+// multi-MX SMTP probe with a generated-recipient catch-all control. No message
+// is sent and no result is stored. Bound commercial providers remain optional.
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
-	"net/mail"
-	"net/smtp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -35,10 +21,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: email-checker
 display_name: Email Checker
-version: 0.3.1
+version: 0.5.2
 description: |
-  Stateless email validation — syntax, DNS MX, disposable/free/role
-  classification, optional SMTP probe.
+  Standalone email checks with RFC-correct DNS, multi-MX SMTP and neutral catch-all detection, plus optional provider verification.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -46,11 +31,22 @@ scopes: [project, global]
 requires:
   permissions:
     - net.egress
+    - platform.connections.execute
+  integrations:
+    - role: verification_providers
+      kind: integration
+      mode: multiple
+      compatible_slugs: [zerobounce, bouncer, neverbounce, kickbox, millionverifier, hunter]
+      capabilities: [email.verify]
+      required: false
+      label: "Email verification providers (optional)"
+      hint: "Provider checks may consume credits; local checks remain available without a connection."
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: email_check, description: "Email validation — syntax + MX + classification, with optional SMTP RCPT TO probe via smtp=true." }
+    - { name: email_check, description: "Local email checks plus optional SMTP or bound provider verification." }
+    - { name: email_verification_providers, description: "List bound verification providers without consuming credits." }
 runtime:
   kind: source
   source:
@@ -62,7 +58,10 @@ runtime:
 upgrade_policy: auto-patch
 `
 
-type App struct{}
+type App struct {
+	ctxMu sync.RWMutex
+	ctx   *sdk.AppCtx
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -72,8 +71,19 @@ func (a *App) Manifest() sdk.Manifest {
 	return *m
 }
 
-func (a *App) OnMount(*sdk.AppCtx) error         { return nil }
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	a.ctxMu.Lock()
+	a.ctx = ctx
+	a.ctxMu.Unlock()
+	return nil
+}
+
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.ctxMu.Lock()
+	a.ctx = nil
+	a.ctxMu.Unlock()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -82,9 +92,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// REST mirror of the main MCP tool — handy for quick curl
-		// checks and for the dashboard if a panel ever lands.
 		{Pattern: "/check", Handler: a.httpCheck},
+		{Pattern: "/providers", Handler: a.httpProviders},
 	}
 }
 
@@ -96,7 +105,36 @@ func (a *App) httpCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	withSMTP := parseBoolQuery(r.URL.Query().Get("smtp"))
 	timeout := parseTimeoutSeconds(r.URL.Query().Get("timeout_seconds"))
-	writeJSON(w, check(email, withSMTP, timeout))
+	opts := CheckOptions{
+		SMTP:         withSMTP,
+		Timeout:      timeout,
+		Provider:     strings.TrimSpace(r.URL.Query().Get("provider")),
+		ConnectionID: parseInt64Query(r.URL.Query().Get("connection_id")),
+		IPAddress:    strings.TrimSpace(r.URL.Query().Get("ip_address")),
+	}
+	result, err := runCheck(a.requestCtx(r), email, opts)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, result)
+}
+
+func (a *App) httpProviders(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, listVerificationProviders(a.requestCtx(r)))
+}
+
+func (a *App) requestCtx(r *http.Request) *sdk.AppCtx {
+	a.ctxMu.RLock()
+	ctx := a.ctx
+	a.ctxMu.RUnlock()
+	if ctx == nil {
+		return nil
+	}
+	if projectID := strings.TrimSpace(r.URL.Query().Get("project_id")); projectID != "" {
+		return ctx.WithProject(projectID)
+	}
+	return ctx
 }
 
 // ─── MCP tools ─────────────────────────────────────────────────────
@@ -105,266 +143,50 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "email_check",
-			Description: "Validate an email. Args: email, smtp? (default false), timeout_seconds? (default 5). " +
-				"Returns {email, valid, reasons[], syntax_ok, domain, mx[], disposable, role, free, smtp}. " +
-				"SMTP is opt-in because it is slow and often non-informative on Google/Microsoft/Yahoo.",
+			Description: "Validate an email locally with RFC-correct mail routing, classification, typo suggestions, and optional multi-MX SMTP/catch-all probing; optionally use a bound provider. " +
+				"Args: email, smtp? (default false), provider? (local|auto|provider slug; default local), " +
+				"connection_id?, timeout_seconds? (default 5), ip_address? (ZeroBounce only). " +
+				"External provider calls may consume credits and therefore run only when provider is explicit. " +
+				"Returns normalized verdict/recommendation, routability, mailbox status, risk level, local signals, and provider details. " +
+				"Catch-all and role addresses are not treated as risky by themselves.",
 			InputSchema: schemaObject(map[string]any{
-				"email":           map[string]any{"type": "string"},
-				"smtp":            map[string]any{"type": "boolean"},
-				"timeout_seconds": map[string]any{"type": "integer"},
+				"email": map[string]any{"type": "string"},
+				"smtp":  map[string]any{"type": "boolean"},
+				"provider": map[string]any{
+					"type": "string",
+					"enum": []string{"local", "auto", "zerobounce", "bouncer", "neverbounce", "kickbox", "millionverifier", "hunter"},
+				},
+				"connection_id":   map[string]any{"type": "integer"},
+				"timeout_seconds": map[string]any{"type": "integer", "minimum": 1, "maximum": 60},
+				"ip_address":      map[string]any{"type": "string", "description": "Optional signup IP forwarded only to ZeroBounce."},
 			}, []string{"email"}),
-			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+			Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				email, _ := args["email"].(string)
 				if email == "" {
 					return nil, errors.New("email required")
 				}
 				withSMTP, _ := args["smtp"].(bool)
-				timeout := 5 * time.Second
-				if v, ok := args["timeout_seconds"].(float64); ok && v > 0 {
-					timeout = time.Duration(v) * time.Second
-				}
-				return check(email, withSMTP, timeout), nil
+				return runCheck(ctx, email, CheckOptions{
+					SMTP:         withSMTP,
+					Timeout:      durationArg(args, "timeout_seconds", 5*time.Second),
+					Provider:     stringArg(args, "provider"),
+					ConnectionID: int64Arg(args, "connection_id"),
+					IPAddress:    stringArg(args, "ip_address"),
+				})
+			},
+		},
+		{
+			Name:        "email_verification_providers",
+			Description: "List verification-provider connections bound to this Email Checker install. This does not call providers or consume credits.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler: func(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+				return listVerificationProviders(ctx), nil
 			},
 		},
 	}
 }
 
 func main() { sdk.Run(&App{}) }
-
-// ─── Live checks ───────────────────────────────────────────────────
-
-type CheckResult struct {
-	Email      string    `json:"email"`
-	Valid      bool      `json:"valid"`
-	Reasons    []string  `json:"reasons"`
-	SyntaxOK   bool      `json:"syntax_ok"`
-	Domain     string    `json:"domain,omitempty"`
-	MX         []string  `json:"mx,omitempty"`
-	Disposable bool      `json:"disposable"`
-	Role       bool      `json:"role"`
-	Free       bool      `json:"free"`
-	SMTP       SMTPProbe `json:"smtp"`
-}
-
-func check(input string, withSMTP bool, smtpTimeout time.Duration) CheckResult {
-	res := CheckResult{
-		Email:   strings.TrimSpace(input),
-		Reasons: []string{},
-		SMTP:    SMTPProbe{Checked: false},
-	}
-
-	// 1. Syntax — net/mail handles RFC 5322 + display-name forms.
-	addr, err := mail.ParseAddress(res.Email)
-	if err != nil {
-		res.Reasons = append(res.Reasons, "bad_syntax")
-		return res
-	}
-	res.SyntaxOK = true
-	// Strip the display name, lowercase the addr-spec — DNS is case
-	// insensitive, MX lookup is normalized, and our list lookups are
-	// keyed off lowercase.
-	res.Email = strings.ToLower(addr.Address)
-	at := strings.LastIndex(res.Email, "@")
-	if at < 0 {
-		res.Reasons = append(res.Reasons, "bad_syntax")
-		return res
-	}
-	local := res.Email[:at]
-	res.Domain = res.Email[at+1:]
-
-	// 2. DNS MX. 3s timeout is enough for any reasonable resolver
-	// and bounded so a dead domain doesn't hang the agent's tool call.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	mxs, _ := net.DefaultResolver.LookupMX(ctx, res.Domain)
-	res.MX = make([]string, 0, len(mxs))
-	for _, mx := range mxs {
-		res.MX = append(res.MX, strings.TrimSuffix(mx.Host, "."))
-	}
-	if len(res.MX) == 0 {
-		res.Reasons = append(res.Reasons, "no_mx_records")
-	}
-
-	// 3. List classification — these are inherently reputation/role
-	// labels, not DNS-derivable. Bundled lists are best-effort; a
-	// disposable provider added yesterday won't be flagged until the
-	// next list refresh ships in a release.
-	res.Disposable = disposableDomains[res.Domain]
-	res.Free = freeDomains[res.Domain]
-	res.Role = roleLocalParts[local]
-	if res.Disposable {
-		res.Reasons = append(res.Reasons, "disposable_domain")
-	}
-	if res.Role {
-		res.Reasons = append(res.Reasons, "role_account")
-	}
-
-	// Final verdict. Free + role are signals an agent might want to
-	// weight ("don't auto-trust signups from gmail" / "info@ is
-	// probably a shared mailbox") but they're not by themselves
-	// invalid — leave them out of the disqualifying-reasons set.
-	res.Valid = res.SyntaxOK && len(res.MX) > 0 && !res.Disposable
-	if withSMTP {
-		res.SMTP = checkSMTP(res.Email, smtpTimeout)
-	}
-	return res
-}
-
-// ─── SMTP probe ─────────────────────────────────────────────────────
-
-type SMTPProbe struct {
-	Checked     bool   `json:"checked"`
-	Email       string `json:"email,omitempty"`
-	MX          string `json:"mx,omitempty"`
-	RcptStatus  string `json:"rcpt_status,omitempty"` // ok | reject | tempfail | timeout | blocked | connect_failed | no_mx | bad_syntax | unknown
-	Code        int    `json:"code,omitempty"`        // SMTP reply code from RCPT TO
-	Response    string `json:"response,omitempty"`    // raw SMTP text
-	Informative *bool  `json:"informative,omitempty"` // whether rcpt_status actually tells us mailbox-exists
-	Note        string `json:"note,omitempty"`        // human-readable caveat ("Google accepts all RCPTs", etc.)
-}
-
-func checkSMTP(input string, timeout time.Duration) SMTPProbe {
-	res := SMTPProbe{Checked: true, Email: strings.TrimSpace(input)}
-	addr, err := mail.ParseAddress(res.Email)
-	if err != nil {
-		res.RcptStatus = "bad_syntax"
-		return res
-	}
-	email := strings.ToLower(addr.Address)
-	at := strings.LastIndex(email, "@")
-	if at < 0 {
-		res.RcptStatus = "bad_syntax"
-		return res
-	}
-	domain := email[at+1:]
-	res.Email = email
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	mxs, err := net.DefaultResolver.LookupMX(ctx, domain)
-	if err != nil || len(mxs) == 0 {
-		res.RcptStatus = "no_mx"
-		return res
-	}
-	mxHost := strings.TrimSuffix(mxs[0].Host, ".")
-	res.MX = mxHost
-	note, informative := smtpProviderNote(mxHost)
-	res.Note = note
-	res.Informative = boolPtr(informative)
-
-	// Connect on :25 with the user's timeout. Cloud hosts (Hetzner,
-	// AWS, GCP) block outbound 25 by default; treat connect failure
-	// distinct from timeout so the operator can tell "blocked at the
-	// edge" from "server isn't answering."
-	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(mxHost, "25"))
-	if err != nil {
-		if strings.Contains(err.Error(), "i/o timeout") {
-			res.RcptStatus = "timeout"
-		} else {
-			res.RcptStatus = "blocked"
-		}
-		res.Response = err.Error()
-		res.Informative = boolPtr(false)
-		return res
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(timeout))
-
-	c, err := smtp.NewClient(conn, mxHost)
-	if err != nil {
-		res.RcptStatus = "connect_failed"
-		res.Response = err.Error()
-		res.Informative = boolPtr(false)
-		return res
-	}
-	defer c.Close()
-
-	if err := c.Hello("checker.apteva.local"); err != nil {
-		res.RcptStatus = "connect_failed"
-		res.Response = err.Error()
-		res.Informative = boolPtr(false)
-		return res
-	}
-	// Empty MAIL FROM (the standard probe form — RFC 5321 §4.5.5).
-	if err := c.Mail(""); err != nil {
-		res.RcptStatus = "connect_failed"
-		res.Response = err.Error()
-		res.Informative = boolPtr(false)
-		return res
-	}
-	err = c.Rcpt(email)
-	_ = c.Quit()
-	if err == nil {
-		res.Code = 250
-		res.RcptStatus = "ok"
-		return res
-	}
-	// net/smtp wraps SMTP errors in textproto.Error — extract code.
-	res.Response = err.Error()
-	if code, msg := parseSMTPErr(err); code != 0 {
-		res.Code = code
-		res.Response = msg
-		switch {
-		case code >= 500 && code < 600:
-			res.RcptStatus = "reject"
-		case code >= 400 && code < 500:
-			// 4xx is greylisting / temp fail. Not a definitive answer.
-			res.RcptStatus = "tempfail"
-			res.Informative = boolPtr(false)
-		default:
-			res.RcptStatus = "unknown"
-			res.Informative = boolPtr(false)
-		}
-		return res
-	}
-	res.RcptStatus = "unknown"
-	res.Informative = boolPtr(false)
-	return res
-}
-
-// parseSMTPErr extracts the numeric reply code + message from an
-// error returned by net/smtp. Returns (0, "") if the error isn't
-// an SMTP-level reply (e.g. it's a transport error from the
-// underlying conn).
-func parseSMTPErr(err error) (int, string) {
-	// net/smtp surfaces SMTP errors as textproto.Error which formats
-	// as "<code> <message>". Avoiding the import by parsing the
-	// formatted string keeps the dependency surface tight.
-	s := err.Error()
-	if len(s) < 4 || s[3] != ' ' {
-		return 0, s
-	}
-	code := 0
-	for i := 0; i < 3; i++ {
-		c := s[i]
-		if c < '0' || c > '9' {
-			return 0, s
-		}
-		code = code*10 + int(c-'0')
-	}
-	return code, strings.TrimSpace(s[4:])
-}
-
-// smtpProviderNote returns a caveat string + whether the provider's
-// RCPT TO replies actually distinguish mailbox-exists from
-// mailbox-doesn't-exist. Google + Microsoft famously accept every
-// RCPT and decide at DATA time, so a 250 from them tells us nothing
-// useful for existence — flag the result non-informative so callers
-// (agents) can weight it correctly.
-func smtpProviderNote(mxHost string) (note string, informative bool) {
-	h := strings.ToLower(mxHost)
-	switch {
-	case strings.HasSuffix(h, ".google.com") || strings.HasSuffix(h, ".googlemail.com"):
-		return "Google Workspace accepts every RCPT and validates at DATA time — 250 doesn't mean the mailbox exists.", false
-	case strings.HasSuffix(h, ".outlook.com") || strings.HasSuffix(h, ".protection.outlook.com") || strings.Contains(h, "office365"):
-		return "Microsoft 365 accepts every RCPT — 250 doesn't mean the mailbox exists.", false
-	case strings.HasSuffix(h, ".yahoodns.net") || strings.HasSuffix(h, ".yahoo.com"):
-		return "Yahoo aggressively rate-limits SMTP probes; results are unreliable.", false
-	}
-	// Self-hosted Postfix / Exim / Exchange typically reply honestly.
-	return "", true
-}
 
 // ─── helpers ───────────────────────────────────────────────────────
 
@@ -408,6 +230,46 @@ func parseTimeoutSeconds(v string) time.Duration {
 		return 5 * time.Second
 	}
 	return d
+}
+
+func parseInt64Query(v string) int64 {
+	n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if n < 0 {
+		return 0
+	}
+	return n
+}
+
+func durationArg(args map[string]any, key string, fallback time.Duration) time.Duration {
+	seconds := int64Arg(args, key)
+	if seconds <= 0 {
+		return fallback
+	}
+	if seconds > 60 {
+		seconds = 60
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func stringArg(args map[string]any, key string) string {
+	v, _ := args[key].(string)
+	return strings.TrimSpace(v)
+}
+
+func int64Arg(args map[string]any, key string) int64 {
+	switch value := args[key].(type) {
+	case int:
+		return int64(value)
+	case int64:
+		return value
+	case float64:
+		return int64(value)
+	case json.Number:
+		n, _ := value.Int64()
+		return n
+	default:
+		return 0
+	}
 }
 
 func boolPtr(v bool) *bool { return &v }

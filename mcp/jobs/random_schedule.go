@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -144,7 +145,7 @@ func randomRunsForDate(cfg RandomSchedule, seed string, localDate time.Time, loc
 		ranked[i].index = i
 	}
 	sort.Slice(ranked, func(i, j int) bool {
-		cmp := strings.Compare(string(ranked[i].score[:]), string(ranked[j].score[:]))
+		cmp := bytes.Compare(ranked[i].score[:], ranked[j].score[:])
 		if cmp == 0 {
 			return ranked[i].index < ranked[j].index
 		}
@@ -204,14 +205,24 @@ func previewRandomSchedule(schedule map[string]any, timezone, seed string, now t
 		limit = 5
 	}
 	runs := make([]string, 0, limit)
-	after := now
-	for len(runs) < limit {
-		next, err := nextRandomRunAfter(cfg, seed, loc, after)
+	date := now.In(loc)
+	date = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
+	for offset := 0; offset < 370 && len(runs) < limit; offset++ {
+		daily, err := randomRunsForDate(cfg, seed, date.AddDate(0, 0, offset), loc)
 		if err != nil {
-			return nil, "", err
+			continue
 		}
-		runs = append(runs, next.Format(time.RFC3339))
-		after = next
+		for _, run := range daily {
+			if run.After(now) {
+				runs = append(runs, run.UTC().Format(time.RFC3339))
+				if len(runs) == limit {
+					break
+				}
+			}
+		}
+	}
+	if len(runs) < limit {
+		return nil, "", errors.New("could not generate preview within one year")
 	}
 	return runs, seed, nil
 }

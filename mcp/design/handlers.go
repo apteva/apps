@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func (a *App) handleDesigns(w http.ResponseWriter, r *http.Request) {
@@ -180,9 +182,103 @@ func (a *App) handleDesign(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"artifacts": artifacts})
+	case "refresh-pcb":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var args map[string]any
+		if err := decodeBody(r, &args); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		args["design_id"] = id
+		result, err := a.toolEnclosureRefreshFromPCB(r.Context(), appCtx, args)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, result)
+	case "refresh-components":
+		if r.Method != http.MethodPost {
+			writeMethodNotAllowed(w, http.MethodPost)
+			return
+		}
+		var args map[string]any
+		if err := decodeBody(r, &args); err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		args["design_id"] = id
+		result, err := a.toolAssemblySourcesRefresh(r.Context(), appCtx, args)
+		if err != nil {
+			writeHTTPError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
 	default:
 		writeJSONError(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (a *App) handleAssemblies(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	appCtx := a.projectContext(r)
+	var args map[string]any
+	if err := decodeBody(r, &args); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	result, err := a.toolAssemblyCreate(r.Context(), appCtx, args)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (a *App) handlePCBSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeMethodNotAllowed(w, http.MethodGet)
+		return
+	}
+	appCtx := a.projectContext(r)
+	result, err := a.toolPCBSourceStatus(r.Context(), appCtx, nil)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (a *App) handlePCBEnclosures(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	appCtx := a.projectContext(r)
+	var args map[string]any
+	if err := decodeBody(r, &args); err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	result, err := a.toolEnclosureFromPCB(r.Context(), appCtx, args)
+	if err != nil {
+		writeHTTPError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (a *App) projectContext(r *http.Request) *sdk.AppCtx {
+	appCtx := a.ctx
+	if project := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")); project != "" && appCtx != nil {
+		appCtx = appCtx.WithProject(project)
+	}
+	return appCtx
 }
 
 func (a *App) handleRevision(w http.ResponseWriter, r *http.Request) {
