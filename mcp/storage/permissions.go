@@ -46,6 +46,9 @@ func (a *App) requireFileAccess(ctx context.Context, app *sdk.AppCtx, args map[s
 		return nil, errors.New("id required")
 	}
 	f, err := dbGetByID(app.AppDB(), pid, id)
+	if err == nil && f == nil && permission == "files.delete" {
+		f, err = scanFile(app.AppDB().QueryRow(`SELECT `+fileSelectColumns+` FROM files WHERE id=? AND project_id=?`, id, pid), true)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +153,10 @@ func (a *App) toolMoveCtx(ctx context.Context, app *sdk.AppCtx, args map[string]
 		destination := f.Folder
 		if raw, exists := args["folder"]; exists {
 			if folder, ok := raw.(string); ok {
-				destination = normaliseFolder(folder)
+				destination, err = validateFolder(folder)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 		resource := fileResource(destination)
@@ -194,7 +200,18 @@ func (a *App) toolRenameFolderCtx(ctx context.Context, app *sdk.AppCtx, args map
 			}
 		}
 	}
-	return a.toolRenameFolder(app, args)
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbRenameFolderAuthorized(app.AppDB(), pid, from, to, func(folder string) error { _, e := authorizeFolder(ctx, "files.write", folder); return e })
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range rows {
+		emitFileEvent(app, "file.updated", f, false)
+	}
+	return map[string]any{"from": from, "to": to, "updated": len(rows)}, nil
 }
 
 // ─── list / search / list_folders ──────────────────────────────────
@@ -204,59 +221,11 @@ func (a *App) toolRenameFolderCtx(ctx context.Context, app *sdk.AppCtx, args map
 // in the handler — run the query, filter the result.
 
 func (a *App) toolListCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	caller := sdk.CallerFrom(ctx)
-	if caller == nil {
-		return a.toolList(app, args)
-	}
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	folder := normaliseFolder(strArg(args, "folder"))
-	recursive, _ := args["recursive"].(bool)
-	limit := intArg(args, "limit", 200)
-	if limit <= 0 || limit > 500 {
-		limit = 200
-	}
-	files, err := dbListFolderFiltered(app.AppDB(), pid, folder, recursive, limit, func(f *File) bool {
-		return caller.Allows("files.read", fileResource(f.Folder))
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"files": files, "count": len(files), "folder": folder, "recursive": recursive,
-	}, nil
+	return a.listFilesPage(ctx, app, args, true)
 }
 
 func (a *App) toolSearchCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	caller := sdk.CallerFrom(ctx)
-	if caller == nil {
-		return a.toolSearch(app, args)
-	}
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
-	limit := intArg(args, "limit", 50)
-	if limit <= 0 || limit > 200 {
-		limit = 50
-	}
-	files, err := dbSearchFiltered(app.AppDB(), pid, searchOpts{
-		Q:           strArg(args, "q"),
-		Folder:      strArg(args, "folder"),
-		ContentType: strArg(args, "content_type"),
-		SHA256:      strArg(args, "sha256"),
-		Tag:         strArg(args, "tag"),
-		Source:      strArg(args, "source"),
-		Limit:       limit,
-	}, func(f *File) bool {
-		return caller.Allows("files.read", fileResource(f.Folder))
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"files": files, "count": len(files)}, nil
+	return a.listFilesPage(ctx, app, args, false)
 }
 
 func (a *App) toolListFoldersCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {

@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
@@ -16,7 +18,7 @@ import (
 )
 
 func TestSidecar_HealthOK(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
 	var got map[string]any
 	resp := sc.GET("/health", &got)
 	if resp.Status != 200 || got["ok"] != true {
@@ -25,7 +27,7 @@ func TestSidecar_HealthOK(t *testing.T) {
 }
 
 func TestSidecar_UploadDownloadRoundtrip(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
 	body := []byte("hello apteva")
 	hash := sha256.Sum256(body)
 	hashHex := hex.EncodeToString(hash[:])
@@ -75,7 +77,7 @@ func TestSidecar_UploadDownloadRoundtrip(t *testing.T) {
 }
 
 func TestSidecar_FoldersAndList(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
 	for _, f := range []struct{ name, folder string }{
 		{"a", "/reports/2025/"},
 		{"b", "/reports/2026/"},
@@ -105,7 +107,7 @@ func TestSidecar_FoldersAndList(t *testing.T) {
 }
 
 func TestSidecar_SignedURL(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
 	out := sc.MCP("files_upload", map[string]any{
 		"name": "secret.txt", "content_base64": base64.StdEncoding.EncodeToString([]byte("shh")),
 		"visibility": "signed",
@@ -158,7 +160,7 @@ func sidecarContentURL(t *testing.T, sidecarBase, minted string) string {
 }
 
 func TestSidecar_DedupeMCP(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := spawnStorageSidecar(t, ".", tk.WithProjectID("test-proj"))
 	body := []byte("dedup-target")
 	sc.MCP("files_upload", map[string]any{
 		"name": "x.txt", "content_base64": base64.StdEncoding.EncodeToString(body),
@@ -173,3 +175,18 @@ func TestSidecar_DedupeMCP(t *testing.T) {
 }
 
 func itoa(i int64) string { return strconv.FormatInt(i, 10) }
+
+func spawnStorageSidecar(t *testing.T, dir string, opts ...tk.Option) *tk.Sidecar {
+	t.Helper()
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/apps/callback/whoami" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"app_name": "storage", "install_id": 1, "bindings": map[string]any{}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	t.Cleanup(gateway.Close)
+	opts = append(opts, tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	return tk.SpawnSidecar(t, dir, opts...)
+}

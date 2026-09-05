@@ -251,7 +251,7 @@ func TestDirectUpload_InitDedupShortCircuit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := strings.NewReader(`{"name":"clip.mp4","size_bytes":999,"sha256":"` + sha + `"}`)
+	body := strings.NewReader(`{"name":"clip.mp4","content_type":"video/mp4","size_bytes":999,"sha256":"` + sha + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", body)
 	rec := httptest.NewRecorder()
 	(&App{}).handleFilesItem(rec, req)
@@ -327,7 +327,7 @@ func TestDirectUpload_FinalizeRoundtrip(t *testing.T) {
 	globalBackend = stub
 
 	// 1. init → returns upload_id + URL
-	sha := repeat64Hex("d")
+	sha := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	body := []byte(`{"name":"clip.mp4","size_bytes":5,"sha256":"` + sha + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
@@ -388,7 +388,7 @@ func TestDirectUpload_FinalizeSameBytesElsewhereCreatesRequestedFile(t *testing.
 	stub := newFakeS3()
 	globalBackend = stub
 
-	sha := repeat64Hex("a")
+	sha := "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
 	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1",
 		strings.NewReader(`{"name":"requested.png","folder":"/hgv/tracy/","size_bytes":5,"sha256":"`+sha+`"}`))
 	rec := httptest.NewRecorder()

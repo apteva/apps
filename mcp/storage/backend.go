@@ -404,8 +404,18 @@ func backend() Backend {
 // present but bucket missing (or creds unreadable) should fail loud
 // at boot, not route writes to disk.
 func initBackend(ctx *sdk.AppCtx) (Backend, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("backend identity unavailable")
+	}
+	identity, err := ctx.PlatformAPI().WhoAmI()
+	if err != nil || identity == nil {
+		return nil, fmt.Errorf("backend identity unavailable: %v", err)
+	}
 	bound := ctx.IntegrationFor(s3IntegrationRole)
 	if bound == nil {
+		if identity.Bindings[s3IntegrationRole] != nil {
+			return nil, errors.New("backend binding is unavailable or invalid")
+		}
 		return newDiskBackend(ctx), nil
 	}
 	bucket := strings.TrimSpace(ctx.Config().Get("s3_bucket"))

@@ -29,9 +29,11 @@ func newFromURLCtx(t *testing.T) (*sdk.AppCtx, *tk.EmitRecorder, string) {
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml",
 		tk.WithProjectID("test-proj"),
+		tk.WithConfig(map[string]string{"import_internal_hosts": "127.0.0.1"}),
 		tk.WithEnv("STORAGE_BLOBS_DIR", dir),
 		tk.WithEmitter(rec),
 	)
+	globalBackend = nil
 	globalCtx = ctx
 	return ctx, rec, dir
 }

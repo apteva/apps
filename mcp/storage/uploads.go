@@ -40,7 +40,6 @@ package main
 import (
 	"context"
 	cryptorand "crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -98,7 +97,7 @@ func configuredUploadIdleTTL(ctx *sdk.AppCtx) time.Duration {
 		// Effectively disable. 100y is "long enough to not fire."
 		return 100 * 365 * 24 * time.Hour
 	}
-	return time.Duration(n) * time.Hour
+	return time.Duration(min(n, 168)) * time.Hour
 }
 
 // configuredSweepInterval reads upload_sweep_interval_minutes,
@@ -116,7 +115,7 @@ func configuredSweepInterval(ctx *sdk.AppCtx) time.Duration {
 	if err != nil {
 		return defaultSweepInterval
 	}
-	d := time.Duration(n) * time.Minute
+	d := time.Duration(min(max(n, 1), 1440)) * time.Minute
 	if d < time.Minute {
 		return time.Minute
 	}
@@ -144,26 +143,54 @@ type uploadMeta struct {
 // (concat + hash + insert + cleanup must run once even if the
 // client retries complete twice). PUT /parts/N has no shared lock —
 // each part writes to its own file.
-var (
-	completeMu    sync.Mutex
-	completeLocks = map[string]*sync.Mutex{}
-)
+type uploadLock struct {
+	sync.RWMutex
+	budget  sync.Mutex
+	sizes   map[int]int64
+	writing map[int]bool
+	total   int64
+	refs    int
+	retired bool
+}
 
-func sessionLock(id string) *sync.Mutex {
+var completeMu sync.Mutex
+var completeLocks = map[string]*uploadLock{}
+
+func sessionLock(id string) *uploadLock {
 	completeMu.Lock()
 	defer completeMu.Unlock()
-	if m, ok := completeLocks[id]; ok {
+	if m := completeLocks[id]; m != nil {
+		m.refs++
 		return m
 	}
-	m := &sync.Mutex{}
+	// Idle cache entries may be evicted; active locks are never replaced.
+	if len(completeLocks) >= 128 {
+		for k, v := range completeLocks {
+			if v.refs == 0 {
+				delete(completeLocks, k)
+			}
+		}
+	}
+	m := &uploadLock{refs: 1}
 	completeLocks[id] = m
 	return m
 }
-
 func releaseSessionLock(id string) {
 	completeMu.Lock()
 	defer completeMu.Unlock()
-	delete(completeLocks, id)
+	if m := completeLocks[id]; m != nil {
+		m.refs--
+		if m.refs == 0 && m.retired {
+			delete(completeLocks, id)
+		}
+	}
+}
+func retireSessionLock(id string) {
+	completeMu.Lock()
+	defer completeMu.Unlock()
+	if m := completeLocks[id]; m != nil {
+		m.retired = true
+	}
 }
 
 func uploadsDir(ctx *sdk.AppCtx) string {
@@ -280,12 +307,28 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		Source      string   `json:"source"`
 		SHA256      string   `json:"sha256"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 32*1024)).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body, 32*1024, false); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	body.Filename = normaliseFilename(body.Filename)
-	body.Folder = normaliseFolder(body.Folder)
+	body.Filename, err = validateFilename(body.Filename)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	body.Folder, err = validateFolder(body.Folder)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if err = validateVisibility(body.Visibility); err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if body.SHA256 != "" && !looksLikeSHA256Hex(body.SHA256) {
+		httpErr(w, 400, "invalid sha256")
+		return
+	}
 	if body.Filename == "" {
 		httpErr(w, http.StatusBadRequest, "filename required")
 		return
@@ -305,6 +348,10 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	// a different name/folder must still materialise a distinct row.
 	if body.SHA256 != "" {
 		if existing, err := dbFindExact(ctx.AppDB(), pid, strings.ToLower(body.SHA256), body.Folder, body.Filename); err == nil && existing != nil {
+			if _, _, err := compatibleExisting(existing, uploadInput{ContentType: safeResponseContentType(body.ContentType), Visibility: effectiveVisibility(ctx, body.Visibility), Tags: cleanTags(body.Tags)}); err != nil {
+				httpErr(w, 409, err.Error())
+				return
+			}
 			httpJSON(w, map[string]any{
 				"file":         existing,
 				"was_existing": true,
@@ -314,6 +361,16 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := newUploadID()
+	if err = reserveUpload(ctx, id, pid, body.Size, 0); err != nil {
+		httpErr(w, 429, err.Error())
+		return
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseUploadReservation(ctx, id)
+		}
+	}()
 	dir := uploadSessionDir(ctx, id)
 	if err := os.MkdirAll(filepath.Join(dir, "parts"), 0755); err != nil {
 		httpErr(w, http.StatusInternalServerError, "mkdir: "+err.Error())
@@ -345,6 +402,7 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	reserved = false
 	httpJSON(w, map[string]any{
 		"upload_id":    id,
 		"part_size":    defaultPartSize,
@@ -390,14 +448,13 @@ func listParts(ctx *sdk.AppCtx, id string) ([]partInfo, error) {
 
 func (a *App) handleUploadStatus(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := globalCtx
-	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
-	if meta.UserID != uid {
+	if err := authorizeHTTPSession(r, meta); err != nil {
 		httpErr(w, http.StatusForbidden, "not your upload")
 		return
 	}
@@ -423,289 +480,52 @@ func (a *App) handleUploadStatus(w http.ResponseWriter, r *http.Request, id stri
 
 func (a *App) handleUploadPart(w http.ResponseWriter, r *http.Request, id string, n int) {
 	ctx := globalCtx
-	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
-	mu := sessionLock(id)
-	mu.Lock()
-	defer mu.Unlock()
-
-	dir := uploadSessionDir(ctx, id)
-	meta, err := loadUploadMeta(dir)
+	written, err := writeUploadPart(r.Context(), ctx, id, n, r.Body, r.ContentLength, func(meta *uploadMeta) error { return authorizeHTTPSession(r, meta) })
 	if err != nil {
-		httpErr(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if meta.UserID != uid {
-		httpErr(w, http.StatusForbidden, "not your upload")
-		return
-	}
-	parts, err := listParts(ctx, id)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "list parts: "+err.Error())
-		return
-	}
-	var existingBytes int64
-	for _, p := range parts {
-		if p.N != n {
-			existingBytes += p.Size
+		code := http.StatusBadRequest
+		if strings.Contains(err.Error(), "allowance") {
+			code = http.StatusRequestEntityTooLarge
 		}
-	}
-	remaining := meta.DeclaredSize - existingBytes
-	if remaining <= 0 {
-		httpErr(w, http.StatusRequestEntityTooLarge, "uploaded parts already reach declared size")
+		if errors.Is(err, errAbortNotOwner) {
+			code = http.StatusForbidden
+		}
+		httpErr(w, code, err.Error())
 		return
 	}
-	partLimit := int64(maxPartSize)
-	if remaining < partLimit {
-		partLimit = remaining
-	}
-
-	// Stream straight to a temp sibling; rename atomically. The
-	// rename is what makes a re-upload of the same part_number safe
-	// — the previous bytes are replaced in one syscall, no torn
-	// half-state observable by complete().
-	pp := partPath(ctx, id, n)
-	tmp := pp + ".tmp." + randHex(8)
-	f, err := os.Create(tmp)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "create part: "+err.Error())
-		return
-	}
-	written, copyErr := io.Copy(f, io.LimitReader(r.Body, partLimit+1))
-	cerr := f.Close()
-	if copyErr != nil {
-		_ = os.Remove(tmp)
-		httpErr(w, http.StatusInternalServerError, "copy: "+copyErr.Error())
-		return
-	}
-	if cerr != nil {
-		_ = os.Remove(tmp)
-		httpErr(w, http.StatusInternalServerError, "close: "+cerr.Error())
-		return
-	}
-	if written > partLimit {
-		_ = os.Remove(tmp)
-		httpErr(w, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("part exceeds remaining upload allowance of %d bytes", partLimit))
-		return
-	}
-	if written == 0 {
-		_ = os.Remove(tmp)
-		httpErr(w, http.StatusBadRequest, "empty part")
-		return
-	}
-	if err := os.Rename(tmp, pp); err != nil {
-		_ = os.Remove(tmp)
-		httpErr(w, http.StatusInternalServerError, "rename: "+err.Error())
-		return
-	}
-	// Touch dir mtime so the sweeper sees activity.
-	_ = os.Chtimes(dir, time.Now(), time.Now())
-
-	httpJSON(w, map[string]any{
-		"part_number": n,
-		"size":        written,
-	})
+	httpJSON(w, map[string]any{"part_number": n, "size": written})
 }
 
 // ─── complete ────────────────────────────────────────────────────────
 
 func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id string) {
-	ctx := globalCtx
-	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
-
-	mu := sessionLock(id)
-	mu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			mu.Unlock()
-		}
-	}()
-
-	dir := uploadSessionDir(ctx, id)
-	meta, err := loadUploadMeta(dir)
-	if err != nil {
-		httpErr(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if meta.UserID != uid {
-		httpErr(w, http.StatusForbidden, "not your upload")
-		return
-	}
-	parts, err := listParts(ctx, id)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "list parts: "+err.Error())
-		return
-	}
-	if len(parts) == 0 {
-		httpErr(w, http.StatusBadRequest, "no parts uploaded")
-		return
-	}
-	// Validate contiguous 1..N — any gap means a part was lost.
-	var totalSize int64
-	for i, p := range parts {
-		if p.N != i+1 {
-			httpErr(w, http.StatusBadRequest,
-				fmt.Sprintf("missing part %d (have %d parts, last is %d)", i+1, len(parts), p.N))
-			return
-		}
-		totalSize += p.Size
-	}
-	if totalSize != meta.DeclaredSize {
-		httpErr(w, http.StatusBadRequest,
-			fmt.Sprintf("size mismatch: parts total %d, declared %d", totalSize, meta.DeclaredSize))
-		return
-	}
-
 	var body struct {
 		SHA256 string `json:"sha256"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&body)
-
-	tmpKey := newUploadID() + extOf(meta.Filename, meta.ContentType)
-
-	// Pass 1: hash the concatenated parts. On disk-backed installs we
-	// simultaneously assemble the final bytes into a temporary file, then
-	// atomically move it into the blob tree after the hash is known. That
-	// avoids reading every part a second time. S3 still uses a hash pass
-	// followed by a parallel ReaderAt upload so network throughput stays high.
-	//
-	// The earlier implementation stream-stitched parts into a local
-	// scratch file, then re-opened that file and uploaded it to the
-	// backend. That cost ~2× totalSize of local I/O before the
-	// network upload could even start, which on S3-backed installs
-	// dominated complete() latency for large uploads.
-	//
-	h := sha256.New()
-	var assembledPath string
-	var assembled *os.File
-	if _, ok := backend().(*diskBackend); ok {
-		assembledPath = filepath.Join(dir, "assembled.tmp."+randHex(8))
-		assembled, err = os.Create(assembledPath)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "create assembled upload: "+err.Error())
-			return
-		}
-		defer os.Remove(assembledPath)
-	}
-	for _, p := range parts {
-		f, err := os.Open(partPath(ctx, id, p.N))
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "open part "+strconv.Itoa(p.N)+": "+err.Error())
-			return
-		}
-		var dst io.Writer = h
-		if assembled != nil {
-			dst = io.MultiWriter(h, assembled)
-		}
-		if _, err := io.Copy(dst, f); err != nil {
-			f.Close()
-			if assembled != nil {
-				assembled.Close()
-			}
-			httpErr(w, http.StatusInternalServerError, "hash part "+strconv.Itoa(p.N)+": "+err.Error())
-			return
-		}
-		f.Close()
-	}
-	if assembled != nil {
-		if err := assembled.Close(); err != nil {
-			httpErr(w, http.StatusInternalServerError, "close assembled upload: "+err.Error())
-			return
-		}
-	}
-	finalSHA := hex.EncodeToString(h.Sum(nil))
-
-	// Verify any client-supplied or pre-declared hash before we
-	// take any action that could observe drift.
-	if body.SHA256 != "" && !strings.EqualFold(body.SHA256, finalSHA) {
-		httpErr(w, http.StatusBadRequest, "sha256 mismatch: client="+body.SHA256+" server="+finalSHA)
+	if err := decodeJSON(r, &body, 1024, true); err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
-	if meta.DeclaredSHA256 != "" && !strings.EqualFold(meta.DeclaredSHA256, finalSHA) {
-		httpErr(w, http.StatusBadRequest, "declared sha256 mismatch — bytes corrupted")
-		return
-	}
-
-	// Dedup before uploading only when both bytes and destination match.
-	// SHA-only reuse would return an unrelated filename/folder and make
-	// callers believe their requested output was created when it was not.
-	if existing, err := dbFindExact(ctx.AppDB(), meta.ProjectID, finalSHA, meta.Folder, meta.Filename); err == nil && existing != nil {
-		_ = os.RemoveAll(dir)
-		mu.Unlock()
-		locked = false
-		releaseSessionLock(id)
-		httpJSON(w, map[string]any{"file": existing, "was_existing": true})
-		return
-	}
-
-	// Pass 2 on remote backends: stream parts → backend without a scratch file.
-	//
-	// We hand the backend a partsReaderAt instead of an io.MultiReader.
-	// The difference matters: minio-go's parallel multipart upload
-	// (the path that gets us decent R2/S3 throughput) probes the
-	// reader for io.ReaderAt and falls back to a single-threaded
-	// sequential upload when it isn't there. io.MultiReader is
-	// forward-only — no ReadAt — so the previous "no-scratch" flow
-	// silently lost parallelism and ran SLOWER than the scratch-file
-	// version on large uploads.
-	//
-	// partsReaderAt lazily opens part files on demand and maps the
-	// virtual offset to (part_index, part_offset). Parallel goroutines
-	// inside minio-go each call ReadAt with their own offsets and
-	// race the bytes onto S3 without local stitching.
-	finalKey := objectKey(finalSHA, tmpKey)
-	if disk, ok := backend().(*diskBackend); ok {
-		if err := disk.CommitTemp(assembledPath, finalKey); err != nil {
-			httpErr(w, http.StatusInternalServerError, "commit disk upload: "+err.Error())
-			return
-		}
-		assembledPath = ""
-	} else {
-		pr, err := newPartsReaderAt(ctx, id, parts)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, "open parts: "+err.Error())
-			return
-		}
-		defer pr.Close()
-		if err := backend().Put(r.Context(), finalKey, meta.ContentType, pr, totalSize); err != nil {
-			httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
-			return
-		}
-	}
-
-	tagsJSON, _ := json.Marshal(meta.Tags)
-	source := strings.TrimSpace(meta.Source)
-	if source == "" {
-		source = "human"
-	}
-	res, err := ctx.AppDB().Exec(
-		`INSERT INTO files
-			(project_id, name, folder, storage_key, content_type, size_bytes,
-			 sha256, uploaded_by, source, tags, visibility)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		meta.ProjectID, meta.Filename, meta.Folder, tmpKey, meta.ContentType, meta.DeclaredSize,
-		finalSHA, callerLabel(), source, string(tagsJSON), meta.Visibility,
-	)
+	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		_ = backend().Delete(r.Context(), finalKey)
-		httpErr(w, http.StatusInternalServerError, "insert: "+err.Error())
+		httpErr(w, 400, err.Error())
 		return
 	}
-	insID, _ := res.LastInsertId()
-	row, err := dbGetByID(ctx.AppDB(), meta.ProjectID, insID)
-	if err != nil || row == nil {
-		httpErr(w, http.StatusInternalServerError, "lookup: "+fmt.Sprint(err))
+	meta, err := loadSessionOrCompletion(globalCtx, id, pid)
+	if err != nil {
+		httpErr(w, 404, "session not found")
 		return
 	}
-	emitFileEvent(ctx, "file.added", row, false)
-
-	_ = os.RemoveAll(dir)
-	mu.Unlock()
-	locked = false
-	releaseSessionLock(id)
-
-	httpJSON(w, map[string]any{"file": row, "was_existing": false})
+	if err = authorizeHTTPSession(r, meta); err != nil {
+		httpErr(w, 403, err.Error())
+		return
+	}
+	c := context.WithValue(r.Context(), actorContextKey{}, requestActor(r))
+	out, err := completeUploadSessionForTool(globalCtx, c, id, body.SHA256)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 // ─── abort ───────────────────────────────────────────────────────────
@@ -713,6 +533,20 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 func (a *App) handleUploadAbort(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := globalCtx
 	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	meta, err := loadSessionOrCompletion(ctx, id, pid)
+	if err != nil {
+		httpErr(w, 404, "session not found")
+		return
+	}
+	if err = authorizeHTTPSession(r, meta); err != nil {
+		httpErr(w, 403, err.Error())
+		return
+	}
 	bytesFreed, err := abortUploadSession(ctx, id, uid, "client")
 	if err != nil {
 		switch err {
@@ -733,9 +567,9 @@ func (a *App) handleUploadAbort(w http.ResponseWriter, r *http.Request, id strin
 // enforce project isolation and files.write scope for the session's
 // destination folder.
 func (a *App) toolAbortUploadCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	id, _ := args["id"].(string)
-	if id == "" {
-		return nil, errors.New("id required")
+	id, err := canonicalUploadID(args)
+	if err != nil {
+		return nil, err
 	}
 	if _, _, err := a.requireUploadSessionWriteAccess(ctx, app, args); err != nil {
 		if errors.Is(err, errUploadSessionNotFound) {
@@ -765,25 +599,31 @@ func (a *App) toolAbortUploadCtx(ctx context.Context, app *sdk.AppCtx, args map[
 // reason is logged + included in the upload.aborted event ("client",
 // "tool", "sweep") for ops visibility.
 func abortUploadSession(ctx *sdk.AppCtx, id string, requestingUser int64, reason string) (int64, error) {
+	mu := sessionLock(id)
+	mu.Lock()
+	defer func() { mu.Unlock(); releaseSessionLock(id) }()
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
 	if err != nil {
 		return 0, errAbortNotFound
 	}
-	// Skip ownership check when the sweeper is calling (requestingUser=0),
-	// or when the meta has no user_id (legacy sessions).
+	if reason == "client" && meta.UserID != requestingUser {
+		return 0, errAbortNotOwner
+	}
 	if requestingUser != 0 && meta.UserID != 0 && meta.UserID != requestingUser {
 		return 0, errAbortNotOwner
 	}
-	bytes := dirSize(dir)
-	mu := sessionLock(id)
-	mu.Lock()
-	rmErr := os.RemoveAll(dir)
-	mu.Unlock()
-	releaseSessionLock(id)
-	if rmErr != nil {
-		return 0, rmErr
+	if reason == "sweep" {
+		if st, e := os.Stat(dir); e != nil || !st.ModTime().Before(time.Now().Add(-configuredUploadIdleTTL(ctx))) {
+			return 0, nil
+		}
 	}
+	bytes := dirSize(dir)
+	if err = os.RemoveAll(dir); err != nil {
+		return 0, err
+	}
+	retireSessionLock(id)
+	releaseUploadReservation(ctx, id)
 	emitUploadAborted(ctx, id, meta, bytes, reason)
 	return bytes, nil
 }
@@ -795,7 +635,7 @@ func emitUploadAborted(ctx *sdk.AppCtx, id string, meta *uploadMeta, bytes int64
 	if ctx == nil {
 		return
 	}
-	ctx.Emit("upload.aborted", map[string]any{
+	ctx.EmitWithProject("upload.aborted", meta.ProjectID, map[string]any{
 		"upload_id":   id,
 		"filename":    meta.Filename,
 		"folder":      meta.Folder,
@@ -936,12 +776,7 @@ func (pr *partsReaderAt) Read(p []byte) (int, error) {
 // <100 even for GB uploads at 5MB part size) so binary search isn't
 // worth the complexity.
 func (pr *partsReaderAt) findRange(off int64) int {
-	for i, r := range pr.ranges {
-		if off >= r.start && off < r.start+r.size {
-			return i
-		}
-	}
-	return len(pr.ranges)
+	return sort.Search(len(pr.ranges), func(i int) bool { return pr.ranges[i].start+pr.ranges[i].size > off })
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
@@ -958,30 +793,7 @@ func loadUploadMeta(dir string) (*uploadMeta, error) {
 	return &m, nil
 }
 
-func newUploadID() string {
-	const alphabet = uploadIDChars
-	now := uint64(time.Now().UnixMilli())
-	var buf [26]byte
-	for i := 9; i >= 0; i-- {
-		buf[i] = alphabet[now&0x1f]
-		now >>= 5
-	}
-	rand := make([]byte, 10)
-	_, _ = readRandom(rand)
-	idx := 10
-	for _, b := range rand {
-		buf[idx] = alphabet[b&0x1f]
-		idx++
-		if idx >= 26 {
-			break
-		}
-	}
-	for idx < 26 {
-		buf[idx] = alphabet[0]
-		idx++
-	}
-	return string(buf[:])
-}
+func newUploadID() string { return newDirectUploadID() }
 
 func randHex(n int) string {
 	b := make([]byte, n)

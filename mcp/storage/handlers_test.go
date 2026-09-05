@@ -22,6 +22,7 @@ func newTestCtx(t *testing.T, opts ...tk.Option) *sdk.AppCtx {
 		tk.WithEnv("STORAGE_BLOBS_DIR", dir),
 	}, opts...)
 	ctx := tk.NewAppCtx(t, "apteva.yaml", full...)
+	globalBackend = nil
 	globalCtx = ctx
 	return ctx
 }
@@ -430,8 +431,10 @@ func TestProjectScope_Isolation(t *testing.T) {
 	// Different DBs — testkit gives each call its own in-memory pool —
 	// so the scope check here is really "the API requires the right
 	// project_id". Validates the env-driven resolveProject path.
+	globalBackend = nil
 	globalCtx = ctxA
 	(&App{}).toolUpload(ctxA, map[string]any{"name": "a.txt", "content_base64": b64("a")})
+	globalBackend = nil
 	globalCtx = ctxB
 	out, _ := (&App{}).toolList(ctxB, map[string]any{})
 	if out.(map[string]any)["count"].(int) != 0 {
@@ -442,6 +445,7 @@ func TestProjectScope_Isolation(t *testing.T) {
 func TestResolveProject_GlobalScopeRequiresArg(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	globalBackend = nil
 	globalCtx = ctx
 	_, err := (&App{}).toolUpload(ctx, map[string]any{
 		"name": "x.txt", "content_base64": b64("x"),
