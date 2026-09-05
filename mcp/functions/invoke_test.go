@@ -178,9 +178,8 @@ func TestInvokeTimeout(t *testing.T) {
 	}
 }
 
-// TestInvokeResponseTruncation caps an oversized handler result at
-// stdoutCap.
-func TestInvokeResponseTruncation(t *testing.T) {
+// Large caller responses are complete; only audit previews are capped.
+func TestInvokeResponseComplete(t *testing.T) {
 	requireBin(t, "node")
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
@@ -196,8 +195,8 @@ func TestInvokeResponseTruncation(t *testing.T) {
 	if res.Status != "ok" {
 		t.Fatalf("status = %q, want ok (err=%q)", res.Status, res.Error)
 	}
-	if len(res.Response) != stdoutCap {
-		t.Errorf("len(Response) = %d, want %d (cap)", len(res.Response), stdoutCap)
+	if len(res.Response) != 200002 {
+		t.Errorf("len(Response) = %d, want full JSON string", len(res.Response))
 	}
 }
 

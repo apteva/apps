@@ -9,9 +9,14 @@
 // the chat surface reads as a single unified system regardless of
 // whether the agent queried a Notion database or an Apteva table.
 
+import { parseJSON } from "./lib/values";
 import { Card, CardHeader, Row, StatusPill } from "@apteva/ui-kit";
 import {
-  CellTone, cellToneClass, rowStatusVariant, tablePanelUrl, tablesVendor,
+  CellTone,
+  cellToneClass,
+  rowStatusVariant,
+  tablePanelUrl,
+  tablesVendor,
 } from "./lib/tables";
 
 /** A single trailing cell — either a plain string (no styling beyond
@@ -23,7 +28,7 @@ export type SummaryCell = string | { value: string; tone?: CellTone };
 
 interface RowItem {
   /** Numeric row id (what tables_query returns). */
-  id: number;
+  id: number | string;
   /** Human label for the row — usually the value of the table's
    *  primary text column (customer, name, etc.). */
   title: string;
@@ -53,20 +58,51 @@ interface Props {
 // what the highlighting can do: an overdue invoice gets a red amount,
 // a high-value pending one gets a warn tint, and the rest are plain.
 const previewRows: RowItem[] = [
-  { id: 1042, title: "Acme Logistics",      status: "paid",    summary: ["$48,000",  "May 11"] },
-  { id: 1043, title: "Globex Innovations",  status: "paid",    summary: ["$24,000",  "Jun 3"]  },
-  { id: 1044, title: "Initech Corp",        status: "paid",    summary: ["$120,000", "May 20"] },
-  { id: 1045, title: "Soylent Foods",       status: "paid",    summary: ["$62,000",  "Jun 17"] },
-  { id: 1046, title: "Hooli",               status: "paid",    summary: ["$315,000", "May 27"] },
-  { id: 1047, title: "Stark Industries",    status: "overdue", summary: [{ value: "$92,000", tone: "error" }, { value: "Apr 28", tone: "error" }] },
-  { id: 1048, title: "Wayne Enterprises",   status: "pending", summary: [{ value: "$210,000", tone: "warn" }, "Jun 30"] },
+  {
+    id: 1042,
+    title: "Acme Logistics",
+    status: "paid",
+    summary: ["$48,000", "May 11"],
+  },
+  {
+    id: 1043,
+    title: "Globex Innovations",
+    status: "paid",
+    summary: ["$24,000", "Jun 3"],
+  },
+  {
+    id: 1044,
+    title: "Initech Corp",
+    status: "paid",
+    summary: ["$120,000", "May 20"],
+  },
+  {
+    id: 1045,
+    title: "Soylent Foods",
+    status: "paid",
+    summary: ["$62,000", "Jun 17"],
+  },
+  { id: 1046, title: "Hooli", status: "paid", summary: ["$315,000", "May 27"] },
+  {
+    id: 1047,
+    title: "Stark Industries",
+    status: "overdue",
+    summary: [
+      { value: "$92,000", tone: "error" },
+      { value: "Apr 28", tone: "error" },
+    ],
+  },
+  {
+    id: 1048,
+    title: "Wayne Enterprises",
+    status: "pending",
+    summary: [{ value: "$210,000", tone: "warn" }, "Jun 30"],
+  },
 ];
 
 export default function TableRowListCard(props: Props) {
   const tableName = props.table_name || (props.preview ? "invoices" : "table");
-  const rows = props.preview
-    ? previewRows
-    : (parseRows(props.rows) ?? []);
+  const rows = props.preview ? previewRows : (parseRows(props.rows) ?? []);
 
   const max = props.max ?? 10;
   const visible = rows.slice(0, max);
@@ -84,7 +120,10 @@ export default function TableRowListCard(props: Props) {
         vendor={tablesVendor}
         title={<span className="font-mono">{tableName}</span>}
         subtitle={subtitle}
-        action={{ label: "Open query", href: tablePanelUrl(tableName) }}
+        action={{
+          label: "Open query",
+          href: tablePanelUrl(tableName, props.projectId),
+        }}
       />
 
       <div className="flex flex-col">
@@ -92,7 +131,7 @@ export default function TableRowListCard(props: Props) {
           <Row
             key={r.id}
             flush={i === 0}
-            href={`${tablePanelUrl(tableName)}&row=${r.id}`}
+            href={`${tablePanelUrl(tableName, props.projectId)}&row=${encodeURIComponent(String(r.id))}`}
             leading={
               <span className="font-mono text-[11px] text-text-dim tabular-nums w-12 text-right">
                 #{r.id}
@@ -114,13 +153,18 @@ export default function TableRowListCard(props: Props) {
                     );
                   }
                   return (
-                    <span key={idx} className="text-text-dim tabular-nums whitespace-nowrap">
+                    <span
+                      key={idx}
+                      className="text-text-dim tabular-nums whitespace-nowrap"
+                    >
                       {cell.value}
                     </span>
                   );
                 })}
                 {r.status && (
-                  <StatusPill variant={mapStatusVariant(r.status)}>{r.status}</StatusPill>
+                  <StatusPill variant={mapStatusVariant(r.status)}>
+                    {r.status}
+                  </StatusPill>
                 )}
               </span>
             }
@@ -136,7 +180,9 @@ export default function TableRowListCard(props: Props) {
   );
 }
 
-function mapStatusVariant(status: string): "success" | "error" | "info" | "warn" | "neutral" {
+function mapStatusVariant(
+  status: string,
+): "success" | "error" | "info" | "warn" | "neutral" {
   const v = rowStatusVariant(status);
   return v;
 }
@@ -154,8 +200,10 @@ function parseRows(raw: RowItem[] | string | undefined): RowItem[] | null {
   if (!raw) return null;
   if (Array.isArray(raw)) return raw;
   try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : null;
+    const parsed = parseJSON(raw);
+    return Array.isArray(parsed)
+      ? parsed.map((row) => ({ ...row, id: String(row.id) }))
+      : null;
   } catch {
     return null;
   }

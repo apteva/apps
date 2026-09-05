@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"io"
 	"net/http"
 	"net/url"
@@ -25,15 +26,7 @@ type ReplayResolver struct {
 func NewReplayResolver(apiKey string) *ReplayResolver {
 	return &ReplayResolver{
 		apiKey: apiKey,
-		http: &http.Client{
-			Timeout: 30 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				if len(via) > 0 && !sameOrigin(req.URL.String(), via[0].URL.String()) {
-					req.Header.Del("X-BB-API-Key")
-				}
-				return nil
-			},
-		},
+		http:   providerhttp.New(30 * time.Second),
 	}
 }
 
@@ -108,7 +101,7 @@ func (r *ReplayResolver) Playlist(ctx context.Context, providerSessionID, stream
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", &replay.HTTPError{Provider: "browserbase", Op: "replay playlist", Status: resp.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := providerhttp.ReadAll(resp.Body, 4<<20)
 	if err != nil {
 		return nil, "", err
 	}
@@ -168,7 +161,7 @@ func (r *ReplayResolver) Resource(ctx context.Context, providerSessionID, token 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
 		return nil, "", &replay.HTTPError{Provider: "browserbase", Op: "recording resource", Status: resp.StatusCode}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, err := providerhttp.ReadAll(resp.Body, 64<<20)
 	if err != nil {
 		return nil, "", err
 	}

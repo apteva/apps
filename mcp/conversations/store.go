@@ -9,10 +9,12 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,6 +57,7 @@ type Component struct {
 }
 
 type Message struct {
+	Revision       int64          `json:"revision,omitempty"`
 	ID             int64          `json:"id"`
 	ConversationID string         `json:"conversation_id"`
 	Role           string         `json:"role"`
@@ -114,6 +117,7 @@ type CreateConversationInput struct {
 	// Audience: '' → operator. See Conversation.Audience.
 	Audience  string
 	Directive string
+	AgentIDs  []int64
 }
 
 func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, error) {
@@ -133,42 +137,98 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 	if in.Audience == "" {
 		in.Audience = "operator"
 	}
-	// External identities are find-or-create: one conversation per key.
-	if in.ConversationKey != "" {
-		if existing, err := s.ConversationByKey(in.ProjectID, in.ConversationKey); err == nil {
-			return existing, nil
-		}
+	if in.Origin == "agent" && in.ConversationKey == "" {
+		in.ConversationKey = fmt.Sprintf("topic:%d:%x", in.LeadAgentID, sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(in.Title)))))
 	}
-	id := newConversationID()
-	_, err := s.db.Exec(`
-		INSERT INTO conversations (id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, directive, owner_user_id)
-		VALUES (?, ?, ?, ?, 'direct', ?, ?, ?, ?, ?)`,
-		id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.Directive, in.OwnerUserID)
+	if len(in.ConversationKey) > 512 {
+		return nil, fmt.Errorf("conversation key too long")
+	}
+	if len([]rune(in.Title)) > 120 || len([]rune(in.Directive)) > 8000 {
+		return nil, fmt.Errorf("title or directive too long")
+	}
+	if in.Audience != "operator" && in.Audience != "public" {
+		return nil, fmt.Errorf("invalid audience")
+	}
+	tx, err := s.db.Begin()
 	if err != nil {
 		return nil, err
 	}
-	if in.LeadAgentID != 0 {
-		if _, err := s.db.Exec(`
-			INSERT OR IGNORE INTO participants (conversation_id, agent_id) VALUES (?, ?)`,
-			id, in.LeadAgentID); err != nil {
-			return nil, err
+	defer tx.Rollback()
+	if in.ConversationKey != "" {
+		existing, lookupErr := scanConversation(tx.QueryRow(`SELECT `+conversationCols+` FROM conversations WHERE project_id=? AND conversation_key=?`, in.ProjectID, in.ConversationKey))
+		if lookupErr == nil {
+			var archived bool
+			if err := tx.QueryRow(`SELECT archived_at IS NOT NULL FROM conversations WHERE id=?`, existing.ID).Scan(&archived); err != nil {
+				return nil, err
+			}
+			if archived {
+				return nil, fmt.Errorf("conversation key belongs to an archived conversation; unarchive it first")
+			}
+			if in.OwnerUserID > 0 && existing.OwnerUserID != 0 && existing.OwnerUserID != in.OwnerUserID {
+				var count int
+				if err := tx.QueryRow(`SELECT COUNT(*) FROM participants WHERE conversation_id=? AND user_id=?`, existing.ID, in.OwnerUserID).Scan(&count); err != nil {
+					return nil, err
+				}
+				if count == 0 {
+					return nil, fmt.Errorf("conversation not found")
+				}
+			}
+			return existing, nil
+		}
+		if lookupErr != sql.ErrNoRows {
+			return nil, lookupErr
 		}
 	}
-	if in.OwnerUserID != 0 {
-		if _, err := s.db.Exec(`
-			INSERT OR IGNORE INTO participants (conversation_id, user_id) VALUES (?, ?)`,
-			id, in.OwnerUserID); err != nil {
-			return nil, err
+	id, err := insertConversationTx(tx, in)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return s.GetConversation(id)
+}
+
+func insertConversationTx(tx *sql.Tx, in CreateConversationInput) (string, error) {
+	id := newConversationID()
+	_, err := tx.Exec(`INSERT INTO conversations(id,project_id,lead_agent_id,title,kind,origin,conversation_key,audience,directive,owner_user_id) VALUES(?,?,?,?,'direct',?,?,?,?,?)`, id, in.ProjectID, in.LeadAgentID, in.Title, in.Origin, in.ConversationKey, in.Audience, in.Directive, in.OwnerUserID)
+	if err != nil {
+		return "", err
+	}
+	agents := map[int64]bool{}
+	if in.LeadAgentID > 0 {
+		agents[in.LeadAgentID] = true
+	}
+	for _, v := range in.AgentIDs {
+		if v <= 0 {
+			return "", fmt.Errorf("invalid agent id")
+		}
+		agents[v] = true
+	}
+	if len(agents) > 8 {
+		return "", fmt.Errorf("at most 8 agents allowed")
+	}
+	for v := range agents {
+		if _, err := tx.Exec(`INSERT INTO participants(conversation_id,agent_id) VALUES(?,?)`, id, v); err != nil {
+			return "", err
+		}
+	}
+	if len(agents) > 1 {
+		if _, err := tx.Exec(`UPDATE conversations SET kind='room' WHERE id=?`, id); err != nil {
+			return "", err
+		}
+	}
+	if in.OwnerUserID > 0 {
+		if _, err := tx.Exec(`INSERT INTO participants(conversation_id,user_id) VALUES(?,?)`, id, in.OwnerUserID); err != nil {
+			return "", err
 		}
 	}
 	if in.ExternalIdentity != "" {
-		if _, err := s.db.Exec(`
-			INSERT OR IGNORE INTO participants (conversation_id, external_identity, display_name)
-			VALUES (?, ?, ?)`, id, in.ExternalIdentity, in.ExternalName); err != nil {
-			return nil, err
+		if _, err := tx.Exec(`INSERT INTO participants(conversation_id,external_identity,display_name) VALUES(?,?,?)`, id, in.ExternalIdentity, in.ExternalName); err != nil {
+			return "", err
 		}
 	}
-	return s.GetConversation(id)
+	return id, nil
 }
 
 const conversationCols = `id, project_id, lead_agent_id, title, kind, origin, conversation_key, audience, directive, thread_id, owner_user_id, created_at, updated_at`
@@ -197,6 +257,10 @@ func (s *store) ConversationByKey(projectID, key string) (*Conversation, error) 
 }
 
 func (s *store) ListConversationsForAgent(projectID string, agentID int64, limit int) ([]Conversation, error) {
+	return s.SearchConversationsForAgent(projectID, agentID, "", limit)
+}
+
+func (s *store) SearchConversationsForAgent(projectID string, agentID int64, query string, limit int) ([]Conversation, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
@@ -204,8 +268,8 @@ func (s *store) ListConversationsForAgent(projectID string, agentID int64, limit
 		SELECT `+prefixCols("c.", conversationCols)+`
 		FROM conversations c
 		JOIN participants p ON p.conversation_id = c.id AND p.agent_id = ?
-		WHERE c.project_id = ? AND c.archived_at IS NULL
-		ORDER BY c.updated_at DESC LIMIT ?`, agentID, projectID, limit)
+		WHERE c.project_id = ? AND c.archived_at IS NULL AND instr(lower(c.title), lower(?)) > 0
+		ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`, agentID, projectID, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -374,36 +438,55 @@ func (s *store) IsParticipantAgent(conversationID string, agentID int64) (bool, 
 	return err == nil, err
 }
 
-func (s *store) AddAgentParticipant(conversationID string, agentID int64) error {
-	if _, err := s.db.Exec(`
-		INSERT OR IGNORE INTO participants (conversation_id, agent_id) VALUES (?, ?)`,
-		conversationID, agentID); err != nil {
+func (s *store) changeAgentParticipant(id string, agent int64, remove bool) error {
+	if agent <= 0 {
+		return fmt.Errorf("invalid agent id")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
 		return err
 	}
-	// A second agent makes it a room; removing back down is a later
-	// concern (mirrors channel-chat's flip semantics).
-	_, err := s.db.Exec(`
-		UPDATE conversations SET kind = CASE WHEN
-			(SELECT COUNT(*) FROM participants WHERE conversation_id = ? AND agent_id != 0) > 1
-			THEN 'room' ELSE 'direct' END,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`, conversationID, conversationID)
-	return err
+	defer tx.Rollback()
+	var lead int64
+	var archived bool
+	if err := tx.QueryRow(`SELECT lead_agent_id,archived_at IS NOT NULL FROM conversations WHERE id=?`, id).Scan(&lead, &archived); err != nil {
+		return err
+	}
+	if archived {
+		return fmt.Errorf("conversation is archived")
+	}
+	if remove {
+		if lead == agent {
+			return fmt.Errorf("cannot remove the lead agent")
+		}
+		if _, err := tx.Exec(`DELETE FROM participants WHERE conversation_id=? AND agent_id=?`, id, agent); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE deliveries SET status='cancelled',lease_token='',last_error='Agent removed from conversation' WHERE target=? AND message_id IN(SELECT id FROM messages WHERE conversation_id=?) AND status IN('pending','processing')`, fmt.Sprintf("agent-inbound:%d", agent), id); err != nil {
+			return err
+		}
+	} else {
+		var count int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM participants WHERE conversation_id=? AND agent_id>0 AND agent_id!=?`, id, agent).Scan(&count); err != nil {
+			return err
+		}
+		if count >= 8 {
+			return fmt.Errorf("at most 8 agents allowed")
+		}
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO participants(conversation_id,agent_id) VALUES(?,?)`, id, agent); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE conversations SET kind=CASE WHEN (SELECT COUNT(*) FROM participants WHERE conversation_id=? AND agent_id>0)>1 THEN 'room' ELSE 'direct' END,updated_at=CURRENT_TIMESTAMP WHERE id=?`, id, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
-
-func (s *store) RemoveAgentParticipant(conversationID string, agentID int64) error {
-	if _, err := s.db.Exec(`
-		DELETE FROM participants WHERE conversation_id = ? AND agent_id = ?`,
-		conversationID, agentID); err != nil {
-		return err
-	}
-	_, err := s.db.Exec(`
-		UPDATE conversations SET kind = CASE WHEN
-			(SELECT COUNT(*) FROM participants WHERE conversation_id = ? AND agent_id != 0) > 1
-			THEN 'room' ELSE 'direct' END,
-			updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`, conversationID, conversationID)
-	return err
+func (s *store) AddAgentParticipant(id string, agent int64) error {
+	return s.changeAgentParticipant(id, agent, false)
+}
+func (s *store) RemoveAgentParticipant(id string, agent int64) error {
+	return s.changeAgentParticipant(id, agent, true)
 }
 
 func (s *store) AgentParticipants(conversationID string) ([]int64, error) {
@@ -434,8 +517,11 @@ func (s *store) getConversationAny(id string) (*Conversation, error) {
 }
 
 func (s *store) UpdateConversationTitle(id, title string) (*Conversation, error) {
+	if len([]rune(title)) > 120 {
+		return nil, fmt.Errorf("title is too long")
+	}
 	res, err := s.db.Exec(`
-		UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND archived_at IS NULL`,
 		title, id)
 	if err != nil {
 		return nil, err
@@ -450,7 +536,7 @@ func (s *store) UpdateConversationDirective(id, directive string) (*Conversation
 	if len([]rune(directive)) > 8000 {
 		return nil, fmt.Errorf("directive is too long")
 	}
-	res, err := s.db.Exec(`UPDATE conversations SET directive=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, directive, id)
+	res, err := s.db.Exec(`UPDATE conversations SET directive=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND archived_at IS NULL`, directive, id)
 	if err != nil {
 		return nil, err
 	}
@@ -553,37 +639,7 @@ func (s *store) AppendMessage(m *Message) (*Message, error) {
 }
 
 func (s *store) AppendMessageIdempotent(m *Message) (*Message, bool, error) {
-	normalizeMessage(m)
-	componentsJSON, _ := json.Marshal(m.Components)
-	attachmentsJSON, _ := json.Marshal(m.Attachments)
-	metadataJSON, _ := json.Marshal(m.Metadata)
-	if m.ClientID != "" {
-		if existing, err := s.messageByClientID(m.ConversationID, m.ClientID); err == nil {
-			return existing, false, nil
-		}
-	}
-	res, err := s.db.Exec(`
-		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
-			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
-			attachments_json, metadata_json, client_message_id, source_app, callback_tool)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
-		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
-		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool)
-	if err != nil {
-		// A concurrent duplicate hits the partial unique index; resolve
-		// to the winner rather than erroring the retry.
-		if m.ClientID != "" && strings.Contains(err.Error(), "UNIQUE") {
-			if existing, lookupErr := s.messageByClientID(m.ConversationID, m.ClientID); lookupErr == nil {
-				return existing, false, nil
-			}
-		}
-		return nil, false, err
-	}
-	id, _ := res.LastInsertId()
-	_, _ = s.db.Exec(`UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?`, m.ConversationID)
-	msg, err := s.GetMessage(id)
-	return msg, true, err
+	return s.AppendMessageWithDeliveries(m, nil)
 }
 
 func normalizeMessage(m *Message) {
@@ -612,6 +668,15 @@ func normalizeMessage(m *Message) {
 // message exists but a crash recovery scan has nothing to replay.
 func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Message, bool, error) {
 	normalizeMessage(m)
+	if err := validateMessageSize(m); err != nil {
+		return nil, false, err
+	}
+	request := *m
+	request.ID = 0
+	request.CreatedAt = time.Time{}
+	request.Revision = 0
+	fingerprint, _ := json.Marshal(&request)
+	requestHash := fmt.Sprintf("%x", sha256.Sum256(fingerprint))
 	componentsJSON, err := json.Marshal(m.Components)
 	if err != nil {
 		return nil, false, err
@@ -631,13 +696,24 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	defer tx.Rollback()
 	if m.ClientID != "" {
 		var existingID int64
-		if err := tx.QueryRow(`SELECT id FROM messages WHERE conversation_id=? AND client_message_id=?`, m.ConversationID, m.ClientID).Scan(&existingID); err == nil {
+		var existingHash string
+		if err := tx.QueryRow(`SELECT id,request_hash FROM messages WHERE conversation_id=? AND client_message_id=?`, m.ConversationID, m.ClientID).Scan(&existingID, &existingHash); err == nil {
+			if existingHash != "" && existingHash != requestHash {
+				return nil, false, fmt.Errorf("client_message_id already belongs to a different request")
+			}
 			_ = tx.Rollback()
 			existing, lookupErr := s.GetMessage(existingID)
+			if lookupErr == nil {
+				lookupErr = validateDuplicateMessage(existing, m)
+			}
 			return existing, false, lookupErr
 		} else if err != sql.ErrNoRows {
 			return nil, false, err
 		}
+	}
+	var active int
+	if err := tx.QueryRow(`SELECT 1 FROM conversations WHERE id=? AND archived_at IS NULL`, m.ConversationID).Scan(&active); err != nil {
+		return nil, false, fmt.Errorf("conversation is archived or unavailable")
 	}
 	res, err := tx.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
@@ -656,6 +732,9 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 		return nil, false, err
 	}
 	id, _ := res.LastInsertId()
+	if _, err := tx.Exec(`UPDATE messages SET request_hash=? WHERE id=?`, requestHash, id); err != nil {
+		return nil, false, err
+	}
 	if _, err := tx.Exec(`UPDATE conversations SET updated_at=CURRENT_TIMESTAMP WHERE id=?`, m.ConversationID); err != nil {
 		return nil, false, err
 	}
@@ -666,6 +745,16 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 			continue
 		}
 		seen[target] = true
+		// Ownership commits with the inbound job, before any async execution.
+		if raw, ok := strings.CutPrefix(target, "agent-inbound:"); ok {
+			agentID, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || agentID <= 0 {
+				return nil, false, fmt.Errorf("invalid inbound agent")
+			}
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO conversation_agent_threads(conversation_id,agent_id,thread_id) VALUES(?,?,?)`, m.ConversationID, agentID, conversationThreadID(m.ConversationID)); err != nil {
+				return nil, false, err
+			}
+		}
 		if _, err := tx.Exec(`INSERT INTO deliveries (message_id,target,next_attempt_at,updated_at)
 			VALUES (?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)`, id, target); err != nil {
 			return nil, false, err
@@ -680,7 +769,7 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 
 const messageCols = `id, conversation_id, role, content, agent_id, user_id, external_sender, thread_id,
 	status, phase, action_status, component_kind, severity, inbox_only, components_json, attachments_json,
-	metadata_json, client_message_id, source_app, callback_tool, created_at`
+	metadata_json, client_message_id, source_app, callback_tool, created_at, revision`
 
 func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var m Message
@@ -688,7 +777,7 @@ func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	var componentsJSON, attachmentsJSON, metadataJSON, created string
 	if err := row.Scan(&m.ID, &m.ConversationID, &m.Role, &m.Content, &m.AgentID, &m.UserID,
 		&m.ExternalSender, &m.ThreadID, &m.Status, &m.Phase, &m.ActionStatus, &m.ComponentKind, &m.Severity, &inboxOnly,
-		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &created); err != nil {
+		&componentsJSON, &attachmentsJSON, &metadataJSON, &m.ClientID, &m.SourceApp, &m.CallbackTool, &created, &m.Revision); err != nil {
 		return nil, err
 	}
 	m.InboxOnly = inboxOnly != 0
@@ -743,8 +832,12 @@ func (s *store) UpdateMessageComponents(id int64, components []Component) (*Mess
 	if err != nil {
 		return nil, err
 	}
-	if _, err := s.db.Exec(`UPDATE messages SET components_json = ? WHERE id = ?`, string(encoded), id); err != nil {
+	res, err := s.db.Exec(`UPDATE messages SET components_json = ? WHERE id = ? AND conversation_id IN (SELECT id FROM conversations WHERE archived_at IS NULL)`, string(encoded), id)
+	if err != nil {
 		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, fmt.Errorf("conversation unavailable or archived")
 	}
 	return s.GetMessage(id)
 }
@@ -765,7 +858,7 @@ func (s *store) ResolveApproval(id int64, components []Component, verdict, resul
 	res, err := tx.Exec(`
 		UPDATE messages
 		SET components_json=?, action_status=?
-		WHERE id=? AND component_kind=? AND action_status='pending'`, string(encoded), verdict, id, kindApproval)
+		WHERE id=? AND component_kind=? AND action_status='pending' AND conversation_id IN (SELECT id FROM conversations WHERE archived_at IS NULL)`, string(encoded), verdict, id, kindApproval)
 	if err != nil {
 		return nil, err
 	}

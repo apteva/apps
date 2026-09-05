@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -45,7 +46,7 @@ type sipSession struct {
 	cancel  context.CancelFunc
 
 	answerMu  sync.Mutex
-	endOnce   sync.Once
+	ended     atomic.Bool
 	mediaOnce sync.Once
 }
 
@@ -312,7 +313,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	sessionCtx, cancel := context.WithCancel(g.ctx)
 	session := &sipSession{
-		gateway: g, dialog: dialog, route: route, call: call, offer: offer,
+		gateway: g, dialog: dialog, route: &routeForCall, call: call, offer: offer,
 		ctx: sessionCtx, cancel: cancel,
 	}
 	dialog.OnState(func(state sip.DialogState) {
@@ -379,8 +380,9 @@ func (g *sipGateway) Reject(row *callRow) error {
 		return errors.New("direct SIP dialog is no longer active")
 	}
 	session.answerMu.Lock()
-	defer session.answerMu.Unlock()
-	if session.media != nil {
+	answered := session.media != nil
+	session.answerMu.Unlock()
+	if answered {
 		return errors.New("direct SIP call has already been answered")
 	}
 	if err := session.dialog.Respond(sip.StatusBusyHere, "Busy Here", nil); err != nil {
@@ -400,23 +402,30 @@ func (g *sipGateway) Hangup(row *callRow) error {
 
 func (s *sipSession) answer() error {
 	s.answerMu.Lock()
-	defer s.answerMu.Unlock()
+	if s.ended.Load() {
+		s.answerMu.Unlock()
+		return errors.New("SIP session ended")
+	}
 	if s.media != nil {
+		s.answerMu.Unlock()
 		return nil
 	}
 	media, err := openSIPRTPMedia(s.gateway.cfg, s.offer)
 	if err != nil {
+		s.answerMu.Unlock()
 		return err
 	}
 	answer, err := buildSIPMediaAnswer(s.gateway.cfg, s.offer, media.localPort, media.security)
 	if err != nil {
 		media.Close()
+		s.answerMu.Unlock()
 		return err
 	}
 	s.media = media
+	s.answerMu.Unlock()
+	// Dialog state callbacks may synchronously finish the session.
 	if err := s.dialog.RespondSDP(answer); err != nil {
-		s.media = nil
-		media.Close()
+		s.finish("local_error", err)
 		return err
 	}
 	return nil
@@ -453,7 +462,10 @@ func (s *sipSession) hangup() error {
 }
 
 func (s *sipSession) finish(leg string, cause error) {
-	s.endOnce.Do(func() {
+	if !s.ended.CompareAndSwap(false, true) {
+		return
+	}
+	func() {
 		s.cancel()
 		s.answerMu.Lock()
 		media := s.media
@@ -482,7 +494,7 @@ func (s *sipSession) finish(leg string, cause error) {
 			projectCtx.Logger().Warn("kill direct SIP call thread", "call", row.ID, "leg", leg, "err", err)
 		}
 		_ = s.dialog.Close()
-	})
+	}()
 }
 
 func (g *sipGateway) addSession(session *sipSession) {

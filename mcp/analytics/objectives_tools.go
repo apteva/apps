@@ -15,7 +15,7 @@ func (a *App) objectiveTools() []sdk.Tool {
 			"aggregation":        map[string]any{"type": "string", "enum": []string{"count", "distinct", "sum", "sum_money", "average", "min", "max", "latest", "change"}},
 			"app":                map[string]any{"type": "string"},
 			"topic":              map[string]any{"type": "string"},
-			"source":             map[string]any{"type": "string", "enum": []string{"track", "auto"}},
+			"source":             map[string]any{"type": "string", "enum": []string{"track", "auto", "web", "bus", "rollup"}},
 			"value":              map[string]any{"type": "string", "description": "Numeric field for sum, sum_money, average, min, max, latest or change."},
 			"by":                 map[string]any{"type": "string", "description": "Field for distinct, for example session_id or props.subscriber_id."},
 			"where":              map[string]any{"type": "object", "description": "Equality filters keyed by props.X."},
@@ -133,11 +133,11 @@ func (a *App) toolObjectiveCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	o, err := createObjective(ctx.AppDB(), projectID, in)
+	o, err := createObjective(toolWriter(ctx), projectID, in)
 	if err != nil {
 		return nil, err
 	}
-	progress, err := evaluateObjective(ctx.AppDB(), projectID, o.ID)
+	progress, err := toolObjectiveProgress(ctx, projectID, o.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func (a *App) toolObjectiveGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	o, err := getObjective(ctx.AppDB(), projectID, id)
+	o, err := getObjective(toolReader(ctx), projectID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (a *App) toolObjectiveSearch(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	rows, err := listObjectives(ctx.AppDB(), projectID, stringArg(args, "status"), stringArg(args, "search"), boolArg(args, "include_archived"), intArg(args, "limit"))
+	rows, err := listObjectives(toolReader(ctx), projectID, stringArg(args, "status"), stringArg(args, "search"), boolArg(args, "include_archived"), intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +181,7 @@ func (a *App) toolObjectiveUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	current, err := getObjective(ctx.AppDB(), projectID, id)
+	current, err := getObjective(toolWriter(ctx), projectID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (a *App) toolObjectiveUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if _, ok := args["targets"]; !ok {
 		in.Targets = nil
 	}
-	o, err := updateObjective(ctx.AppDB(), projectID, id, in)
+	o, err := updateObjective(toolWriter(ctx), projectID, id, in)
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +223,7 @@ func (a *App) toolObjectiveArchive(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	if err := archiveObjective(ctx.AppDB(), projectID, id); err != nil {
+	if err := archiveObjective(toolWriter(ctx), projectID, id); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true}, nil
@@ -238,7 +238,7 @@ func (a *App) toolObjectiveProgress(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	progress, err := evaluateObjective(ctx.AppDB(), projectID, id)
+	progress, err := toolObjectiveProgress(ctx, projectID, id)
 	if err != nil {
 		return nil, err
 	}

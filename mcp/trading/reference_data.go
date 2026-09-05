@@ -9,7 +9,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -831,7 +833,18 @@ func syncAlpacaAssets(ctx *sdk.AppCtx, connectionID int64, result *referenceSync
 			}
 			class := normalizeAssetClass(refString(asset, "class", "asset_class"), symbol)
 			security := &Security{ID: securityID, AssetClass: class, Name: refString(asset, "name"), Status: status, PrimaryCurrency: strings.ToUpper(refString(asset, "currency")), Source: referenceProviderAlpaca}
-			listing := &SecurityListing{ProviderAssetID: assetID, Venue: venue, Symbol: symbol, Currency: security.PrimaryCurrency, ValidTo: validTo, Active: active, Source: referenceProviderAlpaca}
+			listing := &SecurityListing{ProviderAssetID: assetID, Venue: venue, Symbol: symbol, Currency: security.PrimaryCurrency, ValidFrom: today, ValidTo: validTo, Active: active, Source: referenceProviderAlpaca}
+			var priorStart string
+			var priorActive bool
+			if err := ctx.AppDB().QueryRow(`SELECT valid_from,active FROM security_listings WHERE security_id=? AND venue=? AND symbol=? AND source=? ORDER BY valid_from DESC LIMIT 1`, securityID, venue, symbol, referenceProviderAlpaca).Scan(&priorStart, &priorActive); err == nil {
+				if priorActive == active {
+					listing.ValidFrom = priorStart
+				} else {
+					if _, err := ctx.AppDB().Exec(`UPDATE security_listings SET valid_to=? WHERE security_id=? AND venue=? AND symbol=? AND source=? AND valid_to=''`, today, securityID, venue, symbol, referenceProviderAlpaca); err != nil {
+						return err
+					}
+				}
+			}
 			if err := dbUpsertSecurity(ctx.AppDB(), security, listing, map[string]string{"alpaca_asset_id": assetID, "isin": isin, "cusip": cusip}); err != nil {
 				return err
 			}
@@ -857,14 +870,37 @@ func syncAlpacaAssets(ctx *sdk.AppCtx, connectionID int64, result *referenceSync
 	}
 	// Snapshot-derived membership is truthful only from the first observed day.
 	rows, err := ctx.AppDB().Query(`SELECT security_id FROM universe_memberships WHERE universe_id=? AND valid_to=''`, referenceUniverseAlpaca)
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if rows.Scan(&id) == nil && !seenActive[id] {
-				_, _ = ctx.AppDB().Exec(`UPDATE universe_memberships SET valid_to=?,updated_at=CURRENT_TIMESTAMP WHERE universe_id=? AND security_id=? AND valid_to=''`, today, referenceUniverseAlpaca, id)
-			}
+	if err != nil {
+		return err
+	}
+	var removed []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
 		}
+		if !seenActive[id] {
+			removed = append(removed, id)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range removed {
+		if _, err := tx.Exec(`UPDATE universe_memberships SET valid_to=?,updated_at=CURRENT_TIMESTAMP WHERE universe_id=? AND security_id=? AND valid_to=''`, today, referenceUniverseAlpaca, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
 	}
 	_ = dbRecordReferenceIssue(ctx.AppDB(), referenceProviderAlpaca, "historical-universe-limited", "warning", "survivorship", "Alpaca asset snapshots provide point-in-time universe coverage only from the first successful sync; earlier backtests remain explicit-symbol and are marked survivorship-unverified.", map[string]any{"coverage_starts": today})
 	attachStableSecurityIDs(ctx.AppDB())
@@ -1149,6 +1185,13 @@ func applyPendingCashEntitlements(db *sql.DB, portfolio *Portfolio, today string
 		if err != nil {
 			return err
 		}
+		var latest int
+		if err := db.QueryRow(`SELECT MAX(revision) FROM corporate_actions WHERE provider=? AND provider_event_id=?`, key.provider, key.id).Scan(&latest); err != nil {
+			return err
+		}
+		if latest != key.revision || action.Status == "cancelled" || action.Status == "deleted" {
+			continue
+		}
 		if action.PayableDate != "" && action.PayableDate <= today {
 			if err := applyCashDistribution(db, portfolio, action, today); err != nil {
 				return err
@@ -1212,19 +1255,18 @@ func dueDate(action *CorporateAction) string {
 }
 
 func applyCashDistribution(db *sql.DB, portfolio *Portfolio, action *CorporateAction, today string) error {
+	if action.Currency != "" && !strings.EqualFold(action.Currency, "USD") {
+		return errors.New("distribution requires quote-currency conversion")
+	}
 	if action.ExDate == "" || action.ExDate > today || action.CashAmount <= 0 {
 		return nil
 	}
 	var entitled float64
 	err := db.QueryRow(`SELECT entitled_quantity FROM corporate_action_entitlements WHERE portfolio_id=? AND provider=? AND provider_event_id=? AND provider_revision=? AND symbol=?`, portfolio.ID, action.Provider, action.ProviderEventID, action.Revision, action.Symbol).Scan(&entitled)
 	if err == sql.ErrNoRows {
-		if action.ExDate < today {
-			_ = dbRecordReferenceIssue(db, action.Provider, "missed-entitlement:"+action.ProviderEventID+":"+strconv.FormatInt(portfolio.ID, 10), "warning", "accounting", "Distribution arrived after its ex-date; historical entitlement was not inferred from current holdings.", map[string]any{"portfolio_id": portfolio.ID, "symbol": action.Symbol, "ex_date": action.ExDate})
-			return nil
-		} // Never infer a historical entitlement from today's holdings.
-		_ = db.QueryRow(`SELECT COALESCE(SUM(qty),0) FROM positions WHERE portfolio_id=? AND symbol=?`, portfolio.ID, action.Symbol).Scan(&entitled)
-		if entitled <= 0 {
-			return nil
+		entitled, err = historicalQuantity(db, portfolio.ID, action.Symbol, action.ExDate)
+		if err != nil {
+			return err
 		}
 		_, err = db.Exec(`INSERT INTO corporate_action_entitlements(portfolio_id,provider,provider_event_id,provider_revision,symbol,entitled_quantity) VALUES(?,?,?,?,?,?)`, portfolio.ID, action.Provider, action.ProviderEventID, action.Revision, action.Symbol, entitled)
 	}
@@ -1268,22 +1310,41 @@ func applySplit(db *sql.DB, portfolio *Portfolio, action *CorporateAction) error
 	if action.RatioNumerator <= 0 || action.RatioDenominator <= 0 {
 		return fmt.Errorf("invalid split ratio")
 	}
-	ratio := action.RatioNumerator / action.RatioDenominator
-	var qty, avg float64
-	err := db.QueryRow(`SELECT qty,avg_cost FROM positions WHERE portfolio_id=? AND symbol=? AND COALESCE(outcome,'')=''`, portfolio.ID, action.Symbol).Scan(&qty, &avg)
-	if err == sql.ErrNoRows {
-		return nil
-	}
-	if err != nil {
+	var applied int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM corporate_action_postings WHERE portfolio_id=? AND provider=? AND provider_event_id=? AND provider_revision=? AND effect_type='split'`, portfolio.ID, action.Provider, action.ProviderEventID, action.Revision).Scan(&applied); err != nil {
 		return err
 	}
-	newQty := qty * ratio
-	newAvg := avg / ratio
+	if applied > 0 {
+		return nil
+	}
+	ratio := action.RatioNumerator / action.RatioDenominator
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var qty, avg float64
+	err = tx.QueryRow(`SELECT qty,avg_cost FROM positions WHERE portfolio_id=? AND symbol=? AND COALESCE(outcome,'')=''`, portfolio.ID, action.Symbol).Scan(&qty, &avg)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	var eligible float64
+	err = tx.QueryRow(`SELECT qty FROM position_history WHERE portfolio_id=? AND symbol=? AND outcome='' AND julianday(observed_at)<julianday(?) ORDER BY julianday(observed_at) DESC,id DESC LIMIT 1`, portfolio.ID, action.Symbol, dueDate(action)+"T00:00:00Z").Scan(&eligible)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if eligible <= 0 {
+		_, err = insertPostingTx(tx, portfolio, action, "split", action.Symbol, "", 0, 0, 0, map[string]any{"not_entitled": true})
+		if err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if math.Abs(eligible-qty) > 1e-9 {
+		return errors.New("split requires historical reconciliation: holdings changed after effective date")
+	}
+	newQty := qty * ratio
+	newAvg := avg / ratio
 	inserted, err := insertPostingTx(tx, portfolio, action, "split", action.Symbol, "", newQty-qty, 0, 0, map[string]any{"old_quantity": qty, "new_quantity": newQty, "old_avg_cost": avg, "new_avg_cost": newAvg, "ratio": ratio})
 	if err != nil {
 		return err
@@ -1367,19 +1428,19 @@ func applySymbolChange(db *sql.DB, portfolio *Portfolio, action *CorporateAction
 }
 
 func applyWorthlessRemoval(db *sql.DB, portfolio *Portfolio, action *CorporateAction) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	var qty, avg float64
-	err := db.QueryRow(`SELECT qty,avg_cost FROM positions WHERE portfolio_id=? AND symbol=? AND COALESCE(outcome,'')=''`, portfolio.ID, action.Symbol).Scan(&qty, &avg)
+	err = tx.QueryRow(`SELECT qty,avg_cost FROM positions WHERE portfolio_id=? AND symbol=? AND COALESCE(outcome,'')=''`, portfolio.ID, action.Symbol).Scan(&qty, &avg)
 	if err == sql.ErrNoRows {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	inserted, err := insertPostingTx(tx, portfolio, action, "worthless_removal", action.Symbol, "", -qty, 0, -qty*avg, map[string]any{"quantity_removed": qty, "cost_basis_removed": qty * avg})
 	if err != nil {
 		return err
@@ -1499,7 +1560,9 @@ func referenceManifest(db *sql.DB, symbols []string, start, end, adjustment stri
 	if universe, ok := status["universe"].(map[string]any); ok {
 		coverageStart, _ = universe["coverage_start"].(string)
 	}
-	manifest["survivorship_safe"] = coverageStart != "" && start >= coverageStart
+	manifest["survivorship_safe"] = false
+	manifest["membership_coverage_start"] = coverageStart
+	manifest["survivorship_detail"] = "snapshot membership is not complete point-in-time coverage"
 	manifest["universe_id"] = referenceUniverseAlpaca
 	raw, _ := json.Marshal(manifest)
 	manifest["manifest_sha256"] = fmt.Sprintf("%x", sha256.Sum256(raw))

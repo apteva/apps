@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,15 +24,24 @@ const buildTimeout = 2 * time.Minute
 // paths stay stable for the process lifetime — and so each test's
 // fresh AppCtx gets its own base instead of colliding on fn-1/v1.
 func poolBuildBase() (string, error) {
-	if globalPool == nil {
+	p := currentPool()
+	if p == nil {
 		return "", errors.New("function worker pool not initialised")
 	}
-	return globalPool.buildBase, nil
+	return p.buildBase, nil
 }
 
 // versionDir is the deterministic artifact path for one version.
 func versionDir(base string, v *FunctionVersion) string {
-	return filepath.Join(base, fmt.Sprintf("fn-%d", v.FunctionID), fmt.Sprintf("v%d", v.Version))
+	return filepath.Join(base, v.ArtifactKey, fmt.Sprintf("v%d-%s", v.Version, artifactHash(v)[:16]))
+}
+
+var harnessFingerprint = sync.OnceValue(func() string {
+	return hashSource([]byte(string(nodeHarness) + string(goHarness) + runtime.Version() + runtime.GOOS + runtime.GOARCH + toolchainFingerprint()))
+})
+
+func artifactHash(v *FunctionVersion) string {
+	return hashSource([]byte(v.SourceHash + "\x00" + v.PackageJSON + "\x00" + harnessFingerprint()))
 }
 
 // ensureBuilt makes sure version v's artifact dir exists and is fully
@@ -42,22 +52,38 @@ func versionDir(base string, v *FunctionVersion) string {
 // from both deploy and the pool's cold-start path (e.g. a rebuild
 // after a restart cleared an ephemeral build base).
 func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) (string, error) {
+	return ensureBuiltContext(context.Background(), base, v, spec, src)
+}
+func ensureBuiltContext(ctx context.Context, base string, v *FunctionVersion, spec runtimeSpec, src []byte) (string, error) {
+	p := poolFrom(ctx)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	dir := versionDir(base, v)
-	lock := buildLockFor(dir)
-	lock.Lock()
-	defer lock.Unlock()
+	if p != nil {
+		if _, ok := p.artifacts.Load(dir); ok {
+			return dir, nil
+		}
+	}
+	release, err := lockBuild(ctx, dir)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 	marker := filepath.Join(dir, ".ready")
-	if contents, err := os.ReadFile(marker); err == nil && string(contents) == v.SourceHash {
-		_ = makeTreeReadOnly(dir)
+	if contents, err := os.ReadFile(marker); err == nil && string(contents) == artifactHash(v) {
+		if p != nil {
+			p.artifacts.Store(dir, true)
+		}
 		return dir, nil
 	}
-	if globalPool != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	if p != nil {
+		ctx, cancel := context.WithTimeout(ctx, buildTimeout)
 		defer cancel()
-		if err := globalPool.acquireBuild(ctx); err != nil {
+		if err := p.acquireBuild(ctx); err != nil {
 			return "", fmt.Errorf("build queue: %w", err)
 		}
-		defer globalPool.releaseBuild()
+		defer p.releaseBuild()
 	}
 	parent := filepath.Dir(dir)
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -74,11 +100,25 @@ func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) 
 	if err := spec.Stage(tmp); err != nil {
 		return "", fmt.Errorf("stage: %w", err)
 	}
-	if err := spec.Build(tmp, v.PackageJSON); err != nil {
+	if v.PackageLock != "" {
+		if err := os.WriteFile(filepath.Join(tmp, "package-lock.json"), []byte(v.PackageLock), 0600); err != nil {
+			return "", err
+		}
+	}
+	if err := spec.Build(ctx, tmp, v.PackageJSON); err != nil {
+		return "", err
+	}
+	_ = removeTree(filepath.Join(tmp, ".cache"))
+	_ = removeTree(filepath.Join(tmp, ".sandbox-home"))
+	_ = removeTree(filepath.Join(tmp, ".sandbox-tmp"))
+	if _, err := treeBytes(tmp, int64(envInt("APTEVA_FUNCTIONS_ARTIFACT_MB", 512, 16, 8192))<<20); err != nil {
+		return "", err
+	}
+	if _, err := treeBytes(base, int64(envInt("APTEVA_FUNCTIONS_TOTAL_ARTIFACT_MB", 4096, 64, 1048576))<<20); err != nil {
 		return "", err
 	}
 	// Marker written last — its presence means "fully built".
-	if err := os.WriteFile(filepath.Join(tmp, ".ready"), []byte(v.SourceHash), 0o400); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, ".ready"), []byte(artifactHash(v)), 0o400); err != nil {
 		return "", err
 	}
 	if err := makeTreeReadOnly(tmp); err != nil {
@@ -88,24 +128,57 @@ func ensureBuilt(base string, v *FunctionVersion, spec runtimeSpec, src []byte) 
 	if err := os.Rename(tmp, dir); err != nil {
 		return "", err
 	}
+	if p != nil {
+		p.artifacts.Store(dir, true)
+	}
 	return dir, nil
 }
 
-var buildLocks sync.Map
+// Reference-counted, cancellation-aware singleflight; completed versions do not leak locks.
+var buildLocks = struct {
+	sync.Mutex
+	m map[string]*buildGate
+}{m: map[string]*buildGate{}}
 
-func buildLockFor(key string) *sync.Mutex {
-	lock, _ := buildLocks.LoadOrStore(key, &sync.Mutex{})
-	return lock.(*sync.Mutex)
+type buildGate struct {
+	token chan struct{}
+	refs  int
+}
+
+func lockBuild(ctx context.Context, key string) (func(), error) {
+	buildLocks.Lock()
+	g := buildLocks.m[key]
+	if g == nil {
+		g = &buildGate{token: make(chan struct{}, 1)}
+		buildLocks.m[key] = g
+	}
+	g.refs++
+	buildLocks.Unlock()
+	drop := func() {
+		buildLocks.Lock()
+		g.refs--
+		if g.refs == 0 {
+			delete(buildLocks.m, key)
+		}
+		buildLocks.Unlock()
+	}
+	select {
+	case g.token <- struct{}{}:
+		return func() { <-g.token; drop() }, nil
+	case <-ctx.Done():
+		drop()
+		return nil, ctx.Err()
+	}
 }
 
 // runBuildCmd runs a runtime build step in dir, capturing combined
 // output for the error message. Bounded by buildTimeout.
-func runBuildCmd(dir, label, bin string, args ...string) error {
+func runBuildCmd(ctx context.Context, dir, label, bin string, args ...string) error {
 	resolved, err := exec.LookPath(bin)
 	if err != nil {
 		return fmt.Errorf("%s needs %q on PATH", label, bin)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout)
+	ctx, cancel := context.WithTimeout(ctx, buildTimeout)
 	defer cancel()
 	tmpDir := filepath.Join(dir, ".sandbox-tmp")
 	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
@@ -119,10 +192,18 @@ func runBuildCmd(dir, label, bin string, args ...string) error {
 		return err
 	}
 	cmd = commandWithContext(ctx, cmd)
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
 	cmd.Dir = dir
 	cmd.Env = buildCmdEnv(dir, tmpDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 2 * time.Second
+	stopDisk := watchDisk(ctx, dir, int64(envInt("APTEVA_FUNCTIONS_BUILD_DISK_MB", 1024, 64, 8192))<<20, cancel)
+	defer stopDisk()
 	out := newCapBuffer(16 * 1024)
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
@@ -130,11 +211,13 @@ func runBuildCmd(dir, label, bin string, args ...string) error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 			cleanupSandboxProcess(cmd.Process.Pid, sandboxBuild)
 		}
 		return fmt.Errorf("%s failed: %v\n%s", label, err, out.String())
 	}
 	if cmd.Process != nil {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		cleanupSandboxProcess(cmd.Process.Pid, sandboxBuild)
 	}
 	return nil
@@ -166,6 +249,7 @@ func buildCmdEnv(dir, tmpDir string) []string {
 	home := filepath.Join(dir, ".sandbox-home")
 	cache := filepath.Join(dir, ".cache")
 	goCache := filepath.Join(cache, "go-build")
+
 	for _, path := range []string{home, cache, goCache, tmpDir} {
 		_ = os.MkdirAll(path, 0o700)
 	}
@@ -181,13 +265,19 @@ func buildCmdEnv(dir, tmpDir string) []string {
 	)
 }
 
-func runNpmInstall(dir string) error {
-	return runBuildCmd(dir, "npm install", "npm",
-		"install", "--no-audit", "--no-fund", "--loglevel", "error", "--no-package-lock")
+func runNpmInstall(ctx context.Context, dir string) error {
+	action := "install"
+	if _, err := os.Stat(filepath.Join(dir, "package-lock.json")); err == nil {
+		action = "ci"
+	}
+	return runBuildCmd(ctx, dir, "npm "+action, "npm", action, "--no-audit", "--no-fund", "--loglevel", "error")
 }
 
-func runGoBuild(dir string) error {
-	return runBuildCmd(dir, "go build", "go", "build", "-o", "worker", ".")
+func runGoBuild(ctx context.Context, dir string) error {
+	if err := seedGoCache(ctx, filepath.Join(dir, ".cache", "go-build")); err != nil {
+		return err
+	}
+	return runBuildCmd(ctx, dir, "go build", "go", "build", "-trimpath", "-o", "worker", ".")
 }
 
 func makeTreeReadOnly(root string) error {
@@ -254,3 +344,25 @@ func removeTree(root string) error {
 	})
 	return os.RemoveAll(root)
 }
+
+// Binary identity changes on toolchain upgrades without spawning a process on
+// every invocation. One snapshot is taken per sidecar process.
+var toolchainFingerprint = sync.OnceValue(func() string {
+	var parts []string
+	for _, name := range []string{"node", "go", "npm"} {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			continue
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%d:%d", name, resolved, info.Size(), info.ModTime().UnixNano()))
+	}
+	return hashSource([]byte(strings.Join(parts, "\n")))
+})

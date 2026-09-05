@@ -27,6 +27,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -60,179 +61,115 @@ func (a *App) refreshSendersFromProviders(ctx *sdk.AppCtx, pid string) error {
 // inheritance mailboxes whose parent identity is still alive (the
 // parent_identity_id FK gives us a clean check; no more string-suffix
 // gymnastics from v0.11.3).
+type sesInventoryIdentity struct {
+	IdentityName       string `json:"IdentityName"`
+	IdentityType       string `json:"IdentityType"`
+	SendingEnabled     bool   `json:"SendingEnabled"`
+	VerificationStatus string `json:"VerificationStatus"`
+}
+
 func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) error {
-	const maxIdentitiesToList = 1000
-
-	knownSenders, err := dbListSenders(ctx.AppDB(), pid, "email", false)
+	known, err := dbListSenders(ctx.AppDB(), pid, "email", false)
 	if err != nil {
-		return fmt.Errorf("list local senders: %w", err)
+		return err
 	}
-	knownIdentities, err := dbListIdentities(ctx.AppDB(), pid, "email_domain")
+	anchors, err := dbListIdentities(ctx.AppDB(), pid, "email_domain")
 	if err != nil {
-		return fmt.Errorf("list local identities: %w", err)
+		return err
 	}
-
-	sesSenderSet := map[string]bool{}
-	for _, r := range knownSenders {
-		if r.Provider == "aws-ses" && r.Kind == "email_mailbox" {
-			sesSenderSet[r.Address] = true
-		}
-	}
-	sesIdentitySet := map[string]bool{}
-	for _, r := range knownIdentities {
-		if r.Provider == "aws-ses" {
-			sesIdentitySet[r.Address] = true
-		}
-	}
-	if len(sesSenderSet) == 0 && len(sesIdentitySet) == 0 {
+	if len(known)+len(anchors) == 0 {
 		return nil
 	}
-
-	seenMailboxes := map[string]bool{}
-	seenDomains := map[string]bool{}
-	nextToken := ""
-	for {
+	inventory := map[string]sesInventoryIdentity{}
+	tokens := map[string]bool{}
+	token := ""
+	for page := 0; ; page++ {
+		if page >= 1000 {
+			return fmt.Errorf("SES inventory incomplete: page limit reached")
+		}
 		args := map[string]any{"PageSize": 100}
-		if nextToken != "" {
-			args["NextToken"] = nextToken
+		if token != "" {
+			args["NextToken"] = token
 		}
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_identities", args)
 		if err != nil {
-			return fmt.Errorf("ses list_identities: %w", err)
+			return err
 		}
 		if res == nil || !res.Success {
-			body := ""
-			if res != nil {
-				body = string(res.Data)
-			}
-			return fmt.Errorf("ses list_identities non-2xx: %s", truncate(body, 400))
+			return fmt.Errorf("SES inventory: %s", truncateResData(res))
 		}
-		var raw struct {
-			EmailIdentities []struct {
-				IdentityName       string `json:"IdentityName"`
-				IdentityType       string `json:"IdentityType"`
-				SendingEnabled     bool   `json:"SendingEnabled"`
-				VerificationStatus string `json:"VerificationStatus"`
-			} `json:"EmailIdentities"`
-			NextToken string `json:"NextToken"`
+		var data struct {
+			EmailIdentities *[]sesInventoryIdentity `json:"EmailIdentities"`
+			NextToken       string                  `json:"NextToken"`
 		}
-		_ = json.Unmarshal(res.Data, &raw)
-		for _, id := range raw.EmailIdentities {
-			addr := strings.ToLower(id.IdentityName)
-			verified := strings.EqualFold(id.VerificationStatus, "SUCCESS")
-			internalStatus := sesStatusToInternal(id.VerificationStatus)
-			if id.IdentityType == "DOMAIN" || id.IdentityType == "MANAGED_DOMAIN" {
-				seenDomains[addr] = true
-				if !sesIdentitySet[addr] {
-					continue
-				}
-				_, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
-					ProjectID:          pid,
-					Kind:               "email_domain",
-					Address:            addr,
-					Provider:           "aws-ses",
-					ProviderIdentityID: addr,
-					Verified:           verified,
-					VerificationStatus: internalStatus,
-					DkimStatus:         id.VerificationStatus,
-					MarkSyncedNow:      true,
-				})
-				if err != nil {
-					ctx.Logger().Warn("upsert identity during ses refresh", "addr", addr, "err", err)
-				}
-				continue
-			}
-			seenMailboxes[addr] = true
-			if !sesSenderSet[addr] {
-				continue
-			}
-			_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
-				ProjectID:          pid,
-				Channel:            "email",
-				Address:            addr,
-				Kind:               "email_mailbox",
-				Provider:           "aws-ses",
-				ProviderIdentityID: addr,
-				Verified:           verified,
-				VerificationStatus: internalStatus,
-				SendingEnabled:     id.SendingEnabled,
-				DkimStatus:         id.VerificationStatus,
-				MarkSyncedNow:      true,
-			})
-			if err != nil {
-				ctx.Logger().Warn("upsert sender during ses refresh", "addr", addr, "err", err)
-			}
+		if err := json.Unmarshal(res.Data, &data); err != nil {
+			return err
 		}
-		totalSeen := len(seenMailboxes) + len(seenDomains)
-		if raw.NextToken == "" || totalSeen >= maxIdentitiesToList {
+		if data.EmailIdentities == nil {
+			return fmt.Errorf("SES inventory missing EmailIdentities")
+		}
+		for _, v := range *data.EmailIdentities {
+			if v.IdentityName == "" || v.IdentityType == "" {
+				return fmt.Errorf("SES inventory contains invalid identity")
+			}
+			inventory[strings.ToLower(v.IdentityName)] = v
+		}
+		token = data.NextToken
+		if token == "" {
 			break
 		}
-		nextToken = raw.NextToken
+		if tokens[token] {
+			return fmt.Errorf("SES inventory repeated pagination token")
+		}
+		tokens[token] = true
 	}
-
-	// Soft-delete senders missing upstream — except inheritance
-	// mailboxes whose parent identity is alive. The FK + the seen
-	// sets together cover the two cases (parent persisted locally vs.
-	// parent only visible at SES via this refresh's list).
-	for _, r := range knownSenders {
-		if r.Provider != "aws-ses" || seenMailboxes[r.Address] || r.DeletedAt != nil {
+	// Only change state after every page has been validated. Preserve local wiring.
+	for _, r := range anchors {
+		if r.Provider != "aws-ses" {
 			continue
 		}
-		if r.Kind == "email_mailbox" && r.ParentIdentityID != nil {
-			parent, _ := dbGetIdentity(ctx.AppDB(), *r.ParentIdentityID)
-			if parent != nil && parent.DeletedAt == nil {
-				// Inheritance mailbox: its per-address SES identity is
-				// gone (so it's not in seenMailboxes), but it still sends
-				// via the parent domain's DKIM. Re-stamp its verification
-				// state from the live parent instead of leaving a stale
-				// FAILED/pending value frozen from when the per-address
-				// identity last existed.
-				if r.Verified != parent.Verified ||
-					r.VerificationStatus != parent.VerificationStatus ||
-					r.DkimStatus != parent.DkimStatus {
-					if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
-						ProjectID:          pid,
-						Channel:            r.Channel,
-						Address:            r.Address,
-						Kind:               "email_mailbox",
-						Provider:           "aws-ses",
-						ProviderIdentityID: r.Address,
-						Verified:           parent.Verified,
-						VerificationStatus: parent.VerificationStatus,
-						DkimStatus:         parent.DkimStatus,
-						SendingEnabled:     true,
-						ParentIdentityID:   parent.ID,
-						MarkSyncedNow:      true,
-					}); err != nil {
-						ctx.Logger().Warn("re-stamp inheritance mailbox", "addr", r.Address, "err", err)
-					}
+		v, ok := inventory[r.Address]
+		if !ok {
+			if _, err := ctx.AppDB().Exec(`UPDATE identities SET verified=0,verification_status='missing',last_synced_at=CURRENT_TIMESTAMP,last_sync_error='' WHERE id=?`, r.ID); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{ProjectID: pid, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+			return err
+		}
+	}
+	for _, r := range known {
+		if r.Provider != "aws-ses" {
+			continue
+		}
+		v, ok := inventory[r.Address]
+		parentID := int64(0)
+		if r.ParentIdentityID != nil {
+			parentID = *r.ParentIdentityID
+			parent, err := dbGetIdentity(ctx.AppDB(), parentID)
+			if err != nil {
+				return err
+			}
+			if parent != nil {
+				v, ok = inventory[parent.Address]
+			}
+		} else if !ok {
+			v, ok = inventory[parentDomainOf(r.Address)]
+		}
+		if !ok {
+			if parentID != 0 {
+				if _, err := ctx.AppDB().Exec(`UPDATE senders SET verified=0,sending_enabled=0,verification_status='missing',last_synced_at=CURRENT_TIMESTAMP,last_sync_error='' WHERE id=?`, r.ID); err != nil {
+					return err
 				}
-				continue
+			} else if err := dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address); err != nil {
+				return err
 			}
-		}
-		if r.Kind == "email_mailbox" {
-			// Edge case: FK never got set (pre-v0.12 row or inheritance
-			// row whose parent didn't persist). Fall back to seenDomains
-			// from this refresh so we don't wipe a legit mailbox.
-			if seenDomains[parentDomainOf(r.Address)] {
-				continue
-			}
-		}
-		_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
-	}
-
-	// Soft-delete identities missing upstream — only when no active
-	// senders inherit from them. Killing an anchor while mailboxes
-	// still depend on it would orphan those mailboxes.
-	for _, r := range knownIdentities {
-		if r.Provider != "aws-ses" || seenDomains[r.Address] || r.DeletedAt != nil {
 			continue
 		}
-		n, _ := dbCountSendersForIdentity(ctx.AppDB(), r.ID)
-		if n > 0 {
-			continue
+		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: r.Channel, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, SendingEnabled: v.SendingEnabled, ParentIdentityID: parentID, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+			return err
 		}
-		_ = dbSoftDeleteIdentity(ctx.AppDB(), pid, r.Kind, r.Address)
 	}
 	return nil
 }
@@ -268,71 +205,130 @@ func sesStatusToInternal(s string) string {
 // not already tracked locally are ignored; local rows whose number
 // didn't come back from Twilio are soft-deleted.
 func (a *App) refreshTwilioNumbers(ctx *sdk.AppCtx, pid string, connID int64) error {
-	// Collect known Twilio numbers across the channels we surface
-	// them on (sms + whatsapp share the same upstream identity).
-	knownRows, err := dbListSenders(ctx.AppDB(), pid, "", false)
-	if err != nil {
-		return fmt.Errorf("list local senders: %w", err)
-	}
-	known := map[string]bool{}
-	for _, r := range knownRows {
-		if r.Provider == "twilio" {
-			known[r.Address] = true
+	var first error
+	for _, channel := range []string{channelSMS, channelWhatsApp} {
+		if err := a.refreshTwilioChannel(ctx, pid, connID, channel); err != nil && first == nil {
+			first = err
 		}
 	}
-	if len(known) == 0 {
+	return first
+}
+
+// Collect and validate every page before any local mutation. Only PageToken is
+// extracted from provider pagination URLs; we never fetch arbitrary next URLs.
+func twilioInventory(ctx *sdk.AppCtx, connID int64, channel string) ([]map[string]any, error) {
+	tool, key := "list_phone_numbers", "incoming_phone_numbers"
+	if channel == channelWhatsApp {
+		tool, key = "list_whatsapp_senders", "senders"
+	}
+	all := []map[string]any{}
+	token := ""
+	seen := map[string]bool{}
+	for page := 0; ; page++ {
+		if page >= 1000 {
+			return nil, fmt.Errorf("Twilio inventory incomplete: page limit reached")
+		}
+		args := map[string]any{"PageSize": 100}
+		if token != "" {
+			args["PageToken"] = token
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, args)
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, fmt.Errorf("%s: %s", tool, truncateResData(res))
+		}
+		var root map[string]json.RawMessage
+		if err := json.Unmarshal(res.Data, &root); err != nil {
+			return nil, err
+		}
+		raw, ok := root[key]
+		if !ok {
+			return nil, fmt.Errorf("%s missing %s inventory", tool, key)
+		}
+		var rows []map[string]any
+		if err := json.Unmarshal(raw, &rows); err != nil || rows == nil {
+			return nil, fmt.Errorf("%s invalid inventory array", tool)
+		}
+		for _, row := range rows {
+			if firstStringField(row, "sid") == "" || firstStringField(row, "phone_number", "sender_id") == "" {
+				return nil, fmt.Errorf("%s malformed sender", tool)
+			}
+		}
+		all = append(all, rows...)
+		var next string
+		if raw, ok := root["next_page_uri"]; ok {
+			if err := json.Unmarshal(raw, &next); err != nil {
+				return nil, fmt.Errorf("invalid Twilio next page: %w", err)
+			}
+		}
+		var meta struct {
+			Next string `json:"next_page_url"`
+		}
+		if raw, ok := root["meta"]; ok {
+			if err := json.Unmarshal(raw, &meta); err != nil {
+				return nil, err
+			}
+		}
+		if meta.Next != "" {
+			next = meta.Next
+		}
+		if next == "" {
+			return all, nil
+		}
+		u, err := url.Parse(next)
+		if err != nil {
+			return nil, err
+		}
+		token = u.Query().Get("PageToken")
+		if token == "" || seen[token] {
+			return nil, fmt.Errorf("%s invalid pagination token", tool)
+		}
+		seen[token] = true
+	}
+}
+
+func (a *App) refreshTwilioChannel(ctx *sdk.AppCtx, pid string, connID int64, channel string) error {
+	known, err := dbListSenders(ctx.AppDB(), pid, channel, false)
+	if err != nil {
+		return err
+	}
+	hasTwilio := false
+	for _, r := range known {
+		if r.Provider == "twilio" {
+			hasTwilio = true
+		}
+	}
+	if !hasTwilio {
 		return nil
 	}
-
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_phone_numbers", map[string]any{
-		"PageSize": 1000,
-	})
+	rows, err := twilioInventory(ctx, connID, channel)
 	if err != nil {
-		return fmt.Errorf("twilio list_phone_numbers: %w", err)
+		return err
 	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return fmt.Errorf("twilio list_phone_numbers non-2xx: %s", truncate(body, 400))
+	byAddress := map[string]map[string]any{}
+	for _, r := range rows {
+		byAddress[stripScheme(firstStringField(r, "phone_number", "sender_id"))] = r
 	}
-	var listed struct {
-		IncomingPhoneNumbers []struct {
-			SID         string `json:"sid"`
-			PhoneNumber string `json:"phone_number"`
-			SmsURL      string `json:"sms_url"`
-		} `json:"incoming_phone_numbers"`
-	}
-	_ = json.Unmarshal(res.Data, &listed)
-	seen := map[string]bool{}
-	for _, pn := range listed.IncomingPhoneNumbers {
-		seen[pn.PhoneNumber] = true
-		if !known[pn.PhoneNumber] {
+	for _, r := range known {
+		if r.Provider != "twilio" {
 			continue
 		}
-		// Default to "sms"; if there's an existing row on whatsapp we
-		// don't touch it (the upsert keys on (project, channel, address)).
-		_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
-			ProjectID:          pid,
-			Channel:            "sms",
-			Address:            pn.PhoneNumber,
-			Kind:               "phone",
-			Provider:           "twilio",
-			ProviderIdentityID: pn.SID,
-			Verified:           true,
-			VerificationStatus: "verified",
-			SendingEnabled:     true,
-			MarkSyncedNow:      true,
-		})
-		if err != nil {
-			ctx.Logger().Warn("upsert sender during twilio refresh", "addr", pn.PhoneNumber, "err", err)
+		v, ok := byAddress[r.Address]
+		if !ok {
+			if err := dbSoftDeleteSender(ctx.AppDB(), pid, channel, r.Address); err != nil {
+				return err
+			}
+			continue
 		}
-	}
-	// Soft-delete Twilio rows that no longer exist upstream.
-	for _, r := range knownRows {
-		if r.Provider == "twilio" && !seen[r.Address] && r.DeletedAt == nil {
-			_ = dbSoftDeleteSender(ctx.AppDB(), pid, r.Channel, r.Address)
+		verified, status := true, "verified"
+		if channel == channelWhatsApp {
+			verified = twilioWhatsAppSenderVerified(firstStringField(v, "status"))
+			status = twilioWhatsAppVerificationStatus(firstStringField(v, "status"))
+		}
+		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: channel, Address: r.Address, Kind: r.Kind, Provider: "twilio", ProviderIdentityID: firstStringField(v, "sid"), Verified: verified, VerificationStatus: status, SendingEnabled: verified, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -453,13 +449,13 @@ func identityRowToMap(r *identityRow) map[string]any {
 	if r.InboundConfig != "" {
 		var cfg map[string]any
 		if err := json.Unmarshal([]byte(r.InboundConfig), &cfg); err == nil {
-			m["inbound_config"] = cfg
+			m["inbound_config"] = redactCallbackCredentials(cfg)
 		}
 	}
 	if r.Metadata != "" {
 		var meta map[string]any
 		if err := json.Unmarshal([]byte(r.Metadata), &meta); err == nil {
-			m["metadata"] = meta
+			m["metadata"] = redactCallbackCredentials(meta)
 			for _, key := range []string{"mail_from_domain", "mail_from_domain_status", "mail_from_mx_failure_mode"} {
 				if v, ok := meta[key]; ok {
 					m[key] = v

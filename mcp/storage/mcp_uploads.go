@@ -1,13 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +24,13 @@ func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
-	name := normaliseFilename(strArg(args, "name"))
+	name, err := validateFilename(strArg(args, "name"))
+	if err != nil {
+		return nil, err
+	}
+	if err = validateVisibility(strArg(args, "visibility")); err != nil {
+		return nil, err
+	}
 	if name == "" {
 		return nil, errors.New("name required")
 	}
@@ -36,7 +41,10 @@ func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	if size > maxUploadBytes(app) {
 		return nil, fmt.Errorf("upload exceeds max_upload_size_mb (%d bytes > %d)", size, maxUploadBytes(app))
 	}
-	folder := normaliseFolder(strArg(args, "folder"))
+	folder, err := authorizeFolder(ctx, "files.write", strArg(args, "folder"))
+	if err != nil {
+		return nil, err
+	}
 	if caller := sdk.CallerFrom(ctx); caller != nil {
 		res := fileResource(folder)
 		if !caller.Allows("files.write", res) {
@@ -45,12 +53,27 @@ func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	}
 	sha := strings.ToLower(strings.TrimSpace(strArg(args, "sha256")))
 	if sha != "" {
+		if !looksLikeSHA256Hex(sha) {
+			return nil, errors.New("invalid sha256")
+		}
 		if existing, err := dbFindExact(app.AppDB(), pid, sha, folder, name); err == nil && existing != nil {
+			if _, _, err := compatibleExisting(existing, uploadInput{ContentType: safeResponseContentType(strArg(args, "content_type")), Visibility: effectiveVisibility(app, strArg(args, "visibility")), Tags: cleanTags(strArrayArg(args, "tags"))}); err != nil {
+				return nil, err
+			}
 			return map[string]any{"file": existing, "was_existing": true}, nil
 		}
 	}
 
 	id := newUploadID()
+	if err = reserveUpload(app, id, pid, size, 0); err != nil {
+		return nil, err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			releaseUploadReservation(app, id)
+		}
+	}()
 	dir := uploadSessionDir(app, id)
 	if err := os.MkdirAll(filepath.Join(dir, "parts"), 0755); err != nil {
 		return nil, fmt.Errorf("mkdir upload session: %w", err)
@@ -77,6 +100,7 @@ func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("write upload metadata: %w", err)
 	}
+	reserved = false
 	return map[string]any{
 		"upload_id":    id,
 		"part_size":    mcpUploadPartSize,
@@ -117,6 +141,9 @@ func (a *App) toolUploadPartCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	if raw == "" {
 		return nil, errors.New("content_base64 required")
 	}
+	if int64(len(raw)) > mcpUploadPartSize*4/3+4096 {
+		return nil, errors.New("encoded part exceeds MCP chunk limit")
+	}
 	body, err := decodeUploadPayload(raw)
 	if err != nil {
 		return nil, err
@@ -127,19 +154,21 @@ func (a *App) toolUploadPartCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	if int64(len(body)) > mcpUploadPartSize {
 		return nil, fmt.Errorf("decoded part exceeds MCP chunk limit (%d > %d); split into smaller chunks", len(body), mcpUploadPartSize)
 	}
-	if err := writeUploadPartBytes(app, id, n, body); err != nil {
+	if _, err := writeUploadPart(ctx, app, id, n, bytes.NewReader(body), int64(len(body)), nil); err != nil {
 		return nil, err
 	}
-	parts, bytesUploaded, err := uploadSessionPartsStatus(app, id)
-	if err != nil {
-		return nil, err
-	}
+	mu := sessionLock(id)
+	mu.budget.Lock()
+	bytesUploaded := mu.total
+	uploadedParts := len(mu.sizes)
+	mu.budget.Unlock()
+	releaseSessionLock(id)
 	return map[string]any{
 		"upload_id":       id,
 		"part_number":     n,
 		"size":            len(body),
 		"bytes_uploaded":  bytesUploaded,
-		"uploaded_parts":  len(parts),
+		"uploaded_parts":  uploadedParts,
 		"recommended_max": mcpUploadPartSize,
 	}, nil
 }
@@ -149,22 +178,19 @@ func (a *App) toolUploadCompleteCtx(ctx context.Context, app *sdk.AppCtx, args m
 	if err != nil {
 		return nil, err
 	}
-	return completeUploadSessionForTool(app, context.Background(), id, strArg(args, "sha256"))
+	return completeUploadSessionForTool(app, ctx, id, strArg(args, "sha256"))
 }
 
 func (a *App) requireUploadSessionWriteAccess(ctx context.Context, app *sdk.AppCtx, args map[string]any) (string, *uploadMeta, error) {
-	id := strings.TrimSpace(strArg(args, "upload_id"))
-	if id == "" {
-		id = strings.TrimSpace(strArg(args, "id"))
-	}
-	if !validUploadID(id) {
-		return "", nil, errors.New("valid upload_id required")
-	}
-	meta, err := loadUploadMeta(uploadSessionDir(app, id))
+	id, err := canonicalUploadID(args)
 	if err != nil {
-		return "", nil, errUploadSessionNotFound
+		return "", nil, err
 	}
 	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return "", nil, err
+	}
+	meta, err := loadSessionOrCompletion(app, id, pid)
 	if err != nil {
 		return "", nil, err
 	}
@@ -192,125 +218,77 @@ func uploadSessionPartsStatus(ctx *sdk.AppCtx, id string) ([]partInfo, int64, er
 	return parts, bytesUploaded, nil
 }
 
-func writeUploadPartBytes(ctx *sdk.AppCtx, id string, n int, body []byte) error {
-	if int64(len(body)) > maxPartSize {
-		return fmt.Errorf("part exceeds %d bytes", maxPartSize)
-	}
-	dir := uploadSessionDir(ctx, id)
-	if _, err := loadUploadMeta(dir); err != nil {
-		return errors.New("upload session not found")
-	}
-	pp := partPath(ctx, id, n)
-	tmp := pp + ".tmp." + randHex(8)
-	if err := os.WriteFile(tmp, body, 0644); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write part: %w", err)
-	}
-	if err := os.Rename(tmp, pp); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename part: %w", err)
-	}
-	_ = os.Chtimes(dir, time.Now(), time.Now())
-	return nil
+func writeUploadPartBytes(app *sdk.AppCtx, id string, n int, body []byte) error {
+	_, err := writeUploadPart(context.Background(), app, id, n, bytes.NewReader(body), int64(len(body)), nil)
+	return err
 }
 
-func completeUploadSessionForTool(ctx *sdk.AppCtx, reqCtx context.Context, id, suppliedSHA string) (any, error) {
+func completeUploadSessionForTool(app *sdk.AppCtx, c context.Context, id, suppliedSHA string) (any, error) {
 	mu := sessionLock(id)
 	mu.Lock()
-	defer func() {
-		mu.Unlock()
-		releaseSessionLock(id)
-	}()
-
-	dir := uploadSessionDir(ctx, id)
+	defer func() { mu.Unlock(); releaseSessionLock(id) }()
+	var pid string
+	err := app.AppDB().QueryRow(`SELECT project_id FROM completed_uploads WHERE upload_id=?`, id).Scan(&pid)
+	if err == nil {
+		f, existed, e := completedUpload(app, id, pid)
+		if e != nil {
+			return nil, e
+		}
+		if suppliedSHA != "" && !strings.EqualFold(suppliedSHA, f.SHA256) {
+			return nil, errors.New("sha256 mismatch")
+		}
+		return map[string]any{"file": f, "was_existing": existed, "sha256": f.SHA256, "size_bytes": f.SizeBytes}, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+	dir := uploadSessionDir(app, id)
 	meta, err := loadUploadMeta(dir)
 	if err != nil {
-		return nil, errors.New("upload session not found")
+		return nil, errUploadSessionNotFound
 	}
-	parts, err := listParts(ctx, id)
+	parts, err := listParts(app, id)
 	if err != nil {
-		return nil, fmt.Errorf("list parts: %w", err)
+		return nil, err
 	}
 	if len(parts) == 0 {
 		return nil, errors.New("no parts uploaded")
 	}
-	var totalSize int64
+	var total int64
 	for i, p := range parts {
 		if p.N != i+1 {
-			return nil, fmt.Errorf("missing part %d (have %d parts, last is %d)", i+1, len(parts), p.N)
+			return nil, fmt.Errorf("missing part %d", i+1)
 		}
-		totalSize += p.Size
+		total += p.Size
 	}
-	if totalSize != meta.DeclaredSize {
-		return nil, fmt.Errorf("size mismatch: parts total %d, declared %d", totalSize, meta.DeclaredSize)
+	if total != meta.DeclaredSize {
+		return nil, fmt.Errorf("size mismatch: parts total %d, declared %d", total, meta.DeclaredSize)
 	}
-
-	h := sha256.New()
-	for _, p := range parts {
-		f, err := os.Open(partPath(ctx, id, p.N))
-		if err != nil {
-			return nil, fmt.Errorf("open part %d: %w", p.N, err)
-		}
-		if _, err := io.Copy(h, f); err != nil {
-			f.Close()
-			return nil, fmt.Errorf("hash part %d: %w", p.N, err)
-		}
-		f.Close()
+	if suppliedSHA != "" && meta.DeclaredSHA256 != "" && !strings.EqualFold(suppliedSHA, meta.DeclaredSHA256) {
+		return nil, errors.New("declared sha256 mismatch")
 	}
-	finalSHA := hex.EncodeToString(h.Sum(nil))
-	if suppliedSHA != "" && !strings.EqualFold(suppliedSHA, finalSHA) {
-		return nil, fmt.Errorf("sha256 mismatch: client=%s server=%s", suppliedSHA, finalSHA)
-	}
-	if meta.DeclaredSHA256 != "" && !strings.EqualFold(meta.DeclaredSHA256, finalSHA) {
-		return nil, errors.New("declared sha256 mismatch - bytes corrupted")
-	}
-	if existing, err := dbFindExact(ctx.AppDB(), meta.ProjectID, finalSHA, meta.Folder, meta.Filename); err == nil && existing != nil {
-		_ = os.RemoveAll(dir)
-		return map[string]any{"file": existing, "was_existing": true}, nil
-	}
-
-	pr, err := newPartsReaderAt(ctx, id, parts)
+	pr, err := newPartsReaderAt(app, id, parts)
 	if err != nil {
-		return nil, fmt.Errorf("open parts: %w", err)
+		return nil, err
 	}
 	defer pr.Close()
-	tmpKey := newUploadID() + extOf(meta.Filename, meta.ContentType)
-	finalKey := objectKey(finalSHA, tmpKey)
-	if err := backend().Put(reqCtx, finalKey, meta.ContentType, pr, totalSize); err != nil {
-		return nil, fmt.Errorf("backend put: %w", err)
-	}
-
-	tagsJSON, _ := json.Marshal(meta.Tags)
-	source := strings.TrimSpace(meta.Source)
-	if source == "" {
-		source = "agent"
-	}
-	res, err := ctx.AppDB().Exec(
-		`INSERT INTO files
-			(project_id, name, folder, storage_key, content_type, size_bytes,
-			 sha256, uploaded_by, source, tags, visibility)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		meta.ProjectID, meta.Filename, meta.Folder, tmpKey, meta.ContentType, meta.DeclaredSize,
-		finalSHA, callerLabel(), source, string(tagsJSON), meta.Visibility,
-	)
+	release, err := acquireTransfer(c)
 	if err != nil {
-		_ = backend().Delete(reqCtx, finalKey)
-		return nil, fmt.Errorf("insert: %w", err)
+		return nil, err
 	}
-	insID, _ := res.LastInsertId()
-	row, err := dbGetByID(ctx.AppDB(), meta.ProjectID, insID)
-	if err != nil || row == nil {
-		return nil, fmt.Errorf("lookup new file %d: %v", insID, err)
+	defer release()
+	in := uploadInput{Name: meta.Filename, Folder: meta.Folder, ContentType: meta.ContentType, Tags: meta.Tags, Visibility: meta.Visibility, Source: meta.Source, ExpectedSize: meta.DeclaredSize, ExpectedSHA: ifEmpty(suppliedSHA, meta.DeclaredSHA256), UploadID: id, UserID: meta.UserID}
+	f, existed, err := saveStream(c, app, meta.ProjectID, in, pr)
+	if err != nil {
+		return nil, err
 	}
-	emitFileEvent(ctx, "file.added", row, false)
-	_ = os.RemoveAll(dir)
-
-	return map[string]any{
-		"file":         row,
-		"was_existing": false,
-		"sha256":       finalSHA,
-		"size_bytes":   totalSize,
-	}, nil
+	if err = os.RemoveAll(dir); err != nil {
+		app.Logger().Warn("completed scratch cleanup pending", "upload_id", id)
+	}
+	retireSessionLock(id)
+	releaseUploadReservation(app, id)
+	emitFileEvent(app, "file.added", f, existed)
+	return map[string]any{"file": f, "was_existing": existed, "sha256": f.SHA256, "size_bytes": f.SizeBytes}, nil
 }
 
 func uploadPartNumberArg(args map[string]any) (int, error) {

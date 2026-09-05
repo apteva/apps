@@ -28,7 +28,7 @@ assert:
         title: Finalize simulated export
       count: 1
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_set_progress
       args:
         state: running
         progress: 100
@@ -40,6 +40,7 @@ assert:
       args:
         result: EXPORT READY
       count: 1
+  - tool_not_called: tasks_update
   - tool_not_called: tasks_list | tasks_assign | spawn
   - http: GET /api/apps/tasks/tasks?states=completed&agent_id=${APTEVA_TEST_AGENT_ID}
     expect_status: 200

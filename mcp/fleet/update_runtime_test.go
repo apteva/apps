@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -88,6 +89,9 @@ func TestVersionedRuntimeValidationDoesNotExecuteCore(t *testing.T) {
 }
 
 func TestHostedVersionInstallScriptExecutesPinnedRuntimeValidation(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("hosted flock execution requires Linux; script contract is tested separately")
+	}
 	versionsDir := t.TempDir()
 	runtime := writeFakeVersionedRuntime(t, versionsDir, "0.41.1")
 	versionDir := filepath.Join(versionsDir, "0.41.1")

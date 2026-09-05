@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ConversationChat,
+  MoreConversations,
+  refreshConversationList,
   apiGet,
   apiPost,
   type Conversation,
@@ -77,22 +79,26 @@ function ConversationBrowser({
   const wideLayout = useWideWidgetLayout();
   const layout = agentConversationWidgetLayout(wideLayout);
 
+  useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,archived]);
+  const listStateRef=useRef({scope:"",count:0,selected:""});
+  const listScope=`${projectId}:${instanceId}:${archived}`;
+  listStateRef.current=listStateRef.current.scope===listScope ? {scope:listScope,count:conversations.length,selected:selectedId} : {scope:listScope,count:0,selected:""};
   const load = useCallback(async () => {
     if (!validAgent || !projectId) return;
+    const snapshot={...listStateRef.current};
     try {
       const [rows, unreadRows] = await Promise.all([
-        apiGet<Conversation[]>(scopedConversationListPath(archived, instanceId), projectId),
+        refreshConversationList(scopedConversationListPath(archived,instanceId),projectId,snapshot.count,snapshot.selected),
         apiGet<UnreadEntry[]>(appendAgentScope("/unread-summary", instanceId), projectId),
       ]);
+      if(snapshot.scope!==listStateRef.current.scope)return;
       const scoped = rows.filter((conversation) =>
         !conversation.project_id || conversation.project_id === projectId,
       );
-      setConversations(scoped);
+      if(listStateRef.current.count<=Math.max(100,snapshot.count))setConversations(scoped);
       setUnread(new Map(unreadRows.map((entry) => [entry.conversation_id, entry])));
       setSelectedId((current) =>
-        current && scoped.some((conversation) => conversation.id === current)
-          ? current
-          : (scoped[0]?.id ?? ""),
+        (scoped.some(row=>row.id===current) ? current : scoped[0]?.id) || "",
       );
       setError("");
     } catch (loadError) {
@@ -105,16 +111,6 @@ function ConversationBrowser({
     const timer = window.setInterval(load, 8_000);
     return () => window.clearInterval(timer);
   }, [load, eventRevision]);
-
-  useEffect(() => {
-    if (!selectedId) return;
-    const entry = unread.get(selectedId);
-    if (!entry?.unread) return;
-    void apiPost("/seen", {
-      chat_id: selectedId,
-      last_seen_id: entry.latest_id,
-    }, projectId).then(load, () => undefined);
-  }, [load, projectId, selectedId, unread]);
 
   const selected = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,
@@ -217,6 +213,7 @@ function ConversationBrowser({
             </p>
           ) : (
             <ul className="divide-y divide-border">
+              <li><MoreConversations path={scopedConversationListPath(archived,instanceId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
               {conversations.map((conversation) => {
                 const unreadCount = unread.get(conversation.id)?.unread ?? 0;
                 return (
@@ -246,11 +243,12 @@ function ConversationBrowser({
       </aside>
 
       {selected ? (
-        <ConversationChat
+        <ConversationChat key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={archived}
           onActed={load}
           onRemoved={() => {
+            setConversations(current=>current.filter(c=>c.id!==selectedId));
             setSelectedId("");
             void load();
           }}
@@ -333,22 +331,6 @@ function SingleConversation({
       historyGeneration.current += 1;
     };
   }, [instanceId, loadLatest, projectId, validAgent]);
-
-  useEffect(() => {
-    if (!selected?.id || !projectId || !validAgent) return;
-    let cancelled = false;
-    void apiGet<UnreadEntry[]>(appendAgentScope("/unread-summary", instanceId), projectId)
-      .then((entries) => {
-        if (cancelled) return;
-        const seen = selectedConversationSeenInput(entries, selected.id);
-        if (!seen) return;
-        return apiPost("/seen", seen, projectId);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [instanceId, projectId, selected?.id, validAgent]);
 
   const refreshEmpty = useCallback(async () => {
     if (
@@ -444,7 +426,7 @@ function SingleConversation({
           Loading conversation…
         </section>
       ) : selected ? (
-        <ConversationChat
+        <ConversationChat key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={false}
           headerActions={(
@@ -532,6 +514,7 @@ function SingleConversation({
                 <p className="p-5 text-center text-xs text-text-muted">No earlier conversations.</p>
               ) : (
                 <ul className="divide-y divide-border">
+                  <li><MoreConversations path={singleConversationListPath(instanceId,50)} projectId={projectId} rows={history} onRows={setHistory}/></li>
                   {history.map((conversation) => (
                     <li key={conversation.id}>
                       <button

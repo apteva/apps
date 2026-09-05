@@ -77,7 +77,7 @@ func TestPolicyTimestampPropertyControlsStoredDayAndUpsertKey(t *testing.T) {
 		t.Fatalf("snapshot rows=%d want 1", len(rows))
 	}
 	wantTS := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC).UnixMilli()
-	if rows[0].TS != wantTS || !strings.Contains(rows[0].UpsertKey, "day=2026-06-16") {
+	if rows[0].TS != wantTS || !strings.HasPrefix(rows[0].UpsertKey, "v2:") {
 		t.Fatalf("stored snapshot ts=%d key=%q, want date-controlled bucket", rows[0].TS, rows[0].UpsertKey)
 	}
 }

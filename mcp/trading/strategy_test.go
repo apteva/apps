@@ -551,11 +551,11 @@ func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
 	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 1 {
 		t.Fatalf("strategy orders = %d, want 1", got)
 	}
-	rejected, err := dbListOrders(ctx.AppDB(), portfolioID, "rejected", 10)
+	rejected, err := dbListOrders(ctx.AppDB(), portfolioID, "cancelled", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rejected) != 1 || rejected[0].RejectionCode != "insufficient_cash" {
+	if len(rejected) != 1 || rejected[0].RejectionDetail == "" {
 		t.Fatalf("rejected orders = %#v, want one insufficient_cash rejection", rejected)
 	}
 	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)

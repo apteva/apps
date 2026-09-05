@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"time"
 
 	"github.com/chromedp/cdproto/runtime"
@@ -20,6 +21,7 @@ type RecoveryTarget struct {
 }
 
 type Target struct {
+	ID       string
 	Selector string
 	X        int
 	Y        int
@@ -110,6 +112,11 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
       norm(el.getAttribute && el.getAttribute('placeholder'));
   }
   function resolveTarget() {
+    if (target.ID) {
+      var state = window.__aptevaComputerSOM, saved = state && state.targets && state.targets[target.ID];
+      // A stable identity must never fall through to an old coordinate.
+      return saved && saved.element && saved.element.isConnected ? saved.element : null;
+    }
     var el = null;
     if (target.Selector) {
       try { el = document.querySelector(target.Selector); }
@@ -320,7 +327,7 @@ func Set(ctx context.Context, target Target, req Request) (Result, error) {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	})); err != nil {
 		return Result{}, err
@@ -369,13 +376,13 @@ func trustedTextFallback(ctx context.Context, result *Result) error {
 	  return true;
 	})()`, string(selectorJSON))
 	var focused bool
-	if err := chromedp.Run(ctx, chromedp.Evaluate(focusJS, &focused)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(focusJS, &focused)); err != nil {
 		return err
 	}
 	if !focused {
 		return errors.New("temporal fallback target not found")
 	}
-	if err := chromedp.Run(ctx, chromedp.KeyEvent(result.NormalizedValue)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.KeyEvent(result.NormalizedValue)); err != nil {
 		return err
 	}
 	timer := time.NewTimer(100 * time.Millisecond)
@@ -404,7 +411,7 @@ func trustedTextFallback(ctx context.Context, result *Result) error {
 		Validity Validity `json:"validity"`
 		Missing  bool     `json:"missing"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(readJS, &readback, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(readJS, &readback, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	})); err != nil {
 		return err

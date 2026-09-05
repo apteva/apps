@@ -45,6 +45,9 @@ func (a *App) handleAgentEventLifecycle(ctx *sdk.AppCtx, event sdk.Event) error 
 	if err != nil {
 		return err
 	}
+	if strings.HasPrefix(lifecycle.SourceEventID, "notification:") {
+		return nil
+	}
 	taskID, purpose, err := taskAgentEventIdentity(lifecycle.SourceEventID)
 	if err != nil {
 		return err
@@ -91,10 +94,10 @@ func (s *taskStore) RecordAgentEventExecution(taskID, sourceID, executionID, thr
 	result, err := tx.Exec(`UPDATE tasks SET
 		agent_event_source_id=CASE WHEN agent_event_source_id='' THEN ? ELSE agent_event_source_id END,
 		agent_execution_id=CASE WHEN agent_execution_id='' THEN ? ELSE agent_execution_id END,
-		agent_execution_updated_at=COALESCE(agent_execution_updated_at, ?), updated_at=?
+		agent_execution_updated_at=COALESCE(agent_execution_updated_at, ?), updated_at=MAX(updated_at,?)
 		WHERE id=? AND (agent_event_source_id='' OR agent_event_source_id=?)
 		AND (agent_execution_id='' OR agent_execution_id=?)`, sourceID, executionID,
-		at.Format(time.RFC3339Nano), at.Format(time.RFC3339Nano), taskID, sourceID, executionID)
+		at.Format(timeFormat), at.Format(timeFormat), taskID, sourceID, executionID)
 	if err != nil {
 		return err
 	}
@@ -133,7 +136,7 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 	insert, err := tx.Exec(`INSERT OR IGNORE INTO agent_event_lifecycle_deliveries
 		(delivery_id, task_id, execution_id, lifecycle_type, sequence, processed_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, deliveryID, taskID, lifecycle.ExecutionID,
-		lifecycle.Type, lifecycle.Sequence, processedAt.Format(time.RFC3339Nano))
+		lifecycle.Type, lifecycle.Sequence, processedAt.Format(timeFormat))
 	if err != nil {
 		return nil, false, err
 	}
@@ -236,21 +239,21 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 
 	var acceptedValue, startedValue, completedValue, settleValue any
 	if acceptedAt != nil {
-		acceptedValue = acceptedAt.UTC().Format(time.RFC3339Nano)
+		acceptedValue = acceptedAt.UTC().Format(timeFormat)
 	}
 	if startedAt != nil {
-		startedValue = startedAt.UTC().Format(time.RFC3339Nano)
+		startedValue = startedAt.UTC().Format(timeFormat)
 	}
 	if completedAt != nil {
-		completedValue = completedAt.UTC().Format(time.RFC3339Nano)
+		completedValue = completedAt.UTC().Format(timeFormat)
 	}
 	if settleDeadline != nil {
-		settleValue = settleDeadline.UTC().Format(time.RFC3339Nano)
+		settleValue = settleDeadline.UTC().Format(timeFormat)
 	}
 	if _, err = tx.Exec(`UPDATE task_agent_executions SET execution_id=?, thread_id=?, state=?, reason=?,
 		sequence=?, updated_at=?, deadline_at=? WHERE source_event_id=?`, lifecycle.ExecutionID,
 		lifecycle.ThreadID, lifecycle.Type, lifecycle.Reason, lifecycle.Sequence,
-		eventAt.Format(time.RFC3339Nano), settleValue, lifecycle.SourceEventID); err != nil {
+		eventAt.Format(timeFormat), settleValue, lifecycle.SourceEventID); err != nil {
 		return nil, false, err
 	}
 	_, err = tx.Exec(`UPDATE tasks SET state=?, current_step=?, error=?, accepted_at=?,
@@ -258,8 +261,8 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 		agent_execution_state=?, agent_execution_updated_at=?, agent_execution_reason=?,
 		agent_settle_deadline_at=?, agent_lifecycle_sequence=?, updated_at=?, started_at=?, completed_at=?
 		WHERE id=?`, state, step, failure, acceptedValue, executionThread, telemetryReference,
-		lifecycle.SourceEventID, lifecycle.ExecutionID, lifecycle.Type, eventAt.Format(time.RFC3339Nano),
-		lifecycle.Reason, settleValue, lifecycle.Sequence, processedAt.Format(time.RFC3339Nano),
+		lifecycle.SourceEventID, lifecycle.ExecutionID, lifecycle.Type, eventAt.Format(timeFormat),
+		lifecycle.Reason, settleValue, lifecycle.Sequence, processedAt.Format(timeFormat),
 		startedValue, completedValue, taskID)
 	if err != nil {
 		return nil, false, err
@@ -274,7 +277,7 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 		status := occurrenceStatusValues(state, acceptedAt, current.DispatchedAt)
 		var acceptedValue any
 		if acceptedAt != nil {
-			acceptedValue = acceptedAt.UTC().Format(time.RFC3339Nano)
+			acceptedValue = acceptedAt.UTC().Format(timeFormat)
 		}
 		if _, err := tx.Exec(`UPDATE tasks SET last_occurrence_status=?, last_error=?,
 			last_result_reference=?, last_run_at=COALESCE(?, last_run_at) WHERE id=?`,
@@ -298,6 +301,15 @@ func (s *taskStore) ApplyAgentEventLifecycle(deliveryID, taskID, projectID strin
 			"accepted_at": acceptedValue, "settle_deadline_at": settleValue}})
 	if err != nil {
 		return nil, false, err
+	}
+	if state == stateFailed && current.State != stateFailed {
+		failedTask, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE id=?`, taskID))
+		if err != nil {
+			return nil, false, err
+		}
+		if err := enqueueTerminalTx(tx, failedTask, true, "agent_execution_error", processedAt); err != nil {
+			return nil, false, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err

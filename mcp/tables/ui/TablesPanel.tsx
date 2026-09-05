@@ -6,7 +6,19 @@
 // Layout: left rail = list of tables (with row counts), main area =
 // selected table's row grid, bottom drawer = SELECT escape hatch.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  parseJSON,
+  stringifyJSON,
+  parseInputValue,
+  initialField,
+  fieldValue,
+  type FieldValue,
+  type ColumnDef,
+  type ColumnType,
+} from "./lib/values";
+import { useResource } from "./lib/useResource";
+import { Dialog } from "./Dialog";
 
 // Inlined SDK app-event subscription. Panels are runtime-bundled
 // standalone .mjs files and each app is independently installable
@@ -38,15 +50,17 @@ function useAppEvents<T = unknown>(
     // (app, project) instead of opening its own. Without this, a few
     // panels mounted in the agent detail page burn the browser's
     // per-origin HTTP/1.1 connection budget and stuck POSTs follow.
-    const bridge = (window as unknown as {
-      __aptevaAppEvents?: {
-        subscribe(
-          app: string,
-          projectId: string,
-          fn: (ev: AppEventEnvelope<T>) => void,
-        ): () => void;
-      };
-    }).__aptevaAppEvents;
+    const bridge = (
+      window as unknown as {
+        __aptevaAppEvents?: {
+          subscribe(
+            app: string,
+            projectId: string,
+            fn: (ev: AppEventEnvelope<T>) => void,
+          ): () => void;
+        };
+      }
+    ).__aptevaAppEvents;
     if (bridge) {
       return bridge.subscribe(app, projectId, handler);
     }
@@ -63,9 +77,19 @@ function useAppEvents<T = unknown>(
         `?project_id=${encodeURIComponent(projectId)}` +
         (lastSeq > 0 ? `&since=${lastSeq}` : "");
       es = new EventSource(url, { withCredentials: true });
+      es.onopen = () =>
+        handlerRef.current({
+          topic: "table.refresh",
+          app,
+          project_id: projectId,
+          install_id: 0,
+          seq: 0,
+          time: "",
+          data: {} as T,
+        });
       es.onmessage = (e) => {
         try {
-          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          const ev = parseJSON(e.data) as AppEventEnvelope<T>;
           if (ev.seq <= lastSeq) return;
           lastSeq = ev.seq;
           handlerRef.current(ev);
@@ -94,15 +118,6 @@ interface NativePanelProps {
   instanceId?: number;
 }
 
-type ColumnType = "text" | "number" | "bool" | "datetime" | "json" | "file_id";
-
-interface ColumnDef {
-  name: string;
-  type: ColumnType;
-  nullable: boolean;
-  default?: unknown;
-}
-
 interface TableMeta {
   id: number;
   name: string;
@@ -114,7 +129,10 @@ interface TableMeta {
 
 interface RowsResponse {
   rows: Record<string, unknown>[];
-  total: number;
+  total?: number;
+  has_more: boolean;
+  next_cursor?: string;
+  next_offset: number;
 }
 
 interface QueryResponse {
@@ -126,316 +144,459 @@ interface QueryResponse {
 const API = "/api/apps/tables";
 const PAGE_SIZE = 50;
 
-export default function TablesPanel({ projectId, installId }: NativePanelProps) {
-  const [tables, setTables] = useState<TableMeta[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [rows, setRows] = useState<Record<string, unknown>[]>([]);
-  const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(0);
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("");
-  const [showCreate, setShowCreate] = useState(false);
-  const [showInsert, setShowInsert] = useState(false);
-  const [showQuery, setShowQuery] = useState(false);
-  const [showApi, setShowApi] = useState(false);
-  const [showSchema, setShowSchema] = useState(false);
-  const [editingRow, setEditingRow] = useState<Record<string, unknown> | null>(null);
-
-  const withParams = useCallback(
-    (extra: Record<string, string>) =>
-      new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra }).toString(),
-    [projectId, installId],
+export default function TablesPanel({
+  projectId,
+  installId,
+}: NativePanelProps) {
+  const [selected, setSelected] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get("table"),
   );
-
+  const [epoch, setEpoch] = useState(0);
+  const [page, setPage] = useState(0);
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined]);
+  const [columnLimit, setColumnLimit] = useState(8);
+  const [showCreate, setShowCreate] = useState(false),
+    [showInsert, setShowInsert] = useState(false);
+  const [showQuery, setShowQuery] = useState(false),
+    [showApi, setShowApi] = useState(false),
+    [showSchema, setShowSchema] = useState(false);
+  const [editing, setEditing] = useState<{
+    key: string;
+    tableID: string;
+    row: Record<string, unknown>;
+  } | null>(null);
+  const editRequest = useRef(0);
+  const [status, setStatus] = useState("");
+  const [mutation, setMutation] = useState(false);
+  const mutationRef = useRef(false);
+  const scope = `${projectId}:${installId}`,
+    identity = `${scope}:${selected ?? ""}`;
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refresh = useCallback(() => {
+    if (!refreshTimer.current)
+      refreshTimer.current = setTimeout(() => {
+        refreshTimer.current = null;
+        setEpoch((x) => x + 1);
+      }, 120);
+  }, []);
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
   const api = useCallback(
     async <T,>(
       method: string,
       path: string,
       params: Record<string, string> = {},
       body?: unknown,
+      signal?: AbortSignal,
     ): Promise<T> => {
-      const opts: RequestInit = { method, credentials: "same-origin", headers: {} };
-      if (body !== undefined) {
-        (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
-        opts.body = JSON.stringify(body);
-      }
-      const res = await fetch(`${API}${path}?${withParams(params)}`, opts);
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      return res.json();
-    },
-    [withParams],
-  );
-
-  const loadTables = useCallback(async () => {
-    setBusy(true);
-    try {
-      const resp = await api<{ tables: TableMeta[] }>("GET", "/tables");
-      const list = resp.tables || [];
-      setTables(list);
-      if (!selected && list.length > 0) setSelected(list[0].name);
-      setStatus(`${list.length} table${list.length !== 1 ? "s" : ""}`);
-    } catch (e) {
-      setStatus(`Error: ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [api, selected]);
-
-  const loadRows = useCallback(async () => {
-    if (!selected) return;
-    setBusy(true);
-    try {
-      const resp = await api<RowsResponse>("GET", `/tables/${selected}/rows`, {
-        limit: String(PAGE_SIZE),
-        offset: String(page * PAGE_SIZE),
+      const query = new URLSearchParams({
+        project_id: projectId,
+        install_id: String(installId),
+        ...params,
       });
-      setRows(resp.rows || []);
-      setTotal(resp.total || 0);
-    } catch (e) {
-      setStatus(`Error: ${(e as Error).message}`);
-    } finally {
-      setBusy(false);
-    }
-  }, [api, selected, page]);
-
+      const res = await fetch(`${API}${path}?${query}`, {
+        method,
+        credentials: "same-origin",
+        signal,
+        headers:
+          body === undefined ? {} : { "Content-Type": "application/json" },
+        body: body === undefined ? undefined : stringifyJSON(body),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        let message = text;
+        try {
+          message = (parseJSON(text) as { error?: string }).error || text;
+        } catch {}
+        throw new Error(`${res.status}: ${message}`);
+      }
+      return parseJSON(text) as T;
+    },
+    [projectId, installId],
+  );
+  const list = useResource<TableMeta[]>(
+    projectId ? scope : "",
+    epoch,
+    async (signal) => {
+      let offset = 0;
+      const tables: TableMeta[] = [];
+      do {
+        const result = await api<{
+          tables: TableMeta[];
+          has_more: boolean;
+          next_offset: number;
+        }>(
+          "GET",
+          "/tables",
+          { summary: "true", limit: "200", offset: String(offset) },
+          undefined,
+          signal,
+        );
+        tables.push(...result.tables);
+        if (!result.has_more) break;
+        offset = result.next_offset;
+      } while (!signal.aborted);
+      return tables;
+    },
+  );
+  const tables = list.data ?? [];
   useEffect(() => {
-    loadTables();
-  }, [loadTables]);
-
+    if (!list.data) return;
+    setSelected((current) => current ?? list.data![0]?.name ?? null);
+  }, [list.data]);
+  const description = useResource<TableMeta>(
+    selected ? identity : "",
+    epoch,
+    (signal) =>
+      api<TableMeta>("GET", `/tables/${selected}`, {}, undefined, signal),
+  );
+  const selectedTable = description.data
+    ? { ...description.data, columns: description.data.columns ?? [] }
+    : null;
+  const visibleColumns = (selectedTable?.columns ?? []).slice(0, columnLimit);
+  const visibleNames = visibleColumns.map((c) => c.name).join(",");
+  const rowKey = selectedTable
+    ? `${identity}:${selectedTable.id}:${page}:${cursors[page] ?? ""}:${visibleNames}`
+    : "";
+  const rowResource = useResource<RowsResponse>(rowKey, epoch, (signal) =>
+    api<RowsResponse>(
+      "GET",
+      `/tables/${selected}/rows`,
+      {
+        limit: String(PAGE_SIZE),
+        include_total: "false",
+        select: [
+          "id",
+          "_revision",
+          "updated_at",
+          ...visibleColumns.map((c) => c.name),
+        ].join(","),
+        ...(cursors[page] ? { cursor: cursors[page]! } : {}),
+      },
+      undefined,
+      signal,
+    ),
+  );
+  const rows = rowResource.data?.rows ?? [];
+  const selectTable = (name: string) => {
+    editRequest.current++;
+    deepRow.current = null;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("row");
+    window.history.replaceState(null, "", url);
+    setSelected(name);
+    setPage(0);
+    setCursors([undefined]);
+    setEditing(null);
+  };
   useEffect(() => {
     setPage(0);
-    setEditingRow(null);
-  }, [selected]);
-
+    setCursors([undefined]);
+    setEditing(null);
+    setColumnLimit(8);
+    setShowCreate(false);
+    setShowInsert(false);
+    setShowQuery(false);
+    setShowSchema(false);
+    setShowApi(false);
+    setStatus("");
+  }, [identity]);
   useEffect(() => {
-    loadRows();
-  }, [loadRows]);
-
-  // Live refresh on mutations from agents or other tabs. We always
-  // re-fetch the table list on schema-shaped events (the rail's row
-  // counts may have shifted on any of them); we only re-fetch rows
-  // when the active table is the one that changed.
+    if (!selected) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("table", selected);
+    window.history.replaceState(null, "", url);
+  }, [selected]);
   useAppEvents<{ table?: string; name?: string }>("tables", projectId, (ev) => {
-    if (ev.topic.startsWith("table.")) {
-      loadTables();
-      // If the table the user is looking at was just dropped, clear
-      // the selection so the main pane shows the empty state instead
-      // of stale rows.
-      if (ev.topic === "table.dropped" && ev.data.name === selected) {
-        setSelected(null);
-      }
-      return;
+    if (ev.install_id && ev.install_id !== installId) return;
+    if (ev.topic === "table.dropped" && ev.data.name === selected) {
+      setSelected(null);
+      setEditing(null);
     }
-    if (ev.topic.startsWith("row.")) {
-      // table-list row counts shift on every row change.
-      loadTables();
-      if (ev.data.table === selected) {
-        loadRows();
+    if (ev.topic.startsWith("table.") || ev.topic.startsWith("row.")) {
+      refresh();
+      if (ev.topic === "table.altered" && ev.data.name === selected) {
+        setCursors([undefined]);
+        setPage(0);
+        setEditing(null);
       }
     }
   });
-
-  const selectedTable = useMemo(
-    () => tables.find((t) => t.name === selected) || null,
-    [tables, selected],
-  );
-
-  const onCreate = async (name: string, columns: ColumnDef[]) => {
+  useEffect(() => {
+    const connected = (e: Event) => {
+      if ((e as CustomEvent).detail?.projectId === projectId) refresh();
+    };
+    window.addEventListener("apteva:app-events-connected", connected);
+    const handler = () => refresh();
+    window.addEventListener("online", handler);
+    window.addEventListener("focus", handler);
+    return () => {
+      window.removeEventListener("apteva:app-events-connected", connected);
+      window.removeEventListener("online", handler);
+      window.removeEventListener("focus", handler);
+    };
+  }, [refresh, projectId]);
+  useEffect(() => {
+    if (page > 0 && rowResource.data && !rows.length && !rowResource.busy) {
+      setPage((p) => Math.max(0, p - 1));
+    }
+  }, [rowResource.data, rowResource.busy, page, rows.length]);
+  const mutate = async (work: () => Promise<void>) => {
+    if (mutationRef.current) throw new Error("A change is already being saved");
+    mutationRef.current = true;
+    setMutation(true);
     try {
+      await work();
+      refresh();
+    } finally {
+      mutationRef.current = false;
+      setMutation(false);
+    }
+  };
+  const editRow = async (row: Record<string, unknown>) => {
+    const request = ++editRequest.current;
+    const key = identity;
+    try {
+      const result = await api<{
+        row: Record<string, unknown>;
+        found: boolean;
+      }>("GET", `/tables/${selected}/rows/${String(row.id)}`, {
+        select: ["id", "_revision", ...visibleColumns.map((c) => c.name)].join(
+          ",",
+        ),
+      });
+      if (currentIdentity.current === key && request === editRequest.current) {
+        if (result.found)
+          setEditing({
+            key,
+            tableID: String(selectedTable!.id),
+            row: result.row,
+          });
+        else {
+          setStatus("Row was deleted; refreshing.");
+          refresh();
+        }
+      }
+    } catch (e) {
+      if (currentIdentity.current === key) setStatus((e as Error).message);
+    }
+  };
+  const deepRow = useRef<string | null>(
+    new URLSearchParams(window.location.search).get("row"),
+  );
+  useEffect(() => {
+    if (selectedTable && deepRow.current) {
+      const id = deepRow.current;
+      deepRow.current = null;
+      void editRow({ id });
+    }
+  }, [selectedTable?.id]);
+  const onCreate = async (name: string, columns: ColumnDef[]) =>
+    mutate(async () => {
       await api("POST", "/tables", {}, { name, columns });
       setShowCreate(false);
-      await loadTables();
-      setSelected(name);
-    } catch (e) {
-      alert(`Create failed: ${(e as Error).message}`);
-    }
+      selectTable(name);
+    });
+  const onInsert = async (row: Record<string, unknown>) =>
+    mutate(async () => {
+      const key = identity;
+      await api("POST", `/tables/${selected}/rows`, {}, { row });
+      if (currentIdentity.current === key) {
+        setShowInsert(false);
+        setCursors([undefined]);
+        setPage(0);
+      }
+    });
+  const onUpdate = async (id: string, fields: Record<string, unknown>) =>
+    mutate(async () => {
+      const key = identity;
+      await api(
+        "PATCH",
+        `/tables/${selected}/rows/${id}`,
+        {
+          expected_revision: String(editing?.row._revision),
+          expected_table_id: editing?.tableID ?? "",
+          select: "id,_revision",
+        },
+        fields,
+      );
+      if (currentIdentity.current === key) setEditing(null);
+    });
+  const onDeleteRow = async (id: string) => {
+    if (!confirm(`Delete row ${id} from ${selected}?`)) return;
+    await mutate(async () => {
+      const key = identity;
+      await api("DELETE", `/tables/${selected}/rows/${id}`, {
+        expected_revision: String(editing?.row._revision),
+        expected_table_id: editing?.tableID ?? "",
+      });
+      if (currentIdentity.current === key) setEditing(null);
+    });
   };
-
-  const onInsert = async (row: Record<string, unknown>) => {
-    if (!selectedTable) return;
-    try {
-      await api("POST", `/tables/${selectedTable.name}/rows`, {}, { row });
-      setShowInsert(false);
-      await Promise.all([loadTables(), loadRows()]);
-    } catch (e) {
-      alert(`Insert failed: ${(e as Error).message}`);
-    }
-  };
-
-  const onUpdate = async (id: number, fields: Record<string, unknown>) => {
-    if (!selectedTable) return;
-    try {
-      await api("PATCH", `/tables/${selectedTable.name}/rows/${id}`, {}, fields);
-      setEditingRow(null);
-      await loadRows();
-    } catch (e) {
-      alert(`Update failed: ${(e as Error).message}`);
-    }
-  };
-
-  const onDeleteRow = async (id: number) => {
-    if (!selectedTable) return;
-    if (!confirm(`Delete row ${id} from ${selectedTable.name}?`)) return;
-    try {
-      await api("DELETE", `/tables/${selectedTable.name}/rows/${id}`);
-      setEditingRow(null);
-      await Promise.all([loadTables(), loadRows()]);
-    } catch (e) {
-      alert(`Delete failed: ${(e as Error).message}`);
-    }
-  };
-
-  const onAlter = async (op: AlterOp) => {
-    if (!selectedTable) return;
-    await api("PATCH", `/tables/${selectedTable.name}`, {}, op);
-    // The event subscription refreshes the table list automatically;
-    // also refresh rows because new columns appear in the grid.
-    await Promise.all([loadTables(), loadRows()]);
-  };
-
+  const onAlter = async (op: AlterOp) =>
+    mutate(async () => {
+      await api("PATCH", `/tables/${selected}`, {}, op);
+      setEditing(null);
+      setCursors([undefined]);
+      setPage(0);
+    });
   const onDropTable = async () => {
-    if (!selectedTable) return;
-    if (!confirm(`Drop table "${selectedTable.name}" and all its rows? This cannot be undone.`)) return;
+    if (!confirm(`Drop table "${selected}" and all its rows?`)) return;
     try {
-      await api("DELETE", `/tables/${selectedTable.name}`, { confirm: "true" });
-      setSelected(null);
-      await loadTables();
+      await mutate(async () => {
+        await api("DELETE", `/tables/${selected}`, { confirm: "true" });
+        setSelected(null);
+      });
     } catch (e) {
-      alert(`Drop failed: ${(e as Error).message}`);
+      setStatus((e as Error).message);
     }
   };
-
-  const lastPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
-
+  const activeEdit =
+    editing?.key === identity && editing.tableID === String(selectedTable?.id)
+      ? editing.row
+      : null;
+  const gridTable = selectedTable
+    ? { ...selectedTable, columns: visibleColumns }
+    : null;
+  const error = status || rowResource.error || description.error || list.error;
   return (
-    <div className="h-full flex">
-      {/* Left rail */}
-      <aside className="w-64 border-r border-border bg-bg-card flex flex-col">
-        <header className="p-3 border-b border-border flex items-center justify-between">
-          <h2 className="text-sm font-medium text-text">Tables</h2>
-          <button
-            type="button"
-            onClick={() => setShowCreate(true)}
-            className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-          >
-            + New
-          </button>
+    <div className="relative h-full flex min-h-0">
+      <aside className="w-56 shrink-0 border-r border-border flex flex-col">
+        <header className="p-3 flex justify-between">
+          <strong>Tables</strong>
+          <button onClick={() => setShowCreate(true)}>+ New</button>
         </header>
-        <ul className="flex-1 overflow-auto">
-          {tables.length === 0 && !busy && (
-            <li className="p-4 text-xs text-text-muted">
-              No tables yet. Click "+ New" to create one.
-            </li>
-          )}
+        <ul className="overflow-auto flex-1">
           {tables.map((t) => (
             <li key={t.id}>
               <button
-                type="button"
-                onClick={() => setSelected(t.name)}
-                className={`w-full text-left px-3 py-2 text-sm border-l-2 ${
-                  selected === t.name
-                    ? "bg-accent/10 border-accent text-text"
-                    : "border-transparent text-text-muted hover:bg-bg-input/50 hover:text-text"
-                }`}
+                disabled={mutation}
+                onClick={() => selectTable(t.name)}
+                className={`w-full p-3 text-left ${selected === t.name ? "bg-accent/10" : ""}`}
               >
-                <div className="flex items-center justify-between">
-                  <span className="truncate font-mono text-xs">{t.name}</span>
-                  <span className="text-[10px] text-text-dim ml-2">{t.row_count}</span>
-                </div>
-                {t.scope === "global" && (
-                  <span className="text-[10px] text-text-dim">global</span>
-                )}
+                <span className="font-mono">{t.name}</span>{" "}
+                <small>{t.row_count}</small>
               </button>
             </li>
           ))}
         </ul>
       </aside>
-
-      {/* Main area */}
-      <main className="flex-1 flex flex-col min-w-0">
-        {selectedTable ? (
+      <main className="flex-1 flex flex-col min-w-0 min-h-0">
+        {error && (
+          <div role="alert" className="p-3 text-red">
+            {error}
+          </div>
+        )}
+        {selectedTable && gridTable ? (
           <>
-            <header className="border-b border-border p-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="font-mono text-sm text-text truncate">{selectedTable.name}</span>
-                <span className="text-xs text-text-dim">
-                  {selectedTable.columns.length} cols · {selectedTable.row_count} rows
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowInsert(true)}
-                  className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+            <header className="p-3 border-b border-border flex gap-3 flex-wrap items-center">
+              <strong>{selectedTable.name}</strong>
+              <small>{selectedTable.row_count} rows</small>
+              <button disabled={mutation} onClick={() => setShowInsert(true)}>
+                + Insert
+              </button>
+              <button onClick={() => setShowQuery((v) => !v)}>Query</button>
+              <button disabled={mutation} onClick={() => setShowSchema(true)}>
+                Schema
+              </button>
+              <button onClick={() => setShowApi(true)}>API</button>
+              <button disabled={mutation} onClick={onDropTable}>
+                Drop
+              </button>
+              <label>
+                Columns{" "}
+                <select
+                  aria-label="Visible columns"
+                  value={columnLimit}
+                  onChange={(e) => {
+                    setColumnLimit(Number(e.target.value));
+                    setEditing(null);
+                  }}
                 >
-                  + Insert
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowQuery((v) => !v)}
-                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-                >
-                  Query
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowSchema(true)}
-                  title="Add, rename, or drop columns"
-                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-                >
-                  Schema
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowApi(true)}
-                  title="Show curl examples for calling this table from outside"
-                  className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
-                >
-                  API
-                </button>
-                <button
-                  type="button"
-                  onClick={onDropTable}
-                  className="text-xs px-2 py-1 text-red border border-red/40 rounded hover:bg-red/10"
-                >
-                  Drop
-                </button>
-              </div>
+                  {[4, 8, 16, 256].map((n) => (
+                    <option key={n} value={n}>
+                      {n === 256 ? "All" : n}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </header>
             <div className="flex-1 overflow-auto">
-              {rows.length === 0 ? (
-                <div className="p-12 text-center text-text-muted text-sm">
-                  {busy ? "Loading…" : "No rows. Click + Insert to add the first one."}
-                </div>
-              ) : (
+              {rows.length ? (
                 <RowsTable
-                  table={selectedTable}
+                  table={gridTable}
                   rows={rows}
-                  editingRow={editingRow}
-                  onEditStart={(r) => setEditingRow(r)}
-                  onEditCancel={() => setEditingRow(null)}
+                  editingRow={activeEdit}
+                  onEditStart={editRow}
+                  onEditCancel={() => setEditing(null)}
                   onEditSave={onUpdate}
                   onDelete={onDeleteRow}
                 />
+              ) : (
+                <p className="p-8">
+                  {rowResource.busy ? "Loading…" : "No rows on this page."}
+                </p>
               )}
             </div>
-            <footer className="border-t border-border p-2 flex items-center justify-between text-xs text-text-dim">
-              <span>{status}</span>
-              <Pager
-                page={page}
-                lastPage={lastPage}
-                total={total}
-                onChange={setPage}
-              />
+            {activeEdit &&
+              !rows.some((r) => String(r.id) === String(activeEdit.id)) && (
+                <table className="w-full">
+                  <tbody>
+                    <RowEditor
+                      table={gridTable}
+                      row={activeEdit}
+                      onCancel={() => setEditing(null)}
+                      onSave={(fields) =>
+                        onUpdate(String(activeEdit.id), fields)
+                      }
+                      onDelete={() => onDeleteRow(String(activeEdit.id))}
+                    />
+                  </tbody>
+                </table>
+              )}
+            <footer className="p-3 border-t border-border flex gap-3">
+              <button
+                disabled={!page || rowResource.busy}
+                onClick={() => setPage((p) => p - 1)}
+              >
+                Previous
+              </button>
+              <span>Page {page + 1}</span>
+              <button
+                disabled={
+                  !rowResource.data?.has_more ||
+                  !rowResource.data.next_cursor ||
+                  rowResource.busy
+                }
+                onClick={() => {
+                  setCursors((old) => [
+                    ...old.slice(0, page + 1),
+                    rowResource.data!.next_cursor,
+                  ]);
+                  setPage((p) => p + 1);
+                }}
+              >
+                Next
+              </button>
+              {rowResource.busy && <span>Refreshing…</span>}
             </footer>
             {showQuery && (
               <QueryDrawer
+                key={identity}
+                tableName={selectedTable.name}
                 api={api}
                 onClose={() => setShowQuery(false)}
               />
             )}
             {showInsert && (
               <InsertDialog
+                key={identity}
                 table={selectedTable}
                 onCancel={() => setShowInsert(false)}
                 onSubmit={onInsert}
@@ -445,11 +606,13 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
               <ApiHelp
                 table={selectedTable}
                 projectId={projectId}
+                installId={installId}
                 onClose={() => setShowApi(false)}
               />
             )}
             {showSchema && (
               <SchemaEditor
+                key={identity}
                 table={selectedTable}
                 onAlter={onAlter}
                 onClose={() => setShowSchema(false)}
@@ -457,12 +620,15 @@ export default function TablesPanel({ projectId, installId }: NativePanelProps) 
             )}
           </>
         ) : (
-          <div className="flex-1 flex items-center justify-center text-text-muted text-sm">
-            Select or create a table.
-          </div>
+          <p className="p-8">
+            {description.busy ? "Loading…" : "Select or create a table."}
+          </p>
         )}
         {showCreate && (
-          <CreateDialog onCancel={() => setShowCreate(false)} onSubmit={onCreate} />
+          <CreateDialog
+            onCancel={() => setShowCreate(false)}
+            onSubmit={onCreate}
+          />
         )}
       </main>
     </div>
@@ -485,8 +651,8 @@ function RowsTable({
   editingRow: Record<string, unknown> | null;
   onEditStart: (r: Record<string, unknown>) => void;
   onEditCancel: () => void;
-  onEditSave: (id: number, fields: Record<string, unknown>) => void;
-  onDelete: (id: number) => void;
+  onEditSave: (id: string, fields: Record<string, unknown>) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
 }) {
   return (
     <table className="w-full text-xs font-mono">
@@ -505,8 +671,8 @@ function RowsTable({
       </thead>
       <tbody>
         {rows.map((r) => {
-          const id = Number(r.id);
-          const editing = editingRow && Number(editingRow.id) === id;
+          const id = String(r.id);
+          const editing = editingRow && String(editingRow.id) === id;
           return editing ? (
             <RowEditor
               key={id}
@@ -524,7 +690,10 @@ function RowsTable({
             >
               <td className="px-2 py-1.5 text-text-dim">{id}</td>
               {table.columns.map((c) => (
-                <td key={c.name} className="px-2 py-1.5 text-text truncate max-w-xs">
+                <td
+                  key={c.name}
+                  className="px-2 py-1.5 text-text truncate max-w-xs"
+                >
                   {renderCell(c, r[c.name])}
                 </td>
               ))}
@@ -543,11 +712,73 @@ function RowsTable({
 function renderCell(c: ColumnDef, v: unknown): string {
   if (v === null || v === undefined) return "—";
   if (c.type === "bool") return v ? "true" : "false";
-  if (c.type === "json") return JSON.stringify(v);
+  if (c.type === "json") return stringifyJSON(v);
   return String(v);
 }
 
-function RowEditor({
+export function FieldInput({
+  column,
+  value,
+  onChange,
+  insert = false,
+  disabled = false,
+}: {
+  column: ColumnDef;
+  value: FieldValue;
+  onChange: (value: FieldValue) => void;
+  insert?: boolean;
+  disabled?: boolean;
+}) {
+  const cls = "bg-bg-input border border-border rounded p-1 text-xs w-full";
+  return (
+    <div className="flex flex-col gap-1">
+      <select
+        aria-label={`${column.name} value mode`}
+        className={cls}
+        disabled={disabled}
+        value={value.mode}
+        onChange={(e) =>
+          onChange({ ...value, mode: e.target.value as FieldValue["mode"] })
+        }
+      >
+        {insert && (
+          <option value="default">
+            {column.default !== undefined
+              ? "Use default"
+              : column.nullable
+                ? "Omit"
+                : "Enter value"}
+          </option>
+        )}
+        <option value="value">Value</option>
+        {column.nullable && <option value="null">Null</option>}
+      </select>
+      {value.mode === "value" &&
+        (column.type === "bool" ? (
+          <select
+            aria-label={column.name}
+            disabled={disabled}
+            className={cls}
+            value={value.text}
+            onChange={(e) => onChange({ ...value, text: e.target.value })}
+          >
+            <option value="">Choose…</option>
+            <option value="true">true</option>
+            <option value="false">false</option>
+          </select>
+        ) : (
+          <input
+            aria-label={column.name}
+            disabled={disabled}
+            className={cls}
+            value={value.text}
+            onChange={(e) => onChange({ ...value, text: e.target.value })}
+          />
+        ))}
+    </div>
+  );
+}
+export function RowEditor({
   table,
   row,
   onCancel,
@@ -557,139 +788,75 @@ function RowEditor({
   table: TableMeta;
   row: Record<string, unknown>;
   onCancel: () => void;
-  onSave: (fields: Record<string, unknown>) => void;
-  onDelete: () => void;
+  onSave: (fields: Record<string, unknown>) => Promise<void> | void;
+  onDelete: () => Promise<void> | void;
 }) {
-  const [fields, setFields] = useState<Record<string, string>>(() => {
-    const out: Record<string, string> = {};
-    for (const c of table.columns) {
-      const v = row[c.name];
-      if (v === null || v === undefined) out[c.name] = "";
-      else if (c.type === "json") out[c.name] = JSON.stringify(v);
-      else out[c.name] = String(v);
+  const [fields, setFields] = useState<Record<string, FieldValue>>(() =>
+    Object.fromEntries(
+      table.columns.map((c) => [c.name, initialField(c, row[c.name])]),
+    ),
+  );
+  const dirty = useRef(new Set<string>()),
+    saving = useRef(false);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const run = async (action: () => Promise<void> | void) => {
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      saving.current = false;
+      setBusy(false);
     }
-    return out;
-  });
-
-  const submit = () => {
-    const patch: Record<string, unknown> = {};
-    for (const c of table.columns) {
-      const raw = fields[c.name];
-      if (raw === "" && c.nullable) {
-        patch[c.name] = null;
-        continue;
-      }
-      patch[c.name] = parseInputValue(c, raw);
-    }
-    onSave(patch);
   };
-
+  const submit = () =>
+    run(() => {
+      const patch: Record<string, unknown> = {};
+      for (const c of table.columns) {
+        if (dirty.current.has(c.name))
+          patch[c.name] = fieldValue(c, fields[c.name]);
+      }
+      if (!Object.keys(patch).length) {
+        onCancel();
+        return;
+      }
+      return onSave(patch);
+    });
   return (
     <tr className="border-t border-border bg-accent/5">
-      <td className="px-2 py-1.5 text-text-dim align-top">{Number(row.id)}</td>
+      <td>{String(row.id)}</td>
       {table.columns.map((c) => (
-        <td key={c.name} className="px-2 py-1 align-top">
-          <input
-            value={fields[c.name]}
-            onChange={(e) => setFields({ ...fields, [c.name]: e.target.value })}
-            className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs w-full font-mono"
-            placeholder={c.nullable ? "null" : ""}
+        <td key={c.name} className="p-1 align-top">
+          <FieldInput
+            column={c}
+            value={fields[c.name] ?? initialField(c, row[c.name])}
+            disabled={busy}
+            onChange={(v) => {
+              dirty.current.add(c.name);
+              setFields((old) => ({ ...old, [c.name]: v }));
+            }}
           />
         </td>
       ))}
-      <td className="px-2 py-1 align-top text-text-dim">
-        {String(row.updated_at || "").slice(0, 16)}
-      </td>
-      <td className="px-2 py-1 align-top">
-        <div className="flex flex-col gap-1">
-          <button
-            type="button"
-            onClick={submit}
-            className="text-[10px] px-1.5 py-0.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-          >
-            save
-          </button>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="text-[10px] px-1.5 py-0.5 border border-border rounded hover:bg-bg-input text-text-muted"
-          >
-            cancel
-          </button>
-          <button
-            type="button"
-            onClick={onDelete}
-            className="text-[10px] px-1.5 py-0.5 border border-red/40 text-red rounded hover:bg-red/10"
-          >
-            delete
-          </button>
-        </div>
+      <td>{String(row.updated_at ?? "")}</td>
+      <td>
+        <button disabled={busy} onClick={submit}>
+          save
+        </button>{" "}
+        <button disabled={busy} onClick={onCancel}>
+          cancel
+        </button>{" "}
+        <button disabled={busy} onClick={() => run(onDelete)}>
+          delete
+        </button>
+        {error && <p role="alert">{error}</p>}
       </td>
     </tr>
-  );
-}
-
-// parseInputValue translates an HTML input string back to the JSON
-// shape the server expects for the column's type. It's deliberately
-// permissive — invalid input lands as a server-side validation error
-// the user sees in the alert.
-function parseInputValue(c: ColumnDef, raw: string): unknown {
-  if (c.type === "text" || c.type === "datetime") return raw;
-  if (c.type === "number") {
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : raw;
-  }
-  if (c.type === "bool") return raw === "true";
-  if (c.type === "file_id") {
-    const n = Number(raw);
-    return Number.isFinite(n) ? n : raw;
-  }
-  if (c.type === "json") {
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return raw;
-    }
-  }
-  return raw;
-}
-
-// ─── pager ──────────────────────────────────────────────────────────
-
-function Pager({
-  page,
-  lastPage,
-  total,
-  onChange,
-}: {
-  page: number;
-  lastPage: number;
-  total: number;
-  onChange: (p: number) => void;
-}) {
-  if (total === 0) return null;
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={() => onChange(Math.max(0, page - 1))}
-        disabled={page === 0}
-        className="text-xs px-1.5 py-0.5 border border-border rounded disabled:opacity-30"
-      >
-        ‹
-      </button>
-      <span>
-        page {page + 1} / {lastPage + 1} ({total} rows)
-      </span>
-      <button
-        type="button"
-        onClick={() => onChange(Math.min(lastPage, page + 1))}
-        disabled={page >= lastPage}
-        className="text-xs px-1.5 py-0.5 border border-border rounded disabled:opacity-30"
-      >
-        ›
-      </button>
-    </div>
   );
 }
 
@@ -700,9 +867,12 @@ function CreateDialog({
   onSubmit,
 }: {
   onCancel: () => void;
-  onSubmit: (name: string, cols: ColumnDef[]) => void;
+  onSubmit: (name: string, cols: ColumnDef[]) => Promise<void>;
 }) {
   const [name, setName] = useState("");
+  const saving = useRef(false);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
   const [cols, setCols] = useState<ColumnDef[]>([
     { name: "title", type: "text", nullable: false },
   ]);
@@ -713,17 +883,34 @@ function CreateDialog({
     setCols(next);
   };
 
-  const submit = () => {
+  const submit = async () => {
     if (!name) return;
     const cleaned = cols.filter((c) => c.name);
     if (cleaned.length === 0) return;
-    onSubmit(name, cleaned);
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      await onSubmit(name, cleaned);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      saving.current = false;
+      setBusy(false);
+    }
   };
 
   return (
-    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10">
+    <Dialog
+      title="New table"
+      onClose={() => {
+        if (!busy) onCancel();
+      }}
+    >
       <div className="bg-bg-card border border-border rounded p-4 w-[28rem] max-w-[90vw] flex flex-col gap-3">
         <h3 className="text-sm font-medium text-text">New table</h3>
+        {error && <p role="alert">{error}</p>}
         <label className="flex flex-col gap-1 text-xs">
           <span className="text-text-dim">Table name</span>
           <input
@@ -745,7 +932,9 @@ function CreateDialog({
               />
               <select
                 value={c.type}
-                onChange={(e) => update(i, { type: e.target.value as ColumnType })}
+                onChange={(e) =>
+                  update(i, { type: e.target.value as ColumnType })
+                }
                 className="bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs"
               >
                 <option value="text">text</option>
@@ -776,7 +965,9 @@ function CreateDialog({
           ))}
           <button
             type="button"
-            onClick={() => setCols([...cols, { name: "", type: "text", nullable: true }])}
+            onClick={() =>
+              setCols([...cols, { name: "", type: "text", nullable: true }])
+            }
             className="text-xs text-accent hover:underline self-start"
           >
             + add column
@@ -785,6 +976,7 @@ function CreateDialog({
         <div className="flex justify-end gap-2 pt-2">
           <button
             type="button"
+            disabled={busy}
             onClick={onCancel}
             className="text-xs px-3 py-1 border border-border rounded hover:bg-bg-input"
           >
@@ -793,87 +985,85 @@ function CreateDialog({
           <button
             type="button"
             onClick={submit}
-            disabled={!name}
+            disabled={!name || busy}
             className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
           >
             Create
           </button>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
 // ─── insert-row dialog ──────────────────────────────────────────────
 
-function InsertDialog({
+export function InsertDialog({
   table,
   onCancel,
   onSubmit,
 }: {
   table: TableMeta;
   onCancel: () => void;
-  onSubmit: (row: Record<string, unknown>) => void;
+  onSubmit: (row: Record<string, unknown>) => Promise<void> | void;
 }) {
-  const [fields, setFields] = useState<Record<string, string>>({});
-
-  const submit = () => {
-    const row: Record<string, unknown> = {};
-    for (const c of table.columns) {
-      const raw = fields[c.name];
-      if (raw === undefined || raw === "") {
-        if (!c.nullable) {
-          alert(`Column "${c.name}" is required.`);
-          return;
-        }
-        continue;
+  const [fields, setFields] = useState<Record<string, FieldValue>>(() =>
+    Object.fromEntries(
+      table.columns.map((c) => [c.name, initialField(c, undefined, true)]),
+    ),
+  );
+  const saving = useRef(false);
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const submit = async () => {
+    if (saving.current) return;
+    saving.current = true;
+    setBusy(true);
+    setError("");
+    try {
+      const row: Record<string, unknown> = {};
+      for (const c of table.columns) {
+        const v = fieldValue(c, fields[c.name]);
+        if (v !== undefined) row[c.name] = v;
       }
-      row[c.name] = parseInputValue(c, raw);
+      await onSubmit(row);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      saving.current = false;
+      setBusy(false);
     }
-    onSubmit(row);
   };
-
   return (
-    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10">
-      <div className="bg-bg-card border border-border rounded p-4 w-[28rem] max-w-[90vw] flex flex-col gap-3">
-        <h3 className="text-sm font-medium text-text">
-          Insert into <span className="font-mono">{table.name}</span>
-        </h3>
-        <div className="flex flex-col gap-2">
-          {table.columns.map((c) => (
-            <label key={c.name} className="flex flex-col gap-1 text-xs">
-              <span className="text-text-dim">
-                <span className="font-mono text-text">{c.name}</span>{" "}
-                <span>{c.type}</span>
-                {!c.nullable && <span className="text-red"> *</span>}
-              </span>
-              <input
-                value={fields[c.name] || ""}
-                onChange={(e) => setFields({ ...fields, [c.name]: e.target.value })}
-                placeholder={placeholderFor(c)}
-                className="bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
-              />
-            </label>
-          ))}
-        </div>
-        <div className="flex justify-end gap-2 pt-2">
-          <button
-            type="button"
-            onClick={onCancel}
-            className="text-xs px-3 py-1 border border-border rounded hover:bg-bg-input"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submit}
-            className="text-xs px-3 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-          >
-            Insert
-          </button>
-        </div>
+    <Dialog
+      title={`Insert into ${table.name}`}
+      onClose={() => {
+        if (!busy) onCancel();
+      }}
+    >
+      <div className="bg-bg-card border border-border p-4 w-[32rem] max-w-full flex flex-col gap-3">
+        <h3>Insert into {table.name}</h3>
+        {error && <p role="alert">{error}</p>}
+        {table.columns.map((c) => (
+          <label key={c.name}>
+            {c.name} <small>{c.type}</small>
+            <FieldInput
+              column={c}
+              value={fields[c.name]}
+              insert
+              disabled={busy}
+              onChange={(v) => setFields((old) => ({ ...old, [c.name]: v }))}
+            />
+          </label>
+        ))}
+        <button disabled={busy} onClick={onCancel}>
+          Cancel
+        </button>
+        <button disabled={busy} onClick={submit}>
+          {busy ? "Saving…" : "Insert"}
+        </button>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -897,10 +1087,17 @@ function placeholderFor(c: ColumnDef): string {
 // ─── query drawer ───────────────────────────────────────────────────
 
 function QueryDrawer({
+  tableName,
   api,
   onClose,
 }: {
-  api: <T>(method: string, path: string, params?: Record<string, string>, body?: unknown) => Promise<T>;
+  tableName: string;
+  api: <T>(
+    method: string,
+    path: string,
+    params?: Record<string, string>,
+    body?: unknown,
+  ) => Promise<T>;
   onClose: () => void;
 }) {
   const [sql, setSql] = useState(
@@ -915,25 +1112,17 @@ function QueryDrawer({
     ref.current?.focus();
   }, []);
 
-  // The drawer makes a query whose path embeds a table name, but for
-  // this generic playground we route to the first matching table or
-  // require the SQL itself to use placeholders. Simplest: hit any one
-  // table; the server doesn't care which, since validateReadOnlySQL +
-  // placeholder substitution operate on the full query body. We use
-  // the first table from /tables.
   const run = async () => {
     setBusy(true);
     setError(null);
     setResult(null);
     try {
-      const tables = await api<{ tables: TableMeta[] }>("GET", "/tables");
-      const first = tables.tables?.[0]?.name;
-      if (!first) {
-        setError("No tables yet — create one before running a query.");
-        setBusy(false);
-        return;
-      }
-      const resp = await api<QueryResponse>("POST", `/tables/${first}/query`, {}, { sql });
+      const resp = await api<QueryResponse>(
+        "POST",
+        `/tables/${tableName}/query`,
+        {},
+        { sql },
+      );
       setResult(resp);
     } catch (e) {
       setError((e as Error).message);
@@ -943,9 +1132,14 @@ function QueryDrawer({
   };
 
   return (
-    <div className="border-t border-border bg-bg-card flex flex-col" style={{ height: "20rem" }}>
+    <div
+      className="border-t border-border bg-bg-card flex flex-col"
+      style={{ height: "20rem" }}
+    >
       <header className="flex items-center justify-between px-3 py-1.5 border-b border-border">
-        <span className="text-xs text-text-dim">tables_query — read-only SELECT</span>
+        <span className="text-xs text-text-dim">
+          tables_query — read-only SELECT
+        </span>
         <button
           type="button"
           onClick={onClose}
@@ -968,7 +1162,7 @@ function QueryDrawer({
             <div className="flex flex-col gap-2">
               {result.truncated && (
                 <div className="text-text-dim text-[10px]">
-                  truncated at row cap
+                  truncated at row or byte limit
                 </div>
               )}
               <table className="w-full">
@@ -985,7 +1179,10 @@ function QueryDrawer({
                   {result.rows.map((r, i) => (
                     <tr key={i} className="border-t border-border">
                       {result.columns.map((c) => (
-                        <td key={c} className="pr-3 py-0.5 text-text truncate max-w-xs">
+                        <td
+                          key={c}
+                          className="pr-3 py-0.5 text-text truncate max-w-xs"
+                        >
                           {String(r[c] ?? "")}
                         </td>
                       ))}
@@ -1025,79 +1222,97 @@ function QueryDrawer({
 function ApiHelp({
   table,
   projectId,
+  installId,
   onClose,
 }: {
   table: TableMeta;
   projectId: string;
+  installId: number;
   onClose: () => void;
 }) {
-  const origin = typeof window !== "undefined" ? window.location.origin : "https://your-host";
-  const base = `${origin}/api/apps/tables`;
+  const origin =
+    typeof window !== "undefined"
+      ? window.location.origin
+      : "https://your-host";
+  const base = `${origin}/api/apps/tables/_install/${installId}`;
   const sample = sampleRowFor(table);
-  const sampleJSON = JSON.stringify(sample, null, 2);
+  const sampleJSON = stringifyJSON(sample, 2);
   const wherePred = whereExampleFor(table);
-  const whereJSON = JSON.stringify({ where: [wherePred] }, null, 2);
+  const whereJSON = stringifyJSON({ where: [wherePred] }, 2);
 
-  const examples: { title: string; verb: string; description: string; curl: string }[] = [
+  const examples: {
+    title: string;
+    verb: string;
+    description: string;
+    curl: string;
+  }[] = [
     {
       title: "List rows",
       verb: "GET",
       description: "First 50 rows ordered by id desc.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows?limit=50"`,
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows?project_id=${encodeURIComponent(projectId)}&limit=50"`,
     },
     {
       title: "Filtered search",
       verb: "POST",
-      description: "Typed predicates: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows/search" \\\n  -d '${whereJSON}'`,
+      description:
+        "Typed predicates: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows/search?project_id=${encodeURIComponent(projectId)}" \\\n  -d '${whereJSON}'`,
     },
     {
       title: "Get one row",
       verb: "GET",
-      description: "Pass ?hydrate_files=true to resolve file_id columns to {id, url, expires_at}.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows/<id>"`,
+      description:
+        "Pass ?hydrate_files=true to resolve file_id columns to {id, url, expires_at}.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  "${base}/tables/${table.name}/rows/<id>?project_id=${encodeURIComponent(projectId)}"`,
     },
     {
       title: "Insert a row",
       verb: "POST",
-      description: "Wrap a single object as { row: {...} } or pass { rows: [...] } for atomic batch.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows" \\\n  -d '{"row": ${sampleJSON.replace(/\n/g, "\n  ")}}'`,
+      description:
+        "Wrap a single object as { row: {...} } or pass { rows: [...] } for atomic batch.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/rows?project_id=${encodeURIComponent(projectId)}" \\\n  -d '{"row": ${sampleJSON.replace(/\n/g, "\n  ")}}'`,
     },
     {
       title: "Update a row",
       verb: "PATCH",
-      description: "Body is a partial object — only listed fields are touched. updated_at moves automatically.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X PATCH "${base}/tables/${table.name}/rows/<id>" \\\n  -d '${JSON.stringify(sample).slice(0, 80)}...'`,
+      description:
+        "Body is a partial object — only listed fields are touched. updated_at moves automatically.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X PATCH "${base}/tables/${table.name}/rows/<id>?project_id=${encodeURIComponent(projectId)}" \\\n  -d '${stringifyJSON(sample)}'`,
     },
     {
       title: "Delete a row",
       verb: "DELETE",
-      description: "Filter-form (where + confirm=true) is supported on POST /rows/search semantics — see docs.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -X DELETE "${base}/tables/${table.name}/rows/<id>"`,
+      description:
+        "Deletes one row. Use the rows_delete MCP tool for a confirmed filtered deletion.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -X DELETE "${base}/tables/${table.name}/rows/<id>?project_id=${encodeURIComponent(projectId)}"`,
     },
     {
       title: "Run a SELECT (escape hatch)",
       verb: "POST",
-      description: "Read-only. Reference user-tables with {name} placeholders; bind values via params.",
-      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/query" \\\n  -d '{"sql": "SELECT COUNT(*) AS n FROM {${table.name}}"}'`,
+      description:
+        "Read-only. Reference user-tables with {name} placeholders; bind values via params.",
+      curl: `curl -H "Authorization: Bearer $APTEVA_API_KEY" \\\n  -H "Content-Type: application/json" \\\n  -X POST "${base}/tables/${table.name}/query?project_id=${encodeURIComponent(projectId)}" \\\n  -d '{"sql": "SELECT COUNT(*) AS n FROM {${table.name}}"}'`,
     },
   ];
 
   const projectHint =
     projectId && projectId !== ""
-      ? `# Sidecar is bound to project_id="${projectId}". For globally-scoped\n# installs, append &project_id=<id> to the URL or pass _project_id in the body.`
+      ? `# These examples select install ${installId} and project ${projectId}.`
       : "# Add ?project_id=<id> to the URL for globally-scoped installs.";
 
   return (
-    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10 p-6">
+    <Dialog title="Table API" onClose={onClose}>
       <div className="bg-bg-card border border-border rounded w-[44rem] max-w-full max-h-full flex flex-col overflow-hidden">
         <header className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div>
             <h3 className="text-sm font-medium text-text">
-              Connect to <span className="font-mono">{table.name}</span> from outside
+              Connect to <span className="font-mono">{table.name}</span> from
+              outside
             </h3>
             <p className="text-xs text-text-dim mt-0.5">
-              Same REST surface the dashboard uses, reachable from any host with a valid API key.
+              Same REST surface the dashboard uses, reachable from any host with
+              a valid API key.
             </p>
           </div>
           <button
@@ -1111,39 +1326,53 @@ function ApiHelp({
         </header>
         <div className="overflow-auto flex-1 p-4 flex flex-col gap-4 text-xs">
           <section>
-            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Auth carriers</h4>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">
+              Auth carriers
+            </h4>
             <p className="text-text-muted mb-2">
-              Three ways to attach your API key — pick whichever fits the client. Keys are issued
-              under your account settings.
+              Three ways to attach your API key — pick whichever fits the
+              client. Keys are issued under your account settings.
             </p>
             <ul className="space-y-1.5 font-mono">
               <li>
                 <code className="bg-bg-input px-1.5 py-0.5 rounded">
                   Authorization: Bearer $APTEVA_API_KEY
                 </code>{" "}
-                <span className="text-text-dim font-sans not-italic">— canonical</span>
+                <span className="text-text-dim font-sans not-italic">
+                  — canonical
+                </span>
               </li>
               <li>
                 <code className="bg-bg-input px-1.5 py-0.5 rounded">
                   X-API-Key: $APTEVA_API_KEY
                 </code>{" "}
-                <span className="text-text-dim font-sans">— common alt header</span>
+                <span className="text-text-dim font-sans">
+                  — common alt header
+                </span>
               </li>
               <li>
-                <code className="bg-bg-input px-1.5 py-0.5 rounded">?api_key=$APTEVA_API_KEY</code>{" "}
-                <span className="text-text-dim font-sans">— for SSE/EventSource</span>
+                <code className="bg-bg-input px-1.5 py-0.5 rounded">
+                  ?api_key=$APTEVA_API_KEY
+                </code>{" "}
+                <span className="text-text-dim font-sans">
+                  — for SSE/EventSource
+                </span>
               </li>
             </ul>
           </section>
           <section>
-            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Base URL</h4>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">
+              Base URL
+            </h4>
             <CopyBlock text={base} />
             <p className="text-[10px] text-text-dim mt-2 whitespace-pre-line font-mono">
               {projectHint}
             </p>
           </section>
           <section>
-            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">Endpoints</h4>
+            <h4 className="text-text-dim uppercase text-[10px] tracking-wide mb-2">
+              Endpoints
+            </h4>
             <div className="flex flex-col gap-3">
               {examples.map((ex) => (
                 <div key={ex.title} className="border border-border rounded">
@@ -1163,7 +1392,7 @@ function ApiHelp({
           </section>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -1227,7 +1456,14 @@ function sampleRowFor(table: TableMeta): Record<string, unknown> {
   // example isn't an empty object.
   if (Object.keys(out).length === 0 && table.columns.length > 0) {
     const c = table.columns[0];
-    out[c.name] = c.type === "number" ? 0 : "example";
+    out[c.name] = {
+      text: "example",
+      number: 42,
+      bool: true,
+      datetime: "2026-01-01T00:00:00Z",
+      json: { example: true },
+      file_id: "1",
+    }[c.type];
   }
   return out;
 }
@@ -1235,9 +1471,14 @@ function sampleRowFor(table: TableMeta): Record<string, unknown> {
 // whereExampleFor picks the first column whose type makes for a clean
 // predicate demo — string with contains, number with gte, bool with
 // eq, etc. — and returns a {col, op, value} triple.
-function whereExampleFor(table: TableMeta): { col: string; op: string; value: unknown } {
+function whereExampleFor(table: TableMeta): {
+  col: string;
+  op: string;
+  value: unknown;
+} {
   for (const c of table.columns) {
-    if (c.type === "text") return { col: c.name, op: "contains", value: "search" };
+    if (c.type === "text")
+      return { col: c.name, op: "contains", value: "search" };
     if (c.type === "bool") return { col: c.name, op: "eq", value: true };
     if (c.type === "number") return { col: c.name, op: "gte", value: 0 };
   }
@@ -1307,7 +1548,10 @@ function SchemaEditor({
       cancelRename();
       return;
     }
-    await safeAlter({ rename: { from: renaming, to: renameTo.trim() } }, cancelRename);
+    await safeAlter(
+      { rename: { from: renaming, to: renameTo.trim() } },
+      cancelRename,
+    );
   };
 
   const submitDrop = async (name: string) => {
@@ -1316,7 +1560,12 @@ function SchemaEditor({
   };
 
   return (
-    <div className="absolute inset-0 bg-bg/80 flex items-center justify-center z-10 p-6">
+    <Dialog
+      title="Edit schema"
+      onClose={() => {
+        if (!busy) onClose();
+      }}
+    >
       <div className="bg-bg-card border border-border rounded w-[36rem] max-w-full max-h-full flex flex-col overflow-hidden">
         <header className="flex items-center justify-between px-4 py-3 border-b border-border">
           <div>
@@ -1324,9 +1573,11 @@ function SchemaEditor({
               Edit <span className="font-mono">{table.name}</span> schema
             </h3>
             <p className="text-xs text-text-dim mt-0.5">
-              Add, rename, or drop columns. Reserved columns
-              (<span className="font-mono">id</span>, <span className="font-mono">created_at</span>,{" "}
-              <span className="font-mono">updated_at</span>) are managed automatically.
+              Add, rename, or drop columns. Reserved columns (
+              <span className="font-mono">id</span>,{" "}
+              <span className="font-mono">created_at</span>,{" "}
+              <span className="font-mono">updated_at</span>) are managed
+              automatically.
             </p>
           </div>
           <button
@@ -1391,10 +1642,15 @@ function SchemaEditor({
                       </>
                     ) : (
                       <>
-                        <span className="font-mono text-text flex-1 truncate" title={c.name}>
+                        <span
+                          className="font-mono text-text flex-1 truncate"
+                          title={c.name}
+                        >
                           {c.name}
                         </span>
-                        <span className="text-text-dim text-[10px]">{c.type}</span>
+                        <span className="text-text-dim text-[10px]">
+                          {c.type}
+                        </span>
                         {!c.nullable && (
                           <span className="text-[10px] text-red bg-red/10 border border-red/30 rounded px-1">
                             required
@@ -1425,7 +1681,9 @@ function SchemaEditor({
           </section>
           <section className="border-t border-border pt-3 flex flex-col gap-2">
             <div className="flex items-center justify-between">
-              <h4 className="text-text-dim uppercase text-[10px] tracking-wide">Add column</h4>
+              <h4 className="text-text-dim uppercase text-[10px] tracking-wide">
+                Add column
+              </h4>
               {!adding && (
                 <button
                   type="button"
@@ -1449,7 +1707,7 @@ function SchemaEditor({
           </section>
         </div>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
@@ -1468,12 +1726,18 @@ function AddColumnForm({
   const [type, setType] = useState<ColumnType>("text");
   const [nullable, setNullable] = useState(true);
   const [defaultStr, setDefaultStr] = useState("");
+  const [error, setError] = useState("");
 
   const submit = async () => {
     if (!name.trim()) return;
     const col: ColumnDef = { name: name.trim(), type, nullable };
     if (defaultStr.trim() !== "") {
-      col.default = parseInputValue({ name, type, nullable }, defaultStr.trim());
+      try {
+        col.default = parseInputValue({ name, type, nullable }, defaultStr);
+      } catch (e) {
+        setError((e as Error).message);
+        return;
+      }
     }
     // Server requires a default when adding a non-nullable column to a
     // populated table — surface the rule in the UI before the round-trip.
@@ -1486,6 +1750,7 @@ function AddColumnForm({
 
   return (
     <div className="flex flex-col gap-2 border border-border rounded p-2 bg-bg-input/30">
+      {error && <p role="alert">{error}</p>}
       <div className="grid grid-cols-[1fr_auto_auto] gap-2 items-center">
         <input
           autoFocus

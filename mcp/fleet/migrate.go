@@ -33,6 +33,10 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("only Fleet-managed local-kind tenants can be moved (this one is %q)", t.Kind)
 	}
@@ -111,10 +115,29 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"retain_source":    retainSource,
 	})
 
+	targetTenant := *t
+	targetTenant.InstanceID = targetID
+	targetTenant.ConfigDir = targetDir
+	targetTenant.BaseURL = baseURLForHost(targetHost, targetPort)
+	if err := a.store.reserveManagementPort(&targetTenant); err != nil {
+		return nil, err
+	}
+	if err := a.checkpointOperation(t.ID, "stopping_source", map[string]any{"source": t, "target": &targetTenant}); err != nil {
+		return nil, err
+	}
+	targetMayRun := false
 	if err := a.stopTenantOnHost(ctx, t, sourcePort); err != nil {
+		a.requireRecovery(t.ID, err)
 		return nil, fmt.Errorf("stop source tenant: %w", err)
 	}
 	rollback := func(stage string, cause error) (any, error) {
+		if targetMayRun {
+			if stopErr := a.stopTenantOnHost(ctx, &targetTenant, targetPort); stopErr != nil {
+				a.requireRecovery(t.ID, stopErr)
+				return nil, fmt.Errorf("migration recovery required: target stop failed: %w", stopErr)
+			}
+		}
+
 		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
 			map[string]any{"stage": stage, "error": cause.Error()})
 		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t, sourceDir, version, sourcePort, prevStatus); rerr == nil {
@@ -136,18 +159,25 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("migrate %s: %w (source tenant restart attempted)", stage, cause)
 	}
 	if t.InstanceID == targetID {
+		targetMayRun = true
 		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t, sourceDir, version, targetPort, prevStatus)
 		if err != nil {
 			return rollback("restart on new port", err)
 		}
 		if err := a.waitForTargetAppsHealthy(ctx, sourceHost, sourceDir, requiredApps, 10*time.Minute); err != nil {
-			_ = a.stopTenantOnHost(ctx, t, targetPort)
+			if stopErr := a.stopTenantOnHost(ctx, &targetTenant, targetPort); stopErr != nil {
+				a.requireRecovery(t.ID, stopErr)
+				return nil, stopErr
+			}
 			return rollback("validate target apps", err)
 		}
 		routeTenant := *t
 		routeTenant.BaseURL = baseURL
 		if err := a.refreshTenantIngress(ctx, &routeTenant); err != nil {
-			_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
+			if stopErr := a.stopTenantOnHost(ctx, &routeTenant, targetPort); stopErr != nil {
+				a.requireRecovery(t.ID, stopErr)
+				return nil, stopErr
+			}
 			return rollback("route", err)
 		}
 		if err := a.store.setLocation(t.ID, targetID, baseURL, sourceDir); err != nil {
@@ -175,15 +205,18 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return rollback("transfer", err)
 	}
 	targetStarted := false
+	targetMayRun = true
+	_ = a.checkpointOperation(t.ID, "starting_target", nil)
 	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t, targetDir, version, targetPort, prevStatus)
 	if err != nil {
-		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 		return rollback("target start", err)
 	}
 	targetStarted = true
 	if err := a.waitForTargetAppsHealthy(ctx, targetHost, targetDir, requiredApps, 10*time.Minute); err != nil {
-		_ = a.stopTenantOnHost(ctx, &Tenant{Slug: t.Slug, ConfigDir: targetDir, InstanceID: targetID}, targetPort)
-		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		if stopErr := a.stopTenantOnHost(ctx, &targetTenant, targetPort); stopErr != nil {
+			a.requireRecovery(t.ID, stopErr)
+			return nil, stopErr
+		}
 		return rollback("validate target apps", err)
 	}
 	routeTenant := *t
@@ -191,47 +224,42 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	routeTenant.BaseURL = baseURL
 	routeTenant.ConfigDir = targetDir
 	if err := a.refreshTenantIngress(ctx, &routeTenant); err != nil {
-		_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
-		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		if stopErr := a.stopTenantOnHost(ctx, &routeTenant, targetPort); stopErr != nil {
+			a.requireRecovery(t.ID, stopErr)
+			return nil, stopErr
+		}
 		return rollback("route", err)
 	}
 
-	cleanupTarget := func() {
+	cleanupTarget := func() error {
 		if targetStarted {
-			if targetHost.IsLocal() {
-				_ = a.stopTenantBy(t.Slug, targetDir, targetPort, 10*time.Second)
-			} else {
-				_ = stopHostedTenant(ctx, targetHost.InstanceID, t.Slug, targetPort, 10*time.Second)
+			if err := a.stopTenantOnHost(ctx, &targetTenant, targetPort); err != nil {
+				a.requireRecovery(t.ID, err)
+				return err
 			}
 		}
-		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
-	}
-	var retained *RetainedSource
-	if retainSource {
-		retained = &RetainedSource{
-			TenantID:         t.ID,
-			SourceInstanceID: sourceHost.InstanceID,
-			SourceConfigDir:  sourceDir,
-			SourceSlug:       t.Slug,
-		}
-		if err := a.store.createRetainedSource(retained); err != nil {
-			cleanupTarget()
-			return rollback("record retained source", err)
-		}
+		return a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 	}
 
-	if err := a.store.setLocation(t.ID, targetID, baseURL, targetDir); err != nil {
-		if retained != nil {
-			_ = a.store.deleteRetainedSource(t.ID)
+	retained := &RetainedSource{TenantID: t.ID, SourceInstanceID: sourceHost.InstanceID, SourceConfigDir: sourceDir, SourceSlug: t.Slug}
+	if err := a.store.commitMigration(t.ID, targetID, baseURL, targetDir, retained); err != nil {
+		if cleanupErr := cleanupTarget(); cleanupErr != nil {
+			return nil, cleanupErr
 		}
-		cleanupTarget()
 		return rollback("persist", err)
 	}
 	_ = a.store.setStatus(t.ID, newStatus, "user")
 	if !retainSource && (sourceHost.InstanceID != targetHost.InstanceID || sourceDir != targetDir) {
 		if err := a.removeTenantData(ctx, sourceHost, t.Slug, sourceDir); err != nil {
-			return nil, fmt.Errorf("migration committed but source cleanup failed: %w", err)
+			return nil, fmt.Errorf("migration committed but source cleanup failed; retry with tenant_migrate_finalize: %w", err)
 		}
+		if err := a.store.deleteRetainedSource(t.ID); err != nil {
+			return nil, err
+		}
+		if err := a.store.releaseRetiredPorts(t.ID); err != nil {
+			return nil, err
+		}
+		retained = nil
 	}
 	_ = a.store.recordEvent(t.ID, "migrated", "user", map[string]any{
 		"from_instance_id": t.InstanceID,
@@ -268,6 +296,10 @@ func (a *App) toolMigrateFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	defer done()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 
 	retained, err := a.store.getRetainedSource(id)
 	if err != nil {
@@ -296,6 +328,9 @@ func (a *App) toolMigrateFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	if err := a.store.deleteRetainedSource(id); err != nil {
 		return nil, fmt.Errorf("remove retained source record: %w", err)
+	}
+	if err := a.store.releaseRetiredPorts(id); err != nil {
+		return nil, err
 	}
 	_ = a.store.recordEvent(id, "migration_source_finalized", "tool:tenant_migrate_finalize", map[string]any{
 		"source_instance_id": retained.SourceInstanceID,

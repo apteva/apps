@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.7.0
+version: 1.8.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -12,8 +12,10 @@ description: |
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
 
-  v1.7.0 adds incremental HTTP response streaming and Server-Sent Events
-  for both Node and Go functions while keeping functions_invoke unary.
+  v1.8.0 improves warm execution and app-call performance, validates
+  deployments before activation, and hardens resource limits, isolation,
+  cancellation and streaming. Linux requires delegated cgroup v2 and
+  Landlock ABI 6 (Linux 6.12+); see the upgrade notes before installing.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/functions
 icon: /ui/icon.svg

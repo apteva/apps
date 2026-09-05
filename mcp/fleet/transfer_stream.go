@@ -78,7 +78,10 @@ func (a *App) transferTenantDataWithProgress(ctx *sdk.AppCtx, sourceHost, target
 	if err != nil {
 		return err
 	}
-	return removeTransferredRuntimeArtifacts(ctx, targetHost, targetDir)
+	if err := removeTransferredRuntimeArtifacts(ctx, targetHost, targetDir); err != nil {
+		return &publishedTransferError{err}
+	}
+	return nil
 }
 
 func removeTransferredRuntimeArtifacts(ctx *sdk.AppCtx, targetHost fleetHost, targetDir string) error {
@@ -118,28 +121,7 @@ func (a *App) streamLocalTenantToRemote(ctx *sdk.AppCtx, sourceDir string, insta
 	if err != nil {
 		return err
 	}
-	cmd := fmt.Sprintf(`
-set -eu
-DST=%s
-URL=%s
-PARENT=$(dirname "$DST")
-test ! -e "$DST"
-mkdir -p "$PARENT"
-TMP=$(mktemp -d "$PARENT/.transfer-%s-XXXXXX")
-cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
-PAYLOAD="$TMP/payload"
-mkdir -p "$PAYLOAD"
-if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --retry 3 --connect-timeout 15 "$URL" | tar xzf - -C "$PAYLOAD"
-elif command -v wget >/dev/null 2>&1; then
-  wget -qO- "$URL" | tar xzf - -C "$PAYLOAD"
-else
-  echo "curl or wget required for fleet streaming transfer" >&2
-  exit 127
-fi
-mv "$PAYLOAD" "$DST"
-`, sh(targetDir), sh(transferURL), shellSafeSlug(slug))
+	cmd := "set -eu\n" + remoteExtractCommand(transferURL, targetDir)
 	return runHostedTransferJob(ctx, instanceID, cmd, slug)
 }
 
@@ -459,6 +441,11 @@ func extractTenantArchiveStream(r io.Reader, targetDir string) error {
 		return err
 	}
 	defer os.RemoveAll(stage)
+	root, err := os.OpenRoot(stage)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
 	gz, err := gzip.NewReader(r)
 	if err != nil {
 		return err
@@ -480,58 +467,14 @@ func extractTenantArchiveStream(r io.Reader, targetDir string) error {
 			return errors.New("tenant archive exceeds extraction limits")
 		}
 		total += hdr.Size
-		clean := filepath.Clean(filepath.FromSlash(hdr.Name))
-		if clean == "." {
-			continue
-		}
-		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe archive path %q", hdr.Name)
-		}
-		dst := filepath.Join(stage, clean)
-		if !strings.HasPrefix(dst, stage+string(os.PathSeparator)) {
-			return fmt.Errorf("unsafe archive path %q", hdr.Name)
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(dst, os.FileMode(hdr.Mode)&0o700); err != nil {
-				return err
-			}
-		case tar.TypeReg, tar.TypeRegA:
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
-			f, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(hdr.Mode)&0o700)
-			if err != nil {
-				return err
-			}
-			_, copyErr := io.CopyN(f, tr, hdr.Size)
-			closeErr := f.Close()
-			if copyErr != nil {
-				return copyErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-		case tar.TypeSymlink:
-			link := filepath.Clean(filepath.FromSlash(hdr.Linkname))
-			if filepath.IsAbs(link) {
-				return fmt.Errorf("unsafe absolute symlink %q", hdr.Linkname)
-			}
-			resolved := filepath.Clean(filepath.Join(filepath.Dir(dst), link))
-			if resolved != stage && !strings.HasPrefix(resolved, stage+string(os.PathSeparator)) {
-				return fmt.Errorf("unsafe escaping symlink %q", hdr.Linkname)
-			}
-			if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
-				return err
-			}
-			if err := os.Symlink(hdr.Linkname, dst); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported archive entry type %d", hdr.Typeflag)
+		if err := extractArchiveEntry(root, hdr.Name, hdr, tr); err != nil {
+			return err
 		}
 	}
-	return os.Rename(stage, targetDir)
+	if _, err := io.Copy(io.Discard, gz); err != nil {
+		return err
+	}
+	return publishTenantDirectory(stage, targetDir)
 }
 
 func (a *App) signTransfer(id string, exp int64) string {
@@ -686,3 +629,5 @@ func shellSafeSlug(slug string) string {
 	}
 	return b.String()
 }
+
+type publishedTransferError struct{ error }

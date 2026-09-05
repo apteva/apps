@@ -25,6 +25,15 @@ type routingRule struct {
 }
 
 func dbCreateRoutingRule(db *sql.DB, pid string, r *routingRule) (int64, error) {
+	if r.AddListID != nil {
+		l, err := dbListGet(db, pid, *r.AddListID)
+		if err != nil {
+			return 0, err
+		}
+		if l == nil || l.ArchivedAt != "" {
+			return 0, errors.New("list not found in this project")
+		}
+	}
 	if r.MatchRecipient == "" && r.MatchSender == "" {
 		// Allowed (a catch-all), but it must DO something.
 	}
@@ -113,7 +122,7 @@ func applyRoutingRules(db *sql.DB, pid string, contactID int64, recipients []str
 			continue
 		}
 		if r.AddListID != nil {
-			if err := dbListAddContact(db, pid, *r.AddListID, contactID, "routing_rule"); err == nil {
+			if changed, err := dbListAddContactChanged(db, pid, *r.AddListID, contactID, "routing_rule"); err == nil && changed {
 				acted.Lists = append(acted.Lists, *r.AddListID)
 			}
 		}

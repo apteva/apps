@@ -3,10 +3,12 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
+	"github.com/apteva/apps/mcp/computer/internal/browser/providerhttp"
 	"net/http"
 	"time"
 
@@ -15,9 +17,10 @@ import (
 )
 
 type Computer struct {
-	url     string
-	display computer.DisplaySize
-	client  *http.Client
+	requestCtx context.Context
+	url        string
+	display    computer.DisplaySize
+	client     *http.Client
 }
 
 // New creates a Computer backed by a browser-service HTTP API.
@@ -41,8 +44,10 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if dur <= 0 {
 			dur = 1000
 		}
-		time.Sleep(time.Duration(dur) * time.Millisecond)
-		return c.Screenshot()
+		if err := cdputil.Sleep(c.callerContext(), time.Duration(dur)*time.Millisecond); err != nil {
+			return nil, err
+		}
+		return c.finishAction(action)
 	}
 
 	if action.Type == "type" && action.Presentation.Enabled() && action.Presentation.TypingDelayMS > 0 {
@@ -55,18 +60,18 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			time.Sleep(time.Duration(action.Presentation.TypingDelayMS) * time.Millisecond)
 		}
 		presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-		return c.Screenshot()
+		return c.finishAction(action)
 	}
 	if err := c.dispatch(action); err != nil {
 		return nil, err
 	}
 	presentation.AfterAction(action.Presentation, 200*time.Millisecond)
-	return c.Screenshot()
+	return c.finishAction(action)
 }
 
 func (c *Computer) dispatch(action computer.Action) error {
 	data, _ := json.Marshal(action)
-	req, err := http.NewRequest("POST", c.url+"/action", bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(c.callerContext(), "POST", c.url+"/action", bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -79,14 +84,14 @@ func (c *Computer) dispatch(action computer.Action) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := providerhttp.ReadAll(resp.Body, 64<<20)
 		return fmt.Errorf("action %s: HTTP %d: %s", action.Type, resp.StatusCode, string(respBody))
 	}
 	return nil
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {
-	req, err := http.NewRequest("GET", c.url+"/screenshot", nil)
+	req, err := http.NewRequestWithContext(c.callerContext(), "GET", c.url+"/screenshot", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -97,11 +102,11 @@ func (c *Computer) Screenshot() ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := providerhttp.ReadAll(resp.Body, 64<<20)
 		return nil, fmt.Errorf("screenshot: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := providerhttp.ReadAll(resp.Body, 64<<20)
 	if err != nil {
 		return nil, err
 	}
@@ -114,3 +119,26 @@ func (c *Computer) Screenshot() ([]byte, error) {
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
 
 func (c *Computer) Close() error { return nil }
+
+func (c *Computer) callerContext() context.Context {
+	if c.requestCtx != nil {
+		return c.requestCtx
+	}
+	return context.Background()
+}
+func (c *Computer) BindRequest(ctx context.Context) func() {
+	previous := c.requestCtx
+	c.requestCtx = ctx
+	return func() { c.requestCtx = previous }
+}
+func (c *Computer) ExecuteAction(action computer.Action) error {
+	action.NoScreenshot = true
+	_, err := c.Execute(action)
+	return err
+}
+func (c *Computer) finishAction(action computer.Action) ([]byte, error) {
+	if action.NoScreenshot {
+		return nil, nil
+	}
+	return c.Screenshot()
+}

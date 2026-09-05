@@ -68,6 +68,9 @@ func callSiblingTool(ctx *sdk.AppCtx, appName, projectID, tool string, args map[
 	if env.Error != nil {
 		return fmt.Errorf("%s.%s: %s", appName, tool, env.Error.Message)
 	}
+	if failed, _ := env.Result["isError"].(bool); failed {
+		return fmt.Errorf("%s.%s: tool returned an error", appName, tool)
+	}
 	content, _ := env.Result["content"].([]any)
 	if len(content) == 0 {
 		return nil
@@ -329,9 +332,35 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		return err
 	}
 	defer done()
+	dnsDone, err := lockResource(context.Background(), "dns-ownership")
+	if err != nil {
+		return err
+	}
+	defer dnsDone()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return err
+	}
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
 	if fqdn == "" {
 		return errors.New("fqdn required")
+	}
+
+	claimed, err := a.claimHostname(t.ID, fqdn, "primary", false)
+	if err != nil {
+		return err
+	}
+	keepClaim := false
+	defer func() {
+		if claimed && !keepClaim {
+			_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose=?`, t.ID, fqdn, "primary")
+		}
+	}()
+	if t.Domain != "" && t.Domain != fqdn {
+		return errors.New("detach the existing primary domain before assigning a replacement")
+	}
+	if t.Domain == fqdn {
+		return nil
 	}
 
 	var recordID string
@@ -373,6 +402,12 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 			return errors.New("apex CNAME isn't allowed by DNS; use type=A with an IP, or attach a subdomain")
 		}
 
+		if err := ensureNewDNSRecord(ctx, projectID, apex, subArg, rtype); err != nil {
+			return err
+		}
+		if _, err := a.store.db.Exec(`UPDATE fleet_tenant_state SET dns_project_id=? WHERE tenant_id=?`, projectID, t.ID); err != nil {
+			return err
+		}
 		if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
 			"domain": apex, "name": subArg, "type": rtype, "value": target, "ttl": ttl,
 		}, nil); err != nil {
@@ -406,6 +441,7 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		_ = a.deleteAttachedDNSRecord(ctx, projectID, fqdn, recordID)
 		return err
 	}
+	keepClaim = true
 	return nil
 }
 
@@ -426,11 +462,7 @@ func (a *App) deleteAttachedDNSRecord(ctx *sdk.AppCtx, projectID, fqdn, storedID
 	}, nil)
 }
 
-// detachDomain best-effort deletes the DNS record, unregisters the
-// route, and clears the tenant's domain link. The
-// local clear runs even on remote-side failures — a dangling registrar
-// record is operator-recoverable via the Domains panel; a dangling
-// tenant row pointing at a domain that doesn't resolve is worse.
+// detachDomain clears ownership only after external cleanup succeeds.
 func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 	if t == nil {
 		return errors.New("tenant required")
@@ -443,8 +475,21 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 		return err
 	}
 	defer done()
+	dnsDone, err := lockResource(context.Background(), "dns-ownership")
+	if err != nil {
+		return err
+	}
+	defer dnsDone()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return err
+	}
+
 	if t.Domain == "" && t.DomainRecordID == "" {
 		return nil
+	}
+	if t.DomainRecordID != "" && !a.domainsAvailable(ctx) {
+		return errors.New("domains integration unavailable; DNS cleanup retained for retry")
 	}
 	var deleteErr error
 	if t.DomainRecordID != "" && a.domainsAvailable(ctx) {
@@ -464,11 +509,17 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 			}, nil)
 		}
 	}
-	a.unregisterRouteForTenant(ctx, t.Domain)
+	if deleteErr != nil {
+		return deleteErr
+	}
+	if err := a.unregisterTenantHost(ctx, t.Domain); err != nil {
+		return err
+	}
 	if err := a.store.clearDomain(t.ID); err != nil {
 		return err
 	}
 	_ = a.store.recordEvent(t.ID, "domain.detached", "tool:detach_domain", map[string]any{"fqdn": t.Domain})
+	_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose='primary'`, t.ID, t.Domain)
 	return deleteErr
 }
 
@@ -494,10 +545,35 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		return nil, err
 	}
 	defer done()
+	dnsDone, err := lockResource(context.Background(), "dns-ownership")
+	if err != nil {
+		return nil, err
+	}
+	defer dnsDone()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 	domain, err := normaliseGrantDomain(spec.FQDN)
 	if err != nil {
 		return nil, err
 	}
+	if existing, err := a.store.getDomainGrant(t.ID, domain); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return nil, errors.New("domain is already delegated; revoke the existing grant before replacing its DNS records")
+	}
+	claimed, err := a.claimHostname(t.ID, domain, "grant", true)
+	if err != nil {
+		return nil, err
+	}
+	keepClaim := false
+	defer func() {
+		if claimed && !keepClaim {
+			_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose=?`, t.ID, domain, "grant")
+		}
+	}()
+
 	if !spec.ManageDNS {
 		return nil, errors.New("domain grants require managed DNS so Fleet can maintain the delegation boundary")
 	}
@@ -526,6 +602,22 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		ttl = 600
 	}
 
+	if _, err := a.store.db.Exec(`UPDATE fleet_tenant_state SET dns_project_id=? WHERE tenant_id=?`, projectID, t.ID); err != nil {
+		return nil, err
+	}
+	apex, sub, err := resolveApex(ctx, projectID, domain)
+	if err != nil {
+		return nil, err
+	}
+	if sub == "" {
+		sub = "@"
+	}
+	if err := ensureNewDNSRecord(ctx, projectID, apex, sub, rtype); err != nil {
+		return nil, err
+	}
+	if err := ensureNewDNSRecord(ctx, projectID, apex, wildcardSubArg(apex, domain), rtype); err != nil {
+		return nil, err
+	}
 	record, err := a.writeDomainRecord(ctx, projectID, domain, target, rtype, ttl)
 	if err != nil {
 		return nil, err
@@ -572,6 +664,7 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		"domain": domain, "wildcard": true, "target": target, "type": rtype,
 	})
 
+	keepClaim = true
 	return g, nil
 }
 
@@ -584,6 +677,16 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 		return nil, err
 	}
 	defer done()
+	dnsDone, err := lockResource(context.Background(), "dns-ownership")
+	if err != nil {
+		return nil, err
+	}
+	defer dnsDone()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	domain, err = normaliseGrantDomain(domain)
 	if err != nil {
 		return nil, err
@@ -600,7 +703,7 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 		return nil, err
 	}
 	for _, host := range hosts {
-		if err := a.unregisterTenantHost(ctx, host.Hostname); err != nil {
+		if err := a.unregisterOwnedHostname(ctx, t, host.Hostname); err != nil {
 			_ = a.store.setTenantHostStatus(t.ID, host.Hostname, "error", err.Error())
 			return nil, fmt.Errorf("remove ingress for %s: %w", host.Hostname, err)
 		}
@@ -609,6 +712,9 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 		if err := a.store.deleteTenantHost(t.ID, host.Hostname); err != nil {
 			return nil, err
 		}
+	}
+	if (g.DomainRecordID != "" || g.WildcardRecordID != "") && !a.domainsAvailable(ctx) {
+		return nil, errors.New("domains integration unavailable; grant retained for retry")
 	}
 	var deleteErr error
 	if a.domainsAvailable(ctx) {
@@ -637,10 +743,14 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 	if g.Wildcard {
 		a.unregisterRouteForTenant(ctx, wildcardHost(domain))
 	}
+	if deleteErr != nil {
+		return g, deleteErr
+	}
 	if err := a.store.deleteDomainGrant(t.ID, domain); err != nil {
 		return nil, err
 	}
 	_ = a.store.recordEvent(t.ID, "domain_grant.revoked", "tool:tenant_domain_revoke", map[string]any{"domain": domain})
+	_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose='grant'`, t.ID, domain)
 	return g, deleteErr
 }
 
@@ -935,11 +1045,31 @@ func (a *App) attachTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string, g
 		return nil, err
 	}
 	defer done()
+	dnsDone, err := lockResource(context.Background(), "dns-ownership")
+	if err != nil {
+		return nil, err
+	}
+	defer dnsDone()
+	t, _, err = a.store.get(t.ID)
+	if err != nil {
+		return nil, err
+	}
 
 	hostname, err := normaliseExactHostname(rawHostname)
 	if err != nil {
 		return nil, err
 	}
+	claimed, err := a.claimHostname(t.ID, hostname, "app", false)
+	if err != nil {
+		return nil, err
+	}
+	keepClaim := false
+	defer func() {
+		if claimed && !keepClaim {
+			_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose=?`, t.ID, hostname, "app")
+		}
+	}()
+
 	existing, err := a.store.getTenantHostByHostname(hostname)
 	if err != nil {
 		return nil, err
@@ -958,6 +1088,7 @@ func (a *App) attachTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string, g
 	if err := a.store.upsertTenantHost(host); err != nil {
 		return nil, err
 	}
+	keepClaim = true
 	if err := a.registerRouteForTenantHost(ctx, t, hostname, hostname, "tool:tenant_host_attach"); err != nil {
 		_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
 		failed, _ := a.store.getTenantHost(t.ID, hostname)
@@ -993,8 +1124,8 @@ func (a *App) removeTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string) (
 	if host == nil {
 		return nil, fmt.Errorf("tenant hostname not found: %s", hostname)
 	}
-	if t.IngressMode != IngressDirect {
-		if err := a.unregisterTenantHost(ctx, hostname); err != nil {
+	{
+		if err := a.unregisterOwnedHostname(ctx, t, hostname); err != nil {
 			_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
 			return nil, err
 		}
@@ -1003,6 +1134,7 @@ func (a *App) removeTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string) (
 		return nil, err
 	}
 	_ = a.store.recordEvent(t.ID, "tenant_host.removed", "tool:tenant_host_remove", map[string]any{"hostname": hostname})
+	_, _ = a.store.db.Exec(`DELETE FROM fleet_hostname_owners WHERE tenant_id=? AND hostname=? AND purpose='app'`, t.ID, hostname)
 	return host, nil
 }
 

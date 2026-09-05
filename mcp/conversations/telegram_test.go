@@ -364,8 +364,8 @@ func TestTelegramOutboundApprovalCallbackEditsOneMessage(t *testing.T) {
 	if got, _ := updated.Components[0].Props["resolved_by_external"].(string); got != "telegram:9:12345" {
 		t.Fatalf("resolved external actor = %q", got)
 	}
-	if len(platform.threadEvents) != 1 || !strings.Contains(platform.threadEvents[0].Message, "action=approve") {
-		t.Fatalf("approval result events = %+v", platform.threadEvents)
+	if len(platform.trackedEvents) != 1 || !strings.Contains(fmt.Sprint(platform.trackedEvents[0].Message), "action=approve") {
+		t.Fatalf("approval result receipts=%+v", platform.trackedEvents)
 	}
 	tools := []string{}
 	for _, call := range platform.integrationCalls {
@@ -868,6 +868,7 @@ func TestTelegramResponseFeedbackStreamsPrivateDraftAndStopsCleanly(t *testing.T
 	if drafts := telegramCallsByTool(platform, "send_message_draft"); len(drafts) != 0 {
 		t.Fatalf("typing state created an empty draft: %+v", drafts)
 	}
+	boundConversationCaller(t, app, conv, 41)
 	firstFrameAt := time.Now()
 	app.streamer.Ingest("llm.tool_chunk", 41, "chat-"+conv.ID,
 		`{"tool":"conversations_conversations_send","id":"draft-call","chunk":"{\"conversation_id\":\"`+conv.ID+`\",\"text\":\"Hello from the agent\"}"}`,

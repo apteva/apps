@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -47,6 +48,24 @@ func conversationThreadEventID(conversationID string, messageID, agentID int64) 
 // spawnedThreads caches eventless ensure calls. Inbound messages deliberately
 // bypass it because each needs its own stable-event receipt.
 var spawnedThreads sync.Map
+
+type cachedThreadProfile struct {
+	hash    string
+	expires time.Time
+}
+
+func cacheThreadProfile(key, hash string) {
+	now := time.Now()
+	count := 0
+	spawnedThreads.Range(func(k, v any) bool {
+		count++
+		if entry, ok := v.(cachedThreadProfile); !ok || entry.expires.Before(now) || count > 1024 {
+			spawnedThreads.Delete(k)
+		}
+		return true
+	})
+	spawnedThreads.Store(key, cachedThreadProfile{hash, now.Add(5 * time.Minute)})
+}
 
 // legacyThreadPlatforms remembers an explicitly unsupported EnsureThread
 // endpoint for the lifetime of this app process. The key is the App instance,
@@ -156,7 +175,7 @@ func (a *App) ensureConversationThreadForAgent(
 	// through EnsureThread so the desired profile and stable event are one
 	// atomic operation with an accepted-or-duplicate receipt.
 	if initialEvent == nil {
-		if prev, ok := spawnedThreads.Load(cacheKey); ok && prev.(string) == wantHash {
+		if prev, ok := spawnedThreads.Load(cacheKey); ok && prev.(cachedThreadProfile).hash == wantHash && prev.(cachedThreadProfile).expires.After(time.Now()) {
 			return threadID, false, nil
 		}
 	}
@@ -192,7 +211,7 @@ func (a *App) ensureConversationThreadForAgent(
 					_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", err.Error())
 					return threadID, false, err
 				}
-				spawnedThreads.Store(cacheKey, wantHash)
+				cacheThreadProfile(cacheKey, wantHash)
 				_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, wantHash, "")
 				if agentID == conv.LeadAgentID && conv.ThreadID != threadID {
 					if err := a.store.SetConversationThread(conv.ID, threadID); err == nil {
@@ -229,7 +248,7 @@ func (a *App) ensureConversationThreadForAgent(
 		_ = a.store.RecordAgentThread(conv.ID, agentID, threadID, wantHash, "", err.Error())
 		return threadID, false, err
 	}
-	spawnedThreads.Store(cacheKey, wantHash)
+	cacheThreadProfile(cacheKey, wantHash)
 	appliedHash := ""
 	lastError := "thread profile reconciliation pending platform support"
 	if result.Status == "created" || result.Status == "updated" || result.Status == "reconciled" {

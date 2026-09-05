@@ -33,7 +33,7 @@ func TestComputerAppPatreonReliabilityFixture(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+	defer sc.MCP("browser_session", map[string]any{"action": "close", "session_id": sessionID})
 
 	shot := sc.MCP("computer_use", map[string]any{
 		"session_id": sessionID, "action": "screenshot", "include_som": true,

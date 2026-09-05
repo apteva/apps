@@ -280,7 +280,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: code/v0.9.0
     entry: mcp/code
   port: 8080
   health_check: /health

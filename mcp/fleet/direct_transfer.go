@@ -363,7 +363,7 @@ test ! -e "$DST"
 test -d "$STAGE"
 find "$STAGE" -type f \( -name '*-wal' -o -name '*-shm' -o -name '*-journal' -o -name 'fleet.pid' -o -name 'fleet.sid' \) -delete
 rm -rf -- "$STAGE/.fleet-rsync-partial"
-mv "$STAGE" "$DST"`, sh(targetDir), sh(stageDir))
+`, sh(targetDir), sh(stageDir)) + remotePublishCommand(stageDir, targetDir)
 	out, code, err := instanceRunCommand(ctx, instanceID, cmd, 60)
 	if err != nil || code != 0 {
 		return fmt.Errorf("finalize direct transfer: %w (exit %d): %s", err, code, strings.TrimSpace(out))

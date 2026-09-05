@@ -39,52 +39,72 @@ func issueVerifyEmailToken(ctx *sdk.AppCtx, projectID string, org *Organization,
 	return issueVerifyEmailTokenForClient(ctx, projectID, org, userID, email, recoveryLinkOptions{})
 }
 
-func issueVerifyEmailTokenForClient(ctx *sdk.AppCtx, projectID string, org *Organization, userID int64, email string, opts recoveryLinkOptions) error {
+func issueVerifyEmailTokenForClient(ctx *sdk.AppCtx, pid string, org *Organization, uid int64, email string, opts recoveryLinkOptions) error {
+	return issueRecoveryToken(ctx, pid, org, uid, email, "verify_email", opts)
+}
+func issueResetToken(ctx *sdk.AppCtx, pid string, org *Organization, uid int64, email string) error {
+	return issueResetTokenForClient(ctx, pid, org, uid, email, recoveryLinkOptions{})
+}
+func issueResetTokenForClient(ctx *sdk.AppCtx, pid string, org *Organization, uid int64, email string, opts recoveryLinkOptions) error {
+	return issueRecoveryToken(ctx, pid, org, uid, email, "reset_password", opts)
+}
+func issueRecoveryToken(ctx *sdk.AppCtx, pid string, org *Organization, uid int64, email, kind string, opts recoveryLinkOptions) error {
+	if ctx == nil || ctx.PlatformAPI() == nil || strings.TrimSpace(ctx.Config().Get("from_email")) == "" {
+		return errors.New("email delivery is not configured")
+	}
+	if orgBaseURL(ctx, nil, org) == "" {
+		return errors.New("public Auth URL is not configured")
+	}
+	if opts.ClientID == "" {
+		clients, err := dbListClients(ctx.AppDB(), pid, org.ID, false)
+		if err != nil {
+			return err
+		}
+		for _, c := range clients {
+			if c.Type == "spa" || c.Type == "native" {
+				opts.ClientID = c.ClientID
+				break
+			}
+		}
+		if opts.ClientID == "" {
+			return errors.New("an active public client is required for the built-in recovery page")
+		}
+	}
 	raw, err := randSlug(32)
 	if err != nil {
 		return err
 	}
+	action, path, subject, intro, ttl := "verify", "/email/verify", "Verify your email", "Verify your email to finish creating your account.", verifyEmailTTL
+	if kind == "reset_password" {
+		action, path, subject, intro, ttl = "reset", "/password/reset", "Reset your password", "Use this secure link to choose a new password.", resetPasswordTTL
+	}
 	meta, _ := json.Marshal(opts)
-	if err := dbInsertVerificationToken(ctx.AppDB(), projectID, org.ID, userID, "verify_email",
-		hashToken(raw), string(meta), time.Now().Add(verifyEmailTTL)); err != nil {
+	if err = dbInsertVerificationToken(ctx.AppDB(), pid, org.ID, uid, kind, hashToken(raw), string(meta), time.Now().Add(ttl)); err != nil {
 		return err
 	}
-	link := recoveryLink(ctx, org, opts.ContinueURL, "verify", raw, "/email/verify")
-	dbAudit(ctx.AppDB(), projectID, org.ID, &userID, "", "verify_email_sent",
-		"", "", map[string]any{"link": link, "email": email})
-	brand := recoveryBrand(org, opts.BrandName)
-	return sendRecoveryEmail(ctx, projectID, email, brand, "Verify your email",
-		"Verify your email to finish creating your "+brand+" account.", "Verify email", link,
-		fmt.Sprintf("auth:verify:%d:%s", userID, hashToken(raw)[:16]))
-}
-
-func issueResetToken(ctx *sdk.AppCtx, projectID string, org *Organization, userID int64, email string) error {
-	return issueResetTokenForClient(ctx, projectID, org, userID, email, recoveryLinkOptions{})
-}
-
-func issueResetTokenForClient(ctx *sdk.AppCtx, projectID string, org *Organization, userID int64, email string, opts recoveryLinkOptions) error {
-	raw, err := randSlug(32)
+	link := recoveryLink(ctx, org, opts.ContinueURL, action, raw, path)
+	if opts.ContinueURL == "" {
+		u, _ := url.Parse(link)
+		f, _ := url.ParseQuery(u.Fragment)
+		f.Set("client_id", opts.ClientID)
+		f.Set("project_id", pid)
+		u.Fragment = f.Encode()
+		link = u.String()
+	}
+	err = sendRecoveryEmail(ctx, pid, email, recoveryBrand(org, opts.BrandName), subject, intro, subject, link, fmt.Sprintf("auth:%s:%d:%s", action, uid, hashToken(raw)[:16]))
+	status := "sent"
 	if err != nil {
-		return err
+		status = "failed"
+		_, _ = ctx.AppDB().Exec(`DELETE FROM verification_tokens WHERE project_id=? AND token_hash=?`, pid, hashToken(raw))
 	}
-	meta, _ := json.Marshal(opts)
-	if err := dbInsertVerificationToken(ctx.AppDB(), projectID, org.ID, userID, "reset_password",
-		hashToken(raw), string(meta), time.Now().Add(resetPasswordTTL)); err != nil {
-		return err
-	}
-	link := recoveryLink(ctx, org, opts.ContinueURL, "reset", raw, "/password/reset")
-	dbAudit(ctx.AppDB(), projectID, org.ID, &userID, "", "password_reset_sent",
-		"", "", map[string]any{"link": link, "email": email})
-	brand := recoveryBrand(org, opts.BrandName)
-	return sendRecoveryEmail(ctx, projectID, email, brand, "Reset your password",
-		"Use this secure link to choose a new password for your "+brand+" account.", "Reset password", link,
-		fmt.Sprintf("auth:reset:%d:%s", userID, hashToken(raw)[:16]))
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, opts.ClientID, kind+"_delivery", "", "", map[string]any{"status": status})
+	return err
 }
 
 func recoveryLink(ctx *sdk.AppCtx, org *Organization, continueURL, action, token, fallbackPath string) string {
 	continueURL = strings.TrimSpace(continueURL)
 	if continueURL == "" {
-		return buildLink(ctx, org, fallbackPath, url.Values{"token": {token}})
+		return buildLink(ctx, org, fallbackPath, nil) + "#" + url.Values{action: {token}}.Encode()
 	}
 	u, err := url.Parse(continueURL)
 	if err != nil {
@@ -108,11 +128,11 @@ func recoveryBrand(org *Organization, configured string) string {
 
 func sendRecoveryEmail(ctx *sdk.AppCtx, projectID, recipient, brand, subject, intro, action, link, idempotencyKey string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
-		return nil
+		return errors.New("email delivery is not configured")
 	}
 	from := strings.TrimSpace(ctx.Config().Get("from_email"))
 	if from == "" {
-		return nil // Development mode: the audited link remains available.
+		return errors.New("email delivery is not configured")
 	}
 	body := intro + "\n\n" + link + "\n\nIf you did not request this, you can ignore this email."
 	bodyHTML := "<p>" + html.EscapeString(intro) + "</p><p><a href=\"" + html.EscapeString(link) + "\">" + html.EscapeString(action) + "</a></p><p>If you did not request this, you can ignore this email.</p>"
@@ -135,7 +155,7 @@ func sendRecoveryEmail(ctx *sdk.AppCtx, projectID, recipient, brand, subject, in
 func buildLink(ctx *sdk.AppCtx, org *Organization, path string, q url.Values) string {
 	base := orgBaseURL(ctx, nil, org)
 	if base == "" {
-		base = "http://localhost:8080"
+		return ""
 	}
 	if q != nil {
 		return base + path + "?" + q.Encode()

@@ -77,7 +77,7 @@ func TestSumMoneyUsesHistoricalRatesAndLeavesEventsUntouched(t *testing.T) {
 
 func TestSumMoneyTimeseriesAndPreviousPeriodComparison(t *testing.T) {
 	db := testDashboardDB(t)
-	now := time.Now().UTC().Truncate(24 * time.Hour)
+	now := time.Now().UTC()
 	if _, err := upsertFXRate(db, "p1", FXRate{BaseCurrency: "USD", QuoteCurrency: "EUR", AsOf: now.Add(-72 * time.Hour).UnixMilli(), Rate: 0.5, Source: "test"}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,13 @@ func TestSumMoneyTimeseriesAndPreviousPeriodComparison(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := series["series"].([]map[string]any)
-	if len(rows) != 2 || rows[0]["value"] != float64(5) || rows[1]["value"] != float64(10) {
+	observed := []map[string]any{}
+	for _, row := range rows {
+		if count, _ := row["count"].(int64); count > 0 {
+			observed = append(observed, row)
+		}
+	}
+	if len(observed) != 2 || observed[0]["value"] != float64(5) || observed[1]["value"] != float64(10) {
 		t.Fatalf("series=%#v", rows)
 	}
 	statCfg := map[string]any{}

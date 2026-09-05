@@ -46,13 +46,13 @@ func TestRoundCents(t *testing.T) {
 }
 
 func TestLooksLikeISO4217(t *testing.T) {
-	good := []string{"USD", "EUR", "GBP", "CAD", "XYZ"}
+	good := []string{"USD", "EUR", "GBP", "CAD"}
 	for _, s := range good {
 		if !looksLikeISO4217(s) {
 			t.Errorf("expected %q to be valid", s)
 		}
 	}
-	bad := []string{"", "us", "USDS", "us d", "U5D", "usd", "Us-D", "JPY", "KWD"}
+	bad := []string{"", "us", "USDS", "us d", "U5D", "usd", "Us-D", "XYZ", "JPY", "KWD"}
 	for _, s := range bad {
 		if looksLikeISO4217(s) {
 			t.Errorf("expected %q to be invalid", s)

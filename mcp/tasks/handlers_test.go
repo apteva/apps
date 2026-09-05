@@ -95,7 +95,7 @@ func TestTaskLifecycleUsesOpaqueThreadOwnership(t *testing.T) {
 	}
 
 	running, progress, step := stateRunning, 25, "Reviewing records"
-	updatedRaw, err := app.toolUpdate(creator, appCtx, map[string]any{
+	updatedRaw, err := app.toolSetProgress(creator, appCtx, map[string]any{
 		"task_id": created.ID, "state": running, "progress": progress, "current_step": step,
 	})
 	if err != nil {
@@ -204,7 +204,7 @@ func TestAssignmentAndExecutorLifecycle(t *testing.T) {
 	}
 
 	executor := callerContext(7, "thread-exec-91", "project-a")
-	runningRaw, err := app.toolUpdate(executor, appCtx, map[string]any{
+	runningRaw, err := app.toolSetProgress(executor, appCtx, map[string]any{
 		"task_id": task.ID, "state": stateRunning, "progress": 40,
 		"current_step": "Preparing briefing",
 	})
@@ -266,7 +266,112 @@ func TestStructuredProgressUpdatePreservesAuthoritativeDescriptionForWorker(t *t
 	}
 }
 
-func TestToolUpdateAtomicallyEditsPausedRecurringDefinition(t *testing.T) {
+func TestFocusedMutationToolsSeparateProgressEditAndFailure(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	caller := callerContext(7, "thread-main", "project-a")
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Focused mutation task", "description": "Authoritative description",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := raw.(map[string]any)["task"].(*Task)
+
+	progressRaw, err := app.toolSetProgress(caller, appCtx, map[string]any{
+		"task_id": task.ID, "state": stateRunning, "progress": 40, "current_step": "Checking records",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	progressed := progressRaw.(*Task)
+	if progressed.State != stateRunning || progressed.Progress == nil || *progressed.Progress != 40 ||
+		progressed.Description != "Authoritative description" {
+		t.Fatalf("focused progress changed unrelated fields: %+v", progressed)
+	}
+	if _, err := app.toolSetProgress(caller, appCtx, map[string]any{
+		"task_id": task.ID, "state": stateRunning, "progress": 20, "current_step": "Going backwards",
+	}); err == nil || !strings.Contains(err.Error(), "cannot decrease") {
+		t.Fatalf("decreasing progress error=%v", err)
+	}
+	backwards := 30
+	if _, _, err := app.store.Update(task.ID, "thread-racing-writer", UpdateTaskInput{Progress: &backwards}); err == nil || !strings.Contains(err.Error(), "cannot decrease") {
+		t.Fatalf("store accepted a stale concurrent progress write: %v", err)
+	}
+	if _, err := app.toolSetProgress(caller, appCtx, map[string]any{
+		"task_id": task.ID, "state": stateRunning, "progress": 50,
+	}); err == nil || !strings.Contains(err.Error(), "current_step required") {
+		t.Fatalf("progress without a concrete step error=%v", err)
+	}
+	if _, err := app.toolFail(caller, appCtx, map[string]any{"task_id": task.ID, "error": ""}); err == nil || !strings.Contains(err.Error(), "error required") {
+		t.Fatalf("empty terminal failure error=%v", err)
+	}
+
+	failedRaw, err := app.toolFail(caller, appCtx, map[string]any{
+		"task_id": task.ID, "error": "upstream rejected the operation", "result_reference": "operation:42",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := failedRaw.(*Task)
+	if failed.State != stateFailed || failed.Error != "upstream rejected the operation" ||
+		failed.CurrentStep != "Failed" || failed.ResultReference != "operation:42" {
+		t.Fatalf("focused failure did not terminalize task: %+v", failed)
+	}
+
+	editableRaw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Old title", "description": "Remove me",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	editable := editableRaw.(map[string]any)["task"].(*Task)
+	editedRaw, err := app.toolEdit(caller, appCtx, map[string]any{
+		"task_id": editable.ID, "title": "New title", "clear_description": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := editedRaw.(*Task)
+	if edited.Title != "New title" || edited.Description != "" || edited.State != stateQueued {
+		t.Fatalf("focused definition edit changed lifecycle or failed to clear description: %+v", edited)
+	}
+}
+
+func TestFocusedEditRejectsMaterializedOccurrenceDefinition(t *testing.T) {
+	app, appCtx, _ := newTestApp(t)
+	caller := callerContext(7, "schedule-owner", "project-a")
+	raw, err := app.toolCreate(caller, appCtx, map[string]any{
+		"title": "Recurring parent", "schedule": map[string]any{"kind": "interval", "every": "24h"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := raw.(map[string]any)["task"].(*Task)
+	scheduledFor := parent.NextRunAt.UTC()
+	occurrence, _, err := app.store.Create(CreateTaskInput{
+		AgentID: 7, ProjectID: "project-a", Title: parent.Title, Description: "Snapshot",
+		State: stateQueued, AssignedThreadID: "schedule-owner", ParentTaskID: parent.ID,
+		ScheduledFor: &scheduledFor, OccurrenceKey: scheduledFor.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolEdit(caller, appCtx, map[string]any{
+		"task_id": occurrence.ID, "title": "Rewritten snapshot",
+	}); err == nil || !strings.Contains(err.Error(), "occurrence definitions are immutable") {
+		t.Fatalf("materialized occurrence edit error=%v", err)
+	}
+	rewritten := "Store-level rewrite"
+	if _, _, err := app.store.Update(occurrence.ID, "schedule-owner", UpdateTaskInput{Title: &rewritten}); err == nil || !strings.Contains(err.Error(), "cannot edit an occurrence definition") {
+		t.Fatalf("store accepted an occurrence definition rewrite: %v", err)
+	}
+	unchanged, _ := app.store.Get(occurrence.ID)
+	if unchanged.Title != parent.Title || unchanged.Description != "Snapshot" {
+		t.Fatalf("materialized occurrence was mutated: %+v", unchanged)
+	}
+}
+
+func TestToolEditAtomicallyEditsPausedRecurringDefinition(t *testing.T) {
 	app, appCtx, _ := newTestApp(t)
 	creator := callerContext(7, "schedule-owner", "project-a")
 	raw, err := app.toolCreate(creator, appCtx, map[string]any{
@@ -291,11 +396,10 @@ func TestToolUpdateAtomicallyEditsPausedRecurringDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	updatedRaw, err := app.toolUpdate(creator, appCtx, map[string]any{
+	updatedRaw, err := app.toolEdit(creator, appCtx, map[string]any{
 		"task_id": parent.ID, "title": "New recurring title", "description": "New recurring body",
 		// Reproduce provider placeholders while changing only interval cadence and timezone.
 		"schedule": map[string]any{"kind": "once", "at": "", "after": "", "every": "20m", "cron": "", "timezone": "Europe/Madrid"},
-		"state":    stateRunning, "progress": 0, "current_step": "", "error": "", "result_reference": "",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -509,12 +613,12 @@ func TestSchedulesMaterializeOnceAndRecurringWithoutSetupDuplicates(t *testing.T
 	if runs[0].CreatedByThreadID != "opaque-schedule-owner" || runs[0].AssignedThreadID != "opaque-default" {
 		t.Fatalf("occurrence lost opaque thread provenance: %+v", runs[0])
 	}
-	// One ready event for once and one for the recurrence; no duplicate wake.
-	if len(platform.events) != 2 {
+	// Two execution wakes plus one durable completion receipt; no duplicates.
+	if len(platform.events) != 3 {
 		t.Fatalf("unexpected scheduler notifications: %+v", platform.events)
 	}
 	for _, event := range platform.events {
-		if event.Target.ThreadID != "opaque-default" {
+		if event.Message.(map[string]any)["type"] == "task.ready" && event.Target.ThreadID != "opaque-default" {
 			t.Fatalf("scheduled execution targeted creator instead of configured default: %+v", event)
 		}
 	}
@@ -734,7 +838,7 @@ func TestRecurringOccurrenceLifecycleRollsUpDownstreamOutcome(t *testing.T) {
 	if parent.LastRunAt == nil || parent.LastOccurrenceStatus != "accepted" {
 		t.Fatalf("accepted occurrence did not update parent health: %+v", parent)
 	}
-	if _, err := app.toolUpdate(executor, appCtx, map[string]any{"task_id": accepted.ID, "state": stateRunning, "progress": 60, "current_step": "Drafting"}); err != nil {
+	if _, err := app.toolSetProgress(executor, appCtx, map[string]any{"task_id": accepted.ID, "state": stateRunning, "progress": 60, "current_step": "Drafting"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := app.toolComplete(executor, appCtx, map[string]any{"task_id": accepted.ID, "result": "Draft ready", "result_reference": "social:draft-42"}); err != nil {
@@ -770,6 +874,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
 			t.Fatal(err)
 		}
+		if err := app.drainDeliveries("", "project-a", tick); err != nil {
+			t.Fatal(err)
+		}
 		run, _ := app.store.Get(runs[0].ID)
 		wantAttempts := retry + 1
 		if run.State != stateQueued || run.AcceptedAt != nil || run.DispatchAttempts != wantAttempts {
@@ -789,6 +896,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
 			t.Fatal(err)
 		}
+		if err := app.drainDeliveries("", "project-a", tick); err != nil {
+			t.Fatal(err)
+		}
 		afterDuplicate, _ := app.store.Get(run.ID)
 		if afterDuplicate.DispatchAttempts != wantAttempts {
 			t.Fatalf("retry %d duplicated in the same window: %+v", retry, afterDuplicate)
@@ -797,6 +907,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 
 	exhaustedAt := dispatchedAt.Add(time.Duration(dispatchMaxAttempts)*dispatchRetryInterval + time.Second)
 	if err := app.scheduler.reconcileUnaccepted(exhaustedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", exhaustedAt); err != nil {
 		t.Fatal(err)
 	}
 	parent, _ = app.store.Get(parent.ID)
@@ -863,10 +976,16 @@ func TestAcceptedRedispatchStopsRetriesAndFailure(t *testing.T) {
 	if err := app.scheduler.reconcileUnaccepted(retryAt, "project-a"); err != nil {
 		t.Fatal(err)
 	}
+	if err := app.drainDeliveries("", "project-a", retryAt); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := app.store.Accept(runs[0].ID, "opaque-default", retryAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.scheduler.reconcileUnaccepted(retryAt.Add(24*time.Hour), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", retryAt.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _ := app.store.Get(runs[0].ID)
@@ -917,6 +1036,9 @@ func TestInitialDeliveryErrorRemainsQueuedForRetry(t *testing.T) {
 	}
 	platform.sendErr = nil
 	if err := app.scheduler.reconcileUnaccepted(dispatchedAt.Add(dispatchRetryInterval+time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", dispatchedAt.Add(dispatchRetryInterval+time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	retried, _ := app.store.Get(runs[0].ID)
@@ -995,7 +1117,7 @@ func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 		t.Fatalf("tracked retry payload must remain immutable: %+v", payload)
 	}
 
-	// No tasks_get or tasks_update has happened. Core's generic claim is enough
+	// No tasks_get or tasks_set_progress has happened. Core's generic claim is enough
 	// for Tasks to record authoritative acceptance and stop dispatch retries.
 	claimedAt := dispatchedAt.Add(time.Second)
 	if err := app.handleAgentEventLifecycle(appCtx, agentLifecycleDelivery(run, sdk.AgentEventClaimed, 1, claimedAt)); err != nil {
@@ -1014,6 +1136,9 @@ func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 		t.Fatalf("generic claim did not accept occurrence: %+v", accepted)
 	}
 	if err := app.scheduler.reconcileUnaccepted(claimedAt.Add(24*time.Hour), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", claimedAt.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _ = app.store.Get(run.ID)
@@ -1060,7 +1185,7 @@ func TestSettledExecutionGetsOneTerminalizationWakeThenFailsAndUnblocksNextOccur
 	if err := app.handleAgentEventLifecycle(appCtx, agentLifecycleDelivery(run, sdk.AgentEventActive, 2, claimedAt.Add(time.Second))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.toolUpdate(callerContext(7, run.AssignedThreadID, "project-a"), appCtx, map[string]any{
+	if _, err := app.toolSetProgress(callerContext(7, run.AssignedThreadID, "project-a"), appCtx, map[string]any{
 		"task_id": run.ID, "state": stateRunning, "progress": 100, "current_step": "Ready to finalize",
 	}); err != nil {
 		t.Fatal(err)
@@ -1484,7 +1609,7 @@ func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.4.0" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.5.1" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -1514,7 +1639,7 @@ func TestManifestAndToolContract(t *testing.T) {
 		"stops before making external changes",
 		"should not paraphrase the task into a second source of truth",
 		"omitted fields are preserved atomically",
-		"update the recurring parent ID rather than an occurrence ID",
+		"edit the recurring parent ID rather than an occurrence ID",
 		"Never create a placeholder task",
 		"`reply_required: false`",
 		"Core becoming active does not move the occurrence to `running`",
@@ -1525,7 +1650,7 @@ func TestManifestAndToolContract(t *testing.T) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
 		}
 	}
-	want := map[string]bool{"create": false, "list": false, "get": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false, "recover_occurrence": false}
+	want := map[string]bool{"create": false, "list": false, "get": false, "set_progress": false, "edit": false, "fail": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false, "recover_occurrence": false}
 	for _, tool := range app.MCPTools() {
 		if _, ok := want[tool.Name]; !ok {
 			t.Fatalf("unexpected tool %q", tool.Name)
@@ -1574,19 +1699,52 @@ func TestManifestAndToolContract(t *testing.T) {
 				}
 			}
 		}
-		if tool.Name == "update" {
-			for _, required := range []string{"Atomically edit a task definition", "preserving every omitted field", "partial patch", "keeps it paused", "recurring parent task", "Keep the task running while any executor is actively working", "Use waiting only when no executor can progress", "at least two or three intermediate milestones"} {
+		if tool.Name == "set_progress" {
+			for _, required := range []string{"meaningful nonterminal task milestone", "Always provide state, progress, and a concrete current_step", "waiting only when nobody can progress", "must not decrease", "tasks_complete after success", "tasks_fail after failure"} {
 				if !strings.Contains(tool.Description, required) {
-					t.Fatalf("update tool description missing progress rule %q: %s", required, tool.Description)
+					t.Fatalf("set_progress description missing rule %q: %s", required, tool.Description)
 				}
 			}
 			properties, _ := tool.InputSchema["properties"].(map[string]any)
-			if _, ok := properties["title"]; !ok {
-				t.Fatalf("update tool cannot rename a task: %+v", properties)
+			for _, forbidden := range []string{"title", "description", "schedule", "error"} {
+				if _, ok := properties[forbidden]; ok {
+					t.Fatalf("set_progress exposes unrelated field %q: %+v", forbidden, properties)
+				}
+			}
+		}
+		if tool.Name == "edit" {
+			for _, required := range []string{"Atomically edit", "preserving omitted fields", "clear_description=true", "materialized occurrence definitions are immutable", "keeps it paused", "never create a placeholder"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("edit description missing rule %q: %s", required, tool.Description)
+				}
+			}
+			properties, _ := tool.InputSchema["properties"].(map[string]any)
+			for _, forbidden := range []string{"state", "progress", "current_step", "error"} {
+				if _, ok := properties[forbidden]; ok {
+					t.Fatalf("edit exposes execution field %q: %+v", forbidden, properties)
+				}
 			}
 			schedule, _ := properties["schedule"].(map[string]any)
 			if required, ok := schedule["required"].([]string); ok && len(required) > 0 {
-				t.Fatalf("update schedule must be a partial patch: %+v", schedule)
+				t.Fatalf("edit schedule must be a partial patch: %+v", schedule)
+			}
+		}
+		if tool.Name == "fail" {
+			properties, _ := tool.InputSchema["properties"].(map[string]any)
+			if _, ok := properties["state"]; ok {
+				t.Fatalf("fail should not ask the agent to encode terminal state: %+v", properties)
+			}
+			for _, required := range []string{"explicit terminal task failure", "concrete error", "exactly once"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("fail description missing rule %q: %s", required, tool.Description)
+				}
+			}
+		}
+		if tool.Name == "update" {
+			for _, required := range []string{"Legacy compatibility", "Do not use for new work", "tasks_set_progress", "tasks_edit", "tasks_fail", "tasks_complete"} {
+				if !strings.Contains(tool.Description, required) {
+					t.Fatalf("legacy update description missing migration rule %q: %s", required, tool.Description)
+				}
 			}
 		}
 		if tool.Name == "recover_occurrence" {
@@ -1622,11 +1780,12 @@ func TestManifestAndToolContract(t *testing.T) {
 		"stops before making external changes",
 		"should not paraphrase the task into a second source of truth",
 		"omitted fields are preserved atomically",
-		"update the recurring parent ID rather than an occurrence ID",
+		"edit the recurring parent ID rather than an occurrence ID",
 		"Never create a placeholder task",
 		"Keep a task `running` while any executor is actively working",
 		"at least two or three intermediate milestones",
 		"changing threads or entering `waiting` does not by itself increase progress",
+		"New agent work must use `tasks_set_progress`, `tasks_edit`, `tasks_fail`, and `tasks_complete`",
 		"`reply_required: false`",
 		"Core becoming active does not move the occurrence to `running`",
 		"exactly one reconciliation-only",
@@ -1646,12 +1805,21 @@ func TestTerminalMCPGuidanceContract(t *testing.T) {
 		tools[tool.Name] = tool.Description
 	}
 	for _, required := range []string{
-		"Progress 100 and a final-looking current_step are still nonterminal",
-		"call tasks_complete before pace, idle, stopping, or sending the final response",
-		"On failure, record failed with a concrete error before stopping",
+		"Progress 100 is still nonterminal",
+		"tasks_complete after success",
+		"tasks_fail after failure",
 	} {
-		if !strings.Contains(tools["update"], required) {
-			t.Fatalf("tasks_update does not prevent omitted terminal writes; missing %q: %s", required, tools["update"])
+		if !strings.Contains(tools["set_progress"], required) {
+			t.Fatalf("tasks_set_progress does not preserve terminal separation; missing %q: %s", required, tools["set_progress"])
+		}
+	}
+	for _, required := range []string{
+		"explicit terminal task failure",
+		"concrete error",
+		"before pace, idle, stopping, or sending the final response",
+	} {
+		if !strings.Contains(tools["fail"], required) {
+			t.Fatalf("tasks_fail does not make terminal failure explicit; missing %q: %s", required, tools["fail"])
 		}
 	}
 	for _, required := range []string{
@@ -1675,6 +1843,7 @@ func TestTerminalMCPGuidanceContract(t *testing.T) {
 		"`progress: 100` is not a terminal state",
 		"Before the thread calls `pace`, returns idle, stops, or sends its final response",
 		"it must call `tasks_complete` exactly once with the concrete result",
+		"it must call `tasks_fail` exactly once with a concrete error",
 		"A worker's final message is not a Tasks terminal write",
 		"Core lifecycle settlement is only a safety net",
 	} {
@@ -1684,7 +1853,7 @@ func TestTerminalMCPGuidanceContract(t *testing.T) {
 	}
 }
 
-func TestAssignNotifiesTheThreadJustAssignedNotCurrentDBAssignee(t *testing.T) {
+func TestAssignmentDeliveriesRespectLatestOwner(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	creator := callerContext(7, "thread-main", "project-a")
 	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Split inbox"})
@@ -1711,8 +1880,8 @@ func TestAssignNotifiesTheThreadJustAssignedNotCurrentDBAssignee(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := platform.events[len(platform.events)-1]
-	if last.Target.ThreadID != "thread-worker-b" {
-		t.Fatalf("wake event followed the DB's current assignee instead of the call target: %+v", last)
+	if last.Target.ThreadID != "thread-worker-a" {
+		t.Fatalf("pending assignment did not wake the current owner: %+v", last)
 	}
 }
 
@@ -1770,7 +1939,7 @@ func TestOverlapSkipKeepsLastRunAtAndAdvancesNextRun(t *testing.T) {
 	}
 }
 
-func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
+func TestSchedulerPreservesActiveRunDespiteOldProgress(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	caller := callerContext(7, "opaque-schedule-owner", "project-a")
 	raw, err := app.toolCreate(caller, appCtx, map[string]any{
@@ -1793,8 +1962,7 @@ func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Threshold for a 10m cadence clamps to staleRunMinAge (1h); a run idle past
-	// it must be auto-failed instead of blocking every future occurrence.
+	// Old progress is not evidence that an executor has stopped.
 	parent, _ = app.store.Get(parent.ID)
 	staleTick := time.Now().UTC().Add(2 * time.Hour)
 	if parent.NextRunAt.After(staleTick) {
@@ -1804,33 +1972,11 @@ func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs, err = app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
-	if err != nil || len(runs) != 2 {
-		t.Fatalf("stale run did not unblock materialization: runs=%+v err=%v", runs, err)
+	if err != nil || len(runs) != 1 || runs[0].State != stateRunning {
+		t.Fatalf("old progress allowed overlapping work: runs=%+v err=%v", runs, err)
 	}
-	states := map[string]int{}
-	for _, run := range runs {
-		states[run.State]++
-		if run.State == stateFailed && !strings.Contains(run.Error, "auto-failed by scheduler") {
-			t.Fatalf("stale failure lacks operator-readable error: %+v", run)
-		}
+	if len(platform.events) != 1 {
+		t.Fatalf("unexpected replacement or terminal notice: %+v", platform.events)
 	}
-	if states[stateFailed] != 1 || states[stateQueued] != 1 {
-		t.Fatalf("want one auto-failed and one fresh run, got %+v", states)
-	}
-	var creatorReceipt, freshWake bool
-	for _, event := range platform.events {
-		payload, ok := event.Message.(map[string]any)
-		if !ok {
-			continue
-		}
-		if payload["type"] == "task.terminal" && event.Target.ThreadID == "opaque-schedule-owner" {
-			creatorReceipt = true
-		}
-		if payload["type"] == "task.ready" && event.Target.ThreadID == "opaque-default" {
-			freshWake = true
-		}
-	}
-	if !creatorReceipt || !freshWake {
-		t.Fatalf("auto-fail must tell the creator and wake the fresh run: %+v", platform.events)
-	}
+
 }

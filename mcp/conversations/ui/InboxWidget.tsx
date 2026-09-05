@@ -1,3 +1,4 @@
+import { reportSectionsText } from "./messageContent";
 // InboxWidget — the conversations app's dashboard.home widget, a
 // faithful recreation of the dashboard's AptevaInbox (the operator's
 // favorite): tone-coded rows (blue approvals, red/yellow alerts, left
@@ -205,7 +206,7 @@ function itemTitle(message: InboxMessage): string {
 function itemBody(message: InboxMessage): string {
   const kind = message.component_kind;
   if (kind === "approval") return String(card(message, "approval-card").body ?? "");
-  if (kind === "report") return String(card(message, "report-card").summary ?? "");
+  if (kind === "report") return [String(card(message, "report-card").summary ?? ""),reportSectionsText(card(message,"report-card").sections)].filter(Boolean).join("\n\n");
   return String(card(message, "alert-card").text ?? "");
 }
 
@@ -405,6 +406,7 @@ function InboxRow({
   projectId: string;
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
+ const [actionError,setActionError]=useState("");
   const [approvalOpen, setApprovalOpen] = useState(false);
   const m = item.message;
   const kind = m.component_kind || "report";
@@ -424,9 +426,7 @@ function InboxRow({
     try {
       await apiPost(`/message-dismiss`, { message_id: m.id }, projectId);
       onChanged();
-    } catch {
-      /* surfaced on next reload */
-    }
+    } catch(err) {setActionError(String(err));}
   };
 
   return (
@@ -481,6 +481,7 @@ function InboxRow({
           </div>
         </div>
       </article>
+      {actionError&&<p role="alert" className="text-xs text-error">{actionError}</p>}
       {kind === "approval" ? (
         <ApprovalModal
           open={approvalOpen}
@@ -510,6 +511,7 @@ function InboxRow({
 export default function InboxWidget(props: HostProps) {
 	const projectId = props.projectId ?? "";
   const [items, setItems] = useState<InboxItem[]>([]);
+ const [total,setTotal]=useState(0);
   const [agents, setAgents] = useState<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -524,8 +526,8 @@ export default function InboxWidget(props: HostProps) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-		const inbox = await apiGet<InboxItem[]>("/inbox?limit=100", projectId);
-      setItems(inbox);
+		const inbox = await apiGet<{items:InboxItem[];total:number}>("/inbox?page=1&limit=100", projectId);
+      setItems(inbox.items);setTotal(inbox.total);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -558,9 +560,9 @@ export default function InboxWidget(props: HostProps) {
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-text text-sm font-bold">Inbox</h2>
-            {items.length > 0 && (
+            {total > 0 && (
               <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-accent">
-                {items.length}
+                {total}
               </span>
             )}
           </div>
@@ -609,13 +611,13 @@ export default function InboxWidget(props: HostProps) {
 			projectId={projectId}
           />
         ))}
-        {items.length > visible.length && (
+        {total > visible.length && (
           <a
             href={PANEL_HREF}
             className="flex min-h-9 items-center justify-center rounded-md border border-dashed border-border px-3 text-[11px] text-text-muted transition-colors hover:border-accent hover:text-text"
           >
-            {items.length - visible.length} more item
-            {items.length - visible.length === 1 ? "" : "s"} →
+            {total - visible.length} more item
+            {total - visible.length === 1 ? "" : "s"} →
           </a>
         )}
       </div>

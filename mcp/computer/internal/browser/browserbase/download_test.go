@@ -78,3 +78,26 @@ func TestBrowserbaseDownloadRejectsCrossSessionCandidate(t *testing.T) {
 		t.Fatalf("cross-session file should not resolve: %v", err)
 	}
 }
+
+func TestBrowserbaseDownloadAmbiguityNeverGuessesByRetrievalOrder(t *testing.T) {
+	old := apiBase
+	t.Cleanup(func() { apiBase = old })
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("filename") != "original/name.zip" {
+			t.Errorf("lost original filename: %s", r.URL.RawQuery)
+		}
+		io.WriteString(w, `{"downloads":[{"id":"first","filename":"original/name.zip","size":3},{"id":"second","filename":"original/name.zip","size":3}]}`)
+	}))
+	defer server.Close()
+	apiBase = server.URL
+	c := &Computer{sessionID: "s", http: server.Client()}
+	for _, id := range []string{"newer", "older"} {
+		_, err := c.browserbaseDownloadID(context.Background(), computer.Download{ID: id, Filename: "name.zip", OriginalFilename: "original/name.zip", Size: 3})
+		if err == nil || !strings.Contains(err.Error(), "download_identity_ambiguous") {
+			t.Fatalf("guessed identity for %s: %v", id, err)
+		}
+	}
+	if len(c.downloadProviderIDs) != 0 {
+		t.Fatal("ambiguous mappings were cached")
+	}
+}

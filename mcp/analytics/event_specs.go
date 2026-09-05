@@ -45,19 +45,21 @@ type EventIngestPolicy struct {
 }
 
 type EventPropertySpec struct {
-	ID                int64             `json:"id,omitempty"`
-	EventSpecID       int64             `json:"event_spec_id,omitempty"`
-	Key               string            `json:"key"`
-	Type              string            `json:"type"`
-	Required          bool              `json:"required"`
-	Description       string            `json:"description,omitempty"`
-	EnumValues        []string          `json:"enum_values,omitempty"`
-	ReferenceSet      string            `json:"reference_set,omitempty"`
-	AllowedValues     []ReferenceOption `json:"allowed_values,omitempty"`
-	PIIClassification string            `json:"pii_classification"`
-	ExampleValue      string            `json:"example_value,omitempty"`
-	CreatedAt         int64             `json:"created_at,omitempty"`
-	UpdatedAt         int64             `json:"updated_at,omitempty"`
+	ID                   int64             `json:"id,omitempty"`
+	EventSpecID          int64             `json:"event_spec_id,omitempty"`
+	Key                  string            `json:"key"`
+	Type                 string            `json:"type"`
+	Required             bool              `json:"required"`
+	Description          string            `json:"description,omitempty"`
+	EnumValues           []string          `json:"enum_values,omitempty"`
+	ReferenceSet         string            `json:"reference_set,omitempty"`
+	AllowedValues        []ReferenceOption `json:"allowed_values,omitempty"`
+	AllowedValuesTotal   int64             `json:"allowed_values_total,omitempty"`
+	AllowedValuesHasMore bool              `json:"allowed_values_has_more,omitempty"`
+	PIIClassification    string            `json:"pii_classification"`
+	ExampleValue         string            `json:"example_value,omitempty"`
+	CreatedAt            int64             `json:"created_at,omitempty"`
+	UpdatedAt            int64             `json:"updated_at,omitempty"`
 }
 
 type EventSpecViolation struct {
@@ -88,16 +90,21 @@ func (a *App) handleEventSpecs(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		specs, err := listEventSpecs(globalCtx.AppDB(), specFilter{
+		specs, err := listEventSpecs(requestReadDB(r), specFilter{
 			ProjectID: projectID,
 			App:       r.URL.Query().Get("app"),
 			Status:    r.URL.Query().Get("status"),
+			After:     intQuery64(r, "after"), Limit: queryLimit(r, 200, 1000),
 		})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"specs": specs})
+		var next int64
+		if len(specs) > 0 {
+			next = specs[len(specs)-1].ID
+		}
+		writeJSON(w, map[string]any{"specs": specs, "next_cursor": next, "has_more": len(specs) == queryLimit(r, 200, 1000)})
 	case http.MethodPost:
 		var spec EventSpec
 		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
@@ -110,7 +117,7 @@ func (a *App) handleEventSpecs(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.ID = 0
 		spec.ProjectID = projectID
-		saved, err := upsertEventSpec(globalCtx.AppDB(), spec, true)
+		saved, err := upsertEventSpec(requestWriteDB(r), spec, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -170,7 +177,7 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		spec, err := getEventSpecForProject(globalCtx.AppDB(), id, projectID)
+		spec, err := getEventSpecForProject(requestReadDB(r), id, projectID)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -181,7 +188,7 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, spec)
 	case http.MethodPut:
-		existing, err := getEventSpecForProject(globalCtx.AppDB(), id, projectID)
+		existing, err := getEventSpecForProject(requestReadDB(r), id, projectID)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -190,29 +197,44 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		var spec EventSpec
-		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
-			http.Error(w, "invalid json", http.StatusBadRequest)
+		var args map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			http.Error(w, "invalid json", 400)
 			return
 		}
-		if _, err := assignRequestProject(spec.ProjectID, projectID); err != nil {
-			http.Error(w, err.Error(), http.StatusForbidden)
+		if raw, ok := args["project_id"].(string); ok {
+			if _, err := assignRequestProject(raw, projectID); err != nil {
+				http.Error(w, err.Error(), 403)
+				return
+			}
+		}
+		if raw, ok := args["app"]; ok && raw != existing.App {
+			http.Error(w, "app cannot change", 400)
 			return
 		}
-		if strings.TrimSpace(spec.App) != existing.App || strings.TrimSpace(spec.Topic) != existing.Topic {
-			http.Error(w, "app and topic cannot be changed; create a new spec", http.StatusBadRequest)
+		if raw, ok := args["topic"]; ok && raw != existing.Topic {
+			http.Error(w, "topic cannot change", 400)
 			return
 		}
-		spec.ID = id
-		spec.ProjectID = projectID
-		saved, err := upsertEventSpec(globalCtx.AppDB(), spec, true)
+		args["app"], args["topic"], args["id"] = existing.App, existing.Topic, id
+		patch, err := specFromArgs(args)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		spec, replace, err := mergeEventSpecPatch(existing, patch, args)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		saved, err := upsertEventSpec(requestWriteDB(r), spec, replace)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, saved)
 	case http.MethodDelete:
-		result, err := globalCtx.AppDB().Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
+		result, err := requestWriteDB(r).Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -240,7 +262,7 @@ func (a *App) handleEventSpecViolations(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	rows, err := listEventSpecViolations(globalCtx.AppDB(), Filter{
+	rows, err := listEventSpecViolations(requestReadDB(r), Filter{
 		ProjectID: projectID,
 		App:       r.URL.Query().Get("app"),
 		Topic:     r.URL.Query().Get("topic"),
@@ -284,7 +306,7 @@ func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request, pr
 		b, _ := json.Marshal(body.Props)
 		propsJSON = string(b)
 	}
-	out, err := validateEventAgainstSpecs(globalCtx.AppDB(), EventInsert{
+	out, err := validateEventAgainstSpecs(requestWriteDB(r), EventInsert{
 		App:       body.App,
 		Topic:     body.Topic,
 		ProjectID: body.ProjectID,
@@ -306,11 +328,11 @@ func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request, pr
 		UpsertKey: body.UpsertKey,
 		Props:     propsJSON,
 	}
-	writeJSON(w, map[string]any{"valid": len(out.Violations) == 0, "reject": out.Reject, "violations": out.Violations, "ingest": previewEventIngest(globalCtx.AppDB(), ev)})
+	writeJSON(w, map[string]any{"valid": len(out.Violations) == 0, "reject": out.Reject, "violations": out.Violations, "ingest": previewEventIngest(requestWriteDB(r), ev)})
 }
 
 func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, projectID string, specID int64) {
-	if _, err := getEventSpecForProject(globalCtx.AppDB(), specID, projectID); err != nil {
+	if _, err := getEventSpecForProject(requestReadDB(r), specID, projectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 		} else {
@@ -324,11 +346,11 @@ func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	prop.EventSpecID = specID
-	if err := upsertEventPropertySpec(globalCtx.AppDB(), prop); err != nil {
+	if err := upsertEventPropertySpec(requestWriteDB(r), prop); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	spec, err := getEventSpecByID(globalCtx.AppDB(), specID)
+	spec, err := getEventSpecByID(requestReadDB(r), specID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -337,7 +359,7 @@ func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, 
 }
 
 func (a *App) handleEventPropertyDelete(w http.ResponseWriter, r *http.Request, projectID string, specID int64, key string) {
-	if _, err := globalCtx.AppDB().Exec(
+	if _, err := requestWriteDB(r).Exec(
 		`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?
 		 AND event_spec_id IN (SELECT id FROM event_specs WHERE project_id=?)`,
 		specID, key, projectID,
@@ -348,7 +370,7 @@ func (a *App) handleEventPropertyDelete(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func getEventSpecForProject(db *sql.DB, id int64, projectID string) (*EventSpec, error) {
+func getEventSpecForProject(db sqlRunner, id int64, projectID string) (*EventSpec, error) {
 	var found int
 	if err := db.QueryRow(`SELECT 1 FROM event_specs WHERE id=? AND project_id=?`, id, projectID).Scan(&found); err != nil {
 		return nil, err
@@ -360,9 +382,11 @@ type specFilter struct {
 	ProjectID string
 	App       string
 	Status    string
+	After     int64
+	Limit     int
 }
 
-func listEventSpecs(db *sql.DB, f specFilter) ([]EventSpec, error) {
+func listEventSpecs(db sqlRunner, f specFilter) ([]EventSpec, error) {
 	q := `SELECT id, project_id, app, topic, kind, display_name, description, category, status, validation_mode, ingest_mode, upsert_policy, rollup_policy, created_by, created_at, updated_at FROM event_specs`
 	var conds []string
 	var args []any
@@ -381,7 +405,20 @@ func listEventSpecs(db *sql.DB, f specFilter) ([]EventSpec, error) {
 	if len(conds) > 0 {
 		q += " WHERE " + strings.Join(conds, " AND ")
 	}
-	q += " ORDER BY app, category, topic"
+	if f.After > 0 {
+		if len(conds) > 0 {
+			q += " AND id>?"
+		} else {
+			q += " WHERE id>?"
+		}
+		args = append(args, f.After)
+	}
+	limit := f.Limit
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	q += " ORDER BY id LIMIT ?"
+	args = append(args, limit)
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -415,7 +452,7 @@ func listEventSpecs(db *sql.DB, f specFilter) ([]EventSpec, error) {
 	return out, nil
 }
 
-func getEventSpecByID(db *sql.DB, id int64) (*EventSpec, error) {
+func getEventSpecByID(db sqlRunner, id int64) (*EventSpec, error) {
 	var spec EventSpec
 	row := db.QueryRow(`SELECT id, project_id, app, topic, kind, display_name, description, category, status, validation_mode, ingest_mode, upsert_policy, rollup_policy, created_by, created_at, updated_at FROM event_specs WHERE id=?`, id)
 	if err := scanEventSpec(row, &spec); err != nil {
@@ -432,7 +469,18 @@ func getEventSpecByID(db *sql.DB, id int64) (*EventSpec, error) {
 	return &spec, nil
 }
 
-func getEventSpec(db *sql.DB, projectID, app, topic string) (*EventSpec, error) {
+func getEventSpec(db sqlRunner, projectID, app, topic string) (*EventSpec, error) {
+	spec, err := getEventSpecLean(db, projectID, app, topic)
+	if err != nil {
+		return nil, err
+	}
+	if err = hydrateEventSpecReferences(db, spec); err != nil {
+		return nil, err
+	}
+	return spec, nil
+}
+
+func getEventSpecLean(db sqlRunner, projectID, app, topic string) (*EventSpec, error) {
 	var spec EventSpec
 	row := db.QueryRow(`SELECT id, project_id, app, topic, kind, display_name, description, category, status, validation_mode, ingest_mode, upsert_policy, rollup_policy, created_by, created_at, updated_at FROM event_specs WHERE project_id=? AND app=? AND topic=?`, projectID, app, topic)
 	if err := scanEventSpec(row, &spec); err != nil {
@@ -443,9 +491,6 @@ func getEventSpec(db *sql.DB, projectID, app, topic string) (*EventSpec, error) 
 		return nil, err
 	}
 	spec.Properties = props
-	if err := hydrateEventSpecReferences(db, &spec); err != nil {
-		return nil, err
-	}
 	return &spec, nil
 }
 
@@ -459,7 +504,10 @@ func scanEventSpec(row interface{ Scan(...any) error }, spec *EventSpec) error {
 	return nil
 }
 
-func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*EventSpec, error) {
+func upsertEventSpec(db sqlDatabase, spec EventSpec, replaceProperties bool) (*EventSpec, error) {
+	if len(spec.Properties) > 100 {
+		return nil, errors.New("maximum 100 property definitions per spec")
+	}
 	spec.App = strings.TrimSpace(spec.App)
 	spec.Topic = strings.TrimSpace(spec.Topic)
 	if spec.App == "" {
@@ -468,13 +516,27 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 	if spec.Topic == "" {
 		return nil, errors.New("topic required")
 	}
+	for _, choice := range []struct {
+		value   string
+		allowed []string
+	}{{spec.Kind, []string{"occurrence", "aggregate_observation"}}, {spec.Status, []string{"draft", "active", "deprecated", "blocked"}}, {spec.ValidationMode, []string{"observe", "warn", "reject"}}, {spec.IngestMode, []string{"raw", "upsert", "raw_plus_rollup"}}} {
+		if choice.value != "" && !stringIn(choice.value, choice.allowed) {
+			return nil, fmt.Errorf("invalid spec setting %q", choice.value)
+		}
+	}
 	spec.Kind = normalizeChoice(spec.Kind, "occurrence", map[string]bool{"occurrence": true, "aggregate_observation": true})
 	spec.Status = normalizeChoice(spec.Status, "active", map[string]bool{"draft": true, "active": true, "deprecated": true, "blocked": true})
 	spec.ValidationMode = normalizeChoice(spec.ValidationMode, "observe", map[string]bool{"observe": true, "warn": true, "reject": true})
 	spec.IngestMode = normalizeChoice(spec.IngestMode, "raw", map[string]bool{"raw": true, "upsert": true, "raw_plus_rollup": true})
 	defaultTimestampProperty(spec.UpsertPolicy, spec.Properties)
 	defaultTimestampProperty(spec.RollupPolicy, spec.Properties)
+	if err := validateIngestPolicy(spec.UpsertPolicy, spec.IngestMode == "upsert"); err != nil {
+		return nil, err
+	}
 	normalizeIngestPolicy(spec.UpsertPolicy)
+	if err := validateIngestPolicy(spec.RollupPolicy, spec.IngestMode == "raw_plus_rollup"); err != nil {
+		return nil, err
+	}
 	normalizeIngestPolicy(spec.RollupPolicy)
 	upsertPolicy, err := encodeIngestPolicy(spec.UpsertPolicy)
 	if err != nil {
@@ -490,6 +552,24 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 		return nil, err
 	}
 	defer tx.Rollback()
+	var currentID, currentVersion int64
+	lookupErr := tx.QueryRow(`SELECT id,updated_at FROM event_specs WHERE project_id=? AND app=? AND topic=?`, spec.ProjectID, spec.App, spec.Topic).Scan(&currentID, &currentVersion)
+	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
+		return nil, lookupErr
+	}
+	if spec.ID > 0 {
+		if lookupErr != nil || currentID != spec.ID {
+			return nil, sql.ErrNoRows
+		}
+		if spec.UpdatedAt != currentVersion {
+			return nil, errors.New("spec changed since it was loaded; reload and retry")
+		}
+	} else if lookupErr == nil {
+		return nil, errors.New("spec already exists; load and patch it instead of replacing it")
+	}
+	if now <= currentVersion {
+		now = currentVersion + 1
+	}
 	res, err := tx.Exec(
 		`INSERT INTO event_specs (project_id, app, topic, kind, display_name, description, category, status, validation_mode, ingest_mode, upsert_policy, rollup_policy, created_by, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -578,12 +658,12 @@ func normalizeIngestPolicy(policy *EventIngestPolicy) {
 	if policy == nil {
 		return
 	}
-	policy.Bucket = normalizeChoice(policy.Bucket, "none", map[string]bool{
-		"none": true, "hour": true, "day": true, "week": true, "month": true,
-	})
-	policy.Operation = normalizeChoice(policy.Operation, "replace", map[string]bool{
-		"replace": true, "increment": true, "sum": true, "min": true, "max": true,
-	})
+	if policy.Bucket == "" {
+		policy.Bucket = "none"
+	}
+	if policy.Operation == "" {
+		policy.Operation = "replace"
+	}
 	if strings.TrimSpace(policy.Timezone) == "" {
 		policy.Timezone = "UTC"
 	}
@@ -604,7 +684,7 @@ func normalizeIngestPolicy(policy *EventIngestPolicy) {
 	}
 }
 
-func listEventPropertySpecs(db *sql.DB, specID int64) ([]EventPropertySpec, error) {
+func listEventPropertySpecs(db sqlRunner, specID int64) ([]EventPropertySpec, error) {
 	rows, err := db.Query(
 		`SELECT id, event_spec_id, key, type, required, description, enum_values, reference_set, pii_classification, example_value, created_at, updated_at
 		 FROM event_property_specs WHERE event_spec_id=? ORDER BY required DESC, key`,
@@ -692,7 +772,7 @@ func upsertEventPropertySpec(db sqlRunner, prop EventPropertySpec) error {
 	return err
 }
 
-func validateEventInsert(db *sql.DB, ev EventInsert) (validationOutcome, error) {
+func validateEventInsert(db sqlRunner, ev EventInsert) (validationOutcome, error) {
 	out, err := validateEventAgainstSpecs(db, ev)
 	if err != nil {
 		return validationOutcome{}, err
@@ -703,25 +783,17 @@ func validateEventInsert(db *sql.DB, ev EventInsert) (validationOutcome, error) 
 	return out, nil
 }
 
-func validateEventAgainstSpecs(db *sql.DB, ev EventInsert) (validationOutcome, error) {
+func validateEventAgainstSpecs(db sqlRunner, ev EventInsert) (validationOutcome, error) {
+	_, out, _, err := prepareEvent(db, ev)
+	return out, err
+}
+
+func validatePreparedEvent(db sqlRunner, ev EventInsert, spec *EventSpec) (validationOutcome, error) {
 	now := time.Now().UnixMilli()
-	spec, err := getEventSpec(db, ev.ProjectID, ev.App, ev.Topic)
-	if errors.Is(err, sql.ErrNoRows) {
-		return validationOutcome{Violations: []EventSpecViolation{{
-			ProjectID: ev.ProjectID, App: ev.App, Topic: ev.Topic,
-			ViolationType: "unknown_event",
-			Message:       "event has no spec",
-			SeenAt:        now,
-		}}}, nil
-	}
-	if err != nil {
-		return validationOutcome{}, err
-	}
-	if spec.IngestMode == "upsert" && spec.UpsertPolicy != nil && ev.UpsertKey == "" {
-		if next, err := eventFromPolicy(db, ev, spec.Topic, spec.UpsertPolicy, false); err == nil {
-			ev = next
-		}
-	}
+	if spec == nil {
+		return validationOutcome{}, nil
+	} // Unknown generic events are valid, not diagnostic errors.
+
 	var violations []EventSpecViolation
 	add := func(kind, key, msg string) {
 		violations = append(violations, EventSpecViolation{
@@ -766,17 +838,21 @@ func validateEventAgainstSpecs(db *sql.DB, ev EventInsert) (validationOutcome, e
 	return validationOutcome{Reject: reject, Violations: violations}, nil
 }
 
-func recordEventSpecViolations(db sqlRunner, eventID int64, violations []EventSpecViolation) {
+func recordEventSpecViolations(db sqlRunner, eventID int64, violations []EventSpecViolation) error {
 	for _, v := range violations {
-		_, _ = db.Exec(
+		_, err := db.Exec(
 			`INSERT INTO event_spec_violations (project_id, app, topic, event_id, violation_type, message, property_key, seen_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			v.ProjectID, v.App, v.Topic, eventID, v.ViolationType, v.Message, v.PropertyKey, v.SeenAt,
+			 SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM event_spec_violations WHERE project_id=? AND app=? AND topic=? AND violation_type=? AND property_key=? AND seen_at>?)`,
+			v.ProjectID, v.App, v.Topic, nullInt(eventID), v.ViolationType, v.Message, v.PropertyKey, v.SeenAt, v.ProjectID, v.App, v.Topic, v.ViolationType, v.PropertyKey, v.SeenAt-60000,
 		)
+		if err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func listEventSpecViolations(db *sql.DB, f Filter, limit int) ([]EventSpecViolation, error) {
+func listEventSpecViolations(db sqlRunner, f Filter, limit int) ([]EventSpecViolation, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -870,7 +946,7 @@ func valueMatchesType(v any, typ string) bool {
 	case "number", "timestamp":
 		switch n := v.(type) {
 		case float64:
-			return !math.IsNaN(n)
+			return !math.IsNaN(n) && !math.IsInf(n, 0)
 		case int, int64, json.Number:
 			return true
 		default:

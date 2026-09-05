@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"math"
 	"strings"
 	"time"
@@ -48,7 +49,7 @@ func Resolve(ctx context.Context, selector string) (Point, error) {
 })(` + string(selectorJSON) + `)`
 
 	var out result
-	if err := chromedp.Run(ctx, chromedp.Evaluate(scrollScript, &out)); err != nil {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(scrollScript, &out)); err != nil {
 		return Point{}, fmt.Errorf("resolve click selector %q: %w", selector, err)
 	}
 	switch out.Status {
@@ -83,7 +84,7 @@ func Resolve(ctx context.Context, selector string) (Point, error) {
 })(` + string(selectorJSON) + `)`
 
 	out = result{}
-	if err := chromedp.Run(ctx,
+	if err := cdputil.Run(ctx,
 		chromedp.Sleep(50*time.Millisecond),
 		chromedp.Evaluate(measureScript, &out),
 	); err != nil {

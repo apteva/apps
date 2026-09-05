@@ -18,7 +18,7 @@ type outboxRow struct {
 	Attempts int
 }
 
-func (c *callsDB) insertInboundCallWithEvent(call callRow, message string) (*callRow, bool, error) {
+func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans ...*inboundRoutingPlan) (*callRow, bool, error) {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return nil, false, err
@@ -67,15 +67,26 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string) (*cal
 	}); err != nil {
 		return nil, false, err
 	}
-	if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
+	if len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil) {
+		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {
+			return nil, false, err
+		}
+	}
+	if len(plans) > 0 {
+		if err := persistRoutingExecutionTx(tx, call.ID, call.ProjectID, plans[0]); err != nil {
+			return nil, false, err
+		}
+	}
+	stored, err := scanCall(tx.QueryRow(`SELECT `+callSelectColumns+` FROM calls WHERE id=?`, call.ID))
+	if err != nil {
 		return nil, false, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
-	return &call, true, nil
+	return stored, true, nil
 }
 
 func (a *App) deliverOutboxCall(ctx *sdk.AppCtx, callID string) error {
@@ -147,9 +158,9 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
         FROM calls c JOIN inbound_routes r ON r.id = c.route_id
         WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
-          AND r.enabled = 1 AND r.answer_mode = ?
+          AND r.enabled = 1
           AND (c.state_expires_at = '' OR c.state_expires_at > ?)
-        ORDER BY c.placed_at LIMIT 20`, project, answerModeRealtimeImmediate, time.Now().UTC().Format(time.RFC3339))
+        ORDER BY c.placed_at LIMIT 20`, project, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
@@ -167,9 +178,22 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 		return err
 	}
 	for _, item := range pending {
-		route, err := a.db().findRoute(item.routeID)
+		row, err := a.db().findCall(item.callID)
 		if err != nil {
 			return err
+		}
+		if row == nil {
+			continue
+		}
+		route, plan, err := a.routingPlanForCall(row, nil)
+		if err != nil {
+			return err
+		}
+		if plan != nil && plan.TerminalType != "destination" && plan.TerminalType != "ring_group" {
+			continue
+		}
+		if route == nil || route.AnswerMode != answerModeRealtimeImmediate {
+			continue
 		}
 		if err := a.answerImmediateCall(ctx, route, item.callID); err != nil {
 			ctx.Logger().Warn("recover immediate inbound answer", "call", item.callID, "route", item.routeID, "err", err)
@@ -184,6 +208,7 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		return nil
 	}
 	now := time.Now().UTC()
+	_, _ = ctx.AppDB().Exec(`UPDATE call_offers SET status='expired' WHERE project_id=? AND run_id='' AND status='offered' AND expires_at<=?`, project, now.Format(time.RFC3339Nano))
 	if err := a.publishLifecycleEvents(ctx, ""); err != nil {
 		ctx.Logger().Warn("publish pending call lifecycle events", "err", err)
 	}
@@ -243,7 +268,13 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 }
 
 func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
-	if row.CarrierSID != "" {
+	if a.callUsesDirectSIP(row) {
+		if gateway := a.directSIPGateway(); gateway != nil {
+			if err := gateway.Hangup(row); err != nil {
+				return err
+			}
+		}
+	} else if row.CarrierSID != "" {
 		carrier, err := a.carrierForRow(ctx, nil, row)
 		if err != nil {
 			return err

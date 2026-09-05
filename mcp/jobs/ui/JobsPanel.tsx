@@ -119,7 +119,7 @@ interface JobRun {
   id: number;
   started_at: string;
   duration_ms: number;
-  status: "ok" | "error" | "timeout";
+  status: "ok" | "error" | "timeout" | "running" | "interrupted";
   http_status?: number;
   error?: string;
   scheduled_for?: string;
@@ -166,125 +166,127 @@ function statusTone(s: Status): string {
   }
 }
 
-export default function JobsPanel({ projectId, installId }: NativePanelProps) {
+export default function JobsPanel(props: NativePanelProps) {
+  return <JobsScope key={`${props.projectId}:${props.installId}`} {...props} />;
+}
+function JobsScope(props: NativePanelProps) {
+  const [global, setGlobal] = useState(false);
+  const [canShowGlobal, setCanShowGlobal] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    const q = new URLSearchParams({install_id: String(props.installId), ...(props.projectId ? {project_id: props.projectId} : {scope: "global"})});
+    fetch(`${API}/scope?${q}`, {credentials: "same-origin", signal: controller.signal})
+      .then(async (r): Promise<{global_install?: boolean}> => r.ok ? r.json() : {}).then(r => { if (!controller.signal.aborted) setCanShowGlobal(!!r.global_install); }).catch(() => {});
+    return () => controller.abort();
+  }, [props.installId, props.projectId]);
+  return <div className="h-full flex flex-col">
+    {canShowGlobal && props.projectId && <label className="px-6 py-2 text-sm">Scope <select aria-label="Job scope" value={global ? "global" : "project"} onChange={e => setGlobal(e.target.value === "global")}>
+      <option value="project">Current project</option><option value="global">Global jobs (admin)</option>
+    </select></label>}
+    <ScopedJobsPanel key={global ? "global" : props.projectId} {...props} projectId={global ? "" : props.projectId}/>
+  </div>;
+}
+function ScopedJobsPanel({ projectId, installId }: NativePanelProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [statusFilter, setStatusFilter] = useState<Status | "">("");
+  const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Job | null>(null);
   const [runs, setRuns] = useState<JobRun[]>([]);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [runsCursor, setRunsCursor] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const selectedRef = useRef<number | null>(null);
+  const listVersion = useRef(0);
+  const detailVersion = useRef(0);
+  const active = useRef(true);
+  const actionLock = useRef(false);
+  const controllers = useRef(new Set<AbortController>());
+  useEffect(() => {
+    active.current = true;
+    return () => { active.current = false; listVersion.current++; detailVersion.current++; controllers.current.forEach(c => c.abort()); };
+  }, []);
 
-  const withParams = useCallback(
-    (extra: Record<string, string> = {}) => {
-      const u = new URLSearchParams({
-        project_id: projectId,
-        install_id: String(installId),
-        ...extra,
-      });
-      return u.toString();
-    },
-    [projectId, installId],
-  );
-
-  const api = useCallback(
-    async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
+  const withParams = useCallback((extra: Record<string, string> = {}) => new URLSearchParams({
+    ...(projectId ? {project_id: projectId} : {scope: "global"}), install_id: String(installId), ...extra,
+  }).toString(), [projectId, installId]);
+  const api = useCallback(async <T,>(method: string, path: string, body?: unknown, extra: Record<string, string> = {}): Promise<T> => {
+    const controller = new AbortController(); controllers.current.add(controller);
+    try {
       const res = await fetch(`${API}${path}?${withParams(extra)}`, {
-        method,
-        credentials: "same-origin",
-        headers: body ? { "Content-Type": "application/json" } : {},
-        body: body ? JSON.stringify(body) : undefined,
+        method, credentials: "same-origin", signal: controller.signal,
+        headers: body ? {"Content-Type": "application/json"} : {}, body: body ? JSON.stringify(body) : undefined,
       });
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      return res.json();
-    },
-    [withParams],
-  );
+      return await res.json();
+    } finally { controllers.current.delete(controller); }
+  }, [withParams]);
 
-  const loadList = useCallback(async () => {
+  const loadList = useCallback(async (before?: number) => {
+    const version = ++listVersion.current;
+    setLoading(true);
     try {
-      const extra: Record<string, string> = {};
-      if (statusFilter) extra.status = statusFilter;
-      const r = await api<{ jobs?: Job[] }>("GET", "/jobs", undefined, extra);
-      setJobs(r.jobs || []);
-      setError("");
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  }, [api, statusFilter]);
-
-  const loadDetail = useCallback(
-    async (id: number) => {
-      try {
-        const j = await api<{ job: Job }>("GET", `/jobs/${id}`);
-        const r = await api<{ runs?: JobRun[] }>("GET", `/jobs/${id}/runs`);
-        setDetail(j.job);
-        setRuns(r.runs || []);
-      } catch (e) {
-        setDetail(null);
-        setError((e as Error).message);
-      }
-    },
-    [api],
-  );
-
-  // Events drive normal refreshes. A slower poll handles missed events and
-  // keeps relative timestamps current without multiplying dashboard traffic.
-  useEffect(() => { loadList(); }, [loadList]);
+      const r = await api<{jobs: Job[]; next_cursor?: number}>("GET", "/jobs", undefined, {
+        ...(statusFilter ? {status: statusFilter} : {}), ...(search ? {search} : {}), ...(before ? {before: String(before)} : {}),
+      });
+      if (!active.current || version !== listVersion.current) return;
+      setJobs(old => before ? [...old, ...r.jobs.filter(j => !old.some(o => o.id === j.id))] : r.jobs);
+      setNextCursor(r.next_cursor || null); setError("");
+    } catch(e) { if (active.current && version === listVersion.current) setError((e as Error).message); }
+    finally { if (active.current && version === listVersion.current) setLoading(false); }
+  }, [api, statusFilter, search]);
+  const loadDetail = useCallback(async (id: number) => {
+    const version = ++detailVersion.current;
+    try {
+      const [j, r] = await Promise.all([
+        api<{job: Job}>("GET", `/jobs/${id}`), api<{runs: JobRun[]; next_cursor?: number}>("GET", `/jobs/${id}/runs`),
+      ]);
+      if (!active.current || selectedRef.current !== id || version !== detailVersion.current) return;
+      setDetail(j.job); setRuns(r.runs); setRunsCursor(r.next_cursor || null);
+    } catch(e) { if (active.current && selectedRef.current === id && version === detailVersion.current) {setDetail(null);setError((e as Error).message);} }
+  }, [api]);
+  const loadMoreRuns = async () => {
+    const id = selectedRef.current, cursor = runsCursor, version = ++detailVersion.current;
+    if (!id || !cursor) return;
+    try {
+      const r = await api<{runs: JobRun[]; next_cursor?: number}>("GET", `/jobs/${id}/runs`, undefined, {before: String(cursor)});
+      if (!active.current || selectedRef.current !== id || version !== detailVersion.current) return;
+      setRuns(old => [...old, ...r.runs.filter(r => !old.some(o => o.id === r.id))]);setRunsCursor(r.next_cursor || null);
+    } catch(e) {if (active.current && selectedRef.current === id && version === detailVersion.current) setError((e as Error).message);}
+  };
   useEffect(() => {
-    const id = setInterval(() => {
-      loadList();
-      if (selectedId) loadDetail(selectedId);
-    }, 30000);
-    return () => clearInterval(id);
-  }, [loadList, loadDetail, selectedId]);
-
-  // Live refresh: react instantly to schedule/cancel/queue events
-  // (the 5s polling above stays as a safety net for status changes
-  // the dispatcher writes to the DB without an explicit emit).
-  useAppEvents("jobs", projectId, (ev) => {
-    if (
-      ev.topic === "job.scheduled" ||
-      ev.topic === "job.cancelled" ||
-      ev.topic === "job.queued" ||
-      ev.topic === "job.updated"
-    ) {
-      loadList();
-      if (selectedId) loadDetail(selectedId);
-    }
+    listVersion.current++; setJobs([]);setNextCursor(null);
+    const timer = setTimeout(() => loadList(), 200);
+    return () => {clearTimeout(timer);listVersion.current++;};
+  }, [loadList]);
+  useEffect(() => {
+    const timer = setInterval(() => {loadList();if (selectedRef.current) loadDetail(selectedRef.current);}, 30000);
+    return () => clearInterval(timer);
+  }, [loadList, loadDetail]);
+  const eventTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {if (eventTimer.current) {clearTimeout(eventTimer.current);eventTimer.current = null;}}, [loadList, loadDetail]);
+  useAppEvents("jobs", projectId, ev => {
+    if (ev.install_id !== installId || !ev.topic.startsWith("job.") || eventTimer.current) return;
+    eventTimer.current = setTimeout(() => {eventTimer.current = null;loadList();if (selectedRef.current) loadDetail(selectedRef.current);}, 200);
   });
-
-  const handleRunNow = async () => {
-    if (!detail) return;
-    try {
-      await api("POST", `/jobs/${detail.id}/run-now`);
-      await loadDetail(detail.id);
-      await loadList();
-    } catch (e) {
-      alert("Run failed: " + (e as Error).message);
-    }
+  const act = async (method: string, suffix: string) => {
+    const id = selectedRef.current;
+    if (!id || !detail || detail.id !== id || actionLock.current) return;
+    actionLock.current = true;setActionBusy(true);
+    try {await api(method, `/jobs/${id}${suffix}`);if (active.current) {if (selectedRef.current === id) await loadDetail(id);await loadList();}}
+    catch(e) {if (active.current) setError((e as Error).message);}
+    finally {actionLock.current = false;if (active.current) setActionBusy(false);}
   };
-
-  const handleCancel = async () => {
-    if (!detail) return;
-    try {
-      await api("DELETE", `/jobs/${detail.id}`);
-      await loadDetail(detail.id);
-      await loadList();
-    } catch (e) {
-      setError("Cancel failed: " + (e as Error).message);
-    }
-  };
-
+  const handleRunNow = () => act("POST", "/run-now");
+  const handleCancel = () => act("DELETE", "");
   const select = (id: number) => {
-    setSelectedId(id);
-    loadDetail(id);
+    selectedRef.current = id; detailVersion.current++;setSelectedId(id);setDetail(null);setRuns([]);setRunsCursor(null);loadDetail(id);
   };
-
   const closeDetail = () => {
-    setSelectedId(null);
-    setDetail(null);
-    setRuns([]);
+    selectedRef.current = null;detailVersion.current++;setSelectedId(null);setDetail(null);setRuns([]);setRunsCursor(null);
   };
 
   return (
@@ -293,9 +295,10 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
       <header className="px-6 py-3 border-b border-border flex items-center gap-3">
         <h1 className="text-text font-medium">Jobs</h1>
         <span className="text-text-dim text-xs">
-          {jobs.length} job{jobs.length !== 1 ? "s" : ""}
+          {jobs.length} loaded
         </span>
         <select
+          aria-label="Filter jobs by status"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as Status | "")}
           className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
@@ -309,9 +312,10 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
         </select>
         <button
           type="button"
-          onClick={loadList}
+          onClick={() => loadList()} disabled={loading}
           className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
         >Refresh</button>
+        <input aria-label="Search jobs by name or ID" placeholder="Name or ID" value={search} maxLength={200} onChange={e => setSearch(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1 text-sm"/>
         <button
           type="button"
           onClick={() => setCreating(true)}
@@ -347,7 +351,7 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
             <tbody>
               {jobs.map((j) => (
                 <tr
-                  key={j.id}
+                  key={j.id} tabIndex={0} onKeyDown={e => {if (e.key === "Enter" || e.key === " ") {e.preventDefault();select(j.id);}}}
                   onClick={() => select(j.id)}
                   className="border-t border-border cursor-pointer hover:bg-bg-input/50"
                 >
@@ -368,6 +372,7 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
             </tbody>
           </table>
         )}
+        {nextCursor && <button disabled={loading} onClick={() => loadList(nextCursor)} className="m-4 px-3 py-1 border border-border rounded">{loading ? "Loading…" : "Load more jobs"}</button>}
       </main>
 
       {/* Create dialog */}
@@ -385,8 +390,8 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
       {/* Detail dialog */}
       {detail && (
         <DetailDialog
-          job={detail}
-          runs={runs}
+          key={detail.id} job={detail}
+          runs={runs} busy={actionBusy} error={error} hasMoreRuns={!!runsCursor} onMoreRuns={loadMoreRuns}
           onClose={closeDetail}
           onRunNow={handleRunNow}
           onCancel={handleCancel}
@@ -396,19 +401,42 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
   );
 }
 
+function useModal(onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);close.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const root = ref.current;root?.focus();
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {e.preventDefault();close.current();}
+      if (e.key !== "Tab" || !root) return;
+      const elements = Array.from(root.querySelectorAll<HTMLElement>('button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]'));
+      if (!elements.length) {e.preventDefault();return;}
+      const first = elements[0], last = elements[elements.length - 1];
+      if (e.shiftKey && (document.activeElement === first || document.activeElement === root)) {e.preventDefault();last.focus();}
+      else if (!e.shiftKey && (document.activeElement === last || document.activeElement === root)) {e.preventDefault();first.focus();}
+    };
+    root?.addEventListener("keydown", handler);
+    return () => {root?.removeEventListener("keydown", handler);previous?.focus();};
+  }, []);
+  return ref;
+}
+
 // ─── Detail dialog ────────────────────────────────────────────────────
 // Modal showing one job's metadata, target, recent runs, and the
 // run-now / cancel actions. Replaces the old right-pane detail view.
 
 function DetailDialog({
-  job, runs, onClose, onRunNow, onCancel,
+  job, runs, onClose, onRunNow, onCancel, busy, error, hasMoreRuns, onMoreRuns,
 }: {
   job: Job;
   runs: JobRun[];
+  busy: boolean; error: string; hasMoreRuns: boolean; onMoreRuns: () => Promise<void>;
   onClose: () => void;
   onRunNow: () => void | Promise<void>;
   onCancel: () => void | Promise<void>;
 }) {
+  const modalRef = useModal(onClose);
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const cancelled = job.status === "cancelled";
@@ -422,6 +450,7 @@ function DetailDialog({
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
+        ref={modalRef} role="dialog" aria-modal="true" aria-label={`Job ${job.name}`} tabIndex={-1}
         className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-4xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-5 gap-4"
         onClick={(e) => e.stopPropagation()}
       >
@@ -443,21 +472,23 @@ function DetailDialog({
               </p>
             )}
           </div>
-          <button onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">×</button>
+          <button aria-label="Close dialog" onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">×</button>
         </header>
 
+        {error && <p role="alert" className="text-red text-sm break-words">{error}</p>}
         <section>
-          <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Target</h3>
+          <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Target (payload and credentials hidden)</h3>
           <pre className="text-[11px] bg-bg-input border border-border rounded p-3 overflow-auto whitespace-pre-wrap">
             {JSON.stringify(job.target, null, 2)}
           </pre>
         </section>
+        {hasMoreRuns && <button onClick={onMoreRuns} className="text-accent">Load older runs</button>}
 
         <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={onRunNow}
-            disabled={terminal || job.status === "running" || cancelling}
+            disabled={cancelled || job.status === "running" || cancelling || busy}
             className="px-3 py-1 text-sm border border-accent text-accent rounded disabled:opacity-50"
           >Run now</button>
           {terminal ? (
@@ -546,6 +577,8 @@ function CreateJobDialog({
   onCreated: () => void;
   api: ApiFn;
 }) {
+  const submitLock = useRef(false);
+  const modalRef = useModal(() => {if (!submitLock.current) onClose();});
   const [name, setName] = useState("");
   const [scheduleKind, setScheduleKind] = useState<ScheduleKind>("once");
   // once: a datetime-local string (browser local TZ). Default = now+5min.
@@ -633,6 +666,7 @@ function CreateJobDialog({
   }, [api, scheduleKind, timezone, randomRuns, randomWindowStart, randomWindowEnd, randomMinSpacing, scheduleSeed]);
 
   const submit = async () => {
+    if (submitLock.current) return;
     setErr("");
     if (!name.trim()) { setErr("Name is required."); return; }
 
@@ -645,15 +679,17 @@ function CreateJobDialog({
       const n = Number(everyAmount);
       if (!Number.isFinite(n) || n <= 0) { setErr("Interval must be > 0."); return; }
       const mult = everyUnit === "h" ? 3600 : everyUnit === "m" ? 60 : 1;
-      schedule.every_seconds = Math.round(n * mult);
+      const seconds = n * mult;
+      if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 31536000) {setErr("Interval must be whole seconds from 1 second to 365 days.");return;}
+      schedule.every_seconds = seconds;
     } else if (scheduleKind === "cron") {
       if (!cronExpr.trim()) { setErr("Cron expression required."); return; }
       schedule.cron = cronExpr.trim();
     } else {
       const runs = Number(randomRuns);
       const spacing = Number(randomMinSpacing);
-      if (!Number.isInteger(runs) || runs < 1) { setErr("Runs per day must be a positive integer."); return; }
-      if (!Number.isInteger(spacing) || spacing < 0) { setErr("Minimum spacing must be zero or more minutes."); return; }
+      if (!Number.isInteger(runs) || runs < 1 || runs > 100) { setErr("Runs per day must be a positive integer."); return; }
+      if (!Number.isInteger(spacing) || spacing < 0 || spacing > 1440) { setErr("Minimum spacing must be zero or more minutes."); return; }
       schedule.period = "day";
       schedule.runs_per_period = runs;
       schedule.window_start = randomWindowStart;
@@ -664,7 +700,7 @@ function CreateJobDialog({
     const target: Record<string, unknown> = { kind: targetKind };
     if (targetKind === "event") {
       const id = Number(agentId);
-      if (!Number.isInteger(id) || id <= 0) { setErr("Agent ID must be a positive integer."); return; }
+      if (!Number.isSafeInteger(id) || id <= 0) { setErr("Agent ID must be a positive integer."); return; }
       if (!eventMessage.trim()) { setErr("Event message required."); return; }
       target.agent_id = id;
       target.message = eventMessage;
@@ -694,20 +730,20 @@ function CreateJobDialog({
       }
     }
 
-    setSubmitting(true);
+    submitLock.current = true;setSubmitting(true);
     try {
       await api("POST", "/jobs", {
         name: name.trim(),
         schedule,
         target,
-        timezone: timezone.trim() || "UTC",
+        timezone: scheduleKind === "once" || scheduleKind === "every" ? "UTC" : timezone.trim() || "UTC",
         schedule_seed: scheduleKind === "random" ? scheduleSeed : undefined,
       });
       onCreated();
     } catch (e) {
       setErr((e as Error).message);
     } finally {
-      setSubmitting(false);
+      submitLock.current = false;setSubmitting(false);
     }
   };
 
@@ -715,15 +751,16 @@ function CreateJobDialog({
   const labelCls = "text-xs uppercase tracking-wide text-text-dim";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={() => {if (!submitLock.current) onClose();}}>
       <div className="absolute inset-0 bg-bg/80 backdrop-blur-sm" />
       <div
+        ref={modalRef} role="dialog" aria-modal="true" aria-label="Create job" tabIndex={-1}
         className="relative bg-bg-card border border-border rounded-lg shadow-lg max-w-2xl w-full mx-4 overflow-auto flex flex-col max-h-[90vh] p-4 gap-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
           <div className="text-text font-medium">New job</div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+          <button aria-label="Close dialog" onClick={() => {if (!submitLock.current) onClose();}} className="text-text-muted hover:text-text">×</button>
         </div>
 
         <div className="flex flex-col gap-1">
@@ -755,12 +792,15 @@ function CreateJobDialog({
             ))}
           </div>
           {scheduleKind === "once" && (
+            <label className="text-sm">Run at ({Intl.DateTimeFormat().resolvedOptions().timeZone})
             <input
               type="datetime-local"
               value={runAtLocal}
               onChange={(e) => setRunAtLocal(e.target.value)}
               className={inputCls + " mt-1"}
             />
+              <span className="block text-xs text-text-muted mt-1">{Number.isNaN(new Date(runAtLocal).getTime()) ? "Choose a valid local time" : `Resolves to ${new Date(runAtLocal).toISOString()}`}</span>
+            </label>
           )}
           {scheduleKind === "every" && (
             <div className="flex gap-2 mt-1">
@@ -828,8 +868,9 @@ function CreateJobDialog({
               </label>
             </div>
           )}
+          {(scheduleKind === "cron" || scheduleKind === "random") && (
           <label className="flex flex-col gap-1 mt-1 text-xs text-text-dim">
-            Timezone
+            Timezone (cron and random schedules)
             <input
               type="text"
               value={timezone}
@@ -838,6 +879,7 @@ function CreateJobDialog({
               className={inputCls}
             />
           </label>
+          )}
           {scheduleKind === "random" && (
             <div className="border-t border-border pt-2 mt-1">
               <div className="text-xs uppercase tracking-wide text-text-dim mb-1">Next five runs</div>
@@ -936,7 +978,7 @@ function CreateJobDialog({
         <div className="flex gap-2 justify-end mt-1">
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => {if (!submitLock.current) onClose();}}
             className="px-3 py-1.5 text-sm text-text-muted"
           >Cancel</button>
           <button

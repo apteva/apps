@@ -55,13 +55,13 @@ assert:
       count: 2
       before: recovery-sandbox_lookup_operation
   - tool_called_with:
-      tool: tasks_update
+      tool: tasks_fail
       thread_id: main
       args:
-        state: failed
         error: simulated_executor_loss
       count: 1
       before: tasks_recover_occurrence
+  - tool_not_called: tasks_update
   - tool_called_with:
       tool: tasks_recover_occurrence
       thread_id: main

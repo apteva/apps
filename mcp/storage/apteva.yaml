@@ -2,14 +2,14 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.10.26
+version: 0.11.1
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
   local disk by default, S3-compatible (AWS / R2 / B2 / Wasabi /
   MinIO) when configured. On S3, presigned upload + download URLs
-  let clients transfer bytes directly to/from the bucket — bytes
-  never proxy through this container. Three visibility tiers:
+  support direct transfer. Upload finalization verifies bytes before
+  publishing; downloads use revocable Storage delivery by default. Three visibility tiers:
   private (auth-only), signed (time-limited URL), public (open).
   Range requests, ETag, Cache-Control all set per file.
 
@@ -82,23 +82,16 @@ provides:
       resource: folder
       description: Hard- or soft-delete files in matching folders.
   mcp_tools:
-    # Tools where the folder is in the args get platform-side gating
-    # (requires + resource_from). The SDK's MCP handler 403s before
-    # the tool's handler runs.
+    # Handlers validate folders before authorizing the canonical destination.
+    # Raw resource_from substitution cannot safely gate unnormalized paths.
     - name: files_upload
       description: Upload bytes from base64 + filename + folder. Returns was_existing=true only for the same bytes at the same name and folder; a different destination creates a distinct file.
-      requires: files.write
-      resource_from: "folder/{arg.folder?}"
     - name: files_move
       description: Move a file to a different folder, optionally rename it. Handler-enforced because both source and destination folders must allow files.write.
     - name: files_from_url
       description: Fetch an external URL into storage in one call. Returns the new file's id.
-      requires: files.write
-      resource_from: "folder/{arg.folder?}"
     - name: files_create_folder
       description: Create an empty folder via a 0-byte .placeholder upload. Idempotent.
-      requires: files.write
-      resource_from: "folder/{arg.path?}"
     - name: files_rename_folder
       description: Rename or move a virtual folder and all files below it.
     # Tools that operate on a file id don't know the folder until the
@@ -108,7 +101,7 @@ provides:
     - name: files_get
       description: Fetch one file's metadata by id (no bytes). Returns {found:true,file:{...}} or {found:false,file:null}.
     - name: files_get_url
-      description: Mint a signed time-limited URL. Supports disposition=inline|attachment and delivery=apteva|direct|proxy. Proxy serves bytes through Storage without redirecting or exposing the backend. Existing S3 callers that omit delivery retain direct delivery for compatibility.
+      description: Mint a signed time-limited URL. Supports disposition=inline|attachment and delivery=apteva|direct|proxy. Proxy serves bytes through Storage without redirecting or exposing the backend. Omitting delivery uses revocable Storage delivery. Explicit direct links remain usable until their expiry.
     - name: files_get_content
       description: |
         Fetch the file's bytes inline as base64 (≤25 MB). For
@@ -127,8 +120,6 @@ provides:
       description: Delete a file. Default is hard delete — row removed AND bytes removed from disk. Pass keep_record=true for soft-delete (audit history; bytes stay).
     - name: storage_upload_init
       description: Start an agent multipart upload session. Returns was_existing=true only when sha256, name, and folder all match; identical bytes at a different destination create a distinct file.
-      requires: files.write
-      resource_from: "folder/{arg.folder?}"
     - name: storage_upload_status
       description: Inspect an agent multipart upload session and list uploaded parts. Args - upload_id.
     - name: storage_upload_part
@@ -212,6 +203,21 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: import_internal_hosts
+    type: text
+    default: ""
+    label: Internal import hosts
+    description: Optional comma-separated exact hostnames allowed to resolve to private addresses. Empty blocks internal-network URL imports.
+  - name: max_upload_sessions
+    type: text
+    default: "64"
+    label: Pending upload sessions
+    description: Install-wide limit across HTTP, MCP and direct upload sessions.
+  - name: max_pending_upload_mb
+    type: text
+    default: "1024"
+    label: Pending upload allowance (MiB)
+    description: Combined declared size of pending sessions. Direct sessions reserve their allowance until the PUT URL expires.
   - name: default_visibility
     type: select
     options: [private, signed, public]
@@ -227,7 +233,7 @@ config_schema:
     type: text
     default: "100"
     label: Max upload size (MB)
-    description: Hard ceiling for files_upload + multipart uploads. v0.1 stores in memory before write — keep it modest.
+    description: Hard ceiling for files_upload + multipart uploads. Streamed upload limit, capped at 10 GiB. Inline base64 uploads are additionally capped at 25 MiB.
 
   # Stale upload reclamation (new in v0.8.3) ─ a multipart upload
   # that's started but never completed sits as bytes-on-disk in

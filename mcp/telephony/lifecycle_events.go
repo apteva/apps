@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -441,8 +443,36 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	gateway, token := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/"), os.Getenv("APTEVA_APP_TOKEN")
+	if gateway == "" || token == "" {
+		return nil
+	} // Preserve pending events until a gateway is available.
+	batch, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client := &http.Client{Timeout: 500 * time.Millisecond}
 	for _, event := range events {
-		ctx.WithProject(event.ProjectID).Emit(event.Topic, event.Payload)
+		// This is the SDK's documented app-event endpoint. Its fire-and-forget
+		// Emit method cannot acknowledge delivery; mark the durable outbox only
+		// after an HTTP success. Consumers deduplicate using event_id/revision.
+		body, err := json.Marshal(map[string]any{"topic": event.Topic, "project_id": event.ProjectID, "data": event.Payload})
+		if err != nil {
+			return err
+		}
+		request, err := http.NewRequestWithContext(batch, http.MethodPost, gateway+"/api/app-events/internal/emit", bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("Content-Type", "application/json")
+		response, err := client.Do(request)
+		if err != nil {
+			return err
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			return fmt.Errorf("lifecycle event publish returned %d", response.StatusCode)
+		}
 		if _, err := ctx.AppDB().Exec(`UPDATE call_events SET published_at = ?
             WHERE event_id = ? AND published_at = ''`, time.Now().UTC().Format(time.RFC3339Nano), event.EventID); err != nil {
 			return err

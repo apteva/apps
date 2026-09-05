@@ -280,7 +280,7 @@ func TestIdentities_UnlinkRefusesToStrandGuest(t *testing.T) {
 	}
 }
 
-func TestGuestUpgrade_BecomesAccountAndKeepsIdentity(t *testing.T) {
+func TestGuestUpgrade_BecomesAccountAndRevokesDeviceAccess(t *testing.T) {
 	ctx, clientID := newAuthCtx(t)
 	app := &App{}
 	guest := loginIdentity(t, app, ctx, clientID, "device", "dev-upgrade", nil)
@@ -312,9 +312,9 @@ func TestGuestUpgrade_BecomesAccountAndKeepsIdentity(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("login after upgrade status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	// … and the device identity still resolves to the same, now-account user.
+	// The previous device cannot recover the upgraded account; it starts a new guest.
 	again := loginIdentity(t, app, ctx, clientID, "device", "dev-upgrade", nil)
-	if au := again["user"].(*User); au.ID != uid || au.Kind != "account" {
+	if au := again["user"].(*User); au.ID == uid || au.Kind != "guest" {
 		t.Fatalf("device login after upgrade = %+v", au)
 	}
 	// A second upgrade is refused.

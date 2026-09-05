@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.9.0
+version: 0.9.1
 description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
@@ -113,6 +113,8 @@ provides:
   mcp_tools:
     - name: portfolio_create
       description: "Create a paper or live portfolio (live: pass broker_slug)."
+    - name: portfolio_broker_bind
+      description: "Explicitly confirm a legacy portfolio broker account binding."
     - name: brokers_list
       description: "List registered broker adapters + bound connections."
     - name: venue_profiles_list

@@ -1,151 +1,191 @@
-# conversations — design
+# Conversations design
 
-One app owning the replacement conversation surfaces: internal dashboard
-chat, the inbox (approvals / reports / alerts / status), and Telegram as an
-optional connection-backed transport. Slack and other transports remain
-behind the same adapter seam for later releases. Developed in
-parallel with — and without touching — apteva-server's built-in
-`channel-chat` and the deprecated `channels` sidecar. Both are donors;
-neither is modified.
+Conversations owns dashboard chat, approvals, reports, alerts, and an optional
+Telegram transport. The inbox is a projection of the same durable messages as
+the transcript. Agent status belongs to the Status app; historical status rows
+remain inert history. This repair is based on `conversations/v0.18.2`.
 
-## Why one app
+## Authorization and lifecycle
 
-The inbox has no data of its own. Every inbox item IS a message: an
-agent's `request_approval` appends a message with a typed card into its
-conversation, and the inbox is a priority-ordered query over those rows.
-Splitting inbox from conversations would mean mirrored stores, duplicated
-unread bookkeeping, and a cross-app hop inside the approval round-trip —
-the single most valuable behavior in the system.
+Every conversation belongs to a project. An ownerless conversation is visible
+to project users; otherwise only its owner and explicit user participants may
+read it. REST, message and stream SSE events, transport metadata, and delivery
+inspection/retry apply that resource rule. Private cards have no project-wide
+content delivery. A public *audience* controls visitor-facing agent behavior;
+it does not remove authentication or make a private row project-visible.
 
-External transports are not conversation *types*. A Telegram chat is an
-explicit binding to an ordinary conversation. Pairing and public intake create
-the same generic conversation rows as web or app gateways. The bot token stays
-in a platform integration connection; Conversations stores the connection id,
-chat route, webhook verification secret, and external participant identity.
+Creation initializes the roster transactionally. Reusing a key requires access
+before returning the row. `app:<name>:inbox` is reserved for authenticated app
+callers. Agent-created topic keys are deterministic per agent/title. Archiving
+releases those generated topic keys; explicit archived keys require unarchiving
+instead of silently creating another conversation. Rooms allow at most eight
+agents, and the lead cannot be removed without a separate leadership change.
 
-## Model
+Archived conversations are read-only, including card actions and settings.
+Archiving cancels queued/claimed deliveries atomically; recovery never spins on
+archived work. Unarchiving does not replay previously cancelled work. Deletion
+cascades message/route data and records retired thread identities so a surviving
+Core thread cannot acquire global Conversations access after losing its binding.
+Retirement is an authorization policy, not a forced stop of arbitrary Core work.
+A provider request already accepted before archive/delete cannot be recalled.
 
-- `conversations` — id, project, owner user, lead agent, audience
-  (operator|public), kind (direct|room), origin (web|agent|app), and an
-  optional unique conversation key.
-- `messages` — role, content, `component_kind` (approval|report|alert|
-  status — a real indexed column, replacing channel-chat's
-  `LIKE '%"approval-card"%'` scans), components/attachments/metadata
-  JSON, `client_message_id` idempotency key.
-- `participants` — agent, platform user, or externally keyed identity with
-  an optional contact URI. External identities never become platform users
-  implicitly.
-- `deliveries` — the ledger. One row per (message, target); pending rows
-  are redelivered on mount (crash-safe sends, the Hermes pattern).
-- `telegram_connections` / `telegram_bindings` — one verified webhook per
-  bot connection and project-scoped chat-to-conversation routes. Routes may be
-  created by pairing, public intake, one-time invitation, or advanced recovery.
-- `transport_intake_policies` / `transport_access_requests` /
-  `transport_invites` — provider-neutral onboarding state. Unapproved content
-  is never retained; invitations store only a token hash.
-- `telegram_updates` / `telegram_message_links` / `telegram_action_tokens`
-  — inbound deduplication, provider message editing, and opaque callbacks.
+Telegram `/new` copies owner, audience, directive and agent roster in the same
+transaction as switching the route. Undelivered messages for the old Telegram
+route are cancelled; other surfaces retain the old transcript. A durable command
+receipt makes a retried `/new` return the same replacement conversation.
 
-## Surfaces
+## Message and delivery contracts
 
-- **MCP tools** (agents): `conversations_send`, `_request_approval`,
-  `_report` (inbox-only), `_alert`, `_set_status`, `_list`, `_history`.
-- **Inter-app**: `inbox_post` — any sidecar raises inbox items via
-  `CallAppResult("conversations", "inbox_post", …)`, with an optional
-  callback tool invoked on action. This makes the app the platform's
-  notification provider; no other app needs its own inbox.
-- **HTTP** (dashboard): /chats /messages /stream (SSE) /inbox
-  /message-action /seen /telegram-connections /telegram-bindings
-  /telegram-intake /telegram-access /telegram-invites, plus the secret-verified
-  /telegram-webhook/*. (Reserved prefixes /health /manifest
-  /mcp /events /ui/ are avoided — guarded by a test.) `/chats`, `/inbox`, and
-  `/unread-summary` accept an optional `agent_id` projection. It is intersected
-  with the authenticated user/project scope and matches explicit participants,
-  never merely `lead_agent_id`.
-- **Adapters**: `web` (the SSE hub), authenticated agent/app callbacks, and
-  `telegram`. Telegram executes Bot API tools through the bound platform
-  connection; raw bot credentials never enter app config or SQLite.
+`messages` stores content, typed cards, attachments, metadata, authorship and a
+request digest. A message and all initial `deliveries` commit in one transaction.
+Stable client request IDs reject reuse with different payloads. `inbox_post`
+accepts `client_message_id`, scoped to the authenticated source app install;
+callers must supply it when retry safety is required. Legacy rows without a
+request digest compare their immutable author/content fields.
 
-## Telegram onboarding (v0.10.0)
+Content is limited to 256 KiB; the serialized message to 1 MiB; attachments to ten
+images and 768 KiB per data URL. These checks apply at the shared store boundary
+for HTTP, MCP and transport writes. Images remain inline within these bounds.
 
-Webhook activation calls `getMe`, `setWebhook`, and `getWebhookInfo` through
-the bound platform connection. The default intake mode is fail-closed pairing:
-an unknown sender receives one rate-bounded access-request code, while the app
-stores only their Telegram identity metadata. An operator approves, dismisses,
-or blocks the request in the dashboard. One-time `t.me` links bind a private
-chat or group without copying numeric ids; their random token is single-use,
-expires after 15 minutes, and is stored only as SHA-256.
+The executable runs four delivery workers. HTTP/MCP persists and returns without
+waiting for remote providers. Web publication remains immediate. Workers claim
+rows with an atomic lease and token; completion checks that token. A heartbeat
+extends active leases. Payloads are read after claiming their generation, so an
+edit cannot be acknowledged using an older recovery-scan payload. Concurrent
+edits requeue the newer generation. Work per recovery pass is bounded.
 
-Public intake is an explicit alternative. The first private message creates or
-reuses a normal public conversation keyed by connection and Telegram chat, adds
-the external participant, and forwards the first message to the chosen lead
-agent. `/new` rotates only the active route; the old transcript stays in the
-generic store. Groups never auto-open and default to mention-only activation.
-Webhook drift is displayed but never fought automatically.
+Telegram routes serialize pending/processing/ambiguous messages in ID order.
+Retries back off, then become visible failures after ten attempts; unsupported
+payloads fail immediately. Timeout/uncertain send outcomes and expired Telegram
+leases become `ambiguous`, blocking automatic replay and later route messages.
+Only explicit operator retry can risk a duplicate. Card edits preserve ambiguous
+or cancelled state. There is no unconditional exactly-once Telegram guarantee.
 
-## Thread-per-conversation
+`/deliveries?chat_id=...` shows recent delivery states in chat, including queued,
+sending, retrying, delivered, cancelled, failed and ambiguous. Failed/ambiguous
+rows have authorized retry actions. The same route with `stats=1` reports queue/failure counts, oldest age and mean delivery latency per target/state. Tracked approval execution callbacks are persisted idempotently by increasing sequence; they do not claim business success. SDK HTTP clients bound network requests;
+a delivery heartbeat is not an application-level cancellation deadline.
+Confirmed non-Telegram ledger history and redundant change revisions are pruned
+after 30 days. Telegram links/parts and retirement identities are retained while
+needed for deduplication and authorization. Message history is user-owned and
+is not automatically deleted.
 
-Every conversation gets its own core thread ("chat-<conversation id>",
-channel-chat's naming so thread identities survive the data migration),
-spawned lazily on first inbound message via the SDK's `ThreadClient`
-(`platform.threads.write`). The directive suffix carries the
-conversation's context and reply contract; composition with the agent's
-main directive happens core-side. MCP is left nil so the platform
-supplies the agent's spawnable set; the immediate tool preload contains only
-the conversation-facing Conversations tools plus its Core coordination tools.
-The app persists each `(conversation, agent, thread)` relationship before Core
-can execute a newly spawned thread. That stored relationship—not an inferred
-platform role—binds every call from the thread to the exact conversation and
-refuses conversation management or reports there. Spawn is idempotent; a changed
-suffix re-spawns (the sidecar-visible approximation of channel-chat's
-drift update). The first inbound message is an idempotent initial event
-inside that same spawn request, so Core persists it before starting the
-thread. Conversations requires an accepted-or-duplicate event receipt;
-later messages use `SendThreadEvent`. A spawn transport failure degrades
-to the main thread. A successful spawn without a receipt is surfaced as
-a visible delivery failure and is not rerouted, because its outcome is
-ambiguous and a second route could duplicate a message Core persisted.
+## Agent threads and approval results
 
-The remaining parity gap that needs an SDK addition is an
-UpdateThread/ThreadTools surface for true in-place drift correction.
+The app persists `(conversation, agent, thread)` ownership before starting Core.
+Every inbound user message uses `EnsureThread` with the desired directive/tool
+profile and a stable event ID. Accepted or duplicate receipts confirm delivery.
+An explicitly unsupported ensure endpoint may use the legacy spawn API with the
+same event; other failures remain queued. There is no fallback to a different
+thread. Eventless profile caches are bounded and expire after five minutes.
 
-## Approval round-trip
+Conversation-thread tools resolve that persisted binding, not a thread-name
+prefix. They may operate only on their originating conversation. Main manages
+global conversations/reports. Generic workers report to their parent. Public
+visitor requests needing operator attention are delegated to main, which writes
+into an operator conversation; the public thread cannot write across that boundary.
 
-message-action mutates the card in place, publishes the updated row to
-every current surface (one row — transcript, inbox widget, and Telegram
-message agree), and
-forwards an `approval.result` event to the owning agent's
-thread via the platform API. Writer, store, and forwarder stay in one
-process.
+Approval resolution is an atomic pending-to-verdict transition plus outbox write.
+The original requesting agent/thread receives a stable `approval.result` through
+SDK `AgentEventClient.SendTrackedAgentEvent`. The event includes the original conversation ID and asks for receipt acknowledgement before further work. Its receipt must match both the
+source event ID and original thread and be accepted or duplicate. This API works
+for main as well as non-main threads, without replacing their profiles. The
+platform may restore the exact thread identity after restart; an unavailable
+platform/destination remains a visible retry/failure, never a main-thread reroute.
+A platform without tracked-event support cannot confirm approval delivery. The minimum Apteva release is 0.40.6, which introduced tracked agent lifecycle delivery (server 0.23.0 / SDK 0.70.0); this app retains its SDK 0.73.0 pin.
+Sibling-app callbacks receive a stable `operation_id`; the recipient must honor
+that key for its own effects to be idempotent.
 
-## Streaming (v0.2.0)
+## History, inbox and streaming
 
-Ephemeral bubbles ride a named `stream` SSE channel, produced by a port
-of channel-chat's streamer. Two feeds: the platform telemetry bridge
-(`platform.telemetry.read` → llm.tool_chunk/tool.call/tool.result for
-chat-* threads) gives token-level text; without it the app emits
-acknowledgement/done phase frames around forward/reply — same bubble
-lifecycle, no token text. The panel renders either without knowing
-which. Frames never persist; the durable row always wins, and settled
-call ids are tombstoned so a late frame cannot resurrect a bubble.
+`message_changes` journals insert/content/card/action revisions transactionally.
+Card changes requeue surface delivery in the same transaction. Each row carries its latest journal revision so delayed older page/SSE responses cannot overwrite a newer edit. Acknowledgement frames carry the triggering message ID so loading historical replies cannot settle current progress. The latest
+transcript page and its change cursor are read from one database snapshot.
+`/messages?page=1` returns latest messages and backward pagination; `/changes`
+replays durable revisions. SSE subscribes before backlog lookup, sends heartbeats,
+and closes an overflowing durable subscription to force reconciliation. SSE
+message IDs never advance the client's durable replay cursor.
 
-RELEASE DEPENDENCY: v0.2.0 requires an app-sdk release carrying
-TelemetryClient (>= the version that ships sdk/telemetry.go) and a
-server carrying /api/apps/callback/telemetry. On older platforms the
-app runs with phase-frame streaming only.
+The React controller keeps message rows and active stream bubbles separately.
+Only completed change pages advance replay. Drafts and complete pending send
+requests are stored per project/conversation. Remounts, failed sends, delayed
+responses and text typed during a pending send do not move messages or drafts
+between conversations. Read marks require a visible loaded transcript at its
+bottom; selection alone does not mark unread history seen.
 
-## Later phases (not in this repo yet)
+Inbox priority and dismissal filtering occur in SQL before pagination. Responses
+include accurate totals and attention ranks across all matching rows. Conversation
+search also filters before limiting, with cursor pagination and direct ID lookup.
 
-1. Server-side relay: the frozen per-agent `channels`/`agent-output`
-   MCPs forward into this app (running cores never notice).
-2. Dual-write from `channel-chat`, then flip dashboard reads.
-3. One-time data migration of `channel_chat_*` rows (idempotent,
-   refuses-to-guess — same discipline as the providers migration).
-4. Add Slack and other transports through the same connection-backed seam.
-5. Deprecate the `channels` sidecar and shrink `channel-chat`.
+Telemetry requires a persisted participating-agent/thread binding and validates
+the destination before preview publication. An incremental parser handles escaped
+text and Unicode, with bounded buffers, expiration, and publication throttling.
+Frames carry agent/thread/call/run identity so reused provider call IDs and
+concurrent room responses stay separate. Fallback acknowledgement frames work
+without telemetry; durable messages remain authoritative.
 
-## Testing in isolation
+The shared transcript displays sender IDs, supported image attachments, report
+sections and a readable JSON fallback for arbitrary app components. It does not
+execute arbitrary third-party component code. Unsupported images show an explicit
+placeholder. UI bundles use the production React runtime and are verified against
+the dashboard's import surface.
 
-Everything runs against the SDK testkit with a recording platform stub —
-no apteva-server involved. `APTEVA_GATEWAY_URL=… go run .` boots it
-standalone against a dev server when wanted, but no test requires one.
+## Telegram transport
+
+Connections and credentials stay platform-managed. App-side route lookups check
+only the requested bound connection and its current project/status. Pairing is
+fail-closed; public intake is explicit. Unknown senders' unapproved message bodies
+are not retained. Invitation secrets are hashed and expire; webhook secrets are
+checked before handling updates.
+
+Inbound updates use heartbeat-renewed processing leases and a separate completion marker. A retry
+of unfinished work receives a retryable response while leased, and can recover
+after expiry. Only completed duplicates are acknowledged as done. Ordinary
+messages have stable update-derived request IDs, and `/new` has transactional
+command receipts. Cleanup never deletes unfinished update claims.
+
+Commands explicitly addressed to a different bot and partial username matches
+are ignored. Textless inbound media gets an explicit unsupported-content reply.
+Long outgoing replies split at 3,500 UTF-16 units with durable per-part IDs;
+confirmed parts are reused/edited and obsolete parts are removed. Multipart
+messages use plain text to preserve content without broken HTML boundaries.
+Single-part messages use the safe Telegram formatter. Unsupported outgoing media
+is a visible terminal delivery failure rather than silent truncation or retries.
+
+## Validation
+
+Build with Go 1.26.8 or newer; the module minimum and x/sys 0.44.0 remove known standard-library and Windows dependency advisories found during the audit. Go 1.26.8 is an official supported patch release: https://go.dev/dl/#go1.26.8.
+
+Run from this app with the pinned SDK rather than the workspace overlay:
+
+```
+GOWORK=off go test ./... -short
+GOWORK=off go test -race -tags integration ./... -count=1
+GOWORK=off go vet ./...
+GOWORK=off go test -run '^$' -bench BenchmarkAuditStreamSizes -benchmem
+```
+
+From the apps repository root:
+
+```
+bun test mcp/conversations/ui
+bun run scripts/build-panels.ts --app conversations
+```
+
+Tier 1 covers store, permissions, retries, concurrency, migrations and regression
+invariants. Tier 2 starts actual sidecar binaries and uses real local HTTP with a
+stub platform. React behavioral tests exercise snapshot/SSE ordering, switches,
+retries, read visibility, draft preservation and multi-agent streams.
+
+Tier 3 requires a real server/Core, a working `openai-codex` connection, this exact
+candidate installed, and auto-attachment to newly created test agents:
+
+```
+APTEVA_BASE_URL=... APTEVA_API_KEY=... APTEVA_LIVE_PROJECT_ID=... \
+  GOWORK=off go test -tags live -run '^TestLive_' -v -count=1 -timeout 30m
+```
+
+The tests create/clean temporary agents and conversations. Use a dedicated local
+validation server, not a production user's existing conversations. Real Codex
+coverage does not substitute for real Telegram/network fault testing. See the
+repository audit-fix report for measured results and candidate provenance.

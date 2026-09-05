@@ -1,80 +1,200 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func insertEventWithPolicy(db *sql.DB, ev EventInsert) (int64, error) {
+type rejectedEventError struct{ Outcome validationOutcome }
+
+func (e *rejectedEventError) Error() string {
+	return "event rejected by spec: " + joinViolationMessages(e.Outcome.Violations)
+}
+
+func prepareEvent(db sqlRunner, ev EventInsert) (EventInsert, validationOutcome, *EventSpec, error) {
+	if ev.TS == 0 {
+		ev.TS = time.Now().UnixMilli()
+	}
+	if ev.Source == "" {
+		ev.Source = "track"
+	}
 	if ev.Props == "" {
 		ev.Props = "{}"
 	}
-	spec, err := getEventSpec(db, ev.ProjectID, ev.App, ev.Topic)
+	var obj map[string]any
+	if len(ev.Props) > 256*1024 || json.Unmarshal([]byte(ev.Props), &obj) != nil || obj == nil {
+		return ev, validationOutcome{}, nil, errors.New("props must be a JSON object no larger than 256 KiB")
+	}
+	if len(ev.App) > 256 || len(ev.Topic) > 256 || len(ev.UpsertKey) > 512 || len(ev.DeliveryID) > 512 {
+		return ev, validationOutcome{}, nil, errors.New("event identifier exceeds length limit")
+	}
+	spec, err := getEventSpecLean(db, ev.ProjectID, ev.App, ev.Topic)
 	if errors.Is(err, sql.ErrNoRows) {
-		return insertEventRaw(db, ev, true)
+		spec = nil
+	} else if err != nil {
+		return ev, validationOutcome{}, nil, err
 	}
+	if spec != nil {
+		var unresolved int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM analytics_migration_issues i JOIN events e ON e.id=i.event_id WHERE e.project_id=? AND e.app=? AND (e.topic=? OR e.topic=?)`, ev.ProjectID, ev.App, ev.Topic, rollupTopic(spec)).Scan(&unresolved); err != nil {
+			return ev, validationOutcome{}, spec, err
+		}
+		if unresolved > 0 {
+			return ev, validationOutcome{}, spec, errors.New("legacy aggregate identities require repair; see diagnostics")
+		}
+		switch spec.IngestMode {
+		case "upsert":
+			ev, err = eventFromPolicy(db, ev, spec.Topic, spec.UpsertPolicy, false)
+		case "raw_plus_rollup":
+			_, err = eventFromPolicy(db, ev, rollupTopic(spec), spec.RollupPolicy, true)
+		}
+		if err != nil {
+			return ev, validationOutcome{}, spec, err
+		}
+	}
+	out, err := validatePreparedEvent(db, ev, spec)
+	return ev, out, spec, err
+}
+
+func rollupTopic(spec *EventSpec) string {
+	if spec.RollupPolicy != nil {
+		if spec.RollupPolicy.TargetTopic != "" {
+			return spec.RollupPolicy.TargetTopic
+		}
+		if b := spec.RollupPolicy.Bucket; b != "" && b != "none" {
+			return spec.Topic + "_" + b + "_rollup"
+		}
+	}
+	return spec.Topic + "_rollup"
+}
+
+func insertEventWithPolicy(db sqlDatabase, original EventInsert) (int64, error) {
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	validation, err := validateEventInsert(db, ev)
+	defer tx.Rollback()
+	fingerprint := fmt.Sprintf("%x", sha256.Sum256([]byte(mustJSON(original))))
+	if original.DeliveryID != "" {
+		var id int64
+		var previous string
+		err = tx.QueryRow(`SELECT event_id,fingerprint FROM ingest_receipts WHERE project_id=? AND app=? AND topic=? AND delivery_id=?`, original.ProjectID, original.App, original.Topic, original.DeliveryID).Scan(&id, &previous)
+		if err == nil {
+			if previous != fingerprint {
+				return 0, errors.New("delivery_id already used with different event data")
+			}
+			return id, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+	}
+	next, validation, spec, err := prepareEvent(tx, original)
 	if err != nil {
 		return 0, err
 	}
-	switch spec.IngestMode {
-	case "upsert":
-		tx, err := db.Begin()
-		if err != nil {
+	if validation.Reject {
+		if err = recordEventSpecViolations(tx, 0, validation.Violations); err != nil {
 			return 0, err
 		}
-		defer tx.Rollback()
-		next, err := eventFromPolicy(tx, ev, spec.Topic, spec.UpsertPolicy, false)
-		if err != nil {
+		if err = tx.Commit(); err != nil {
 			return 0, err
 		}
-		id, err := insertEventRawValidated(tx, next, validation)
-		if err != nil {
-			return 0, err
-		}
-		if err := tx.Commit(); err != nil {
-			return 0, err
-		}
-		return id, nil
-	case "raw_plus_rollup":
-		tx, err := db.Begin()
-		if err != nil {
-			return 0, err
-		}
-		defer tx.Rollback()
-		id, err := insertEventRawValidated(tx, ev, validation)
-		if err != nil {
-			return 0, err
-		}
-		rollupTopic := spec.Topic + "_rollup"
-		if spec.RollupPolicy != nil && spec.RollupPolicy.TargetTopic != "" {
-			rollupTopic = spec.RollupPolicy.TargetTopic
-		} else if spec.RollupPolicy != nil && spec.RollupPolicy.Bucket != "" && spec.RollupPolicy.Bucket != "none" {
-			rollupTopic = spec.Topic + "_" + spec.RollupPolicy.Bucket + "_rollup"
-		}
-		rollup, err := eventFromPolicy(tx, ev, rollupTopic, spec.RollupPolicy, true)
-		if err != nil {
-			return 0, err
-		}
-		if _, err := insertEventRawValidated(tx, rollup, validationOutcome{}); err != nil {
-			return 0, err
-		}
-		if err := tx.Commit(); err != nil {
-			return 0, err
-		}
-		return id, nil
-	default:
-		return insertEventRaw(db, ev, true)
+		return 0, &rejectedEventError{validation}
 	}
+	// A corrected raw upsert needs both its old and new rollup groups rebuilt.
+	var previous *EventInsert
+	if spec != nil && spec.IngestMode == "raw_plus_rollup" && original.UpsertKey != "" {
+		old := original
+		err = tx.QueryRow(`SELECT ts,props FROM events WHERE project_id=? AND app=? AND topic=? AND upsert_key=?`, original.ProjectID, original.App, original.Topic, original.UpsertKey).Scan(&old.TS, &old.Props)
+		if err == nil {
+			previous = &old
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+	}
+	id, err := insertEventRawValidated(tx, next, validation)
+	if err != nil {
+		return 0, err
+	}
+	if spec != nil && spec.IngestMode == "raw_plus_rollup" {
+		if previous != nil {
+			err = rebuildCorrectedRollups(tx, original, *previous, spec)
+		} else {
+			var rollup EventInsert
+			rollup, err = eventFromPolicy(tx, next, rollupTopic(spec), spec.RollupPolicy, true)
+			if err == nil {
+				_, err = insertEventRawValidated(tx, rollup, validationOutcome{})
+			}
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+	if original.DeliveryID != "" {
+		_, err = tx.Exec(`INSERT INTO ingest_receipts VALUES(?,?,?,?,?,?,?)`, original.ProjectID, original.App, original.Topic, original.DeliveryID, id, fingerprint, time.Now().UnixMilli())
+		if err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
+}
+
+// Corrections are uncommon. Rebuild only affected buckets from original raw
+// events so min/max, timestamp moves and dimension changes remain exact.
+func rebuildCorrectedRollups(tx *sql.Tx, current, old EventInsert, spec *EventSpec) error {
+	keys := map[string]bool{}
+	for _, ev := range []EventInsert{current, old} {
+		next, err := eventFromPolicy(tx, ev, rollupTopic(spec), spec.RollupPolicy, true)
+		if err != nil {
+			return err
+		}
+		keys[next.UpsertKey] = true
+	}
+	for key := range keys {
+		if _, err := tx.Exec(`DELETE FROM events WHERE project_id=? AND app=? AND topic=? AND upsert_key=?`, current.ProjectID, current.App, rollupTopic(spec), key); err != nil {
+			return err
+		}
+	}
+	rows, err := tx.Query(`SELECT ts,props FROM events WHERE project_id=? AND app=? AND topic=? ORDER BY ts,id`, current.ProjectID, current.App, current.Topic)
+	if err != nil {
+		return err
+	}
+	events := []EventInsert{}
+	for rows.Next() {
+		ev := current
+		ev.UpsertKey = ""
+		if err = rows.Scan(&ev.TS, &ev.Props); err != nil {
+			rows.Close()
+			return err
+		}
+		events = append(events, ev)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		next, err := eventFromPolicy(tx, ev, rollupTopic(spec), spec.RollupPolicy, true)
+		if err != nil {
+			return err
+		}
+		if keys[next.UpsertKey] {
+			if _, err = insertEventRawValidated(tx, next, validationOutcome{}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func eventFromPolicy(db sqlRunner, ev EventInsert, targetTopic string, policy *EventIngestPolicy, rollup bool) (EventInsert, error) {
@@ -96,7 +216,11 @@ func eventFromPolicy(db sqlRunner, ev EventInsert, targetTopic string, policy *E
 	if err != nil {
 		return EventInsert{}, err
 	}
-	upsertKey, err := computedUpsertKey(ev, targetTopic, policy, bucket, values)
+	identityEvent := ev
+	if rollup {
+		identityEvent.UpsertKey = ""
+	}
+	upsertKey, err := computedUpsertKey(identityEvent, targetTopic, policy, bucket, values)
 	if err != nil {
 		return EventInsert{}, err
 	}
@@ -104,22 +228,26 @@ func eventFromPolicy(db sqlRunner, ev EventInsert, targetTopic string, policy *E
 	if err != nil {
 		return EventInsert{}, err
 	}
-	propsJSON, _ := json.Marshal(props)
+	propsJSON, err := json.Marshal(props)
+	if err != nil {
+		return EventInsert{}, fmt.Errorf("policy result: %w", err)
+	}
 	source := ev.Source
 	if rollup {
 		source = "rollup"
 	}
 	return EventInsert{
-		TS:        ev.TS,
-		App:       ev.App,
-		Topic:     targetTopic,
-		ProjectID: ev.ProjectID,
-		InstallID: ev.InstallID,
-		UserID:    ev.UserID,
-		SessionID: ev.SessionID,
-		Source:    source,
-		UpsertKey: upsertKey,
-		Props:     string(propsJSON),
+		DeliveryID: ev.DeliveryID,
+		TS:         ev.TS,
+		App:        ev.App,
+		Topic:      targetTopic,
+		ProjectID:  ev.ProjectID,
+		InstallID:  ev.InstallID,
+		UserID:     ev.UserID,
+		SessionID:  ev.SessionID,
+		Source:     source,
+		UpsertKey:  upsertKey,
+		Props:      string(propsJSON),
 	}, nil
 }
 
@@ -151,7 +279,7 @@ func bucketForPolicy(ts int64, policy *EventIngestPolicy) (policyBucket, error) 
 	t := time.UnixMilli(ts).In(loc)
 	switch name {
 	case "hour":
-		start := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
+		start := t.Add(-time.Duration(t.Minute())*time.Minute - time.Duration(t.Second())*time.Second - time.Duration(t.Nanosecond()))
 		return policyBucket{Name: name, Label: start.Format("2006-01-02T15:00"), StartMS: start.UnixMilli()}, nil
 	case "day":
 		start := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
@@ -174,14 +302,10 @@ func bucketForPolicy(ts int64, policy *EventIngestPolicy) (policyBucket, error) 
 }
 
 func computedUpsertKey(ev EventInsert, targetTopic string, policy *EventIngestPolicy, bucket policyBucket, values map[string]any) (string, error) {
-	parts := []string{ev.ProjectID, ev.App, targetTopic}
-	if bucket.Name != "" && bucket.Name != "none" {
-		parts = append(parts, bucket.Name+"="+bucket.Label)
-	}
-	for _, dim := range policy.Dimensions {
-		if dim == "" {
-			continue
-		}
+	parts := []any{ev.ProjectID, ev.App, targetTopic, bucket.Name, bucket.StartMS, policy.Timezone}
+	dimensions := append([]string{}, policy.Dimensions...)
+	sort.Strings(dimensions)
+	for _, dim := range dimensions {
 		if !validEventPropertyKey(dim) {
 			return "", fmt.Errorf("unsupported dimension %q", dim)
 		}
@@ -189,12 +313,21 @@ func computedUpsertKey(ev EventInsert, targetTopic string, policy *EventIngestPo
 		if !ok || value == nil || value == "" {
 			return "", fmt.Errorf("dimension %q missing", dim)
 		}
-		parts = append(parts, dim+"="+fmt.Sprint(value))
+		switch value.(type) {
+		case string, bool, float64, int64, int, json.Number:
+		default:
+			return "", fmt.Errorf("dimension %q must be scalar", dim)
+		}
+		parts = append(parts, []any{dim, value})
 	}
-	if len(parts) == 3 && ev.UpsertKey != "" {
-		parts = append(parts, "manual="+ev.UpsertKey)
+	if len(policy.Dimensions) == 0 && bucket.Name == "none" && ev.UpsertKey != "" {
+		parts = append(parts, ev.UpsertKey)
 	}
-	return strings.Join(parts, "|"), nil
+	raw, err := json.Marshal(parts)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("v2:%x", sha256.Sum256(raw)), nil
 }
 
 func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *EventIngestPolicy, bucket policyBucket, values map[string]any, upsertKey string, rollup bool) (map[string]any, error) {
@@ -202,7 +335,11 @@ func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *Ev
 	if !rollup {
 		props = propsObject(ev.Props)
 	}
-	if existing := existingUpsertProps(db, ev.ProjectID, ev.App, targetTopic, upsertKey); existing != nil {
+	existing, err := existingUpsertProps(db, ev.ProjectID, ev.App, targetTopic, upsertKey)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
 		for k, v := range existing {
 			props[k] = v
 		}
@@ -221,19 +358,23 @@ func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *Ev
 		if dim == "" {
 			continue
 		}
-		props[lastPathSegment(dim)] = values[dim]
+		setNestedExample(props, strings.TrimPrefix(dim, "props."), values[dim])
 	}
 	output := strings.TrimPrefix(policy.OutputProperty, "props.")
 	if output == "" {
 		output = "value"
 	}
+	previous := eventValueMap(EventInsert{Props: mustJSON(existing)})["props."+output]
 	incoming, hasIncoming := policyValue(policy, values)
 	switch policy.Operation {
 	case "replace":
 		if hasIncoming {
-			props[output] = incoming
+			setNestedExample(props, output, incoming)
 		}
 	case "increment", "sum":
+		if !hasIncoming && (policy.Operation == "sum" || policy.ValueKey != "" || policy.Value != nil) {
+			return nil, errors.New("policy operand missing")
+		}
 		inc := 1.0
 		if hasIncoming {
 			n, ok := numericValue(incoming)
@@ -242,8 +383,8 @@ func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *Ev
 			}
 			inc = n
 		}
-		current, _ := numericValue(props[output])
-		props[output] = current + inc
+		current, _ := numericValue(previous)
+		setNestedExample(props, output, current+inc)
 	case "min", "max":
 		if !hasIncoming {
 			return nil, fmt.Errorf("policy value required for %s", policy.Operation)
@@ -252,31 +393,34 @@ func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *Ev
 		if !ok {
 			return nil, fmt.Errorf("policy value for %s must be numeric", policy.Operation)
 		}
-		current, ok := numericValue(props[output])
+		current, ok := numericValue(previous)
 		if !ok {
-			props[output] = in
+			setNestedExample(props, output, in)
 		} else if policy.Operation == "min" {
-			props[output] = math.Min(current, in)
+			setNestedExample(props, output, math.Min(current, in))
 		} else {
-			props[output] = math.Max(current, in)
+			setNestedExample(props, output, math.Max(current, in))
 		}
 	}
 	return props, nil
 }
 
-func existingUpsertProps(db sqlRunner, projectID, app, topic, upsertKey string) map[string]any {
+func existingUpsertProps(db sqlRunner, projectID, app, topic, upsertKey string) (map[string]any, error) {
 	if upsertKey == "" {
-		return nil
+		return nil, nil
 	}
 	var raw string
 	err := db.QueryRow(
 		`SELECT props FROM events WHERE project_id=? AND app=? AND topic=? AND upsert_key=?`,
 		projectID, app, topic, upsertKey,
 	).Scan(&raw)
-	if err != nil {
-		return nil
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	return propsObject(raw)
+	if err != nil {
+		return nil, err
+	}
+	return propsObject(raw), nil
 }
 
 func timestampForPolicy(fallback int64, values map[string]any, policy *EventIngestPolicy) (int64, error) {
@@ -300,7 +444,7 @@ func timestampForPolicy(fallback int64, values map[string]any, policy *EventInge
 		loc = loaded
 	}
 	if n, ok := numericValue(raw); ok {
-		if n <= 0 || n > math.MaxInt64 {
+		if n <= 0 || n >= float64(math.MaxInt64) {
 			return 0, fmt.Errorf("timestamp_property %q must be a positive unix millisecond value", key)
 		}
 		return int64(n), nil
@@ -359,19 +503,19 @@ func policyValue(policy *EventIngestPolicy, values map[string]any) (any, bool) {
 func numericValue(v any) (float64, bool) {
 	switch x := v.(type) {
 	case float64:
-		return x, true
+		return x, !math.IsNaN(x) && !math.IsInf(x, 0)
 	case float32:
-		return float64(x), true
+		return float64(x), !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0)
 	case int:
-		return float64(x), true
+		return float64(x), !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0)
 	case int64:
-		return float64(x), true
+		return float64(x), !math.IsNaN(float64(x)) && !math.IsInf(float64(x), 0)
 	case json.Number:
 		n, err := x.Float64()
-		return n, err == nil
+		return n, err == nil && !math.IsNaN(n) && !math.IsInf(n, 0)
 	case string:
 		n, err := strconv.ParseFloat(x, 64)
-		return n, err == nil
+		return n, err == nil && !math.IsNaN(n) && !math.IsInf(n, 0)
 	default:
 		return 0, false
 	}
@@ -386,7 +530,7 @@ func lastPathSegment(path string) string {
 	return parts[len(parts)-1]
 }
 
-func previewEventIngest(db *sql.DB, ev EventInsert) map[string]any {
+func previewEventIngest(db sqlRunner, ev EventInsert) map[string]any {
 	spec, err := getEventSpec(db, ev.ProjectID, ev.App, ev.Topic)
 	if err != nil {
 		return nil
@@ -404,7 +548,7 @@ func previewEventIngest(db *sql.DB, ev EventInsert) map[string]any {
 	if spec.IngestMode == "raw_plus_rollup" && spec.RollupPolicy != nil {
 		target := spec.RollupPolicy.TargetTopic
 		if target == "" {
-			target = spec.Topic + "_" + spec.RollupPolicy.Bucket + "_rollup"
+			target = rollupTopic(spec)
 		}
 		if rollup, err := eventFromPolicy(db, ev, target, spec.RollupPolicy, true); err == nil {
 			out["rollup"] = map[string]any{
@@ -416,3 +560,5 @@ func previewEventIngest(db *sql.DB, ev EventInsert) map[string]any {
 	}
 	return out
 }
+
+func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }

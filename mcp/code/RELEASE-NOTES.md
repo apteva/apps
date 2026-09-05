@@ -5,6 +5,8 @@ It prevents lost concurrent edits and stale editor saves, makes multi-file
 mutations recoverable, corrects Git status/selected commits, and preserves
 workspace data when sync fails.
 
+The app source is pinned to the immutable `code/v0.9.0` release tag.
+
 ## Changes
 
 - Transactional edits/imports/patches, conditional file saves, no-overwrite

@@ -7,7 +7,7 @@ package main
 //
 //   public  → anyone can fetch
 //   signed  → requires ?sig=&exp=
-//   private → requires X-User-ID set by authMiddleware OR valid sig
+//   private → public route requires a valid signature; protected route uses auth
 
 import (
 	"encoding/base64"
@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +34,62 @@ type urlPlatform struct {
 type cdnCountingPlatform struct {
 	tk.BasePlatformClient
 	calls int
+}
+
+type cdnBlockingPlatform struct {
+	tk.BasePlatformClient
+	calls   atomic.Int32
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *cdnBlockingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if input["zone_id"] == int64(7) {
+		if p.calls.Add(1) == 1 {
+			close(p.started)
+		}
+		<-p.release
+	}
+	out.(*struct {
+		URL string `json:"url"`
+	}).URL = "https://cdn.example.com/"
+	return nil
+}
+
+func TestCDNConcurrentResolutionCoalescesWithoutBlockingOtherZones(t *testing.T) {
+	resetCDNBaseCache()
+	t.Cleanup(resetCDNBaseCache)
+	p := &cdnBlockingPlatform{started: make(chan struct{}), release: make(chan struct{})}
+	ctx := newTestCtx(t, tk.WithPlatform(p), tk.WithConfig(map[string]string{"cdn_zone_id": "7"}))
+	other := newTestCtx(t, tk.WithPlatform(p), tk.WithConfig(map[string]string{"cdn_zone_id": "8"}))
+	var release sync.Once
+	defer release.Do(func() { close(p.release) })
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := cdnURLFor(ctx, "/file", "proj"); got != "https://cdn.example.com/file" {
+				t.Errorf("URL = %q", got)
+			}
+		}()
+	}
+	<-p.started
+	done := make(chan string, 1)
+	go func() { done <- cdnURLFor(other, "/other", "proj") }()
+	select {
+	case got := <-done:
+		if got != "https://cdn.example.com/other" {
+			t.Errorf("other zone URL = %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("one zone's network request blocked another zone")
+	}
+	release.Do(func() { close(p.release) })
+	wg.Wait()
+	if got := p.calls.Load(); got != 1 {
+		t.Fatalf("same-zone requests = %d, want 1", got)
+	}
 }
 
 func (p *cdnCountingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -104,7 +162,7 @@ func TestAbsoluteContentURL_CachesCDNBaseAcrossFileRows(t *testing.T) {
 		got := absoluteContentURL(ctx, &File{
 			ID: i, Name: "x.png", ProjectID: "test-proj", Visibility: "public",
 		})
-		if !strings.HasPrefix(got, "https://cdn.example.com/files/") {
+		if !strings.HasPrefix(got, "https://cdn.example.com/public/files/") {
 			t.Fatalf("file %d URL = %q", i, got)
 		}
 	}
@@ -156,7 +214,7 @@ func TestAbsoluteContentURL_UsesPublicRouteOnlyForPublicFiles(t *testing.T) {
 func TestSignedAbsoluteURL(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
 	got := signedAbsoluteURL(nil, &File{ID: 42, Name: "video.mp4"}, "abcdef", 1234567890)
-	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?sig=abcdef&exp=1234567890"
+	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?exp=1234567890&sig=abcdef"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -175,7 +233,7 @@ func TestSignedAbsoluteURL_IncludesProjectID(t *testing.T) {
 		Name:      "video.mp4",
 		ProjectID: "1776532035349-7aca99abbd8afe9e",
 	}, "abcdef", 1234567890)
-	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?sig=abcdef&exp=1234567890&project_id=1776532035349-7aca99abbd8afe9e"
+	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?exp=1234567890&project_id=1776532035349-7aca99abbd8afe9e&sig=abcdef"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -187,7 +245,7 @@ func TestDBGetByID_PopulatesURL(t *testing.T) {
 	f := mustUpload(t, ctx, "video.mp4", "/clips/", "fakebytes")
 
 	wantURL := "https://agents.example.com/api/apps/storage/files/" +
-		intToString(f.ID) + "/content/video.mp4"
+		intToString(f.ID) + "/content/video.mp4?project_id=test-proj"
 	if f.URL != wantURL {
 		t.Errorf("URL = %q, want %q", f.URL, wantURL)
 	}
@@ -326,68 +384,50 @@ func TestSignedAbsoluteURL_AttachmentUsesDownloadRouteAndVersion(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
 	f := &File{ID: 42, Name: "résumé.pdf", ProjectID: "p 1", SHA256: "b46cc4504014abcdef"}
 	got := signedAbsoluteURLWithDisposition(nil, f, "abcdef", 1234567890, DispositionAttachment)
-	want := "https://agents.example.com/api/apps/storage/public/files/42/download/r%C3%A9sum%C3%A9.pdf?sig=abcdef&exp=1234567890&v=b46cc4504014abcd&project_id=p+1"
+	want := "https://agents.example.com/api/apps/storage/public/files/42/download/r%C3%A9sum%C3%A9.pdf?exp=1234567890&project_id=p+1&sig=abcdef&v=b46cc4504014abcd"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
-func TestS3ContentRedirect_IsInlineNoStoreAndNever304(t *testing.T) {
-	ctx, f, stub := newRemoteFile(t, "image/png", "public")
-	_ = ctx
-	req := httptest.NewRequest(http.MethodGet,
-		"/public/files/"+intToString(f.ID)+"/content/image.png?project_id=test-proj", nil)
-	req.Header.Set("If-None-Match", `"`+f.SHA256+`"`)
+func TestS3ContentStreamsRevocableBytes(t *testing.T) {
+	_, f, stub := newRemoteFile(t, "image/png", "public")
+	req := httptest.NewRequest(http.MethodGet, "/public/files/"+intToString(f.ID)+"/content?project_id=test-proj", nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handlePublicFilesItem(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != 200 || rec.Body.String() != "PNG" || rec.Header().Get("Location") != "" || stub.getCalls != 0 {
+		t.Fatalf("response=%d %s location=%s presigns=%d", rec.Code, rec.Body.String(), rec.Header().Get("Location"), stub.getCalls)
 	}
-	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
-		t.Fatalf("cache-control=%q", got)
-	}
-	if got := rec.Header().Get("ETag"); got != "" {
-		t.Fatalf("remote redirect exposed validator %q", got)
-	}
-	if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
-		t.Fatalf("nosniff=%q", got)
-	}
-	if !strings.HasPrefix(rec.Header().Get("Location"), "https://fake-s3.example.com/") {
-		t.Fatalf("location=%q", rec.Header().Get("Location"))
-	}
-	if stub.getOptions.Disposition != DispositionInline || stub.getOptions.ContentType != "image/png" {
-		t.Fatalf("get options=%+v", stub.getOptions)
-	}
-	if stub.getTTL > 15*time.Minute || stub.getTTL < 14*time.Minute {
-		t.Fatalf("presign TTL=%v", stub.getTTL)
+	if rec.Header().Get("Cache-Control") != "private, no-store" {
+		t.Fatal(rec.Header())
 	}
 }
 
 func TestS3DownloadRedirect_UsesAttachment(t *testing.T) {
-	_, f, stub := newRemoteFile(t, "image/png", "public")
+	_, f, _ := newRemoteFile(t, "image/png", "public")
 	req := httptest.NewRequest(http.MethodGet,
 		"/public/files/"+intToString(f.ID)+"/download/image.png?project_id=test-proj", nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handlePublicFilesItem(rec, req)
-	if rec.Code != http.StatusFound {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if stub.getOptions.Disposition != DispositionAttachment {
-		t.Fatalf("disposition=%q", stub.getOptions.Disposition)
+	if !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("disposition=%q", rec.Header().Get("Content-Disposition"))
 	}
 }
 
 func TestUnsafeS3Content_IsForcedToAttachment(t *testing.T) {
-	_, f, stub := newRemoteFile(t, "text/html", "public")
+	_, f, _ := newRemoteFile(t, "text/html", "public")
 	req := httptest.NewRequest(http.MethodGet,
 		"/public/files/"+intToString(f.ID)+"/content/page.html?project_id=test-proj", nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handlePublicFilesItem(rec, req)
-	if rec.Code != http.StatusFound {
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d", rec.Code)
 	}
-	if stub.getOptions.Disposition != DispositionAttachment {
-		t.Fatalf("HTML disposition=%q", stub.getOptions.Disposition)
+	if !strings.HasPrefix(rec.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("HTML disposition=%q", rec.Header().Get("Content-Disposition"))
 	}
 }
 
@@ -418,7 +458,7 @@ func TestDiskContentAndDownloadMatchDispositionAndCaching(t *testing.T) {
 			if !strings.HasPrefix(rec.Header().Get("Content-Disposition"), tc.want+";") {
 				t.Fatalf("content-disposition=%q", rec.Header().Get("Content-Disposition"))
 			}
-			if got := rec.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
+			if got := rec.Header().Get("Cache-Control"); got != "public, max-age=0, must-revalidate" {
 				t.Fatalf("cache-control=%q", got)
 			}
 			if got := rec.Header().Get("X-Content-Type-Options"); got != "nosniff" {
@@ -459,39 +499,34 @@ func TestS3AuthorizationRulesRemainUnchanged(t *testing.T) {
 		return rec.Code
 	}
 
-	if got := request("public", false, false); got != http.StatusFound {
+	if got := request("public", false, false); got != http.StatusOK {
 		t.Fatalf("public anonymous status=%d", got)
 	}
 	if got := request("private", false, false); got != http.StatusForbidden {
 		t.Fatalf("private anonymous status=%d", got)
 	}
-	if got := request("private", true, false); got != http.StatusFound {
+	if got := request("private", true, false); got != http.StatusForbidden {
 		t.Fatalf("private authenticated status=%d", got)
 	}
-	if got := request("private", false, true); got != http.StatusFound {
+	if got := request("private", false, true); got != http.StatusOK {
 		t.Fatalf("private signed status=%d", got)
 	}
 	if got := request("signed", false, false); got != http.StatusForbidden {
 		t.Fatalf("signed without signature status=%d", got)
 	}
-	if got := request("signed", false, true); got != http.StatusFound {
+	if got := request("signed", false, true); got != http.StatusOK {
 		t.Fatalf("signed with signature status=%d", got)
 	}
 }
 
-func TestSignedS3RedirectTTLDoesNotOutliveShare(t *testing.T) {
+func TestSignedS3ShareDoesNotExposeReusableBackendURL(t *testing.T) {
 	_, f, stub := newRemoteFile(t, "image/png", "signed")
-	exp := time.Now().Add(75 * time.Second).Unix()
-	path := "/public/files/" + intToString(f.ID) + "/content/image.png?project_id=test-proj" +
-		"&sig=" + signFile(f.ID, exp) + "&exp=" + intToString(exp)
-	req := httptest.NewRequest(http.MethodGet, path, nil)
+	exp := time.Now().Add(time.Minute).Unix()
+	path := "/public/files/" + intToString(f.ID) + "/content?project_id=test-proj&sig=" + signFile(f.ID, exp) + "&exp=" + intToString(exp)
 	rec := httptest.NewRecorder()
-	(&App{}).handlePublicFilesItem(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if stub.getTTL <= 60*time.Second || stub.getTTL > 75*time.Second {
-		t.Fatalf("presign TTL=%v, want within signed URL remainder", stub.getTTL)
+	(&App{}).handlePublicFilesItem(rec, httptest.NewRequest("GET", path, nil))
+	if rec.Code != 200 || rec.Header().Get("Location") != "" || stub.getCalls != 0 {
+		t.Fatal(rec.Code, rec.Header())
 	}
 }
 
@@ -504,7 +539,7 @@ func TestFilesGetURL_DeliveryCompatibilityAndExplicitOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyMap := legacy.(map[string]any)
-	if legacyMap["delivery"] != "direct" || legacyMap["disposition"] != "attachment" {
+	if legacyMap["delivery"] != "apteva" || legacyMap["disposition"] != "inline" {
 		t.Fatalf("legacy response=%v", legacyMap)
 	}
 
@@ -521,7 +556,7 @@ func TestFilesGetURL_DeliveryCompatibilityAndExplicitOptions(t *testing.T) {
 	if !strings.Contains(stableMap["url"].(string), "/public/files/") || !strings.Contains(stableMap["url"].(string), "/content/") {
 		t.Fatalf("stable URL=%q", stableMap["url"])
 	}
-	if stub.getCalls != 1 {
+	if stub.getCalls != 0 {
 		t.Fatalf("stable URL unexpectedly presigned; calls=%d", stub.getCalls)
 	}
 
@@ -592,6 +627,7 @@ func TestBrowserStylePublicPNGRedirectDecodesWithDimensions(t *testing.T) {
 	}))
 	t.Cleanup(objectServer.Close)
 	stub.getURL = objectServer.URL + "/image.png"
+	stub.objects[objectKey(f.SHA256, f.StorageKey)] = pngBytes
 
 	app := &App{}
 	storageServer := httptest.NewServer(http.HandlerFunc(app.handlePublicFilesItem))

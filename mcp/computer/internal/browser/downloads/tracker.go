@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"io"
 	"mime"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	cdpbrowser "github.com/chromedp/cdproto/browser"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
 )
 
@@ -57,6 +59,8 @@ type entry struct {
 // Tracker turns Chrome's browser-level download events into a session-scoped
 // lifecycle. The disk/provider path never leaves this package.
 type Tracker struct {
+	attached        map[context.Context]context.CancelFunc
+	lifetimeOnce    sync.Once
 	mu              sync.Mutex
 	byID            map[string]*entry
 	byGUID          map[string]*entry
@@ -109,28 +113,55 @@ func (t *Tracker) Attach(ctx context.Context) error {
 	}
 	// Chrome emits Browser.download* events on the target event stream used by
 	// chromedp (the same wiring as chromedp's own download integration test).
-	chromedp.ListenTarget(ctx, t.handleEvent)
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return ErrClosed
+	}
+	if t.attached == nil {
+		t.attached = make(map[context.Context]context.CancelFunc)
+	}
+	if t.attached[ctx] != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	listenerCtx, listenerCancel := context.WithCancel(ctx)
+	t.attached[ctx] = listenerCancel
+	t.mu.Unlock()
+	chromedp.ListenTarget(listenerCtx, t.handleEvent)
 	t.mu.Lock()
 	if t.cancelDownload == nil {
 		t.cancelDownload = func(guid string) {
-			cancelCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			cancelCtx, cancel := context.WithTimeout(t.lifetimeOr(ctx), 5*time.Second)
 			defer cancel()
-			_ = chromedp.Run(cancelCtx, cdpbrowser.CancelDownload(guid))
+			if c := chromedp.FromContext(ctx); c != nil && c.Browser != nil {
+				_ = cdpbrowser.CancelDownload(guid).Do(cdp.WithExecutor(cancelCtx, c.Browser))
+			}
 		}
 	}
 	t.mu.Unlock()
-	if err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	if err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		return cdpxSetBehavior(t.behavior, path).Do(ctx)
 	})); err != nil {
+		t.Detach(ctx)
 		return err
 	}
 	if t.lifetime != nil {
-		go func() {
-			<-t.lifetime.Done()
-			_ = t.Close()
-		}()
+		t.lifetimeOnce.Do(func() {
+			go func() {
+				<-t.lifetime.Done()
+				_ = t.Close()
+			}()
+		})
 	}
 	return nil
+}
+
+func (t *Tracker) lifetimeOr(ctx context.Context) context.Context {
+	if t.lifetime != nil {
+		return t.lifetime
+	}
+	return ctx
 }
 
 func cdpxAllowAndName() cdpbrowser.SetDownloadBehaviorBehavior {
@@ -163,7 +194,7 @@ func (t *Tracker) started(guid, filename, source string) {
 	t.sequence++
 	now := time.Now().UTC()
 	item := &entry{guid: guid, sequence: t.sequence, meta: computer.Download{
-		ID: newID(), Filename: SanitizeFilename(filename), MIMEType: mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))),
+		OriginalFilename: filename, ID: newID(), Filename: SanitizeFilename(filename), MIMEType: mime.TypeByExtension(strings.ToLower(filepath.Ext(filename))),
 		Status: computer.DownloadInProgress, SourceOrigin: sourceOrigin(source), CreatedAt: now,
 	}}
 	if t.behavior == cdpbrowser.SetDownloadBehaviorBehaviorAllowAndName && t.downloadPath != "" {
@@ -449,6 +480,10 @@ func (t *Tracker) Close() error {
 		return nil
 	}
 	t.closed = true
+	for _, cancel := range t.attached {
+		cancel()
+	}
+	t.attached = nil
 	t.notifyLocked()
 	dir := t.directory
 	t.mu.Unlock()
@@ -516,4 +551,13 @@ func sourceOrigin(raw string) string {
 		return ""
 	}
 	return parsed.Scheme + "://" + parsed.Host
+}
+
+func (t *Tracker) Detach(ctx context.Context) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if cancel := t.attached[ctx]; cancel != nil {
+		cancel()
+		delete(t.attached, ctx)
+	}
 }

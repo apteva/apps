@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -26,7 +27,7 @@ go_ready() {
 }
 
 required_ready() {
-  for cmd in node npm python3 tar gzip curl git setsid base64 df tail dirname mktemp mv grep sed ss; do
+  for cmd in node npm python3 tar gzip curl git setsid base64 df tail dirname mktemp mv grep sed ss flock; do
     command -v "$cmd" >/dev/null 2>&1 || return 1
   done
   major=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
@@ -125,9 +126,15 @@ func (a *App) ensureHostedRuntime(ctx *sdk.AppCtx, instanceID int64) error {
 	if instanceID <= 0 {
 		return errors.New("hosted runtime requires instance_id")
 	}
+	done, err := lockResource(context.Background(), fmt.Sprintf("host-runtime:%d", instanceID))
+	if err != nil {
+		return err
+	}
+	defer done()
 	a.runtimeMu.Lock()
-	defer a.runtimeMu.Unlock()
-	if checked := a.runtimeReady[instanceID]; !checked.IsZero() && time.Since(checked) < hostedRuntimeCacheTTL {
+	checked := a.runtimeReady[instanceID]
+	a.runtimeMu.Unlock()
+	if !checked.IsZero() && time.Since(checked) < hostedRuntimeCacheTTL {
 		return nil
 	}
 
@@ -147,7 +154,12 @@ func (a *App) ensureHostedRuntime(ctx *sdk.AppCtx, instanceID int64) error {
 	if err := verifyHostedTunnelLifecycle(ctx, instanceID); err != nil {
 		return fmt.Errorf("verify instance tunnel: %w", err)
 	}
+	a.runtimeMu.Lock()
+	if a.runtimeReady == nil {
+		a.runtimeReady = map[int64]time.Time{}
+	}
 	a.runtimeReady[instanceID] = time.Now()
+	a.runtimeMu.Unlock()
 	return nil
 }
 

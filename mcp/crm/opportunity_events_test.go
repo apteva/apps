@@ -154,7 +154,7 @@ func TestEmitOpportunity_WonCarriesWonStageFacts(t *testing.T) {
 	if p["value"] != 1200.0 || p["currency"] != "EUR" {
 		t.Errorf("value/currency lost on won: %v", p)
 	}
-	if p["previous_stage_id"] != stages["New"] {
+	if int64FromAny(p["previous_stage_id"]) != stages["New"] {
 		t.Errorf("previous_stage_id=%v, want the New stage %v", p["previous_stage_id"], stages["New"])
 	}
 }

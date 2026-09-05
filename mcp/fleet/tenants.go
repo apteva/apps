@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -174,6 +175,9 @@ func newID() string {
 // setup token for setup_pending tenants; pass nil for tenants that
 // already have an api_key (remote connect, etc.).
 func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
+	return s.insertInitialized(t, apiKeyEnc, setupTokenEnc, "", "", false)
+}
+func (s *store) insertInitialized(t *Tenant, apiKeyEnc, setupTokenEnc []byte, operation, opID string, quarantine bool) error {
 	if t.ID == "" {
 		t.ID = newID()
 	}
@@ -192,13 +196,35 @@ func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 	if len(setupTokenEnc) > 0 {
 		stTok = setupTokenEnc
 	}
-	_, err := s.db.Exec(`
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`
 		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id, ingress_mode, ingress_error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
 		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID, t.IngressMode, nullStr(t.IngressError))
-	return err
+	if err != nil {
+		return err
+	}
+	if err = reserveManagementPortTx(tx, t); err != nil {
+		return err
+	}
+	if quarantine {
+		if _, err = tx.Exec(`UPDATE fleet_tenant_state SET quarantine_required=1 WHERE tenant_id=?`, t.ID); err != nil {
+			return err
+		}
+	}
+	if operation != "" {
+		snapshot, _ := json.Marshal(map[string]any{"source": t})
+		if _, err = tx.Exec(`INSERT INTO fleet_active_operations(tenant_id,id,operation,snapshot) VALUES(?,?,?,?)`, t.ID, opID, operation, string(snapshot)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // getSetupToken returns the sealed setup_token_enc for a tenant, or
@@ -215,11 +241,18 @@ func (s *store) getSetupToken(id string) ([]byte, error) {
 // attachAPIKey replaces the sentinel api_key_enc with the real key,
 // clears the setup_token, and flips the row to active in one step.
 func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
-	_, err := s.db.Exec(
-		`UPDATE fleet_tenants SET api_key_enc = ?, setup_token_enc = NULL, status = ?, updated_at = ? WHERE id = ?`,
-		apiKeyEnc, StatusActive, time.Now().UTC(), id,
-	)
-	return err
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE fleet_tenants SET api_key_enc=?,setup_token_enc=NULL,status=CASE WHEN status IN ('stopped','suspended') THEN status ELSE 'active' END,updated_at=? WHERE id=?`, apiKeyEnc, time.Now().UTC(), id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE fleet_tenant_state SET setup_complete=1,setup_password_enc=NULL,setup_phase='complete' WHERE tenant_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *store) get(id string) (*Tenant, []byte, error) {
@@ -257,7 +290,22 @@ func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 		q.WriteString(fmt.Sprintf(" AND %s = ?", cols[k]))
 		args = append(args, v)
 	}
-	q.WriteString(" ORDER BY created_at DESC")
+	if search := filter["search"]; search != "" {
+		q.WriteString(" AND (instr(lower(slug),lower(?))>0 OR instr(lower(owner_email),lower(?))>0)")
+		args = append(args, search, search)
+	}
+	q.WriteString(" ORDER BY created_at DESC,id DESC")
+	if limit, err := strconv.Atoi(filter["limit"]); err == nil && limit > 0 {
+		if limit > 201 {
+			limit = 201
+		}
+		offset, _ := strconv.Atoi(filter["offset"])
+		if offset < 0 {
+			offset = 0
+		}
+		q.WriteString(" LIMIT ? OFFSET ?")
+		args = append(args, limit, offset)
+	}
 	rows, err := s.db.Query(q.String(), args...)
 	if err != nil {
 		return nil, err
@@ -275,6 +323,15 @@ func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 }
 
 func (s *store) setStatus(id, newStatus, actor string) error {
+	if newStatus == StatusActive {
+		var complete bool
+		if err := s.db.QueryRow(`SELECT setup_complete FROM fleet_tenant_state WHERE tenant_id=?`, id).Scan(&complete); err != nil {
+			return err
+		}
+		if !complete {
+			newStatus = StatusSetupPending
+		}
+	}
 	prev, _, err := s.get(id)
 	if err != nil {
 		return err
@@ -292,6 +349,9 @@ func (s *store) setStatus(id, newStatus, actor string) error {
 func (s *store) updateHealth(id string, ok bool, version string, payload []byte) error {
 	now := time.Now().UTC()
 	if ok {
+		if _, err := s.db.Exec(`UPDATE fleet_tenant_state SET health_failures=0 WHERE tenant_id=?`, id); err != nil {
+			return err
+		}
 		_, err := s.db.Exec(`UPDATE fleet_tenants SET last_seen_at = ?, last_health = ?, current_version = COALESCE(NULLIF(?, ''), current_version), updated_at = ? WHERE id = ?`,
 			now, string(payload), version, now, id)
 		return err
@@ -499,7 +559,17 @@ func (s *store) setCurrentVersion(id, version string) error {
 // config_dir atomically. Used by tenant_migrate after the data dir has
 // been transferred and the new apteva-server is confirmed healthy.
 func (s *store) setLocation(id string, instanceID int64, baseURL, configDir string) error {
-	_, err := s.db.Exec(
+	tenant, _, err := s.get(id)
+	if err != nil {
+		return err
+	}
+	tenant.InstanceID = instanceID
+	tenant.BaseURL = baseURL
+	tenant.ConfigDir = configDir
+	if err = s.reserveManagementPort(tenant); err != nil {
+		return err
+	}
+	_, err = s.db.Exec(
 		`UPDATE fleet_tenants SET instance_id = ?, base_url = ?, config_dir = ?, updated_at = ? WHERE id = ?`,
 		instanceID, baseURL, configDir, time.Now().UTC(), id,
 	)

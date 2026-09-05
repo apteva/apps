@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -12,6 +11,7 @@ import (
 )
 
 type FXRate struct {
+	RevisionID    int64   `json:"revision_id"`
 	ID            int64   `json:"id"`
 	ProjectID     string  `json:"project_id,omitempty"`
 	BaseCurrency  string  `json:"base_currency"`
@@ -46,6 +46,9 @@ type moneyBreakdown struct {
 }
 
 type moneyRateUse struct {
+	RevisionID    int64   `json:"revision_id,omitempty"`
+	QuotedRate    float64 `json:"quoted_rate,omitempty"`
+	Inverse       bool    `json:"inverse,omitempty"`
 	BaseCurrency  string  `json:"base_currency"`
 	QuoteCurrency string  `json:"quote_currency"`
 	AsOf          int64   `json:"as_of"`
@@ -122,7 +125,7 @@ func normalizeFXRate(rate *FXRate) error {
 	return nil
 }
 
-func upsertFXRate(db *sql.DB, projectID string, rate FXRate) (*FXRate, error) {
+func upsertFXRate(db sqlRunner, projectID string, rate FXRate) (*FXRate, error) {
 	rate.ProjectID = projectID
 	if err := normalizeFXRate(&rate); err != nil {
 		return nil, err
@@ -137,17 +140,17 @@ func upsertFXRate(db *sql.DB, projectID string, rate FXRate) (*FXRate, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.QueryRow(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at
+	if err := db.QueryRow(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at, (SELECT MAX(r.id) FROM fx_rate_revisions r WHERE r.rate_id=fx_rates.id)
 		FROM fx_rates WHERE project_id=? AND base_currency=? AND quote_currency=? AND as_of=?`,
 		projectID, rate.BaseCurrency, rate.QuoteCurrency, rate.AsOf).Scan(
 		&rate.ID, &rate.ProjectID, &rate.BaseCurrency, &rate.QuoteCurrency, &rate.AsOf,
-		&rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt); err != nil {
+		&rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt, &rate.RevisionID); err != nil {
 		return nil, err
 	}
 	return &rate, nil
 }
 
-func listFXRates(db *sql.DB, projectID, base, quote string, since, until int64, limit int) ([]FXRate, error) {
+func listFXRates(db sqlRunner, projectID, base, quote string, since, until int64, limit int) ([]FXRate, error) {
 	base = strings.ToUpper(strings.TrimSpace(base))
 	quote = strings.ToUpper(strings.TrimSpace(quote))
 	if base != "" && !validCurrencyCode(base) {
@@ -177,7 +180,7 @@ func listFXRates(db *sql.DB, projectID, base, quote string, since, until int64, 
 		where, args = append(where, "as_of<?"), append(args, until)
 	}
 	args = append(args, limit)
-	rows, err := db.Query(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at
+	rows, err := db.Query(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at, (SELECT MAX(r.id) FROM fx_rate_revisions r WHERE r.rate_id=fx_rates.id)
 		FROM fx_rates WHERE `+strings.Join(where, " AND ")+` ORDER BY as_of DESC, id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -187,7 +190,7 @@ func listFXRates(db *sql.DB, projectID, base, quote string, since, until int64, 
 	for rows.Next() {
 		var rate FXRate
 		if err := rows.Scan(&rate.ID, &rate.ProjectID, &rate.BaseCurrency, &rate.QuoteCurrency,
-			&rate.AsOf, &rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt); err != nil {
+			&rate.AsOf, &rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt, &rate.RevisionID); err != nil {
 			return nil, err
 		}
 		out = append(out, rate)
@@ -195,8 +198,18 @@ func listFXRates(db *sql.DB, projectID, base, quote string, since, until int64, 
 	return out, rows.Err()
 }
 
-func loadFXRateIndex(db *sql.DB, projectID string) (*fxRateIndex, error) {
-	rows, err := db.Query(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at
+func loadFXRateIndex(db sqlRunner, projectID string) (*fxRateIndex, error) {
+	if plan, ok := db.(*evaluationPlan); ok {
+		if cached, found := plan.fx[projectID]; found {
+			return cached, nil
+		}
+		idx, err := loadFXRateIndex(plan.sqlRunner, projectID)
+		if err == nil {
+			plan.fx[projectID] = idx
+		}
+		return idx, err
+	}
+	rows, err := db.Query(`SELECT id, project_id, base_currency, quote_currency, as_of, rate, source, created_at, updated_at, (SELECT MAX(r.id) FROM fx_rate_revisions r WHERE r.rate_id=fx_rates.id)
 		FROM fx_rates WHERE project_id=? ORDER BY as_of, id`, projectID)
 	if err != nil {
 		return nil, err
@@ -206,7 +219,7 @@ func loadFXRateIndex(db *sql.DB, projectID string) (*fxRateIndex, error) {
 	for rows.Next() {
 		var rate FXRate
 		if err := rows.Scan(&rate.ID, &rate.ProjectID, &rate.BaseCurrency, &rate.QuoteCurrency,
-			&rate.AsOf, &rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt); err != nil {
+			&rate.AsOf, &rate.Rate, &rate.Source, &rate.CreatedAt, &rate.UpdatedAt, &rate.RevisionID); err != nil {
 			return nil, err
 		}
 		rates = append(rates, rate)
@@ -237,12 +250,16 @@ func (idx *fxRateIndex) resolve(base, quote string, at int64) (float64, moneyRat
 	if base == quote {
 		return 1, moneyRateUse{BaseCurrency: base, QuoteCurrency: quote, Rate: 1, Source: "identity"}, nil
 	}
-	if rate, ok := latestRateAt(idx.direct[base+"/"+quote], at); ok {
-		return rate.Rate, moneyRateUse{BaseCurrency: base, QuoteCurrency: quote, AsOf: rate.AsOf, Rate: rate.Rate, Source: rate.Source}, nil
+	direct, hasDirect := latestRateAt(idx.direct[base+"/"+quote], at)
+	inverse, hasInverse := latestRateAt(idx.direct[quote+"/"+base], at)
+	// Freshest applicable quote wins; direct wins ties.
+	if hasDirect && (!hasInverse || direct.AsOf >= inverse.AsOf) {
+		return direct.Rate, moneyRateUse{BaseCurrency: base, QuoteCurrency: quote, AsOf: direct.AsOf, Rate: direct.Rate, QuotedRate: direct.Rate, Source: direct.Source, RevisionID: direct.RevisionID}, nil
 	}
-	if rate, ok := latestRateAt(idx.direct[quote+"/"+base], at); ok {
-		return 1 / rate.Rate, moneyRateUse{BaseCurrency: base, QuoteCurrency: quote, AsOf: rate.AsOf, Rate: 1 / rate.Rate, Source: rate.Source + " (inverse)"}, nil
+	if hasInverse {
+		return 1 / inverse.Rate, moneyRateUse{BaseCurrency: base, QuoteCurrency: quote, AsOf: inverse.AsOf, Rate: 1 / inverse.Rate, QuotedRate: inverse.Rate, Inverse: true, Source: inverse.Source + " (inverse)", RevisionID: inverse.RevisionID}, nil
 	}
+
 	return 0, moneyRateUse{}, fmt.Errorf("missing FX rate %s/%s at %s", base, quote, time.UnixMilli(at).UTC().Format("2006-01-02"))
 }
 
@@ -268,6 +285,9 @@ func parseMoneyRateDate(raw string, eventTS int64) (int64, error) {
 }
 
 func currencyMinorDigits(currency string) int {
+	if oneOf(currency, "CLF", "UYW") {
+		return 4
+	}
 	// ISO 4217 currencies whose minor unit differs from the common two digits.
 	if oneOf(currency, "BIF", "CLP", "DJF", "GNF", "ISK", "JPY", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF") {
 		return 0
@@ -278,7 +298,7 @@ func currencyMinorDigits(currency string) int {
 	return 2
 }
 
-func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[string]*moneyBucket, error) {
+func moneyAggregate(db sqlRunner, f Filter, q MoneyQuery, bucketExpr string) (map[string]*moneyBucket, error) {
 	valueExpr, numericPredicate, _ := numericValueExtract(q.Value)
 	currencyExpr, _ := propsExtract(q.CurrencyField)
 	dateExpr := "CAST(ts AS TEXT)"
@@ -286,8 +306,11 @@ func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[
 		dateExpr, _ = propsExtract(q.RateDateField)
 		dateExpr = "COALESCE(CAST(" + dateExpr + " AS TEXT), '')"
 	}
-	where, args := f.buildWhere()
-	conditions := []string{valueExpr + " IS NOT NULL", currencyExpr + " IS NOT NULL"}
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
+	conditions := []string{"1=1"}
 	if where != "" {
 		conditions = append([]string{where}, conditions...)
 	}
@@ -295,9 +318,9 @@ func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[
 	if bucketExpr != "" {
 		selectBucket = bucketExpr
 	}
-	query := `SELECT id, ts, ` + selectBucket + `, CAST(` + valueExpr + ` AS REAL),
+	query := `SELECT id, ts, ` + selectBucket + `, COALESCE(CAST(` + valueExpr + ` AS TEXT), ''),
 		CASE WHEN ` + numericPredicate + ` THEN 1 ELSE 0 END,
-		CAST(` + currencyExpr + ` AS TEXT), ` + dateExpr + `
+		COALESCE(CAST(` + currencyExpr + ` AS TEXT), ''), ` + dateExpr + `
 		FROM events WHERE ` + strings.Join(conditions, " AND ") + ` ORDER BY ts, id`
 	idx, err := loadFXRateIndex(db, f.ProjectID)
 	if err != nil {
@@ -310,14 +333,17 @@ func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[
 	defer rows.Close()
 	buckets := map[string]*moneyBucket{}
 	targetScale := math.Pow10(currencyMinorDigits(q.ReportingCurrency))
+	conversions := map[string]int64{}
 	for rows.Next() {
 		var id, eventTS int64
 		var bucket, currency, rawRateDate string
+		var amountText string
 		var amount float64
 		var numeric int
-		if err := rows.Scan(&id, &eventTS, &bucket, &amount, &numeric, &currency, &rawRateDate); err != nil {
+		if err := rows.Scan(&id, &eventTS, &bucket, &amountText, &numeric, &currency, &rawRateDate); err != nil {
 			return nil, err
 		}
+		amount, _ = strconv.ParseFloat(amountText, 64)
 		if numeric == 0 || math.IsNaN(amount) || math.IsInf(amount, 0) {
 			return nil, fmt.Errorf("sum_money value %q contains a non-numeric row at event %d", q.Value, id)
 		}
@@ -325,11 +351,14 @@ func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[
 		if !validCurrencyCode(currency) {
 			return nil, fmt.Errorf("sum_money currency_field %q contains invalid currency %q at event %d", q.CurrencyField, currency, id)
 		}
+		if q.RateDateField != "" && rawRateDate == "" {
+			return nil, fmt.Errorf("missing rate_date_field %q at event %d", q.RateDateField, id)
+		}
 		rateDate, err := parseMoneyRateDate(rawRateDate, eventTS)
 		if err != nil {
 			return nil, fmt.Errorf("sum_money rate_date_field %q at event %d: %w", q.RateDateField, id, err)
 		}
-		rate, used, err := idx.resolve(currency, q.ReportingCurrency, rateDate)
+		_, used, err := idx.resolve(currency, q.ReportingCurrency, rateDate)
 		if err != nil {
 			return nil, err
 		}
@@ -337,11 +366,17 @@ func moneyAggregate(db *sql.DB, f Filter, q MoneyQuery, bucketExpr string) (map[
 		if q.AmountUnit == "minor" {
 			sourceMajor /= math.Pow10(currencyMinorDigits(currency))
 		}
-		convertedMinorFloat := math.Round(sourceMajor * rate * targetScale)
-		if math.Abs(convertedMinorFloat) > math.MaxInt64 {
-			return nil, fmt.Errorf("sum_money converted value overflows at event %d", id)
+		conversionKey := fmt.Sprintf("%s/%s/%d/%g/%t", amountText, currency, used.RevisionID, used.QuotedRate, used.Inverse)
+		convertedMinor, found := conversions[conversionKey]
+		if !found {
+			convertedMinor, err = convertMinor(amountText, used, currencyMinorDigits(currency), currencyMinorDigits(q.ReportingCurrency), q.AmountUnit)
+			if err != nil {
+				return nil, fmt.Errorf("sum_money event %d: %w", id, err)
+			}
+			if len(conversions) < 2048 {
+				conversions[conversionKey] = convertedMinor
+			}
 		}
-		convertedMinor := int64(convertedMinorFloat)
 		entry := buckets[bucket]
 		if entry == nil {
 			entry = &moneyBucket{Breakdown: map[string]*moneyBreakdown{}, Rates: map[string]moneyRateUse{}}
@@ -400,11 +435,11 @@ func moneyBucketResult(bucket *moneyBucket, q MoneyQuery) map[string]any {
 		"currency_field":    q.CurrencyField,
 		"rate_date_field":   q.RateDateField,
 		"breakdown":         breakdown,
-		"fx":                map[string]any{"policy": "at_or_before_event_date", "coverage": 1, "rates_used": rates},
+		"fx":                map[string]any{"policy": "latest_direct_or_inverse_at_or_before_event_date", "rounding": "half_away_from_zero_per_event", "coverage_policy": "fail_on_incomplete_candidate", "coverage": 1, "rates_used": rates},
 	}
 }
 
-func moneyScalarForWidget(db *sql.DB, f Filter, cfg map[string]any) (map[string]any, error) {
+func moneyScalarForWidget(db sqlRunner, f Filter, cfg map[string]any) (map[string]any, error) {
 	q, err := moneyQueryFromConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -416,12 +451,16 @@ func moneyScalarForWidget(db *sql.DB, f Filter, cfg map[string]any) (map[string]
 	return moneyBucketResult(buckets[""], q), nil
 }
 
-func moneySeriesForWidget(db *sql.DB, f Filter, interval string, cfg map[string]any) ([]map[string]any, map[string]any, error) {
+func moneySeriesForWidget(db sqlRunner, f Filter, interval string, cfg map[string]any) ([]map[string]any, map[string]any, error) {
 	q, err := moneyQueryFromConfig(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
-	buckets, err := moneyAggregate(db, f, q, dashboardBucketExpr(interval))
+	start, end, step, err := seriesGrid(db, f, interval)
+	if err != nil {
+		return nil, nil, err
+	}
+	buckets, err := moneyAggregate(db, f, q, gridBucketExpr(step))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -436,7 +475,11 @@ func moneySeriesForWidget(db *sql.DB, f Filter, interval string, cfg map[string]
 		row := moneyBucketResult(buckets[key], q)
 		row["bucket"] = key
 		rows = append(rows, row)
-		all.ValueMinor += buckets[key].ValueMinor
+		n := buckets[key].ValueMinor
+		if (n > 0 && all.ValueMinor > math.MaxInt64-n) || (n < 0 && all.ValueMinor < math.MinInt64-n) {
+			return nil, nil, errors.New("sum_money series total overflows")
+		}
+		all.ValueMinor += n
 		all.Count += buckets[key].Count
 		for currency, line := range buckets[key].Breakdown {
 			combined := all.Breakdown[currency]
@@ -452,5 +495,5 @@ func moneySeriesForWidget(db *sql.DB, f Filter, interval string, cfg map[string]
 			all.Rates[rateKey] = rate
 		}
 	}
-	return rows, moneyBucketResult(all, q), nil
+	return fillSeries(rows, start, end, step, "sum_money"), moneyBucketResult(all, q), nil
 }

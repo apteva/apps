@@ -166,14 +166,14 @@ func TestSidecar_JWKSPublishesActiveKey(t *testing.T) {
 	}
 }
 
-func TestSidecar_OIDCDiscoveryAdvertisesEndpoints(t *testing.T) {
+func TestSidecar_DiscoveryAdvertisesImplementedEndpoints(t *testing.T) {
 	sc, _ := newSidecar(t)
 	var cfg map[string]any
 	resp := sc.GET("/.well-known/openid-configuration", &cfg)
 	if resp.Status != 200 {
 		t.Fatalf("oidc-config status=%d body=%s", resp.Status, string(resp.Body))
 	}
-	for _, key := range []string{"issuer", "jwks_uri", "token_endpoint", "userinfo_endpoint"} {
+	for _, key := range []string{"issuer", "jwks_uri", "login_endpoint", "refresh_endpoint", "userinfo_endpoint"} {
 		if v, _ := cfg[key].(string); v == "" {
 			t.Errorf("openid-configuration missing %q: %v", key, cfg)
 		}

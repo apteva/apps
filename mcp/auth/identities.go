@@ -102,7 +102,7 @@ func validateProviderPair(provider, subject string) (string, string, error) {
 
 // ─── DB access ───────────────────────────────────────────────────────
 
-func dbFindIdentity(db *sql.DB, projectID string, orgID int64, provider, subject string) (*Identity, error) {
+func dbFindIdentity(db DBTX, projectID string, orgID int64, provider, subject string) (*Identity, error) {
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), user_id, provider, provider_user_id,
 		       IFNULL(created_at,''), IFNULL(last_used_at,'')
@@ -120,7 +120,7 @@ func dbFindIdentity(db *sql.DB, projectID string, orgID int64, provider, subject
 	return &i, nil
 }
 
-func dbInsertIdentity(db *sql.DB, projectID string, orgID, userID int64, provider, subject, rawProfile string) (int64, error) {
+func dbInsertIdentity(db DBTX, projectID string, orgID, userID int64, provider, subject, rawProfile string) (int64, error) {
 	res, err := db.Exec(`
 		INSERT INTO oauth_identities(project_id, organization_id, user_id, provider, provider_user_id, raw_profile, last_used_at)
 		VALUES(?,?,?,?,?,?,?)`,
@@ -131,13 +131,13 @@ func dbInsertIdentity(db *sql.DB, projectID string, orgID, userID int64, provide
 	return res.LastInsertId()
 }
 
-func dbTouchIdentity(db *sql.DB, id int64) error {
+func dbTouchIdentity(db DBTX, id int64) error {
 	_, err := db.Exec(`UPDATE oauth_identities SET last_used_at = ? WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339), id)
 	return err
 }
 
-func dbListIdentities(db *sql.DB, projectID string, orgID, userID int64) ([]Identity, error) {
+func dbListIdentities(db DBTX, projectID string, orgID, userID int64) ([]Identity, error) {
 	rows, err := db.Query(`
 		SELECT id, IFNULL(organization_id,0), user_id, provider, provider_user_id,
 		       IFNULL(created_at,''), IFNULL(last_used_at,'')
@@ -163,7 +163,7 @@ func dbListIdentities(db *sql.DB, projectID string, orgID, userID int64) ([]Iden
 
 // dbDeleteIdentities removes one identity (provider + subject) or every
 // identity of a provider (subject == "") for a user.
-func dbDeleteIdentities(db *sql.DB, projectID string, orgID, userID int64, provider, subject string) (int64, error) {
+func dbDeleteIdentities(db DBTX, projectID string, orgID, userID int64, provider, subject string) (int64, error) {
 	q := `DELETE FROM oauth_identities WHERE project_id = ? AND organization_id = ? AND user_id = ? AND provider = ?`
 	args := []any{projectID, orgID, userID, provider}
 	if subject != "" {
@@ -177,7 +177,7 @@ func dbDeleteIdentities(db *sql.DB, projectID string, orgID, userID int64, provi
 	return res.RowsAffected()
 }
 
-func dbCreateGuestUser(db *sql.DB, projectID string, orgID int64, email, displayName, metadataJSON string) (int64, error) {
+func dbCreateGuestUser(db DBTX, projectID string, orgID int64, email, displayName, metadataJSON string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if strings.TrimSpace(metadataJSON) == "" {
 		metadataJSON = "{}"
@@ -194,7 +194,7 @@ func dbCreateGuestUser(db *sql.DB, projectID string, orgID int64, email, display
 
 // dbCountClientEvents — audit rows for one client + event since a
 // point in time. Backs the per-client creation rate limit.
-func dbCountClientEvents(db *sql.DB, projectID, clientID, event string, since time.Time) (int, error) {
+func dbCountClientEvents(db DBTX, projectID, clientID, event string, since time.Time) (int, error) {
 	var n int
 	err := db.QueryRow(
 		`SELECT COUNT(*) FROM audit_log WHERE project_id = ? AND client_id = ? AND event = ? AND occurred_at > ?`,
@@ -205,7 +205,7 @@ func dbCountClientEvents(db *sql.DB, projectID, clientID, event string, since ti
 // dbUpgradeGuest turns a guest row into an account row in one statement.
 // The WHERE kind = 'guest' guard makes a double upgrade a no-op error
 // instead of a silent overwrite of a real account's credentials.
-func dbUpgradeGuest(db *sql.DB, projectID string, orgID, userID int64, email, passwordHash string, emailVerified bool) error {
+func dbUpgradeGuest(db DBTX, projectID string, orgID, userID int64, email, passwordHash string, emailVerified bool) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	verifiedAt := sql.NullString{}
 	if emailVerified {
@@ -295,7 +295,7 @@ func (a *App) identityTools() []sdk.Tool {
 		},
 		{
 			Name:        "auth_guest_upgrade",
-			Description: "Convert a guest user into a full account by setting an email and password. Requires organization_id/slug + user_id + email + password; optional display_name. Validates the password policy and email uniqueness, keeps every linked identity, and sends a verification email when email_verification_required is true. Returns {user, verification_required}.",
+			Description: "Convert a guest user into a full account by setting an email and password. Requires organization_id/slug + user_id + email + password; optional display_name. Validates the password policy and email uniqueness, revokes guest sessions and removes linked identities, and sends a verification email when email_verification_required is true. Returns {user, verification_required}.",
 			InputSchema: schemaObject(merge(map[string]any{
 				"user_id":      map[string]any{"type": "integer"},
 				"email":        map[string]any{"type": "string"},
@@ -332,7 +332,11 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	ip := stringArg(args, "ip", "")
 	ua := stringArg(args, "user_agent", "mcp:auth_public_login_identity")
-	db := ctx.AppDB()
+	db, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Rollback()
 
 	ident, err := dbFindIdentity(db, pid, org.ID, provider, subject)
 	if err != nil {
@@ -352,16 +356,8 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 				map[string]any{"reason": "identity_unknown", "provider": provider})
 			return nil, errors.New("identity_not_found")
 		}
-		if limit := cfgInt(ctx, "identity_signups_per_client_per_hour", 600); limit > 0 {
-			n, err := dbCountClientEvents(db, pid, client.ClientID, identityCreatedEvent, time.Now().Add(-time.Hour))
-			if err != nil {
-				return nil, err
-			}
-			if n >= limit {
-				dbAudit(db, pid, org.ID, nil, client.ClientID, "identity_rate_limited", ip, ua,
-					map[string]any{"provider": provider, "limit": limit})
-				return nil, fmt.Errorf("rate_limited: client %s created %d identities in the last hour (limit %d)", client.ClientID, n, limit)
-			}
+		if err := consumeRate(db, pid+":identity:"+client.ClientID, cfgInt(ctx, "identity_signups_per_client_per_hour", 600), time.Hour); err != nil {
+			return nil, err
 		}
 		email, err := newGuestEmail()
 		if err != nil {
@@ -405,19 +401,18 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	r, _ := http.NewRequest("POST", "/login", nil)
 	r.RemoteAddr = ip
 	r.Header.Set("User-Agent", ua)
-	tokens, err := mintSession(ctx, pid, org, user, client, r)
+	tokens, err := mintSessionTx(ctx, db, pid, org.ID, user.ID, client.ClientID, r, "", time.Time{}, "")
 	if err != nil {
+		return nil, err
+	}
+	dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "identity_login", ip, ua, map[string]any{"provider": provider, "created": created})
+	if err = db.Commit(); err != nil {
 		return nil, err
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
 	if err != nil {
-		ctx.Logger().Warn("delegated user token mint failed", "err", err)
+		ctx.Logger().Warn("delegated mint failed", "err", err)
 		aptevaToken = nil
-	}
-	dbAudit(db, pid, org.ID, &user.ID, client.ClientID, "identity_login", ip, ua,
-		map[string]any{"provider": provider, "created": created})
-	if refreshed, err := dbGetUserByID(db, pid, org.ID, user.ID); err == nil {
-		user = refreshed
 	}
 	out := map[string]any{
 		"user":              user,
@@ -583,10 +578,14 @@ func (a *App) toolGuestUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if email == "" || password == "" {
 		return nil, errors.New("email and password required")
 	}
-	if !strings.Contains(email, "@") || isGuestEmail(email) {
+	if validateEmail(email) != nil {
 		return nil, errors.New("email must be a real address")
 	}
-	db := ctx.AppDB()
+	db, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Rollback()
 	user, err := dbGetUserByID(db, pid, org.ID, uid)
 	if err != nil {
 		return nil, errors.New("unknown user_id")
@@ -599,32 +598,44 @@ func (a *App) toolGuestUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	if reason := validatePassword(password,
-		cfgInt(ctx, "password_min_length", 8),
-		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-		return nil, errors.New(reason)
+	if err := checkPasswordPolicy(ctx, org, password); err != nil {
+		return nil, err
 	}
 	pwHash, err := hashPassword(password)
 	if err != nil {
 		return nil, err
 	}
-	verificationRequired := cfgBool(ctx, "email_verification_required", true)
+	policy, err := effectivePolicy(ctx, org)
+	if err != nil {
+		return nil, err
+	}
+	verificationRequired := policy.Verify
 	if err := dbUpgradeGuest(db, pid, org.ID, uid, email, pwHash, !verificationRequired); err != nil {
 		return nil, err
 	}
 	if v, ok := args["display_name"].(string); ok && strings.TrimSpace(v) != "" {
 		_ = dbUpdateUserProfile(db, pid, org.ID, uid, &v, nil, nil)
 	}
-	if verificationRequired {
-		if err := issueVerifyEmailToken(ctx, pid, org, uid, email); err != nil {
-			ctx.Logger().Warn("verify-email send failed", "err", err)
-		}
+	if _, err = revokeUserState(db, pid, org.ID, uid); err != nil {
+		return nil, err
+	}
+	// A guest device must not retain access to a newly credentialed account.
+	if _, err = db.Exec(`DELETE FROM oauth_identities WHERE project_id=? AND organization_id=? AND user_id=?`, pid, org.ID, uid); err != nil {
+		return nil, err
 	}
 	dbAudit(db, pid, org.ID, &uid, "", "guest_upgraded", "", "agent",
 		map[string]any{"email": email, "verification_required": verificationRequired})
 	updated, err := dbGetUserByID(db, pid, org.ID, uid)
 	if err != nil {
 		return nil, err
+	}
+	if err = db.Commit(); err != nil {
+		return nil, err
+	}
+	if verificationRequired {
+		if err := issueVerifyEmailToken(ctx, pid, org, uid, email); err != nil {
+			ctx.Logger().Warn("verify-email send failed", "err", err)
+		}
 	}
 	return map[string]any{"user": updated, "verification_required": verificationRequired}, nil
 }

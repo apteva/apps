@@ -30,6 +30,8 @@
 // holds a platform token.
 
 import net from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
+const invocationStorage = new AsyncLocalStorage();
 import { pathToFileURL } from "node:url";
 
 const ENTRY = process.env.APTEVA_FN_ENTRY;
@@ -49,7 +51,7 @@ function encodeFrame(obj) {
 function writeFrameAsync(sock, obj) {
   const frame = encodeFrame(obj);
   if (sock.write(frame)) return Promise.resolve();
-  return new Promise((resolve) => sock.once("drain", resolve));
+  return new Promise((resolve,reject)=>{const clean=()=>{sock.off("drain",drained);sock.off("error",failed);sock.off("close",closed)};const drained=()=>{clean();resolve()};const failed=e=>{clean();reject(e)};const closed=()=>failed(new Error("worker socket closed"));sock.once("drain",drained);sock.once("error",failed);sock.once("close",closed)});
 }
 
 // ── log capture ───────────────────────────────────────────────────
@@ -58,7 +60,7 @@ function writeFrameAsync(sock, obj) {
 // it falls through to real stderr.
 let currentLogs = null;
 const MAX_LOG_BYTES = 16 * 1024;
-const MAX_INBOUND_FRAME = 128 * 1024 * 1024;
+const MAX_INBOUND_FRAME = 8 * 1024 * 1024;
 let currentLogBytes = 0;
 const realErr = console.error.bind(console);
 function fmt(args) {
@@ -76,14 +78,17 @@ function fmt(args) {
 for (const m of ["log", "info", "warn", "error", "debug"]) {
   console[m] = (...args) => {
     const line = fmt(args);
-    if (currentLogs) {
-      if (currentLogBytes < MAX_LOG_BYTES) {
-        const remaining = MAX_LOG_BYTES - currentLogBytes;
+    const scope=invocationStorage.getStore();
+ if(scope&&!scope.active)return;
+ const currentLogs=scope?.logs;
+ if (currentLogs) {
+      if (scope.logBytes < MAX_LOG_BYTES) {
+        const remaining = MAX_LOG_BYTES - scope.logBytes;
         const clipped = Buffer.byteLength(line) > remaining
           ? Buffer.from(line).subarray(0, remaining).toString("utf8")
           : line;
         currentLogs.push(clipped);
-        currentLogBytes += Buffer.byteLength(clipped) + 1;
+        scope.logBytes += Buffer.byteLength(clipped) + 1;
       }
     }
     else realErr(line);
@@ -125,7 +130,7 @@ async function main() {
   let callSeq = 0;
   const pendingCalls = new Map(); // callId -> { resolve, reject }
 
-  function makeCall(app, tool, input) {
+  function makeCall(app, tool, input, invocationId) {
     return new Promise((resolve, reject) => {
       if (!app || !tool) {
         reject(new Error("context.call(app, tool, input): app and tool are required"));
@@ -134,7 +139,7 @@ async function main() {
       const callId = ++callSeq;
       pendingCalls.set(callId, { resolve, reject });
       try {
-        sock.write(encodeFrame({ type: "call", callId, app, tool, input: input ?? {} }));
+        sock.write(encodeFrame({ type: "call", id: invocationId, callId, app, tool, input: input ?? {} }));
       } catch (e) {
         pendingCalls.delete(callId);
         reject(e);
@@ -142,7 +147,7 @@ async function main() {
     });
   }
 
-  function makeIntegration(conn, tool, input) {
+  function makeIntegration(conn, tool, input, invocationId) {
     return new Promise((resolve, reject) => {
       if (conn == null || conn === "") {
         reject(new Error("context.integration(conn, tool, input): conn (numeric id or slug) is required"));
@@ -158,7 +163,7 @@ async function main() {
         // `conn` is passed verbatim — the sidecar accepts a number
         // (connection_id) or a string (app slug to resolve in the
         // project, e.g. "pushover").
-        sock.write(encodeFrame({ type: "integration", callId, conn, tool, input: input ?? {} }));
+        sock.write(encodeFrame({ type: "integration", id: invocationId, callId, conn, tool, input: input ?? {} }));
       } catch (e) {
         pendingCalls.delete(callId);
         reject(e);
@@ -169,11 +174,11 @@ async function main() {
   // ── invocation handling ─────────────────────────────────────────
   async function handle(req) {
     const { id, event } = req;
-    const logs = [];
-    currentLogs = logs;
-    currentLogBytes = 0;
+    const logs=[];const scope={logs,logBytes:0,active:true};
+ const assertActive=()=>{if(!scope.active)throw new Error("invocation already completed")};
     let streamStarted = false;
     async function startStream(options = {}) {
+ assertActive();
       if (streamStarted) return;
       streamStarted = true;
       const statusCode = Number.isInteger(options.statusCode) ? options.statusCode : 200;
@@ -192,9 +197,8 @@ async function main() {
       else if (ArrayBuffer.isView(chunk)) payload = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
       else if (chunk instanceof ArrayBuffer) payload = Buffer.from(chunk);
       else payload = Buffer.from(String(chunk ?? ""), "utf8");
-      await writeFrameAsync(sock, {
-        type: "stream_chunk", id, encoding: "base64", data: payload.toString("base64"),
-      });
+      assertActive();
+ for(let offset=0;offset<payload.length;offset+=65536){await writeFrameAsync(sock,{type:"stream_chunk",id,encoding:"base64",data:payload.subarray(offset,offset+65536).toString("base64")})}
     }
     async function sendSSE(data, options = {}) {
       if (!streamStarted) {
@@ -213,7 +217,7 @@ async function main() {
       if (options.event) lines.push(`event: ${String(options.event).replace(/[\r\n]/g, "")}`);
       if (Number.isInteger(options.retry) && options.retry >= 0) lines.push(`retry: ${options.retry}`);
       const text = typeof data === "string" ? data : JSON.stringify(data ?? null);
-      for (const line of text.split(/\r?\n/)) lines.push(`data: ${line}`);
+      for (const line of text.split(/\r\n|\r|\n/)) lines.push(`data: ${line}`);
       await writeStream(`${lines.join("\n")}\n\n`);
     }
     async function sendSSEComment(comment) {
@@ -226,7 +230,7 @@ async function main() {
           },
         });
       }
-      const text = String(comment ?? "").split(/\r?\n/).map((line) => `: ${line}`).join("\n");
+      const text = String(comment ?? "").split(/\r\n|\r|\n/).map((line) => `: ${line}`).join("\n");
       await writeStream(`${text}\n\n`);
     }
     const context = {
@@ -235,24 +239,24 @@ async function main() {
       runtime: process.env.APTEVA_FUNCTION_RUNTIME || "",
       env: { ...process.env },
       log: (...a) => console.log(...a),
-      call: (app, tool, input) => makeCall(app, tool, input),
-      integration: (conn, tool, input) => makeIntegration(conn, tool, input),
+      call: (app, tool, input) => {assertActive();return makeCall(app, tool, input,id)},
+      integration: (conn, tool, input) => {assertActive();return makeIntegration(conn, tool, input,id)},
       stream: { start: startStream, write: writeStream },
       sse: { send: sendSSE, comment: sendSSEComment },
     };
     let frame;
     try {
-      const result = await handler(event, context);
-      frame = { id, ok: true, result: result === undefined ? null : result, logs };
+      const result = await invocationStorage.run(scope,()=>handler(event, context));
+      frame = { type:"result", id, ok: true, result: result === undefined ? null : result, logs };
     } catch (e) {
-      frame = { id, ok: false, error: String((e && e.stack) || e), logs };
+      frame = { type:"result", id, ok: false, error: String((e && e.stack) || e), logs };
     } finally {
-      currentLogs = null;
+      scope.active=false;
     }
     try {
       await writeFrameAsync(sock, frame);
-    } catch {
-      // socket gone — the sidecar already moved on
+    } catch(e) {
+ try{await writeFrameAsync(sock,{type:"result",id,ok:false,error:"Response serialization failed: "+String(e),logs})}catch{sock.destroy()}
     }
   }
 

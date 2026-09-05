@@ -72,7 +72,7 @@ func newRecordingPlatform() *recordingPlatform {
 			InstallID: 99,
 			ProjectID: "test-proj",
 		},
-		executeResponses: map[string]*sdk.ExecuteResult{},
+		executeResponses: map[string]*sdk.ExecuteResult{"query_creator_info": {Success: true, Status: 200, Data: json.RawMessage(`{"data":{"privacy_level_options":["PUBLIC_TO_EVERYONE","SELF_ONLY"],"max_video_post_duration_sec":600},"error":{"code":"ok"}}`)}},
 		executeQueues:    map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
@@ -500,7 +500,7 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	if r["display_name"] != "My Restaurant" {
 		t.Errorf("display_name wrong: %+v", r)
 	}
-	if r["avatar_url"] != "https://cdn/r.jpg" {
+	if r["avatar_url"] != "" {
 		t.Errorf("avatar_url wrong: %+v", r)
 	}
 	if r["external_account_id"] != "100" {
@@ -649,7 +649,7 @@ func TestAccountCheck_TwitterProfileOK(t *testing.T) {
 	)
 	acctID, _ := r.LastInsertId()
 
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	out, err := app.toolAccountCheck(ctx, map[string]any{"social_account_id": acctID})
 	if err != nil {
 		t.Fatal(err)
@@ -3061,18 +3061,18 @@ func TestPublishTikTok_BuildsFileUploadInitInput_SingleChunk(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "ride the wave #fyp",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(7)},
+		"mode":              "publish",
+		"body":              "ride the wave #fyp",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(7)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected one post_video init call: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected one post_video init call: %+v", pf.nonCreatorInfoCalls())
 	}
-	in := pf.executeCalls[0].Input
+	in := pf.nonCreatorInfoCalls()[0].Input
 	postInfo, ok := in["post_info"].(map[string]any)
 	if !ok {
 		t.Fatalf("post_info not nested: %+v", in)
@@ -3128,14 +3128,14 @@ func TestPublishTikTok_UsesPullFromURLWhenDeliveryReady(t *testing.T) {
 	acctID, _ := r.LastInsertId()
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode": "publish", "body": "verified pull", "social_account_ids": []any{acctID}, "media_storage_ids": []any{int64(17)},
+		"mode": "publish", "body": "verified pull", "targets": []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}}, "media_storage_ids": []any{int64(17)},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(pf.executeCalls) < 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected post_video: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) < 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected post_video: %+v", pf.nonCreatorInfoCalls())
 	}
-	source := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	source := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
 	if source["source"] != "PULL_FROM_URL" || source["video_url"] == "" {
 		t.Fatalf("expected PULL_FROM_URL input, got %+v", source)
 	}
@@ -3169,18 +3169,18 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "long video",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(8)},
+		"mode":              "publish",
+		"body":              "long video",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(8)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_video" {
-		t.Fatalf("expected post_video init: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 1 || pf.nonCreatorInfoCalls()[0].Tool != "post_video" {
+		t.Fatalf("expected post_video init: %+v", pf.nonCreatorInfoCalls())
 	}
-	srcInfo := pf.executeCalls[0].Input["source_info"].(map[string]any)
+	srcInfo := pf.nonCreatorInfoCalls()[0].Input["source_info"].(map[string]any)
 	if srcInfo["video_size"] != int64(videoBytes) {
 		t.Errorf("video_size = %v, want %d", srcInfo["video_size"], videoBytes)
 	}
@@ -3237,6 +3237,7 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		"targets": []any{
 			map[string]any{
 				"social_account_id": acctID,
+				"privacy_level":     "PUBLIC_TO_EVERYONE",
 				"title":             "Photo title",
 				"auto_add_music":    true,
 			},
@@ -3245,10 +3246,10 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "post_photo" || pf.executeCalls[1].Tool != "get_publish_status" {
-		t.Fatalf("expected post_photo followed by get_publish_status: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 2 || pf.nonCreatorInfoCalls()[0].Tool != "post_photo" || pf.nonCreatorInfoCalls()[1].Tool != "get_publish_status" {
+		t.Fatalf("expected post_photo followed by get_publish_status: %+v", pf.nonCreatorInfoCalls())
 	}
-	in := pf.executeCalls[0].Input
+	in := pf.nonCreatorInfoCalls()[0].Input
 	if in["post_mode"] != "DIRECT_POST" || in["media_type"] != "PHOTO" {
 		t.Fatalf("unexpected photo mode fields: %+v", in)
 	}
@@ -3435,16 +3436,16 @@ func TestPublishTikTok_PhotoPostRejectsMixedMedia(t *testing.T) {
 
 	app := &App{}
 	if _, err := app.toolPostCreate(ctx, map[string]any{
-		"mode":               "publish",
-		"body":               "mixed media",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(9), int64(10)},
+		"mode":              "publish",
+		"body":              "mixed media",
+		"targets":           []any{map[string]any{"social_account_id": acctID, "privacy_level": "PUBLIC_TO_EVERYONE"}},
+		"media_storage_ids": []any{int64(9), int64(10)},
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 0 {
-		t.Fatalf("TikTok integration should not be called for mixed media: %+v", pf.executeCalls)
+	if len(pf.nonCreatorInfoCalls()) != 0 {
+		t.Fatalf("TikTok integration should not be called for mixed media: %+v", pf.nonCreatorInfoCalls())
 	}
 	var lastErr string
 	ctx.AppDB().QueryRow(
@@ -4658,7 +4659,7 @@ func TestCacheAvatar_WritesContentAddressedFile(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	got := app.cacheAvatar(ctx, srv.URL+"/avatar.jpg")
 	wantPrefix := "/api/apps/social/avatars/"
@@ -4692,18 +4693,18 @@ func TestCacheAvatar_WritesContentAddressedFile(t *testing.T) {
 	}
 }
 
-func TestCacheAvatar_FailsOpenOnUpstreamError(t *testing.T) {
+func TestCacheAvatar_OmitsUntrustedFallbackOnUpstreamError(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DB_PATH", dir+"/app.db")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "nope", 500)
 	}))
 	defer srv.Close()
-	app := &App{}
+	app := &App{avatarClient: srv.Client()}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	upstream := srv.URL + "/img"
-	if got := app.cacheAvatar(ctx, upstream); got != upstream {
-		t.Errorf("expected fallback to upstream URL on 5xx, got %q", got)
+	if got := app.cacheAvatar(ctx, upstream); got != "" {
+		t.Errorf("expected omitted avatar on 5xx, got %q", got)
 	}
 }
 
@@ -5026,15 +5027,15 @@ func TestPostDelete_FansOutUpstream(t *testing.T) {
 		t.Errorf("instagram outcome: %+v", byPlatform["instagram"])
 	}
 
-	// Local rows are still gone — best-effort semantics.
+	// A failed remote deletion retains local rows for an explicit retry.
 	var n int
 	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&n)
-	if n != 0 {
-		t.Errorf("post row should be deleted regardless of upstream outcome")
+	if n != 1 {
+		t.Errorf("post must remain after an upstream failure")
 	}
 	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=?`, postID).Scan(&n)
-	if n != 0 {
-		t.Errorf("post_targets should be deleted regardless of upstream outcome")
+	if n == 0 {
+		t.Errorf("targets must remain after an upstream failure")
 	}
 }
 
@@ -5248,7 +5249,7 @@ func TestMetricBreakdownsPersistWithoutPollutingHistory(t *testing.T) {
 	if len(history["views"]) != 1 || history["views"][0].Value != 1000 {
 		t.Fatalf("history polluted by dimensions: %#v", history)
 	}
-	breakdowns := loadAccountBreakdowns(ctx, "test-proj", 42, "range_28d")
+	breakdowns := loadAccountBreakdowns(ctx, "test-proj", 42, (analyticsQuery{RangeDays: 28}).cacheKey())
 	if len(breakdowns) != 1 || len(breakdowns[0].Rows) != 2 {
 		t.Fatalf("stored breakdowns = %#v", breakdowns)
 	}
@@ -5274,4 +5275,14 @@ func TestAccountComparisonFiltersUnsupportedAccounts(t *testing.T) {
 	if comparison.Rows[0].Dimensions["account_name"] != "YouTube A" || comparison.Rows[0].Metrics["views"] != 700 {
 		t.Fatalf("comparison = %#v", comparison.Rows[0])
 	}
+}
+
+func (p *recordingPlatform) nonCreatorInfoCalls() []executeCall {
+	var out []executeCall
+	for _, c := range p.executeCalls {
+		if c.Tool != "query_creator_info" {
+			out = append(out, c)
+		}
+	}
+	return out
 }

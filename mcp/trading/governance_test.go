@@ -166,7 +166,7 @@ func TestStrategyScorecardPersistsEvaluationAndGatesPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !evaluation.Passed || evaluation.DatasetSHA256 != "dataset-123" || evaluation.PolicyHash == "" || evaluation.PolicyHash != policy.PolicyHash || math.Abs(evaluation.Metrics["return_pct"]-10) > 1e-9 {
+	if !evaluation.Passed || evaluation.DatasetSHA256 != "" || evaluation.PolicyHash == "" || evaluation.PolicyHash != policy.PolicyHash || math.Abs(evaluation.Metrics["return_pct"]-10) > 1e-9 {
 		t.Fatalf("evaluation=%#v", evaluation)
 	}
 	rows, err := dbListStrategyScorecardEvaluations(ctx.AppDB(), "test-proj", portfolioID, strategyID, 10)

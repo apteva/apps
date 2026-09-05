@@ -13,6 +13,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+var emailCheckSlots = make(chan struct{}, maxParallelEmailChecks)
+
 const (
 	emailVerificationRole       = "email_verification"
 	emailVerificationCapability = "email.verify"
@@ -334,13 +336,13 @@ func prepareAutomaticEmailVerifications(ctx *sdk.AppCtx, pid string, raw any, ex
 	results := make([]EmailVerificationResult, len(emails))
 	checkerResults := make([]emailCheckerResult, len(emails))
 	smtp := settings.Mode == "smtp"
-	sem := make(chan struct{}, maxParallelEmailChecks)
+	sem := emailCheckSlots
 	var wg sync.WaitGroup
 	for i, email := range emails {
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(index int, address string) {
 			defer wg.Done()
-			sem <- struct{}{}
 			checked, callErr := callEmailCheckerTarget(ctx, pid, address, smtp, settings.TimeoutSeconds, target)
 			<-sem
 			if callErr != nil {

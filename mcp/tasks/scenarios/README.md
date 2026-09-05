@@ -57,3 +57,15 @@ defines the request thread. Runtime placeholders expose the opaque IDs:
 - `${APTEVA_TEST_DEFAULT_THREAD_ID}`
 - `${APTEVA_TEST_AGENT_ID}`
 - `${APTEVA_TEST_WAKE_AT}` when `setup.initial_wake` is configured
+
+Additional reliability scenarios:
+
+| File | What it exercises |
+|---|---|
+| `17-cancel-recurring-definition.yaml` | Cancelling a recurring definition disables its scheduler. |
+| `18-paused-manual-run.yaml` | A manual child completes while its recurring parent remains paused. |
+| `19-paginated-inventory.yaml` | The agent follows cursors to enumerate the complete inventory. |
+| `20-resume-future-once.yaml` | Pause/resume preserves a future absolute one-time deadline. |
+
+Use a current runner that recognizes successful `done(message)` results as
+thread responses, as well as plain assistant text and successful `send` calls.

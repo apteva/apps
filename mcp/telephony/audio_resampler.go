@@ -13,6 +13,7 @@ type pcmResampler struct {
 	base            int64
 	next            float64
 	samples         []float64
+	kernels         [][]float64
 }
 
 func newPCMResampler(inRate, outRate int) *pcmResampler {
@@ -21,7 +22,28 @@ func newPCMResampler(inRate, outRate int) *pcmResampler {
 	if outRate < inRate {
 		cutoff *= float64(outRate) / float64(inRate)
 	}
-	return &pcmResampler{
+	gcd := func(a, b int) int {
+		for b != 0 {
+			a, b = b, a%b
+		}
+		return a
+	}
+	phases := outRate / gcd(inRate, outRate)
+	kernels := make([][]float64, phases)
+	for phase := range kernels {
+		weights := make([]float64, half*2)
+		total := 0.0
+		for tap := range weights {
+			distance := float64(phase)/float64(phases) - float64(tap-half+1)
+			weights[tap] = cutoff * sinc(cutoff*distance) * blackman(distance/half)
+			total += weights[tap]
+		}
+		for tap := range weights {
+			weights[tap] /= total
+		}
+		kernels[phase] = weights
+	}
+	return &pcmResampler{kernels: kernels,
 		inRate: float64(inRate), outRate: float64(outRate),
 		step: float64(inRate) / float64(outRate), cutoff: cutoff,
 		half: half, base: -half, samples: make([]float64, half),
@@ -40,19 +62,17 @@ func (r *pcmResampler) Process(input []int16) []int16 {
 	out := make([]int16, 0, estimate)
 	for r.next+float64(r.half) <= float64(last) {
 		center := int64(math.Floor(r.next))
-		var sum, weights float64
-		for n := center - int64(r.half) + 1; n <= center+int64(r.half); n++ {
-			index := n - r.base
-			if index < 0 || index >= int64(len(r.samples)) {
-				continue
-			}
-			distance := r.next - float64(n)
-			weight := r.cutoff * sinc(r.cutoff*distance) * blackman(distance/float64(r.half))
-			sum += r.samples[index] * weight
-			weights += weight
+		phase := int(math.Round((r.next - float64(center)) * float64(len(r.kernels))))
+		if phase == len(r.kernels) {
+			center++
+			phase = 0
 		}
-		if math.Abs(weights) > 1e-12 {
-			sum /= weights
+		sum := 0.0
+		for tap, weight := range r.kernels[phase] {
+			index := center - int64(r.half) + 1 + int64(tap) - r.base
+			if index >= 0 && index < int64(len(r.samples)) {
+				sum += r.samples[index] * weight
+			}
 		}
 		out = append(out, clampPCM16(sum))
 		r.next += r.step

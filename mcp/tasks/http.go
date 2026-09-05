@@ -47,11 +47,20 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeTaskError(w http.ResponseWriter, err error) {
-	status := http.StatusBadRequest
-	if errors.Is(err, errTaskNotFound) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, errTaskNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, errTerminalTask):
+		status = http.StatusConflict
+	case errors.Is(err, errInvalidInput) || errors.Is(err, errInvalidState) || errors.Is(err, errInvalidProgress):
+		status = http.StatusBadRequest
 	}
-	http.Error(w, err.Error(), status)
+	message := err.Error()
+	if status == http.StatusInternalServerError {
+		message = "internal task error"
+	}
+	http.Error(w, message, status)
 }
 
 func decodeStrictJSON(w http.ResponseWriter, r *http.Request, value any) error {
@@ -126,7 +135,7 @@ func taskRecentTime(task Task) time.Time {
 func buildMobileTaskSummary(tasks []Task, recentLimit int) mobileTaskSummary {
 	summary := mobileTaskSummary{Active: []Task{}, Upcoming: []Task{}, Recent: []Task{}}
 	for _, task := range tasks {
-		isScheduleDefinition := task.ScheduleKind != "" && task.State == stateWaiting
+		isScheduleDefinition := isScheduleDefinitionTask(&task)
 		if isScheduleDefinition && task.ScheduleEnabled && task.NextRunAt != nil {
 			summary.Upcoming = append(summary.Upcoming, task)
 		}
@@ -195,13 +204,27 @@ func (a *App) handleMobileSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "project context required", http.StatusBadRequest)
 		return
 	}
-	empty := ""
-	tasks, err := a.store.List(TaskFilter{ProjectID: projectID, ParentTaskID: &empty, Limit: maxMobileSummaryTasks})
+	work, err := a.store.List(TaskFilter{ProjectID: projectID, View: "work", Limit: 6})
 	if err != nil {
 		writeTaskError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, buildMobileTaskSummary(tasks, mobileRecentLimit(r.URL.Query().Get("recent_limit"))))
+	upcoming, err := a.store.List(TaskFilter{ProjectID: projectID, View: "upcoming", Limit: 4})
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	recent, err := a.store.List(TaskFilter{ProjectID: projectID, View: "recent", Limit: mobileRecentLimit(r.URL.Query().Get("recent_limit"))})
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	counts, err := a.store.Counts(projectID, 0, true)
+	if err != nil {
+		writeTaskError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, mobileTaskSummary{Active: work, Upcoming: upcoming, Recent: recent, Counts: mobileSummaryCounts{Active: counts.Active, Scheduled: counts.Scheduled, Blocked: counts.Blocked}})
 }
 
 func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
@@ -213,22 +236,35 @@ func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		agentID, _ := strconv.ParseInt(r.URL.Query().Get("agent_id"), 10, 64)
-		filter := TaskFilter{ProjectID: projectID, AgentID: agentID, States: splitStates(r.URL.Query().Get("states"))}
+		filter := TaskFilter{ProjectID: projectID, AgentID: agentID, States: splitStates(r.URL.Query().Get("states")), View: r.URL.Query().Get("view"), Search: r.URL.Query().Get("q"), Cursor: r.URL.Query().Get("cursor")}
 		if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 {
 			filter.Limit = limit
 		}
-		includeRuns := r.URL.Query().Get("include_runs") == "1"
+		includeRuns, _ := strconv.ParseBool(r.URL.Query().Get("include_runs"))
 		if !includeRuns {
 			empty := ""
 			filter.ParentTaskID = &empty
 		}
-		tasks, err := a.store.List(filter)
+		page, err := a.store.ListPage(filter)
 		if err != nil {
 			writeTaskError(w, err)
 			return
 		}
-		counts, _ := a.store.Counts(projectID, agentID, includeRuns)
-		writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks, "counts": counts, "enabled": true, "scheduling_enabled": true})
+		if r.URL.Query().Get("projection") == "summary" {
+			for i := range page.Tasks {
+				task := &page.Tasks[i]
+				task.Description = summaryText(task.Description)
+				task.Result = summaryText(task.Result)
+				task.Error = summaryText(task.Error)
+				task.CurrentStep = summaryText(task.CurrentStep)
+			}
+		}
+		counts, countErr := a.store.Counts(projectID, agentID, includeRuns)
+		if countErr != nil {
+			writeTaskError(w, countErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"tasks": page.Tasks, "next_cursor": page.NextCursor, "has_more": page.HasMore, "counts": counts, "enabled": true, "scheduling_enabled": true})
 	case http.MethodPost:
 		var body struct {
 			AgentID          int64          `json:"agent_id"`
@@ -301,12 +337,12 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "GET only", http.StatusMethodNotAllowed)
 				return
 			}
-			events, err := a.store.Events(task.ID)
+			events, err := a.store.EventsPage(task.ID, r.URL.Query().Get("cursor"), 100)
 			if err != nil {
 				writeTaskError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"events": events})
+			writeJSON(w, http.StatusOK, events)
 			return
 		case "runs":
 			if r.Method != http.MethodGet {
@@ -314,12 +350,12 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			parent := task.ID
-			runs, err := a.store.List(TaskFilter{ProjectID: task.ProjectID, AgentID: task.AgentID, ParentTaskID: &parent, Limit: 200})
+			runs, err := a.store.ListPage(TaskFilter{ProjectID: task.ProjectID, AgentID: task.AgentID, ParentTaskID: &parent, Limit: 50, Cursor: r.URL.Query().Get("cursor")})
 			if err != nil {
 				writeTaskError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"runs": runs})
+			writeJSON(w, http.StatusOK, map[string]any{"runs": runs.Tasks, "next_cursor": runs.NextCursor, "has_more": runs.HasMore})
 			return
 		case "executions":
 			if r.Method != http.MethodGet {
@@ -387,15 +423,28 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 				writeTaskError(w, err)
 				return
 			}
+			_ = a.drainDeliveries(updated.ID, updated.ProjectID, a.store.now())
 			writeJSON(w, http.StatusOK, map[string]any{"task": updated})
 			return
 		}
 	}
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		events, _ := a.store.Events(task.ID)
-		executions, _ := a.store.AgentExecutions(task.ID)
-		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events, "agent_executions": executions})
+		events, err := a.store.EventsPage(task.ID, "", 100)
+		if err != nil {
+			writeTaskError(w, err)
+			return
+		}
+		executions, err := a.store.AgentExecutions(task.ID)
+		if err != nil {
+			writeTaskError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"task": task, "events": events.Events, "events_next_cursor": events.NextCursor, "agent_executions": executions})
 	case http.MethodPatch, http.MethodPut:
 		var body struct {
 			Title            *string        `json:"title"`
@@ -424,9 +473,7 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			writeTaskError(w, err)
 			return
 		}
-		if terminalState(updated.State) {
-			_ = a.notifyCreator(updated)
-		}
+		_ = a.drainDeliveries(updated.ID, updated.ProjectID, a.store.now())
 		writeJSON(w, http.StatusOK, map[string]any{"task": updated, "changed": changed})
 	case http.MethodDelete:
 		state, reason := stateCancelled, "Cancelled by operator"
@@ -435,10 +482,18 @@ func (a *App) handleTask(w http.ResponseWriter, r *http.Request) {
 			writeTaskError(w, err)
 			return
 		}
-		_, _ = a.store.db.Exec(`UPDATE tasks SET schedule_enabled=0, next_run_at=NULL WHERE id=?`, task.ID)
 		_ = a.notifyCreator(updated)
 		writeJSON(w, http.StatusOK, map[string]any{"task": updated})
 	default:
 		http.Error(w, "GET, PATCH, or DELETE", http.StatusMethodNotAllowed)
 	}
+}
+
+// Compact list views fetch the complete authoritative record when opened.
+func summaryText(value string) string {
+	chars := []rune(value)
+	if len(chars) > 512 {
+		return string(chars[:512]) + "…"
+	}
+	return value
 }

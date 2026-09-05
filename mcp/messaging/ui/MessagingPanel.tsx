@@ -98,6 +98,7 @@ interface MessageRow {
   subject?: string;
   body_text?: string;
   body_html?: string;
+  headers?: Record<string, string>;
   status: string;
   status_reason?: string;
   provider_message_id?: string;
@@ -118,6 +119,8 @@ interface MessageRow {
   event_counts?: Record<string, number>;
 }
 interface MessageAttachment {
+  processing_status?: string;
+  processing_error?: string;
   id?: number;
   storage_id?: number;
   url?: string;
@@ -164,6 +167,7 @@ interface ProviderTemplateRow {
   local_state: "new" | "imported" | "changed";
 }
 interface InboundRoute {
+  channel?: string;
   id: number;
   pattern: string;
   target_app: string;
@@ -312,7 +316,8 @@ function messageListParams(
 }
 
 // ─── Component ────────────────────────────────────────────────────
-export default function MessagingPanel({ projectId, installId }: NativePanelProps) {
+export default function MessagingPanel(props: NativePanelProps) { return <MessagingWorkspace key={`${props.projectId}:${props.installId}`} {...props}/>; }
+function MessagingWorkspace({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("outbox");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -337,6 +342,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   });
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [routes, setRoutes] = useState<InboundRoute[]>([]);
+  const [suppressionOffset, setSuppressionOffset] = useState(0);
+  const [suppressionTotal, setSuppressionTotal] = useState(0);
   const [suppressions, setSuppressions] = useState<SuppressionRow[]>([]);
   const [senders, setSenders] = useState<SenderRow[]>([]);
   const [identities, setIdentities] = useState<IdentityRow[]>([]);
@@ -407,14 +414,20 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     return res.json();
   }, [withParams]);
 
+  const outboxGeneration = useRef(0);
+  const inboxGeneration = useRef(0);
+  const detailGeneration = useRef(0);
+  const quotaReadAt = useRef(0);
   const loadOutbox = useCallback(async () => {
-    const params = messageListParams("out", outboxPage, outboxFilters);
+    const generation = ++outboxGeneration.current;
+    const params = {...messageListParams("out", outboxPage, outboxFilters), summary:"true"};
     const [r, unfiltered] = await Promise.all([
       api<MessageListResponse>("GET", "/messages", params),
       hasMessageFilters(outboxFilters)
         ? api<MessageListResponse>("GET", "/messages", { direction: "out", limit: "1", offset: "0" })
         : Promise.resolve(null),
     ]);
+    if (generation !== outboxGeneration.current) return;
     setOutboxCount(unfiltered?.total ?? r.total ?? (r.messages || []).length);
     setOutbox(r.messages || []);
     setOutboxPage((p) => ({
@@ -424,13 +437,15 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }));
   }, [api, outboxPage.limit, outboxPage.offset, outboxFilters]);
   const loadInbox = useCallback(async () => {
-    const params = messageListParams("in", inboxPage, inboxFilters);
+    const generation = ++inboxGeneration.current;
+    const params = {...messageListParams("in", inboxPage, inboxFilters), summary:"true"};
     const [r, unfiltered] = await Promise.all([
       api<MessageListResponse>("GET", "/messages", params),
       hasMessageFilters(inboxFilters)
         ? api<MessageListResponse>("GET", "/messages", { direction: "in", limit: "1", offset: "0" })
         : Promise.resolve(null),
     ]);
+    if (generation !== inboxGeneration.current) return;
     setInboxCount(unfiltered?.total ?? r.total ?? (r.messages || []).length);
     setInbox(r.messages || []);
     setInboxPage((p) => ({
@@ -440,20 +455,22 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }));
   }, [api, inboxPage.limit, inboxPage.offset, inboxFilters]);
   const loadTemplates = useCallback(async () => {
-    const r = await api<{ templates: TemplateRow[] }>("POST", "/tools/call", {}, {
-      tool: "template_list",
-      args: { limit: 200 },
-    });
-    setTemplates(r.templates || []);
-  }, [api]);
+    const all: TemplateRow[]=[];
+    for(let offset=0;;offset+=200) {
+      const r=await api<{templates:TemplateRow[];has_more:boolean}>("POST","/tools/call",{},{tool:"template_list",args:{limit:200,offset}});
+      all.push(...r.templates);if(!r.has_more) break;
+    }
+    setTemplates(all);
+  },[api]);
   const loadRoutes = useCallback(async () => {
     const r = await api<{ routes: InboundRoute[] }>("GET", "/inbound-routes", {});
     setRoutes(r.routes || []);
   }, [api]);
   const loadSuppressions = useCallback(async () => {
-    const r = await api<{ suppressions: SuppressionRow[] }>("GET", "/suppressions", {});
+    const r = await api<{ suppressions: SuppressionRow[]; total: number }>("GET", "/suppressions", {limit:"100",offset:String(suppressionOffset)});
+    setSuppressionTotal(r.total);
     setSuppressions(r.suppressions || []);
-  }, [api]);
+  }, [api, suppressionOffset]);
   // Senders + quota call the bound SES integration. We capture the
   // error rather than silently swallowing it — the most common cause
   // is "no email_provider bound", which the operator needs to fix in
@@ -479,6 +496,8 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }
   }, [api]);
   const loadQuota = useCallback(async () => {
+    if (Date.now() - quotaReadAt.current < 60000) return;
+    quotaReadAt.current = Date.now();
     try {
       const q = await api<QuotaInfo>("GET", "/senders/quota", {});
       setQuota(q);
@@ -487,7 +506,9 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     }
   }, [api]);
   const loadMessageDetail = useCallback(async (id: number) => {
+    const generation = ++detailGeneration.current;
     const r = await api<{ message: MessageRow; events: DeliveryEvent[] }>("GET", `/messages/${id}`, {});
+    if (generation !== detailGeneration.current) return;
     setSelected(r.message);
     setSelectedEvents(r.events || []);
   }, [api]);
@@ -512,10 +533,22 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   useEffect(() => { reload(); }, [reload]);
 
-  // Live refresh on any messaging event.
+  // Coalesce provider-specific + generic notifications without refreshing provider inventory.
+  const liveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const liveRefresh = useRef(() => {});
+  liveRefresh.current = () => {
+    const work: Promise<unknown>[] = [];
+    if (tab === "inbox" || tab === "compose") work.push(loadInbox());
+    if (tab === "outbox") work.push(loadOutbox());
+    if (tab === "templates" || tab === "compose") work.push(loadTemplates());
+    if (tab === "suppressions") work.push(loadSuppressions());
+    if (selectedRef.current) work.push(loadMessageDetail(selectedRef.current.id));
+    void Promise.all(work).catch((e) => setStatus((e as Error).message));
+  };
+  useEffect(() => () => { if (liveTimer.current) clearTimeout(liveTimer.current); }, []);
   useAppEvents("messaging", projectId, (ev) => {
-    if (messagingLiveTopics.has(ev.topic)) {
-      reload();
+    if ((messagingLiveTopics.has(ev.topic) || ev.topic === "suppression.changed") && !liveTimer.current) {
+      liveTimer.current = setTimeout(() => { liveTimer.current = null; liveRefresh.current(); }, 200);
     }
   });
 
@@ -541,11 +574,13 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   }, []);
 
   const filterOutbox = useCallback((filters: MessageFilters) => {
+    outboxGeneration.current++;detailGeneration.current++;
     setSelected(null);
     setOutboxFilters(filters);
     setOutboxPage((p) => ({ ...p, offset: 0 }));
   }, []);
   const filterInbox = useCallback((filters: MessageFilters) => {
+    inboxGeneration.current++;detailGeneration.current++;
     setSelected(null);
     setInboxFilters(filters);
     setInboxPage((p) => ({ ...p, offset: 0 }));
@@ -556,9 +591,9 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     inbox: inboxCount,
     templates: templates.length,
     routes: routes.length,
-    suppressions: suppressions.length,
+    suppressions: suppressionTotal,
     senders: senders.length,
-  }), [outboxCount, inboxCount, templates, routes, suppressions, senders]);
+  }), [outboxCount, inboxCount, templates, routes, suppressionTotal, senders]);
 
   const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
@@ -650,7 +685,7 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
             />
           )}
           {tab === "compose" && (
-            <ComposeView
+            <ComposeView key={projectId}
               api={api}
               senders={verifiedSenders}
               templates={templates}
@@ -665,16 +700,16 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
           {tab === "senders" && <SendersView rows={senders} identities={identities} quota={quota} api={api} reload={reload} error={sendersError} notify={notify} confirmAction={confirmAction} />}
           {tab === "templates" && <TemplatesView rows={templates} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
           {tab === "routes" && <RoutesView rows={routes} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
-          {tab === "suppressions" && <SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} confirmAction={confirmAction} />}
+          {tab === "suppressions" && <><div className="p-3 flex gap-3"><button disabled={suppressionOffset===0} onClick={() => setSuppressionOffset(Math.max(0,suppressionOffset-100))}>Previous</button><span>{Math.min(suppressionOffset+1,suppressionTotal)}–{Math.min(suppressionOffset+100,suppressionTotal)} of {suppressionTotal}</span><button disabled={suppressionOffset+100>=suppressionTotal} onClick={() => setSuppressionOffset(suppressionOffset+100)}>Next</button></div><SuppressionsView rows={suppressions} api={api} reload={reload} notify={notify} confirmAction={confirmAction} /></>}
         </div>
 
         {/* Detail pane (only meaningful for messages) */}
         {(tab === "outbox" || tab === "inbox") && selected && (
-          <MessageDetail
+          <MessageDetail key={selected.id} api={api} reload={reload}
             m={selected}
             events={selectedEvents}
             onReply={replyToMessage}
-            onClose={() => setSelected(null)}
+            onClose={() => {detailGeneration.current++;setSelected(null);}}
           />
         )}
       </div>
@@ -848,7 +883,15 @@ function MessagePager({ page, rowCount, onPage }: { page: MessagePageState; rowC
   );
 }
 
-function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events: DeliveryEvent[]; onReply: (m: MessageRow) => void; onClose: () => void }) {
+function MessageDetail({ m, events, onReply, onClose, api, reload }: { api: <T,>(m: string,p: string,q?: Record<string,string>,b?: unknown) => Promise<T>; reload: () => void; m: MessageRow; events: DeliveryEvent[]; onReply: (m: MessageRow) => void; onClose: () => void }) {
+  const [actionError, setActionError] = useState("");
+  const download = async (att: MessageAttachment) => {
+    const tab = window.open("about:blank", "_blank");
+    if (!tab) { setActionError("Allow popups to download this attachment."); return; }
+    tab.opener = null;
+    try { const result = await api<{url:string}>("GET", `/messages/${m.id}/attachments/${att.id}`, {}); const url = new URL(result.url); if (!["https:","http:"].includes(url.protocol)) throw new Error("Invalid attachment URL"); tab.location.replace(url.href); } catch(e) { tab.close(); setActionError((e as Error).message); }
+  };
+  const retry = async () => {try {await api("POST", "/tools/call", {}, {tool:"inbound_redispatch",args:{id:m.id}});reload();}catch(e){setActionError((e as Error).message)}};
   return (
     <div className="w-[28rem] border-l border-border overflow-auto p-5 text-sm">
       <div className="flex items-center justify-between mb-3">
@@ -864,6 +907,8 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
           <button type="button" className="text-text-dim hover:text-text" onClick={onClose}>×</button>
         </div>
       </div>
+      {actionError && <p role="alert" className="text-red-500">{actionError}</p>}
+      {m.direction === "in" && ["no_match","target_failed","failed","pending"].includes(m.route_status || "") && <button type="button" className="text-accent" onClick={retry}>Retry processing</button>}
       <DL label="From" value={stripScheme(m.from)} />
       <DL label="To" value={m.to.map(stripScheme).join(", ")} />
       {m.cc && m.cc.length > 0 && <DL label="Cc" value={m.cc.map(stripScheme).join(", ")} />}
@@ -888,7 +933,7 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
       {m.in_reply_to && <DL label="In-Reply-To" value={<code className="text-xs">{m.in_reply_to}</code>} />}
 
       {(m.body_text || m.body_html) && (
-        <EmailBodyViewer bodyText={m.body_text || ""} bodyHTML={m.body_html || ""} />
+        <EmailBodyViewer key={m.id} bodyText={m.body_text || ""} bodyHTML={m.body_html || ""} />
       )}
       {m.attachments && m.attachments.length > 0 && (
         <div className="mt-4">
@@ -902,6 +947,8 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
                   {att.size_bytes ? ` · ${formatBytes(att.size_bytes)}` : ""}
                   {att.source ? ` · ${att.source}` : ""}
                 </div>
+                {att.processing_status && att.processing_status !== "ready" && <div className="text-yellow-500">{att.processing_status}: {att.processing_error}</div>}
+                {att.storage_id && <button type="button" className="text-accent" onClick={() => download(att)}>Download</button>}
                 {att.url && (
                   <a className="text-accent break-all" href={att.url} target="_blank" rel="noreferrer">Open URL</a>
                 )}
@@ -931,7 +978,7 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
   );
 }
 
-function EmailBodyViewer({ bodyText, bodyHTML }: { bodyText: string; bodyHTML: string }) {
+export function EmailBodyViewer({ bodyText, bodyHTML }: { bodyText: string; bodyHTML: string }) {
   const [mode, setMode] = useState<"rendered" | "text" | "source">(bodyHTML ? "rendered" : "text");
   const [loadRemoteImages, setLoadRemoteImages] = useState(false);
   const srcDoc = useMemo(
@@ -996,7 +1043,7 @@ function EmailBodyViewer({ bodyText, bodyHTML }: { bodyText: string; bodyHTML: s
       {mode === "rendered" && hasHTML && (
         <iframe
           title="Rendered email body"
-          sandbox=""
+          sandbox="allow-popups allow-popups-to-escape-sandbox"
           referrerPolicy="no-referrer"
           className="w-full h-[34rem] bg-white rounded border border-border"
           srcDoc={srcDoc}
@@ -1022,7 +1069,7 @@ function bodyModeButtonClass(active: boolean): string {
     : "px-2 py-1 text-text-dim hover:text-text hover:bg-surface-2";
 }
 
-function safeEmailHTMLDocument(rawHTML: string, opts: { loadRemoteImages: boolean }): string {
+export function safeEmailHTMLDocument(rawHTML: string, opts: { loadRemoteImages: boolean }): string {
   if (!rawHTML.trim()) return "";
   try {
     const parser = new DOMParser();
@@ -1071,6 +1118,7 @@ function safeEmailHTMLDocument(rawHTML: string, opts: { loadRemoteImages: boolea
 <html>
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src ${opts.loadRemoteImages ? 'https: http: data:' : 'data:'}; font-src 'none'; media-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   html, body { margin: 0; padding: 0; background: #fff; color: #111; }
@@ -1143,6 +1191,7 @@ const messagingLiveTopics = new Set([
   "message.rendering_failed",
   "message.subscription_changed",
   "message.event",
+  "message.processed",
   "templates.synced",
 ]);
 
@@ -1179,7 +1228,13 @@ function stringMeta(meta: Record<string, unknown>, key: string): string {
   return typeof v === "string" ? v : "";
 }
 
-function composeDraftFromMessage(m: MessageRow, senders: SenderRow[]): ComposeDraft | null {
+function replyAddressList(value: string): string {
+  // Keep quoted display-name commas out of the recipient tokenizer.
+  const mailboxes = [...value.matchAll(/<([^<>]+)>|([^,;<>]+@[^,;<>]+)/g)].map(match => stripScheme((match[1] || match[2]).trim()));
+  return mailboxes.length ? mailboxes.join(", ") : stripScheme(value);
+}
+
+export function composeDraftFromMessage(m: MessageRow, senders: SenderRow[]): ComposeDraft | null {
   const from = replyFromAddress(m, senders);
   if (!from) return null;
   const inReplyTo = m.message_id_header || "";
@@ -1188,7 +1243,7 @@ function composeDraftFromMessage(m: MessageRow, senders: SenderRow[]): ComposeDr
     key: m.id,
     channel: m.channel || "email",
     from,
-    to: stripScheme(m.from),
+    to: replyAddressList(Object.entries(m.headers || {}).find(([key]) => key.toLowerCase() === "reply-to")?.[1] || m.from),
     subject: replySubject(m.subject || ""),
     body: "",
     in_reply_to: inReplyTo,
@@ -1202,7 +1257,7 @@ function replyFromAddress(m: MessageRow, senders: SenderRow[]): string {
     ...(m.to || []),
   ].map(stripScheme));
   for (const candidate of candidates) {
-    if (senders.some((s) => senderCanSendAddress(s, candidate))) {
+    if (senders.some((s) => s.channel === m.channel && senderCanSendAddress(s, candidate))) {
       return candidate;
     }
   }
@@ -1232,7 +1287,7 @@ function uniqueStrings(values: string[]): string[] {
   return out;
 }
 
-function ComposeView({
+export function ComposeView({
   api, senders, templates, quota, inbox, draft, onSent, gotoSenders, gotoTemplates,
 }: {
   api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
@@ -1269,13 +1324,16 @@ function ComposeView({
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
   const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
 
+  const initializedDraft = useRef<number | null>(null);
+  const sendAttempt = useRef<{key: string; payload: string} | null>(null);
+
   // Default selection: prefer email/domain for the original email-first
   // workflow, but phone-only installs must still initialise state. Without
   // this, the browser visually shows the first <option> while React keeps an
   // empty selectedAddress, so submit fails with "Pick a sender."
   useEffect(() => {
     if (selectedAddress) return;
-    const firstEmail = verified.find((s) => s.kind === "email");
+    const firstEmail = verified.find((s) => s.is_default) || verified.find((s) => s.channel === "email");
     if (firstEmail) {
       setSelectedAddress(stripScheme(firstEmail.address));
       setSelectedChannel(firstEmail.channel);
@@ -1299,10 +1357,11 @@ function ComposeView({
   }, [verified, selectedAddress]);
 
   useEffect(() => {
-    if (!draft) return;
+    if (!draft || initializedDraft.current === draft.key) return;
+    initializedDraft.current = draft.key;
     const from = stripScheme(draft.from);
     const at = from.indexOf("@");
-    const exact = verified.find((s) => stripScheme(s.address) === from);
+    const exact = verified.find((s) => stripScheme(s.address) === from && s.channel === draft.channel);
     const domain = at > 0
       ? verified.find((s) => s.kind === "domain" && stripScheme(s.address) === from.slice(at + 1))
       : undefined;
@@ -1354,9 +1413,10 @@ function ComposeView({
     ),
     [templates],
   );
+  const composeTemplates = channel === "whatsapp" ? approvedWhatsAppTemplates : templates.filter((t) => t.channel === channel);
   const selectedTemplate = useMemo(
-    () => approvedWhatsAppTemplates.find((t) => String(t.id) === templateID) || null,
-    [approvedWhatsAppTemplates, templateID],
+    () => composeTemplates.find((t) => String(t.id) === templateID) || null,
+    [composeTemplates, templateID],
   );
   const selectedTemplateVars = useMemo(
     () => selectedTemplate ? templateVarKeys(selectedTemplate) : [],
@@ -1371,7 +1431,7 @@ function ComposeView({
   const whatsAppChecking = channel === "whatsapp" && waSession.state === "checking";
 
   useEffect(() => {
-    if (channel !== "whatsapp") return;
+    if (channel !== "whatsapp") { if (templateID && !templates.some((t) => t.channel === channel && String(t.id) === templateID)) setTemplateID(""); return; }
     if (templateID && approvedWhatsAppTemplates.some((t) => String(t.id) === templateID)) return;
     setTemplateID(approvedWhatsAppTemplates[0] ? String(approvedWhatsAppTemplates[0].id) : "");
   }, [channel, approvedWhatsAppTemplates, templateID]);
@@ -1485,7 +1545,7 @@ function ComposeView({
         from: computedFrom,
         to: recipients,
       };
-      if (channel === "whatsapp" && !whatsAppFreeformAllowed) {
+      if (selectedTemplate || (channel === "whatsapp" && !whatsAppFreeformAllowed)) {
         if (!selectedTemplate) {
           setErr("Pick an approved WhatsApp template. Free-form WhatsApp messages require an inbound message in the last 24 hours.");
           setBusy(false);
@@ -1500,7 +1560,7 @@ function ComposeView({
         args.template_id = selectedTemplate.id;
         args.vars = templateVars;
       } else {
-        if (!body.trim()) {
+        if (!body.trim() && attachments.length === 0) {
           setErr("Enter a body.");
           setBusy(false);
           return;
@@ -1523,7 +1583,15 @@ function ComposeView({
           content_base64: att.content_base64,
         }));
       }
-      await api("POST", "/tools/call", {}, { tool: "send_message", args });
+      const payload = JSON.stringify(args);
+      if (!sendAttempt.current || sendAttempt.current.payload !== payload) sendAttempt.current = {key: crypto.randomUUID(), payload};
+      args.idempotency_key = sendAttempt.current.key;
+      const result = await api<{status: string; status_reason?: string}>("POST", "/tools/call", {}, { tool: "send_message", args });
+      if (!["sent", "delivered", "opened", "clicked"].includes(result.status)) {
+        if (["failed", "suppressed"].includes(result.status)) sendAttempt.current = null;
+        throw new Error(result.status_reason || `Message was not sent (${result.status}).`);
+      }
+      sendAttempt.current = null;
       setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]); setTemplateVars({}); setAttachments([]);
       onSent();
     } catch (e) {
@@ -1633,9 +1701,10 @@ function ComposeView({
           <input className={inputCls} value={subject} onChange={(e) => setSubject(e.target.value)} disabled={noVerifiedSenders} />
         </Field>
       )}
-      {channel === "whatsapp" && !whatsAppFreeformAllowed ? (
+      {channel !== "whatsapp" && <Field label="Saved template"><select className={inputCls} value={templateID} onChange={(e) => setTemplateID(e.target.value)}><option value="">Write a message</option>{composeTemplates.map((t) => <option key={t.id} value={String(t.id)}>{t.name}</option>)}</select></Field>}
+      {selectedTemplate || (channel === "whatsapp" && !whatsAppFreeformAllowed) ? (
         <WhatsAppTemplateComposer
-          templates={approvedWhatsAppTemplates}
+          templates={composeTemplates}
           selectedTemplate={selectedTemplate}
           templateID={templateID}
           vars={templateVars}
@@ -1651,7 +1720,7 @@ function ComposeView({
             rows={10}
             value={body}
             onChange={(e) => setBody(e.target.value)}
-            required={channel !== "whatsapp" || whatsAppFreeformAllowed}
+            required={attachments.length === 0}
             disabled={noVerifiedSenders || whatsAppChecking}
           />
         </Field>
@@ -2932,16 +3001,18 @@ function ProviderTemplateStatePill({ state }: { state: ProviderTemplateRow["loca
 function RoutesView({ rows, api, reload, notify, confirmAction }: { rows: InboundRoute[]; api: <T,>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>; reload: () => void; notify: Notify; confirmAction: ConfirmFn }) {
   const [pattern, setPattern] = useState("");
   const [targetApp, setTargetApp] = useState("");
-  const [targetRoute, setTargetRoute] = useState("/inbound");
+  const [targetRoute, setTargetRoute] = useState("inbound");
 
+  const [channel, setChannel] = useState("email");
+  const [priority, setPriority] = useState(0);
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       await api("POST", "/tools/call", {}, {
         tool: "inbound_route_set",
-        args: { pattern, target_app: targetApp, target_route: targetRoute },
+        args: { channel, priority, pattern, target_app: targetApp, target_route: targetRoute },
       });
-      setPattern(""); setTargetApp(""); setTargetRoute("/inbound");
+      setPattern(""); setTargetApp(""); setTargetRoute("inbound");
       reload();
     } catch (e) {
       notify("error", `Add failed: ${(e as Error).message}`);
@@ -2972,13 +3043,15 @@ function RoutesView({ rows, api, reload, notify, confirmAction }: { rows: Inboun
   return (
     <div>
       <form onSubmit={add} className="p-4 flex gap-2 items-end border-b border-border flex-wrap">
+        <Field label="Channel"><select className={inputCls} value={channel} onChange={(e) => setChannel(e.target.value)}>{["email", "sms", "whatsapp"].map((c) => <option key={c}>{c}</option>)}</select></Field>
+        <Field label="Priority"><input className={inputCls} type="number" value={priority} onChange={(e) => setPriority(Number(e.target.value))}/></Field>
         <Field label="Pattern" hint="e.g. mailto:support+*@acme.com">
           <input className={inputCls + " w-72"} value={pattern} onChange={(e) => setPattern(e.target.value)} required />
         </Field>
         <Field label="Target app">
           <input className={inputCls + " w-40"} value={targetApp} onChange={(e) => setTargetApp(e.target.value)} required placeholder="support" />
         </Field>
-        <Field label="Target route">
+        <Field label="Target tool">
           <input className={inputCls + " w-40"} value={targetRoute} onChange={(e) => setTargetRoute(e.target.value)} required />
         </Field>
         <button type="submit" className="px-3 py-1.5 bg-accent text-white rounded">Add</button>
@@ -2998,7 +3071,7 @@ function RoutesView({ rows, api, reload, notify, confirmAction }: { rows: Inboun
           <tbody>
             {rows.map((r) => (
               <tr key={r.id} className="border-b border-border">
-                <td className="px-4 py-2"><code className="text-xs">{r.pattern}</code></td>
+                <td className="px-4 py-2"><code className="text-xs">{r.channel || "email"}: {r.pattern}</code></td>
                 <td className="px-4 py-2">{r.target_app}<span className="text-text-dim">{r.target_route}</span></td>
                 <td className="px-4 py-2">{r.priority}</td>
                 <td className="px-4 py-2 text-right">

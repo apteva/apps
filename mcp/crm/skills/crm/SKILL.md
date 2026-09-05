@@ -4,7 +4,7 @@ description: Use CRM tools for contacts, customer conversations, lists, segments
 compatibility: Requires the CRM MCP tools supplied by an Apteva app installation.
 metadata:
   author: apteva
-  version: "1.1"
+  version: "1.2"
 ---
 
 # CRM
@@ -45,6 +45,12 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Use `contacts_set_conversation_status` only when the user asks to change
   workflow state or when the requested workflow clearly requires it.
 
+- Change primary addresses through `channels`; `primary_email` and `primary_phone`
+  are read-only mirrors. Include the contact's `updated_at` as
+  `expected_updated_at` in update patches, and reread on a stale-edit conflict.
+- Archived contacts remain readable and can be restored with `status: active`.
+  A merged record exposes `merged_into_id`; use the surviving contact for work.
+
 ## Lists, segments, and pipeline
 
 - Lists are explicit memberships. Segments are saved predicates or snapshots.
@@ -55,11 +61,23 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Use opportunity search for pipeline totals and current sales work. State the
   filters used when a count could otherwise be ambiguous.
 
+- Preserve declared JSON types in attribute predicates. Static segments populate
+  snapshots on creation and definition updates; `not_in_segment` accepts only
+  active static references from the same project.
+- Page list/segment evaluation using `next_after_contact_id` until an empty page.
+  Resolve an audience before sending; static membership alone is not eligibility.
+
 ## Messaging safety
 
 - `contacts_send_message`, `contacts_reply`, and `contacts_send_test` create
   real external messages. Call them only when the user explicitly requests a
   send or a previously approved workflow requires it.
+- Replies use the inbound message's Reply-To/From and receiving identity. Use
+  `reply_to_activity_id` for a specific inbound message; do not work around a
+  blocked reply route by silently sending to a different address.
+- `do_not_contact` blocks sending and audience eligibility. Delivery recovery
+  does not remove Messaging suppressions. Legacy messages with unknown source
+  installation retain local history but omit remote status enrichment.
 - For free-form sends, pass `body` and omit `template_id`, `content_sid`,
   `template_vars`, and every other unused optional field. Never manufacture
   placeholders such as `template_id: 0`, `list_id: 0`, or empty strings/maps.

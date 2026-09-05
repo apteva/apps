@@ -1,0 +1,33 @@
+name: multipart-retry
+description: Agent completes a multipart upload twice without duplicating its file.
+timeout: 90s
+max_iterations: 8
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  Save exactly the text "abcdefgh" as "multipart.txt" in "/resumable/".
+  Folders are virtual: do not call files_create_folder.
+  Use storage_upload_init with size_bytes=8 and content_type="text/plain".
+  Upload two parts using storage_upload_part: part 1 content_base64="YWJjZA==",
+  part 2 content_base64="ZWZnaA==". Then use storage_upload_complete.
+  Retry storage_upload_complete once using the same upload_id. Both results
+  should refer to the same file. Do not make a new session. Then stop.
+assert:
+  - tool_called: storage_upload_init
+  - tool_called: storage_upload_part
+  - tool_called_with:
+      tool: storage_upload_complete
+      min_count: 2
+  - http: GET /api/apps/storage/files?folder=/resumable/&q=multipart.txt
+    expect_count_at: files
+    expect_count: 1
+    expect_item_at: files
+    expect_item:
+      name: multipart.txt
+      size_bytes: 8
+  - iterations_at_most: 8
+budget:
+  total_tokens: 65000
+  cost_usd: 0.40

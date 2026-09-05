@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.46
+version: 0.13.47
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -10,11 +10,10 @@ description: |
   bounces and complaints, and routes inbound mail/SMS/WhatsApp to
   other app tools via a small pattern table.
 
-  The shape is channel-agnostic: addresses are URIs (mailto:, tel:,
-  apteva://contact/N) and a single `send_message` tool dispatches
-  on the URI scheme. Per-channel fields (subject, body_html for
-  email) are optional and ignored when the resolved channel is not
-  email.
+  Send with an explicit channel (email, sms, or whatsapp). Addresses
+  accept plain mailbox/E.164 values and compatible URI prefixes.
+  Omit from to use the configured default sender for that channel.
+  Subject and HTML body apply only to email.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/messaging
@@ -105,7 +104,7 @@ provides:
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns normalized attachment metadata and never returns base64. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
+    - { name: send_message,           description: "Send a message. Args: channel (email|sms|whatsapp), to (address or address[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns normalized attachment metadata and never returns base64. Channel is explicit. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events, and normalized attachment metadata without raw bytes." }
     - { name: message_list,           description: "List messages with normalized attachment metadata. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
@@ -118,7 +117,7 @@ provides:
     - { name: template_create,        description: "Create a template. Args: name, channel (default 'email'), subject?, body_text?, body_html?, vars_schema?, provider_create?, language?, category?, submit_for_approval?. Phone templates can create an upstream provider template; WhatsApp submits for approval by default." }
     - { name: template_update,        description: "Update a template (partial). Args: id, fields…" }
     - { name: template_get,           description: "Fetch one template by id." }
-    - { name: template_list,          description: "List templates. Args: channel?, limit?." }
+    - { name: template_list,          description: "List templates. Args: channel?, limit?, offset?." }
     - { name: template_delete,        description: "Remove a template from this project. Args: id, delete_provider? (default false)." }
     # suppression
     - { name: suppression_list,       description: "List suppressed exact addresses and domains with stable pagination. Args: channel?, limit?, offset?. Returns count, total, limit, offset, and has_more." }
@@ -141,6 +140,8 @@ provides:
       icon: mail
       entry: /ui/MessagingPanel.mjs
   workers:
+    - name: messaging-recovery
+      schedule: "@every 30s"
     - name: ses-verify-poller
       schedule: "@every 5m"
 

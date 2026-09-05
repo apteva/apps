@@ -129,9 +129,11 @@ async function uploadChunked(
   if (!init.upload_id) {
     throw new Error("init returned no upload_id");
   }
-  const id = init.upload_id;
+  const id = encodeURIComponent(init.upload_id);
+ try {
   const partSize = init.part_size ?? defaultPartSize;
-  const parallel = Math.max(1, opts.parallel ?? init.max_parallel ?? defaultParallel);
+  if (!Number.isFinite(partSize) || partSize<=0) throw new Error("invalid upload part size");
+ const parallel = Math.max(1, Math.min(16, Math.floor(opts.parallel ?? defaultParallel), Math.floor(init.max_parallel ?? defaultParallel)));
 
   // Build the parts queue (1-indexed, S3-style). Each entry is
   // {n, start, end} so workers can slice without recomputing.
@@ -195,7 +197,7 @@ async function uploadChunked(
             );
             return;
           }
-          await sleep(250 * Math.pow(2, attempt - 1));
+          await sleep(250 * Math.pow(2, attempt - 1),opts.signal);
         }
       }
     }
@@ -203,7 +205,9 @@ async function uploadChunked(
 
   const workers: Promise<void>[] = [];
   for (let i = 0; i < parallel; i++) workers.push(work());
-  await Promise.all(workers);
+  const settled=await Promise.allSettled(workers);
+ const rejected=settled.find(r=>r.status==="rejected");
+ if(rejected?.status==="rejected")throw rejected.reason;
   if (firstErr) throw firstErr;
   if (opts.signal?.aborted) {
     throw new DOMException("upload aborted", "AbortError");
@@ -216,6 +220,11 @@ async function uploadChunked(
     { body: {}, signal: opts.signal },
   )).body;
   return completion.file;
+ } catch(error) {
+ // Cleanup uses a separate bounded signal because the upload may be aborted.
+ await fetch(`${STORAGE_API}/uploads/${id}${scopeQS(opts)}`, {method:"DELETE",credentials:"same-origin",signal:AbortSignal.timeout(5000)}).catch(()=>{});
+ throw error;
+ }
 }
 
 // ─── helpers ─────────────────────────────────────────────────────
@@ -239,6 +248,10 @@ async function jsonFetch<T>(
   return { status: res.status, body: (await res.json()) as T };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+function sleep(ms: number,signal?:AbortSignal): Promise<void> {
+ return new Promise((resolve,reject)=>{
+  const abort=()=>{clearTimeout(timer);signal?.removeEventListener("abort",abort);reject(new DOMException("upload aborted","AbortError"));};
+  const timer=setTimeout(()=>{signal?.removeEventListener("abort",abort);resolve();},ms);
+  signal?.addEventListener("abort",abort,{once:true});if(signal?.aborted)abort();
+ });
 }

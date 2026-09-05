@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
@@ -13,6 +14,7 @@ import (
 )
 
 type Target struct {
+	ID       string
 	Selector string
 	X        int
 	Y        int
@@ -58,6 +60,11 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 	if req.Mode == "" {
 		req.Mode = "replace"
 	}
+	switch req.Mode {
+	case "replace", "add", "remove", "toggle":
+	default:
+		return Result{}, errors.New("select_option: invalid mode")
+	}
 	if len(req.Texts) == 0 && req.Text != "" {
 		req.Texts = []string{req.Text}
 	}
@@ -100,6 +107,11 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     try { el.dispatchEvent(new MouseEvent('click', opts)); } catch (e) { if (el.click) el.click(); }
   }
   function resolveTarget() {
+    if (target.ID) {
+      var state = window.__aptevaComputerSOM, saved = state && state.targets && state.targets[target.ID];
+      // A stable identity must never fall through to an old coordinate.
+      return saved && saved.element && saved.element.isConnected ? saved.element : null;
+    }
     var el = null;
     if (target.Selector) el = document.querySelector(target.Selector);
     if (!el && target.HasPoint) el = document.elementFromPoint(target.X, target.Y);
@@ -114,11 +126,11 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
   function requestKeys() {
     return {
       texts: (req.Texts || []).map(lower).filter(Boolean),
-      values: (req.Values || []).map(function(v) { return String(v || ''); }).filter(Boolean)
+      values: (req.Values || []).map(function(v) { return String(v ?? ''); })
     };
   }
 	function requestedOptions() {
-	  return (req.Texts || []).map(norm).filter(Boolean).concat((req.Values || []).map(function(v) { return String(v || ''); }).filter(Boolean));
+	  return (req.Texts || []).map(norm).filter(Boolean).concat((req.Values || []).map(function(v) { return String(v ?? ''); }));
 	}
 	function controlKind(control) {
 	  var tag = String(control && control.tagName || '').toLowerCase();
@@ -136,13 +148,19 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     if (keys.texts.indexOf(text) >= 0) return true;
     return false;
   }
+  function matchingError(options,keys){
+    var requests=keys.texts.map(function(k){return {texts:[k],values:[]};}).concat(keys.values.map(function(k){return {texts:[],values:[k]};}));
+    for(var request of requests){var count=options.filter(function(o){return optionMatches(o,request);}).length;if(count>1)return 'ambiguous';if(count===0)return 'missing';}
+    return '';
+  }
   function optionLabel(opt) {
     return optionText(opt) || String(opt.value || opt.getAttribute('data-value') || opt.getAttribute('value') || '');
   }
   function selectedOptionLabel(opt) {
     return optionText(opt) || String(opt.value || '');
   }
-  function nativeSelect(sel) {
+  async function nativeSelect(sel) {
+    if(sel.disabled || sel.matches(':disabled')) return {error:'select_option: control is disabled'};
     var keys = requestKeys();
     var mode = lower(req.Mode || 'replace');
     var options = Array.prototype.slice.call(sel.options || []);
@@ -151,13 +169,15 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     var matched = [];
     var found = new Set();
     for (var i = 0; i < options.length; i++) {
-      if (optionMatches(options[i], keys)) {
+      if (optionMatches(options[i], keys) && !options[i].disabled && !(options[i].parentElement.tagName==='OPTGROUP' && options[i].parentElement.disabled)) {
         matched.push(selectedOptionLabel(options[i]));
         found.add(i);
       }
     }
 	var wanted = Math.max(keys.texts.length, keys.values.length);
-    if (matched.length === 0 || matched.length < wanted) {
+    var matchError=matchingError(options,keys);
+    if(matchError==='ambiguous'||(!sel.multiple&&found.size>1))return {error:'select_option: ambiguous option; use a unique value',error_code:'option_ambiguous'};
+    if (matchError || matched.length === 0 || matched.length < wanted) {
 	  return {error: 'select_option: option not found', error_code:'native_select_option_unavailable',
 		kind:'native', control_kind:'native_select', mode:mode, selector:cssPath(sel),
 		requested_options:requested, previous_value:previous, current_value:previous,
@@ -165,7 +185,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
         return {text: selectedOptionLabel(o), value: String(o.value || ''), selected: !!o.selected, visible: true};
       })};
     }
-    if (!sel.multiple || mode === 'replace') {
+    if (mode === 'replace' || (!sel.multiple && mode === 'add')) {
       for (var c = 0; c < options.length; c++) options[c].selected = false;
     }
     for (var j = 0; j < options.length; j++) {
@@ -179,8 +199,11 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
       else if (mode === 'toggle') options[j].selected = !options[j].selected;
       else options[j].selected = true;
     }
+    var expected = options.filter(function(o){return o.selected;}).map(function(o){return o.index;}).join(',');
     sel.dispatchEvent(new Event('input', {bubbles:true}));
     sel.dispatchEvent(new Event('change', {bubbles:true}));
+    await new Promise(function(r){setTimeout(r,150);});
+    if (!sel.isConnected || expected !== Array.from(sel.options).filter(function(o){return o.selected;}).map(function(o){return o.index;}).join(',')) return {error:'select_option: selection reverted after reconciliation'};
     return {
 	  ok: true, kind: 'native', control_kind:'native_select', selector:cssPath(sel),
 	  multiple: !!sel.multiple, mode: mode, requested_options:requested, matched: matched,
@@ -193,8 +216,21 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
       })
     };
   }
+  var popupRoot = null;
   function customOptions() {
-    return Array.prototype.slice.call(document.querySelectorAll('[role="option"],[role="menuitem"],[role="treeitem"]')).filter(visible);
+    if (!popupRoot || !popupRoot.isConnected) return [];
+    return Array.from(popupRoot.querySelectorAll('[role="option"],[role="menuitem"],[role="treeitem"]')).filter(visible);
+  }
+  function resolvePopup(control, before) {
+    var ids=(control.getAttribute('aria-controls')||control.getAttribute('aria-owns')||'').split(/\s+/).filter(Boolean);
+    var roots=ids.map(function(id){return document.getElementById(id);}).filter(Boolean);
+    if(control.matches('[role="listbox"],[role="menu"],[role="tree"]')) roots.push(control);
+    if(roots.length===1) return roots[0];
+    if(roots.length>1) return null;
+    // Compatibility for unlabelled portals: require exactly one newly opened
+    // popup, never a pre-existing unrelated list/menu.
+    var added=Array.from(document.querySelectorAll('[role="listbox"],[role="menu"],[role="tree"]')).filter(function(n){return visible(n)&&!before.has(n);});
+    return added.length===1?added[0]:null;
   }
   function selectedLike(el) {
     var aria = lower(el.getAttribute('aria-selected') || el.getAttribute('aria-checked'));
@@ -220,11 +256,15 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 	var requested = requestedOptions();
 	var kind = controlKind(control);
 	var selector = cssPath(control);
+    if(control.disabled||control.getAttribute('aria-disabled')==='true') return {error:'select_option: control is disabled'};
+    var before=new Set(Array.from(document.querySelectorAll('[role="listbox"],[role="menu"],[role="tree"]')).filter(visible));
+    popupRoot=resolvePopup(control,before);
     if (control.getAttribute && control.getAttribute('aria-expanded') !== 'true') {
       eventClick(control);
     } else if (!customOptions().length) {
       eventClick(control);
     }
+    for(var attempt=0;attempt<50&&!popupRoot;attempt++){popupRoot=resolvePopup(control,before);if(!popupRoot)await new Promise(function(r){setTimeout(r,50);});}
     var opts = await waitForOptions();
 	var menuOpen = (control.getAttribute && control.getAttribute('aria-expanded') === 'true') || opts.length > 0;
     if (!opts.length) {
@@ -235,7 +275,9 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 		menu_open:menuOpen, option_available:false, recoverable:true};
     }
     var candidates = opts.filter(function(o) { return optionMatches(o, keys); });
-    if (candidates.length === 0 || candidates.length < wanted) {
+    var matchError=matchingError(opts,keys);
+    if(matchError==='ambiguous')return {error:'select_option: ambiguous option; use a unique value',error_code:'option_ambiguous'};
+    if (matchError || candidates.length === 0 || candidates.length < wanted) {
 	  return {error:'select_option: option not found', error_code:'custom_combobox_option_unavailable',
 		kind:'custom', control_kind:kind, selector:selector, mode:mode, requested_options:requested,
 		control_text:norm(control.textContent || ''), previous_value:previous,
@@ -243,6 +285,14 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 		option_available:false, recoverable:false, options: opts.map(function(o) {
         return {text: optionLabel(o), value: String(o.getAttribute('data-value') || o.getAttribute('value') || ''), selected: selectedLike(o), visible: true};
       })};
+    }
+    var multiple = popupRoot.getAttribute('aria-multiselectable')==='true' || control.getAttribute('aria-multiselectable')==='true';
+    var expectedLabels = new Set(opts.filter(selectedLike).map(optionLabel));
+    if(mode==='replace')expectedLabels.clear();
+    for(var c of candidates){var label=optionLabel(c); if(mode==='remove'||(mode==='toggle'&&expectedLabels.has(label)))expectedLabels.delete(label);else expectedLabels.add(label);}
+    if(mode==='replace' && popupRoot && multiple) {
+      var remove=opts.filter(function(o){return selectedLike(o)&&!optionMatches(o,keys);});
+      for(var old of remove){ if(old.getAttribute('aria-disabled')==='true')return {error:'select_option: selected option is disabled'}; eventClick(old); await new Promise(function(r){setTimeout(r,150);}); }
     }
     for (var i = 0; i < candidates.length; i++) {
       opts = customOptions();
@@ -253,6 +303,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
         }
       }
       if (!c) c = candidates[i];
+      if(c.disabled||c.getAttribute('aria-disabled')==='true')return {error:'select_option: option is disabled'};
       var already = selectedLike(c);
       if (mode === 'remove' && !already) continue;
       if ((mode === 'add' || mode === 'replace') && already) {
@@ -269,14 +320,21 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
     }
     await new Promise(function(r) { setTimeout(r, 150); });
     var after = customOptions();
+    var allAfter = popupRoot && popupRoot.isConnected ? Array.from(popupRoot.querySelectorAll('[role="option"],[role="menuitem"],[role="treeitem"]')) : [];
+    var selectedLabels = allAfter.filter(selectedLike).map(optionLabel);
+    var hasSelectionState = allAfter.some(function(o){return o.hasAttribute('aria-selected')||o.hasAttribute('aria-checked');});
+    var observed = new Set(selectedLabels);
+    var verified = expectedLabels.size===observed.size && Array.from(expectedLabels).every(function(label){return observed.has(label);});
+    if(!multiple&&!hasSelectionState){var displayed=lower(control.value||control.textContent||'');verified=expectedLabels.size===1&&Array.from(expectedLabels).some(function(label){return displayed===lower(label);});}
+    if(!verified)return {error:'select_option: selection could not be verified after reconciliation',error_code:'selection_unverified',kind:'custom',mode:mode,matched:matched,selected:selectedLabels,option_available:true};
     return {
 	  ok: true, kind: 'custom', control_kind:kind, selector:selector,
-	  multiple: candidates.length > 1, mode: mode, requested_options:requested,
+	  multiple: multiple, mode: mode, requested_options:requested,
       matched: matched, control_text: norm(control.textContent || ''),
 	  previous_value:previous, current_value:norm(control.value || control.textContent || ''),
 	  menu_open:(control.getAttribute && control.getAttribute('aria-expanded') === 'true') || after.length > 0,
 	  option_available:true,
-      selected: after.filter(selectedLike).map(optionLabel),
+      selected: selectedLabels,
       options: after.map(function(o) {
         return {text: optionLabel(o), value: String(o.getAttribute('data-value') || o.getAttribute('value') || ''), selected: selectedLike(o), visible: true};
       })
@@ -286,7 +344,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
   var targetEl = resolveTarget();
   if (!targetEl) return {error:'select_option: target not found'};
   var result = targetEl.tagName && targetEl.tagName.toLowerCase() === 'select'
-    ? nativeSelect(targetEl)
+    ? await nativeSelect(targetEl)
     : await customSelect(targetEl);
 	if (result && !result.selector) result.selector = cssPath(targetEl);
   return result;
@@ -297,7 +355,7 @@ func Select(ctx context.Context, target Target, req Request) (Result, error) {
 		OK    bool   `json:"ok"`
 		Error string `json:"error,omitempty"`
 	}
-	if err := chromedp.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	if err := cdputil.Run(ctx, chromedp.Evaluate(js, &out, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 		return p.WithAwaitPromise(true)
 	})); err != nil {
 		return Result{}, err

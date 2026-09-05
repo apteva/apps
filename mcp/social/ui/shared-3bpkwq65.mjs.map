@@ -1,0 +1,10 @@
+{
+  "version": 3,
+  "sources": ["metricsPresentation.ts"],
+  "sourcesContent": [
+    "export const ACCOUNT_METRICS_STALE_MS = 4 * 60 * 60 * 1000;\n\nexport interface AccountMetricsFreshness {\n  status?: string;\n  updated_at?: string;\n}\n\nexport interface MetricPoint {\n  time?: string;\n  value: number;\n}\n\nexport function accountMetricsNeedRefresh(\n  metrics: AccountMetricsFreshness | null | undefined,\n  now = Date.now(),\n): boolean {\n  if (!metrics || metrics.status === \"failed\") return false;\n  if (!metrics.updated_at) return true;\n  const updated = Date.parse(metrics.updated_at);\n  return !Number.isFinite(updated) || now - updated >= ACCOUNT_METRICS_STALE_MS;\n}\n\nexport function metricTrendEntries(\n  insights: Record<string, MetricPoint[]> | null | undefined,\n): { name: string; points: MetricPoint[] }[] {\n  return Object.entries(insights || {})\n    .filter(([name]) => !name.startsWith(\"_\") && !name.startsWith(\"total_\") && !name.endsWith(\"_total\"))\n    .map(([name, points]) => ({ name, points }))\n    .filter(({ points }) => points.length >= 2 && points.some((point) => Number(point.value) !== 0));\n}\n"
+  ],
+  "mappings": "AAAO,IAAM,EAA2B,SAYjC,SAAS,CAAyB,CACvC,EACA,EAAM,KAAK,IAAI,EACN,CACT,GAAI,CAAC,GAAW,EAAQ,SAAW,SAAU,MAAO,GACpD,GAAI,CAAC,EAAQ,WAAY,MAAO,GAChC,IAAM,EAAU,KAAK,MAAM,EAAQ,UAAU,EAC7C,MAAO,CAAC,OAAO,SAAS,CAAO,GAAK,EAAM,GAnBJ,SAsBjC,SAAS,CAAkB,CAChC,EAC2C,CAC3C,OAAO,OAAO,QAAQ,GAAY,CAAC,CAAC,EACjC,OAAO,EAAE,KAAU,CAAC,EAAK,WAAW,GAAG,GAAK,CAAC,EAAK,WAAW,QAAQ,GAAK,CAAC,EAAK,SAAS,QAAQ,CAAC,EAClG,IAAI,EAAE,EAAM,MAAa,CAAE,OAAM,QAAO,EAAE,EAC1C,OAAO,EAAG,YAAa,EAAO,QAAU,GAAK,EAAO,KAAK,CAAC,IAAU,OAAO,EAAM,KAAK,IAAM,CAAC,CAAC",
+  "debugId": "BFFA9289D97D36AF64756E2164756E21",
+  "names": []
+}

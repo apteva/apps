@@ -1,0 +1,19 @@
+{
+  "name": "fleet-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test fleet-state.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:browser": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "^1.4.1",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "^7.0.2"
+  }
+}

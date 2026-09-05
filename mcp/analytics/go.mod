@@ -1,9 +1,9 @@
 module github.com/apteva/apps/mcp/analytics
 
-go 1.25.1
+go 1.26.6
 
 require (
-	github.com/apteva/app-sdk v0.67.0
+	github.com/apteva/app-sdk v0.75.0
 	modernc.org/sqlite v1.50.0
 )
 

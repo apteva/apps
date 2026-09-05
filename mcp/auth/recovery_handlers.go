@@ -1,11 +1,9 @@
 package main
 
 import (
-	"database/sql"
-	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -32,85 +30,82 @@ func (a *App) handlePasswordResetRequest(w http.ResponseWriter, r *http.Request)
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	user, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, strings.ToLower(strings.TrimSpace(body.Email)))
-	if err == nil && user != nil && user.Status == "active" {
-		if sendErr := issueResetTokenForClient(ctx, pid, org, user.ID, user.Email, recoveryLinkOptions{
-			ClientID: client.ClientID, ContinueURL: body.ContinueURL,
-		}); sendErr != nil {
-			ctx.Logger().Warn("password reset email failed", "err", sendErr)
-		}
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		ctx.Logger().Warn("password reset lookup failed", "err", err)
+	if err := enqueueRecovery(ctx, pid, org, client, strings.ToLower(strings.TrimSpace(body.Email)), "reset_password", body.ContinueURL); err != nil {
+		httpErr(w, 503, "recovery unavailable")
+		return
 	}
 	// Always return the same response so this endpoint cannot enumerate users.
 	httpStatus(w, http.StatusAccepted, map[string]any{"ok": true})
 }
 
 func (a *App) handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpErr(w, http.StatusMethodNotAllowed, "POST only")
-		return
-	}
-	ctx, pid, body, client, org, ok := recoveryContext(w, r)
-	if !ok {
-		return
-	}
-	if reason := validatePassword(body.Password, cfgInt(ctx, "password_min_length", 8), cfgInt(ctx, "password_classes_required", 0)); reason != "" {
-		httpErr(w, http.StatusBadRequest, reason)
-		return
-	}
-	uid, _, err := dbConsumeVerificationToken(ctx.AppDB(), pid, hashToken(strings.TrimSpace(body.Token)), org.ID, "reset_password", client.ClientID)
-	if err != nil {
-		httpErr(w, http.StatusBadRequest, "reset link is invalid or expired")
-		return
-	}
-	if _, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, true, "password_reset_completed", client.ClientID, r.RemoteAddr, r.UserAgent()); err != nil {
-		httpErr(w, code, err.Error())
-		return
-	}
-	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	resp, err := mintPublicAuthResponse(ctx, pid, org, user, client, r)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	httpJSON(w, resp)
+	a.confirmRecovery(w, r, "reset_password")
 }
-
 func (a *App) handleEmailVerify(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+	a.confirmRecovery(w, r, "verify_email")
+}
+func (a *App) confirmRecovery(w http.ResponseWriter, r *http.Request, kind string) {
+	if r.Method != "POST" {
+		httpErr(w, 405, "POST only")
 		return
 	}
 	ctx, pid, body, client, org, ok := recoveryContext(w, r)
 	if !ok {
 		return
 	}
-	uid, _, err := dbConsumeVerificationToken(ctx.AppDB(), pid, hashToken(strings.TrimSpace(body.Token)), org.ID, "verify_email", client.ClientID)
+	var hash string
+	if kind == "reset_password" {
+		if err := checkPasswordPolicy(ctx, org, body.Password); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		var err error
+		hash, err = hashPassword(body.Password)
+		if err != nil {
+			httpErr(w, 503, "password_service_busy")
+			return
+		}
+	}
+	tx, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, "verification link is invalid or expired")
+		httpErr(w, 500, "recovery_failed")
 		return
 	}
-	if err := dbMarkEmailVerified(ctx.AppDB(), pid, org.ID, uid); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
+	defer tx.Rollback()
+	uid, _, err := consumeVerificationTokenTx(tx, pid, hashToken(body.Token), org.ID, kind, client.ClientID)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, 400, "link is invalid or expired")
 		return
 	}
-	resp, err := mintPublicAuthResponse(ctx, pid, org, user, client, r)
+	user, err := dbGetUserByID(tx, pid, org.ID, uid)
+	currentOrg, orgErr := dbGetOrgByID(tx, pid, org.ID)
+	currentClient, clientErr := dbGetClientByClientID(tx, pid, client.ClientID)
+	if err != nil || orgErr != nil || clientErr != nil || user.Status != "active" || currentOrg.Status != "active" || currentClient.DisabledAt != "" {
+		httpErr(w, 400, "link is invalid or expired")
+		return
+	}
+	if kind == "reset_password" {
+		if err = dbSetUserPassword(tx, pid, org.ID, uid, hash); err == nil {
+			_, err = revokeUserState(tx, pid, org.ID, uid)
+		}
+		if err == nil {
+			_, err = tx.Exec(`UPDATE users SET failed_login_count=0,locked_until=NULL WHERE project_id=? AND organization_id=? AND id=?`, pid, org.ID, uid)
+		}
+	}
+	// Possession of either emailed credential proves ownership of the mailbox.
+	if err == nil {
+		err = dbMarkEmailVerified(tx, pid, org.ID, uid)
+	}
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, 500, "recovery_failed")
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, org.ID, &uid, client.ClientID, "email_verified", r.RemoteAddr, r.UserAgent(), nil)
-	httpJSON(w, resp)
+	dbAudit(tx, pid, org.ID, &uid, client.ClientID, kind+"_completed", r.RemoteAddr, r.UserAgent(), nil)
+	if err = tx.Commit(); err != nil {
+		httpErr(w, 500, "recovery_failed")
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "login_required": true})
 }
 
 func (a *App) handleEmailVerificationResend(w http.ResponseWriter, r *http.Request) {
@@ -126,13 +121,9 @@ func (a *App) handleEmailVerificationResend(w http.ResponseWriter, r *http.Reque
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	user, err := dbGetUserByEmail(ctx.AppDB(), pid, org.ID, strings.ToLower(strings.TrimSpace(body.Email)))
-	if err == nil && user != nil && user.Status == "active" && user.EmailVerifiedAt == "" {
-		if sendErr := issueVerifyEmailTokenForClient(ctx, pid, org, user.ID, user.Email, recoveryLinkOptions{
-			ClientID: client.ClientID, ContinueURL: body.ContinueURL,
-		}); sendErr != nil {
-			ctx.Logger().Warn("verification email resend failed", "err", sendErr)
-		}
+	if err := enqueueRecovery(ctx, pid, org, client, strings.ToLower(strings.TrimSpace(body.Email)), "verify_email", body.ContinueURL); err != nil {
+		httpErr(w, 503, "recovery unavailable")
+		return
 	}
 	httpStatus(w, http.StatusAccepted, map[string]any{"ok": true})
 }
@@ -145,7 +136,7 @@ func recoveryContext(w http.ResponseWriter, r *http.Request) (*sdk.AppCtx, strin
 		return nil, "", recoveryRequest{}, nil, nil, false
 	}
 	var body recoveryRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeRequest(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return nil, "", body, nil, nil, false
 	}
@@ -154,13 +145,17 @@ func recoveryContext(w http.ResponseWriter, r *http.Request) (*sdk.AppCtx, strin
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return nil, "", body, nil, nil, false
 	}
-	if err := requireAllowedOrigin(client, r.Header.Get("Origin")); err != nil {
+	if err := requireRecoveryOrigin(ctx, client, r); err != nil {
 		httpErr(w, http.StatusForbidden, "origin_not_allowed")
 		return nil, "", body, nil, nil, false
 	}
 	org, err := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
+		return nil, "", body, nil, nil, false
+	}
+	if err := consumeRate(ctx.AppDB(), pid+":recovery:"+client.ClientID+":"+strings.ToLower(strings.TrimSpace(body.Email)), 20, time.Hour); err != nil {
+		httpErr(w, 429, "rate_limited")
 		return nil, "", body, nil, nil, false
 	}
 	return ctx, pid, body, client, org, true

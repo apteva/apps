@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -150,7 +151,7 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	result, err := evaluateWidget(globalCtx.AppDB(), projectID, body.Widget, body.Filters)
+	result, err := evaluateWidget(requestReadDB(r), projectID, body.Widget, body.Filters)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -182,11 +183,18 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		DashboardID  int64          `json:"dashboard_id"`
 		Filters      map[string]any `json:"filters"`
 		IncludeGoals bool           `json:"include_goals"`
+		WidgetIDs    []int64        `json:"widget_ids"`
 	}
 	if r.Method == http.MethodGet {
 		body.ProjectID = r.URL.Query().Get("project_id")
 		body.DashboardID = parseInt64(r.URL.Query().Get("dashboard_id"))
 		body.IncludeGoals = r.URL.Query().Get("include_goals") == "true"
+		if raw := r.URL.Query().Get("widget_ids"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body.WidgetIDs); err != nil {
+				http.Error(w, "invalid widget_ids", 400)
+				return
+			}
+		}
 		if raw := r.URL.Query().Get("filters"); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &body.Filters); err != nil {
 				http.Error(w, "invalid filters", http.StatusBadRequest)
@@ -201,7 +209,14 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	dashboard, err := getDashboardForProject(globalCtx.AppDB(), body.DashboardID, projectID)
+	tx, err := readPool(globalCtx).BeginTx(r.Context(), &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer tx.Rollback()
+	plan := newEvaluationPlan(contextualDB{db: tx, ctx: r.Context()})
+	dashboard, err := getDashboardForProject(plan, body.DashboardID, projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -210,10 +225,28 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if len(body.WidgetIDs) > 0 {
+		requested := map[int64]bool{}
+		for _, id := range body.WidgetIDs {
+			requested[id] = true
+		}
+		filtered := []DashboardWidget{}
+		for _, widget := range dashboard.Widgets {
+			if requested[widget.ID] {
+				filtered = append(filtered, widget)
+				delete(requested, widget.ID)
+			}
+		}
+		if len(requested) > 0 {
+			http.Error(w, "widget is not in this dashboard", 400)
+			return
+		}
+		dashboard.Widgets = filtered
+	}
 	goalsByWidget := map[int64][]DashboardGoalProgress{}
 	goalErrors := map[int64]string{}
 	if body.IncludeGoals {
-		goalsByWidget, goalErrors, err = dashboardGoalsForWidgets(globalCtx.AppDB(), projectID, dashboard.Widgets)
+		goalsByWidget, goalErrors, err = dashboardGoalsForWidgets(plan, projectID, dashboard.Widgets)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -221,7 +254,7 @@ func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]dashboardWidgetResult, 0, len(dashboard.Widgets))
 	for _, widget := range dashboard.Widgets {
-		data, err := evaluateWidget(globalCtx.AppDB(), projectID, widget, body.Filters)
+		data, err := evaluateWidget(plan, projectID, widget, body.Filters)
 		result := dashboardWidgetResult{WidgetID: widget.ID, Data: data}
 		if err != nil {
 			result.Data = nil
@@ -270,7 +303,7 @@ func (a *App) handleDashboardFilterOptions(w http.ResponseWriter, r *http.Reques
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	options, err := dashboardFilterOptions(globalCtx.AppDB(), projectID, body.Filter)
+	options, err := dashboardFilterOptions(requestReadDB(r), projectID, body.Filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -279,7 +312,7 @@ func (a *App) handleDashboardFilterOptions(w http.ResponseWriter, r *http.Reques
 }
 
 func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request, projectID string) {
-	rows, err := globalCtx.AppDB().Query(
+	rows, err := requestReadDB(r).Query(
 		`SELECT id, project_id, name, description, COALESCE(config_json, '{}'), created_at, updated_at
 		 FROM dashboards WHERE project_id = ? ORDER BY updated_at DESC, id DESC`,
 		projectID,
@@ -336,7 +369,7 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request, pro
 	if body.Template != "" && len(cfg) == 0 {
 		cfg = templateDashboardConfig(body.Template)
 	}
-	d, err := createDashboard(globalCtx.AppDB(), projectID, body.Name, body.Description, cfg, templateWidgets(body.Template))
+	d, err := createDashboard(requestWriteDB(r), projectID, body.Name, body.Description, cfg, templateWidgets(body.Template))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -345,7 +378,7 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request, pro
 }
 
 func (a *App) handleDashboardGet(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
-	d, err := getDashboardForProject(globalCtx.AppDB(), id, projectID)
+	d, err := getDashboardForProject(requestReadDB(r), id, projectID)
 	if err == sql.ErrNoRows {
 		http.NotFound(w, r)
 		return
@@ -373,7 +406,7 @@ func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 	cfg, _ := json.Marshal(nonNilConfig(body.Config))
-	result, err := globalCtx.AppDB().Exec(
+	result, err := requestWriteDB(r).Exec(
 		`UPDATE dashboards SET name=?, description=?, config_json=?, updated_at=? WHERE id=? AND project_id=?`,
 		body.Name, body.Description, string(cfg), time.Now().UnixMilli(), id, projectID,
 	)
@@ -389,7 +422,7 @@ func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, proj
 }
 
 func (a *App) handleDashboardDelete(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
-	result, err := globalCtx.AppDB().Exec(`DELETE FROM dashboards WHERE id=? AND project_id=?`, id, projectID)
+	result, err := requestWriteDB(r).Exec(`DELETE FROM dashboards WHERE id=? AND project_id=?`, id, projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -402,7 +435,7 @@ func (a *App) handleDashboardDelete(w http.ResponseWriter, r *http.Request, proj
 }
 
 func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, projectID string, dashboardID int64) {
-	if _, err := getDashboardForProject(globalCtx.AppDB(), dashboardID, projectID); err != nil {
+	if _, err := getDashboardForProject(requestReadDB(r), dashboardID, projectID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 		} else {
@@ -422,11 +455,11 @@ func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, project
 	if body.Title == "" {
 		body.Title = defaultWidgetTitle(body.Type)
 	}
-	if err := validateDashboardGoalLinks(globalCtx.AppDB(), projectID, body.Config); err != nil {
+	if err := validateDashboardGoalLinks(requestWriteDB(r), projectID, body.Config); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	widget, err := insertWidget(globalCtx.AppDB(), dashboardID, body)
+	widget, err := insertWidget(requestWriteDB(r), dashboardID, body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -447,12 +480,12 @@ func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, project
 	if body.Title == "" {
 		body.Title = defaultWidgetTitle(body.Type)
 	}
-	if err := validateDashboardGoalLinks(globalCtx.AppDB(), projectID, body.Config); err != nil {
+	if err := validateDashboardGoalLinks(requestWriteDB(r), projectID, body.Config); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	cfg, _ := json.Marshal(nonNilConfig(body.Config))
-	result, err := globalCtx.AppDB().Exec(
+	result, err := requestWriteDB(r).Exec(
 		`UPDATE dashboard_widgets SET type=?, title=?, position=?, config_json=?, updated_at=?
 		 WHERE id=? AND dashboard_id IN (SELECT id FROM dashboards WHERE project_id=?)`,
 		body.Type, body.Title, body.Position, string(cfg), time.Now().UnixMilli(), id, projectID,
@@ -469,7 +502,7 @@ func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, project
 }
 
 func (a *App) handleWidgetDelete(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
-	result, err := globalCtx.AppDB().Exec(
+	result, err := requestWriteDB(r).Exec(
 		`DELETE FROM dashboard_widgets WHERE id=? AND dashboard_id IN (SELECT id FROM dashboards WHERE project_id=?)`,
 		id, projectID,
 	)
@@ -484,7 +517,7 @@ func (a *App) handleWidgetDelete(w http.ResponseWriter, r *http.Request, project
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func createDashboard(db *sql.DB, projectID, name, description string, config map[string]any, widgets []DashboardWidget) (*Dashboard, error) {
+func createDashboard(db sqlDatabase, projectID, name, description string, config map[string]any, widgets []DashboardWidget) (*Dashboard, error) {
 	now := time.Now().UnixMilli()
 	tx, err := db.Begin()
 	if err != nil {
@@ -513,7 +546,7 @@ func createDashboard(db *sql.DB, projectID, name, description string, config map
 	return getDashboard(db, id)
 }
 
-func getDashboard(db *sql.DB, id int64) (*Dashboard, error) {
+func getDashboard(db sqlRunner, id int64) (*Dashboard, error) {
 	var d Dashboard
 	var cfg string
 	err := db.QueryRow(
@@ -535,7 +568,7 @@ func getDashboard(db *sql.DB, id int64) (*Dashboard, error) {
 	return &d, nil
 }
 
-func getDashboardForProject(db *sql.DB, id int64, projectID string) (*Dashboard, error) {
+func getDashboardForProject(db sqlRunner, id int64, projectID string) (*Dashboard, error) {
 	var found int
 	if err := db.QueryRow(`SELECT 1 FROM dashboards WHERE id=? AND project_id=?`, id, projectID).Scan(&found); err != nil {
 		return nil, err
@@ -543,7 +576,14 @@ func getDashboardForProject(db *sql.DB, id int64, projectID string) (*Dashboard,
 	return getDashboard(db, id)
 }
 
-func insertWidget(db *sql.DB, dashboardID int64, w DashboardWidget) (*DashboardWidget, error) {
+func insertWidget(db sqlRunner, dashboardID int64, w DashboardWidget) (*DashboardWidget, error) {
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM dashboard_widgets WHERE dashboard_id=?`, dashboardID).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count >= 50 {
+		return nil, errors.New("dashboard limit is 50 widgets")
+	}
 	now := time.Now().UnixMilli()
 	res, err := db.Exec(
 		`INSERT INTO dashboard_widgets (dashboard_id, type, title, position, config_json, created_at, updated_at)
@@ -571,7 +611,7 @@ func insertWidgetTx(tx *sql.Tx, dashboardID int64, w DashboardWidget, now int64)
 	return err
 }
 
-func listWidgets(db *sql.DB, dashboardID int64) ([]DashboardWidget, error) {
+func listWidgets(db sqlRunner, dashboardID int64) ([]DashboardWidget, error) {
 	rows, err := db.Query(
 		`SELECT id, dashboard_id, type, title, position, config_json, created_at, updated_at
 		 FROM dashboard_widgets WHERE dashboard_id=? ORDER BY position, id`,
@@ -597,9 +637,27 @@ func listWidgets(db *sql.DB, dashboardID int64) ([]DashboardWidget, error) {
 	return out, rows.Err()
 }
 
-func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
+func evaluateWidget(db sqlRunner, projectID string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
+	if plan, ok := db.(*evaluationPlan); ok {
+		key := widgetCacheKey(projectID, w, selectedFilters)
+		if cached, found := plan.widgets[key]; found {
+			return copyResult(cached.data), cached.err
+		}
+		data, err := evaluateWidgetUncached(db, projectID, w, selectedFilters)
+		plan.widgets[key] = cachedWidget{copyResult(data), err}
+		return data, err
+	}
+	return evaluateWidgetUncached(db, projectID, w, selectedFilters)
+}
+func evaluateWidgetUncached(db sqlRunner, projectID string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
 	cfg := resolveDashboardFilters(w.Config, selectedFilters)
 	f := filterFromWidget(projectID, cfg)
+	if plan, ok := db.(*evaluationPlan); ok {
+		if ms := windowMillis(stringConfig(cfg, "window", "24h")); ms > 0 {
+			f.Since = plan.now - ms
+			f.Until = plan.now
+		}
+	}
 	limit := intConfig(cfg, "limit", 10)
 	switch w.Type {
 	case "stat":
@@ -668,7 +726,10 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFil
 // aggregation. It is intentionally opt-in because counts, sums, snapshots, and
 // distinct values can all use the same comparison, while dashboards that do
 // not want it keep their existing payload unchanged.
-func addPreviousPeriodComparison(db *sql.DB, result map[string]any, current Filter, cfg map[string]any, aggregation string) error {
+func addPreviousPeriodComparison(db sqlRunner, result map[string]any, current Filter, cfg map[string]any, aggregation string) error {
+	if result["value"] == nil {
+		return nil
+	}
 	if stringConfig(cfg, "comparison", "") != "previous_period" {
 		return nil
 	}
@@ -730,7 +791,7 @@ func numericMapValue(value any) (float64, bool) {
 	}
 }
 
-func evaluateStatWidget(db *sql.DB, f Filter, widgetType string, cfg map[string]any, aggregation string) (map[string]any, error) {
+func evaluateStatWidget(db sqlRunner, f Filter, widgetType string, cfg map[string]any, aggregation string) (map[string]any, error) {
 	valueKey := stringConfig(cfg, "value", "")
 	by := stringConfig(cfg, "by", "")
 	if aggregation == "count" {
@@ -806,7 +867,8 @@ func filterFromWidget(projectID string, cfg map[string]any) Filter {
 		Source:    stringConfig(cfg, "source", ""),
 	}
 	if window > 0 {
-		f.Since = time.Now().UnixMilli() - window
+		f.Until = time.Now().UnixMilli() + 1
+		f.Since = f.Until - window
 	}
 	if raw, ok := cfg["where"].(map[string]any); ok {
 		f.Where = raw
@@ -814,8 +876,22 @@ func filterFromWidget(projectID string, cfg map[string]any) Filter {
 	return f
 }
 
-func seriesForWidget(db *sql.DB, f Filter, interval, valueKey, by, aggregation string) ([]map[string]any, error) {
-	where, args := f.buildWhere()
+func seriesForWidget(db sqlRunner, f Filter, interval, valueKey, by, aggregation string) ([]map[string]any, error) {
+	start, end, step, err := seriesGrid(db, f, interval)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := seriesForWidgetRaw(db, f, fmt.Sprintf("grid:%d", step), valueKey, by, aggregation)
+	if err != nil {
+		return nil, err
+	}
+	return fillSeries(rows, start, end, step, aggregation), nil
+}
+func seriesForWidgetRaw(db sqlRunner, f Filter, interval, valueKey, by, aggregation string) ([]map[string]any, error) {
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	bucketExpr := dashboardBucketExpr(interval)
 	if aggregation == "latest" || aggregation == "change" {
 		return orderedSeriesForWidget(db, f, bucketExpr, valueKey, aggregation)
@@ -893,6 +969,9 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey, by, aggregation s
 }
 
 func dashboardBucketExpr(interval string) string {
+	if step, ok := parseGridInterval(interval); ok {
+		return gridBucketExpr(step)
+	}
 	switch interval {
 	case "hour":
 		return "strftime('%Y-%m-%dT%H:00:00Z', ts / 1000, 'unixepoch')"
@@ -903,12 +982,15 @@ func dashboardBucketExpr(interval string) string {
 	}
 }
 
-func numericScalarForWidget(db *sql.DB, f Filter, valueKey, aggregation string) (map[string]any, error) {
+func numericScalarForWidget(db sqlRunner, f Filter, valueKey, aggregation string) (map[string]any, error) {
 	expr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok {
 		return nil, fmt.Errorf("value must be a numeric event field or props.X")
 	}
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	valueWhere := expr + " IS NOT NULL"
 	if where != "" {
 		valueWhere = where + " AND " + valueWhere
@@ -930,7 +1012,13 @@ func numericScalarForWidget(db *sql.DB, f Filter, valueKey, aggregation string) 
 	if invalid > 0 {
 		return nil, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
 	}
-	resultValue := 0.0
+	var resultValue any = float64(0)
+	if !value.Valid && aggregation != "sum" {
+		resultValue = nil
+	}
+	if value.Valid && (math.IsNaN(value.Float64) || math.IsInf(value.Float64, 0)) {
+		return nil, errors.New("numeric aggregate overflow")
+	}
 	if value.Valid {
 		resultValue = value.Float64
 	}
@@ -939,7 +1027,7 @@ func numericScalarForWidget(db *sql.DB, f Filter, valueKey, aggregation string) 
 
 // sumScalarForWidget remains the shared strict-sum primitive used by v0.9
 // objective targets as well as legacy dashboard callers.
-func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, error) {
+func sumScalarForWidget(db sqlRunner, f Filter, valueKey string) (float64, int64, error) {
 	result, err := numericScalarForWidget(db, f, valueKey, "sum")
 	if err != nil {
 		return 0, 0, err
@@ -949,7 +1037,7 @@ func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, 
 	return value, count, nil
 }
 
-func orderedScalarForWidget(db *sql.DB, expr, numericPredicate, where string, args []any, valueKey, aggregation string) (map[string]any, error) {
+func orderedScalarForWidget(db sqlRunner, expr, numericPredicate, where string, args []any, valueKey, aggregation string) (map[string]any, error) {
 	var invalid int64
 	if err := db.QueryRow("SELECT COALESCE(SUM(CASE WHEN "+numericPredicate+" THEN 0 ELSE 1 END), 0) FROM events WHERE "+where, args...).Scan(&invalid); err != nil {
 		return nil, err
@@ -988,15 +1076,22 @@ func orderedScalarForWidget(db *sql.DB, expr, numericPredicate, where string, ar
 			result["change_percent"] = change / previous * 100
 		}
 	}
+	if count == 0 || (aggregation == "change" && count < 2) {
+		result["value"] = nil
+		result["status"] = "no_data"
+	}
 	return result, nil
 }
 
-func orderedSeriesForWidget(db *sql.DB, f Filter, bucketExpr, valueKey, aggregation string) ([]map[string]any, error) {
+func orderedSeriesForWidget(db sqlRunner, f Filter, bucketExpr, valueKey, aggregation string) ([]map[string]any, error) {
 	expr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok || valueKey == "" {
 		return nil, fmt.Errorf("%s aggregation requires a numeric event field or props.X", aggregation)
 	}
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
 	if where != "" {
 		where += " AND " + expr + " IS NOT NULL"
 	} else {
@@ -1062,12 +1157,15 @@ func orderedSeriesForWidget(db *sql.DB, f Filter, bucketExpr, valueKey, aggregat
 	return out, nil
 }
 
-func distinctCount(db *sql.DB, f Filter, by string) (int64, error) {
+func distinctCount(db sqlRunner, f Filter, by string) (int64, error) {
 	expr, ok := dashboardGroupExpr(by)
 	if !ok {
 		return 0, fmt.Errorf("by must be session_id, user_id, app, topic, source or props.X")
 	}
-	where, args := f.buildWhere()
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return 0, filterErr
+	}
 	q := "SELECT COUNT(DISTINCT " + expr + ") FROM events"
 	if where != "" {
 		q += " WHERE " + where + " AND " + expr + " IS NOT NULL"
@@ -1101,10 +1199,10 @@ func resolveDashboardFilters(cfg map[string]any, selected map[string]any) map[st
 	for k, v := range out {
 		if s, ok := v.(string); ok {
 			if resolved, found := filterPlaceholderValue(s, selected); found {
-				if isEmptyDashboardFilterValue(resolved) {
+				if k != "window" && isEmptyDashboardFilterValue(resolved) {
 					delete(out, k)
 				} else {
-					out[k] = resolved
+					out[k] = unwrapFilterValue(resolved)
 				}
 			}
 		}
@@ -1116,14 +1214,12 @@ func resolveDashboardFilters(cfg map[string]any, selected map[string]any) map[st
 				resolved, found := filterPlaceholderValue(s, selected)
 				if found {
 					if !isEmptyDashboardFilterValue(resolved) {
-						where[k] = resolved
+						where[k] = unwrapFilterValue(resolved)
 					}
 					continue
 				}
 			}
-			if !isEmptyDashboardFilterValue(v) {
-				where[k] = v
-			}
+			where[k] = v
 		}
 		if len(where) == 0 {
 			delete(out, "where")
@@ -1146,6 +1242,11 @@ func filterPlaceholderValue(s string, selected map[string]any) (any, bool) {
 	if !ok {
 		return nil, true
 	}
+	if wrapped, ok := value.(map[string]any); ok {
+		if typed, found := wrapped["value"]; found {
+			return typedFilterValue{typed}, true
+		}
+	}
 	return value, true
 }
 
@@ -1155,7 +1256,7 @@ func isEmptyDashboardFilterValue(v any) bool {
 	}
 	switch raw := v.(type) {
 	case string:
-		return raw == "" || raw == "all"
+		return raw == "" || raw == "all" // Legacy placeholder sentinel; typed selections use a value wrapper.
 	case []any:
 		if len(raw) == 0 {
 			return true
@@ -1181,7 +1282,7 @@ func isEmptyDashboardFilterValue(v any) bool {
 	}
 }
 
-func dashboardFilterOptions(db *sql.DB, projectID string, filter map[string]any) ([]map[string]any, error) {
+func dashboardFilterOptions(db sqlRunner, projectID string, filter map[string]any) ([]map[string]any, error) {
 	source, ok := filter["source"].(map[string]any)
 	if !ok {
 		if options, ok := filter["options"].([]any); ok {
@@ -1226,12 +1327,23 @@ func dashboardFilterOptions(db *sql.DB, projectID string, filter map[string]any)
 			f.Since = time.Now().UnixMilli() - ms
 		}
 	}
-	where, args := f.buildWhere()
-	q := "SELECT " + valueExpr + " AS value, MAX(CAST(" + labelExpr + " AS TEXT)) AS label, COUNT(*) AS count FROM events"
+	where, args, filterErr := f.buildWhere()
+	if filterErr != nil {
+		return nil, filterErr
+	}
+	typedExpr := "json_quote(" + valueExpr + ")"
+	if path, ok := propsJSONPath(valueField); ok {
+		typedExpr = "CASE json_type(props, '" + path + "') WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ELSE json_quote(" + valueExpr + ") END"
+	}
+	presentPredicate := valueExpr + " IS NOT NULL"
+	if path, ok := propsJSONPath(valueField); ok {
+		presentPredicate = "json_type(props, '" + path + "') IS NOT NULL"
+	}
+	q := "SELECT " + typedExpr + " AS value, MAX(CAST(" + labelExpr + " AS TEXT)) AS label, COUNT(*) AS count FROM events"
 	if where != "" {
-		q += " WHERE " + where + " AND " + valueExpr + " IS NOT NULL"
+		q += " WHERE " + where + " AND " + presentPredicate
 	} else {
-		q += " WHERE " + valueExpr + " IS NOT NULL"
+		q += " WHERE " + presentPredicate
 	}
 	q += " GROUP BY value ORDER BY label COLLATE NOCASE LIMIT 200"
 	rows, err := db.Query(q, args...)
@@ -1249,11 +1361,15 @@ func dashboardFilterOptions(db *sql.DB, projectID string, filter map[string]any)
 		if !value.Valid || value.String == "" {
 			continue
 		}
-		display := value.String
+		var typed any
+		if err := json.Unmarshal([]byte(value.String), &typed); err != nil {
+			return nil, err
+		}
+		display := fmt.Sprint(typed)
 		if label.Valid && label.String != "" {
 			display = label.String
 		}
-		out = append(out, map[string]any{"value": value.String, "label": display, "count": count})
+		out = append(out, map[string]any{"value": typed, "label": display, "count": count})
 	}
 	return out, rows.Err()
 }
@@ -1416,4 +1532,13 @@ func windowMillis(s string) int64 {
 	default:
 		return 24 * 3600 * 1000
 	}
+}
+
+type typedFilterValue struct{ Value any }
+
+func unwrapFilterValue(v any) any {
+	if w, ok := v.(typedFilterValue); ok {
+		return w.Value
+	}
+	return v
 }

@@ -70,13 +70,9 @@ func TestTenantSpawnEnvStripsParentAppIdentity(t *testing.T) {
 			t.Fatalf("%s leaked into tenant environment as %q", key, value)
 		}
 	}
-	if got["APTEVA_DELEGATED_DNS_FLEET_URL"] != "http://127.0.0.1:5555" {
-		t.Fatalf("delegated Fleet URL = %q", got["APTEVA_DELEGATED_DNS_FLEET_URL"])
-	}
-	if got["APTEVA_DELEGATED_DNS_TOKEN"] != "parent-app-token" {
-		t.Fatalf("delegated token was not copied explicitly")
-	}
-	if got["APTEVA_DELEGATED_DNS_PROJECT_ID"] != "parent-project" {
-		t.Fatalf("delegated project was not copied explicitly")
+	for _, key := range []string{"APTEVA_DELEGATED_DNS_FLEET_URL", "APTEVA_DELEGATED_DNS_TOKEN", "APTEVA_DELEGATED_DNS_PROJECT_ID", "FLEET_MASTER_KEY"} {
+		if got[key] != "" {
+			t.Fatalf("parent credential leaked: %s", key)
+		}
 	}
 }

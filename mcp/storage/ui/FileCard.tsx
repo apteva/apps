@@ -7,7 +7,7 @@
 // The only storage-specific code is the thumbnail preview (image /
 // video / icon by MIME) and the metadata fetch.
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { Card, CardHeader, DataList, type CardVendor } from "@apteva/ui-kit";
 
 // Brand identity for storage cards. First-party Apteva app, so we
@@ -43,6 +43,7 @@ interface Props {
   /** Injected by the host — scopes the metadata fetch and the event
    *  subscription to the right project. */
   projectId?: string;
+  installId?: number;
   /** Soft convention: when true, render synthetic sample data
    *  instead of fetching. Used by the dashboard's app detail panel
    *  to preview a brand-new install before any real files exist. */
@@ -66,8 +67,10 @@ function useStorageEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { id?: number } }) => void,
 ) {
+  const handlerRef = useRef(onEvent); handlerRef.current = onEvent;
   useEffect(() => {
     if (!projectId) return;
+    const handler = (ev: any) => handlerRef.current(ev);
 
     // Bridge to the dashboard's shared (app, project) multiplexer
     // when it's loaded. Without this, every Card mount opens its own
@@ -85,13 +88,13 @@ function useStorageEvents(
       };
     }).__aptevaAppEvents;
     if (bridge) {
-      return bridge.subscribe("storage", projectId, onEvent as any);
+      return bridge.subscribe("storage", projectId, handler as any);
     }
     const url = `/api/app-events/storage?project_id=${encodeURIComponent(projectId)}`;
     const es = new EventSource(url, { withCredentials: true });
     es.onmessage = (e) => {
       try {
-        onEvent(JSON.parse(e.data));
+        handler(JSON.parse(e.data));
       } catch {
         /* ignore malformed frames */
       }
@@ -101,26 +104,33 @@ function useStorageEvents(
   }, [projectId]);
 }
 
-export default function FileCard({ file_id, projectId, preview }: Props) {
+export default function FileCard(props: Props) { return <FileCardContent key={`${props.projectId}:${props.installId}:${props.file_id}:${props.preview}`} {...props} />; }
+function FileCardContent({ file_id, projectId, installId, preview }: Props) {
   const [meta, setMeta] = useState<FileMeta | null>(preview ? previewSample : null);
   const [missing, setMissing] = useState(false);
 
+  const generation = useRef(0);
+  const controller = useRef<AbortController | null>(null);
+  const scope = new URLSearchParams({ ...(projectId ? { project_id: projectId } : {}), ...(installId != null ? { install_id: String(installId) } : {}) }).toString();
   const refetch = () => {
+    const request = ++generation.current; controller.current?.abort(); controller.current = new AbortController();
     if (preview) return;
     if (!projectId) return;
     const url =
       `/api/apps/storage/files/${file_id}` +
-      `?project_id=${encodeURIComponent(projectId)}`;
-    fetch(url, { credentials: "same-origin" })
+      `?${scope}`;
+    fetch(url, { credentials: "same-origin", signal: controller.current.signal })
       .then((r) => {
+        if (request !== generation.current) return null;
         if (r.status === 404) {
           setMissing(true);
           return null;
         }
+        if (!r.ok) throw new Error(String(r.status));
         return r.json();
       })
       .then((data) => {
-        if (!data) return;
+        if (!data || request !== generation.current) return;
         const file =
           (data.file as FileMeta | undefined) ??
           (data.id ? (data as FileMeta) : null);
@@ -137,12 +147,13 @@ export default function FileCard({ file_id, projectId, preview }: Props) {
 
   useEffect(() => {
     refetch();
+    return () => { generation.current++; controller.current?.abort(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file_id, projectId]);
+  }, [file_id, projectId, installId]);
 
   useStorageEvents(preview ? undefined : projectId, (ev) => {
     if (ev?.data?.id !== file_id) return;
-    if (ev.topic === "file.deleted") setMissing(true);
+    if (ev.topic === "file.deleted") { generation.current++; controller.current?.abort(); setMissing(true); }
     else refetch();
   });
 
@@ -168,7 +179,7 @@ export default function FileCard({ file_id, projectId, preview }: Props) {
   // photo on every refresh, no dependency on auth or our backend.
   const contentURL = preview
     ? "https://picsum.photos/seed/apteva-storage/480/300"
-    : `/api/apps/storage/files/${file_id}/content`;
+    : `/api/apps/storage/files/${file_id}/content?${scope}`;
 
   // Whole card isn't wrapped in <a> — that nested an anchor inside
   // CardHeader's own "Open" link, which the HTML parser splits and

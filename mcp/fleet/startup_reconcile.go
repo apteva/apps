@@ -92,7 +92,7 @@ func (a *App) reconcileHostedOnBoot(ctx context.Context, app *sdk.AppCtx, t *Ten
 		return err
 	}
 	if !alive {
-		a.tryRespawnHosted(ctx, app, t)
+		a.tryRespawnHostedLocked(ctx, app, t)
 		if err := a.retryHostedStartup(ctx, app, "verify respawned hosted tenant port", func() error {
 			var err error
 			alive, err = hostedPortListening(app, t.InstanceID, port)

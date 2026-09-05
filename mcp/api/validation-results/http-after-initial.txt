@@ -1,0 +1,35 @@
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=4.705 p50_ms=0.970 p95_ms=3.107 requests_per_second=781.04 total_with_log_drain_ms=128.035
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=1.451 p50_ms=1.380 p95_ms=57.142 requests_per_second=128.49 total_with_log_drain_ms=778.284
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=65.400 p50_ms=2.064 p95_ms=30.978 requests_per_second=149.95 total_with_log_drain_ms=666.879
+--- PASS: TestGatewayHTTPPerformance (1.74s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.16s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.79s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.78s)
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=59.743 p50_ms=2.295 p95_ms=30.656 requests_per_second=134.19 total_with_log_drain_ms=745.216
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=3.914 p50_ms=5.235 p95_ms=82.439 requests_per_second=65.36 total_with_log_drain_ms=1529.923
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=29.790 p50_ms=2.746 p95_ms=26.488 requests_per_second=123.65 total_with_log_drain_ms=808.765
+--- PASS: TestGatewayHTTPPerformance (3.39s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.90s)
+    --- PASS: TestGatewayHTTPPerformance/100 (1.54s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (0.96s)
+=== RUN   TestGatewayHTTPPerformance
+=== RUN   TestGatewayHTTPPerformance/10
+    performance_test.go:74: PERF routes=10 requests=100 cold_ms=7.403 p50_ms=1.676 p95_ms=30.938 requests_per_second=141.26 total_with_log_drain_ms=707.925
+=== RUN   TestGatewayHTTPPerformance/100
+    performance_test.go:74: PERF routes=100 requests=100 cold_ms=12.938 p50_ms=2.357 p95_ms=43.302 requests_per_second=137.60 total_with_log_drain_ms=726.758
+=== RUN   TestGatewayHTTPPerformance/1000
+    performance_test.go:74: PERF routes=1000 requests=100 cold_ms=6.223 p50_ms=6.057 p95_ms=59.554 requests_per_second=67.51 total_with_log_drain_ms=1481.243
+--- PASS: TestGatewayHTTPPerformance (2.99s)
+    --- PASS: TestGatewayHTTPPerformance/10 (0.72s)
+    --- PASS: TestGatewayHTTPPerformance/100 (0.74s)
+    --- PASS: TestGatewayHTTPPerformance/1000 (1.53s)
+PASS
+ok  	github.com/apteva/apps/mcp/api	8.662s

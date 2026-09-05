@@ -100,6 +100,8 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 		return s.executeReply, nil
 	}
 	switch tool {
+	case "get_bucket_policy":
+		return &sdk.ExecuteResult{Success: false, Status: 404, Data: json.RawMessage(`{"Code":"NoSuchBucketPolicy"}`)}, nil
 	case "send_email":
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"MessageId":"ses-msg-123"}`)}, nil
 	case "send_raw_email":
@@ -121,6 +123,9 @@ func (s *stubPlatform) CallApp(app, tool string, input map[string]any) (json.Raw
 	}
 	if raw, ok := s.callAppReplyByTool[tool]; ok {
 		return raw, nil
+	}
+	if app == "domains" && tool == "domain_records_list" && len(s.callAppReply) == 0 {
+		return json.RawMessage(`{"records":[]}`), nil
 	}
 	return s.callAppReply, nil
 }
@@ -258,7 +263,7 @@ func TestDispatchInbound_GenericRouteIncludesStableAttachmentMetadata(t *testing
 	}
 	var firstID int64
 	for i, call := range plat.callAppCalls {
-		if call.App != "support" || call.Tool != "/receive" {
+		if call.App != "support" || call.Tool != "receive" {
 			t.Fatalf("call=%+v", call)
 		}
 		attachments, ok := call.Input["attachments"].([]MessageAttachment)
@@ -374,7 +379,7 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 }
 func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
 	if s.connectionCreds == nil {
-		return nil, tk.ErrNotImplemented
+		return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "aws-ses", Fields: map[string]string{"region": "eu-west-1"}}, nil
 	}
 	fields, ok := s.connectionCreds[id]
 	if !ok {
@@ -631,20 +636,18 @@ func TestValidatePublicHTTPURLRejectsLocalTargets(t *testing.T) {
 }
 
 func TestBootstrapPublishDNSRecordUsesPlatformGrant(t *testing.T) {
-	plat := &stubPlatform{
-		domainGrants: []sdk.DomainGrant{{Domain: "example.com", Status: "active"}},
-		dnsResult:    &sdk.DNSRecordResult{OK: true, Action: "updated"},
-	}
+	plat := &stubPlatform{domainGrants: []sdk.DomainGrant{{Domain: "example.com", Status: "active"}}, dnsResult: &sdk.DNSRecordResult{OK: true, Action: "updated"}}
 	ctx := newTestCtx(t, plat)
 	step := bootstrapPublishDNSRecord(ctx, "test-proj", "publish_dmarc", "example.com", "_dmarc", "TXT", "v=DMARC1; p=none")
-	if !step.OK || step.Detail != "updated" {
-		t.Fatalf("step=%+v", step)
+	if step.OK || len(plat.dnsRequests) != 0 || !strings.Contains(step.Error, "inventory unavailable") {
+		t.Fatalf("must not overwrite unknown DMARC: %+v", step)
 	}
-	if len(plat.dnsRequests) != 1 {
-		t.Fatalf("DNS requests=%d", len(plat.dnsRequests))
+	step = bootstrapPublishDNSRecord(ctx, "test-proj", "publish_dkim", "example.com", "token._domainkey", "CNAME", "token.dkim.amazonses.com")
+	if !step.OK || len(plat.dnsRequests) != 1 {
+		t.Fatalf("DKIM with platform grant: %+v", step)
 	}
 	req := plat.dnsRequests[0]
-	if req.ProjectID != "test-proj" || req.Domain != "example.com" || req.Name != "_dmarc" || req.Type != "TXT" {
+	if req.ProjectID != "test-proj" || req.Type != "CNAME" || req.Name != "token._domainkey" {
 		t.Fatalf("request=%+v", req)
 	}
 }
@@ -2747,7 +2750,7 @@ func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T)
 	for _, want := range []string{
 		"/api/apps/messaging/webhooks/ses-bounces?",
 		"/api/apps/messaging/webhooks/ses-inbound?",
-		"api_key=dev-47",
+		"install_id=47",
 		"project_id=test-proj",
 	} {
 		if !strings.Contains(joined, want) {
@@ -2802,8 +2805,8 @@ func TestSendersCreate_Domain_GlobalInstallWebhookURLsOmitProject(t *testing.T) 
 		}
 	}
 	joined := strings.Join(endpoints, "\n")
-	if !strings.Contains(joined, "api_key=dev-47") {
-		t.Fatalf("subscribe endpoints missing api key:\n%s", joined)
+	if strings.Contains(joined, "api_key=") || !strings.Contains(joined, "install_id=47") {
+		t.Fatalf("subscribe endpoints exposed app token:\n%s", joined)
 	}
 	if strings.Contains(joined, "project_id=") {
 		t.Fatalf("global install webhook endpoints should omit project_id:\n%s", joined)
@@ -2888,115 +2891,22 @@ func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
 // describe → merge → delete → recreate-with-both, not the pre-v0.12.5
 // silent no-op.
 func TestSendersCreate_Domain_AlreadyExists_MergesRecipients(t *testing.T) {
-	const describeReply = `{
-		"DescribeActiveReceiptRuleSetResponse": {
-			"DescribeActiveReceiptRuleSetResult": {
-				"Metadata": {"Name":"apteva-default"},
-				"Rules": {"member":[
-					{"Name":"messaging-inbound-47","Recipients":{"member":["schwartzindustries.com"]}}
-				]}
-			}
-		}
-	}`
-	plat := &stubPlatform{
-		bindingsOverride: map[string]any{
-			"email_provider":        float64(1),
-			"inbound_storage":       float64(2),
-			"inbound_notifications": float64(3),
-		},
-		whoAmIOverride: &sdk.InstallIdentity{
-			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
-		},
-		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
-			"set_topic_attributes":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"create_s3_bucket":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"put_s3_bucket_policy":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"verify_domain":           {Success: true, Status: 200, Data: json.RawMessage(`{"DkimAttributes":{"Tokens":["a","b","c"],"Status":"SUCCESS"}}`)},
-			"create_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			// First create_receipt_rule call (for the new domain) fails
-			// AlreadyExists; merge path then describes, deletes, recreates.
-			"set_active_receipt_rule_set":      {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"subscribe":                        {Success: true, Status: 200, Data: json.RawMessage(`{"SubscribeResponse":{"SubscribeResult":{"SubscriptionArn":"arn:sub"}}}`)},
-			"delete_receipt_rule":              {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
-			"describe_active_receipt_rule_set": {Success: true, Status: 200, Data: json.RawMessage(describeReply)},
-		},
-		// create_receipt_rule needs a per-call switch: first AlreadyExists,
-		// second (recreate) success. Use a tiny dispatcher.
-		executeOverride: func(tool string, calls int) *sdk.ExecuteResult {
-			if tool == "create_receipt_rule" {
-				if calls == 0 {
-					return &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"Error":{"Code":"AlreadyExists","Message":"Rule already exists"}}`)}
-				}
-				return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{}`)}
-			}
-			return nil
-		},
-	}
-	t.Setenv("APTEVA_PUBLIC_URL", "https://test.public.example")
+	plat := &stubPlatform{replyByTool: map[string]*sdk.ExecuteResult{
+		"describe_receipt_rule": {Success: true, Data: json.RawMessage(`{"DescribeReceiptRuleResponse":{"DescribeReceiptRuleResult":{"Rule":{"Name":"messaging-inbound-47","Recipients":{"member":"schwartzindustries.com"},"Enabled":true,"ScanEnabled":true,"TlsPolicy":"Require","Actions":{"member":{"S3Action":{"BucketName":"existing-bucket","ObjectKeyPrefix":"mail/"}}}}}}}`)},
+	}}
 	ctx := newTestCtx(t, plat)
-	app := &App{}
-
-	if _, err := app.toolSendersCreate(ctx, map[string]any{
-		"address": "hypnofans.com",
-		"inbound": "true",
-	}); err != nil {
+	if err := mergeReceiptRuleRecipient(ctx, 1, "existing-set", "messaging-inbound-47", "hypnofans.com", "unused", "unused"); err != nil {
 		t.Fatal(err)
 	}
-
-	// Confirm the dispatch order: create → describe → delete → create.
-	var seq []string
-	for _, c := range plat.executeCalls {
-		switch c.Tool {
-		case "create_receipt_rule", "describe_active_receipt_rule_set", "delete_receipt_rule":
-			seq = append(seq, c.Tool)
-		}
+	if len(plat.executeCalls) != 2 || plat.executeCalls[0].Tool != "describe_receipt_rule" || plat.executeCalls[1].Tool != "update_receipt_rule" {
+		t.Fatalf("unexpected mutations: %+v", plat.executeCalls)
 	}
-	if len(seq) != 4 ||
-		seq[0] != "create_receipt_rule" ||
-		seq[1] != "describe_active_receipt_rule_set" ||
-		seq[2] != "delete_receipt_rule" ||
-		seq[3] != "create_receipt_rule" {
-		t.Fatalf("expected create→describe→delete→create dispatch, got %v", seq)
+	got := plat.executeCalls[1].Input
+	if got["Rule.Recipients.member.1"] != "schwartzindustries.com" || got["Rule.Recipients.member.2"] != "hypnofans.com" {
+		t.Fatalf("recipients=%+v", got)
 	}
-
-	// The recreate (2nd create_receipt_rule call) must carry BOTH the
-	// existing (schwartzindustries.com) and the new (hypnofans.com)
-	// recipient. Pre-v0.12.5 the bug was the silent no-op; this
-	// assertion is the actual fix.
-	var recreate *executeCall
-	createSeen := 0
-	for i := range plat.executeCalls {
-		if plat.executeCalls[i].Tool == "create_receipt_rule" {
-			createSeen++
-			if createSeen == 2 {
-				recreate = &plat.executeCalls[i]
-				break
-			}
-		}
-	}
-	if recreate == nil {
-		t.Fatal("no 2nd create_receipt_rule call (the recreate after delete)")
-	}
-	for _, key := range []string{"Rule.Recipients.member.1", "Rule.Recipients.member.2"} {
-		if recreate.Input[key] == nil {
-			t.Errorf("recreate missing %s: %+v", key, recreate.Input)
-		}
-	}
-	got := []string{
-		fmt.Sprint(recreate.Input["Rule.Recipients.member.1"]),
-		fmt.Sprint(recreate.Input["Rule.Recipients.member.2"]),
-	}
-	want := map[string]bool{"schwartzindustries.com": false, "hypnofans.com": false}
-	for _, r := range got {
-		if _, ok := want[r]; ok {
-			want[r] = true
-		}
-	}
-	for r, seen := range want {
-		if !seen {
-			t.Errorf("merged recipients missing %q (got %v)", r, got)
-		}
+	if got["Rule.Actions.member.1.S3Action.BucketName"] != "existing-bucket" || got["Rule.TlsPolicy"] != "Require" || got["RuleSetName"] != "existing-set" {
+		t.Fatalf("existing settings lost: %+v", got)
 	}
 }
 
@@ -4473,7 +4383,7 @@ func TestSendMessageSMS_UsesDefaultSenderAndStatusCallback(t *testing.T) {
 	cb, _ := sendCall.Input["StatusCallback"].(string)
 	if !strings.Contains(cb, "/api/apps/messaging/webhooks/twilio-status") ||
 		!strings.Contains(cb, "project_id=test-proj") ||
-		!strings.Contains(cb, "api_key=tok") {
+		strings.Contains(cb, "api_key=") {
 		t.Errorf("StatusCallback=%q", cb)
 	}
 }
@@ -4719,7 +4629,7 @@ func TestTwilioInboundWebhook_PersistsSMSAndDispatches(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -4772,7 +4682,7 @@ func TestTwilioInboundWebhook_UsesBoundConnectionCredentials(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -4796,7 +4706,7 @@ func TestTwilioInboundWebhook_FailsClosedWithoutAuthToken(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", "forged")
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
@@ -4838,7 +4748,7 @@ func TestTwilioInboundWebhook_DeduplicatesMessageSid(t *testing.T) {
 		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		r.Header.Set("X-Twilio-Signature", signature)
 		w := httptest.NewRecorder()
-		app.handleTwilioInboundWebhook(w, r)
+		app.handleTwilioInboundAndProcessForTest(w, r)
 		if w.Code != http.StatusOK {
 			t.Fatalf("attempt %d status=%d body=%s", i+1, w.Code, w.Body.String())
 		}
@@ -4885,7 +4795,7 @@ func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
@@ -4933,7 +4843,7 @@ func TestTwilioInboundWebhook_AutoSuppressesOnSTOP(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", sig)
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)
@@ -4971,7 +4881,7 @@ func TestTwilioInboundWebhook_RejectsBadSignature(t *testing.T) {
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.Header.Set("X-Twilio-Signature", "AAAA")
 	w := httptest.NewRecorder()
-	app.handleTwilioInboundWebhook(w, r)
+	app.handleTwilioInboundAndProcessForTest(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d body=%s", w.Code, w.Body.String())
 	}
@@ -5163,7 +5073,7 @@ func TestSESInbound_PersistsVerdicts(t *testing.T) {
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
 	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
-	app.handleInboundWebhook(w, r)
+	app.handleInboundAndProcessForTest(w, r)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status=%d", w.Code)

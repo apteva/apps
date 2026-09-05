@@ -31,12 +31,6 @@ func requestProjectID(r *http.Request) (string, error) {
 		}
 		return authorized, nil
 	}
-	// Global installs receive a gateway-authorized project in both the query
-	// and trusted header. Retaining the query fallback keeps direct SDK tests
-	// and project-scoped legacy installs usable without weakening mismatch checks.
-	if query != "" {
-		return query, nil
-	}
 	return "", errors.New("project context required")
 }
 

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 const patreonMediaPublishFixtureURL = "https://iframe.mediadelivery.net/play/374587/dfea9276-4b32-44e2-be3a-87d137752dc6"
@@ -36,7 +38,7 @@ func TestComputerPatreonRealMediaPublish(t *testing.T) {
 	if os.Getenv("COMPUTER_PATREON_ALLOW_PUBLISH") != "I_ACKNOWLEDGE_LIVE_PUBLISH" {
 		t.Fatal("COMPUTER_PATREON_ALLOW_PUBLISH=I_ACKNOWLEDGE_LIVE_PUBLISH is required because this test publishes a real post")
 	}
-	contextID := requireLiveEnv(t, "COMPUTER_PATREON_CONTEXT_ID")
+	contextID := patreonContextReference(t)
 	creatorURL := requireLiveEnv(t, "COMPUTER_PATREON_CREATOR_URL")
 	if parsed, err := url.Parse(creatorURL); err != nil || !strings.HasSuffix(strings.ToLower(parsed.Hostname()), "patreon.com") {
 		t.Fatalf("COMPUTER_PATREON_CREATOR_URL must be a patreon.com creator page, got %q", creatorURL)
@@ -50,7 +52,7 @@ func TestComputerPatreonRealMediaPublish(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer client.call(t, "browser_session", map[string]any{"action": "close", "session_id": sessionID})
+	defer closePatreonTestSession(t, client, sessionID)
 	if intFromAny(opened["effective_timeout_seconds"]) < 1800 {
 		t.Fatalf("media publish session received a short provider lifetime: %v", opened)
 	}
@@ -242,7 +244,7 @@ func assertRealMediaLoaded(t *testing.T, result map[string]any, requireConfigura
 	}
 }
 
-// TestComputerPatreonRealContenteditableWithLLM is an opt-in regression for
+// TestLLMPatreonRealContenteditableLive is a tier 3 regression for
 // the real Patreon ProseMirror/Remirror post editor. A real authenticated LLM
 // chooses the post-body target from Computer's screenshot and SoM. The test
 // replaces only the disposable draft body, verifies the reconciled value and
@@ -255,14 +257,17 @@ func assertRealMediaLoaded(t *testing.T, result map[string]any, requireConfigura
 //	COMPUTER_PATREON_CONTEXT_ID=ctx_...
 //	COMPUTER_PATREON_DRAFT_URL=https://www.patreon.com/.../edit
 //	COMPUTER_PATREON_ORIGINAL_TEXT='exact disposable draft body'
-func TestComputerPatreonRealContenteditableWithLLM(t *testing.T) {
-	if os.Getenv("RUN_COMPUTER_PATREON_TEXT_LIVE") != "1" {
-		t.Skip("set RUN_COMPUTER_PATREON_TEXT_LIVE=1 to run the real LLM + Patreon contenteditable test")
+func TestLLMPatreonRealContenteditableLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_PATREON_TEXT_LIVE") != "1" && os.Getenv("RUN_COMPUTER_LLM_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_LLM_TESTS=1")
 	}
-	if _, err := exec.LookPath("codex"); err != nil {
+	if os.Getenv("COMPUTER_PATREON_DRAFT_URL") == "" {
+		t.Skip("configure COMPUTER_PATREON_DRAFT_URL for the saved-context tier 3 editor test")
+	}
+	if _, err := exec.LookPath(computerLLMBinary()); err != nil {
 		t.Skip("codex CLI is required for the authenticated LLM regression")
 	}
-	contextID := requireLiveEnv(t, "COMPUTER_PATREON_CONTEXT_ID")
+	contextID := patreonContextReference(t)
 	draftURL := requireLiveEnv(t, "COMPUTER_PATREON_DRAFT_URL")
 	original := requireLiveEnv(t, "COMPUTER_PATREON_ORIGINAL_TEXT")
 	if parsed, err := url.Parse(draftURL); err != nil || !strings.HasSuffix(strings.ToLower(parsed.Hostname()), "patreon.com") || !strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/edit") {
@@ -277,10 +282,11 @@ func TestComputerPatreonRealContenteditableWithLLM(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer client.call(t, "browser_session", map[string]any{"action": "close", "session_id": sessionID})
+	defer closePatreonTestSession(t, client, sessionID)
 
 	shot := liveScreenshot(t, client, sessionID)
 	frame := decodeScreenshot(t, shot)
+
 	marker := "COMPUTER_SET_TEXT_LIVE_PROBE_20260829"
 	var decision semanticTextDecision
 	callComputerLLM(t, frame,
@@ -367,7 +373,7 @@ func TestComputerPatreonRealSite(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_PATREON_LIVE") != "1" {
 		t.Skip("set RUN_COMPUTER_PATREON_LIVE=1 to run against Patreon")
 	}
-	contextID := requireLiveEnv(t, "COMPUTER_PATREON_CONTEXT_ID")
+	contextID := patreonContextReference(t)
 	draftURL := requireLiveEnv(t, "COMPUTER_PATREON_DRAFT_URL")
 	dateValue := requireLiveEnv(t, "COMPUTER_PATREON_DATE")
 	timeValue := requireLiveEnv(t, "COMPUTER_PATREON_TIME")
@@ -383,7 +389,7 @@ func TestComputerPatreonRealSite(t *testing.T) {
 	if sessionID == "" {
 		t.Fatalf("open returned no session id: %v", opened)
 	}
-	defer client.call(t, "browser_session", map[string]any{"action": "close", "session_id": sessionID})
+	defer closePatreonTestSession(t, client, sessionID)
 	if intFromAny(opened["effective_timeout_seconds"]) < 1800 || stringValue(opened["expires_at"]) == "" {
 		t.Fatalf("hosted session lifetime diagnostics are incomplete: %v", opened)
 	}
@@ -516,14 +522,40 @@ func TestComputerPatreonRealSite(t *testing.T) {
 }
 
 type localComputerMCPClient struct {
+	sidecar   *tk.Sidecar
+	contextID string
 	endpoint  string
 	apiKey    string
 	projectID string
 	http      *http.Client
 }
 
+func patreonContextReference(t *testing.T) string {
+	t.Helper()
+	id := strings.TrimSpace(os.Getenv("COMPUTER_PATREON_CONTEXT_ID"))
+	if id == "" && strings.TrimSpace(os.Getenv("COMPUTER_PATREON_PROVIDER_CONTEXT_ID")) == "" {
+		t.Fatal("configure COMPUTER_PATREON_CONTEXT_ID or COMPUTER_PATREON_PROVIDER_CONTEXT_ID")
+	}
+	return id
+}
+
 func newLocalComputerMCPClient(t *testing.T) *localComputerMCPClient {
 	t.Helper()
+	if providerID := strings.TrimSpace(os.Getenv("COMPUTER_PATREON_PROVIDER_CONTEXT_ID")); providerID != "" {
+		if !browserbaseCredentialsAvailable() {
+			t.Fatal("Browserbase credentials are required for the isolated Patreon sidecar")
+		}
+		sc := tk.SpawnSidecar(t, ".")
+		created := sc.MCP("computer_context_create", map[string]any{
+			"name": "Patreon tier 3", "backend": "browserbase", "provider_context_id": providerID,
+		})
+		contextRecord, _ := created["context"].(map[string]any)
+		id := stringValue(contextRecord["id"])
+		if id == "" {
+			t.Fatalf("import Patreon context: %v", created)
+		}
+		return &localComputerMCPClient{sidecar: sc, contextID: id}
+	}
 	if endpoint := strings.TrimSpace(os.Getenv("COMPUTER_MCP_ENDPOINT")); endpoint != "" {
 		token := strings.TrimSpace(os.Getenv("COMPUTER_MCP_TOKEN"))
 		if token == "" {
@@ -580,6 +612,21 @@ func newLocalComputerMCPClient(t *testing.T) *localComputerMCPClient {
 
 func (c *localComputerMCPClient) call(t *testing.T, tool string, arguments map[string]any) map[string]any {
 	t.Helper()
+	if c.sidecar != nil {
+		if tool == "browser_session" && stringValue(arguments["action"]) == "open" {
+			if c.contextID != "" {
+				arguments["context_id"] = c.contextID
+			}
+		}
+		result, err := c.sidecar.MCPRaw("tools/call", map[string]any{"name": tool, "arguments": arguments})
+		if err != nil {
+			if strings.HasPrefix(err.Error(), "mcp error ") {
+				return map[string]any{"failed": true, "error": err.Error()}
+			}
+			t.Fatalf("transport calling %s: %v", tool, err)
+		}
+		return result
+	}
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{"name": tool, "arguments": arguments}})
 	req, err := http.NewRequest(http.MethodPost, c.endpoint, bytes.NewReader(body))
 	if err != nil {

@@ -443,6 +443,15 @@ func TestLifecycleReconciliationIsProjectScoped(t *testing.T) {
 }
 
 func TestCommittedLifecycleEventCanPublishAfterWorkerRestart(t *testing.T) {
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/app-events/internal/emit" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", gateway.URL)
+	t.Setenv("APTEVA_APP_TOKEN", "test-token")
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	db := &callsDB{db: ctx.AppDB()}
 	call := testCall("restart-publish", "initiated")

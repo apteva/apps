@@ -17,6 +17,13 @@ func contactAddedEvent(t *testing.T, rec *tk.EmitRecorder) (string, map[string]a
 	if !ok {
 		t.Fatalf("contact.added payload type=%T, want map[string]any", events[0].Data)
 	}
+	if raw, ok := payload["list_ids"].([]any); ok {
+		ids := make([]int64, 0, len(raw))
+		for _, v := range raw {
+			ids = append(ids, int64FromAny(v))
+		}
+		payload["list_ids"] = ids
+	}
 	return events[0].ProjectID, payload
 }
 

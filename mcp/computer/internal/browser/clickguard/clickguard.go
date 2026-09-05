@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"strings"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
@@ -79,7 +80,7 @@ func Click(ctx context.Context, x, y, clickCount int, options Options) (Target, 
 		clickCount = 1
 	}
 	var target Target
-	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		result, exception, err := cdpruntime.Evaluate(inspectScript(x, y, options.TargetID)).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return fmt.Errorf("inspect click target: %w", err)

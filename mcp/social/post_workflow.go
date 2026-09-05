@@ -30,10 +30,10 @@ func explicitPostMode(args map[string]any) (string, error) {
 
 func workflowActor(args map[string]any) string {
 	if actor := strings.TrimSpace(toString(args["_caller"])); actor != "" {
-		return actor
+		return "reported:" + actor
 	}
 	if actor := strings.TrimSpace(toString(args["actor"])); actor != "" {
-		return actor
+		return "reported:" + actor
 	}
 	return "system"
 }
@@ -192,6 +192,7 @@ func recordPostReviewTx(tx *sql.Tx, postID, revision int64, action, actor, reaso
 }
 
 func (a *App) toolPostDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	copyArgs := make(map[string]any, len(args)+1)
 	for key, value := range args {
 		copyArgs[key] = value
@@ -201,11 +202,14 @@ func (a *App) toolPostDraftCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolPostDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	expectedRevision := int64(intArg(args, "expected_revision", 0))
 	if postID <= 0 || expectedRevision <= 0 {
 		return mcpError("post_id and expected_revision are required"), nil
 	}
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	var currentStatus, body, mediaJSON, mediaProjectID string
 	var revision int64
@@ -262,7 +266,7 @@ func (a *App) toolPostDraftUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		    SET body=?, media_storage_ids=?, media_project_id=?, revision=revision+1,
 		        status='draft', approval_status='not_requested', approved_revision=0,
 		        rejection_reason='', requested_mode='draft', updated_at=CURRENT_TIMESTAMP
-		  WHERE id=? AND project_id=? AND revision=?`,
+		  WHERE id=? AND project_id=? AND revision=? AND status IN ('draft','rejected','approved')`,
 		body, mediaJSON, mediaProjectID, postID, pid, expectedRevision,
 	)
 	if err != nil {
@@ -305,6 +309,8 @@ func (a *App) transitionDraftReview(ctx *sdk.AppCtx, args map[string]any, action
 	if action == "reject" && reason == "" {
 		return mcpError("reason required when rejecting a draft"), nil
 	}
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -375,18 +381,22 @@ func (a *App) transitionDraftReview(ctx *sdk.AppCtx, args map[string]any, action
 }
 
 func (a *App) toolPostDraftSubmit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return a.transitionDraftReview(ctx, args, "submit")
 }
 
 func (a *App) toolPostDraftApprove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return a.transitionDraftReview(ctx, args, "approve")
 }
 
 func (a *App) toolPostDraftReject(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	return a.transitionDraftReview(ctx, args, "reject")
 }
 
 func (a *App) toolPostDraftPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = ctx.WithProject(projectScope(ctx, args))
 	postID := int64(intArg(args, "post_id", 0))
 	expectedRevision := int64(intArg(args, "expected_revision", 0))
 	mode := strings.ToLower(strings.TrimSpace(toString(args["mode"])))
@@ -409,6 +419,8 @@ func (a *App) toolPostDraftPublish(ctx *sdk.AppCtx, args map[string]any) (any, e
 	} else if scheduleAt != "" {
 		return mcpError("schedule_at is only valid when mode=schedule"), nil
 	}
+	unlock := lockSocialPost(ctx, postID)
+	defer unlock()
 	pid := projectScope(ctx, args)
 	var status, body string
 	var revision, approvedRevision, approvalRequired, targetCount int64
@@ -446,15 +458,19 @@ func (a *App) toolPostDraftPublish(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if mode == postModeSchedule {
 		nextStatus = "scheduled"
 	}
-	if _, err := tx.Exec(
-		`UPDATE posts SET status=?, requested_mode=?, schedule_at=?, job_id=0,
-		        updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND revision=?`,
+	res, err := tx.Exec(
+		`UPDATE posts SET status=?, requested_mode=?, schedule_at=?, job_id=0, schedule_generation=schedule_generation+1,
+		        updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND revision=? AND status IN ('draft','approved') AND (approval_required=0 OR (status='approved' AND approved_revision=revision))`,
 		nextStatus, mode, nullable(scheduleAt), postID, pid, revision,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, err
 	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return mcpError("post state or revision changed; reload before publishing"), nil
+	}
 	if _, err := tx.Exec(
-		`UPDATE post_targets SET status='pending', attempts=0, last_error=NULL,
+		`UPDATE post_targets SET status='pending', attempts=0, last_error=NULL, delivery_revision=(SELECT revision FROM posts WHERE id=post_id),
 		        failure_code='', retryable=1, upstream_status=0, existing_post_id=''
 		  WHERE post_id=?`, postID,
 	); err != nil {

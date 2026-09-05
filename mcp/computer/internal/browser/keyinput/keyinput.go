@@ -4,6 +4,7 @@ package keyinput
 import (
 	"context"
 	"fmt"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdputil"
 	"os"
 	"strings"
 
@@ -80,9 +81,9 @@ func Dispatch(ctx context.Context, key, logPrefix string) error {
 	}
 	if !ok {
 		fmt.Fprintf(os.Stderr, "%s key fallback (unknown key %q): typing literally\n", logPrefix, key)
-		return chromedp.Run(ctx, chromedp.KeyEvent(key))
+		return cdputil.Run(ctx, chromedp.KeyEvent(key))
 	}
-	return chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+	return cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
 		for _, ev := range events {
 			if err := ev.Do(ctx); err != nil {
 				return err

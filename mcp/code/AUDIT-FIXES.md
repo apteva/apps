@@ -95,3 +95,4 @@ production load tests.
 
 Repeated page reads were **5.3× faster** in this sample; streaming grep used
 **about 92% fewer allocated bytes**. These figures describe the fixtures above,
+not guaranteed production latency.
