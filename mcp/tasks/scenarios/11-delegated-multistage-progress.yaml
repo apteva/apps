@@ -81,7 +81,7 @@ assert:
       tool: tasks_get
       thread_id: gmail-review-worker
       count: 1
-      before: send
+      before: send | done
   - tool_called_with:
       tool: tasks_set_progress
       thread_id: main

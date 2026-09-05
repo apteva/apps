@@ -21,7 +21,7 @@ func (s *taskStore) RecoverOccurrence(id, actorThread, assignedThread, reason, r
 		return nil, false, err
 	}
 	if source.State != stateFailed || source.ScheduledFor == nil {
-		return nil, false, errors.New("only a failed scheduled occurrence can be recovered")
+		return nil, false, validationError("only a failed scheduled occurrence can be recovered")
 	}
 	root := source
 	if source.RecoveryOfTaskID != "" {
@@ -32,7 +32,7 @@ func (s *taskStore) RecoverOccurrence(id, actorThread, assignedThread, reason, r
 	}
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
-		return nil, false, errors.New("recovery reason required")
+		return nil, false, validationError("recovery reason required")
 	}
 	requestKey = strings.TrimSpace(requestKey)
 	if requestKey == "" {
@@ -41,8 +41,25 @@ func (s *taskStore) RecoverOccurrence(id, actorThread, assignedThread, reason, r
 	sum := sha256.Sum256([]byte(source.ID + "\x00" + requestKey))
 	idempotencyKey := "recovery:" + source.ID + ":" + hex.EncodeToString(sum[:8])
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	if existing, err := scanTask(tx.QueryRow(`SELECT `+taskColumns+` FROM tasks WHERE agent_id=? AND idempotency_key=?`, root.AgentID, idempotencyKey)); err == nil {
+		return existing, false, nil
+	} else if !errors.Is(err, errTaskNotFound) {
+		return nil, false, err
+	}
+	var open int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE recovery_of_task_id=? AND state IN ('queued','running','waiting','blocked','completed')`, root.ID).Scan(&open); err != nil {
+		return nil, false, err
+	}
+	if open > 0 {
+		return nil, false, validationError("occurrence already has an open or successful recovery")
+	}
 	var attempt int
-	if err := s.db.QueryRow(`SELECT COALESCE(MAX(recovery_attempt), 0)+1 FROM tasks WHERE recovery_of_task_id=?`, root.ID).Scan(&attempt); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(recovery_attempt), 0)+1 FROM tasks WHERE recovery_of_task_id=?`, root.ID).Scan(&attempt); err != nil {
 		return nil, false, err
 	}
 	now = now.UTC()
@@ -55,15 +72,29 @@ func (s *taskStore) RecoverOccurrence(id, actorThread, assignedThread, reason, r
 	if assignedThread == "" {
 		assignedThread = source.AssignedThreadID
 	}
-	task, created, err := s.Create(CreateTaskInput{
+	var events []TaskEvent
+	creator := actorThread
+	if creator == "api" {
+		creator = root.CreatedByThreadID
+	}
+	task, created, err := s.createTx(tx, CreateTaskInput{
 		AgentID: root.AgentID, ProjectID: root.ProjectID, Title: root.Title,
 		Description: root.Description, State: stateQueued,
 		CurrentStep:       "Reconciliation required before external action",
-		CreatedByThreadID: actorThread, AssignedThreadID: assignedThread,
+		CreatedByThreadID: creator, AssignedThreadID: assignedThread,
 		ParentTaskID: root.ParentTaskID, IdempotencyKey: idempotencyKey,
 		RecoveryOfTaskID: root.ID, OriginalOccurrenceKey: originalKey,
 		RecoveryAttempt: attempt, RecoveryReason: reason, OperationKey: root.OperationKey,
 		ScheduledFor: &now, OccurrenceKey: recoveryKey,
-	})
-	return task, created, err
+	}, now, &events)
+	if err != nil {
+		return nil, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	for _, event := range events {
+		s.emit(event)
+	}
+	return task, created, nil
 }

@@ -1,0 +1,32 @@
+name: resume-future-once
+description: Pausing and resuming an absolute one-time schedule preserves its future date.
+timeout: 2m
+settle_for: 5s
+max_iterations: 14
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  Create one task named "Future deadline regression" scheduled once at
+  "2099-01-15T09:00:00Z". Pause it, then resume it. Fetch the task and verify
+  next_run_at still refers to January 15, 2099 at 09:00 UTC. Do not run it now,
+  complete it, or create a replacement. Stop after verification.
+assert:
+  - tool_called: tasks_create
+  - tool_called: tasks_pause
+  - tool_called: tasks_resume
+  - tool_called: tasks_get
+  - tool_not_called: tasks_run_now | tasks_complete | send
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.next_run_at
+    expect_field_eq: "2099-01-15T09:00:00Z"
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_field_at: tasks.0.schedule_enabled
+    expect_field_eq: true
+budget:
+  total_tokens: 200000
+  cost_usd: 1.50

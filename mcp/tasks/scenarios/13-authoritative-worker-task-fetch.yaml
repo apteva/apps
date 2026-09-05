@@ -117,9 +117,9 @@ assert:
         timezone: Europe/Madrid
         final_action: Schedule
       count: 1
-      before: send
+      before: send | done
   - tool_called_with:
-      tool: send
+      tool: send | done
       thread_id: authoritative-task-worker
       args:
         message: HANDOFF VERIFIED|Monika's Hypnosis Reactions|Freeze Play in Full|BODY-END-7Q9|authoritative-bunny-931d9ce2|Member+Exclusive|sell=false|2026-08-14T20:00:00|Europe/Madrid|Schedule

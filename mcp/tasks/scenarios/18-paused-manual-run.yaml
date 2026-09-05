@@ -1,0 +1,44 @@
+name: paused-manual-run
+description: Run-now creates one child without resuming its recurring definition.
+timeout: 2m
+settle_for: 5s
+max_iterations: 14
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  Create a recurring task named "Paused manual run regression", every 1 hour,
+  with description "This deterministic fixture completes with result MANUAL VERIFIED. No domain action is needed."
+  Pause the definition, then request one manual occurrence through tasks_run_now.
+  Fetch the returned occurrence before progressing or completing it. Complete
+  that occurrence with result "MANUAL VERIFIED". If its task.ready event arrives
+  after completion, inspect the record and leave the terminal result unchanged.
+  Fetch the definition and verify it is still waiting and paused. Never resume
+  or complete the definition. Do not call send. Stop after verification.
+assert:
+  - tool_called: tasks_create
+  - tool_called: tasks_pause
+  - tool_called: tasks_run_now
+  - tool_called: tasks_get
+  - tool_called_with:
+      tool: tasks_complete
+      args:
+        result: MANUAL VERIFIED
+      count: 1
+  - tool_not_called: tasks_resume | send
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&view=scheduled
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&view=scheduled
+    expect_field_at: tasks.0.schedule_enabled
+    expect_field_eq: false
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&view=completed&include_runs=1
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&include_runs=1
+    expect_count_at: tasks
+    expect_count: 2
+budget:
+  total_tokens: 250000
+  cost_usd: 2.00

@@ -16,7 +16,8 @@ setup:
     mcp: [tasks]
     directive: |
       Convert the request into exactly one recurring task by calling
-      tasks_create directly. Represent one recurring outcome as one logical
+      tasks_create directly. Tasks tools are already loaded in this thread;
+      do not call search_tools to rediscover them. Represent one recurring outcome as one logical
       task. Use the interval schedule form specifically: kind="interval" and
       every="15m"; do not translate the interval into cron. Do not spawn a
       worker and do not execute a future occurrence during schedule creation.

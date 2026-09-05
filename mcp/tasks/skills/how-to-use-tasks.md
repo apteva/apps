@@ -192,3 +192,27 @@ is proven absent and its domain safety/idempotency rules allow execution. If
 the outcome remains ambiguous, call `tasks_fail` for the recovery with
 `external_outcome_unknown`; do not guess, use `blocked` as a false terminal
 state, or make the recurring parent due with `tasks_run_now`.
+
+## Delivery and inventory guarantees
+
+A task change and its pending notification are committed together. If delivery
+fails, the same event is retried automatically with its stable source ID; use
+the returned task ID and the same create/recovery idempotency key when retrying
+a request. Completion receipts are delivered once through this same queue.
+
+`tasks_list` supports `view`, `query`, `limit`, and `cursor`. Follow `next_cursor`
+until `has_more` is false when asked for the complete inventory. Use `active`
+for unfinished execution, `attention` for failures or blocked work (including
+a recurring parent's latest failed run), and `scheduled` for definitions.
+
+Pausing preserves a future deadline. Resuming an overdue recurring schedule
+skips missed runs while preserving its interval phase. `tasks_run_now` creates
+one manual occurrence and returns that occurrence; the recurring parent stays
+paused if it was paused, and its regular cadence is unchanged. Cancelling or
+otherwise terminalizing a definition disables further scheduling. An open run
+prevents overlapping occurrences; old progress alone never proves failure.
+
+Terminal records are immutable. Completion requires a concrete result, failure
+requires a concrete error, and retrying the identical terminal write is safe.
+Only one open recovery is allowed for an original occurrence. A completed
+recovery prevents further recovery attempts for that original occurrence.

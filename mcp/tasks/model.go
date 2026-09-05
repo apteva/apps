@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -146,6 +147,9 @@ type UpdateTaskInput struct {
 }
 
 type TaskFilter struct {
+	View         string
+	Search       string
+	Cursor       string
 	ProjectID    string
 	AgentID      int64
 	States       []string
@@ -190,4 +194,15 @@ func validTransition(from, to string) bool {
 		return from == stateWaiting || from == stateBlocked
 	}
 	return validState(to)
+}
+
+// Definition identity does not change when an occurrence waits for a callback.
+func isScheduleDefinitionTask(task *Task) bool {
+	return task.ScheduleKind != "" && task.ScheduledFor == nil && task.ParentTaskID == "" && !terminalState(task.State)
+}
+
+var errInvalidInput = errors.New("invalid task input")
+
+func validationError(message string, args ...any) error {
+	return fmt.Errorf("%w: %s", errInvalidInput, fmt.Sprintf(message, args...))
 }

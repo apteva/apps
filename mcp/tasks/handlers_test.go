@@ -613,12 +613,12 @@ func TestSchedulesMaterializeOnceAndRecurringWithoutSetupDuplicates(t *testing.T
 	if runs[0].CreatedByThreadID != "opaque-schedule-owner" || runs[0].AssignedThreadID != "opaque-default" {
 		t.Fatalf("occurrence lost opaque thread provenance: %+v", runs[0])
 	}
-	// One ready event for once and one for the recurrence; no duplicate wake.
-	if len(platform.events) != 2 {
+	// Two execution wakes plus one durable completion receipt; no duplicates.
+	if len(platform.events) != 3 {
 		t.Fatalf("unexpected scheduler notifications: %+v", platform.events)
 	}
 	for _, event := range platform.events {
-		if event.Target.ThreadID != "opaque-default" {
+		if event.Message.(map[string]any)["type"] == "task.ready" && event.Target.ThreadID != "opaque-default" {
 			t.Fatalf("scheduled execution targeted creator instead of configured default: %+v", event)
 		}
 	}
@@ -874,6 +874,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
 			t.Fatal(err)
 		}
+		if err := app.drainDeliveries("", "project-a", tick); err != nil {
+			t.Fatal(err)
+		}
 		run, _ := app.store.Get(runs[0].ID)
 		wantAttempts := retry + 1
 		if run.State != stateQueued || run.AcceptedAt != nil || run.DispatchAttempts != wantAttempts {
@@ -893,6 +896,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 		if err := app.scheduler.reconcileUnaccepted(tick, "project-a"); err != nil {
 			t.Fatal(err)
 		}
+		if err := app.drainDeliveries("", "project-a", tick); err != nil {
+			t.Fatal(err)
+		}
 		afterDuplicate, _ := app.store.Get(run.ID)
 		if afterDuplicate.DispatchAttempts != wantAttempts {
 			t.Fatalf("retry %d duplicated in the same window: %+v", retry, afterDuplicate)
@@ -901,6 +907,9 @@ func TestUnacceptedDispatchRetriesBeforeFailure(t *testing.T) {
 
 	exhaustedAt := dispatchedAt.Add(time.Duration(dispatchMaxAttempts)*dispatchRetryInterval + time.Second)
 	if err := app.scheduler.reconcileUnaccepted(exhaustedAt, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", exhaustedAt); err != nil {
 		t.Fatal(err)
 	}
 	parent, _ = app.store.Get(parent.ID)
@@ -967,10 +976,16 @@ func TestAcceptedRedispatchStopsRetriesAndFailure(t *testing.T) {
 	if err := app.scheduler.reconcileUnaccepted(retryAt, "project-a"); err != nil {
 		t.Fatal(err)
 	}
+	if err := app.drainDeliveries("", "project-a", retryAt); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := app.store.Accept(runs[0].ID, "opaque-default", retryAt.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.scheduler.reconcileUnaccepted(retryAt.Add(24*time.Hour), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", retryAt.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _ := app.store.Get(runs[0].ID)
@@ -1021,6 +1036,9 @@ func TestInitialDeliveryErrorRemainsQueuedForRetry(t *testing.T) {
 	}
 	platform.sendErr = nil
 	if err := app.scheduler.reconcileUnaccepted(dispatchedAt.Add(dispatchRetryInterval+time.Second), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", dispatchedAt.Add(dispatchRetryInterval+time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	retried, _ := app.store.Get(runs[0].ID)
@@ -1118,6 +1136,9 @@ func TestTrackedOccurrenceLifecycleAcceptsBeforeAnyTasksMCPCall(t *testing.T) {
 		t.Fatalf("generic claim did not accept occurrence: %+v", accepted)
 	}
 	if err := app.scheduler.reconcileUnaccepted(claimedAt.Add(24*time.Hour), "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.drainDeliveries("", "project-a", claimedAt.Add(24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _ = app.store.Get(run.ID)
@@ -1588,7 +1609,7 @@ func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.5.0" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.5.1" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -1832,7 +1853,7 @@ func TestTerminalMCPGuidanceContract(t *testing.T) {
 	}
 }
 
-func TestAssignNotifiesTheThreadJustAssignedNotCurrentDBAssignee(t *testing.T) {
+func TestAssignmentDeliveriesRespectLatestOwner(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	creator := callerContext(7, "thread-main", "project-a")
 	raw, err := app.toolCreate(creator, appCtx, map[string]any{"title": "Split inbox"})
@@ -1859,8 +1880,8 @@ func TestAssignNotifiesTheThreadJustAssignedNotCurrentDBAssignee(t *testing.T) {
 		t.Fatal(err)
 	}
 	last := platform.events[len(platform.events)-1]
-	if last.Target.ThreadID != "thread-worker-b" {
-		t.Fatalf("wake event followed the DB's current assignee instead of the call target: %+v", last)
+	if last.Target.ThreadID != "thread-worker-a" {
+		t.Fatalf("pending assignment did not wake the current owner: %+v", last)
 	}
 }
 
@@ -1918,7 +1939,7 @@ func TestOverlapSkipKeepsLastRunAtAndAdvancesNextRun(t *testing.T) {
 	}
 }
 
-func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
+func TestSchedulerPreservesActiveRunDespiteOldProgress(t *testing.T) {
 	app, appCtx, platform := newTestApp(t)
 	caller := callerContext(7, "opaque-schedule-owner", "project-a")
 	raw, err := app.toolCreate(caller, appCtx, map[string]any{
@@ -1941,8 +1962,7 @@ func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Threshold for a 10m cadence clamps to staleRunMinAge (1h); a run idle past
-	// it must be auto-failed instead of blocking every future occurrence.
+	// Old progress is not evidence that an executor has stopped.
 	parent, _ = app.store.Get(parent.ID)
 	staleTick := time.Now().UTC().Add(2 * time.Hour)
 	if parent.NextRunAt.After(staleTick) {
@@ -1952,33 +1972,11 @@ func TestSchedulerAutoFailsStaleRunAndResumesOccurrences(t *testing.T) {
 		t.Fatal(err)
 	}
 	runs, err = app.store.List(TaskFilter{ProjectID: "project-a", ParentTaskID: &parentID, Limit: 10})
-	if err != nil || len(runs) != 2 {
-		t.Fatalf("stale run did not unblock materialization: runs=%+v err=%v", runs, err)
+	if err != nil || len(runs) != 1 || runs[0].State != stateRunning {
+		t.Fatalf("old progress allowed overlapping work: runs=%+v err=%v", runs, err)
 	}
-	states := map[string]int{}
-	for _, run := range runs {
-		states[run.State]++
-		if run.State == stateFailed && !strings.Contains(run.Error, "auto-failed by scheduler") {
-			t.Fatalf("stale failure lacks operator-readable error: %+v", run)
-		}
+	if len(platform.events) != 1 {
+		t.Fatalf("unexpected replacement or terminal notice: %+v", platform.events)
 	}
-	if states[stateFailed] != 1 || states[stateQueued] != 1 {
-		t.Fatalf("want one auto-failed and one fresh run, got %+v", states)
-	}
-	var creatorReceipt, freshWake bool
-	for _, event := range platform.events {
-		payload, ok := event.Message.(map[string]any)
-		if !ok {
-			continue
-		}
-		if payload["type"] == "task.terminal" && event.Target.ThreadID == "opaque-schedule-owner" {
-			creatorReceipt = true
-		}
-		if payload["type"] == "task.ready" && event.Target.ThreadID == "opaque-default" {
-			freshWake = true
-		}
-	}
-	if !creatorReceipt || !freshWake {
-		t.Fatalf("auto-fail must tell the creator and wake the fresh run: %+v", platform.events)
-	}
+
 }

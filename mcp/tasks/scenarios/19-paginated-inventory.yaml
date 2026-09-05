@@ -1,0 +1,52 @@
+name: paginated-inventory
+description: Agent follows opaque cursors to enumerate all tasks, one record per page.
+timeout: 2m
+settle_for: 5s
+max_iterations: 14
+setup:
+  mode: autonomous
+  app:
+    path: ./
+  seed_mcp_calls:
+    - app: tasks
+      tool: create
+      thread_id: main
+      args:
+        title: Inventory page Alpha
+        schedule:
+          kind: interval
+          every: 24h
+    - app: tasks
+      tool: create
+      thread_id: main
+      args:
+        title: Inventory page Beta
+        schedule:
+          kind: interval
+          every: 24h
+    - app: tasks
+      tool: create
+      thread_id: main
+      args:
+        title: Inventory page Gamma
+        schedule:
+          kind: interval
+          every: 24h
+directive: |
+  List the complete authoritative Tasks inventory using tasks_list with limit 1.
+  Follow each next_cursor, always keeping limit 1, until has_more is false.
+  There are three seeded schedules. Do not create, mutate, or execute any task.
+  Report all three titles from the pages and stop. Never ask another thread.
+assert:
+  - tool_called_with:
+      tool: tasks_list
+      args:
+        limit: 1
+      count: 3
+  - tool_not_called: tasks_create | tasks_set_progress | tasks_edit | tasks_complete | tasks_cancel | tasks_run_now | send
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}&view=scheduled
+    expect_count_at: tasks
+    expect_count: 3
+budget:
+  total_tokens: 150000
+  cost_usd: 1.50
