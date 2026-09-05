@@ -36,11 +36,13 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
+	AfterMessageID int64     `json:"after_message_id,omitempty"`
 	Type           string    `json:"type"` // always "stream"
 	ConversationID string    `json:"chat_id"`
 	AgentID        int64     `json:"agent_id,omitempty"`
 	ThreadID       string    `json:"thread_id"`
 	CallID         string    `json:"call_id"`
+	RunID          string    `json:"run_id,omitempty"`
 	Text           string    `json:"text"`
 	Phase          string    `json:"phase,omitempty"`
 	Done           bool      `json:"done"`
@@ -48,7 +50,10 @@ type StreamFrame struct {
 }
 
 type streamState struct {
+	runID          string
 	buf            strings.Builder
+	parser         flatStringParser
+	lastPublished  time.Time
 	conversationID string
 	threadID       string
 	callID         string
@@ -58,9 +63,13 @@ type streamState struct {
 
 type streamer struct {
 	hub      *hub
+	resolve  func(int64, string) string
+	throttle time.Duration
 	mu       sync.Mutex
 	buffers  map[string]*streamState
 	lastEmit map[string]string
+	touched  map[string]time.Time
+	ackTimes map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
@@ -80,11 +89,41 @@ func (s *streamer) publish(frame StreamFrame) {
 
 func newStreamer(h *hub) *streamer {
 	return &streamer{
-		hub:         h,
-		buffers:     map[string]*streamState{},
-		lastEmit:    map[string]string{},
+		hub:      h,
+		buffers:  map[string]*streamState{},
+		lastEmit: map[string]string{},
+		touched:  map[string]time.Time{}, ackTimes: map[string]time.Time{},
 		pendingAcks: map[string]string{},
 	}
+}
+
+// All ephemeral maps have a time and size bound, including final-only calls.
+func (s *streamer) pruneLocked() {
+	now := time.Now()
+	for key, at := range s.touched {
+		if now.Sub(at) > 5*time.Minute || len(s.touched) > 1024 {
+			delete(s.touched, key)
+			delete(s.buffers, key)
+			delete(s.lastEmit, key)
+		}
+	}
+	for key, at := range s.ackTimes {
+		if now.Sub(at) > 5*time.Minute || len(s.ackTimes) > 1024 {
+			delete(s.ackTimes, key)
+			delete(s.pendingAcks, key)
+		}
+	}
+}
+func (s *streamer) runLocked(key string) *streamState {
+	s.pruneLocked()
+	s.touched[key] = time.Now()
+	if state := s.buffers[key]; state != nil {
+		return state
+	}
+	s.ackSeq++
+	state := &streamState{runID: strconv.FormatUint(s.ackSeq, 10), createdAt: time.Now()}
+	s.buffers[key] = state
+	return state
 }
 
 // visibleConversationTool: which tool calls stream into a bubble.
@@ -127,6 +166,9 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 		return
 	}
 	conversationID := conversationForThread(threadID)
+	if s.resolve != nil {
+		conversationID = s.resolve(agentID, threadID)
+	}
 	if conversationID == "" {
 		return
 	}
@@ -162,18 +204,28 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	}
 	key := streamCallKey(agentID, threadID, callID)
 	s.mu.Lock()
-	st, ok := s.buffers[key]
-	if !ok {
-		st = &streamState{
-			conversationID: conversationID, threadID: threadID,
-			callID: callID, tool: tool, createdAt: ts,
-		}
-		s.buffers[key] = st
+	s.pruneLocked()
+	if s.buffers[key] == nil && len(s.buffers) >= 32 {
+		s.mu.Unlock()
+		return
+	}
+	st := s.runLocked(key)
+	if st.buf.Len()+len(chunk) > maxMessageBytes {
+		delete(s.buffers, key)
+		delete(s.lastEmit, key)
+		s.mu.Unlock()
+		return
 	}
 	st.buf.WriteString(chunk)
-	text, _ := extractTextField(st.buf.String())
-	changed := text != "" && text != s.lastEmit[key]
+	st.parser.consume(st.buf.String())
+	if (s.resolve != nil && !st.parser.destinationSeen) || (st.parser.destinationSeen && st.parser.destination != conversationID) {
+		s.mu.Unlock()
+		return
+	}
+	text := st.parser.text.String()
+	changed := text != "" && text != s.lastEmit[key] && (st.parser.textComplete || time.Since(st.lastPublished) >= s.throttle)
 	if changed {
+		st.lastPublished = time.Now()
 		s.lastEmit[key] = text
 	}
 	s.mu.Unlock()
@@ -182,7 +234,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
 	})
 }
 
@@ -209,11 +261,17 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 		return
 	}
 	text, ok := decodeSendArgs(firstRawJSON(d.Args, d.Arguments, d.Input, d.Params), conversationID)
-	if !ok || text == "" {
+	if !ok || text == "" || len(text) > maxMessageBytes {
 		return
 	}
 	key := streamCallKey(agentID, threadID, callID)
 	s.mu.Lock()
+	s.pruneLocked()
+	if s.buffers[key] == nil && len(s.buffers) >= 32 {
+		s.mu.Unlock()
+		return
+	}
+	st := s.runLocked(key)
 	changed := text != s.lastEmit[key]
 	if changed {
 		s.lastEmit[key] = text
@@ -224,7 +282,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
 	})
 }
 
@@ -248,12 +306,17 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 	}
 	key := streamCallKey(agentID, threadID, callID)
 	s.mu.Lock()
+	runID := ""
+	if st := s.buffers[key]; st != nil {
+		runID = st.runID
+	}
+	delete(s.touched, key)
 	delete(s.buffers, key)
 	delete(s.lastEmit, key)
 	s.mu.Unlock()
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, Done: true, CreatedAt: ts,
+		CallID: callID, RunID: runID, Done: true, CreatedAt: ts,
 	})
 }
 
@@ -262,33 +325,46 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 // emitAck publishes the acknowledgement bubble shown between "user
 // message forwarded" and "agent reply landed". Each emission mints a
 // fresh call id and records it as the conversation's pending ack.
-func (s *streamer) emitAck(conversationID, threadID string, agentID int64) {
+func (s *streamer) emitAck(conversationID, threadID string, agentID int64, afterMessageIDs ...int64) {
 	s.mu.Lock()
+	s.pruneLocked()
 	s.ackSeq++
 	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
-	s.pendingAcks[conversationID] = id
+	afterID := int64(0)
+	if len(afterMessageIDs) > 0 {
+		afterID = afterMessageIDs[0]
+	}
+	s.pendingAcks[conversationID+":"+strconv.FormatInt(agentID, 10)] = id
+	s.ackTimes[conversationID+":"+strconv.FormatInt(agentID, 10)] = time.Now()
 	s.mu.Unlock()
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: id, Phase: "acknowledgement",
+		CallID: id, Phase: "acknowledgement", AfterMessageID: afterID,
 		CreatedAt: time.Now(),
 	})
 }
 
 // settleAck settles the conversation's outstanding ack, if any. A
 // no-op when nothing is pending — durable rows land for many reasons.
-func (s *streamer) settleAck(conversationID string) {
+func (s *streamer) settleAck(conversationID string, agents ...int64) {
 	s.mu.Lock()
-	id := s.pendingAcks[conversationID]
-	delete(s.pendingAcks, conversationID)
-	s.mu.Unlock()
-	if id == "" {
-		return
+	var frames []StreamFrame
+	for key, id := range s.pendingAcks {
+		if !strings.HasPrefix(key, conversationID+":") {
+			continue
+		}
+		agent, _ := strconv.ParseInt(strings.TrimPrefix(key, conversationID+":"), 10, 64)
+		if len(agents) > 0 && agent != agents[0] {
+			continue
+		}
+		delete(s.pendingAcks, key)
+		delete(s.ackTimes, key)
+		frames = append(frames, StreamFrame{Type: "stream", ConversationID: conversationID, AgentID: agent, CallID: id, Done: true, CreatedAt: time.Now()})
 	}
-	s.publish(StreamFrame{
-		Type: "stream", ConversationID: conversationID,
-		CallID: id, Done: true, CreatedAt: time.Now(),
-	})
+	s.mu.Unlock()
+	for _, f := range frames {
+		s.publish(f)
+	}
 }
 
 // ─── telemetry feed ──────────────────────────────────────────────────

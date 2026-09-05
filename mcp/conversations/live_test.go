@@ -85,13 +85,15 @@ func (c *liveClient) do(method, path string, body any, out any) int {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
 		c.t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
 	if out != nil {
-		_ = json.NewDecoder(resp.Body).Decode(out)
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			c.t.Fatalf("decode %s %s response: %v", method, path, err)
+		}
 	}
 	return resp.StatusCode
 }
@@ -611,6 +613,9 @@ func TestLive_CodexApprovalRoundTrip(t *testing.T) {
 		}
 	}
 	if !acked {
+		var deliveryState []map[string]any
+		c.do("GET", "/api/apps/conversations/deliveries?chat_id="+item.Message.ConversationID, nil, &deliveryState)
+		t.Logf("approval delivery diagnostics: %+v", deliveryState)
 		t.Fatal("no agent acknowledgment after the verdict within 120s")
 	}
 	t.Log("approval card mutated and the agent acknowledged the verdict")
@@ -834,4 +839,91 @@ func TestLive_CodexPublicRefusal(t *testing.T) {
 
 	c.assertQuietInbox(agentID, 20*time.Second)
 	t.Log("absurd request refused without operator involvement")
+}
+
+// Real multi-agent fan-out plus HTTP retry must keep one durable user request.
+func TestLive_CodexRoomFanoutAndRetry(t *testing.T) {
+	c := newLiveClient(t)
+	first, cleanFirst := c.ensureAgent()
+	defer cleanFirst()
+	second, cleanSecond := c.ensureAgent()
+	defer cleanSecond()
+	if first == second {
+		t.Skip("room test requires two temporary agents; unset APTEVA_LIVE_AGENT_ID")
+	}
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_ids": []int64{first, second}, "lead_agent_id": first, "title": "Live room fan-out"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create room: %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	payload := map[string]any{"content": "Reply once with exactly: room-ready. Do not delegate or ask the other participant to reply.", "target_agent_ids": []int64{first, second}, "client_message_id": "live-room-retry"}
+	var original, retry struct {
+		ID int64 `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, payload, &original); status != 200 {
+		t.Fatalf("send %d", status)
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, payload, &retry); status != 200 || retry.ID != original.ID {
+		t.Fatalf("retry status=%d original=%d retry=%d", status, original.ID, retry.ID)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var rows []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &rows)
+		users := 0
+		replies := map[int64]bool{}
+		for _, m := range rows {
+			if m.Role == "user" {
+				users++
+			}
+			if m.Role == "agent" && strings.Contains(strings.ToLower(m.Content), "room-ready") {
+				replies[m.AgentID] = true
+			}
+		}
+		if users != 1 {
+			t.Fatalf("retry created %d user rows", users)
+		}
+		if replies[first] && replies[second] {
+			t.Log("both real Codex agents replied; duplicate HTTP submission reused one message")
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("both Codex room participants did not reply within 120s")
+}
+
+func TestLive_CodexConversationApprovalDestination(t *testing.T) {
+	c := newLiveClient(t)
+	agent, cleanup := c.ensureAgent()
+	defer cleanup()
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Live bound approval"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create %d", status)
+	}
+	defer c.deleteConversation(conv.ID)
+	c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{"content": "This is a harmless approval-routing test. Use conversations_request_approval in this exact conversation to ask the operator to approve a simulated maintenance operation. Do not perform any real operation. Wait for the verdict, then reply in this conversation with exactly: bound-verdict-received.", "client_message_id": "live-bound-approval"}, nil)
+	item := c.pollInbox(agent, "approval", 120*time.Second)
+	if item.Message.ConversationID != conv.ID {
+		t.Fatalf("approval escaped originating conversation: %s", item.Message.ConversationID)
+	}
+	if status := c.do("POST", "/api/apps/conversations/message-action", map[string]any{"message_id": item.Message.ID, "action_id": approvalActionID(item), "note": "Approved for simulation only."}, nil); status != 200 {
+		t.Fatalf("resolve %d", status)
+	}
+	deadline := time.Now().Add(120 * time.Second)
+	for time.Now().Before(deadline) {
+		var rows []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &rows)
+		for _, m := range rows {
+			if m.ID > item.Message.ID && m.AgentID == agent && m.Role == "agent" && strings.Contains(m.Content, "bound-verdict-received") {
+				t.Log("real Codex consumed the verdict in its bound originating conversation thread")
+				return
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	t.Fatal("no bound-thread verdict acknowledgement within 120s")
 }

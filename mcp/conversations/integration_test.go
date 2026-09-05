@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
@@ -457,6 +458,16 @@ func TestSidecar_TelegramPublicOnboardingWebhookAndOutboundFlow(t *testing.T) {
 	}
 
 	sc.MCPAs("send", map[string]any{"conversation_id": convID, "text": "real sidecar outbound"}, 41, conversationThreadID(convID), itProject)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		fixture.mu.Lock()
+		ready := len(fixture.sent) == 1 && len(fixture.ensureEventIDs) == 1
+		fixture.mu.Unlock()
+		if ready {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	fixture.mu.Lock()
 	defer fixture.mu.Unlock()
 	if len(fixture.ensureEventIDs) != 1 || fixture.threadEvents != 0 ||

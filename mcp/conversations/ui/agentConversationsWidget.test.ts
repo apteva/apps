@@ -53,7 +53,7 @@ describe("AgentConversationsWidget scope", () => {
 
     const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).toContain('appendAgentScope("/unread-summary", instanceId)');
-    expect(widget).toContain('apiPost("/seen", seen, projectId)');
+    expect(widget).not.toContain('apiPost("/seen", seen, projectId)');
   });
 
   test("browser remains the default and creation visibility is configurable", () => {
