@@ -11,6 +11,7 @@ import (
 
 type recordingVolumePlatform struct {
 	tk.BasePlatformClient
+	attached    any
 	slug        string
 	connections []int64
 	tools       []string
@@ -30,6 +31,20 @@ func (p *recordingVolumePlatform) ExecuteIntegrationTool(connectionID int64, too
 	p.tools = append(p.tools, tool)
 	p.args = append(p.args, input)
 	data := json.RawMessage(`{}`)
+	if tool == "volume_action" {
+		if input["type"] == "attach" {
+			p.attached = input["droplet_id"]
+		} else {
+			p.attached = nil
+		}
+	}
+	if tool == "volume_get" {
+		ids := []any{}
+		if p.attached != nil {
+			ids = append(ids, p.attached)
+		}
+		data, _ = json.Marshal(map[string]any{"volume": map[string]any{"id": input["volume_id"], "size_gigabytes": 80, "droplet_ids": ids}})
+	}
 	if tool == "volume_create" {
 		data = json.RawMessage(`{"volume":{"id":"volume-1","size_gigabytes":80}}`)
 	}
@@ -71,11 +86,11 @@ func TestVolumeCreate_AttachesAndRecordsDigitalOceanVolume(t *testing.T) {
 	if volume.ProviderVolumeID != "volume-1" || volume.InstanceID == nil || *volume.InstanceID != inst.ID || volume.Status != "attached" || volume.DeletePolicy != "retain" {
 		t.Fatalf("volume = %#v", volume)
 	}
-	if len(platform.tools) != 2 || platform.tools[0] != "volume_create" || platform.tools[1] != "volume_action" {
+	if strings.Join(platform.tools, ",") != "volume_create,volume_get,volume_action,volume_get" {
 		t.Fatalf("tools = %#v", platform.tools)
 	}
-	if platform.args[1]["type"] != "attach" || platform.args[1]["droplet_id"] != int64(123) {
-		t.Fatalf("attach args = %#v", platform.args[1])
+	if platform.args[2]["type"] != "attach" || platform.args[2]["droplet_id"] != int64(123) {
+		t.Fatalf("attach args = %#v", platform.args[2])
 	}
 	for _, connectionID := range platform.connections {
 		if connectionID != 7 {

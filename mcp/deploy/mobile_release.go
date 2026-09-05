@@ -85,6 +85,8 @@ type mobileReleaseMeta struct {
 	TesterGroups        []string                              `json:"tester_groups,omitempty"`
 	InstallURL          string                                `json:"install_url,omitempty"`
 	TesterSyncedAt      string                                `json:"tester_synced_at,omitempty"`
+	BuildProcessed      bool                                  `json:"build_processed,omitempty"`
+	ReviewSubmitted     bool                                  `json:"review_submitted,omitempty"`
 	Prepared            bool                                  `json:"prepared,omitempty"`
 	ProviderValidations map[string]providerValidationEvidence `json:"provider_validations,omitempty"`
 	ReviewOutcome       *mobileReviewOutcome                  `json:"review_outcome,omitempty"`
@@ -254,14 +256,25 @@ func isMobileDeployment(d *Deployment, b *Build) bool {
 }
 
 func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
+	if cfg, cfgErr := parseMobileTargetConfig(d.TargetConfigJSON); cfgErr == nil && cfg.SmokeOnly {
+		return nil, errors.New("smoke_only mobile builds cannot be published; disable smoke_only and create a signed build")
+	}
+	unlock := a.lockEnvironment(d.ID, d.EnvironmentID)
+	defer unlock()
+	fresh, err := a.refreshDeployment(d)
+	if err != nil {
+		return nil, err
+	}
+	if fresh.ArchivedAt != "" {
+		return nil, errors.New("deployment environment is archived")
+	}
+	a.artifactMu.RLock()
+	defer a.artifactMu.RUnlock()
 	if b.Status != "succeeded" {
 		return nil, fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
 	}
 	if !buildArtifactAvailable(b) {
 		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
-	}
-	if cfg, cfgErr := parseMobileTargetConfig(d.TargetConfigJSON); cfgErr == nil && cfg.SmokeOnly {
-		return nil, errors.New("smoke_only mobile builds cannot be published; disable smoke_only and create a signed build")
 	}
 	manifest, err := readArtifactManifest(b)
 	if err != nil {
@@ -283,7 +296,10 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if platform == "android" && isProductionMobileChannel(platform, channel) && (opts.RolloutFraction < 0 || opts.RolloutFraction > 1) {
 		return nil, errors.New("Android rollout_fraction must be between 0 and 1")
 	}
-	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
+	rel, created, err := a.createOperationRelease(d, b)
+	if err == nil && !created {
+		return rel, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -671,12 +687,12 @@ func (a *App) syncPendingMobileReleases(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if releases[i].Provider != "app_store_connect" {
-			continue
-		}
+
+		var phase mobileReleaseMeta
+		_ = json.Unmarshal([]byte(releases[i].ReleaseMetaJSON), &phase)
 		if uploadedAt, parseErr := time.Parse(time.RFC3339, releases[i].CreatedAt); parseErr == nil &&
 			time.Since(uploadedAt) > 48*time.Hour &&
-			(releases[i].ExternalID == "" || strings.HasPrefix(releases[i].ExternalID, "uploaded-")) {
+			(releases[i].Provider == "app_store_connect" && !phase.BuildProcessed && !phase.Prepared) {
 			errText := "App Store did not finish processing the uploaded build within 48 hours"
 			_ = dbUpdateRelease(globalCtx.AppDB(), releases[i].ID, map[string]any{
 				"status": "failed", "error": errText, "external_status": "processing_timeout", "stopped_at": nowUTC(),
@@ -708,9 +724,12 @@ func (a *App) syncIOSRelease(rel *Release) error {
 		return err
 	}
 	if meta.AppStoreVersionID != "" && meta.Prepared {
+		if meta.SubmitForReview && !meta.ReviewSubmitted {
+			return a.prepareIOSProductionRelease(bound, rel, rel.ExternalID, &meta)
+		}
 		return a.syncAppStoreVersionState(bound, rel, &meta)
 	}
-	input := map[string]any{"app_id": meta.AppID, "processing_state": "VALID", "limit": 20, "sort": "-uploadedDate"}
+	input := map[string]any{"app_id": meta.AppID, "limit": 20, "sort": "-uploadedDate"}
 	if meta.BuildNumber != "" {
 		input["version"] = meta.BuildNumber
 	}
@@ -718,11 +737,16 @@ func (a *App) syncIOSRelease(rel *Release) error {
 	if err != nil {
 		return err
 	}
-	buildID := findAppleBuildID(builds, meta.BuildNumber)
+	buildID, processingState, processingErr := appleProcessingBuild(builds, meta.BuildNumber)
+	if processingErr != nil {
+		return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "error": processingErr.Error(), "external_status": strings.ToLower(processingState), "stopped_at": nowUTC()})
+	}
 	if buildID == "" {
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_status": "processing"})
 		return nil
 	}
+	meta.BuildProcessed = true
+	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"external_id": buildID, "release_meta_json": mustJSON(meta)})
 	rel.ExternalID = buildID
 	if rel.Channel == "internal" || rel.Channel == "external" {
 		group, err := a.findIOSBetaGroup(bound, distributionTarget{
@@ -748,7 +772,7 @@ func (a *App) syncIOSRelease(rel *Release) error {
 				}
 			}
 		}
-		return markTestFlightAvailable(rel, buildID, group.ID, &meta)
+		return a.syncTestFlightAvailability(bound, rel, buildID, group.ID, &meta)
 	}
 	if rel.Channel == "production" {
 		return a.prepareIOSProductionRelease(bound, rel, buildID, &meta)
@@ -890,6 +914,7 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 			return fmt.Errorf("record provider validation: %w", err)
 		}
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "provider_validation_accepted", mustJSON(evidence))
+		meta.ReviewSubmitted = true
 		status = "waiting_for_review"
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
@@ -1086,9 +1111,9 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	if err != nil {
 		return err
 	}
-	state := jsonStringAt(version, "data", "attributes", "appStoreState")
+	state := jsonStringAt(version, "data", "attributes", "appVersionState")
 	if state == "" {
-		state = jsonStringAt(version, "data", "attributes", "appVersionState")
+		state = jsonStringAt(version, "data", "attributes", "appStoreState")
 	}
 	if state == "" {
 		return errors.New("App Store version response missing state")
@@ -1098,12 +1123,12 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 	meta.ReviewOutcome = a.observeAppleReviewOutcome(bound, rel, meta, version)
 	fields := map[string]any{"external_status": normalized, "release_meta_json": mustJSON(meta), "error": ""}
 	switch state {
-	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE":
+	case "READY_FOR_SALE", "PRE_ORDER_READY_FOR_SALE", "READY_FOR_DISTRIBUTION", "PREORDER_READY_FOR_DISTRIBUTION":
 		fields["status"] = "live"
 	case "PENDING_APPLE_RELEASE":
 		fields["status"] = "starting"
 		fields["external_status"] = "approved_pending_release"
-	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY":
+	case "REJECTED", "METADATA_REJECTED", "INVALID_BINARY", "DEVELOPER_REJECTED", "REMOVED_FROM_SALE", "DEVELOPER_REMOVED_FROM_SALE", "REMOVED_FROM_DISTRIBUTION", "DEVELOPER_REMOVED_FROM_DISTRIBUTION":
 		fields["status"] = "failed"
 		fields["error"] = appleReviewFailureMessage(state, meta.ReviewOutcome)
 	}
@@ -1119,7 +1144,7 @@ func (a *App) syncAppStoreVersionState(bound *sdk.BoundIntegration, rel *Release
 func (a *App) toolPromoteMobile(ctx *sdk.AppCtx, base *Deployment, args map[string]any) (any, error) {
 	var source *Release
 	if releaseID := int64(intArg(args, "release_id")); releaseID > 0 {
-		rel, err := dbGetRelease(ctx.AppDB(), releaseID)
+		rel, err := releaseFromArgs(ctx, args, releaseID)
 		if err != nil || rel == nil || rel.DeploymentID != base.ID || rel.Provider == "" {
 			return nil, fmt.Errorf("mobile release %d not found for deployment", releaseID)
 		}
@@ -1404,7 +1429,7 @@ func googleTrackRelease(channel string, meta *mobileReleaseMeta) map[string]any 
 
 func (a *App) toolRollout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	releaseID := int64(intArg(args, "release_id"))
-	rel, err := dbGetRelease(ctx.AppDB(), releaseID)
+	rel, err := releaseFromArgs(ctx, args, releaseID)
 	if err != nil || rel == nil || rel.Provider != "google_play" || rel.Channel != "production" {
 		return nil, errors.New("release_id must be a Google Play production release")
 	}
@@ -1442,7 +1467,7 @@ func (a *App) toolRollout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolHalt(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	releaseID := int64(intArg(args, "release_id"))
-	rel, err := dbGetRelease(ctx.AppDB(), releaseID)
+	rel, err := releaseFromArgs(ctx, args, releaseID)
 	if err != nil || rel == nil || rel.Provider == "" {
 		return nil, errors.New("mobile release not found")
 	}
@@ -1629,7 +1654,15 @@ func runCapturedCommand(timeout time.Duration, dir string, env []string, logW io
 		return captured.Bytes(), err
 	case <-ctx.Done():
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-		<-done
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+			}
+		}
 		return captured.Bytes(), ctx.Err()
 	}
 }

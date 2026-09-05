@@ -452,7 +452,24 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 	if json.Unmarshal(data, &root) != nil {
 		return "", "", ""
 	}
+	// Select the resource envelope before considering identity fields. Never
+	// use request, action, network, image or nested volume IDs as host identity.
+	if obj, ok := root.(map[string]any); ok {
+		for _, key := range []string{"server", "instance", "droplet"} {
+			if resource, ok := obj[key].(map[string]any); ok {
+				root = resource
+				break
+			}
+		}
+	}
 	objects := collectMaps(root)
+	if provider != "aws-ec2" && provider != "contabo" {
+		obj, ok := root.(map[string]any)
+		if !ok {
+			return "", "", ""
+		}
+		objects = []map[string]any{obj}
+	}
 	for _, obj := range objects {
 		candidateID := ""
 		switch provider {
@@ -511,6 +528,17 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 			}
 		}
 		if candidateID != "" {
+			if obj, ok := root.(map[string]any); ok && len(obj) > 1 && ipv4 == "" && ipv6 == "" && provider != "aws-ec2" && provider != "contabo" {
+				valid := false
+				for _, key := range []string{"name", "label", "region", "commercial_type", "plan", "flavorId", "status", "state", "ssh_username", "offer_id"} {
+					if mapValue(obj, key) != nil {
+						valid = true
+					}
+				}
+				if !valid {
+					continue
+				}
+			}
 			return candidateID, ipv4, ipv6
 		}
 	}

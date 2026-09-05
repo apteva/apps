@@ -145,6 +145,10 @@ func prepareAttachedVolume(ctx *sdk.AppCtx, v *InstanceVolume, req *VolumePrepar
 		return nil, nil, fmt.Errorf("instance must be ready for guest preparation, current status is %q", inst.Status)
 	}
 
+	observed, verifyErr := readProviderVolume(ctx, v)
+	if verifyErr != nil || !volumeConverged(observed, "attach", volumeIntent{ProviderInstanceID: inst.ProviderID}) {
+		return nil, nil, fmt.Errorf("provider attachment must be verified before guest preparation: %v", verifyErr)
+	}
 	script := buildVolumePrepareScript(v, req)
 	command := rootGuestCommand(inst, script)
 	output, exitCode, runErr := runVolumeGuestCommand(inst, command, 2*time.Minute)
@@ -222,8 +226,9 @@ mount_mode=%s
 mount_options=%s
 format_if_blank=%s
 marker=%s
+expected_links=%s
 die() { echo "guest volume prepare: $*" >&2; exit 1; }
-for tool in lsblk findmnt blkid mount readlink awk grep tr find; do command -v "$tool" >/dev/null 2>&1 || die "required command $tool is not installed"; done
+for tool in lsblk findmnt blkid wipefs mount readlink awk grep tr find flock; do command -v "$tool" >/dev/null 2>&1 || die "required command $tool is not installed"; done
 [ "$(uname -s)" = "Linux" ] || die "Linux is required"
 root_source=$(findmnt -nr -o SOURCE / | head -n 1)
 root_parent=$(lsblk -ndo PKNAME "$root_source" 2>/dev/null | head -n 1 || true)
@@ -237,33 +242,19 @@ add_candidate() {
   grep -Fxq "$candidate" "$candidate_file" 2>/dev/null || echo "$candidate" >> "$candidate_file"
 }
 id_token=$(printf '%%s' "$provider_id" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
-name_token=$(printf '%%s' "$volume_name" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
 attempt=0
 while [ "$attempt" -lt 30 ]; do
   : > "$candidate_file"
-  [ -n "$recorded_device" ] && add_candidate "$recorded_device"
-  for link in /dev/disk/by-id/*; do
-    [ -e "$link" ] || continue
-    link_token=$(basename "$link" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
-    if { [ ${#id_token} -ge 4 ] && case "$link_token" in *"$id_token"*) true;; *) false;; esac; } ||
-       { [ ${#name_token} -ge 6 ] && case "$link_token" in *"$name_token"*) true;; *) false;; esac; }; then
-      add_candidate "$link"
-    fi
+  printf '%%s\n' "$expected_links" | while IFS= read -r link; do
+    [ -n "$link" ] && [ -e "$link" ] && add_candidate "$link"
+  done
+  # Match the complete hardware serial to the provider ID. Sizes and mutable
+  # /dev/sdX names never establish identity for formatting.
+  lsblk -bdnpo NAME,SERIAL | while read -r dev serial; do
+    serial_token=$(printf '%%s' "$serial" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')
+    [ -n "$id_token" ] && [ "$serial_token" = "$id_token" ] && add_candidate "$dev"
   done
   count=$(awk 'NF {n++} END {print n+0}' "$candidate_file")
-  if [ "$count" -eq 0 ]; then
-    target_bytes=$((size_gb * 1000000000))
-    min_bytes=$((target_bytes * 95 / 100))
-    max_bytes=$((target_bytes * 105 / 100))
-    lsblk -bdnpo NAME,TYPE,SIZE | while read -r dev type bytes; do
-      [ "$type" = "disk" ] || continue
-      [ "$dev" != "$root_device" ] || continue
-      [ "$bytes" -ge "$min_bytes" ] && [ "$bytes" -le "$max_bytes" ] || continue
-      if lsblk -nrpo MOUNTPOINT "$dev" | grep -q '[^[:space:]]'; then continue; fi
-      add_candidate "$dev"
-    done
-    count=$(awk 'NF {n++} END {print n+0}' "$candidate_file")
-  fi
   [ "$count" -gt 0 ] && break
   attempt=$((attempt + 1))
   sleep 2
@@ -273,16 +264,23 @@ done
 device=$(head -n 1 "$candidate_file")
 children=$(lsblk -nrpo NAME "$device" | tail -n +2 | awk 'NF {n++} END {print n+0}')
 [ "$children" -eq 0 ] || die "device $device has partitions or child mappings; refusing to modify it"
-existing_fs=$(blkid -s TYPE -o value "$device" 2>/dev/null || true)
+exec 9>/etc/fstab.apteva.lock
+flock -w 90 9 || die "fstab is busy"
+probe_status=0
+probe_output=$(blkid -p -o export "$device" 2>/dev/null) || probe_status=$?
+case "$probe_status" in
+  0) existing_fs=$(printf '%%s\n' "$probe_output" | sed -n 's/^TYPE=//p'); [ -n "$existing_fs" ] || die "unknown disk signature; refusing to format" ;;
+  2) existing_fs=""; signatures=$(wipefs -n --noheadings "$device") || die "cannot inspect disk signatures"; [ -z "$signatures" ] || die "disk has signatures; refusing to format"; dd if="$device" of=/dev/null bs=4096 count=1 2>/dev/null || die "disk is unreadable" ;;
+  *) die "ambiguous or failed signature probe ($probe_status); refusing to format" ;;
+esac
 formatted=false
 if [ -z "$existing_fs" ]; then
-  if blkid -p "$device" >/dev/null 2>&1; then die "device $device has an unknown signature; refusing to format it"; fi
   [ "$format_if_blank" = "true" ] || die "device $device is blank; set format_if_blank=true to create a filesystem"
   [ -n "$requested_fs" ] || requested_fs=ext4
   command -v "mkfs.$requested_fs" >/dev/null 2>&1 || die "mkfs.$requested_fs is not installed"
   case "$requested_fs" in
-    ext4) mkfs.ext4 -F "$device" >/dev/null ;;
-    xfs) mkfs.xfs -f "$device" >/dev/null ;;
+    ext4) mkfs.ext4 "$device" >/dev/null ;;
+    xfs) mkfs.xfs "$device" >/dev/null ;;
     *) die "unsupported filesystem $requested_fs" ;;
   esac
   existing_fs=$requested_fs
@@ -305,8 +303,13 @@ mkdir -p "$mount_path"
 fstab_source=$(awk -v p="$mount_path" '$1 !~ /^#/ && $2 == p {print $1; exit}' /etc/fstab)
 if [ -n "$fstab_source" ] && [ "$fstab_source" != "UUID=$uuid" ]; then die "fstab already assigns $mount_path to $fstab_source"; fi
 if [ -z "$fstab_source" ]; then
+  fstab_tmp=$(mktemp /etc/.apteva-fstab.XXXXXX)
+  trap 'rm -f "$fstab_tmp"' EXIT
+  cp -p /etc/fstab "$fstab_tmp"
   pass=0; [ "$existing_fs" = "ext4" ] && pass=2
-  printf 'UUID=%%s\t%%s\t%%s\t%%s\t0\t%%s\t# %%s\n' "$uuid" "$mount_path" "$existing_fs" "$mount_options" "$pass" "$marker" >> /etc/fstab
+  printf 'UUID=%%s\t%%s\t%%s\t%%s\t0\t%%s\t# %%s\n' "$uuid" "$mount_path" "$existing_fs" "$mount_options" "$pass" "$marker" >> "$fstab_tmp"
+  mv -f "$fstab_tmp" /etc/fstab
+  trap - EXIT
 fi
 if [ "$current_target" = "$mount_path" ]; then already_mounted=true; else mount "$mount_path"; fi
 verified=$(findmnt -nr -M "$mount_path" -o SOURCE | head -n 1 || true)
@@ -321,23 +324,46 @@ echo "APTEVA_VOLUME_FORMATTED=$formatted"
 echo "APTEVA_VOLUME_ALREADY_MOUNTED=$already_mounted"`,
 		shellSingleQuote(v.ProviderVolumeID), shellSingleQuote(v.Name), shellSingleQuote(v.DevicePath), v.SizeGB,
 		shellSingleQuote(req.Filesystem), shellSingleQuote(req.MountPath), shellSingleQuote(req.Owner), shellSingleQuote(req.Mode),
-		shellSingleQuote(req.MountOptions), format, shellSingleQuote("apteva-volume:"+strconv.FormatInt(v.ID, 10)))
+		shellSingleQuote(req.MountOptions), format, shellSingleQuote("apteva-volume:"+strconv.FormatInt(v.ID, 10)), shellSingleQuote(strings.Join(expectedGuestVolumePaths(v), "\n")))
+}
+
+func expectedGuestVolumePaths(v *InstanceVolume) []string {
+	switch v.Provider {
+	case "hetzner":
+		return []string{"/dev/disk/by-id/scsi-0HC_Volume_" + v.ProviderVolumeID}
+	case "digitalocean":
+		return []string{"/dev/disk/by-id/scsi-0DO_Volume_" + v.Name}
+	case "linode":
+		return []string{"/dev/disk/by-id/scsi-0Linode_Volume_" + v.Name}
+	case "aws-ec2":
+		return []string{"/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_" + strings.ReplaceAll(v.ProviderVolumeID, "-", "")}
+	}
+	return nil
 }
 
 func buildVolumeUnmountScript(v *InstanceVolume) string {
 	return fmt.Sprintf(`set -eu
 mount_path=%s
 marker=%s
+expected_device=%s
+exec 9>/etc/fstab.apteva.lock
+flock -w 30 9 || { echo "fstab is busy" >&2; exit 1; }
 if [ -n "$mount_path" ]; then
   current_target=$(findmnt -nr -M "$mount_path" -o TARGET 2>/dev/null | head -n 1 || true)
-  if [ "$current_target" = "$mount_path" ]; then umount "$mount_path"; fi
+  if [ "$current_target" = "$mount_path" ]; then
+    expected_source=$(awk -v marker="$marker" '$NF == marker {print $1; exit}' /etc/fstab)
+    actual_uuid=$(findmnt -nr -M "$mount_path" -o UUID | head -n 1)
+    [ -n "$actual_uuid" ] && [ "$expected_source" = "UUID=$actual_uuid" ] || { echo "mounted filesystem identity changed" >&2; exit 1; }
+    umount "$mount_path"
+  fi
 fi
 if [ -f /etc/fstab ]; then
-  tmp=$(mktemp)
-  awk -v marker="$marker" 'index($0, "# " marker) == 0 {print}' /etc/fstab > "$tmp"
-  cat "$tmp" > /etc/fstab
-  rm -f "$tmp"
-fi`, shellSingleQuote(v.MountPath), shellSingleQuote("apteva-volume:"+strconv.FormatInt(v.ID, 10)))
+  tmp=$(mktemp /etc/.apteva-fstab.XXXXXX)
+  trap 'rm -f "$tmp"' EXIT HUP INT TERM
+  cp -p /etc/fstab "$tmp"
+  awk -v marker="$marker" '$NF != marker {print}' /etc/fstab > "$tmp"
+  mv -f "$tmp" /etc/fstab
+fi`, shellSingleQuote(v.MountPath), shellSingleQuote("apteva-volume:"+strconv.FormatInt(v.ID, 10)), shellSingleQuote(v.DevicePath))
 }
 
 func parseVolumePrepareOutput(output string) (*VolumePrepareResult, error) {
@@ -363,6 +389,11 @@ func parseVolumePrepareOutput(output string) (*VolumePrepareResult, error) {
 }
 
 func (a *App) toolVolumePrepare(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	unlock, err := lockResource(ctx.AppDB(), "volume", int64Arg(args, "id"))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	v, err := dbGetVolume(ctx.AppDB(), int64Arg(args, "id"))
 	if err != nil {
 		return nil, err

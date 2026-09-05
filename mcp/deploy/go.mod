@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/deploy
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.57.0
+	github.com/apteva/app-sdk v0.75.0
 	github.com/ggpslop/go-pkcs12 v0.3.0
 	go.mozilla.org/pkcs7 v0.10.0
 	gopkg.in/yaml.v3 v3.0.1

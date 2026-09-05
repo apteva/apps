@@ -640,6 +640,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 		"releases":        releases,
 		"current_release": current,
+		"routing":         routingStatus(d),
 		"url":             a.deploymentURL(d, current),
 	}, nil
 }
@@ -739,7 +740,17 @@ func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if env.Name == defaultEnvironmentName {
 		return nil, errors.New("production environment cannot be destroyed")
 	}
+	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, map[string]any{"archived_at": nowUTC()}); err != nil {
+		return nil, err
+	}
 	effective := effectiveDeploymentForEnvironment(d, env)
+	a.cancelDeploymentBuilds(effective)
+	if _, err := a.stopDeployment(effective); err != nil {
+		return nil, err
+	}
+	if err := a.setIntent(effective, "archived", 0); err != nil {
+		return nil, err
+	}
 	if effective.DomainRecordID != "" || effective.Domain != "" {
 		_ = a.detachDomain(ctx, effective)
 	}
@@ -764,31 +775,13 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		opts := releaseOptionsFromArgs(args)
 		releaseOpts = &opts
 	}
-	build, err := a.runBuildWithOptions(d, releaseOpts)
+	build, err := a.submitBuild(d, releaseOpts)
 	if err != nil {
 		return nil, err
 	}
 	res := map[string]any{"build": buildWithArtifactDownloadURL(build, d.ProjectID)}
-	if boolArg(args, "release") {
-		opts := *releaseOpts
-		if build.Status == "succeeded" {
-			rel, err := a.runReleaseWithOptions(d, build, opts)
-			if err != nil {
-				res["release_error"] = err.Error()
-			} else {
-				res["release"] = rel
-				res["url"] = a.deploymentURL(d, rel)
-			}
-		} else if normalizeBuildBackend(build.BuildBackend) != buildBackendLocal {
-			body, _ := json.Marshal(opts)
-			_ = dbUpdateBuild(ctx.AppDB(), build.ID, map[string]any{
-				"release_requested": true, "release_options_json": string(body),
-			})
-			build, _ = dbGetBuild(ctx.AppDB(), build.ID)
-			res["build"] = buildWithArtifactDownloadURL(build, d.ProjectID)
-			res["release_requested"] = true
-		}
-	}
+	res["release_requested"] = releaseOpts != nil
+
 	return res, nil
 }
 
@@ -1187,17 +1180,22 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 		"releases":        releases,
 		"current_release": current,
+		"routing":         routingStatus(d),
 		"url":             a.deploymentURL(d, current),
 	}, nil
 }
 
 func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
 	tail := intArg(args, "tail")
 	if tail == 0 {
 		tail = 200
 	}
 	if bid := int64(intArg(args, "build_id")); bid != 0 {
-		b, err := dbGetBuild(ctx.AppDB(), bid)
+		b, err := scopedBuild(ctx.AppDB(), project, bid)
 		if err != nil || b == nil {
 			return nil, fmt.Errorf("build %d not found", bid)
 		}
@@ -1208,7 +1206,7 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"kind": "build", "build_id": bid, "log": body}, nil
 	}
 	if rid := int64(intArg(args, "release_id")); rid != 0 {
-		r, err := dbGetRelease(ctx.AppDB(), rid)
+		r, err := scopedRelease(ctx.AppDB(), project, rid)
 		if err != nil || r == nil {
 			return nil, fmt.Errorf("release %d not found", rid)
 		}
@@ -1226,22 +1224,7 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if d.CurrentReleaseID == nil {
-		return map[string]any{"stopped": false, "reason": "no live release"}, nil
-	}
-	rid := *d.CurrentReleaseID
-	rel, _ := dbGetRelease(ctx.AppDB(), rid)
-	// Authoritative stop — see stopReleaseAuthoritative comment.
-	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
-		return nil, err
-	}
-	a.markStopped(rid)
-	if d.EnvironmentID > 0 {
-		_ = dbSetEnvironmentCurrentRelease(ctx.AppDB(), d.EnvironmentID, nil)
-	} else {
-		_ = dbSetCurrentRelease(ctx.AppDB(), d.ID, nil)
-	}
-	return map[string]any{"stopped": true, "release_id": rid}, nil
+	return a.stopDeployment(d)
 }
 
 func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1255,6 +1238,30 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	d, err := a.lookupDeployment(args)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE deployments SET archived_at=? WHERE id=? AND project_id=?`, nowUTC(), d.ID, pid); err != nil {
+		return nil, err
+	}
+	environments, err := dbListEnvironments(ctx.AppDB(), d.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	base, err := dbGetDeploymentByID(ctx.AppDB(), d.ID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range environments {
+		effective := effectiveDeploymentForEnvironment(base, &environments[i])
+		a.cancelDeploymentBuilds(effective)
+		if _, err := a.stopDeployment(effective); err != nil {
+			return nil, err
+		}
+		_ = a.setIntent(effective, "archived", 0)
+		if effective.Domain != "" || effective.DomainRecordID != "" {
+			if err := a.detachDomain(ctx, effective); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Drop the DNS record before deleting the row so the deployment's
 	// link metadata is still around for detach to work.
@@ -1818,7 +1825,17 @@ func tailFile(path string, n int) (string, error) {
 		return "", err
 	}
 	defer f.Close()
-	body, err := io.ReadAll(f)
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	const maxTailBytes int64 = 1 << 20
+	if info.Size() > maxTailBytes {
+		if _, err = f.Seek(-maxTailBytes, io.SeekEnd); err != nil {
+			return "", err
+		}
+	}
+	body, err := io.ReadAll(io.LimitReader(f, maxTailBytes))
 	if err != nil {
 		return "", err
 	}

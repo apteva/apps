@@ -1,11 +1,11 @@
 module github.com/apteva/apps/mcp/instances
 
-go 1.25.1
+go 1.27.1
 
 require (
-	github.com/apteva/app-sdk v0.71.0
+	github.com/apteva/app-sdk v0.75.0
 	github.com/shirou/gopsutil/v4 v4.26.4
-	golang.org/x/crypto v0.52.0
+	golang.org/x/crypto v0.56.0
 	modernc.org/sqlite v1.50.0
 )
 
@@ -22,7 +22,7 @@ require (
 	github.com/tklauser/go-sysconf v0.3.16 // indirect
 	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +164,7 @@ func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error)
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
@@ -258,7 +260,11 @@ func runPodDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 }
 
 func kickRunPodReadinessProbe(ctx *sdk.AppCtx, id int64) {
-	go func() {
+	if !finishInstanceCreation(ctx, id) {
+		return
+	}
+	probe := probeSSHReadyFn
+	startInstanceWorker(ctx, id, func(work context.Context) {
 		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil {
 			return
@@ -276,15 +282,19 @@ func kickRunPodReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
-		if err := probeSSHReadyFn(fresh, 10*time.Minute); err != nil {
+		fresh.workContext = work
+		if err := probe(fresh, 10*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
+		if work.Err() != nil {
+			return
+		}
 		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
-	}()
+	})
 }
 
 func waitRunPodNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
@@ -316,7 +326,9 @@ func waitRunPodNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (
 		if time.Now().After(deadline) {
 			return nil, errors.New("timed out waiting for public IP and 22/tcp mapping")
 		}
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(instanceWorkerContext(ctx, inst.ID), 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
 }
 

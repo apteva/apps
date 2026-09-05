@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
@@ -104,10 +105,22 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 		Timeout: timeout,
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	client, err := ssh.Dial("tcp", addr, cfg)
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return nil, err
 	}
+	_ = conn.SetDeadline(deadline)
+	cc, channels, requests, err := ssh.NewClientConn(conn, addr, cfg)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	_ = conn.SetDeadline(time.Time{})
+	client := ssh.NewClient(cc, channels, requests)
 	if inst.SSHHostKey == "" && observedHostKey != "" {
 		pinned := observedHostKey
 		if globalCtx != nil && globalCtx.AppDB() != nil {
@@ -121,7 +134,6 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 			_ = client.Close()
 			return nil, fmt.Errorf("SSH host key changed while connecting to instance %d", inst.ID)
 		}
-		inst.SSHHostKey = pinned
 	}
 	return client, nil
 }
@@ -154,8 +166,9 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 // when the remote sshd disconnects.
 
 type sshPool struct {
-	mu      sync.Mutex
-	clients map[int64]*ssh.Client
+	mu         sync.Mutex
+	clients    map[int64]*ssh.Client
+	identities map[int64][32]byte
 }
 
 var globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{}}
@@ -164,27 +177,41 @@ var globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{}}
 // if none is cached. fresh=true when this call dialed a new one
 // (caller can use that to decide whether to retry on error).
 func (p *sshPool) get(inst *Instance) (client *ssh.Client, fresh bool, err error) {
+	return p.getWithTimeout(inst, 10*time.Second)
+}
+
+func (p *sshPool) getWithTimeout(inst *Instance, timeout time.Duration) (client *ssh.Client, fresh bool, err error) {
+	identity := sha256.Sum256([]byte(fmt.Sprintf("%s|%d|%s|%s|%s|%s|%d|%s|%s", inst.Provider, inst.ProviderConnectionID, inst.ProviderID, inst.SSHHost, inst.PublicIPv4, inst.PublicIPv6, inst.SSHPort, inst.SSHUser, inst.SSHPrivateKey)))
 	p.mu.Lock()
 	if c, ok := p.clients[inst.ID]; ok {
-		p.mu.Unlock()
-		return c, false, nil
+		known, recorded := p.identities[inst.ID]
+		if !recorded || known == identity {
+			p.mu.Unlock()
+			return c, false, nil
+		}
+		delete(p.clients, inst.ID)
+		_ = c.Close()
 	}
 	p.mu.Unlock()
-
-	c, err := dialSSH(inst, 10*time.Second)
+	c, err := dialSSH(inst, timeout)
 	if err != nil {
 		return nil, true, err
 	}
-
 	p.mu.Lock()
-	// Re-check after the dial — another goroutine may have raced us
-	// and already cached one. Use theirs; close ours.
 	if existing, ok := p.clients[inst.ID]; ok {
-		p.mu.Unlock()
-		_ = c.Close()
-		return existing, false, nil
+		known, recorded := p.identities[inst.ID]
+		if !recorded || known == identity {
+			p.mu.Unlock()
+			_ = c.Close()
+			return existing, false, nil
+		}
+		_ = existing.Close()
+	}
+	if p.identities == nil {
+		p.identities = map[int64][32]byte{}
 	}
 	p.clients[inst.ID] = c
+	p.identities[inst.ID] = identity
 	p.mu.Unlock()
 	return c, true, nil
 }
@@ -298,41 +325,74 @@ func runSSH(inst *Instance, cmd string, timeout time.Duration) (output string, e
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	client, fresh, err := globalSSHPool.get(inst)
+	started := time.Now()
+	if inst.workContext != nil && inst.workContext.Err() != nil {
+		return "", -1, inst.workContext.Err()
+	}
+	client, fresh, err := globalSSHPool.getWithTimeout(inst, timeout)
 	if err != nil {
 		return "", -1, fmt.Errorf("ssh dial: %w", err)
 	}
-	out, exit, runErr := runSSHOnce(client, cmd, timeout)
-	if runErr != nil && !fresh && isSSHConnError(runErr) {
+	if inst.workContext != nil {
+		boundClient := client
+		stop := context.AfterFunc(inst.workContext, func() { _ = boundClient.Close() })
+		defer stop()
+	}
+	out, exit, runErr := runSSHOnce(client, cmd, timeout-time.Since(started))
+	var opening *sshSessionOpenError
+	if runErr != nil && !fresh && errors.As(runErr, &opening) && time.Since(started) < timeout {
 		// Cached client went stale (idle timeout, VPS reboot, etc.).
 		// Evict + redial once. Pure session errors (non-zero exit
 		// code from the user's command) don't trigger this branch
 		// — those are returned as-is.
 		globalSSHPool.drop(inst.ID, client)
-		client, _, err = globalSSHPool.get(inst)
+		client, _, err = globalSSHPool.getWithTimeout(inst, timeout-time.Since(started))
 		if err != nil {
 			return "", -1, fmt.Errorf("ssh redial after stale connection: %w", err)
 		}
-		out, exit, runErr = runSSHOnce(client, cmd, timeout)
+		out, exit, runErr = runSSHOnce(client, cmd, timeout-time.Since(started))
+	}
+	if runErr != nil && isSSHConnError(runErr) {
+		globalSSHPool.drop(inst.ID, client)
 	}
 	return out, exit, runErr
+}
+
+type sshSessionOpenError struct{ error }
+
+func (e *sshSessionOpenError) Unwrap() error { return e.error }
+
+// Closing the transport is necessary if the peer stops answering channel
+// requests. The deadline starts before NewSession, not after it.
+func boundedSSHSession(client *ssh.Client, timeout time.Duration) (*ssh.Session, func(), error) {
+	if timeout <= 0 {
+		return nil, func() {}, context.DeadlineExceeded
+	}
+	timer := time.AfterFunc(timeout, func() { _ = client.Close() })
+	session, err := client.NewSession()
+	if err != nil {
+		timer.Stop()
+		return nil, func() {}, &sshSessionOpenError{err}
+	}
+	return session, func() { _ = session.Close(); timer.Stop() }, nil
 }
 
 // runSSHOnce is the single-attempt body of runSSH — open a session
 // on the supplied client, run cmd, return combined output + exit
 // code. Doesn't touch the pool.
 func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, int, error) {
-	session, err := client.NewSession()
+	started := time.Now()
+	session, cleanup, err := boundedSSHSession(client, timeout)
 	if err != nil {
-		return "", -1, fmt.Errorf("ssh session: %w", err)
+		return "", -1, err
 	}
-	defer session.Close()
+	defer cleanup()
 
 	writer := &lockedWriter{max: maxCommandOutputBytes}
 	session.Stdout = writer
 	session.Stderr = writer
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout-time.Since(started))
 	defer cancel()
 	marker, err := newSSHExitMarker()
 	if err != nil {
@@ -342,12 +402,9 @@ func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, 
 	go func() { done <- session.Run(wrapSSHCommand(cmd, marker)) }()
 	select {
 	case <-ctx.Done():
-		// Best-effort kill — close the session, the connection will
-		// drop the remote shell via SIGHUP. We don't evict the
-		// cached client here: a timeout is the user's command being
-		// slow, not the transport being broken.
-		_ = session.Signal(ssh.SIGTERM)
-		_ = session.Close()
+		// Closing the transport bounds session/channel waits. The remote
+		// command outcome may be unknown, so it must not be replayed.
+		_ = client.Close()
 		out := writer.String()
 		return out, -1, fmt.Errorf("command timed out after %s", timeout)
 	case runErr := <-done:
@@ -471,7 +528,8 @@ func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err e
 		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
 	}
 	n, runErr := uploadSSHOnce(client, path, contentB64, len(body))
-	if runErr != nil && !fresh && isSSHConnError(runErr) {
+	var opening *sshSessionOpenError
+	if runErr != nil && !fresh && errors.As(runErr, &opening) {
 		globalSSHPool.drop(inst.ID, client)
 		client, _, err = globalSSHPool.get(inst)
 		if err != nil {
@@ -483,13 +541,22 @@ func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err e
 }
 
 func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedLen int) (int, error) {
-	session, err := client.NewSession()
+	if path == "" || strings.ContainsRune(path, 0) {
+		return 0, errors.New("valid file path required")
+	}
+	session, cleanup, err := boundedSSHSession(client, time.Minute)
 	if err != nil {
 		return 0, err
 	}
-	defer session.Close()
+	defer cleanup()
 
-	cmd := fmt.Sprintf(`mkdir -p $(dirname %q) && base64 -d > %q`, path, path)
+	cmd := `set -eu; path=` + quoteShellArg(path) + `; case "$path" in -*) path=./$path;; esac
+dir=$(dirname "$path"); mkdir -p "$dir"
+tmp=$(mktemp "$dir/.apteva-upload.XXXXXX")
+trap 'rm -f "$tmp"' EXIT HUP INT TERM
+base64 -d > "$tmp"
+chmod 0644 "$tmp"
+mv -f "$tmp" "$path"`
 	stdin, err := session.StdinPipe()
 	if err != nil {
 		return 0, err
@@ -531,16 +598,19 @@ func downloadSSH(inst *Instance, path string) (contentB64 string, bytesRead int,
 }
 
 func downloadSSHOnce(client *ssh.Client, path string) ([]byte, error) {
-	session, err := client.NewSession()
+	if path == "" || strings.ContainsRune(path, 0) {
+		return nil, errors.New("valid file path required")
+	}
+	session, cleanup, err := boundedSSHSession(client, time.Minute)
 	if err != nil {
 		return nil, err
 	}
-	defer session.Close()
+	defer cleanup()
 	stdout := &lockedWriter{max: maxFileTransferBytes + 1}
 	stderr := &lockedWriter{max: maxCommandOutputBytes}
 	session.Stdout = stdout
 	session.Stderr = stderr
-	if err := session.Run(fmt.Sprintf(`cat %q`, path)); err != nil {
+	if err := session.Run(`test -f ` + quoteShellArg(path) + ` && head -c ` + strconv.Itoa(maxFileTransferBytes+1) + ` < ` + quoteShellArg(path)); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
 			return nil, fmt.Errorf("remote read failed: %w: %s", err, msg)
@@ -559,10 +629,17 @@ func downloadSSHOnce(client *ssh.Client, path string) ([]byte, error) {
 // interactive sessions with "password expired"; those hosts are not
 // actually ready for instance_run_command or metrics.
 func probeSSHReady(inst *Instance, timeout time.Duration) error {
+	work := inst.workContext
+	if work == nil {
+		work = context.Background()
+	}
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
-		client, err := dialSSH(inst, 5*time.Second)
+		if work.Err() != nil {
+			return work.Err()
+		}
+		client, err := dialSSH(inst, min(5*time.Second, time.Until(deadline)))
 		if err == nil {
 			out, exit, runErr := runSSHOnce(client, "true", 5*time.Second)
 			_ = client.Close()
@@ -577,7 +654,11 @@ func probeSSHReady(inst *Instance, timeout time.Duration) error {
 		} else {
 			lastErr = err
 		}
-		time.Sleep(3 * time.Second)
+		select {
+		case <-work.Done():
+			return work.Err()
+		case <-time.After(min(3*time.Second, time.Until(deadline))):
+		}
 	}
 	if lastErr == nil {
 		lastErr = errors.New("ssh probe timed out")

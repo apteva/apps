@@ -36,8 +36,10 @@ type Deployment struct {
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
 
-	EnvironmentID   int64  `json:"-"`
-	EnvironmentName string `json:"environment,omitempty"`
+	EnvironmentID     int64  `json:"-"`
+	EnvironmentName   string `json:"environment,omitempty"`
+	RecoveryReleaseID int64  `json:"-"`
+	AutomaticRelease  bool   `json:"-"`
 }
 
 type DeploymentEnvironment struct {
@@ -503,6 +505,9 @@ func effectiveDeploymentForEnvironment(d *Deployment, env *DeploymentEnvironment
 	out.DomainRecordID = env.DomainRecordID
 	out.DomainAttachedAt = env.DomainAttachedAt
 	out.CurrentReleaseID = env.CurrentReleaseID
+	if env.ArchivedAt != "" {
+		out.ArchivedAt = env.ArchivedAt
+	}
 	out.EnvironmentID = env.ID
 	out.EnvironmentName = env.Name
 	return &out
@@ -667,8 +672,23 @@ func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 		return nil
 	}
 	args = append(args, id)
-	_, err := db.Exec(`UPDATE builds SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
-	return err
+	where := " WHERE id = ?"
+	if status, ok := fields["status"]; ok {
+		where += " AND (status IN ('pending','running') OR status = ?)"
+		args = append(args, status)
+	}
+	result, err := db.Exec(`UPDATE builds SET `+strings.Join(cols, ", ")+where, args...)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return errors.New("build operation was superseded")
+	}
+	return nil
 }
 
 func dbGetBuild(db *sql.DB, id int64) (*Build, error) {
@@ -726,7 +746,7 @@ func dbListPendingCloudBuilds(db *sql.DB, limit int) ([]Build, error) {
 	}
 	rows, err := db.Query(`SELECT `+buildColumns+`
 		FROM builds
-		WHERE build_backend != 'local' AND status IN ('pending','running')
+		WHERE build_backend != 'local' AND status IN ('pending','running') AND external_job_id != ''
 		  AND (external_next_poll_at = '' OR external_next_poll_at <= ?)
 		ORDER BY id LIMIT ?`, nowUTC(), limit)
 	if err != nil {
@@ -748,7 +768,7 @@ func dbTryAcquireCloudBuildPoll(db *sql.DB, id int64, now, leaseUntil string) (b
 	res, err := db.Exec(`UPDATE builds
 		SET external_poll_lease_until = ?
 		WHERE id = ?
-		  AND build_backend != 'local'
+		  AND build_backend != 'local' AND external_job_id != ''
 		  AND status IN ('pending','running')
 		  AND (external_next_poll_at = '' OR external_next_poll_at <= ?)
 		  AND (external_poll_lease_until = '' OR external_poll_lease_until <= ?)`,
@@ -910,7 +930,7 @@ func dbListPendingMobileReleases(db *sql.DB, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider != '' AND status = 'starting' ORDER BY id LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider NOT IN ('','pending_mobile') AND (status = 'starting' OR (status='live' AND external_status IN ('inProgress','in_progress','waiting_for_review','in_review'))) ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

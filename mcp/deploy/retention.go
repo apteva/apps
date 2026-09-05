@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var retentionMu sync.Mutex
@@ -29,8 +30,12 @@ func (a *App) pruneBuildArtifactsAsync(reason string) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return
 	}
+	if !a.retentionQueued.CompareAndSwap(false, true) {
+		return
+	}
 	db := ctx.AppDB()
 	go func() {
+		defer a.retentionQueued.Store(false)
 		if _, err := a.pruneBuildArtifactsWithContext(db, reason, ctx); err != nil {
 			ctx.Logger().Warn("build retention prune failed", "reason", reason, "err", err)
 		}
@@ -44,6 +49,8 @@ func (a *App) pruneBuildArtifacts(db *sql.DB, reason string) (retentionSummary, 
 func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx interface {
 	Emit(string, any)
 }) (retentionSummary, error) {
+	a.artifactMu.Lock()
+	defer a.artifactMu.Unlock()
 	retentionMu.Lock()
 	defer retentionMu.Unlock()
 
@@ -91,6 +98,15 @@ func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx
 		return summary, err
 	}
 	for _, p := range orphanDirs {
+		id, _ := strconv.ParseInt(filepath.Base(p), 10, 64)
+		var present int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM builds WHERE id=?`, id).Scan(&present); err != nil || present > 0 {
+			continue
+		}
+		info, err := os.Stat(p)
+		if err != nil || time.Since(info.ModTime()) < time.Hour {
+			continue
+		}
 		size, _ := dirSize(p)
 		if err := os.RemoveAll(p); err != nil {
 			return summary, fmt.Errorf("prune orphan build dir %s: %w", p, err)
@@ -102,9 +118,20 @@ func (a *App) pruneBuildArtifactsWithContext(db *sql.DB, reason string, eventCtx
 }
 
 func (a *App) retentionStatus(db *sql.DB) (retentionSummary, error) {
+	a.retentionCacheMu.Lock()
+	defer a.retentionCacheMu.Unlock()
+	if !a.retentionCacheAt.IsZero() && time.Since(a.retentionCacheAt) < time.Minute {
+		return a.retentionCache, nil
+	}
+	a.artifactMu.RLock()
+	defer a.artifactMu.RUnlock()
 	retentionMu.Lock()
 	defer retentionMu.Unlock()
 	summary, _, _, err := a.retentionSummaryLocked(db)
+	if err == nil {
+		a.retentionCache = summary
+		a.retentionCacheAt = time.Now()
+	}
 	return summary, err
 }
 
@@ -150,7 +177,10 @@ func (a *App) retentionRollbackCount() int {
 func retainedBuildIDs(db *sql.DB, rollbackCount int) (map[int64]bool, error) {
 	keep := map[int64]bool{}
 	rows, err := db.Query(`
-		SELECT r.build_id
+		SELECT id FROM builds WHERE release_requested = 1
+ UNION SELECT r.build_id FROM deployment_intents i JOIN releases r ON r.id=i.release_id WHERE i.desired_state='running'
+ UNION
+ SELECT r.build_id
 		  FROM deployments d
 		  JOIN releases r ON r.id = d.current_release_id
 		 WHERE r.build_id > 0

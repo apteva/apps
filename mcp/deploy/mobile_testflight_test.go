@@ -80,6 +80,7 @@ func (p *testFlightPlatform) ExecuteIntegrationTool(_ int64, tool string, input 
 			relationships = append(relationships, map[string]any{"type": "betaGroups", "id": id})
 			included = append(included, map[string]any{"type": "betaGroups", "id": id})
 		}
+		included = append(included, map[string]any{"type": "buildBetaDetails", "attributes": map[string]any{"internalBuildState": "IN_BETA_TESTING", "externalBuildState": "IN_BETA_TESTING"}})
 		result.Data, _ = json.Marshal(map[string]any{
 			"data": map[string]any{
 				"id": "build-42",
@@ -190,7 +191,7 @@ func TestIOSReleaseConfirmedRedundantAssignmentSucceeds(t *testing.T) {
 	if fresh.Status != "live" || fresh.ExternalStatus != "testflight_available" {
 		t.Fatalf("release=%+v", fresh)
 	}
-	if countIntegrationCalls(platform.calls, "get_build") != 1 {
+	if countIntegrationCalls(platform.calls, "get_build") != 2 {
 		t.Fatalf("expected relationship verification: calls=%+v", platform.calls)
 	}
 }

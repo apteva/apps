@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -436,7 +435,12 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "build id required")
 		return
 	}
-	build, err := dbGetBuild(globalCtx.AppDB(), id)
+	project, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	build, err := scopedBuild(globalCtx.AppDB(), project, id)
 	if err != nil || build == nil {
 		httpErr(w, http.StatusNotFound, "build not found")
 		return
@@ -469,6 +473,8 @@ func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, map[string]any{"build": cancelled, "cancelled": cancelled.Status == "cancelled"})
 	case "artifact":
+		a.artifactMu.RLock()
+		defer a.artifactMu.RUnlock()
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD")
 			return
@@ -518,7 +524,12 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "release id required")
 		return
 	}
-	rel, err := dbGetRelease(globalCtx.AppDB(), id)
+	project, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rel, err := scopedRelease(globalCtx.AppDB(), project, id)
 	if err != nil || rel == nil {
 		httpErr(w, http.StatusNotFound, "release not found")
 		return
@@ -535,7 +546,7 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")
 			return
 		}
-		out, err := a.toolReleaseSync(globalCtx, map[string]any{"release_id": float64(rel.ID)})
+		out, err := a.toolReleaseSync(globalCtx, map[string]any{"_project_id": project, "release_id": float64(rel.ID)})
 		if err != nil {
 			httpStoreErr(w, err, http.StatusBadRequest)
 			return
@@ -553,7 +564,7 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		out, err := a.toolRollout(globalCtx, map[string]any{"release_id": float64(rel.ID), "fraction": body.Fraction})
+		out, err := a.toolRollout(globalCtx, map[string]any{"_project_id": project, "release_id": float64(rel.ID), "fraction": body.Fraction})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -564,7 +575,7 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")
 			return
 		}
-		out, err := a.toolHalt(globalCtx, map[string]any{"release_id": float64(rel.ID)})
+		out, err := a.toolHalt(globalCtx, map[string]any{"_project_id": project, "release_id": float64(rel.ID)})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -704,43 +715,23 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 		if d.CurrentReleaseID != nil {
 			current, _ = dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
 		}
+		environments, _ := dbListEnvironments(globalCtx.AppDB(), d.ID, false)
 		httpJSON(w, map[string]any{
 			"deployment":      d,
+			"environments":    environments,
 			"builds":          buildsWithArtifactDownloadURLs(builds, d.ProjectID),
 			"releases":        releases,
 			"current_release": current,
+			"routing":         routingStatus(d),
 			"url":             a.deploymentURL(d, current),
 		})
 	case http.MethodDelete:
-		if d.EnvironmentID > 0 && d.EnvironmentName != defaultEnvironmentName {
-			if d.Domain != "" || d.DomainRecordID != "" {
-				_ = a.detachDomain(globalCtx, d)
-			}
-			if err := a.stopRunningReleasesForDeployment(d.ID, d.EnvironmentID, 5*time.Second); err != nil {
-				httpErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			if err := dbUpdateEnvironment(globalCtx.AppDB(), d.EnvironmentID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
-				httpErr(w, http.StatusInternalServerError, err.Error())
-				return
-			}
-			_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10), strconv.FormatInt(d.EnvironmentID, 10)))
-			emit("deploy.environment.destroyed", map[string]any{
-				"deployment_id": d.ID, "environment_id": d.EnvironmentID, "environment": d.EnvironmentName,
-			})
-			httpJSON(w, map[string]any{"destroyed": true, "environment": d.EnvironmentName, "environment_id": d.EnvironmentID})
-			return
-		}
-		if err := a.stopRunningReleasesForDeployment(d.ID, 0, 5*time.Second); err != nil {
+		out, err := a.toolDestroy(globalCtx, map[string]any{"id": float64(d.ID), "_project_id": d.ProjectID, "environment": d.EnvironmentName})
+		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		builds, _ := dbListBuilds(globalCtx.AppDB(), d.ID, 100000)
-		_ = dbDeleteDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
-		a.removeBuildDirs(builds)
-		_ = os.RemoveAll(filepath.Join(a.dataDir, "store-assets", strconv.FormatInt(d.ID, 10)))
-		emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
-		httpJSON(w, map[string]any{"destroyed": true, "id": d.ID})
+		httpJSON(w, out)
 	case http.MethodPatch:
 		a.httpDeploymentPatch(w, r, d)
 	default:
@@ -905,32 +896,14 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 		opts := releaseOptionsFromArgs(body)
 		releaseOpts = &opts
 	}
-	build, err := a.runBuildWithOptions(d, releaseOpts)
+	build, err := a.submitBuild(d, releaseOpts)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	res := map[string]any{"build": buildWithArtifactDownloadURL(build, d.ProjectID)}
-	if boolArg(body, "release") {
-		opts := *releaseOpts
-		if build.Status == "succeeded" {
-			rel, err := a.runReleaseWithOptions(d, build, opts)
-			if err != nil {
-				res["release_error"] = err.Error()
-			} else {
-				res["release"] = rel
-				res["url"] = a.deploymentURL(d, rel)
-			}
-		} else if normalizeBuildBackend(build.BuildBackend) != buildBackendLocal {
-			optsJSON, _ := json.Marshal(opts)
-			_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
-				"release_requested": true, "release_options_json": string(optsJSON),
-			})
-			build, _ = dbGetBuild(globalCtx.AppDB(), build.ID)
-			res["build"] = buildWithArtifactDownloadURL(build, d.ProjectID)
-			res["release_requested"] = true
-		}
-	}
+	res["release_requested"] = releaseOpts != nil
+
 	httpJSON(w, res)
 }
 
@@ -967,26 +940,12 @@ func (a *App) httpDeploymentStop(w http.ResponseWriter, r *http.Request, d *Depl
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	if d.CurrentReleaseID == nil {
-		httpJSON(w, map[string]any{"stopped": false, "reason": "no live release"})
-		return
-	}
-	rid := *d.CurrentReleaseID
-	rel, _ := dbGetRelease(globalCtx.AppDB(), rid)
-	// Authoritative stop: don't return until the port is actually free
-	// (or report the failure). Fixes the orphan class where runtime.Stop
-	// was a no-op (registry handle missing) and the process kept serving.
-	if err := a.stopReleaseAuthoritative(rel, 5*time.Second); err != nil {
+	out, err := a.stopDeployment(d)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	a.markStopped(rid)
-	if d.EnvironmentID > 0 {
-		_ = dbSetEnvironmentCurrentRelease(globalCtx.AppDB(), d.EnvironmentID, nil)
-	} else {
-		_ = dbSetCurrentRelease(globalCtx.AppDB(), d.ID, nil)
-	}
-	httpJSON(w, map[string]any{"stopped": true, "release_id": rid})
+	httpJSON(w, out)
 }
 
 func (a *App) httpDeploymentLogs(w http.ResponseWriter, r *http.Request, d *Deployment) {

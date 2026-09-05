@@ -158,26 +158,15 @@ func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 // ─── Hetzner adapters ──────────────────────────────────────────────
 
 func hetznerListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	data, err := executeProviderTool(ctx, "hetzner", "server_types_list", map[string]any{"per_page": 50})
 	if err != nil {
 		return nil, err
 	}
-	// per_page=50 hits Hetzner's max for server_types; the current
-	// catalog is well under that, so one page covers everything.
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_types_list", map[string]any{
-		"per_page": 50,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("server_types_list: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("server_types_list: %s", upstreamErrorString(res))
-	}
-	types, err := parseHetznerServerTypes(res.Data)
+	rows, err := parseHetznerServerTypes(data)
 	if err != nil {
 		return nil, err
 	}
-	return activeServerTypes(types), nil
+	return activeServerTypes(rows), nil
 }
 
 func activeServerTypes(types []ServerType) []ServerType {
@@ -191,50 +180,21 @@ func activeServerTypes(types []ServerType) []ServerType {
 }
 
 func hetznerListLocations(ctx *sdk.AppCtx) ([]Location, error) {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	data, err := executeProviderTool(ctx, "hetzner", "locations_list", map[string]any{"per_page": 50})
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "locations_list", map[string]any{})
-	if err != nil {
-		return nil, fmt.Errorf("locations_list: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("locations_list: %s", upstreamErrorString(res))
-	}
-	return parseHetznerLocations(res.Data)
+	return parseHetznerLocations(data)
 }
 
 func hetznerListImages(ctx *sdk.AppCtx) ([]Image, error) {
-	bound, err := instanceProviderBinding(ctx, "hetzner")
+	data, err := executeProviderTool(ctx, "hetzner", "images_list", map[string]any{"per_page": 50, "type": "system", "status": "available"})
 	if err != nil {
 		return nil, err
 	}
-	// type=system narrows to the OS images we'd boot a fresh server
-	// from. Excludes snapshots/backups/app images which aren't
-	// relevant to provisioning. status=available skips images still
-	// being created.
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "images_list", map[string]any{
-		"type":     "system",
-		"status":   "available",
-		"per_page": 50,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("images_list: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("images_list: %s", upstreamErrorString(res))
-	}
-	return parseHetznerImages(res.Data)
+	return parseHetznerImages(data)
 }
 
-// ─── Hetzner response parsers ──────────────────────────────────────
-
-// parseHetznerServerTypes pulls the `server_types` array out of
-// Hetzner's response. Each type carries pricing per location; we
-// pick the first location's monthly + hourly EUR rate (they're
-// identical across Hetzner locations today; we still copy the
-// per-location list into AvailableIn so panels can filter).
 func parseHetznerServerTypes(data json.RawMessage) ([]ServerType, error) {
 	var v struct {
 		ServerTypes []struct {

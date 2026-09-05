@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"golang.org/x/crypto/ssh"
 	"io"
 	"net"
 	"sync"
@@ -22,8 +23,9 @@ type managedTunnel struct {
 	localPort int
 	instance  *Instance
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
+	mu     sync.Mutex
+	conns  map[net.Conn]struct{}
+	closed bool
 }
 
 type tunnelRegistry struct {
@@ -46,7 +48,7 @@ func dialInstanceLoopback(inst *Instance, target string) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	conn, err := client.Dial("tcp", target)
+	conn, err := dialTunnelWithDeadline(client, target)
 	if err == nil {
 		return conn, nil
 	}
@@ -56,7 +58,7 @@ func dialInstanceLoopback(inst *Instance, target string) (net.Conn, error) {
 		if redialErr != nil {
 			return nil, fmt.Errorf("ssh tunnel redial: %w", redialErr)
 		}
-		return client.Dial("tcp", target)
+		return dialTunnelWithDeadline(client, target)
 	}
 	return nil, err
 }
@@ -106,13 +108,19 @@ func (r *tunnelRegistry) serve(t *managedTunnel) {
 }
 
 func (r *tunnelRegistry) forward(t *managedTunnel, local net.Conn, target string) {
+	if !t.track(local, true) {
+		return
+	}
+	defer t.track(local, false)
 	remote, err := r.dial(t.instance, target)
 	if err != nil {
 		_ = local.Close()
 		return
 	}
-	t.track(local, true)
-	t.track(remote, true)
+	if !t.track(remote, true) {
+		_ = local.Close()
+		return
+	}
 	defer func() {
 		t.track(local, false)
 		t.track(remote, false)
@@ -123,7 +131,7 @@ func (r *tunnelRegistry) forward(t *managedTunnel, local net.Conn, target string
 	done := make(chan struct{}, 2)
 	copyOne := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
-		if tcp, ok := dst.(*net.TCPConn); ok {
+		if tcp, ok := dst.(interface{ CloseWrite() error }); ok {
 			_ = tcp.CloseWrite()
 		}
 		done <- struct{}{}
@@ -131,22 +139,32 @@ func (r *tunnelRegistry) forward(t *managedTunnel, local net.Conn, target string
 	go copyOne(remote, local)
 	go copyOne(local, remote)
 	<-done
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+	}
 }
 
-func (t *managedTunnel) track(conn net.Conn, add bool) {
+func (t *managedTunnel) track(conn net.Conn, add bool) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if add {
+		if t.closed {
+			_ = conn.Close()
+			return false
+		}
 		t.conns[conn] = struct{}{}
 	} else {
 		delete(t.conns, conn)
 	}
+	return true
 }
 
 func (t *managedTunnel) close() {
 	_ = t.listener.Close()
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	t.closed = true
 	for conn := range t.conns {
 		_ = conn.Close()
 	}
@@ -229,4 +247,10 @@ func (a *App) toolCloseTunnel(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	closed := globalTunnelRegistry.close(id, targetPort)
 	return map[string]any{"id": id, "target_port": targetPort, "closed": closed}, nil
+}
+
+func dialTunnelWithDeadline(client *ssh.Client, target string) (net.Conn, error) {
+	timer := time.AfterFunc(10*time.Second, func() { _ = client.Close() })
+	defer timer.Stop()
+	return client.Dial("tcp", target)
 }

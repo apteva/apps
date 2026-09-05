@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -82,6 +83,10 @@ func instanceProviderBinding(ctx *sdk.AppCtx, provider string) (*sdk.BoundIntegr
 	if ctx == nil {
 		return nil, errors.New("Instances app context is unavailable")
 	}
+	if connection := catalogScope(ctx).ConnectionID; connection > 0 {
+		return storageBinding(ctx, provider, connection)
+	}
+
 	var first *sdk.BoundIntegration
 	for _, bound := range ctx.IntegrationsFor("provider") {
 		if bound == nil || bound.ConnectionID <= 0 || providerSlugForBinding(ctx, bound) != provider {
@@ -182,6 +187,8 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 		return nil, err
 	}
 	in.ProviderConnectionID = bound.ConnectionID
+	ctx, releaseScope := scopedCatalog(ctx, catalogOptions{ConnectionID: bound.ConnectionID, Zone: in.Region})
+	defer releaseScope()
 	if err := validateStorageRequest(provider, in.Storage); err != nil {
 		return nil, fmt.Errorf("invalid storage request: %w", err)
 	}
@@ -219,9 +226,9 @@ func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 }
 
 type DestroyOptions struct {
-	Force             bool
-	RetainVolumes     *bool
-	RetainFlexibleIPs bool
+	Force             bool  `json:"force"`
+	RetainVolumes     *bool `json:"retain_volumes,omitempty"`
+	RetainFlexibleIPs bool  `json:"retain_flexible_ips"`
 }
 
 func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
@@ -235,43 +242,100 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 	if !instanceCapabilities(inst).Destroy {
 		return providerAdapterUnavailable(inst.Provider, "destroy")
 	}
-	previous := inst.Status
+	// Retrying an interrupted destroy resumes its saved intent. New options may
+	// only make cleanup safer (retain) or explicitly permit an unreachable guest.
+	if inst.Status == "destroying" {
+		var saved DestroyOptions
+		if err := json.Unmarshal([]byte(inst.DestroyOptionsJSON), &saved); err != nil {
+			return err
+		}
+		saved.Force = saved.Force || options.Force
+		saved.RetainFlexibleIPs = saved.RetainFlexibleIPs || options.RetainFlexibleIPs
+		if options.RetainVolumes != nil {
+			saved.RetainVolumes = options.RetainVolumes
+		}
+		options = saved
+	}
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		return err
+	}
 	_, claimed, err := transitionInstanceAndEmit(ctx, inst.ID,
-		[]string{"pending", "provisioning", "ready", "error"}, "destroying", map[string]any{"lifecycle_stage": "Delete", "cleanup_error": ""})
+		[]string{"pending", "provisioning", "ready", "error", "destroying"}, "destroying",
+		map[string]any{"lifecycle_stage": "Delete", "cleanup_error": "", "destroy_options_json": string(encoded)})
 	if err != nil {
 		return err
 	}
 	if !claimed {
-		return fmt.Errorf("instance lifecycle operation already in progress (status=%s)", previous)
+		return ErrOperationSuperseded
 	}
-	claimedInst, err := dbGetInstance(ctx.AppDB(), inst.ID)
+	cancelInstanceWorker(ctx, inst.ID)
+	fresh, err := dbGetInstance(ctx.AppDB(), inst.ID)
 	if err != nil {
 		return err
 	}
+	if fresh.CreatePending {
+		if !instanceCreateActive(ctx, fresh.ID) {
+			_ = dbUpdateInstance(ctx.AppDB(), fresh.ID, map[string]any{"cleanup_error": "Provider create outcome is unknown; reconcile the recorded account before deletion"})
+			return fmt.Errorf("provider create outcome is unknown; inventory retained for reconciliation")
+		}
+		return nil
+	} // create completion will compensate
+	return resumeInstanceDestroy(ctx, fresh)
+}
+
+func resumeInstanceDestroy(ctx *sdk.AppCtx, inst *Instance) (err error) {
+	unlock, err := lockResource(ctx.AppDB(), "instance", inst.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	inst, err = dbGetInstance(ctx.AppDB(), inst.ID)
+	if err != nil {
+		return err
+	}
+	if inst.Status != "destroying" || inst.CreatePending {
+		return ErrOperationSuperseded
+	}
+	var options DestroyOptions
+	if err = json.Unmarshal([]byte(inst.DestroyOptionsJSON), &options); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"cleanup_error": err.Error()})
+		}
+	}()
+	if err = reconcileAWSBootStorage(ctx, inst); err != nil {
+		return err
+	}
 	if options.RetainVolumes != nil {
+		if err = applyDestroyBootPolicy(ctx, inst, *options.RetainVolumes); err != nil {
+			return err
+		}
 		policy := "with_instance"
 		if *options.RetainVolumes {
 			policy = "retain"
 		}
-		if _, err = ctx.AppDB().Exec(`UPDATE instance_volumes SET delete_policy=? WHERE instance_id=? AND managed=1`, policy, inst.ID); err != nil {
+		if _, err = ctx.AppDB().Exec(`UPDATE instance_volumes SET delete_policy=? WHERE (instance_id=? OR id IN(SELECT resource_id FROM resource_operations WHERE resource_kind='volume' AND json_extract(input_json,'$.InstanceID')=?)) AND managed=1`, policy, inst.ID, inst.ID); err != nil {
 			return err
 		}
 	}
-	if err := prepareVolumesForInstanceDestroy(ctx, inst.ID, options.Force); err != nil {
-		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
+	if err = prepareVolumesForInstanceDestroy(ctx, inst.ID, options.Force); err != nil {
 		return err
 	}
-	var providerErr error
-	if isScalewayElasticMetalInstance(claimedInst) {
-		providerErr = scalewayElasticMetalDestroyWithOptions(ctx, claimedInst, options.RetainFlexibleIPs)
+	if isScalewayElasticMetalInstance(inst) {
+		err = scalewayElasticMetalDestroyWithOptions(ctx, inst, options.RetainFlexibleIPs)
 	} else {
-		providerErr = destroyProviderInstance(ctx, claimedInst)
+		err = destroyProviderInstance(ctx, inst)
 	}
-	if err := providerErr; err != nil {
-		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"cleanup_error": err.Error(), "lifecycle_stage": "Delete"})
+	if err != nil {
 		return err
 	}
-	if err := deleteInstanceAndEmit(ctx, claimedInst); err != nil {
+	if err = finalizeAWSBootVolumes(ctx, inst); err != nil {
+		return err
+	}
+	if err = deleteInstanceAndEmit(ctx, inst); err != nil {
 		return err
 	}
 	globalTunnelRegistry.closeInstance(inst.ID)
@@ -280,24 +344,45 @@ func destroyManagedInstanceWithOptions(ctx *sdk.AppCtx, inst *Instance, options 
 	return nil
 }
 
+// Called only once the create response and all synchronous initialization have
+// been recorded. A cancellation keeps the row until its upstream ID is known.
+func finishInstanceCreation(ctx *sdk.AppCtx, id int64) bool {
+	if err := dbUpdateInstance(ctx.AppDB(), id, map[string]any{"create_pending": false}); err != nil {
+		return false
+	}
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		return false
+	}
+	if inst.Status == "destroying" {
+		if err := resumeInstanceDestroy(ctx, inst); err != nil {
+			ctx.Logger().Warn("cancelled create cleanup pending", "id", id, "err", err)
+		}
+		return false
+	}
+	return inst.Status == "provisioning"
+}
+
 func reconcileDestroying(ctx *sdk.AppCtx) {
 	rows, err := dbListInstances(ctx.AppDB(), "", "destroying")
 	if err != nil {
-		ctx.Logger().Warn("instances: reconcile destroying list failed", "err", err)
+		ctx.Logger().Warn("destroy recovery list", "err", err)
 		return
 	}
 	for _, inst := range rows {
-		if err := destroyProviderInstance(ctx, inst); err != nil {
-			ctx.Logger().Error("instances: destroy recovery failed", "id", inst.ID, "err", err)
+		if instanceCreateActive(ctx, inst.ID) {
 			continue
 		}
-		if err := deleteInstanceAndEmit(ctx, inst); err != nil {
-			ctx.Logger().Error("instances: destroy recovery delete failed", "id", inst.ID, "err", err)
+		if inst.CreatePending && inst.ProviderID == "" {
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"cleanup_error": "creation was interrupted before its provider ID was recorded; reconcile the provider resource before forgetting this row"})
 			continue
 		}
-		globalTunnelRegistry.closeInstance(inst.ID)
-		globalSSHPool.evict(inst.ID)
-		clearMetricsCache(inst.ID)
+		if inst.CreatePending {
+			_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"create_pending": false})
+		}
+		if err := resumeInstanceDestroy(ctx, inst); err != nil {
+			ctx.Logger().Warn("destroy recovery pending", "id", inst.ID, "err", err)
+		}
 	}
 }
 

@@ -48,8 +48,14 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	if r, ok := s.replyByTool[tool]; ok {
 		return r, nil
 	}
-	// Default empty success.
-	return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)}, nil
+	switch tool {
+	case "list_dns_records":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS","records":[]}`)}, nil
+	case "create_dns_record", "edit_dns_record", "edit_dns_record_by_type", "delete_dns_record", "delete_dns_record_by_type", "create_records", "update_record", "delete_record", "save_dns_records", "delete_dns_records":
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)}, nil
+	default:
+		return nil, fmt.Errorf("unexpected provider tool %q", tool)
+	}
 }
 
 func (s *stubPlatform) CallApp(string, string, map[string]any) (json.RawMessage, error) {
@@ -507,7 +513,7 @@ const porkbunAvailableJSON = `{
 	"response": {
 		"avail": "yes",
 		"type": "registration",
-		"price": "11.06"
+		"price": "11.06", "minDuration": 1
 	}
 }`
 
@@ -566,7 +572,7 @@ func TestDomainAvailabilityCheck_FallsBackToRDAPOnRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := out.(map[string]any)["availability"].(*DomainAvailability)
-	if got.Provider != "rdap" || got.Source != "rdap" || !got.Available || got.Confidence != "best_effort" {
+	if got.Provider != "rdap" || got.Source != "rdap" || got.Available || got.Known || got.Confidence != "unknown" {
 		t.Fatalf("RDAP fallback not normalized: %+v", got)
 	}
 	if !strings.Contains(got.Warning, "Registrar availability check failed") {
@@ -606,16 +612,32 @@ func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testi
 	plat := &stubPlatform{
 		replyByTool: map[string]*sdk.ExecuteResult{
 			"check_availability": {Success: true, Status: 200, Data: json.RawMessage(porkbunAvailableJSON)},
-			"register_domain":    {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS","order_id":"ord_123"}`)},
 		},
 	}
+	plat.executeFn = func(_ int64, tool string, in map[string]any) (*sdk.ExecuteResult, error) {
+		if tool == "check_availability" {
+			return plat.replyByTool[tool], nil
+		}
+		if tool != "register_domain" {
+			return nil, fmt.Errorf("unexpected tool %s", tool)
+		}
+		body := map[string]any{"status": "SUCCESS", "domain": in["domain"], "orderId": 123, "cost": in["cost"]}
+		if in["dryRun"] == true {
+			body["dryRun"] = true
+			body["wouldSucceed"] = true
+			body["duration"] = 1
+		}
+		raw, _ := json.Marshal(body)
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: raw}, nil
+	}
+
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
 	prepared, err := app.toolDomainRegistrationPrepare(ctx, map[string]any{
 		"domain":        "fresh-example.com",
-		"years":         2,
-		"auto_renew":    false,
+		"years":         1,
+		"auto_renew":    true,
 		"whois_privacy": true,
 		"notes":         "new product",
 	})
@@ -635,10 +657,10 @@ func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testi
 	if d.Name != "fresh-example.com" || d.RegistrarSlug != "porkbun" || d.DNSProviderSlug != "porkbun" || d.ConnectionID != 1 {
 		t.Fatalf("domain row not populated from registrar: %+v", d)
 	}
-	if len(plat.calls) != 2 || plat.calls[0].Tool != "check_availability" || plat.calls[1].Tool != "register_domain" {
+	if len(plat.calls) != 3 || plat.calls[0].Tool != "check_availability" || plat.calls[1].Input["dryRun"] != true || plat.calls[2].Tool != "register_domain" {
 		t.Fatalf("wrong provider call order: %+v", plat.calls)
 	}
-	if plat.calls[1].Input["years"] != 2 || plat.calls[1].Input["renewAuto"] != "no" || plat.calls[1].Input["whoisPrivacy"] != "yes" {
+	if plat.calls[2].Input["years"] != nil || plat.calls[2].Input["cost"] != int64(1106) || plat.calls[2].Input["whoisPrivacy"] != true || plat.calls[2].Input["idempotency_key"] != token {
 		t.Fatalf("registration payload wrong: %+v", plat.calls[1].Input)
 	}
 	listed, _ := app.toolDomainList(ctx, map[string]any{})
@@ -652,7 +674,7 @@ func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testi
 	if !replayed.(map[string]any)["idempotent_replay"].(bool) {
 		t.Fatalf("expected idempotent replay: %+v", replayed)
 	}
-	if len(plat.calls) != 2 {
+	if len(plat.calls) != 3 {
 		t.Fatalf("replay called provider again: %+v", plat.calls)
 	}
 }
@@ -676,7 +698,7 @@ func TestDomainRegister_RejectsUnavailableDomain(t *testing.T) {
 	app := &App{}
 
 	_, err := app.toolDomainRegistrationPrepare(ctx, map[string]any{"domain": "taken-example.com"})
-	if err == nil || !strings.Contains(err.Error(), "not available") {
+	if err == nil || !strings.Contains(err.Error(), "not confirmed available") {
 		t.Fatalf("expected unavailable error, got %v", err)
 	}
 	for _, c := range plat.calls {
@@ -1016,7 +1038,7 @@ func TestDomainRecordsList_NoProviderBound(t *testing.T) {
 const namecheapHostsXML = `<?xml version="1.0" encoding="utf-8"?>
 <ApiResponse Status="OK" xmlns="http://api.namecheap.com/xml.response">
   <CommandResponse>
-    <DomainDNSGetHostsResult Domain="acme.com">
+    <DomainDNSGetHostsResult Domain="acme.com" EmailType="MX">
       <host HostId="1" Name="@" Type="A" Address="1.2.3.4" TTL="600" MXPref="0"/>
       <host HostId="2" Name="www" Type="CNAME" Address="acme.com." TTL="600" MXPref="0"/>
       <host HostId="3" Name="@" Type="MX" Address="mx.acme.com" TTL="600" MXPref="10"/>
@@ -1177,7 +1199,7 @@ func TestNamecheap_UpsertCreatesWhenAbsent(t *testing.T) {
 		stubPlatform: stubPlatform{
 			replyByTool: map[string]*sdk.ExecuteResult{
 				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(namecheapHostsXML)},
-				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult IsSuccess="true"/></CommandResponse></ApiResponse>`)},
 			},
 			bindingsOverride: map[string]any{"dns_provider": float64(2)},
 		},
@@ -1224,7 +1246,7 @@ func TestNamecheap_DeleteOmitsMatchingHost(t *testing.T) {
 		stubPlatform: stubPlatform{
 			replyByTool: map[string]*sdk.ExecuteResult{
 				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(namecheapHostsXML)},
-				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult IsSuccess="true"/></CommandResponse></ApiResponse>`)},
 			},
 			bindingsOverride: map[string]any{"dns_provider": float64(2)},
 		},
@@ -1268,7 +1290,7 @@ func TestNamecheap_NewMXDefaultsPriority(t *testing.T) {
 		stubPlatform: stubPlatform{
 			replyByTool: map[string]*sdk.ExecuteResult{
 				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(namecheapHostsXML)},
-				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult IsSuccess="true"/></CommandResponse></ApiResponse>`)},
 			},
 			bindingsOverride: map[string]any{"dns_provider": float64(2)},
 		},
@@ -1316,10 +1338,10 @@ func TestNamecheap_MXUpdatePreservesExistingPriority(t *testing.T) {
 			replyByTool: map[string]*sdk.ExecuteResult{
 				"get_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0" encoding="utf-8"?>
 <ApiResponse Status="OK"><CommandResponse>
-<DomainDNSGetHostsResult Domain="acme.com">
+<DomainDNSGetHostsResult Domain="acme.com" EmailType="MX">
 <host HostId="3" Name="@" Type="MX" Address="oldmail.acme.com" TTL="600" MXPref="20"/>
 </DomainDNSGetHostsResult></CommandResponse></ApiResponse>`)},
-				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"/>`)},
+				"set_dns_hosts": {Success: true, Status: 200, Data: jsonStringWrap(`<?xml version="1.0"?><ApiResponse Status="OK"><CommandResponse><DomainDNSSetHostsResult IsSuccess="true"/></CommandResponse></ApiResponse>`)},
 			},
 			bindingsOverride: map[string]any{"dns_provider": float64(2)},
 		},

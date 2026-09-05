@@ -72,6 +72,7 @@ type InstanceVolume struct {
 	Status               string `json:"status"`
 	Filesystem           string `json:"filesystem,omitempty"`
 	MountPath            string `json:"mount_path,omitempty"`
+	ProviderDevicePath   string `json:"provider_device_path,omitempty"`
 	DevicePath           string `json:"device_path,omitempty"`
 	GuestReady           bool   `json:"guest_ready"`
 	Managed              bool   `json:"managed"`
@@ -172,6 +173,9 @@ func validateStorageRequest(provider string, req InstanceStorageRequest) error {
 	if req.Boot.DeletePolicy != "with_instance" && req.Boot.DeletePolicy != "retain" {
 		return errors.New("storage.boot.delete_policy must be with_instance or retain")
 	}
+	if req.Boot.DeletePolicy == "retain" && provider != "scaleway" && provider != "aws-ec2" {
+		return fmt.Errorf("provider %q cannot retain boot storage through Instances", provider)
+	}
 	if req.Boot.Tier == "" {
 		if req.Boot.StorageClass == "local" || req.Boot.ProviderType == "l_ssd" {
 			req.Boot.Tier = "local"
@@ -180,7 +184,9 @@ func validateStorageRequest(provider string, req InstanceStorageRequest) error {
 		}
 	}
 	if req.Boot.StorageClass == "" {
-		if req.Boot.ProviderType == "l_ssd" || req.Boot.Tier == "local" {
+		if provider == "runpod" {
+			req.Boot.StorageClass = "ephemeral"
+		} else if req.Boot.ProviderType == "l_ssd" || req.Boot.Tier == "local" {
 			req.Boot.StorageClass = "local"
 		} else {
 			req.Boot.StorageClass = "block"
@@ -212,7 +218,7 @@ func scanVolume(s rowScanner) (*InstanceVolume, error) {
 	err := s.Scan(&v.ID, &instanceID, &v.Provider, &v.ProviderConnectionID, &v.ProviderVolumeID, &v.Name,
 		&v.Role, &v.StorageClass, &v.Tier, &v.ProviderType, &v.SizeGB, &v.Region, &v.Status,
 		&v.Filesystem, &v.MountPath, &v.DevicePath, &managed, &v.DeletePolicy, &v.ProviderMetadataJSON,
-		&v.ErrorMessage, &v.CreatedAt, &v.UpdatedAt)
+		&v.ErrorMessage, &v.CreatedAt, &v.UpdatedAt, &v.ProviderDevicePath)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +233,7 @@ func scanVolume(s rowScanner) (*InstanceVolume, error) {
 const volumeCols = `id, instance_id, provider, provider_connection_id, provider_volume_id, name,
 	role, storage_class, tier, provider_type, size_gb, region, status, filesystem, mount_path,
 	device_path, managed, delete_policy, provider_metadata_json, error_message,
-	COALESCE(created_at,''), COALESCE(updated_at,'')`
+	COALESCE(created_at,''), COALESCE(updated_at,''), provider_device_path`
 
 func dbGetVolume(db *sql.DB, id int64) (*InstanceVolume, error) {
 	v, err := scanVolume(db.QueryRow(`SELECT `+volumeCols+` FROM instance_volumes WHERE id=?`, id))
@@ -241,8 +247,8 @@ func dbListVolumes(db *sql.DB, instanceID int64, provider string) ([]*InstanceVo
 	query := `SELECT ` + volumeCols + ` FROM instance_volumes WHERE 1=1`
 	args := []any{}
 	if instanceID > 0 {
-		query += ` AND instance_id=?`
-		args = append(args, instanceID)
+		query += ` AND (instance_id=? OR id IN (SELECT resource_id FROM resource_operations WHERE resource_kind='volume' AND json_extract(input_json,'$.InstanceID')=?))`
+		args = append(args, instanceID, instanceID)
 	}
 	if provider != "" {
 		query += ` AND provider=?`
@@ -287,7 +293,7 @@ func dbCreateVolume(db *sql.DB, in CreateVolumeInput, providerID, storageClass, 
 
 func dbUpdateVolume(db *sql.DB, id int64, fields map[string]any) error {
 	cols, args := []string{}, []any{}
-	for _, key := range []string{"instance_id", "size_gb", "status", "filesystem", "mount_path", "device_path", "delete_policy", "provider_metadata_json", "error_message"} {
+	for _, key := range []string{"instance_id", "provider_volume_id", "provider_type", "storage_class", "role", "size_gb", "status", "filesystem", "mount_path", "device_path", "provider_device_path", "delete_policy", "provider_metadata_json", "error_message"} {
 		if value, ok := fields[key]; ok {
 			cols, args = append(cols, key+"=?"), append(args, value)
 		}
@@ -297,7 +303,14 @@ func dbUpdateVolume(db *sql.DB, id int64, fields map[string]any) error {
 	}
 	cols = append(cols, "updated_at=?")
 	args = append(args, nowUTC(), id)
-	_, err := db.Exec(`UPDATE instance_volumes SET `+strings.Join(cols, ",")+` WHERE id=?`, args...)
+	res, err := db.Exec(`UPDATE instance_volumes SET `+strings.Join(cols, ",")+` WHERE id=?`, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n == 0 {
+		return ErrVolumeNotFound
+	}
 	return err
 }
 
@@ -376,15 +389,22 @@ func createProviderVolume(ctx *sdk.AppCtx, in CreateVolumeInput, inst *Instance)
 }
 
 func providerVolumeID(provider string, data json.RawMessage) string {
-	switch provider {
-	case "aws-ec2":
+	if provider == "aws-ec2" {
 		return findJSONScalar(data, "volumeId")
-	case "huawei-cloud":
-		if id := findJSONScalar(data, "volume_id"); id != "" {
-			return id
+	}
+	var root map[string]json.RawMessage
+	if json.Unmarshal(data, &root) != nil {
+		return ""
+	}
+	for _, key := range []string{"volume", "block_storage", "networkVolume"} {
+		if raw := root[key]; len(raw) > 0 {
+			return jsonStringAt(raw, "id")
 		}
 	}
-	return findJSONScalar(data, "id")
+	if provider == "huawei-cloud" {
+		return jsonStringAt(data, "volume_id")
+	}
+	return jsonStringAt(data, "id")
 }
 
 func resolveCreatedVolumeID(ctx *sdk.AppCtx, in CreateVolumeInput, data json.RawMessage) (string, error) {
@@ -421,6 +441,13 @@ func resolveCreatedVolumeID(ctx *sdk.AppCtx, in CreateVolumeInput, data json.Raw
 	}
 }
 
+func attachCreatedVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) error {
+	if v.Provider == "linode" {
+		return nil
+	} // create_volume carried linode_id
+	return attachProviderVolume(ctx, v, inst)
+}
+
 func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) error {
 	if inst == nil || inst.ProviderID == "" {
 		return errors.New("target instance has no provider id")
@@ -435,10 +462,13 @@ func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) er
 	case "vultr":
 		tool, args = "block_storage_attach", map[string]any{"block_id": v.ProviderVolumeID, "instance_id": inst.ProviderID, "live": true}
 	case "aws-ec2":
-		device := v.DevicePath
+		device := v.ProviderDevicePath
 		if device == "" {
 			device = nextAWSVolumeDevice(ctx.AppDB(), inst.ID)
-			_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"device_path": device})
+			if device == "" {
+				return errors.New("no free AWS attachment device")
+			}
+			_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"provider_device_path": device})
 		}
 		tool, args = "volume_attach", map[string]any{"Action": "AttachVolume", "Version": "2016-11-15", "VolumeId": v.ProviderVolumeID, "InstanceId": inst.ProviderID, "Device": "/dev/sdf"}
 		args["Device"] = device
@@ -447,7 +477,7 @@ func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) er
 	case "huawei-cloud":
 		tool, args = "attach_volume", map[string]any{"server_id": inst.ProviderID, "volumeAttachment": map[string]any{"volumeId": v.ProviderVolumeID}}
 	case "linode":
-		return nil // attached atomically by create_volume when instance_id is supplied
+		tool, args = "attach_volume", map[string]any{"volumeId": atoiAny(v.ProviderVolumeID), "linode_id": atoiAny(inst.ProviderID)}
 	case "ovhcloud":
 		tool, args = "attach_volume", map[string]any{"volumeId": v.ProviderVolumeID, "instanceId": inst.ProviderID}
 	case "runpod":
@@ -455,22 +485,33 @@ func attachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, inst *Instance) er
 	default:
 		return providerAdapterUnavailable(v.Provider, "volume attach")
 	}
-	_, err := executeVolumeTool(ctx, v.ProviderConnectionID, v.Provider, tool, args)
-	return err
+	return mutateProviderVolume(ctx, v, "attach", tool, args, volumeIntent{InstanceID: inst.ID, ProviderInstanceID: inst.ProviderID})
 }
 
 func nextAWSVolumeDevice(db *sql.DB, instanceID int64) string {
-	var count int
-	_ = db.QueryRow(`SELECT COUNT(*) FROM instance_volumes WHERE instance_id=? AND provider='aws-ec2'`, instanceID).Scan(&count)
-	// /dev/sdf through /dev/sdp are valid recommended data-device names.
-	index := count - 1
-	if index < 0 {
-		index = 0
+	rows, err := db.Query(`SELECT COALESCE(NULLIF(provider_device_path,''),device_path) FROM instance_volumes WHERE (instance_id=? OR id IN(SELECT resource_id FROM resource_operations WHERE resource_kind='volume' AND json_extract(input_json,'$.InstanceID')=?)) AND provider='aws-ec2'`, instanceID, instanceID)
+	if err != nil {
+		return ""
 	}
-	if index > 10 {
-		index = 10
+	defer rows.Close()
+	used := map[string]bool{}
+	for rows.Next() {
+		var device string
+		if rows.Scan(&device) != nil {
+			return ""
+		}
+		used[device] = true
 	}
-	return "/dev/sd" + string(rune('f'+index))
+	if rows.Err() != nil {
+		return ""
+	}
+	for slot := 'f'; slot <= 'p'; slot++ {
+		device := "/dev/sd" + string(slot)
+		if !used[device] {
+			return device
+		}
+	}
+	return ""
 }
 
 func detachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
@@ -503,8 +544,7 @@ func detachProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	default:
 		return providerAdapterUnavailable(v.Provider, "volume detach")
 	}
-	_, err = executeVolumeTool(ctx, v.ProviderConnectionID, v.Provider, tool, args)
-	return err
+	return mutateProviderVolume(ctx, v, "detach", tool, args, volumeIntent{})
 }
 
 func resizeProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, sizeGB int) error {
@@ -532,8 +572,7 @@ func resizeProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume, sizeGB int) error 
 	default:
 		return providerAdapterUnavailable(v.Provider, "volume resize")
 	}
-	_, err := executeVolumeTool(ctx, v.ProviderConnectionID, v.Provider, tool, args)
-	return err
+	return mutateProviderVolume(ctx, v, "resize", tool, args, volumeIntent{SizeGB: sizeGB})
 }
 
 func deleteProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
@@ -565,8 +604,7 @@ func deleteProviderVolume(ctx *sdk.AppCtx, v *InstanceVolume) error {
 	default:
 		return providerAdapterUnavailable(v.Provider, "volume delete")
 	}
-	_, err := executeVolumeTool(ctx, v.ProviderConnectionID, v.Provider, tool, args)
-	return err
+	return mutateProviderVolume(ctx, v, "delete", tool, args, volumeIntent{})
 }
 
 func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64, force bool) error {
@@ -575,8 +613,46 @@ func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64, force b
 		return err
 	}
 	for _, v := range volumes {
+		unlock, err := lockResource(ctx.AppDB(), "volume", v.ID)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		if v.Role == "boot" {
 			continue
+		}
+		var op, payload string
+		pendingErr := ctx.AppDB().QueryRow(`SELECT operation,input_json FROM resource_operations WHERE resource_kind='volume' AND resource_id=?`, v.ID).Scan(&op, &payload)
+		if pendingErr == nil && op == "await_attach" {
+			if v.DeletePolicy == "with_instance" && v.Managed {
+				if err = deleteProviderVolume(ctx, v); err != nil {
+					return err
+				}
+			} else {
+				if _, err = ctx.AppDB().Exec(`DELETE FROM resource_operations WHERE resource_kind='volume' AND resource_id=?`, v.ID); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if pendingErr == nil {
+			var intent volumeIntent
+			if err = json.Unmarshal([]byte(payload), &intent); err != nil {
+				return err
+			}
+			if strings.HasPrefix(v.ProviderVolumeID, "pending:") {
+				return fmt.Errorf("volume %d has an unknown create outcome; reconcile before deleting the instance", v.ID)
+			}
+			if err = verifyVolumeOperation(ctx, v, op, intent); err != nil {
+				return err
+			}
+			v, err = dbGetVolume(ctx.AppDB(), v.ID)
+			if errors.Is(err, ErrVolumeNotFound) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
 		}
 		if err := unmountPreparedVolume(ctx, v); err != nil {
 			if !force {
@@ -604,6 +680,14 @@ func prepareVolumesForInstanceDestroy(ctx *sdk.AppCtx, instanceID int64, force b
 }
 
 func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume, error) {
+	if in.InstanceID > 0 {
+		unlock, err := lockResource(ctx.AppDB(), "instance", in.InstanceID)
+		if err != nil {
+			return nil, err
+		}
+		defer unlock()
+	}
+
 	if in.Name == "" || in.SizeGB <= 0 {
 		return nil, errors.New("name and positive size_gb are required")
 	}
@@ -622,6 +706,10 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 		if err != nil {
 			return nil, err
 		}
+		if inst.Status != "ready" {
+			return nil, fmt.Errorf("target instance is %s", inst.Status)
+		}
+
 		if inst.IsLocal() {
 			return nil, errors.New("provider volumes cannot attach to the local instance")
 		}
@@ -673,25 +761,66 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 	if in.DeletePolicy != "retain" && in.DeletePolicy != "with_instance" {
 		return nil, errors.New("delete_policy must be retain or with_instance")
 	}
-	data, providerType, class, err := createProviderVolume(ctx, in, inst)
+	var pendingID int64
+	if err := ctx.AppDB().QueryRow(`SELECT id FROM instance_volumes WHERE provider=? AND provider_connection_id=? AND name=? AND region=? AND provider_volume_id LIKE 'pending:%' LIMIT 1`, provider, in.ProviderConnectionID, in.Name, in.Region).Scan(&pendingID); err == nil {
+		return nil, fmt.Errorf("volume %d already has an unresolved create request; reconcile it before retrying", pendingID)
+	}
+	// Inventory intent precedes the paid provider mutation. Unknown outcomes
+	// retain the pending identity and request for reconciliation, never retry create blindly.
+	pendingInput := in
+	pendingInput.InstanceID = 0
+	class := "block"
+	if provider == "runpod" {
+		class = "network"
+	}
+	intentJSON, _ := json.Marshal(in)
+	v, err := dbCreateVolume(ctx.AppDB(), pendingInput, "pending:"+newRequestID(), class, "creating", string(intentJSON))
 	if err != nil {
 		return nil, err
 	}
-	in.ProviderType = providerType
+	desired := volumeIntent{SizeGB: in.SizeGB, InstanceID: in.InstanceID}
+	if provider == "linode" && inst != nil {
+		desired.InstanceID = inst.ID
+		desired.ProviderInstanceID = inst.ProviderID
+	}
+	if err = persistVolumeIntent(ctx.AppDB(), v.ID, "create", desired); err != nil {
+		return nil, err
+	}
+	data, providerType, class, err := createProviderVolume(ctx, in, inst)
+	if err != nil {
+		_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"status": "error", "error_message": "provider create outcome requires reconciliation: " + err.Error()})
+		return nil, err
+	}
 	providerID, err := resolveCreatedVolumeID(ctx, in, data)
 	if err != nil {
 		return nil, err
 	}
 	if providerID == "" {
-		return nil, fmt.Errorf("%s volume create response did not include a volume id", provider)
+		return nil, fmt.Errorf("%s volume create returned no identity; pending volume %d retained for reconciliation", provider, v.ID)
 	}
-	metadata, _ := json.Marshal(map[string]any{"create_response": json.RawMessage(data)})
-	v, err := dbCreateVolume(ctx.AppDB(), in, providerID, class, "available", string(metadata))
+	metadata, _ := json.Marshal(map[string]any{"create_response": json.RawMessage(data), "request": in})
+	if err = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"provider_volume_id": providerID, "provider_type": providerType, "storage_class": class, "provider_metadata_json": string(metadata)}); err != nil {
+		return nil, fmt.Errorf("record provider volume %s: %w", providerID, err)
+	}
+	v, err = dbGetVolume(ctx.AppDB(), v.ID)
 	if err != nil {
-		return nil, fmt.Errorf("volume %s was created upstream but could not be recorded: %w", providerID, err)
+		return nil, err
 	}
+	if err = verifyVolumeOperation(ctx, v, "create", desired); err != nil {
+		_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"error_message": err.Error()})
+		return nil, err
+	}
+
 	if inst != nil {
-		if err := attachProviderVolume(ctx, v, inst); err != nil {
+		fresh, e := dbGetInstance(ctx.AppDB(), inst.ID)
+		if e != nil {
+			return nil, e
+		}
+		if fresh.Status != "ready" {
+			return nil, fmt.Errorf("volume %d is recorded but attachment stopped because instance is %s", v.ID, fresh.Status)
+		}
+		inst = fresh
+		if err := attachCreatedVolume(ctx, v, inst); err != nil {
 			_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"status": "error", "error_message": err.Error()})
 			return nil, fmt.Errorf("volume %d was created and recorded but attachment failed: %w", v.ID, err)
 		}
@@ -709,7 +838,7 @@ func createManagedVolume(ctx *sdk.AppCtx, in CreateVolumeInput) (*InstanceVolume
 		}
 		return v, nil
 	}
-	return v, nil
+	return dbGetVolume(ctx.AppDB(), v.ID)
 }
 
 func atoiAny(s string) any {
@@ -776,6 +905,18 @@ func (a *App) toolVolumeList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	target := int64Arg(args, "instance_id")
+	unlockInstance, lockErr := lockResource(ctx.AppDB(), "instance", target)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlockInstance()
+	unlock, lockErr := lockResource(ctx.AppDB(), "volume", int64Arg(args, "id"))
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	prepare, err := volumePrepareRequestArg(args, "prepare", false)
 	if err != nil {
 		return nil, err
@@ -788,6 +929,10 @@ func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if inst.Status != "ready" {
+		return nil, fmt.Errorf("target instance is %s", inst.Status)
+	}
+
 	if v.InstanceID != nil {
 		return nil, errors.New("volume is already attached")
 	}
@@ -803,7 +948,7 @@ func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err = attachProviderVolume(ctx, v, inst); err != nil {
 		return nil, err
 	}
-	_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"instance_id": inst.ID, "status": "attached", "error_message": ""})
+	_ = dbUpdateVolume(ctx.AppDB(), v.ID, map[string]any{"instance_id": inst.ID, "role": "data", "status": "attached", "error_message": ""})
 	v, _ = dbGetVolume(ctx.AppDB(), v.ID)
 	if prepare != nil {
 		prepared, result, prepareErr := prepareAttachedVolume(ctx, v, prepare)
@@ -816,6 +961,12 @@ func (a *App) toolVolumeAttach(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolVolumeDetach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	unlock, lockErr := lockResource(ctx.AppDB(), "volume", int64Arg(args, "id"))
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	v, err := dbGetVolume(ctx.AppDB(), int64Arg(args, "id"))
 	if err != nil {
 		return nil, err
@@ -835,6 +986,12 @@ func (a *App) toolVolumeDetach(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolVolumeResize(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	unlock, lockErr := lockResource(ctx.AppDB(), "volume", int64Arg(args, "id"))
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	v, err := dbGetVolume(ctx.AppDB(), int64Arg(args, "id"))
 	if err != nil {
 		return nil, err
@@ -852,6 +1009,12 @@ func (a *App) toolVolumeResize(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolVolumeDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	unlock, lockErr := lockResource(ctx.AppDB(), "volume", int64Arg(args, "id"))
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlock()
+
 	if !boolArg(args, "confirm", false) {
 		return nil, errors.New("confirm=true is required to permanently delete a volume")
 	}
@@ -859,7 +1022,7 @@ func (a *App) toolVolumeDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	if v.Role == "boot" {
+	if v.Role == "boot" && v.InstanceID != nil {
 		return nil, errors.New("boot volumes are deleted only with their instance")
 	}
 	if v.InstanceID != nil {

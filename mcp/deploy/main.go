@@ -31,7 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -46,9 +46,20 @@ var manifestYAML string
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	dataDir  string
-	runtime  Runtime
-	registry *SupervisorRegistry
+	retentionQueued  atomic.Bool
+	retentionCacheMu sync.Mutex
+	retentionCache   retentionSummary
+	retentionCacheAt time.Time
+	capsuleCleanupAt time.Time
+	ingressMu        sync.Mutex
+	operationLocks   sync.Map
+	transitionMu     sync.Mutex
+	artifactMu       sync.RWMutex
+	localBuildMu     sync.Mutex
+	localBuilds      map[int64]context.CancelFunc
+	dataDir          string
+	runtime          Runtime
+	registry         *SupervisorRegistry
 
 	cfg sourceConfig
 
@@ -72,7 +83,7 @@ type App struct {
 	// the counter, which is fine — reconcileReleases will re-adopt
 	// any process that survived. Per deployment: how many consecutive
 	// restart attempts have fired, and when the last one fired (for
-	// exponential backoff). Cleared on a successful promoteToLive.
+	// exponential backoff). Reset after five minutes of stable service.
 	autoRestartMu    sync.Mutex
 	autoRestartState map[int64]autoRestartInfo
 }
@@ -155,6 +166,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if a.retainRollbacks < 0 {
 		a.retainRollbacks = 0
 	}
+	_, _ = ctx.AppDB().Exec(`UPDATE builds SET status='failed',error='local build interrupted by supervisor restart',finished_at=? WHERE build_backend='local' AND status IN ('pending','running')`, nowUTC())
 	a.buildSem = make(chan struct{}, a.maxBuilds)
 	a.registry = NewSupervisorRegistry()
 	a.autoRestartState = map[int64]autoRestartInfo{}
@@ -166,6 +178,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"max_build_concurrency", a.maxBuilds,
 		"retain_rollback_builds", a.retainRollbacks,
 	)
+
+	// Manual mobile submission interrupted before durable provider metadata is
+	// explicit failure; automatic submissions retain their resumable build job.
+	_, _ = ctx.AppDB().Exec(`UPDATE releases SET status='failed', error='mobile release interrupted before submission; retry publishing' WHERE provider='pending_mobile' AND status='starting' AND id NOT IN (SELECT automatic_release_id FROM builds WHERE automatic_release_id IS NOT NULL)`)
 
 	// Releases the DB still thinks are "live"/"starting" were spawned
 	// by a previous instance of this sidecar. Re-adopt the ones whose
@@ -209,6 +225,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.localBuildMu.Lock()
+	for _, cancel := range a.localBuilds {
+		cancel()
+	}
+	a.localBuildMu.Unlock()
 	// Deliberately do NOT stop supervised releases here. They're
 	// spawned in their own process groups and aren't signalled when
 	// this sidecar exits, so they outlive an app upgrade; the next
@@ -226,6 +247,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "ingress_sync", Schedule: "@every 15s", Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.reconcileIngress(ctx) }},
 		{
 			Name: "mobile_release_sync", Schedule: "@every 1m",
 			Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
@@ -316,7 +338,7 @@ func (a *App) recoverBootOrphan(rel *Release) (*Release, error) {
 	if err != nil {
 		return nil, err
 	}
-	if d == nil || d.CurrentReleaseID == nil || *d.CurrentReleaseID != rel.ID {
+	if d == nil || !a.recoveryAllowed(d, rel.ID) {
 		// A stale row can still say "live" after a newer release became
 		// current. Never let it roll the environment back during boot.
 		return nil, nil
@@ -349,6 +371,8 @@ func (a *App) recoverBootOrphan(rel *Release) (*Release, error) {
 		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID,
 		"release_id": rel.ID, "build_id": b.ID,
 	})
+	d = a.releaseConfiguration(d, rel.ID)
+	d.RecoveryReleaseID = rel.ID
 	recovered, err := a.runServiceRelease(d, b)
 	if err != nil {
 		a.recordBootRecoveryFailure(rel, err)
@@ -565,14 +589,28 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	if err != nil {
 		return nil, err
 	}
+	return a.runLocalBuildRecord(d, build)
+}
+func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
+	fw := d.Framework
+	var err error
+	buildCtx, finishBuild := a.registerLocalBuild(build.ID)
+	defer finishBuild()
 	d, err = a.prepareMobileBuildTarget(d, build)
 	if err != nil {
 		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
 	}
 
 	// Concurrency throttle.
-	a.buildSem <- struct{}{}
+	select {
+	case a.buildSem <- struct{}{}:
+	case <-buildCtx.Done():
+		return a.failBuild(build, buildCtx.Err().Error()), nil
+	}
 	defer func() { <-a.buildSem }()
+	if !activeBuild(build.ID) {
+		return dbGetBuild(globalCtx.AppDB(), build.ID)
+	}
 
 	emit("deploy.build.started", map[string]any{"deployment_id": d.ID, "environment": d.EnvironmentName, "build_id": build.ID})
 
@@ -644,13 +682,19 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 		return a.failBuild(build, err.Error()), nil
 	}
 
+	credentials, err := a.mobileSigningBuildCredentials(d)
+	if err != nil {
+		return a.failBuild(build, "signing credentials: "+err.Error()), nil
+	}
+	defer clearRunnerCredentials(&credentials)
 	entrypoint, err := builder.Build(srcDir, distDir, BuildOverrides{
+		Context:          buildCtx,
 		BuildCmd:         d.BuildCmd,
 		StartCmd:         d.StartCmd,
 		Env:              parseEnvJSON(d.EnvJSON),
 		TargetConfigJSON: d.TargetConfigJSON,
-		Credentials:      a.mobileSigningBuildCredentials(d),
-	}, logF)
+		Credentials:      credentials,
+	}, newBoundedLogWriter(logF))
 	if err != nil {
 		return a.failBuild(build, err.Error()), nil
 	}
@@ -663,7 +707,7 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 	}
 	fmt.Fprintf(logF, "=== build succeeded in %dms, artifact=%s, entrypoint=%q ===\n", durMs, distDir, entrypoint)
 
-	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
+	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
 		"status":                 "succeeded",
 		"finished_at":            nowUTC(),
 		"duration_ms":            durMs,
@@ -677,7 +721,9 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 		// persisting it here, runRelease's resolveCommand falls into
 		// the default case and fails with "no default start command".
 		"framework": fw,
-	})
+	}); err != nil {
+		return dbGetBuild(globalCtx.AppDB(), build.ID)
+	}
 	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	// Stash entrypoint via the build's (framework-chosen) BuildCmd
 	// metadata is not enough — the runtime needs entrypoint at
@@ -720,64 +766,67 @@ func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions
 }
 
 // runServiceRelease starts a supervised process for the build and
-// atomically stops the deployment's previous current release.
+// keeps the previous service until the candidate is ready and routed.
 func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	if b.Status != "succeeded" {
 		return nil, fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
 	}
+	unlock := a.lockEnvironment(d.ID, d.EnvironmentID)
+	defer unlock()
+	a.artifactMu.RLock()
+	defer a.artifactMu.RUnlock()
 	if !buildArtifactAvailable(b) {
 		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
 	}
-
-	// Stop the previous live release first so we don't double-bind.
-	if d.CurrentReleaseID != nil {
-		if rr := a.registry.Get(*d.CurrentReleaseID); rr != nil {
-			_ = a.runtime.Stop(rr)
-			_ = dbReleasePortLease(globalCtx.AppDB(), rr.Port)
-			a.registry.Delete(rr.ReleaseID)
-		}
-		_ = dbUpdateRelease(globalCtx.AppDB(), *d.CurrentReleaseID, map[string]any{
-			"status":     "stopped",
-			"stopped_at": nowUTC(),
-		})
-		// Unregister the route while we're between releases. The new
-		// release only re-registers once probeReady confirms it owns
-		// its port. Without this, during the rebuild gap the route
-		// keeps pointing at a dead (and potentially-recycled) port —
-		// the smaller-blast-radius cousin of the false-live incident.
-		// promoteToLive will register the fresh target when the new
-		// release verifies.
-		if d.Domain != "" {
-			unregisterRouteForDeployment(globalCtx, a, d.Domain)
-		}
+	if err := a.stopSupersededCandidates(d); err != nil {
+		return nil, err
 	}
-
-	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
+	fresh, err := a.refreshDeployment(d)
+	if err != nil {
+		return nil, err
+	}
+	if fresh.ArchivedAt != "" {
+		return nil, errors.New("deployment environment is archived")
+	}
+	if d.RecoveryReleaseID > 0 && !a.recoveryAllowed(d, d.RecoveryReleaseID) {
+		return nil, errors.New("recovery superseded by operator action")
+	}
+	d.CurrentReleaseID = fresh.CurrentReleaseID
+	previousID := int64(0)
+	if d.CurrentReleaseID != nil {
+		previousID = *d.CurrentReleaseID
+	}
+	rel, created, err := a.createOperationRelease(d, b)
+	if err == nil && !created {
+		return rel, nil
+	}
 	if err != nil {
 		return nil, err
 	}
 
-	// Allocate port. Explicit PortHint is sticky-by-design; with no
-	// hint, prefer the previous release's port for this deployment so
-	// re-releases don't drift through the range (operator may have
-	// written Caddy rules / firewall holes / docs against the old
-	// port). Falls through to the range scan if that port can't be
-	// claimed any more (operator changed something, port now held by
-	// another tenant, etc.) — allocator's fail-loud only fires for
-	// EXPLICIT hints.
-	effectiveHint := d.PortHint
-	if effectiveHint == 0 {
-		if prev := a.previousReleasePort(d.ID, d.EnvironmentID); prev > 0 {
-			effectiveHint = prev
+	previousID = 0
+	if d.CurrentReleaseID != nil {
+		previousID = *d.CurrentReleaseID
+	}
+	started := false
+	defer func() {
+		if !started {
+			a.restorePreviousIntent(rel)
+			if previousID > 0 && a.watchdogStop != nil {
+				go a.autoRestart(d.ID, d.EnvironmentID, "replacement_failed")
+			}
 		}
+	}()
+	// Fixed ports require controlled downtime; candidate ports preserve the old service.
+	if d.PortHint > 0 && previousID > 0 {
+		previous, _ := dbGetRelease(globalCtx.AppDB(), previousID)
+		if err := a.stopReleaseAuthoritative(previous, 5*time.Second); err != nil {
+			_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"status": "failed", "error": err.Error()})
+			return nil, err
+		}
+		a.markStopped(previousID)
 	}
-	port, err := a.allocatePort(effectiveHint, rel.ID)
-	if err != nil && effectiveHint != 0 && d.PortHint == 0 {
-		// Implicit hint (previous release's port) lost — quietly
-		// fall back to a range scan. Explicit hint failure bubbles
-		// up; this branch only catches the convenience path.
-		port, err = a.allocatePort(0, rel.ID)
-	}
+	port, err := a.allocatePort(d.PortHint, rel.ID)
 	if err != nil {
 		_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 			"status": "failed", "error": err.Error(),
@@ -804,6 +853,9 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 		Env:          envMap,
 	}
 
+	activated := make(chan struct{})
+	spec.Activated = activated
+	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"port": port, "started_at": nowUTC(), "log_path": a.runtime.LogPath(rel.ID)})
 	rr, err := a.runtime.Start(spec)
 	if err != nil {
 		_ = dbReleasePortLease(globalCtx.AppDB(), port)
@@ -817,6 +869,7 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	}
 
 	a.registry.Put(rr)
+	_, _ = globalCtx.AppDB().Exec(`UPDATE release_runtime SET process_identity=? WHERE release_id=?`, processIdentity(rr.PID), rel.ID)
 	// Status starts at "starting" — only probeReady's pidOwnsPort
 	// success flips it to "live", at which point current_release is
 	// set and the route is registered. This prevents the false-live
@@ -825,16 +878,17 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	// pointer or the host router. Today's "5s probe, then mark live
 	// no matter what" behavior is what poisoned marcoschwartz.com.
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
-		"status":     "starting",
 		"port":       port,
 		"pid":        rr.PID,
 		"started_at": nowUTC(),
 		"log_path":   a.runtime.LogPath(rel.ID),
 	})
+	close(activated)
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "start", "{}")
 	emit("deploy.release.started", map[string]any{
 		"deployment_id": d.ID, "environment": d.EnvironmentName, "release_id": rel.ID, "port": port, "pid": rr.PID,
 	})
+	started = true
 	a.pruneBuildArtifactsAsync("release_started")
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
@@ -842,6 +896,8 @@ func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 // markCrashed is called by the runtime when a supervised process
 // exits unexpectedly.
 func (a *App) markCrashed(releaseID int64, cause error) {
+	a.transitionMu.Lock()
+	defer a.transitionMu.Unlock()
 	// Defensive: tests can run the runtime without an apteva-server
 	// context (no OnMount → no globalCtx, no AppDB). Skipping the DB
 	// updates is safe — the test owns the lifecycle and isn't reading
@@ -856,7 +912,8 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 	})
 	rel, _ := dbGetRelease(globalCtx.AppDB(), releaseID)
 	if rel != nil {
-		_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
+		a.restorePreviousIntent(rel)
+		_ = releaseOwnedPort(globalCtx.AppDB(), rel.ID, rel.Port)
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "crash", fmt.Sprintf(`{"error":%q}`, cause.Error()))
 		payload := a.crashEventPayload(rel, "process_exit")
 		payload["error"] = cause.Error()
@@ -873,74 +930,27 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 	a.registry.Delete(releaseID)
 }
 
-// stopReleaseAuthoritative is the operator-facing stop. Unlike a
-// bare runtime.Stop, this guarantees the port is actually free when
-// it returns — by killing the process group of whatever owns the
-// port, regardless of whether fleet's in-memory registry knows
-// about it.
-//
-// Fixes the orphan class operators reported: registry.Get(rid) was
-// nil (sidecar restart cleared the in-memory map; markStopped from
-// a prior call already deleted the entry; etc.), runtime.Stop was a
-// no-op, the actual process kept serving while the DB said stopped.
-// Re-release then allocated a different port → two processes
-// listening, both releases drifting from reality.
-//
-// Sequence:
-//  1. runtime.Stop on the in-memory handle if present (graceful
-//     cmd.Wait path with cancel + SIGTERM/SIGKILL escalation).
-//  2. Probe the port. If still held, find the pid that owns it
-//     (pid-tree-aware now), SIGTERM the whole pgrp, poll until
-//     free, escalate to SIGKILL.
-//  3. Return only when the port is genuinely free, or after the
-//     hard fallback (with an error so the operator sees it).
-//
-// Stop is now synchronous from the operator's POV.
+// stopReleaseAuthoritative only signals the recorded process generation.
+// A port number alone never authorizes termination of its current owner.
 func (a *App) stopReleaseAuthoritative(rel *Release, grace time.Duration) error {
 	if rel == nil {
 		return nil
 	}
 	if rr := a.registry.Get(rel.ID); rr != nil {
-		_ = a.runtime.Stop(rr)
+		return a.runtime.Stop(rr)
 	}
-	if rel.Port <= 0 {
+	if rel.PID <= 0 {
 		return nil
 	}
-	if portFreeForServer(rel.Port) {
-		return nil // happy path — registry stop did its job
-	}
-	// Port still held → find the pid + kill its process group. The
-	// pid we know about (rel.PID) is often a wrapper; pid-by-port
-	// gets us the actual owner. Then walk up to its pgrp leader so
-	// the whole tree dies (bun wrapper → bun script, npm wrapper →
-	// node, etc.).
-	pid := findPidListeningOn(rel.Port)
-	if pid <= 0 {
-		// portFreeForServer says held but nothing in proc — corner
-		// case (kernel TIME_WAIT? socket in another namespace?).
-		// Treat as success; the next allocator pick will bind-probe.
+	identity := ""
+	_ = globalCtx.AppDB().QueryRow(`SELECT process_identity FROM release_runtime WHERE release_id=?`, rel.ID).Scan(&identity)
+	if processIdentity(rel.PID) == "" {
 		return nil
 	}
-	pgid, _ := syscall.Getpgid(pid)
-	if pgid <= 0 {
-		pgid = pid
+	if identity == "" || processIdentity(rel.PID) != identity {
+		return errors.New("release process identity is unknown or changed; refusing to terminate")
 	}
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	deadline := time.Now().Add(grace)
-	for time.Now().Before(deadline) {
-		if portFreeForServer(rel.Port) {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	for i := 0; i < 25; i++ { // 5s after SIGKILL
-		if portFreeForServer(rel.Port) {
-			return nil
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	return fmt.Errorf("port %d still bound after SIGKILL (pid %d, pgrp %d)", rel.Port, pid, pgid)
+	return terminateOwnedGroup(rel.PID, identity, grace)
 }
 
 func (a *App) stopRunningReleasesForDeployment(deploymentID, environmentID int64, grace time.Duration) error {
@@ -957,8 +967,11 @@ func (a *App) stopRunningReleasesForDeployment(deploymentID, environmentID int64
 		if rel.Status != "live" && rel.Status != "starting" {
 			continue
 		}
-		if err := a.stopReleaseAuthoritative(rel, grace); err != nil && firstErr == nil {
-			firstErr = err
+		if err := a.stopReleaseAuthoritative(rel, grace); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		a.markStopped(rel.ID)
 	}
@@ -966,6 +979,8 @@ func (a *App) stopRunningReleasesForDeployment(deploymentID, environmentID int64
 }
 
 func (a *App) markStopped(releaseID int64) {
+	a.transitionMu.Lock()
+	defer a.transitionMu.Unlock()
 	// Same defensive skip as markCrashed — see comment there.
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return
@@ -976,7 +991,7 @@ func (a *App) markStopped(releaseID int64) {
 	})
 	rel, _ := dbGetRelease(globalCtx.AppDB(), releaseID)
 	if rel != nil {
-		_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
+		_ = releaseOwnedPort(globalCtx.AppDB(), rel.ID, rel.Port)
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "stop", "{}")
 		emit("deploy.release.stopped", map[string]any{
 			"deployment_id": rel.DeploymentID, "release_id": releaseID,
@@ -997,7 +1012,7 @@ func (a *App) cascadeUnregisterRouteForRelease(rel *Release) {
 		return
 	}
 	d, _ := a.deploymentForRelease(rel)
-	if d == nil || d.Domain == "" {
+	if d == nil || d.Domain == "" || d.CurrentReleaseID == nil || *d.CurrentReleaseID != rel.ID {
 		return
 	}
 	unregisterRouteForDeployment(globalCtx, a, d.Domain)
@@ -1070,8 +1085,7 @@ func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
 // until the supervisor reports a crash. The release is NEVER marked
 // "live" without pid-owns-port verification.
 //
-// Authoritative test is pidOwnsPort (procfs on linux, always-true
-// stub elsewhere). The TCP dial used to be the only check; relying
+// Authoritative test is pidOwnsPort (procfs on Linux, lsof/ps on macOS). The TCP dial used to be the only check; relying
 // on "something answers" is what let a co-located apteva instance's
 // process poison marcoschwartz.com.
 func (a *App) probeReady(releaseID int64, pid, port int, timeout time.Duration) {
@@ -1100,6 +1114,8 @@ func (a *App) probeReady(releaseID int64, pid, port int, timeout time.Duration) 
 // after the first call, which is what makes the watchdog safe to
 // run alongside probeReady.
 func (a *App) promoteToLive(releaseID int64, pid, port int) {
+	a.transitionMu.Lock()
+	defer a.transitionMu.Unlock()
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return
 	}
@@ -1112,13 +1128,17 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 		_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{"last_health_at": nowUTC()})
 		return
 	}
+	if !a.releaseMayPromote(rel) {
+		return
+	}
 	if rel.Status != "starting" {
 		// Stopped/crashed/failed releases can't be promoted; the
 		// supervisor path that set the terminal state wins.
 		return
 	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), releaseID, map[string]any{
-		"status":         "live",
+		"status": "live",
+		"pid":    pid, "port": port,
 		"last_health_at": nowUTC(),
 	})
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_ok", "{}")
@@ -1130,12 +1150,16 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 	emit("deploy.release.live", map[string]any{
 		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID, "release_id": releaseID, "port": port, "pid": pid,
 	})
-	// Release is healthy — clear any auto-restart backoff so the next
-	// crash starts from a fresh attempts budget.
-	a.resetAutoRestart(rel.DeploymentID, rel.EnvironmentID)
+
 	d, _ := a.deploymentForRelease(rel)
 	if d != nil && d.Domain != "" {
-		registerRouteForDeployment(globalCtx, a, d)
+		if err := registerRouteForDeployment(globalCtx, a, d); err != nil {
+			return
+		}
+	}
+	var previous int64
+	if globalCtx.AppDB().QueryRow(`SELECT previous_release_id FROM release_runtime WHERE release_id=?`, releaseID).Scan(&previous) == nil && previous > 0 {
+		go a.retirePreviousRelease(releaseID)
 	}
 }
 
@@ -1153,7 +1177,7 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 //
 // Tick interval is 60s — small enough that domain-collision blast
 // radius is bounded, large enough that procfs scans don't matter.
-// pidOwnsPort is a no-op true on non-Linux, so this is a free tick.
+// Ownership is checked on Linux and macOS.
 func (a *App) runWatchdog(stop <-chan struct{}) {
 	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
@@ -1175,6 +1199,7 @@ func (a *App) watchdogTick() {
 		if rr.PID <= 0 || rr.Port <= 0 {
 			continue
 		}
+		_ = rotateRuntimeLog(a.runtime.LogPath(rr.ReleaseID))
 		owns := pidOwnsPort(rr.PID, rr.Port)
 		rel, _ := dbGetRelease(globalCtx.AppDB(), rr.ReleaseID)
 		if rel == nil {
@@ -1182,10 +1207,20 @@ func (a *App) watchdogTick() {
 		}
 		switch rel.Status {
 		case "starting":
+			if !owns {
+				if started, err := time.Parse(time.RFC3339, rel.StartedAt); err == nil && time.Since(started) > 2*time.Minute {
+					go a.failUnreadyRelease(rel)
+				}
+			}
 			if owns {
 				a.promoteToLive(rr.ReleaseID, rr.PID, rr.Port)
 			}
 		case "live":
+			if owns {
+				if started, err := time.Parse(time.RFC3339, rel.StartedAt); err == nil && time.Since(started) > 5*time.Minute {
+					a.resetAutoRestart(rel.DeploymentID, rel.EnvironmentID)
+				}
+			}
 			if !owns {
 				a.markPortOwnerChanged(rel)
 			}
@@ -1206,7 +1241,7 @@ func (a *App) markPortOwnerChanged(rel *Release) {
 		"stopped_at": nowUTC(),
 		"error":      fmt.Sprintf("port owner changed: pid %d no longer holds :%d", rel.PID, rel.Port),
 	})
-	_ = dbReleasePortLease(globalCtx.AppDB(), rel.Port)
+	_ = releaseOwnedPort(globalCtx.AppDB(), rel.ID, rel.Port)
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "crash", `{"reason":"port_owner_changed"}`)
 	emit("deploy.release.crashed", a.crashEventPayload(rel, "port_owner_changed"))
 	a.registry.Delete(rel.ID)
@@ -1255,6 +1290,9 @@ func (a *App) autoRestart(deploymentID, environmentID int64, reason string) {
 	}
 	stateKey := autoRestartStateKey(deploymentID, environmentID)
 	a.autoRestartMu.Lock()
+	if a.autoRestartState == nil {
+		a.autoRestartState = map[int64]autoRestartInfo{}
+	}
 	st := a.autoRestartState[stateKey]
 	if st.Paused {
 		a.autoRestartMu.Unlock()
@@ -1304,24 +1342,34 @@ func (a *App) autoRestart(deploymentID, environmentID int64, reason string) {
 		}
 		d = effectiveDeploymentForEnvironment(d, env)
 	}
-	if d.Domain == "" && d.CurrentReleaseID == nil {
-		// Operator-cleared deployment; nothing to restart toward.
+	if d.ArchivedAt != "" {
 		return
 	}
-	builds, err := dbListBuildsForEnv(globalCtx.AppDB(), deploymentID, environmentID, 5)
-	if err != nil {
-		return
+	recoveryID := int64(0)
+	if d.CurrentReleaseID != nil {
+		recoveryID = *d.CurrentReleaseID
 	}
-	var lastBuild *Build
-	for i := range builds {
-		if builds[i].Status == "succeeded" && buildArtifactAvailable(&builds[i]) {
-			lastBuild = &builds[i]
-			break
+	var intended int64
+	var desired string
+	if err := globalCtx.AppDB().QueryRow(`SELECT desired_state,release_id FROM deployment_intents WHERE deployment_id=? AND environment_id=?`, deploymentID, environmentID).Scan(&desired, &intended); err == nil {
+		if desired != "running" {
+			return
 		}
+		recoveryID = intended
 	}
-	if lastBuild == nil {
+	rel, err := dbGetRelease(globalCtx.AppDB(), recoveryID)
+	if err != nil || rel == nil || rel.Status == "live" {
 		return
 	}
+	lastBuild, err := dbGetBuild(globalCtx.AppDB(), rel.BuildID)
+	if err != nil || lastBuild == nil || lastBuild.Status != "succeeded" || !buildArtifactAvailable(lastBuild) {
+		return
+	}
+	if !a.recoveryAllowed(d, recoveryID) {
+		return
+	}
+	d = a.releaseConfiguration(d, recoveryID)
+	d.RecoveryReleaseID = recoveryID
 	emit("deploy.auto_restart_attempted", map[string]any{
 		"deployment_id": deploymentID, "environment_id": environmentID, "build_id": lastBuild.ID,
 		"attempt": st.Attempts, "reason": reason,

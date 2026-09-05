@@ -62,6 +62,9 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 			return nil, err
 		}
 	}
+	var rotationInput *mobileSigningIdentityInput
+	var rotationPayload mobileSigningSecretPayload
+	previousIdentity := identity
 	if identity == nil || rotate {
 		input, payload, generateErr := generateAndroidSigningIdentity(d.ProjectID, packageName)
 		if generateErr != nil {
@@ -70,7 +73,37 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 		if identity == nil {
 			identity, err = a.createMobileSigningIdentity(db, input, payload)
 		} else {
-			identity, err = a.replaceMobileSigningIdentity(db, identity, input, payload)
+			rotationInput = &input
+			rotationPayload = payload
+			candidate := *identity
+			candidate.Revision++
+			candidate.Format = input.Format
+			candidate.KeyAlias = input.KeyAlias
+			candidate.CertificatePEM = input.CertificatePEM
+			candidate.CertificateSHA1 = input.CertificateSHA1
+			candidate.CertificateSHA256 = input.CertificateSHA256
+			candidate.ExpiresAt = input.ExpiresAt
+			candidate.EncryptedPayload, err = a.encryptMobileSigningPayload(input, candidate.Revision, payload)
+			if err == nil {
+				// Keep the candidate durable before touching the provider. A retry
+				// reuses this immutable revision if provisioning was interrupted.
+				candidatePtr, stageErr := stageSigningRevision(db, &candidate)
+				if stageErr != nil {
+					return nil, stageErr
+				}
+				identity = candidatePtr
+				recoveredPayload, decryptErr := a.decryptMobileSigningPayload(identity)
+				if decryptErr != nil {
+					return nil, decryptErr
+				}
+				rotationPayload = *recoveredPayload
+				rotationInput.Format = identity.Format
+				rotationInput.KeyAlias = identity.KeyAlias
+				rotationInput.CertificatePEM = identity.CertificatePEM
+				rotationInput.CertificateSHA1 = identity.CertificateSHA1
+				rotationInput.CertificateSHA256 = identity.CertificateSHA256
+				rotationInput.ExpiresAt = identity.ExpiresAt
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -144,6 +177,12 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 			"build_backend_config_json": string(cfgBody),
 		}); persistErr != nil {
 			return nil, fail(persistErr)
+		}
+	}
+	if rotationInput != nil {
+		identity, err = a.replaceMobileSigningIdentity(db, previousIdentity, *rotationInput, rotationPayload)
+		if err != nil {
+			return nil, fail(err)
 		}
 	}
 	setup.Status = mobileSigningStatusReady

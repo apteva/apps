@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
@@ -142,7 +144,11 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 // Best-effort: every error path lives inside the goroutine, the
 // caller (provision or reconcile) doesn't block on this.
 func kickReadinessProbe(ctx *sdk.AppCtx, id int64) {
-	go func() {
+	if !finishInstanceCreation(ctx, id) {
+		return
+	}
+	probe := probeSSHReadyFn
+	startInstanceWorker(ctx, id, func(work context.Context) {
 		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil {
 			return
@@ -150,15 +156,19 @@ func kickReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		if fresh.Status != "provisioning" {
 			return
 		}
-		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
+		fresh.workContext = work
+		if err := probe(fresh, 5*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
+		if work.Err() != nil {
+			return
+		}
 		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
-	}()
+	})
 }
 
 // reconcileHetznerProvisioning recovers rows left in 'provisioning' by
@@ -485,7 +495,9 @@ func waitHetznerAction(ctx *sdk.AppCtx, connectionID int64, actionID int64, time
 		if time.Now().After(deadline) {
 			return fmt.Errorf("action %d timed out after %s", actionID, timeout)
 		}
-		time.Sleep(2 * time.Second)
+		if err := sleepOperation(ctx, 2*time.Second); err != nil {
+			return err
+		}
 	}
 }
 
@@ -512,7 +524,9 @@ func waitHetznerServerStatus(ctx *sdk.AppCtx, connectionID int64, providerID str
 		if time.Now().After(deadline) {
 			return fmt.Errorf("server %s status is %q, want %q", providerID, status, want)
 		}
-		time.Sleep(2 * time.Second)
+		if err := sleepOperation(ctx, 2*time.Second); err != nil {
+			return err
+		}
 	}
 }
 

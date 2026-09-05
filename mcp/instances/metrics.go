@@ -104,6 +104,8 @@ var (
 	metricsInFlight = map[metricsCacheKey]*metricsFlight{}
 )
 
+var metricsSlots = make(chan struct{}, 8)
+
 const metricsTTL = 5 * time.Second
 
 func clearMetricsCache(id int64) {
@@ -157,7 +159,17 @@ func collectMetricsCached(inst *Instance, collect func() (*Metrics, error)) (*Me
 	metricsInFlight[key] = flight
 	metricsMu.Unlock()
 
+	metricsSlots <- struct{}{}
 	m, err := collect()
+	<-metricsSlots
+	if m != nil {
+		if m.Disk == nil {
+			m.Disk = []DiskMetrics{}
+		}
+		if m.Net == nil {
+			m.Net = []NetMetrics{}
+		}
+	}
 	metricsMu.Lock()
 	if err == nil {
 		metricsCache[key] = metricsCacheEntry{at: time.Now(), value: m}

@@ -32,7 +32,7 @@ import (
 // when the listening process is now somebody else's. PID-tree-owns-
 // port is the authoritative answer.
 func pidOwnsPort(pid, port int) bool {
-	if pid <= 0 || port <= 0 {
+	if pid <= 1 || port <= 0 {
 		return false
 	}
 	inodes := listenInodesForPort(port)
@@ -202,7 +202,9 @@ func listenInodesForPort(port int) map[string]bool {
 }
 
 // procnet row layout (post-header):
-//   sl  local_address  rem_address  st  ...  uid  timeout  inode  ...
+//
+//	sl  local_address  rem_address  st  ...  uid  timeout  inode  ...
+//
 // LISTEN state == "0A".
 func collectListenPorts(path string, out map[int]bool) {
 	f, err := os.Open(path)

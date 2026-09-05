@@ -475,65 +475,10 @@ func urlParseAbsolute(raw string) (*url.URL, error) {
 func extractRunnerSource(archivePath, destination string) error {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
-		return errors.New("source capsule is not a valid zip archive")
+		return err
 	}
 	defer reader.Close()
-	var extracted int64
-	for _, entry := range reader.File {
-		clean := filepath.Clean(filepath.FromSlash(entry.Name))
-		if entry.Name == "" || clean == "." || filepath.IsAbs(clean) ||
-			clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("unsafe source archive entry %q", entry.Name)
-		}
-		mode := entry.Mode()
-		if mode&os.ModeSymlink != 0 || (!mode.IsRegular() && !mode.IsDir()) {
-			return fmt.Errorf("unsupported source archive entry %q", entry.Name)
-		}
-		target := filepath.Join(destination, clean)
-		rel, err := filepath.Rel(destination, target)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("source archive entry escapes root: %q", entry.Name)
-		}
-		if mode.IsDir() {
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		extracted += int64(entry.UncompressedSize64)
-		if extracted > maxSourceCapsuleBytes {
-			return fmt.Errorf("extracted source exceeds %d bytes", maxSourceCapsuleBytes)
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		source, err := entry.Open()
-		if err != nil {
-			return err
-		}
-		permissions := mode.Perm()
-		if permissions == 0 {
-			permissions = 0o644
-		}
-		output, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, permissions)
-		if err != nil {
-			source.Close()
-			return err
-		}
-		written, copyErr := io.Copy(output, io.LimitReader(source, int64(entry.UncompressedSize64)+1))
-		source.Close()
-		closeErr := output.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
-		}
-		if written != int64(entry.UncompressedSize64) {
-			return fmt.Errorf("source archive entry size mismatch: %q", entry.Name)
-		}
-	}
-	return nil
+	return extractBoundedZip(&reader.Reader, destination, maxSourceCapsuleBytes, false)
 }
 
 func zipDirectoryTree(root, prefix, destination string) error {
@@ -556,7 +501,9 @@ func zipDirectoryTree(root, prefix, destination string) error {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("artifact contains unsupported symlink %q", path)
+			if _, err := confinedDownloadArtifactPath(root, pathRelative(root, path)); err != nil {
+				return err
+			}
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
@@ -578,6 +525,17 @@ func zipDirectoryTree(root, prefix, destination string) error {
 		}
 		if info.IsDir() {
 			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err == nil && filepath.IsAbs(target) {
+				err = errors.New("artifact symlink must use a relative target")
+			}
+			if err != nil {
+				return err
+			}
+			_, err = io.WriteString(entry, target)
+			return err
 		}
 		source, err := os.Open(path)
 		if err != nil {

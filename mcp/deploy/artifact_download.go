@@ -222,7 +222,22 @@ func serveBuildArtifact(w http.ResponseWriter, r *http.Request, artifact buildAr
 			w.WriteHeader(http.StatusOK)
 			return nil
 		}
-		return streamArtifactDirectoryZip(w, artifact.Path)
+		file, err := os.CreateTemp("", "deploy-artifact-*.zip")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(file.Name())
+		defer file.Close()
+		if err = streamArtifactDirectoryZip(file, artifact.Path); err != nil {
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return err
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		http.ServeContent(w, r, artifact.Filename, info.ModTime(), file)
+		return nil
 	}
 	file, err := os.Open(artifact.Path)
 	if err != nil {
@@ -247,7 +262,9 @@ func streamArtifactDirectoryZip(output io.Writer, root string) error {
 			return nil
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("artifact contains unsupported symlink %q", path)
+			if _, err := confinedDownloadArtifactPath(root, pathRelative(root, path)); err != nil {
+				return err
+			}
 		}
 		paths = append(paths, path)
 		return nil
@@ -257,7 +274,7 @@ func streamArtifactDirectoryZip(output io.Writer, root string) error {
 
 	writer := zip.NewWriter(output)
 	for _, path := range paths {
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
 			_ = writer.Close()
 			return err
@@ -285,6 +302,21 @@ func streamArtifactDirectoryZip(output io.Writer, root string) error {
 		if info.IsDir() {
 			continue
 		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err == nil && filepath.IsAbs(target) {
+				err = errors.New("artifact symlink must use a relative target")
+			}
+			if err != nil {
+				writer.Close()
+				return err
+			}
+			if _, err = io.WriteString(entry, target); err != nil {
+				writer.Close()
+				return err
+			}
+			continue
+		}
 		file, err := os.Open(path)
 		if err != nil {
 			_ = writer.Close()
@@ -303,3 +335,5 @@ func streamArtifactDirectoryZip(output io.Writer, root string) error {
 	}
 	return writer.Close()
 }
+
+func pathRelative(root, path string) string { rel, _ := filepath.Rel(root, path); return rel }

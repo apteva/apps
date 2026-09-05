@@ -24,12 +24,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -40,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.41
+version: 0.4.42
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -185,7 +187,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.41
+    ref: instances/v0.4.42
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -214,6 +216,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("instances requires a db block")
 	}
+	workerMutex.Lock()
+	delete(stoppedWorkers, ctx.AppDB())
+	workerMutex.Unlock()
 	globalCtx = ctx
 
 	// Seed the local instance (id=0) on first boot. Idempotent —
@@ -232,18 +237,36 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// manual cloud cleanup. We never infer a provider_id by name,
 	// because destroy must only target an upstream id recorded from
 	// the original create response.
-	go reconcileHetznerProvisioning(ctx)
-	go reconcileDigitalOceanProvisioning(ctx)
-	go reconcileRunPodProvisioning(ctx)
-	go reconcileAPIProviderProvisioning(ctx)
-	go reconcileHetznerUpgrading(ctx)
-	go reconcileDestroying(ctx)
-	go reconcileTrackedProviderState(ctx)
+	startInstanceWorker(ctx, -1, func(work context.Context) {
+		for _, reconcile := range []func(*sdk.AppCtx){reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState} {
+			if work.Err() != nil {
+				return
+			}
+			reconcile(ctx)
+		}
+		for {
+			if err := sleepContext(work, 30*time.Second); err != nil {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			for _, reconcile := range []func(*sdk.AppCtx){reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying} {
+				if work.Err() != nil {
+					return
+				}
+				reconcile(ctx)
+			}
+		}
+	})
 
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	stopInstanceWorkers(ctx)
 	globalTunnelRegistry.closeAll()
 	globalSSHPool.closeAll()
 	return nil
