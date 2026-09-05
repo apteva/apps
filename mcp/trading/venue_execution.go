@@ -713,7 +713,7 @@ func convertCommissionToQuote(db *sql.DB, o *Order, amount float64, asset, quote
 	if asset == base && fillPrice > 0 {
 		return amount * fillPrice, true
 	}
-	if mark, err := dbGetMark(db, asset+"-USD"); err == nil && mark.Price > 0 {
+	if mark, err := dbGetMark(db, asset+"-USD"); err == nil && mark.Price > 0 && markFresh(mark, time.Now()) {
 		return amount * mark.Price, true
 	}
 	return 0, false

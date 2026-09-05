@@ -1180,7 +1180,8 @@ function pnlClass(n: number | undefined): string {
 
 type TabId = "portfolios" | "trade" | "positions" | "risk" | "agents" | "strategies" | "backtests" | "brokers" | "journal";
 
-export default function TradingPanel({ projectId, installId }: NativePanelProps) {
+export default function TradingPanel(props: NativePanelProps) { return <TradingPanelInstance key={`${props.projectId}:${props.installId}`} {...props} />; }
+function TradingPanelInstance({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("portfolios");
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -1207,9 +1208,12 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
     return res.json() as Promise<T>;
   }, [withParams]);
 
+  const portfolioGeneration = useRef(0);
   const loadPortfolios = useCallback(async () => {
+    const generation = ++portfolioGeneration.current;
     try {
       const r = await api<{ portfolios?: Portfolio[] }>("GET", "/portfolios");
+      if (generation !== portfolioGeneration.current) return;
       const list = r.portfolios || [];
       setPortfolios(list);
       setSelectedId((cur) => cur ?? (list.length > 0 ? list[0].id : null));
@@ -1293,13 +1297,13 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
           />
         )}
         {tab === "trade" && (
-          <TradeTab portfolio={selected} api={api} setBusy={setBusy} setError={setError} projectId={projectId} />
+          <TradeTab key={selected?.id} portfolio={selected} api={api} setBusy={setBusy} setError={setError} projectId={projectId} />
         )}
         {tab === "positions" && (
           <PositionsTab portfolio={selected} api={api} setError={setError} />
         )}
         {tab === "risk" && (
-          <RiskObjectivesTab portfolio={selected} api={api} refreshToken={riskRefresh} setError={setError} />
+          <RiskObjectivesTab key={selected?.id} portfolio={selected} api={api} refreshToken={riskRefresh} setError={setError} />
         )}
         {tab === "agents" && (
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
@@ -1330,6 +1334,8 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
   setError: (e: string | null) => void;
 }) {
   const [policy, setPolicy] = useState<RiskPolicy | null>(null);
+  const dirtyPolicy = useRef(false);
+  const riskGeneration = useRef(0);
   const [state, setState] = useState<RiskState | null>(null);
   const [objectives, setObjectives] = useState<PortfolioObjective[]>([]);
   const [universePolicy, setUniversePolicy] = useState<PortfolioUniversePolicy | null>(null);
@@ -1341,14 +1347,17 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
   const [deadline, setDeadline] = useState("");
   const load = useCallback(async () => {
     if (!portfolio) return;
+    const generation = ++riskGeneration.current;
     try {
       const [risk, goals, universe] = await Promise.all([
         api<{ policy: RiskPolicy; state: RiskState }>("GET", `/portfolios/${portfolio.id}/risk`),
         api<{ objectives: PortfolioObjective[] }>("GET", `/portfolios/${portfolio.id}/objectives`),
         api<{ policy: PortfolioUniversePolicy }>("GET", `/portfolios/${portfolio.id}/universe-policy`),
       ]);
-      setPolicy(risk.policy); setState(risk.state); setObjectives(goals.objectives || []); setError(null);
-      setUniversePolicy(universe.policy); setIncludeSymbols((universe.policy.include_symbols || []).join(", ")); setExcludeSymbols((universe.policy.exclude_symbols || []).join(", "));
+      if (generation !== riskGeneration.current) return;
+      if (!dirtyPolicy.current) { setPolicy(risk.policy);
+        setUniversePolicy(universe.policy); setIncludeSymbols((universe.policy.include_symbols || []).join(", ")); setExcludeSymbols((universe.policy.exclude_symbols || []).join(", ")); }
+      setState(risk.state); setObjectives(goals.objectives || []); setError(null);
     } catch (e) { setError((e as Error).message); }
   }, [portfolio?.id, api]);
   useEffect(() => { load(); }, [load, refreshToken]);
@@ -1357,7 +1366,7 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
     try {
       const body = custom ? { ...custom, risk_level: "custom" } : { risk_level: riskLevel };
       const out = await api<{ policy: RiskPolicy }>("PUT", `/portfolios/${portfolio.id}/risk`, undefined, body);
-      setPolicy(out.policy);
+      dirtyPolicy.current = false; setPolicy(out.policy);
     } catch (e) { setError((e as Error).message); }
   };
   const createObjective = async () => {
@@ -1378,7 +1387,7 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
       setUniversePolicy(out.policy); setError(null);
     } catch (e) { setError((e as Error).message); }
   };
-  return <div className="grid gap-4 lg:grid-cols-2">
+  return <div onChangeCapture={() => { dirtyPolicy.current = true; }} className="grid gap-4 lg:grid-cols-2">
     <Section title="Enforced risk policy">
       <div className="p-3 border border-border rounded bg-bg-card">
         <div className="flex gap-2 mb-4">
@@ -1388,7 +1397,7 @@ function RiskObjectivesTab({ portfolio, api, refreshToken, setError }: {
         {policy && <>
           <div className="grid grid-cols-2 gap-3">
             {([["Daily loss", "max_daily_loss_pct"], ["Max drawdown", "max_drawdown_pct"], ["Max position", "max_position_pct"], ["Gross exposure", "max_gross_exposure_pct"], ["Max order", "max_order_pct"]] as const).map(([label, key]) => <label key={key} className="text-xs text-text-muted">{label} %
-              <input type="number" min="0.01" step="0.25" value={policy[key]} onChange={(e) => setPolicy({ ...policy, [key]: Number(e.target.value), risk_level: "custom" })}
+              <input type="number" min="0.01" step="0.25" value={policy[key]} onChange={(e) => (dirtyPolicy.current = true, setPolicy({ ...policy, [key]: Number(e.target.value), risk_level: "custom" }))}
                 className="mt-1 w-full px-2 py-1.5 bg-bg-input border border-border rounded text-text" />
             </label>)}
           </div>
@@ -2066,6 +2075,7 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
   setSymbol: (s: string) => void;
   universe: Mark[];
 }) {
+  const requestIntent = useRef<{ body: string; key: string } | null>(null);
   const [side, setSide] = useState<string>("buy");
   const [outcome, setOutcome] = useState<string>("yes");
   const [type, setType] = useState<string>("market");
@@ -2106,12 +2116,18 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
       if (isPoly && side === "sell") body.outcome = outcome;
       if (limitPrice) body.limit_price = Number(limitPrice);
       if (stopPrice) body.stop_price = Number(stopPrice);
-      const r = await api<{ order_id?: string; status?: string; code?: string; detail?: string }>(
+      const serialized = JSON.stringify(body);
+      if (!requestIntent.current || requestIntent.current.body !== serialized) requestIntent.current = { body: serialized, key: crypto.randomUUID() };
+      body.idempotency_key = requestIntent.current.key;
+      const r = await api<{ order_id?: string; status?: string; code?: string; detail?: string; uncertain?: boolean }>(
         "POST", `/portfolios/${portfolio.id}/orders`, undefined, body,
       );
       if (r.status === "rejected") {
         setError(`Order rejected: ${r.code} — ${r.detail}`);
+      } else if (r.uncertain) {
+        setError(`Order ${r.order_id} requires reconciliation: ${r.detail ?? "broker response uncertain"}`); onPlaced();
       } else {
+        requestIntent.current = null;
         setSymbol(""); setQty(""); setLimitPrice(""); setStopPrice(""); setRationale("");
         setQuote(null);
         onPlaced();
@@ -2596,12 +2612,12 @@ function AgentsTab({ portfolio, api, projectId, onChanged, setError }: {
   const agentName = (id: number) => agents.find((a) => a.id === id)?.name || `Agent #${id}`;
   const portfolioBoundAgentID = portfolioAgentID(portfolio);
   const tradingMCPAgentIds = new Set(
-    Object.entries(agentTradingMCPs)
+    Object.entries<string[]>(agentTradingMCPs)
       .filter(([, names]) => names.length > 0)
       .map(([id]) => Number(id)),
   );
   const portfolioEventAgentIds = new Set([
-    ...Object.values(states)
+    ...Object.values<AgentLiveState>(states)
       .filter((s) => !!s.trading_event_at && eventRelevantToPortfolio(portfolio, s.portfolio_id, s.symbol))
       .map((s) => s.agent_id),
     ...activities.map((a) => a.agent_id),

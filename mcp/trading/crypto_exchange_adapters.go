@@ -579,13 +579,16 @@ func (bitstampAdapter) ParseOrder(raw json.RawMessage) (*brokerOrderResult, erro
 	if id == "" {
 		return nil, fmt.Errorf("bitstamp order response missing id: %s", string(raw))
 	}
-	executed := parseFloat(firstString(o.ExecutedAmount, o.Amount))
+	executed := parseFloat(o.ExecutedAmount)
 	cum := 0.0
 	fills := make([]brokerFill, 0, len(o.Transactions))
 	for _, tx := range o.Transactions {
 		qty := parseFloat(tx.Amount)
 		price := parseFloat(tx.Price)
 		cum += qty * price
+		if o.ExecutedAmount == "" {
+			executed += qty
+		}
 		fills = append(fills, brokerFill{Qty: qty, Price: price, Commission: parseFloat(tx.Fee), CommissionAsset: "USD"})
 	}
 	if cum == 0 && executed > 0 {

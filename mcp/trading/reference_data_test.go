@@ -92,6 +92,7 @@ func TestCorporateActionProjector_AppliesSplitExactlyOnce(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Split book", []string{"equity"})
 	insertPosition(t, ctx, portfolioID, "AAPL", 10, 200)
+	_, _ = ctx.AppDB().Exec(`UPDATE position_history SET observed_at='2019-12-31T00:00:00Z' WHERE portfolio_id=?`, portfolioID)
 	action := testCorporateAction("split-1", "forward_split", "AAPL")
 	action.RatioNumerator = 4
 	action.RatioDenominator = 1
@@ -116,6 +117,7 @@ func TestCorporateActionProjector_CreditsDividendEntitlementOnce(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Dividend book", []string{"equity"})
 	insertPosition(t, ctx, portfolioID, "AAPL", 8, 100)
+	_, _ = ctx.AppDB().Exec(`UPDATE position_history SET observed_at='2026-01-01T00:00:00Z' WHERE portfolio_id=?`, portfolioID)
 	portfolio := mustPortfolio(t, ctx, portfolioID)
 	action := testCorporateAction("div-1", "cash_dividend", "AAPL")
 	action.CashAmount = 0.25
@@ -183,7 +185,7 @@ func TestReferenceManifest_ReportsForwardOnlyUniverseCoverage(t *testing.T) {
 		t.Fatalf("before=%v", before)
 	}
 	after := referenceManifest(ctx.AppDB(), []string{"TEST"}, "2026-02-01", "2026-03-01", "total_return")
-	if after["survivorship_safe"] != true {
+	if after["survivorship_safe"] != false {
 		t.Fatalf("after=%v", after)
 	}
 }
@@ -243,6 +245,7 @@ func TestCorporateActionProjector_RefusesCorrectedAppliedRevision(t *testing.T) 
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Correction book", []string{"equity"})
 	insertPosition(t, ctx, portfolioID, "AAPL", 10, 20)
+	_, _ = ctx.AppDB().Exec(`UPDATE position_history SET observed_at='2025-12-31T00:00:00Z' WHERE portfolio_id=?`, portfolioID)
 	first := testCorporateAction("split-corrected", "forward_split", "AAPL")
 	first.RatioNumerator, first.RatioDenominator = 2, 1
 	first.EffectiveDate = "2026-01-01"

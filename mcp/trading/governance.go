@@ -141,6 +141,8 @@ func dbGetPortfolioUniversePolicy(db *sql.DB, portfolio *Portfolio) (*PortfolioU
 }
 
 func dbUpsertPortfolioUniversePolicy(db *sql.DB, portfolio *Portfolio, p PortfolioUniversePolicy) (*PortfolioUniversePolicy, error) {
+	orderPlacementMu.Lock()
+	defer orderPlacementMu.Unlock()
 	p.PortfolioID, p.ProjectID = portfolio.ID, portfolio.ProjectID
 	if err := validateUniversePolicy(&p); err != nil {
 		return nil, err
@@ -450,11 +452,7 @@ func evaluateAndStoreStrategyScorecard(db *sql.DB, projectID string, portfolioID
 			datasetSHA = strings.TrimSpace(fmt.Sprint(value))
 		}
 	}
-	if datasetSHA == "" && run.ReferenceManifest != nil {
-		if value, ok := run.ReferenceManifest["manifest_sha256"]; ok && value != nil {
-			datasetSHA = strings.TrimSpace(fmt.Sprint(value))
-		}
-	}
+
 	metricsJSON, _ := json.Marshal(performance.Metrics)
 	checksJSON, _ := json.Marshal(checks)
 	policyJSON, _ := json.Marshal(policy)
@@ -534,11 +532,14 @@ func scorecardStageRank(stage string) int {
 
 func scorecardAllowsExecution(db *sql.DB, portfolio *Portfolio, strategyID int64) (bool, string) {
 	policy, err := dbGetStrategyScorecardPolicy(db, portfolio.ProjectID, portfolio.ID, strategyID)
-	if err != nil || !policy.EnforcementEnabled {
-		return err == nil, firstString(errorString(err), "scorecard enforcement disabled")
+	if err != nil {
+		return false, err.Error()
 	}
 	if policy.PromotionStage == "suspended" {
 		return false, "strategy scorecard is suspended"
+	}
+	if !policy.EnforcementEnabled {
+		return true, "scorecard enforcement disabled"
 	}
 	required := 0
 	switch normalizeExecutionEnvironment(portfolio.ExecutionEnvironment, portfolio.Mode, portfolio.BrokerSlug) {
@@ -549,6 +550,12 @@ func scorecardAllowsExecution(db *sql.DB, portfolio *Portfolio, strategyID int64
 	}
 	if scorecardStageRank(policy.PromotionStage) < required {
 		return false, fmt.Sprintf("strategy stage %s is below the required stage for %s", policy.PromotionStage, portfolio.ExecutionEnvironment)
+	}
+	if required > 0 {
+		count, err := currentPassingRuns(db, policy)
+		if err != nil || count < policy.MinCompletedRuns {
+			return false, "current strategy version lacks passing evidence"
+		}
 	}
 	return true, "scorecard gate passed"
 }
@@ -590,10 +597,7 @@ func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, targe
 	if targetRank != currentRank+1 {
 		return nil, errors.New("promotion must advance one stage at a time")
 	}
-	var passingRuns int
-	err := db.QueryRow(`SELECT COUNT(DISTINCT backtest_run_id) FROM strategy_scorecard_evaluations
-		WHERE project_id=? AND portfolio_id=? AND strategy_id=? AND policy_hash=? AND passed=1`,
-		policy.ProjectID, policy.PortfolioID, policy.StrategyID, scorecardPolicyHash(policy)).Scan(&passingRuns)
+	passingRuns, err := currentPassingRuns(db, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -602,6 +606,50 @@ func promoteStrategyScorecard(db *sql.DB, policy *StrategyScorecardPolicy, targe
 	}
 	policy.PromotionStage = target
 	return dbUpsertStrategyScorecardPolicy(db, *policy)
+}
+
+func currentPassingRuns(db *sql.DB, policy *StrategyScorecardPolicy) (int, error) {
+	pf, err := dbGetPortfolio(db, policy.ProjectID, policy.PortfolioID)
+	if err != nil {
+		return 0, err
+	}
+	strategy, err := dbGetStrategy(db, policy.ProjectID, policy.StrategyID)
+	if err != nil {
+		return 0, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return 0, err
+	}
+	current, err := captureReplayPolicy(db, pf, def.Universe)
+	if err != nil {
+		return 0, err
+	}
+	currentHash := replayPolicyHash(current)
+	rows, err := db.Query(`SELECT DISTINCT e.backtest_run_id,b.summary_json FROM strategy_scorecard_evaluations e JOIN backtest_runs b ON b.id=e.backtest_run_id
+ WHERE e.project_id=? AND e.portfolio_id=? AND e.strategy_id=? AND e.policy_hash=? AND e.passed=1 AND e.strategy_version=? AND b.status='completed'`, policy.ProjectID, policy.PortfolioID, policy.StrategyID, scorecardPolicyHash(policy), strategy.Version)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	count := 0
+	for rows.Next() {
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			return 0, err
+		}
+		var summary map[string]any
+		if err := json.Unmarshal([]byte(raw), &summary); err != nil {
+			return 0, err
+		}
+		run := &BacktestRun{Summary: summary}
+		captured := decodeReplayPolicy(run)
+		if captured != nil && replayPolicyHash(captured) == currentHash {
+			count++
+		}
+	}
+	return count, rows.Err()
 }
 
 func sortedCriteria(criteria []ScorecardCriterion) []ScorecardCriterion {

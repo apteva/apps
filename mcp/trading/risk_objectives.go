@@ -102,6 +102,8 @@ func validateRiskPolicy(p *PortfolioRiskPolicy) error {
 }
 
 func dbUpsertPortfolioRiskPolicy(db *sql.DB, portfolio *Portfolio, requested PortfolioRiskPolicy) (*PortfolioRiskPolicy, error) {
+	orderPlacementMu.Lock()
+	defer orderPlacementMu.Unlock()
 	if portfolio == nil {
 		return nil, errors.New("portfolio required")
 	}
@@ -162,6 +164,9 @@ type RiskBreach struct {
 }
 
 func preTradeRiskCheck(db *sql.DB, portfolio *Portfolio, symbol, side string, qty, price float64) (*RiskBreach, error) {
+	return preTradeRiskCheckExcluding(db, portfolio, symbol, side, qty, price, "")
+}
+func preTradeRiskCheckExcluding(db *sql.DB, portfolio *Portfolio, symbol, side string, qty, price float64, excludeOrder string) (*RiskBreach, error) {
 	if portfolio == nil || !isBuySide(side) || qty <= 0 || price <= 0 {
 		return nil, nil
 	}
@@ -170,8 +175,11 @@ func preTradeRiskCheck(db *sql.DB, portfolio *Portfolio, symbol, side string, qt
 		return nil, err
 	}
 	equity, err := computeEquity(db, portfolio)
-	if err != nil || equity <= 0 {
+	if err != nil {
 		return nil, err
+	}
+	if breach, err := currentLossBreach(db, portfolio, policy, equity); err != nil || breach != nil {
+		return breach, err
 	}
 	orderNotional := qty * price
 	orderPct := orderNotional / equity * 100
@@ -185,6 +193,9 @@ func preTradeRiskCheck(db *sql.DB, portfolio *Portfolio, symbol, side string, qt
 	gross, symbolValue := 0.0, 0.0
 	for _, position := range positions {
 		mark, _ := dbGetMark(db, position.Symbol)
+		if mark == nil || mark.Price <= 0 {
+			return &RiskBreach{Code: "risk_unpriced_position", Detail: "cannot authorize more risk while a holding has no price"}, nil
+		}
 		marketPrice := position.AvgCost
 		if mark != nil && mark.Price > 0 {
 			marketPrice = markPriceForSide(mark, position.Outcome)
@@ -195,12 +206,12 @@ func preTradeRiskCheck(db *sql.DB, portfolio *Portfolio, symbol, side string, qt
 			symbolValue += value
 		}
 	}
-	working, err := dbWorkingOrders(db)
+	working, err := workingPortfolioOrders(db, portfolio.ID)
 	if err != nil {
 		return nil, err
 	}
 	for _, order := range working {
-		if order.PortfolioID != portfolio.ID || !isBuySide(order.Side) {
+		if order.ID == excludeOrder || order.PortfolioID != portfolio.ID || !isBuySide(order.Side) {
 			continue
 		}
 		workingPrice := orderRiskPrice(db, order)
@@ -210,13 +221,30 @@ func preTradeRiskCheck(db *sql.DB, portfolio *Portfolio, symbol, side string, qt
 			symbolValue += value
 		}
 	}
-	positionPct := (symbolValue + orderNotional) / equity * 100
-	if positionPct > policy.MaxPositionPct+1e-9 {
-		return &RiskBreach{Code: "risk_max_position", Detail: fmt.Sprintf("projected %s weight %.2f%% exceeds %.2f%% maximum", canonicalSymbol(symbol), positionPct, policy.MaxPositionPct), ActualPct: positionPct, LimitPct: policy.MaxPositionPct}, nil
+	return exposureBreach(policy, equity, orderNotional, symbolValue, gross), nil
+}
+
+func currentLossBreach(db *sql.DB, pf *Portfolio, policy *PortfolioRiskPolicy, equity float64) (*RiskBreach, error) {
+	if equity <= 0 {
+		return &RiskBreach{Code: "risk_no_equity", Detail: "positive portfolio equity required"}, nil
 	}
-	grossPct := (gross + orderNotional) / equity * 100
-	if grossPct > policy.MaxGrossExposurePct+1e-9 {
-		return &RiskBreach{Code: "risk_max_gross_exposure", Detail: fmt.Sprintf("projected gross exposure %.2f%% exceeds %.2f%% maximum", grossPct, policy.MaxGrossExposurePct), ActualPct: grossPct, LimitPct: policy.MaxGrossExposurePct}, nil
+	baseline, ok, err := dbGetDayBaseline(db, pf.ID, utcDay(executionTime(db, pf.ID)))
+	if err != nil {
+		return nil, err
+	}
+	if ok && baseline > 0 && (equity/baseline-1)*100 < -policy.MaxDailyLossPct {
+		return &RiskBreach{Code: "daily_loss_halt", Detail: "daily loss limit reached"}, nil
+	}
+	state, err := dbGetPortfolioRiskState(db, pf.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	peak := pf.StartingCash
+	if state != nil {
+		peak = math.Max(peak, state.HighWaterEquity)
+	}
+	if peak > 0 && (equity/peak-1)*100 < -policy.MaxDrawdownPct {
+		return &RiskBreach{Code: "max_drawdown_halt", Detail: "drawdown limit reached"}, nil
 	}
 	return nil, nil
 }
@@ -301,8 +329,15 @@ func dbCreatePortfolioObjective(db *sql.DB, portfolio *Portfolio, objective Port
 		return nil, err
 	}
 	start, _ := time.Parse(time.RFC3339, objective.StartsAt)
-	if objective.Metric == "period_return_pct" && !start.After(time.Now().UTC()) {
-		objective.BaselineEquity = &equity
+	if objective.Metric == "period_return_pct" {
+		objective.BaselineEquity = nil
+		now := time.Now().UTC()
+		if start.Before(now.Add(-time.Minute)) {
+			return nil, errors.New("historical objective baseline unavailable; start a new period now or in the future")
+		}
+		if !start.After(now) {
+			objective.BaselineEquity = &equity
+		}
 	}
 	res, err := db.Exec(`INSERT INTO portfolio_objectives(project_id,portfolio_id,name,metric,target_pct,direction,starts_at,deadline_at,baseline_equity,status)
 		VALUES(?,?,?,?,?,?,?,?,?,?)`, objective.ProjectID, objective.PortfolioID, objective.Name, objective.Metric, objective.TargetPct,
@@ -388,7 +423,7 @@ func objectivesWithProgress(db *sql.DB, portfolio *Portfolio, includeArchived bo
 func initializeDueObjectiveBaselines(db *sql.DB, portfolio *Portfolio, equity float64, now time.Time) error {
 	_, err := db.Exec(`UPDATE portfolio_objectives SET baseline_equity=?,updated_at=CURRENT_TIMESTAMP
 		WHERE portfolio_id=? AND project_id=? AND metric='period_return_pct' AND baseline_equity IS NULL
-		AND status='active' AND starts_at<=?`, equity, portfolio.ID, portfolio.ProjectID, now.UTC().Format(time.RFC3339))
+		AND status='active' AND julianday(starts_at)<=julianday(?) AND julianday(starts_at)>=julianday(?) AND (deadline_at IS NULL OR deadline_at='' OR julianday(deadline_at)>julianday(?))`, equity, portfolio.ID, portfolio.ProjectID, now.UTC().Format(time.RFC3339), now.Add(-time.Minute).UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339))
 	return err
 }
 
@@ -410,9 +445,33 @@ func objectiveProgress(db *sql.DB, portfolio *Portfolio, objective *PortfolioObj
 		}
 	}
 	actual := 0.0
+	var finalized int
+	if err := db.QueryRow(`SELECT actual_pct,achieved FROM objective_results WHERE objective_id=?`, objective.ID).Scan(&actual, &finalized); err == nil {
+		objective.ActualPct = &actual
+		objective.Achieved = finalized != 0
+		objective.PeriodState = "ended"
+		return
+	}
+	if objective.Status != "active" || objective.PeriodState == "ended" {
+		cutoff := now.Format(time.RFC3339Nano)
+		if objective.DeadlineAt != "" && objective.PeriodState == "ended" {
+			cutoff = objective.DeadlineAt
+		}
+		if err := db.QueryRow(`SELECT actual_pct FROM objective_observations WHERE objective_id=? AND julianday(observed_at)<=julianday(?) ORDER BY observed_at DESC LIMIT 1`, objective.ID, cutoff).Scan(&actual); err != nil {
+			objective.PeriodState = "unverifiable"
+			return
+		}
+		objective.ActualPct = &actual
+		objective.Achieved = (objective.Direction == "at_least" && actual >= objective.TargetPct) || (objective.Direction == "at_most" && actual <= objective.TargetPct)
+		if objective.PeriodState == "ended" {
+			_, _ = db.Exec(`INSERT INTO objective_results(objective_id,actual_pct,achieved,finalized_at) VALUES(?,?,?,?) ON CONFLICT(objective_id) DO NOTHING`, objective.ID, actual, boolInt(objective.Achieved), now.Format(time.RFC3339Nano))
+		}
+		return
+	}
 	switch objective.Metric {
 	case "period_return_pct":
 		if objective.BaselineEquity == nil || *objective.BaselineEquity <= 0 {
+			objective.PeriodState = "unverifiable"
 			return
 		}
 		actual = (snap.Equity/(*objective.BaselineEquity) - 1) * 100
@@ -427,6 +486,12 @@ func objectiveProgress(db *sql.DB, portfolio *Portfolio, objective *PortfolioObj
 		}
 		actual = math.Abs(state.CurrentDrawdownPct)
 	}
+	if objective.Metric == "drawdown_pct" {
+		var worst float64
+		_ = db.QueryRow(`SELECT COALESCE(MAX(actual_pct),0) FROM objective_observations WHERE objective_id=?`, objective.ID).Scan(&worst)
+		actual = math.Max(actual, worst)
+	}
+	_, _ = db.Exec(`INSERT INTO objective_observations(objective_id,observed_at,actual_pct) VALUES(?,?,?) ON CONFLICT(objective_id,observed_at) DO NOTHING`, objective.ID, now.Format(time.RFC3339Nano), actual)
 	objective.ActualPct = &actual
 	objective.Achieved = (objective.Direction == "at_least" && actual >= objective.TargetPct) || (objective.Direction == "at_most" && actual <= objective.TargetPct)
 	if objective.TargetPct != 0 {
