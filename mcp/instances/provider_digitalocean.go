@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,55 +17,27 @@ func digitalOceanBound(ctx *sdk.AppCtx) (*sdk.BoundIntegration, error) {
 }
 
 func digitalOceanListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
-	bound, err := digitalOceanBound(ctx)
+	data, err := executeProviderTool(ctx, "digitalocean", "list_sizes", map[string]any{"per_page": 200})
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_sizes", map[string]any{
-		"per_page": 200,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("digitalocean.list_sizes: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("digitalocean.list_sizes: %s", upstreamErrorString(res))
-	}
-	return parseDigitalOceanSizes(res.Data)
+	return parseDigitalOceanSizes(data)
 }
 
 func digitalOceanListLocations(ctx *sdk.AppCtx) ([]Location, error) {
-	bound, err := digitalOceanBound(ctx)
+	data, err := executeProviderTool(ctx, "digitalocean", "list_regions", map[string]any{"per_page": 200})
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_regions", map[string]any{
-		"per_page": 200,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("digitalocean.list_regions: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("digitalocean.list_regions: %s", upstreamErrorString(res))
-	}
-	return parseDigitalOceanRegions(res.Data)
+	return parseDigitalOceanRegions(data)
 }
 
 func digitalOceanListImages(ctx *sdk.AppCtx) ([]Image, error) {
-	bound, err := digitalOceanBound(ctx)
+	data, err := executeProviderTool(ctx, "digitalocean", "list_images", map[string]any{"per_page": 200, "type": "distribution"})
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_images", map[string]any{
-		"type":     "distribution",
-		"per_page": 200,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("digitalocean.list_images: %w", err)
-	}
-	if res == nil || !res.Success {
-		return nil, fmt.Errorf("digitalocean.list_images: %s", upstreamErrorString(res))
-	}
-	return parseDigitalOceanImages(res.Data)
+	return parseDigitalOceanImages(data)
 }
 
 func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
@@ -100,6 +73,7 @@ func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, 
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
@@ -179,7 +153,11 @@ func digitalOceanDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 }
 
 func kickDigitalOceanReadinessProbe(ctx *sdk.AppCtx, id int64) {
-	go func() {
+	if !finishInstanceCreation(ctx, id) {
+		return
+	}
+	probe := probeSSHReadyFn
+	startInstanceWorker(ctx, id, func(work context.Context) {
 		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil {
 			return
@@ -197,15 +175,19 @@ func kickDigitalOceanReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
-		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
+		fresh.workContext = work
+		if err := probe(fresh, 5*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
+		if work.Err() != nil {
+			return
+		}
 		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
-	}()
+	})
 }
 
 func waitDigitalOceanDropletNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
@@ -235,7 +217,9 @@ func waitDigitalOceanDropletNetwork(ctx *sdk.AppCtx, inst *Instance, timeout tim
 		if time.Now().After(deadline) {
 			return nil, errors.New("timed out waiting for public IP")
 		}
-		time.Sleep(5 * time.Second)
+		if err := sleepContext(instanceWorkerContext(ctx, inst.ID), 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
 }
 

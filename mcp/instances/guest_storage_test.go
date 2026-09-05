@@ -30,7 +30,7 @@ func TestValidateVolumePrepareRequest_UsesSafeDefaults(t *testing.T) {
 }
 
 func TestVolumePrepare_UpdatesVerifiedGuestMetadata(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderConnectionID: 7, ProviderID: "123", Region: "ams3",
 		Status: "ready", Platform: "linux", SSHUser: "apteva", SSHHost: "host.test", SSHPrivateKey: "test",
@@ -80,7 +80,7 @@ func TestVolumePrepare_UpdatesVerifiedGuestMetadata(t *testing.T) {
 }
 
 func TestVolumePrepare_FailureLeavesVolumeAttached(t *testing.T) {
-	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(&recordingVolumePlatform{slug: "digitalocean", attached: int64(123)}))
 	inst, err := dbCreateInstance(ctx.AppDB(), CreateInstanceInput{
 		Name: "media", Provider: "digitalocean", ProviderID: "123", Region: "ams3", Status: "ready", Platform: "linux", SSHUser: "root",
 	})
@@ -140,7 +140,7 @@ func TestVolumeCreate_AutoPreparesWhenRequested(t *testing.T) {
 	if volume.MountPath != "/srv/media" || volume.Filesystem != "ext4" || !strings.Contains(command, "format_if_blank=true") {
 		t.Fatalf("auto-prepared volume=%#v command=%s", volume, command)
 	}
-	if len(platform.tools) != 2 || platform.tools[0] != "volume_create" || platform.tools[1] != "volume_action" {
+	if strings.Join(platform.tools, ",") != "volume_create,volume_get,volume_action,volume_get,volume_get" {
 		t.Fatalf("provider tools = %#v", platform.tools)
 	}
 }
@@ -179,7 +179,7 @@ func TestVolumeDetach_UnmountsGuestBeforeProvider(t *testing.T) {
 	if !strings.Contains(guestCommand, "umount") || !strings.Contains(guestCommand, "apteva-volume:") {
 		t.Fatalf("unmount command = %s", guestCommand)
 	}
-	if len(platform.tools) != 1 || platform.tools[0] != "volume_action" {
+	if strings.Join(platform.tools, ",") != "volume_action,volume_get" {
 		t.Fatalf("provider tools = %#v", platform.tools)
 	}
 }

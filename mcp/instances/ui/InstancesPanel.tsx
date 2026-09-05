@@ -1,3 +1,4 @@
+import { normalizeArchitecture } from "./catalog-state";
 // InstancesPanel — install-settings admin view for the instances app.
 //
 // Shows the host fleet: local (always present, id=0) plus any
@@ -17,6 +18,7 @@ interface NativePanelProps {
 }
 
 interface Instance {
+  provider_connection_id?: number;
   id: number;
   name: string;
   provider: string;
@@ -57,6 +59,7 @@ interface Instance {
 }
 
 interface InstanceVolumeWire {
+  provider_connection_id?: number;
   id: number;
   instance_id?: number;
   provider: string;
@@ -100,6 +103,7 @@ interface ObjectStorageCredentialsWire {
   access_key_id: string;
   secret_access_key: string;
   expires_at?: string;
+  scope?: string;
   shown_once: boolean;
 }
 
@@ -114,6 +118,7 @@ interface StorageCapabilitiesWire {
   boot_size_configurable: boolean;
   data_volumes: boolean;
   dynamic_attach: boolean;
+  detach: boolean;
   resize: boolean;
   guest_prepare?: boolean;
   guest_filesystems?: string[];
@@ -205,9 +210,9 @@ function formatProviderPrice(cents: number, provider?: string): string {
 function formatRemoteTotal(instances: Instance[]): string {
   const priced = instances.filter((i) => i.provider !== "local" && i.monthly_cost_cents > 0);
   if (priced.length === 0) return "";
-  const providers = new Set(priced.map((i) => i.provider));
-  const total = priced.reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
-  return providers.size === 1 ? formatProviderPrice(total, priced[0]?.provider) : "";
+  const totals = new Map<string, number>();
+  for (const item of priced) { const currency = providerCurrencySymbol(item.provider); totals.set(currency, (totals.get(currency) || 0) + item.monthly_cost_cents); }
+  return [...totals].map(([currency, cents]) => `${currency}${(cents / 100).toFixed(2)}`).join(" + ");
 }
 
 function deletionLockLabel(inst: Instance): string {
@@ -417,7 +422,7 @@ function MultiLineChart({
 }
 
 export default function InstancesPanel({ projectId, installId }: NativePanelProps) {
-  const [view, setView] = useState<"compute" | "object-storage">("compute");
+  const [view, setView] = useState<"compute" | "object-storage" | "volumes">("compute");
   const [objectStorageRefresh, setObjectStorageRefresh] = useState(0);
   const [instances, setInstances] = useState<Instance[] | null>(null);
   const [error, setError] = useState("");
@@ -442,10 +447,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       const j = (await r.json()) as { instances: Instance[] };
       setInstances(j.instances || []);
-      setError("");
     } catch (e) {
       setError((e as Error).message);
-      setInstances([]);
+      setInstances((previous) => previous ?? []);
     }
   }, [withParams]);
 
@@ -454,7 +458,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   // Refresh status cards every 10s — provisioning rows can flip
   // ready, ready rows can flip to error, etc.
   useEffect(() => {
-    const t = setInterval(load, 10000);
+    const t = setInterval(() => { if (!document.hidden) load(); }, 10000);
     return () => clearInterval(t);
   }, [load]);
 
@@ -519,17 +523,18 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
             className={`px-2 py-1 text-xs rounded ${view === "object-storage" ? "bg-bg-input text-text" : "text-text-muted hover:text-text"}`}>
             Object storage
           </button>
+          <button type="button" className="px-2 py-1 text-xs rounded" onClick={() => setView("volumes")}>Volumes</button>
         </div>
         <span className="flex-1" />
         {view === "compute" && remoteCount > 0 && (
           <span
             className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
-            title="Sum of monthly cost across non-local instances (0 when the catalog hasn't priced them yet)"
+            title="Compute estimate from catalog prices; excludes storage, IPs, taxes, and unpriced resources"
           >
             {monthlyTotal ? (
               <>
                 <span className="font-mono text-text">{monthlyTotal}</span>
-                <span className="text-text-dim">/mo</span>
+                <span className="text-text-dim">/mo compute estimate</span>
                 <span className="text-text-dim mx-1">·</span>
               </>
             ) : null}
@@ -543,16 +548,16 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
         >+ Provision</button>}
         <button
           type="button"
-          onClick={() => view === "object-storage" ? setObjectStorageRefresh((value) => value + 1) : load()}
+          onClick={() => view !== "compute" ? setObjectStorageRefresh((value) => value + 1) : load()}
           disabled={busy}
           className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
         >Refresh</button>
       </header>
 
-      {error && <div className="px-4 py-2 text-red text-xs border-b border-border">{error}</div>}
+      {error && <div role="alert" className="relative z-50 px-4 py-2 bg-bg text-red text-xs border-b border-border">{error}<button className="ml-3" onClick={() => setError("")}>Dismiss</button></div>}
 
       <main className="flex-1 overflow-auto p-3 space-y-2">
-        {view === "object-storage" ? (
+        {view === "volumes" ? (<GlobalVolumes withParams={withParams} instances={instances || []} refresh={objectStorageRefresh} />) : view === "object-storage" ? (
           <ObjectStorageSection withParams={withParams} setError={setError} refresh={objectStorageRefresh} />
         ) : instances === null ? (
           <div className="p-6 text-text-muted text-sm">Loading…</div>
@@ -634,7 +639,6 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
       if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
       const body = await response.json();
       setItems(body.object_storages || []);
-      setError("");
     } catch (error) {
       setItems([]);
       setError("Object storage failed: " + (error as Error).message);
@@ -730,7 +734,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
         <CreateObjectStorageDialog
           withParams={withParams}
           onClose={() => setShowCreate(false)}
-          onCreated={(result) => { setShowCreate(false); setCredentialResult(result); load(); }}
+          onCreated={(result) => { setShowCreate(false); if (result.credentials) setCredentialResult(result); load(); }}
           setError={setError}
         />
       )}
@@ -782,16 +786,18 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
       if (providers.length === 0) setLoading(false);
       return;
     }
+    const controller = new AbortController();
     (async () => {
-      setLoading(true);
+      setLoading(true); setLocations([]); setPlans([]); setRegion(""); setPlan("");
       setLocalError("");
       try {
         const params = new URLSearchParams(withParams());
         params.set("provider", selectedProvider.provider);
         params.set("provider_connection_id", String(selectedProvider.connection_id));
-        const response = await fetch(`${API}/object-storage-plans?${params}`, { credentials: "same-origin" });
+        const response = await fetch(`${API}/object-storage-plans?${params}`, { credentials: "same-origin", signal: controller.signal });
         if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
         const body = await response.json();
+        if (controller.signal.aborted) return;
         const nextLocations = body.locations || [];
         const nextPlans = body.plans || [];
         setLocations(nextLocations);
@@ -799,11 +805,12 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
         setRegion(String(nextLocations[0]?.id ?? nextLocations[0]?.cluster_id ?? ""));
         setPlan(String(nextPlans[0]?.id ?? nextPlans[0]?.tier_id ?? ""));
       } catch (error) {
-        setLocalError((error as Error).message);
+        if (!controller.signal.aborted) setLocalError((error as Error).message);
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) setLoading(false);
       }
     })();
+    return () => controller.abort();
   }, [providers, selectedProvider, withParams]);
 
   const submit = async (event: React.FormEvent) => {
@@ -838,7 +845,7 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
       <form onSubmit={submit} onClick={(event) => event.stopPropagation()} className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(560px, 100%)" }}>
         <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
           <h2 className="text-text font-semibold">Provision object storage</h2>
-          <p className="text-xs text-text-muted">Creates provider infrastructure and returns S3 credentials. No Connection is created.</p>
+          <p className="text-xs text-text-muted">Creates provider infrastructure and returns S3 credentials. Scaleway credentials grant Object Storage access across the selected project; use a dedicated project for isolation.</p>
         </div>
         <div className="p-5 space-y-4">
           {localError && <div className="text-xs text-red">{localError}</div>}
@@ -915,6 +922,7 @@ function ObjectStorageCredentialsDialog({ result, onClose }: {
     ["Endpoint", credentials.endpoint], ["Region", credentials.region || ""], ["Bucket", credentials.bucket || ""],
     ["Access key ID", credentials.access_key_id], ["Secret access key", credentials.secret_access_key],
     ["Credentials expire", credentials.expires_at || ""],
+    ["Access scope", credentials.scope || "Provider resource"],
   ].filter((row) => row[1]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" style={{ padding: 24 }} role="presentation">
@@ -1227,7 +1235,7 @@ interface MetricsSample {
 const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
-function InstanceCard({
+export function InstanceCard({
   inst, withParams, busy, onUpgrade, onVolumes, onDestroy,
 }: {
   inst: Instance;
@@ -1241,7 +1249,7 @@ function InstanceCard({
   const [metricsError, setMetricsError] = useState("");
   const [lastPollAt, setLastPollAt] = useState(0);
   const [expanded, setExpanded] = useState(false);
-	const [comparison, setComparison] = useState<{ differences?: string[]; provider_state?: string; checked_at?: string } | null>(null);
+	const [comparison, setComparison] = useState<{ complete?: boolean; warnings?: string[]; differences?: string[]; provider_state?: string; checked_at?: string } | null>(null);
 	const [diagnosticBusy, setDiagnosticBusy] = useState(false);
 	const [benchmark, setBenchmark] = useState<{ output?: string; elapsed_seconds?: number; measured_at?: string } | null>(null);
 	const [benchmarkBusy, setBenchmarkBusy] = useState(false);
@@ -1252,7 +1260,7 @@ function InstanceCard({
     let inFlight = false;
     const controller = new AbortController();
     const fetchMetrics = async () => {
-      if (inst.status !== "ready" || inFlight) return;
+      if (inst.status !== "ready" || inFlight || document.hidden) return;
       inFlight = true;
       try {
         const response = await fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, {
@@ -1291,9 +1299,9 @@ function InstanceCard({
   const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
   const deleteLocked = deletionLockLabel(inst);
   const resources = resourceSummary(inst);
-  const memPct = metrics?.mem.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
-  const loadPct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
-  const rootDisk = metrics?.disk.find((disk) => disk.mount === "/") || metrics?.disk[0];
+  const memPct = metrics?.mem?.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
+  const loadPct = metrics?.cpu?.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
+  const rootDisk = metrics?.disk?.find((disk) => disk.mount === "/") || metrics?.disk?.[0];
   const staleAge = lastPollAt ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
   const stale = staleAge > STALE_THRESHOLD_MS / 1000;
   const meta = [inst.provider, inst.size, inst.region, resources].filter(Boolean).join(" · ");
@@ -1309,7 +1317,7 @@ function InstanceCard({
 	const runBenchmark = async () => {
 		setBenchmarkBusy(true);
 		try {
-			const response = await fetch(`${API}/instances/${inst.id}/storage-benchmark?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_path: "/" }) });
+			const response = await fetch(`${API}/instances/${inst.id}/storage-benchmark?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_path: "/tmp" }) });
 			if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`);
 			setBenchmark((await response.json()).result);
 		} catch (error) { setBenchmark({ output: (error as Error).message }); }
@@ -1375,7 +1383,7 @@ function InstanceCard({
       </div>
 
       {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
-	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${comparison.differences?.length ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : "matches tracked state"}</div>}
+	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${(!comparison.complete || comparison.differences?.length) ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : comparison.complete ? "matches checked state" : "comparison incomplete"}</div>}
 
       {metrics ? (
         <div
@@ -1453,333 +1461,13 @@ function CompactMetric({
   );
 }
 
-function ExpandedInstanceCardLegacy({
-  inst, withParams, busy, onUpgrade, onDestroy,
-}: {
-  inst: Instance;
-  withParams: () => string;
-  busy: boolean;
-  onUpgrade: () => void;
-  onDestroy: () => void;
-}) {
-  const [metrics, setMetrics] = useState<MetricsWire | null>(null);
-  const [history, setHistory] = useState<MetricsSample[]>([]);
-  const [lastPollAt, setLastPollAt] = useState<number>(0);
-  const [metricsError, setMetricsError] = useState("");
-  const [, setNowTick] = useState(0); // forces stale-badge re-render
-
-  useEffect(() => {
-    let cancelled = false;
-    let inFlight = false;
-    const controller = new AbortController();
-    const fetchMetrics = async () => {
-      if (inst.status !== "ready") return;
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const r = await fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, {
-          credentials: "same-origin",
-          signal: controller.signal,
-        });
-        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "metrics unavailable")}`);
-        const j = await r.json();
-        if (cancelled || !j?.metrics) return;
-        const m = j.metrics as MetricsWire;
-        setMetrics(m);
-        setMetricsError("");
-        setLastPollAt(Date.now());
-          // Append to history. Memory % derived from used/total so
-          // the chart can put cpu + mem on the same 0-100 scale.
-          const memPct = m.mem.total_bytes > 0
-            ? (m.mem.used_bytes / m.mem.total_bytes) * 100
-            : 0;
-        setHistory((prev) => {
-          const next = [...prev, { ts: Date.now(), cpuPct: m.cpu.total_pct, memPct, l1: m.load.l1 }];
-          return next.length > HISTORY_MAX ? next.slice(-HISTORY_MAX) : next;
-        });
-      } catch (e) {
-        if (!cancelled && (e as Error).name !== "AbortError") setMetricsError((e as Error).message);
-      } finally {
-        inFlight = false;
-      }
-    };
-    fetchMetrics();
-    const t = setInterval(fetchMetrics, 10000);
-    // Tick the clock every 5s so the "stale Ns ago" badge updates
-    // without waiting on the next metrics fetch.
-    const tick = setInterval(() => setNowTick((n) => n + 1), 5000);
-    return () => { cancelled = true; controller.abort(); clearInterval(t); clearInterval(tick); };
-  }, [inst.id, inst.status, withParams]);
-
-  const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
-  const sshHost = inst.ssh_host || ip;
-  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
-  const isLocal = inst.provider === "local";
-  const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
-  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "vultr", "aws-ec2", "scaleway", "huawei-cloud", "linode", "ovhcloud", "runpod"].includes(inst.provider);
-  const deleteLocked = deletionLockLabel(inst);
-  const resources = resourceSummary(inst);
-  const resourceModel = resources.toLowerCase().replace(/^[0-9]+x\s+/, "");
-  const showResources = resources && (!resources.startsWith("1x ") || !inst.size?.toLowerCase().includes(resourceModel));
-  const memPct = metrics && metrics.mem.total_bytes > 0
-    ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100
-    : 0;
-  const staleAgeS = lastPollAt > 0 ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
-  const stale = lastPollAt > 0 && (Date.now() - lastPollAt) > STALE_THRESHOLD_MS;
-  const loadPressurePct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
-
-  // Pick the most space-pressed mounts first when there are many
-  // (local dev box has /dev, /System/Volumes/VM, etc.). Top 3 by
-  // used_pct keeps the interesting ones; full list is one click
-  // away in the existing /metrics REST shape if needed later.
-  const sortedDisks = metrics?.disk
-    ? [...metrics.disk].sort((a, b) => b.used_pct - a.used_pct).slice(0, 3)
-    : [];
-
-  return (
-    <div
-      className="rounded-lg overflow-hidden"
-      // Outer card: very subtle border + bg-card tint. The dashboard's
-      // `--border` token looked stark in dark mode; inline rgba sits
-      // closer to the panel bg, giving a quiet edge.
-      style={{ backgroundColor: "var(--bg-card, transparent)", border: `1px solid ${SUBTLE_BORDER}` }}
-    >
-      {/* Header strip — distinct, slightly lighter background so the
-          card has a visible "spine" and the body content reads as
-          bounded sections without needing strong borders. */}
-      <div
-        className="flex items-center gap-2 px-4 py-3 flex-wrap"
-        style={{ backgroundColor: HEADER_STRIP_BG, borderBottom: `1px solid ${SUBTLE_BORDER}` }}
-      >
-        <span className={statusColor(inst.status) + " text-base leading-none"}>●</span>
-        <span className="text-text font-semibold">{inst.name}</span>
-        <span className="text-text-dim text-xs ml-1">
-          {inst.provider}
-          {inst.size ? ` · ${inst.size}` : ""}
-          {inst.region ? ` · ${inst.region}` : ""}
-          {showResources ? ` · ${resources}` : ""}
-        </span>
-        <span className="text-text-dim text-xs font-mono ml-2">{endpoint}</span>
-        {!isLocal && inst.monthly_cost_cents > 0 && (
-          <span
-            className="text-[11px] text-text-muted font-mono ml-2"
-            title="Monthly cost from the provider catalog"
-          >
-            {formatProviderPrice(inst.monthly_cost_cents, inst.provider)}/mo
-          </span>
-        )}
-        <span className="flex-1" />
-        {stale && metrics && (
-          <span
-            className="text-[10px] px-1.5 py-0.5 rounded bg-amber/15 text-amber"
-            title={`No successful metrics poll for ${staleAgeS}s — values shown may be outdated`}
-          >stale {staleAgeS}s</span>
-        )}
-        <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
-          {inst.status}
-        </span>
-        {deleteLocked && <span className="text-[10px] text-amber" title={deleteLocked}>24h lock</span>}
-        {(canUpgrade || canDestroy) && (
-          <>
-            {canUpgrade && <button
-              type="button"
-              onClick={onUpgrade}
-              disabled={busy || inst.status !== "ready"}
-              className="px-2 py-0.5 text-[11px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50"
-            >Upgrade</button>}
-            {canDestroy && <button
-              type="button"
-              onClick={onDestroy}
-              disabled={busy}
-              className="px-2 py-0.5 text-[11px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
-            >Destroy</button>}
-          </>
-        )}
-      </div>
-
-      {inst.error && (
-        <div className="px-4 py-2 text-red text-xs bg-red/5 border-b border-red/20">
-          {inst.error}
-        </div>
-      )}
-
-      {/* Body — split into three sub-cards (vitals / disk / history).
-          Background depth comes from rgba tints rather than tokens
-          because the dashboard's bg-input/N classes can be loud in
-          dark mode. */}
-      {metrics ? (
-        <div
-          className="p-4 space-y-4"
-          style={stale ? { opacity: 0.55 } : undefined}
-        >
-          {metricsError && <div className="text-[11px] text-red">Metrics refresh failed: {metricsError}</div>}
-          {/* Vitals — bars + stat row. */}
-          <div
-            className="rounded-md p-4 space-y-4"
-            style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
-          >
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="flex items-end gap-3">
-                <div className="flex-1 min-w-0">
-                  <ProgressBar
-                    label="CPU"
-                    sublabel={formatCPUDetail(metrics.cpu)}
-                    pct={metrics.cpu.total_pct}
-                  />
-                </div>
-                <Sparkline
-                  values={history.map((s) => s.cpuPct)}
-                  color="#3b82f6"
-                  width={64}
-                  height={22}
-                />
-              </div>
-              <div className="flex items-end gap-3">
-                <div className="flex-1 min-w-0">
-                  <ProgressBar
-                    label="Memory"
-                    sublabel={`${formatBytes(metrics.mem.used_bytes)} / ${formatBytes(metrics.mem.total_bytes)} · ${memPct.toFixed(0)}%`}
-                    pct={memPct}
-                  />
-                </div>
-                <Sparkline
-                  values={history.map((s) => s.memPct)}
-                  color="#a78bfa"
-                  width={64}
-                  height={22}
-                />
-              </div>
-              <div className="flex items-end gap-3">
-                <div className="flex-1 min-w-0">
-                  <ProgressBar
-                    label="Load pressure"
-                    sublabel={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} / ${metrics.cpu.cores} vCPU · ${loadPressurePct.toFixed(0)}%` : metrics.load.l1.toFixed(2)}
-                    pct={loadPressurePct}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div
-              className="flex flex-wrap text-xs pt-3"
-              // Inline gap + border because Tailwind JIT can't be
-              // relied on for gap-x-N / border-border/N at panel-
-              // bundle time. Real screenshot showed labels touching
-              // values + chips merging without padding.
-              style={{ gap: "20px", borderTop: `1px solid ${FAINT_DIVIDER}` }}
-            >
-              <StatChip label="Load (1m)">
-                <span
-                  className="font-mono"
-                  style={{ color: loadColor(metrics.load.l1, metrics.cpu.cores) }}
-                  title={
-                    metrics.cpu.cores && metrics.cpu.cores > 0
-                      ? `1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)} · ${((metrics.load.l1 / metrics.cpu.cores) * 100).toFixed(0)}% of ${metrics.cpu.cores} vCPU capacity`
-                      : `1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`
-                  }
-                >
-                  {metrics.load.l1.toFixed(2)}
-                </span>
-                <span className="text-text-dim font-mono ml-1">
-                  / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}
-                </span>
-              </StatChip>
-              <StatChip label="Uptime">
-                <span className="text-text font-mono">{formatUptime(metrics.uptime_s)}</span>
-              </StatChip>
-              {metrics.process_count > 0 && (
-                <StatChip label="Processes">
-                  <span className="text-text font-mono">{metrics.process_count}</span>
-                </StatChip>
-              )}
-            </div>
-          </div>
-
-          {/* Disks — sub-card with titled header strip. */}
-          {sortedDisks.length > 0 && (
-            <div
-              className="rounded-md overflow-hidden"
-              style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
-            >
-              <SectionHeader title="Disk" />
-              <div className="p-4 space-y-3">
-                {sortedDisks.map((d) => (
-                  <ProgressBar
-                    key={d.mount}
-                    label={d.mount}
-                    sublabel={`${formatBytes(d.used_bytes)} / ${formatBytes(d.total_bytes)} · ${d.used_pct.toFixed(0)}%`}
-                    pct={d.used_pct}
-                    height={8}
-                  />
-                ))}
-                {metrics.disk.length > sortedDisks.length && (
-                  <div className="text-[10px] text-text-dim italic">
-                    + {metrics.disk.length - sortedDisks.length} more mount(s) — top {sortedDisks.length} by utilization shown
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* History sub-card disabled in v0.4.4 — operator preferred
-              the at-a-glance sparklines next to CPU/MEM bars over a
-              full-width time-range chart that mostly read as flat
-              lines anyway in dark mode. MultiLineChart kept defined
-              above so re-enabling is one block of JSX away. */}
-        </div>
-      ) : inst.status === "ready" ? (
-        <div className={`px-4 py-3 text-[11px] ${metricsError ? "text-red" : "text-text-dim"}`}>
-          {metricsError ? `Vitals unavailable: ${metricsError}` : "Loading vitals…"}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// StatChip — uniform label + value pair for the stat row under the
-// vitals bars. Inline-padded label because Tailwind utility margins
-// (mr-1.5 etc.) sometimes don't compile in the panel CSS bundle, and
-// the live screenshot showed labels touching values.
-function StatChip({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="inline-flex items-baseline">
-      <span
-        className="text-text-dim uppercase text-[10px] tracking-wider font-medium"
-        style={{ marginRight: "8px" }}
-      >{label}</span>
-      <span>{children}</span>
-    </div>
-  );
-}
-
-// SectionHeader — uniform titled strip on each sub-card. Used for
-// Disk and History (live). Right side optional, useful for showing
-// the session-scope hint on the history chart.
-function SectionHeader({ title, right }: { title: string; right?: string }) {
-  return (
-    <div
-      className="px-4 py-2 flex items-center justify-between"
-      style={{
-        backgroundColor: "rgba(255,255,255,0.02)",
-        borderBottom: `1px solid ${FAINT_DIVIDER}`,
-      }}
-    >
-      <span className="text-[10px] uppercase tracking-wider text-text-dim font-semibold">
-        {title}
-      </span>
-      {right && (
-        <span className="text-[10px] text-text-dim normal-case">{right}</span>
-      )}
-    </div>
-  );
-}
-
 function VolumesDialog({ inst, withParams, onClose, setError }: {
   inst: Instance;
   withParams: () => string;
   onClose: () => void;
   setError: (message: string) => void;
 }) {
+  const [localError, setLocalError] = useState("");
   const [volumes, setVolumes] = useState<InstanceVolumeWire[]>([]);
   const [capabilities, setCapabilities] = useState<StorageCapabilitiesWire | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1816,7 +1504,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
       setCapabilities(nextCapabilities);
       if (!tier) setTier(nextCapabilities.tiers?.[0]?.name || "provider-default");
     } catch (error) {
-      setError("Volumes failed: " + (error as Error).message);
+      setLocalError("Volumes failed: " + (error as Error).message);
     } finally {
       setLoading(false);
     }
@@ -1836,7 +1524,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
       if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
       await load();
     } catch (error) {
-      setError("Volume operation failed: " + (error as Error).message);
+      setLocalError("Volume operation failed: " + (error as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1851,7 +1539,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
       size_gb: sizeGB,
       tier,
       delete_policy: deletePolicy,
-      prepare: prepareGuest && capabilities?.guest_prepare ? {
+      prepare: prepareGuest && (capabilities?.guest_prepare && inst.platform !== "macos" && inst.status === "ready") ? {
         filesystem,
         mount_path: mountPath.trim(),
         owner: mountOwner.trim() || "root:root",
@@ -1866,15 +1554,16 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
   try { requestedBoot = JSON.parse(inst.storage_json || "{}").boot || null; } catch { requestedBoot = null; }
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60" style={{ padding: 24 }} onClick={() => { if (!busy) onClose(); }}>
       <div className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(680px, 100%)" }} onClick={(event) => event.stopPropagation()}>
         <div className="px-5 py-4 flex items-start gap-3" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
           <div>
             <h2 className="text-text font-semibold">Volumes · {inst.name}</h2>
+            {localError && <p role="alert" className="text-xs text-red">{localError}</p>}
             <p className="text-xs text-text-muted">Boot storage and attached data storage are tracked separately. New data volumes default to retain.</p>
           </div>
           <span className="flex-1" />
-          <button type="button" onClick={onClose} className="text-text-muted hover:text-text">×</button>
+          <button type="button" onClick={() => { if (!busy) onClose(); }} className="text-text-muted hover:text-text">×</button>
         </div>
         <div className="p-5 space-y-4 max-h-[70vh] overflow-auto">
           <div className="rounded p-3 flex items-center gap-2" style={{ border: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
@@ -1904,7 +1593,7 @@ function VolumesDialog({ inst, withParams, onClose, setError }: {
                     const value = window.prompt("New size in GB (must be larger)", String(volume.size_gb));
                     if (value) mutate(`/instance-volumes/${volume.id}/resize`, "POST", { size_gb: Number(value) });
                   }}>Resize</button>}
-                  {volume.role === "data" && !volume.mount_path && capabilities?.guest_prepare && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-blue/60 text-blue rounded" onClick={() => {
+                  {volume.role === "data" && !volume.mount_path && (capabilities?.guest_prepare && inst.platform !== "macos" && inst.status === "ready") && <button type="button" disabled={busy} className="px-2 py-1 text-[10px] border border-blue/60 text-blue rounded" onClick={() => {
                     const value = window.prompt("Mount path. A blank device will be formatted ext4; existing signatures are never overwritten.", `/srv/${volume.name.replace(/[^A-Za-z0-9._-]+/g, "-")}`);
                     if (value) mutate(`/instance-volumes/${volume.id}/prepare`, "POST", { filesystem: "ext4", mount_path: value, owner: "root:root", mode: "0755", mount_options: "defaults,nofail", format_if_blank: true });
                   }}>Prepare & mount</button>}
@@ -2015,7 +1704,7 @@ function formatCatalogMonthlyPrice(t?: ServerTypeWire): string {
   return "";
 }
 
-function CreateDialog({
+export function CreateDialog({
   onClose, onCreated, withParams, setError,
 }: {
   onClose: () => void;
@@ -2023,6 +1712,8 @@ function CreateDialog({
   withParams: () => string;
   setError: (s: string) => void;
 }) {
+  const [localError, setLocalError] = useState("");
+  const [loadedCatalog, setLoadedCatalog] = useState("");
   const [name, setName] = useState("");
   const [size, setSize] = useState("");
   const [region, setRegion] = useState("");
@@ -2051,7 +1742,7 @@ function CreateDialog({
 
   const selectedType = serverTypes.find((candidate) => candidate.name === size);
 
-  const bootStorageOptions = selectedType?.boot_storage?.length
+  const bootStorageOptions: Array<{storage_class: string; min_size_gb?: number; max_size_gb?: number}> = selectedType?.boot_storage?.length
     ? selectedType.boot_storage
     : (storageCapabilities?.storage_classes || []).map((storageClass) => ({ storage_class: storageClass }));
   const selectedBootConstraint = bootStorageOptions.find((candidate) => candidate.storage_class === bootStorageClass);
@@ -2062,6 +1753,7 @@ function CreateDialog({
     !selectedType?.available_in?.length || selectedType.available_in.includes(candidate.name)
   );
   const compatibleImages = images.filter((candidate) => {
+    if (selectedType?.architecture && candidate.architecture && normalizeArchitecture(selectedType.architecture) !== normalizeArchitecture(candidate.architecture)) return false;
     if (selectedType?.resource_class && candidate.resource_class && candidate.resource_class !== selectedType.resource_class) return false;
     if (selectedType?.platform && candidate.platform && candidate.platform !== selectedType.platform) return false;
     if (candidate.available_in?.length && region && !candidate.available_in.includes(region)) return false;
@@ -2137,6 +1829,7 @@ function CreateDialog({
       }
       return;
     }
+    const controller = new AbortController();
     (async () => {
       setCatalogLoading(true);
       setCatalogError(null);
@@ -2145,19 +1838,18 @@ function CreateDialog({
       setImages([]);
       setStorageCapabilities(null);
       setCustomBootStorage(false);
-      setSize("");
-      setRegion("");
-      setImage("");
+      setLoadedCatalog("");
       const params = new URLSearchParams(withParams());
       params.set("provider", provider);
       if (providerConnectionID) params.set("provider_connection_id", String(providerConnectionID));
+      if (region) params.set("region", region);
       const qs = params.toString();
       try {
         const [stRes, locRes, imgRes, storageRes] = await Promise.all([
-          fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin" }),
-          fetch(`${API}/instances-locations?${qs}`, { credentials: "same-origin" }),
-          fetch(`${API}/instances-images?${qs}`, { credentials: "same-origin" }),
-          fetch(`${API}/instances-storage-capabilities?${qs}`, { credentials: "same-origin" }),
+          fetch(`${API}/instances-server-types?${qs}`, { credentials: "same-origin", signal: controller.signal }),
+          fetch(`${API}/instances-locations?${qs}`, { credentials: "same-origin", signal: controller.signal }),
+          fetch(`${API}/instances-images?${qs}`, { credentials: "same-origin", signal: controller.signal }),
+          fetch(`${API}/instances-storage-capabilities?${qs}`, { credentials: "same-origin", signal: controller.signal }),
         ]);
         if (!stRes.ok) throw new Error(`server_types: ${stRes.status} ${await stRes.text().catch(() => "")}`);
         if (!locRes.ok) throw new Error(`locations: ${locRes.status} ${await locRes.text().catch(() => "")}`);
@@ -2167,6 +1859,8 @@ function CreateDialog({
         const locJson = await locRes.json();
         const imgJson = await imgRes.json();
         const storageJson = await storageRes.json();
+        if (controller.signal.aborted) return;
+        setLoadedCatalog(`${provider}:${providerConnectionID}:${region}`);
         const nextStorageCapabilities = storageJson.capabilities as StorageCapabilitiesWire;
         setStorageCapabilities(nextStorageCapabilities);
         const firstClass = nextStorageCapabilities.storage_classes?.[0] || "block";
@@ -2195,20 +1889,23 @@ function CreateDialog({
         setImages(imgs);
         // Sensible defaults: cheapest size, first location
         // alphabetically, ubuntu LTS if present otherwise first image.
-        if (types.length) setSize(types[0].name);
-        if (locs.length) setRegion(locs[0].name);
+        if (types.length) setSize((current) => types.some((t) => t.name === current) ? current : types[0].name);
+        if (locs.length) setRegion((current) => locs.some((l) => l.name === current) ? current : locs[0].name);
       } catch (e) {
-        setCatalogError((e as Error).message);
+        if (!controller.signal.aborted) setCatalogError((e as Error).message);
       } finally {
-        setCatalogLoading(false);
+        if (!controller.signal.aborted) setCatalogLoading(false);
       }
     })();
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [provider, providerConnectionID, providersLoading]);
+  }, [provider, providerConnectionID, providersLoading, region]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || busy) return;
+    if (!catalogError && (catalogLoading || loadedCatalog !== `${provider}:${providerConnectionID}:${region}`)) return;
+    setLocalError("");
     setBusy(true);
     try {
       const r = await fetch(`${API}/instances?${withParams()}`, {
@@ -2224,7 +1921,7 @@ function CreateDialog({
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
     } catch (e) {
-      setError("Provision failed: " + (e as Error).message);
+      setLocalError("Provision failed: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -2274,7 +1971,7 @@ function CreateDialog({
     <div
       className="fixed inset-0 z-30 flex items-center justify-center bg-black/50"
       style={{ padding: 24 }}
-      onClick={onClose}
+      onClick={() => { if (!busy) onClose(); }}
     >
       <form
         onClick={(e) => e.stopPropagation()}
@@ -2283,6 +1980,7 @@ function CreateDialog({
         style={{ width: "min(480px, 100%)" }}
       >
         <h2 className="text-text font-semibold">Provision a new instance</h2>
+        {localError && <p role="alert" className="text-xs text-red">{localError}</p>}
         {catalogError ? (
           <p className="text-xs text-amber">
             Couldn't load the selected provider catalog: {catalogError}. Enter provider-specific
@@ -2302,10 +2000,11 @@ function CreateDialog({
             onChange={(e) => {
               const connectionID = Number(e.target.value);
               const binding = providers.find((candidate) => candidate.connection_id === connectionID);
+              setSize(""); setRegion(""); setImage(""); setLoadedCatalog("");
               setProviderConnectionID(connectionID);
               setProvider(binding?.provider || "");
             }}
-            disabled={providersLoading || providers.length === 0}
+            disabled={busy || providersLoading || providers.length === 0}
             className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
           >
             {providers.length === 0 && <option value="">No provider bound</option>}
@@ -2440,7 +2139,7 @@ function CreateDialog({
           )}
           <button
             type="button"
-            onClick={onClose}
+            onClick={() => { if (!busy) onClose(); }}
             disabled={busy}
             className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
           >Cancel</button>
@@ -2453,4 +2152,48 @@ function CreateDialog({
       </form>
     </div>
   );
+}
+
+function GlobalVolumes({withParams, instances, refresh}: {withParams: () => string; instances: Instance[]; refresh: number}) {
+  const [volumes, setVolumes] = useState<InstanceVolumeWire[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [targets, setTargets] = useState<Record<number, string>>({});
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch(`${API}/instance-volumes?${withParams()}`, {credentials:"same-origin", signal});
+      if (!response.ok) throw new Error(await response.text());
+      const body = await response.json(); if (!signal?.aborted) setVolumes(body.volumes || []);
+    } catch (e) { if (!signal?.aborted) setError((e as Error).message); }
+  }, [withParams]);
+  useEffect(() => { const controller = new AbortController(); load(controller.signal); return () => controller.abort(); }, [load, refresh]);
+  const mutate = async (volume: InstanceVolumeWire, action: "attach" | "delete") => {
+    if (action === "delete" && !window.confirm(`Permanently delete volume ${volume.name} and its contents?`)) return;
+    setBusy(true); setError("");
+    try {
+      const response = await fetch(`${API}/instance-volumes/${volume.id}${action === "attach" ? "/attach?" : "?confirm=true&"}${withParams()}`, {
+        method: action === "attach" ? "POST" : "DELETE", credentials:"same-origin", headers:{"Content-Type":"application/json"},
+        body: action === "attach" ? JSON.stringify({instance_id:Number(targets[volume.id])}) : undefined,
+      });
+      if (!response.ok) throw new Error(await response.text());
+      await load();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  return <section className="space-y-3">
+    <h2 className="font-semibold">All volumes</h2>
+    <p className="text-xs text-text-muted">Includes detached data disks and retained boot disks. Attaching an existing disk preserves its contents.</p>
+    {error && <p role="alert" className="text-xs text-red">{error}</p>}
+    {volumes.length === 0 && <p className="text-sm text-text-muted">No tracked volumes.</p>}
+    {volumes.map((volume) => {
+      const eligible = instances.filter((instance) => instance.status === "ready" && instance.provider === volume.provider && instance.provider_connection_id === volume.provider_connection_id && instance.region === volume.region);
+      return <div key={volume.id} className="border border-border rounded p-3 space-y-2">
+        <div>{volume.name} <span className="text-xs text-text-muted">{volume.size_gb} GB · {volume.provider} · {volume.region} · {volume.role} · {volume.status}</span></div>
+        {volume.error && <p className="text-xs text-red">{volume.error}</p>}
+        {!volume.instance_id && (volume.status === "available" || volume.status === "error") && <div className="flex gap-2">
+          {volume.provider !== "runpod" && <><select value={targets[volume.id] || ""} disabled={busy} onChange={(e) => setTargets({...targets,[volume.id]:e.target.value})} className="bg-bg-input text-sm"><option value="">Select compatible instance</option>{eligible.map((instance) => <option key={instance.id} value={instance.id}>{instance.name}</option>)}</select><button disabled={busy || !targets[volume.id]} onClick={() => mutate(volume,"attach")}>Attach</button></>}
+          <button disabled={busy} onClick={() => mutate(volume,"delete")} className="text-red">Delete permanently</button>
+        </div>}
+      </div>;
+    })}
+  </section>;
 }

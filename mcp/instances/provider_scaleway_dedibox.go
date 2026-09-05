@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -233,6 +234,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 
@@ -250,7 +252,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 	}
 
 	offerID, _ := scalewayDediboxOfferID(in.Size)
-	data, err := executeProviderTool(ctx, "scaleway", "dedibox_server_create", map[string]any{
+	data, err := executeProviderToolOnConnection(ctx, in.ProviderConnectionID, "scaleway", "dedibox_server_create", map[string]any{
 		"zone": in.Region, "offer_id": offerID, "project_id": metadata.ProjectID, "server_option_ids": []int{},
 	})
 	if err != nil {
@@ -269,7 +271,7 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
 		"provider_id": "service:" + serviceID, "provider_metadata_json": scalewayDediboxMetadataJSON(metadata),
 	}); err != nil {
-		_ = scalewayDediboxDeleteService(ctx, in.Region, serviceID)
+		_ = scalewayDediboxDeleteService(ctx, in.ProviderConnectionID, in.Region, serviceID)
 		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, metadata.SSHKeyID)
 		return nil, fmt.Errorf("persist Dedibox service identity: %w; upstream order was cancelled", err)
 	}
@@ -278,17 +280,24 @@ func scalewayDediboxProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instanc
 }
 
 func kickScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) {
-	go func() {
-		if err := continueScalewayDediboxProvisioning(ctx, instanceID); err != nil {
+	if !finishInstanceCreation(ctx, instanceID) {
+		return
+	}
+	probe := probeSSHReadyFn
+	startInstanceWorker(ctx, instanceID, func(work context.Context) {
+		if err := continueScalewayDediboxProvisioningWithProbe(ctx, instanceID, probe); err != nil {
 			fresh, getErr := dbGetInstance(ctx.AppDB(), instanceID)
 			if getErr == nil && fresh.Status == "provisioning" {
 				_, _ = updateInstanceAndEmit(ctx, instanceID, map[string]any{"status": "error", "error_message": err.Error()})
 			}
 		}
-	}()
+	})
 }
 
 func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) error {
+	return continueScalewayDediboxProvisioningWithProbe(ctx, instanceID, probeSSHReadyFn)
+}
+func continueScalewayDediboxProvisioningWithProbe(ctx *sdk.AppCtx, instanceID int64, probe func(*Instance, time.Duration) error) error {
 	inst, err := dbGetInstance(ctx.AppDB(), instanceID)
 	if err != nil || inst.Status != "provisioning" {
 		return err
@@ -303,7 +312,7 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 
 	serverID := inst.ProviderID
 	if strings.HasPrefix(serverID, "service:") || serverID == "" {
-		serverID, err = waitScalewayDediboxDelivery(ctx, inst.Region, metadata.ServiceID, scalewayDediboxDeliveryTimeout)
+		serverID, err = waitScalewayDediboxDelivery(ctx, inst.ProviderConnectionID, inst.Region, metadata.ServiceID, scalewayDediboxDeliveryTimeout, instanceWorkerContext(ctx, instanceID))
 		if err != nil {
 			return err
 		}
@@ -312,7 +321,7 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 		}
 	}
 
-	serverData, err := executeProviderTool(ctx, "scaleway", "dedibox_server_get", map[string]any{
+	serverData, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "dedibox_server_get", map[string]any{
 		"zone": inst.Region, "server_id": numericOrString(serverID),
 	})
 	if err != nil {
@@ -325,7 +334,7 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 	}
 	if installedOS == "" {
 		if !metadata.InstallStarted {
-			osID, osErr := selectScalewayDediboxOS(ctx, inst.Region, serverID, metadata.ProjectID, metadata.DesiredImage)
+			osID, osErr := selectScalewayDediboxOS(ctx, inst.ProviderConnectionID, inst.Region, serverID, metadata.ProjectID, metadata.DesiredImage)
 			if osErr != nil {
 				return osErr
 			}
@@ -333,7 +342,7 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 			if err := dbUpdateInstance(ctx.AppDB(), instanceID, map[string]any{"provider_metadata_json": scalewayDediboxMetadataJSON(metadata)}); err != nil {
 				return err
 			}
-			_, err = executeProviderTool(ctx, "scaleway", "dedibox_server_install", map[string]any{
+			_, err = executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "dedibox_server_install", map[string]any{
 				"zone": inst.Region, "server_id": numericOrString(serverID), "os_id": numericOrString(osID),
 				"hostname": scalewayDediboxHostname(inst.Name), "user_login": "apteva", "ssh_key_ids": []string{metadata.SSHKeyID},
 			})
@@ -343,7 +352,7 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 				return err
 			}
 		}
-		if err := waitScalewayDediboxInstall(ctx, inst.Region, serverID, scalewayDediboxInstallTimeout); err != nil {
+		if err := waitScalewayDediboxInstall(ctx, inst.ProviderConnectionID, inst.Region, serverID, scalewayDediboxInstallTimeout, instanceWorkerContext(ctx, instanceID)); err != nil {
 			return err
 		}
 	}
@@ -353,8 +362,10 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 		if time.Now().After(deadline) {
 			return errors.New("timed out waiting for Dedibox public IP")
 		}
-		time.Sleep(scalewayDediboxPollInterval)
-		serverData, err = executeProviderTool(ctx, "scaleway", "dedibox_server_get", map[string]any{
+		if err := sleepContext(instanceWorkerContext(ctx, instanceID), scalewayDediboxPollInterval); err != nil {
+			return err
+		}
+		serverData, err = executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "dedibox_server_get", map[string]any{
 			"zone": inst.Region, "server_id": numericOrString(serverID),
 		})
 		if err != nil {
@@ -369,17 +380,18 @@ func continueScalewayDediboxProvisioning(ctx *sdk.AppCtx, instanceID int64) erro
 	if err != nil {
 		return err
 	}
-	if err := probeSSHReadyFn(fresh, 15*time.Minute); err != nil {
+	fresh.workContext = instanceWorkerContext(ctx, instanceID)
+	if err := probe(fresh, 15*time.Minute); err != nil {
 		return fmt.Errorf("ssh probe: %w", err)
 	}
 	_, _, err = transitionInstanceAndEmit(ctx, instanceID, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
 	return err
 }
 
-func waitScalewayDediboxDelivery(ctx *sdk.AppCtx, zone, serviceID string, timeout time.Duration) (string, error) {
+func waitScalewayDediboxDelivery(ctx *sdk.AppCtx, connectionID int64, zone, serviceID string, timeout time.Duration, workers ...context.Context) (string, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		data, err := executeProviderTool(ctx, "scaleway", "dedibox_service_get", map[string]any{
+		data, err := executeProviderToolOnConnection(ctx, connectionID, "scaleway", "dedibox_service_get", map[string]any{
 			"zone": zone, "service_id": numericOrString(serviceID),
 		})
 		if err != nil {
@@ -396,12 +408,14 @@ func waitScalewayDediboxDelivery(ctx *sdk.AppCtx, zone, serviceID string, timeou
 		if time.Now().After(deadline) {
 			return "", fmt.Errorf("timed out waiting for Dedibox service %s delivery", serviceID)
 		}
-		time.Sleep(scalewayDediboxPollInterval)
+		if err := sleepDedibox(ctx, workers, scalewayDediboxPollInterval); err != nil {
+			return "", err
+		}
 	}
 }
 
-func selectScalewayDediboxOS(ctx *sdk.AppCtx, zone, serverID, projectID, desired string) (string, error) {
-	data, err := executeProviderTool(ctx, "scaleway", "dedibox_os_list", map[string]any{
+func selectScalewayDediboxOS(ctx *sdk.AppCtx, connectionID int64, zone, serverID, projectID, desired string) (string, error) {
+	data, err := executeProviderToolOnConnection(ctx, connectionID, "scaleway", "dedibox_os_list", map[string]any{
 		"zone": zone, "server_id": numericOrString(serverID), "project_id": projectID, "type": "server", "page_size": 100,
 	})
 	if err != nil {
@@ -448,10 +462,10 @@ func dediboxOSMatches(text, wanted string) bool {
 	return strings.Contains(text, version) || strings.Contains(text, strings.Split(version, ".")[0])
 }
 
-func waitScalewayDediboxInstall(ctx *sdk.AppCtx, zone, serverID string, timeout time.Duration) error {
+func waitScalewayDediboxInstall(ctx *sdk.AppCtx, connectionID int64, zone, serverID string, timeout time.Duration, workers ...context.Context) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		data, err := executeProviderTool(ctx, "scaleway", "dedibox_install_get", map[string]any{
+		data, err := executeProviderToolOnConnection(ctx, connectionID, "scaleway", "dedibox_install_get", map[string]any{
 			"zone": zone, "server_id": numericOrString(serverID),
 		})
 		if err != nil {
@@ -464,7 +478,9 @@ func waitScalewayDediboxInstall(ctx *sdk.AppCtx, zone, serverID string, timeout 
 		if time.Now().After(deadline) {
 			return fmt.Errorf("timed out waiting for Dedibox server %s OS installation (last status %q)", serverID, status)
 		}
-		time.Sleep(scalewayDediboxPollInterval)
+		if err := sleepDedibox(ctx, workers, scalewayDediboxPollInterval); err != nil {
+			return err
+		}
 	}
 }
 
@@ -472,9 +488,9 @@ func scalewayDediboxDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	metadata := parseScalewayDediboxMetadata(inst.ProviderMetadataJSON)
 	var err error
 	if metadata.ServiceID != "" {
-		err = scalewayDediboxDeleteService(ctx, inst.Region, metadata.ServiceID)
+		err = scalewayDediboxDeleteService(ctx, inst.ProviderConnectionID, inst.Region, metadata.ServiceID)
 	} else if inst.ProviderID != "" && !strings.HasPrefix(inst.ProviderID, "service:") {
-		err = scalewayDediboxDeleteServer(ctx, inst.Region, inst.ProviderID)
+		err = scalewayDediboxDeleteServer(ctx, inst.ProviderConnectionID, inst.Region, inst.ProviderID)
 	}
 	if err != nil {
 		return err
@@ -482,20 +498,16 @@ func scalewayDediboxDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 	return deleteScalewaySSHKeyOnConnection(ctx, inst.ProviderConnectionID, metadata.SSHKeyID)
 }
 
-func scalewayDediboxDeleteService(ctx *sdk.AppCtx, zone, serviceID string) error {
-	return scalewayDediboxDelete(ctx, "dedibox_service_delete", map[string]any{"zone": zone, "service_id": numericOrString(serviceID)})
+func scalewayDediboxDeleteService(ctx *sdk.AppCtx, connectionID int64, zone, serviceID string) error {
+	return scalewayDediboxDelete(ctx, connectionID, "dedibox_service_delete", map[string]any{"zone": zone, "service_id": numericOrString(serviceID)})
 }
 
-func scalewayDediboxDeleteServer(ctx *sdk.AppCtx, zone, serverID string) error {
-	return scalewayDediboxDelete(ctx, "dedibox_server_delete", map[string]any{"zone": zone, "server_id": numericOrString(serverID)})
+func scalewayDediboxDeleteServer(ctx *sdk.AppCtx, connectionID int64, zone, serverID string) error {
+	return scalewayDediboxDelete(ctx, connectionID, "dedibox_server_delete", map[string]any{"zone": zone, "server_id": numericOrString(serverID)})
 }
 
-func scalewayDediboxDelete(ctx *sdk.AppCtx, tool string, args map[string]any) error {
-	bound, err := apiProviderBound(ctx, "scaleway")
-	if err != nil {
-		return err
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, args)
+func scalewayDediboxDelete(ctx *sdk.AppCtx, connectionID int64, tool string, args map[string]any) error {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, tool, args)
 	if err != nil {
 		return fmt.Errorf("scaleway.%s: %w", tool, err)
 	}
@@ -551,4 +563,11 @@ func scalewayDediboxHostname(name string) string {
 
 func bytesToDecimalGB(value int64) float64 {
 	return float64(value) / 1_000_000_000
+}
+
+func sleepDedibox(ctx *sdk.AppCtx, workers []context.Context, d time.Duration) error {
+	if len(workers) > 0 {
+		return sleepContext(workers[0], d)
+	}
+	return sleepApp(ctx, d)
 }

@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,6 +47,8 @@ func runLocal(cmd string, timeout time.Duration) (output string, exitCode int, e
 	defer cancel()
 
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	configureCommandProcess(c)
+	c.WaitDelay = 50 * time.Millisecond
 	writer := &lockedWriter{max: maxCommandOutputBytes}
 	c.Stdout = writer
 	c.Stderr = writer
@@ -81,10 +84,33 @@ func uploadLocal(ctx *sdk.AppCtx, path string, contentB64 string) (bytesWritten 
 	if len(body) > maxFileTransferBytes {
 		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
 	}
-	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
+	confined, err := os.OpenRoot(root)
+	if err != nil {
 		return 0, err
 	}
-	if err := os.WriteFile(cleaned, body, 0o644); err != nil {
+	defer confined.Close()
+	rel, err := filepath.Rel(root, cleaned)
+	if err != nil {
+		return 0, err
+	}
+	if err := confined.MkdirAll(filepath.Dir(rel), 0o755); err != nil {
+		return 0, err
+	}
+	temp := filepath.Join(filepath.Dir(rel), ".apteva-upload-"+newRequestID())
+	f, err := confined.OpenFile(temp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer confined.Remove(temp)
+	_, writeErr := f.Write(body)
+	closeErr := f.Close()
+	if writeErr != nil {
+		return 0, writeErr
+	}
+	if closeErr != nil {
+		return 0, closeErr
+	}
+	if err := confined.Rename(temp, rel); err != nil {
 		return 0, err
 	}
 	return len(body), nil
@@ -96,16 +122,36 @@ func downloadLocal(ctx *sdk.AppCtx, path string) (contentB64 string, bytesRead i
 	if err != nil {
 		return "", 0, err
 	}
-	info, err := os.Stat(cleaned)
+	confined, err := os.OpenRoot(root)
 	if err != nil {
 		return "", 0, err
+	}
+	defer confined.Close()
+	rel, err := filepath.Rel(root, cleaned)
+	if err != nil {
+		return "", 0, err
+	}
+	f, err := confined.OpenFile(rel, os.O_RDONLY|localNonblockFlag(), 0)
+	if err != nil {
+		return "", 0, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", 0, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", 0, errors.New("download requires a regular file")
 	}
 	if info.Size() > maxFileTransferBytes {
 		return "", 0, fmt.Errorf("file exceeds %d byte download limit", maxFileTransferBytes)
 	}
-	body, err := os.ReadFile(cleaned)
+	body, err := io.ReadAll(io.LimitReader(f, maxFileTransferBytes+1))
 	if err != nil {
 		return "", 0, err
+	}
+	if len(body) > maxFileTransferBytes {
+		return "", 0, errors.New("file grew beyond download limit")
 	}
 	return base64.StdEncoding.EncodeToString(body), len(body), nil
 }
@@ -122,6 +168,9 @@ func resolveLocalPath(root, requested string) (string, error) {
 		return "", fmt.Errorf("path must be relative or under %q", root)
 	}
 	full := filepath.Join(root, cleaned)
+	if filepath.IsAbs(cleaned) {
+		full = cleaned
+	}
 	abs, err := filepath.Abs(full)
 	if err != nil {
 		return "", err

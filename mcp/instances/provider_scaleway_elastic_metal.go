@@ -21,8 +21,10 @@ type ElasticMetalConfig struct {
 }
 
 type scalewayElasticMetalMetadata struct {
-	SSHKeyID  string `json:"ssh_key_id,omitempty"`
-	ProjectID string `json:"project_id,omitempty"`
+	SSHKeyID          string   `json:"ssh_key_id,omitempty"`
+	ProjectID         string   `json:"project_id,omitempty"`
+	OwnedFlexibleIPs  []string `json:"owned_flexible_ip_ids,omitempty"`
+	RetainFlexibleIPs bool     `json:"retain_flexible_ips,omitempty"`
 }
 
 func isScalewayElasticMetalSize(value string) bool {
@@ -205,6 +207,7 @@ func scalewayElasticMetalProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*In
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "ProviderCreate"})
@@ -214,6 +217,9 @@ func scalewayElasticMetalProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*In
 		return nil, err
 	}
 	metadata := scalewayElasticMetalMetadata{SSHKeyID: access.SSHKeyID, ProjectID: access.ProjectID}
+	if in.ElasticMetal != nil {
+		metadata.RetainFlexibleIPs = in.ElasticMetal.RetainFlexibleIPs
+	}
 	metaJSON, _ := json.Marshal(metadata)
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"provider_metadata_json": string(metaJSON)})
 	install := map[string]any{"os_id": scalewayElasticMetalID(in.Image), "hostname": scalewayDediboxHostname(in.Name), "ssh_key_ids": []string{access.SSHKeyID}, "user": "root"}
@@ -267,7 +273,7 @@ func scalewayElasticMetalProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*In
 		failInstanceStage(ctx, inst.ID, "ProviderCreate", err)
 		return nil, err
 	}
-	providerID := findJSONScalar(data, "id")
+	providerID, _, _ := parseProviderResource("scaleway", data)
 	if providerID == "" {
 		err = fmt.Errorf("Scaleway Elastic Metal create response missing server id")
 		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, access.SSHKeyID)
@@ -288,7 +294,7 @@ func scalewayElasticMetalDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 func scalewayElasticMetalDestroyWithOptions(ctx *sdk.AppCtx, inst *Instance, retainFlexibleIPs bool) error {
 	metadata := scalewayElasticMetalMetadata{}
 	_ = json.Unmarshal([]byte(inst.ProviderMetadataJSON), &metadata)
-	if !retainFlexibleIPs && inst.ProviderID != "" {
+	if !retainFlexibleIPs && !metadata.RetainFlexibleIPs && len(metadata.OwnedFlexibleIPs) > 0 && inst.ProviderID != "" {
 		data, listErr := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, "scaleway", "elastic_metal_flexible_ips_list", map[string]any{"zone": inst.Region, "project_id": metadata.ProjectID, "page_size": 100})
 		if listErr != nil {
 			return fmt.Errorf("list Elastic Metal Flexible IPs before deletion: %w", listErr)
@@ -298,6 +304,9 @@ func scalewayElasticMetalDestroyWithOptions(ctx *sdk.AppCtx, inst *Instance, ret
 		for _, object := range collectMaps(root) {
 			fipID := mapString(object, "id")
 			if fipID == "" {
+				continue
+			}
+			if !containsString(metadata.OwnedFlexibleIPs, fipID) {
 				continue
 			}
 			serverID := firstNonEmpty(mapString(object, "server_id"), nestedMapString(object, "server", "id"))

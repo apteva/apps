@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,7 +58,12 @@ func (a *App) handleListServerTypes(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	ctx := appCtxForRequest(r)
+	ctx, release, err := catalogRequest(appCtxForRequest(r), r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
@@ -77,7 +82,12 @@ func (a *App) handleListLocations(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	ctx := appCtxForRequest(r)
+	ctx, release, err := catalogRequest(appCtxForRequest(r), r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
@@ -96,7 +106,12 @@ func (a *App) handleListImages(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
 		return
 	}
-	ctx := appCtxForRequest(r)
+	ctx, release, err := catalogRequest(appCtxForRequest(r), r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, r.URL.Query().Get("provider"))
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
@@ -280,11 +295,19 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 	force := r.URL.Query().Get("force") == "true" || r.URL.Query().Get("force") == "1"
 	options := DestroyOptions{Force: force, RetainFlexibleIPs: r.URL.Query().Get("retain_flexible_ips") == "true"}
 	if value := r.URL.Query().Get("retain_volumes"); value != "" {
-		retain := value == "true" || value == "1"
+		retain, parseErr := strconv.ParseBool(value)
+		if parseErr != nil {
+			httpErr(w, http.StatusBadRequest, "invalid retain_volumes boolean")
+			return
+		}
 		options.RetainVolumes = &retain
 	}
 	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		httpProviderErr(w, err)
+		return
+	}
+	if pending, err := dbGetInstance(ctx.AppDB(), id); err == nil {
+		httpJSON(w, map[string]any{"destroyed": false, "id": id, "status": pending.Status})
 		return
 	}
 	httpJSON(w, map[string]any{"destroyed": true, "id": id})
@@ -472,25 +495,12 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	inst, err := dbGetInstance(ctx.AppDB(), id)
+	inst, err := waitInstanceReady(r.Context(), ctx, id, timeout)
 	if err != nil {
-		httpErr(w, http.StatusNotFound, "instance not found")
+		httpErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	if inst.IsLocal() || inst.Status == "ready" {
-		httpJSON(w, map[string]any{"ready": true, "id": id, "status": inst.Status})
-		return
-	}
-	if inst.Status != "provisioning" {
-		httpErr(w, http.StatusConflict, fmt.Sprintf("instance cannot be marked ready from status=%s", inst.Status))
-		return
-	}
-	if err := probeSSHReadyFn(inst, timeout); err != nil {
-		httpErr(w, http.StatusGatewayTimeout, err.Error())
-		return
-	}
-	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "ready", "ready_at": nowUTC()})
-	httpJSON(w, map[string]any{"ready": true, "id": id, "status": "ready"})
+	httpJSON(w, map[string]any{"ready": true, "id": id, "status": inst.Status})
 }
 
 func (a *App) httpMetrics(w http.ResponseWriter, r *http.Request, id int64) {

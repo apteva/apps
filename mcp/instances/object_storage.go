@@ -46,6 +46,7 @@ type ObjectStorageCredentials struct {
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
 	ExpiresAt       string `json:"expires_at,omitempty"`
+	Scope           string `json:"scope,omitempty"`
 	ShownOnce       bool   `json:"shown_once"`
 }
 
@@ -64,6 +65,8 @@ type objectStorageMetadata struct {
 	ApplicationID  string `json:"application_id,omitempty"`
 	PolicyID       string `json:"policy_id,omitempty"`
 	KeyExpiresAt   string `json:"key_expires_at,omitempty"`
+	PendingStep    string `json:"pending_step,omitempty"`
+	BucketCreated  bool   `json:"bucket_created,omitempty"`
 	ClusterID      int    `json:"cluster_id,omitempty"`
 }
 
@@ -129,7 +132,7 @@ func dbListObjectStorages(db *sql.DB, provider string) ([]*ObjectStorage, error)
 
 func dbUpdateObjectStorage(db *sql.DB, id int64, fields map[string]any) error {
 	columns, args := []string{}, []any{}
-	for _, key := range []string{"status", "endpoint", "access_key_id", "provider_metadata_json", "error_message"} {
+	for _, key := range []string{"provider_id", "region", "status", "endpoint", "access_key_id", "provider_metadata_json", "error_message"} {
 		if value, ok := fields[key]; ok {
 			columns = append(columns, key+"=?")
 			args = append(args, value)
@@ -325,15 +328,40 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("load Scaleway API-key expiration policy: %w", err)
 	}
+	if _, headErr := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_head", map[string]any{"bucket": bucket, "region": region}); headErr == nil {
+		return nil, nil, errors.New("bucket already exists; refusing to adopt or replace an existing bucket")
+	} else if !strings.Contains(headErr.Error(), "status=404") {
+		return nil, nil, fmt.Errorf("verify bucket is absent before creation: %w", headErr)
+	}
+	endpoint := "https://s3." + region + ".scw.cloud"
+	meta := objectStorageMetadata{ProjectID: projectID, OrganizationID: organizationID, KeyExpiresAt: keyExpiresAt, PendingStep: "bucket create"}
+	encoded, _ := json.Marshal(meta)
+	item, err := dbCreateObjectStorage(ctx.AppDB(), in, bucket, "provisioning", endpoint, "", string(encoded))
+	if err != nil {
+		return nil, nil, err
+	}
+	save := func(step string) error {
+		meta.PendingStep = step
+		b, _ := json.Marshal(meta)
+		return dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_metadata_json": string(b), "error_message": ""})
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			status := "error"
+			if meta.BucketCreated {
+				status = "deleting"
+			}
+			_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": status, "error_message": "Provisioning interrupted at " + meta.PendingStep + "; known resource cleanup is queued; unknown provider outcomes remain recorded for reconciliation. Do not repeat create."})
+		}
+	}()
 	if _, err = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_create", map[string]any{"bucket": bucket, "region": region}); err != nil {
 		return nil, nil, err
 	}
-	cleanupBucket := true
-	defer func() {
-		if cleanupBucket {
-			_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "object_bucket_delete", map[string]any{"bucket": bucket, "region": region})
-		}
-	}()
+	meta.BucketCreated = true
+	if err = save("IAM application create"); err != nil {
+		return nil, nil, err
+	}
 
 	resourceName := scalewayIAMName(in.Name)
 	appData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_application_create", map[string]any{
@@ -346,21 +374,10 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if applicationID == "" {
 		return nil, nil, errors.New("Scaleway application create response did not include id")
 	}
-	policyID := ""
-	accessKeyID := ""
-	cleanupIAM := true
-	defer func() {
-		if !cleanupIAM {
-			return
-		}
-		if accessKeyID != "" {
-			_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_api_key_delete", map[string]any{"access_key": accessKeyID})
-		}
-		if policyID != "" {
-			_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_policy_delete", map[string]any{"policy_id": policyID})
-		}
-		_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_application_delete", map[string]any{"application_id": applicationID})
-	}()
+	meta.ApplicationID = applicationID
+	if err = save("IAM policy create"); err != nil {
+		return nil, nil, err
+	}
 	policyData, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "scaleway", "iam_policy_create", map[string]any{
 		"name": resourceName, "description": "Object Storage access for " + in.Name,
 		"organization_id": organizationID, "application_id": applicationID,
@@ -370,9 +387,13 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("create scoped Scaleway IAM policy: %w", err)
 	}
-	policyID = jsonStringAt(policyData, "id")
+	policyID := jsonStringAt(policyData, "id")
 	if policyID == "" {
 		return nil, nil, errors.New("Scaleway IAM policy create response did not include id")
+	}
+	meta.PolicyID = policyID
+	if err = save("API key create"); err != nil {
+		return nil, nil, err
 	}
 	keyArgs := map[string]any{
 		"application_id": applicationID, "default_project_id": projectID, "description": "Object Storage key for " + in.Name,
@@ -385,17 +406,26 @@ func createScalewayObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (
 		return nil, nil, fmt.Errorf("create scoped Scaleway Object Storage credentials: %w", err)
 	}
 	accessKeyID, secret := jsonStringAt(keyData, "access_key"), jsonStringAt(keyData, "secret_key")
+	if accessKeyID != "" {
+		if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"access_key_id": accessKeyID}); err != nil {
+			return nil, nil, err
+		}
+	}
 	if accessKeyID == "" || secret == "" {
 		return nil, nil, errors.New("Scaleway API key response did not include the one-time access and secret key")
 	}
-	metaBytes, _ := json.Marshal(objectStorageMetadata{ProjectID: projectID, OrganizationID: organizationID, ApplicationID: applicationID, PolicyID: policyID, KeyExpiresAt: keyExpiresAt})
-	endpoint := "https://s3." + region + ".scw.cloud"
-	item, err := dbCreateObjectStorage(ctx.AppDB(), in, bucket, "ready", endpoint, accessKeyID, string(metaBytes))
-	if err != nil {
-		return nil, nil, fmt.Errorf("Scaleway bucket was created but could not be recorded: %w", err)
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"access_key_id": accessKeyID}); err != nil {
+		return nil, nil, err
 	}
-	cleanupBucket, cleanupIAM = false, false
-	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: region, Bucket: bucket, AccessKeyID: accessKeyID, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, ShownOnce: true}, nil
+	if err = save(""); err != nil {
+		return nil, nil, err
+	}
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": "ready"}); err != nil {
+		return nil, nil, err
+	}
+	completed = true
+	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
+	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: region, Bucket: bucket, AccessKeyID: accessKeyID, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, Scope: "Scaleway project " + projectID + " (all Object Storage resources)", ShownOnce: true}, err
 }
 
 func scalewayObjectStorageKeyExpiry(ctx *sdk.AppCtx, connectionID int64, organizationID string) (string, error) {
@@ -448,6 +478,11 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 		}
 		args["tier_id"] = tierID
 	}
+	metaBytes, _ := json.Marshal(objectStorageMetadata{ClusterID: clusterID, PendingStep: "provider create"})
+	item, err := dbCreateObjectStorage(ctx.AppDB(), in, "pending:"+newRequestID(), "provisioning", "", "", string(metaBytes))
+	if err != nil {
+		return nil, nil, err
+	}
 	data, err := executeObjectStorageTool(ctx, in.ProviderConnectionID, "vultr", "object_storage_create", args)
 	if err != nil {
 		return nil, nil, err
@@ -460,8 +495,17 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 	providerID := mapString(obj, "id")
 	endpoint := mapString(obj, "s3_hostname")
 	accessKey, secret := mapString(obj, "s3_access_key"), mapString(obj, "s3_secret_key")
-	if providerID == "" || endpoint == "" || accessKey == "" || secret == "" {
-		return nil, nil, errors.New("Vultr Object Storage create response did not include id, endpoint, and S3 credentials")
+	if providerID == "" {
+		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": "Provider create outcome unknown; reconcile before retrying"})
+		return nil, nil, errors.New("Vultr create returned no identity; pending record retained")
+	}
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_id": providerID}); err != nil {
+		return nil, nil, err
+	}
+	if endpoint == "" || accessKey == "" || secret == "" {
+		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": "Provisioning pending; refresh provider state, then rotate credentials when ready"})
+		item, _ = dbGetObjectStorage(ctx.AppDB(), item.ID)
+		return item, nil, nil
 	}
 	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
 		endpoint = "https://" + endpoint
@@ -469,15 +513,17 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 	if region := mapString(obj, "region"); region != "" {
 		in.Region = region
 	}
-	metaBytes, _ := json.Marshal(objectStorageMetadata{ClusterID: clusterID})
+	metaBytes, _ = json.Marshal(objectStorageMetadata{ClusterID: clusterID})
 	status := strings.ToLower(mapString(obj, "status"))
 	if status == "" {
 		status = "ready"
 	}
-	item, err := dbCreateObjectStorage(ctx.AppDB(), in, providerID, status, endpoint, accessKey, string(metaBytes))
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": status, "endpoint": endpoint, "region": in.Region, "access_key_id": accessKey, "provider_metadata_json": string(metaBytes)}); err != nil {
+		return nil, nil, err
+	}
+	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
 	if err != nil {
-		_, _ = executeObjectStorageTool(ctx, in.ProviderConnectionID, "vultr", "object_storage_delete", map[string]any{"object_storage_id": providerID})
-		return nil, nil, fmt.Errorf("Vultr Object Storage was created but could not be recorded: %w", err)
+		return nil, nil, err
 	}
 	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: in.Region, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, nil
 }
@@ -489,6 +535,16 @@ func parseObjectStorageMetadata(item *ObjectStorage) objectStorageMetadata {
 }
 
 func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*ObjectStorageCredentials, []string, error) {
+	unlock, err := lockResource(ctx.AppDB(), "object_storage", item.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer unlock()
+	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	warnings := []string{}
 	if item.Provider == "vultr" {
 		data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_rotate_credentials", map[string]any{"object_storage_id": item.ProviderID})
@@ -524,6 +580,14 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 	if keyExpiresAt != "" {
 		keyArgs["expires_at"] = keyExpiresAt
 	}
+	if metadata.PendingStep != "" {
+		return nil, nil, fmt.Errorf("unfinished credential operation %s must be reconciled before rotation", metadata.PendingStep)
+	}
+	metadata.PendingStep = "credential rotation; response may be lost"
+	encoded, _ := json.Marshal(metadata)
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_metadata_json": string(encoded)}); err != nil {
+		return nil, nil, err
+	}
 	data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "iam_api_key_create", keyArgs)
 	if err != nil {
 		return nil, nil, err
@@ -532,19 +596,34 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 	if accessKey == "" || secret == "" {
 		return nil, nil, errors.New("Scaleway credential rotation did not return the new key pair")
 	}
-	if err := dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"access_key_id": accessKey, "error_message": ""}); err != nil {
-		_, _ = executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "iam_api_key_delete", map[string]any{"access_key": accessKey})
+	metadata.KeyExpiresAt = keyExpiresAt
+	metadata.PendingStep = ""
+	if err = commitObjectStorageRotation(ctx, item, accessKey, metadata); err != nil {
+		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO object_storage_key_cleanup(object_storage_id,connection_id,access_key_id,error) VALUES(?,?,?,?)`, item.ID, item.ProviderConnectionID, accessKey, "New key commit failed; revoke it")
 		return nil, nil, err
 	}
-	if item.AccessKeyID != "" {
-		if _, deleteErr := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "iam_api_key_delete", map[string]any{"access_key": item.AccessKeyID}); deleteErr != nil {
-			warnings = append(warnings, "new credentials are active, but the previous Scaleway key could not be revoked: "+deleteErr.Error())
-		}
-	}
-	return &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, ShownOnce: true}, warnings, nil
+	warnings = cleanupObjectStorageKeys(ctx, item.ID)
+
+	return &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ExpiresAt: keyExpiresAt, Scope: "Scaleway project " + metadata.ProjectID + " (all Object Storage resources)", ShownOnce: true}, warnings, nil
 }
 
 func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error) {
+	unlock, err := lockResource(ctx.AppDB(), "object_storage", item.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.HasPrefix(item.ProviderID, "pending:") || (item.Provider == "scaleway" && parseObjectStorageMetadata(item).PendingStep == "bucket create") {
+		return nil, errors.New("create ownership is unconfirmed; reconcile provider identity before deletion")
+	}
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": "deleting"}); err != nil {
+		return nil, err
+	}
+
 	warnings := []string{}
 	if item.Provider == "vultr" {
 		_, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_delete", map[string]any{"object_storage_id": item.ProviderID})
@@ -587,6 +666,11 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 			}
 		}
 	}
+	metadata := parseObjectStorageMetadata(item)
+	if (metadata.PendingStep == "IAM application create" && metadata.ApplicationID == "") || (metadata.PendingStep == "IAM policy create" && metadata.PolicyID == "") || (metadata.PendingStep == "API key create" && item.AccessKeyID == "") || strings.HasPrefix(metadata.PendingStep, "credential rotation") {
+		warnings = append(warnings, "A provider mutation response was lost; reconcile the unconfirmed IAM operation before removing this inventory record: "+metadata.PendingStep)
+	}
+	warnings = append(warnings, cleanupObjectStorageKeys(ctx, item.ID)...)
 	if len(warnings) > 0 {
 		sort.Strings(warnings)
 		return warnings, fmt.Errorf("provider resource was deleted, but credential cleanup is incomplete: %s", strings.Join(warnings, "; "))

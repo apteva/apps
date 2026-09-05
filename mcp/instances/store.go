@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 // consumer (Live Link, Deploy, Backup, future Containers) sees this
 // shape via `instance_get` / `instance_list`.
 type Instance struct {
+	workContext          context.Context
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
 	Provider             string `json:"provider"` // 'local' | 'hetzner' | future
@@ -52,6 +54,8 @@ type Instance struct {
 	CreatedAt             string               `json:"created_at,omitempty"`
 	ReadyAt               string               `json:"ready_at,omitempty"`
 	DestroyedAt           string               `json:"destroyed_at,omitempty"`
+	CreatePending         bool                 `json:"create_pending,omitempty"`
+	DestroyOptionsJSON    string               `json:"-"`
 }
 
 type InstanceCapabilities struct {
@@ -122,6 +126,7 @@ type CreateInstanceInput struct {
 
 var ErrInstanceNotFound = errors.New("instance not found")
 var ErrLocalInstanceImmutable = errors.New("local instance (id 0) cannot be created or destroyed")
+var ErrOperationSuperseded = errors.New("instance operation was superseded")
 
 // ─── Local seed ────────────────────────────────────────────────────
 
@@ -146,7 +151,7 @@ const instanceCols = `id, name, provider, provider_connection_id, provider_id, p
 		status, region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
 		tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
 		lifecycle_stage, primary_error, cleanup_error, retain_on_failure, provider_inventory_json, COALESCE(provider_checked_at,''),
-		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,'')`
+		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,''), create_pending, destroy_options_json`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
@@ -155,6 +160,7 @@ func scanInstance(s rowScanner) (*Instance, error) {
 		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
 		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
+		&i.CreatePending, &i.DestroyOptionsJSON,
 	); err != nil {
 		return nil, err
 	}
@@ -194,20 +200,25 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 			storageJSON = string(encoded)
 		}
 	}
-	res, err := db.Exec(`
+	reservation, err := db.Exec(`INSERT INTO instance_ids DEFAULT VALUES`)
+	if err != nil {
+		return nil, err
+	}
+	id, err := reservation.LastInsertId()
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`
 		INSERT INTO instances (
-			name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
+			id, create_pending, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
 				region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
 				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, in.Status == "provisioning" && in.ProviderID == "",
 		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
 		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
 		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(),
 	)
-	if err != nil {
-		return nil, err
-	}
-	id, err := res.LastInsertId()
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +243,7 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "storage_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
 		"lifecycle_stage", "primary_error", "cleanup_error", "retain_on_failure", "provider_inventory_json", "provider_checked_at",
+		"create_pending", "destroy_options_json",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -242,7 +254,18 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 		return nil
 	}
 	args = append(args, id)
-	_, err := db.Exec(`UPDATE instances SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
+	guard := ""
+	if status, ok := fields["status"].(string); ok && status != "destroying" && status != "rolling_back" {
+		guard = " AND status NOT IN ('destroying','rolling_back')"
+	}
+	res, err := db.Exec(`UPDATE instances SET `+strings.Join(cols, ", ")+` WHERE id = ?`+guard, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err == nil && n != 1 {
+		return ErrOperationSuperseded
+	}
 	return err
 }
 
@@ -257,7 +280,7 @@ func dbTransitionStatus(db *sql.DB, id int64, from []string, to string, fields m
 	fields["status"] = to
 	cols := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+len(from)+1)
-	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at"} {
+	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at", "destroy_options_json", "provider_id", "public_ipv4", "public_ipv6", "create_pending"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

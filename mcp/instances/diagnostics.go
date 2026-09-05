@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 type ProviderComparison struct {
+	Complete       bool           `json:"complete"`
+	Warnings       []string       `json:"warnings"`
 	InstanceID     int64          `json:"instance_id"`
 	CheckedAt      string         `json:"checked_at"`
 	ProviderExists bool           `json:"provider_exists"`
@@ -27,7 +30,7 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 	if inst == nil {
 		return nil, ErrInstanceNotFound
 	}
-	result := &ProviderComparison{InstanceID: inst.ID, CheckedAt: nowUTC(), Resources: map[string]any{}, Differences: []string{}}
+	result := &ProviderComparison{Complete: true, Warnings: []string{}, InstanceID: inst.ID, CheckedAt: nowUTC(), Resources: map[string]any{}, Differences: []string{}}
 	if inst.IsLocal() || inst.Provider == "external" {
 		result.ProviderExists = true
 		result.ProviderState = inst.Status
@@ -91,24 +94,50 @@ func compareInstanceProvider(ctx *sdk.AppCtx, inst *Instance) (*ProviderComparis
 		inst = repaired
 	}
 	result.ProviderExists = true
-	result.ProviderState = firstNonEmpty(findJSONScalar(data, "state"), findJSONScalar(data, "status"))
+	result.ProviderState = providerResourceState(inst.Provider, data)
 	if inst.Provider == "hetzner" {
 		_, result.ProviderIPv4, result.ProviderIPv6 = parseHetznerCreateResponse(data)
+	} else if inst.Provider == "digitalocean" {
+		_, result.ProviderIPv4, result.ProviderIPv6 = parseDigitalOceanDropletResponse(data)
 	} else {
 		_, result.ProviderIPv4, result.ProviderIPv6 = parseProviderResource(inst.Provider, data)
 	}
-	if result.ProviderIPv4 == "" {
-		result.ProviderIPv4 = firstNonEmpty(findJSONScalar(data, "public_ipv4"), findJSONScalar(data, "address"))
-	}
-	if inst.PublicIPv4 != "" && result.ProviderIPv4 != "" && inst.PublicIPv4 != result.ProviderIPv4 {
+	if inst.PublicIPv4 != result.ProviderIPv4 {
 		result.Differences = append(result.Differences, fmt.Sprintf("IPv4 differs: app=%s provider=%s", inst.PublicIPv4, result.ProviderIPv4))
 	}
-	if inst.Status == "ready" && strings.EqualFold(result.ProviderState, "stopped") {
-		result.Differences = append(result.Differences, "app is ready but provider reports stopped")
+	if inst.PublicIPv6 != result.ProviderIPv6 {
+		result.Differences = append(result.Differences, fmt.Sprintf("IPv6 differs: app=%s provider=%s", inst.PublicIPv6, result.ProviderIPv6))
 	}
-	volumes, _ := dbListVolumes(ctx.AppDB(), inst.ID, "")
+	if result.ProviderState == "" {
+		result.Complete = false
+		result.Warnings = append(result.Warnings, "Provider state is unknown")
+	}
+	if inst.Status == "ready" && result.ProviderState != "" && !containsString([]string{"running", "active", "ready", "on"}, result.ProviderState) {
+		result.Differences = append(result.Differences, "app is ready but provider reports "+result.ProviderState)
+	}
+	volumes, listErr := dbListVolumes(ctx.AppDB(), inst.ID, "")
+	if listErr != nil {
+		result.Complete = false
+		result.Warnings = append(result.Warnings, listErr.Error())
+	}
 	result.Resources["server_id"] = inst.ProviderID
-	result.Resources["volumes"] = volumes
+	observed := map[int64]any{}
+	for _, volume := range volumes {
+		actual, e := readProviderVolume(ctx, volume)
+		if e != nil {
+			result.Complete = false
+			result.Warnings = append(result.Warnings, fmt.Sprintf("volume %d: %v", volume.ID, e))
+			continue
+		}
+		observed[volume.ID] = actual
+		if !containsString(actual.Attached, inst.ProviderID) {
+			result.Differences = append(result.Differences, fmt.Sprintf("volume %d is not attached to the tracked server", volume.ID))
+		}
+		if actual.SizeGB != volume.SizeGB {
+			result.Differences = append(result.Differences, fmt.Sprintf("volume %d size differs: app=%d provider=%d", volume.ID, volume.SizeGB, actual.SizeGB))
+		}
+	}
+	result.Resources["volumes"] = observed
 	persistProviderComparison(ctx, inst.ID, result)
 	return result, nil
 }
@@ -172,7 +201,13 @@ func scalewayProviderInventory(ctx *sdk.AppCtx, connectionID int64) (map[string]
 		}
 		connectionID = bound.ConnectionID
 	}
-	zones := []string{"fr-par-1", "fr-par-2", "nl-ams-1", "nl-ams-2", "pl-waw-2", "pl-waw-3"}
+	if _, err := storageBinding(ctx, "scaleway", connectionID); err != nil {
+		return nil, err
+	}
+	zones := []string{}
+	for _, location := range scalewayLocations() {
+		zones = append(zones, location.Name)
+	}
 	trackedInstances := map[string]bool{}
 	if instances, err := dbListInstances(ctx.AppDB(), "scaleway", ""); err == nil {
 		for _, instance := range instances {
@@ -198,54 +233,75 @@ func scalewayProviderInventory(ctx *sdk.AppCtx, connectionID int64) (map[string]
 			trackedBucketNames[item.Bucket] = true
 		}
 	}
-	result := map[string]any{"provider": "scaleway", "connection_id": connectionID, "checked_at": nowUTC(), "zones": map[string]any{}, "tracked_object_storage": trackedBuckets}
+	result := map[string]any{"complete": true, "warnings": []string{}, "provider": "scaleway", "connection_id": connectionID, "checked_at": nowUTC(), "zones": map[string]any{}, "tracked_object_storage": trackedBuckets}
 	zoneResults := result["zones"].(map[string]any)
 	orphanServers, orphanVolumes := []string{}, []string{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, 4)
 	for _, zone := range zones {
-		entry := map[string]any{}
-		resources := []struct{ label, tool, array string }{
-			{"instances", "server_list", "servers"},
-			{"volumes", "volume_list", "volumes"},
-			{"elastic_metal", "elastic_metal_servers_list", "servers"},
-			{"flexible_ips", "elastic_metal_flexible_ips_list", "flexible_ips"},
-		}
-		for _, resource := range resources {
-			pageArg := "page_size"
-			if resource.tool == "volume_list" {
-				pageArg = "per_page"
+		wg.Add(1)
+		go func(zone string) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			entry := map[string]any{}
+			resources := []struct{ label, tool, array string }{
+				{"instances", "server_list", "servers"},
+				{"volumes", "volume_list", "volumes"},
+				{"elastic_metal", "elastic_metal_servers_list", "servers"},
+				{"flexible_ips", "elastic_metal_flexible_ips_list", "flexible_ips"},
 			}
-			data, err := executeProviderToolOnConnection(ctx, connectionID, "scaleway", resource.tool, map[string]any{"zone": zone, pageArg: 100})
-			if err != nil {
-				entry[resource.label+"_error"] = err.Error()
-				continue
-			}
-			var decoded any
-			if json.Unmarshal(data, &decoded) == nil {
-				entry[resource.label] = decoded
-				for _, item := range namedResourceMaps(decoded, resource.array) {
-					id := mapString(item, "id")
-					if id == "" {
-						continue
-					}
-					if (resource.label == "instances" || resource.label == "elastic_metal") && !trackedInstances[id] {
-						orphanServers = append(orphanServers, id)
-					}
-					if resource.label == "volumes" && !trackedVolumes[id] {
-						orphanVolumes = append(orphanVolumes, id)
+			for _, resource := range resources {
+				pageArg := "page_size"
+				if resource.tool == "volume_list" {
+					pageArg = "per_page"
+				}
+				data, err := executePagedProviderTool(ctx, connectionID, "scaleway", resource.tool, map[string]any{"zone": zone, pageArg: 100})
+				if err != nil {
+					entry[resource.label+"_error"] = err.Error()
+					mu.Lock()
+					result["complete"] = false
+					result["warnings"] = append(result["warnings"].([]string), zone+" "+resource.label+": "+err.Error())
+					mu.Unlock()
+					continue
+				}
+				var decoded any
+				if json.Unmarshal(data, &decoded) == nil {
+					entry[resource.label] = decoded
+					for _, item := range namedResourceMaps(decoded, resource.array) {
+						id := mapString(item, "id")
+						if id == "" {
+							continue
+						}
+						if (resource.label == "instances" || resource.label == "elastic_metal") && !trackedInstances[id] {
+							mu.Lock()
+							orphanServers = append(orphanServers, id)
+							mu.Unlock()
+						}
+						if resource.label == "volumes" && !trackedVolumes[id] {
+							mu.Lock()
+							orphanVolumes = append(orphanVolumes, id)
+							mu.Unlock()
+						}
 					}
 				}
 			}
-		}
-		zoneResults[zone] = entry
+			mu.Lock()
+			zoneResults[zone] = entry
+			mu.Unlock()
+		}(zone)
 	}
-	result["orphan_server_ids"] = orphanServers
-	result["orphan_volume_ids"] = orphanVolumes
+	wg.Wait()
+	result["untracked_server_ids"] = orphanServers
+	result["untracked_volume_ids"] = orphanVolumes
 	providerBuckets := map[string][]string{}
 	orphanBuckets, seenBuckets := []string{}, map[string]bool{}
 	for _, region := range []string{"fr-par", "nl-ams", "pl-waw", "it-mil"} {
 		data, err := executeProviderToolOnConnection(ctx, connectionID, "scaleway", "object_bucket_list", map[string]any{"region": region})
 		if err != nil {
-			providerBuckets[region] = []string{}
+			result["complete"] = false
+			result["warnings"] = append(result["warnings"].([]string), region+" buckets: "+err.Error())
 			continue
 		}
 		names := scalewayBucketNames(data)
@@ -258,7 +314,7 @@ func scalewayProviderInventory(ctx *sdk.AppCtx, connectionID int64) (map[string]
 		}
 	}
 	result["provider_object_storage"] = providerBuckets
-	result["orphan_bucket_names"] = orphanBuckets
+	result["untracked_bucket_names"] = orphanBuckets
 	return result, nil
 }
 
@@ -311,17 +367,21 @@ func benchmarkInstanceStorage(ctx *sdk.AppCtx, inst *Instance, target string) (m
 	}
 	target = strings.TrimSpace(target)
 	if target == "" {
-		target = "/"
+		target = "/tmp"
 	}
 	if !strings.HasPrefix(target, "/") || strings.Contains(target, "\x00") {
 		return nil, errors.New("target_path must be an absolute path")
 	}
-	file := strings.TrimRight(target, "/") + "/.apteva-storage-benchmark"
-	cmd := "set -eu; test -d " + quoteShellArg(target) + "; trap 'rm -f " + quoteShellArg(file) + "' EXIT; dd if=/dev/zero of=" + quoteShellArg(file) + " bs=1M count=256 conv=fdatasync 2>&1"
+	unlock, err := lockResource(ctx.AppDB(), "benchmark", inst.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	cmd := storageBenchmarkCommand(target)
+
 	started := time.Now()
 	var output string
 	var exit int
-	var err error
 	if inst.IsLocal() {
 		output, exit, err = runLocal(cmd, 2*time.Minute)
 	} else {
@@ -331,9 +391,22 @@ func benchmarkInstanceStorage(ctx *sdk.AppCtx, inst *Instance, target string) (m
 	encoded, _ := json.Marshal(result)
 	_, _ = ctx.AppDB().Exec(`INSERT INTO instance_storage_benchmarks(instance_id,target_path,result_json) VALUES(?,?,?)`, inst.ID, target, string(encoded))
 	if err != nil || exit != 0 {
-		return result, fmt.Errorf("storage benchmark failed (exit=%d): %w", exit, err)
+		return result, fmt.Errorf("storage benchmark failed (exit=%d): %v", exit, err)
 	}
 	return result, nil
+}
+
+func storageBenchmarkCommand(target string) string {
+	return `set -eu
+ target=` + quoteShellArg(target) + `
+ test -d "$target" && test -w "$target"
+ tmp=$(mktemp "$target/.apteva-storage-benchmark.XXXXXX")
+ trap 'rm -f "$tmp"' EXIT HUP INT TERM
+ case $(uname -s) in
+  Linux) dd if=/dev/zero of="$tmp" bs=1048576 count=256 conv=fdatasync 2>&1 ;;
+  Darwin) dd if=/dev/zero of="$tmp" bs=1048576 count=256 2>&1; sync ;;
+  *) echo "unsupported benchmark platform" >&2; exit 1 ;;
+ esac`
 }
 
 func reconcileTrackedProviderState(ctx *sdk.AppCtx) {
@@ -394,4 +467,26 @@ func (a *App) toolStorageBenchmark(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return map[string]any{"result": result}, err
 	}
 	return map[string]any{"result": result}, nil
+}
+
+func providerResourceState(provider string, data json.RawMessage) string {
+	var root map[string]any
+	if json.Unmarshal(data, &root) != nil {
+		return ""
+	}
+	obj := root
+	for _, key := range []string{"server", "instance", "droplet"} {
+		if nested, ok := root[key].(map[string]any); ok {
+			obj = nested
+			break
+		}
+	}
+	if provider == "aws-ec2" {
+		for _, candidate := range collectMaps(root) {
+			if state, ok := candidate["instanceState"].(map[string]any); ok {
+				return strings.ToLower(mapString(state, "name"))
+			}
+		}
+	}
+	return strings.ToLower(firstNonEmpty(mapString(obj, "state"), mapString(obj, "status")))
 }

@@ -103,6 +103,17 @@ async function main() {
   };
 
   for (const [uiDir, sources] of grouped) {
+    // App-owned checks run before transpilation so a successful bundle cannot
+    // hide wire-type errors in panels that provide a TypeScript contract.
+    const appDir = dirname(uiDir);
+    const manifestPath = join(appDir, "package.json");
+    if (existsSync(manifestPath)) {
+      const manifest = await Bun.file(manifestPath).json();
+      if (manifest.scripts?.typecheck) {
+        const check = Bun.spawn(["bun", "run", "typecheck"], { cwd: appDir, stdout: "inherit", stderr: "inherit" });
+        if (await check.exited !== 0) throw new Error(`Type checking failed: ${appDir}`);
+      }
+    }
     if (existsSync(join(uiDir, "split-bundle.json"))) {
       await build(sources, true);
       continue;

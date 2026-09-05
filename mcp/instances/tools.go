@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -237,7 +238,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Returns active, non-deprecated types only: name + cores + memory_gb + disk_gb + monthly/hourly price + available_in (locations). " +
 				"Use this to discover valid `size` values for instance_create instead of hardcoding. " +
 				"Args: provider? (default: bound provider).",
-			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"}, "resource_class": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListServerTypes,
 		},
 		{
@@ -245,7 +246,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List the VPS regions available from the bound provider, live from upstream. " +
 				"Returns name + city + country + network_zone for each. " +
 				"Use to discover valid `region` values for instance_create. Args: provider? (default: bound provider).",
-			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"}, "resource_class": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListLocations,
 		},
 		{
@@ -253,7 +254,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List OS images available from the bound provider, live from upstream (system images only — snapshots/backups/apps excluded). " +
 				"Returns name + os_flavor + os_version + architecture. " +
 				"Use to discover valid `image` values for instance_create. Args: provider? (default: bound provider).",
-			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
+			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}, "provider_connection_id": map[string]any{"type": "integer", "minimum": 1}, "region": map[string]any{"type": "string"}, "resource_class": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListImages,
 		},
 	}
@@ -408,11 +409,17 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	options := DestroyOptions{Force: boolArg(args, "force", false), RetainFlexibleIPs: boolArg(args, "retain_flexible_ips", false)}
 	if value, present := args["retain_volumes"]; present {
-		parsed, _ := value.(bool)
+		parsed, ok := value.(bool)
+		if !ok {
+			return nil, errors.New("retain_volumes must be a boolean")
+		}
 		options.RetainVolumes = &parsed
 	}
 	if err := destroyManagedInstanceWithOptions(ctx, inst, options); err != nil {
 		return nil, err
+	}
+	if pending, err := dbGetInstance(ctx.AppDB(), id); err == nil {
+		return map[string]any{"destroyed": false, "id": id, "status": pending.Status}, nil
 	}
 	return map[string]any{"destroyed": true, "id": id}, nil
 }
@@ -520,23 +527,11 @@ func (a *App) toolDownloadFile(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolWaitReady(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	id := int64Arg(args, "id")
-	timeout := time.Duration(intArg(args, "timeout_s", 300)) * time.Second
-	inst, err := dbGetInstance(ctx.AppDB(), id)
+	inst, err := waitInstanceReady(context.Background(), ctx, int64Arg(args, "id"), time.Duration(intArg(args, "timeout_s", 300))*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	if inst.IsLocal() || inst.Status == "ready" {
-		return map[string]any{"ready": true, "id": id, "status": inst.Status}, nil
-	}
-	if inst.Status != "provisioning" {
-		return nil, fmt.Errorf("instance cannot be marked ready from status=%s", inst.Status)
-	}
-	if err := probeSSHReadyFn(inst, timeout); err != nil {
-		return nil, err
-	}
-	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "ready", "ready_at": nowUTC()})
-	return map[string]any{"ready": true, "id": id, "status": "ready"}, nil
+	return map[string]any{"ready": true, "id": inst.ID, "status": inst.Status}, nil
 }
 
 func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -553,6 +548,8 @@ func (a *App) toolMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx, release := scopedCatalog(ctx, catalogOptions{ConnectionID: int64Arg(args, "provider_connection_id"), Zone: strArg(args, "region"), ResourceClass: strArg(args, "resource_class")})
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
@@ -565,6 +562,8 @@ func (a *App) toolListServerTypes(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func (a *App) toolListLocations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx, release := scopedCatalog(ctx, catalogOptions{ConnectionID: int64Arg(args, "provider_connection_id"), Zone: strArg(args, "region"), ResourceClass: strArg(args, "resource_class")})
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err
@@ -577,6 +576,8 @@ func (a *App) toolListLocations(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolListImages(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx, release := scopedCatalog(ctx, catalogOptions{ConnectionID: int64Arg(args, "provider_connection_id"), Zone: strArg(args, "region"), ResourceClass: strArg(args, "resource_class")})
+	defer release()
 	provider, err := resolveInstanceProvider(ctx, strArg(args, "provider"))
 	if err != nil {
 		return nil, err

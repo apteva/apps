@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -48,6 +49,20 @@ func executeProviderTool(ctx *sdk.AppCtx, provider, tool string, args map[string
 }
 
 func executeProviderToolOnConnection(ctx *sdk.AppCtx, connectionID int64, provider, tool string, args map[string]any) (json.RawMessage, error) {
+	bound, err := storageBinding(ctx, provider, connectionID)
+	if err != nil {
+		return nil, err
+	}
+	connectionID = bound.ConnectionID
+	if isCatalogTool(tool) {
+		return cachedCatalog(ctx, connectionID, provider, tool, args, func() (json.RawMessage, error) {
+			return executePagedProviderTool(ctx, connectionID, provider, tool, args)
+		})
+	}
+	return executeProviderToolUncached(ctx, connectionID, provider, tool, args)
+}
+
+func executeProviderToolUncached(ctx *sdk.AppCtx, connectionID int64, provider, tool string, args map[string]any) (json.RawMessage, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, tool, args)
 	if err != nil {
 		return nil, fmt.Errorf("%s.%s: %w", provider, tool, err)
@@ -69,7 +84,7 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 	case "aws-ec2":
 		tool, args = "list_instance_types", map[string]any{"Action": "DescribeInstanceTypes", "Version": "2016-11-15", "MaxResults": 100}
 	case "scaleway":
-		tool, args = "server_types_list", map[string]any{"zone": "fr-par-1", "per_page": 100}
+		tool, args = "server_types_list", map[string]any{"zone": catalogZone(ctx), "per_page": 100}
 	case "huawei-cloud":
 		tool, args = "list_flavors", map[string]any{}
 	case "linode":
@@ -95,7 +110,7 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 			types[i].ResourceClass = "virtual"
 		}
 	}
-	if provider == "scaleway" {
+	if provider == "scaleway" && catalogScope(ctx).ResourceClass != "virtual" {
 		elasticTypes, elasticErr := scalewayElasticMetalListServerTypes(ctx)
 		if elasticErr == nil {
 			types = append(types, elasticTypes...)
@@ -171,14 +186,21 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 	case "vultr":
 		tool, args = "list_os", map[string]any{"per_page": 500}
 	case "aws-ec2":
+		owner := "099720109477"
+		zone := catalogScope(ctx).Zone
+		if strings.HasPrefix(zone, "us-gov-") {
+			owner = "513442679011"
+		}
+		if strings.HasPrefix(zone, "cn-") {
+			owner = "837727238323"
+		}
 		tool, args = "list_images", map[string]any{
-			"Action": "DescribeImages", "Version": "2016-11-15", "Owner.1": "amazon",
-			"Filter.1.Name": "name", "Filter.1.Value.1": "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*",
+			"Action": "DescribeImages", "Version": "2016-11-15", "Owner.1": owner,
+			"Filter.1.Name": "name", "Filter.1.Value.1": "ubuntu/images/hvm-ssd*/ubuntu-noble-24.04-*-server-*",
 			"Filter.2.Name": "state", "Filter.2.Value.1": "available",
-			"Filter.3.Name": "architecture", "Filter.3.Value.1": "x86_64",
 		}
 	case "scaleway":
-		tool, args = "image_list", map[string]any{"zone": "fr-par-1", "per_page": 100, "public": true}
+		tool, args = "image_list", map[string]any{"zone": catalogZone(ctx), "per_page": 100, "public": true}
 	case "huawei-cloud":
 		tool, args = "list_images", map[string]any{"imagetype": "gold", "__os_type": "Linux", "limit": 100}
 	case "linode":
@@ -204,7 +226,7 @@ func apiProviderListImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 			images[i].ResourceClass = "virtual"
 		}
 	}
-	if provider == "scaleway" {
+	if provider == "scaleway" && catalogScope(ctx).ResourceClass != "virtual" {
 		elasticImages, elasticErr := scalewayElasticMetalImages(ctx)
 		if elasticErr == nil {
 			images = append(images, elasticImages...)
@@ -292,6 +314,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 	if err != nil {
 		return nil, err
 	}
+	defer trackInstanceCreation(ctx, inst.ID)()
 	emitInstanceCreated(ctx, inst)
 	emitInstanceStatus(ctx, inst)
 	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{"lifecycle_stage": "ProviderCreate"})
@@ -381,6 +404,11 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 }
 
 func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstanceInput) error {
+	var selectedType *ServerType
+	types, typesErr := apiProviderListServerTypes(ctx, provider)
+	if typesErr != nil && in.Size == "" {
+		return typesErr
+	}
 	if in.Size == "" {
 		types, err := apiProviderListServerTypes(ctx, provider)
 		if err != nil {
@@ -391,6 +419,12 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		}
 		in.Size = types[0].Name
 	}
+	for i := range types {
+		if types[i].Name == in.Size {
+			selectedType = &types[i]
+			break
+		}
+	}
 	if in.Region == "" {
 		locations, err := apiProviderListLocations(ctx, provider)
 		if err != nil {
@@ -400,12 +434,28 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			return fmt.Errorf("%s returned no provisionable locations", provider)
 		}
 		in.Region = locations[0].Name
+		if selectedType != nil && len(selectedType.AvailableIn) > 0 {
+			in.Region = selectedType.AvailableIn[0]
+		}
 	}
+	if selectedType != nil && len(selectedType.AvailableIn) > 0 && !containsString(selectedType.AvailableIn, in.Region) {
+		return fmt.Errorf("%s is unavailable in %s", in.Size, in.Region)
+	}
+	scoped, release := scopedCatalog(ctx, catalogOptions{ConnectionID: in.ProviderConnectionID, Zone: in.Region, ResourceClass: catalogScope(ctx).ResourceClass})
+	defer release()
+	ctx = scoped
 	if in.Image == "" {
 		images, err := apiProviderListImages(ctx, provider)
 		if err != nil {
 			return fmt.Errorf("load %s images for default: %w", provider, err)
 		}
+		compatible := []Image{}
+		for _, image := range images {
+			if imageMatchesType(image, selectedType, in.Region) {
+				compatible = append(compatible, image)
+			}
+		}
+		images = compatible
 		if len(images) == 0 {
 			return fmt.Errorf("%s returned no provisionable images", provider)
 		}
@@ -482,6 +532,16 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 		}
 		if !strings.HasPrefix(in.Image, scalewayElasticMetalPrefix) {
 			return fmt.Errorf("Scaleway Elastic Metal size %s requires an Elastic Metal OS", in.Size)
+		}
+	}
+	if selectedType != nil && in.Image != "" {
+		images, e := apiProviderListImages(ctx, provider)
+		if e == nil {
+			for _, image := range images {
+				if image.Name == in.Image && !imageMatchesType(image, selectedType, in.Region) {
+					return fmt.Errorf("image %s is incompatible with %s in %s", in.Image, in.Size, in.Region)
+				}
+			}
 		}
 	}
 	return nil
@@ -613,7 +673,9 @@ func resolveProviderCreateResponse(ctx *sdk.AppCtx, provider string, in CreateIn
 		if time.Now().After(deadline) {
 			return "", "", "", errors.New("timed out waiting for Huawei Cloud create job")
 		}
-		time.Sleep(5 * time.Second)
+		if err := sleepOperation(ctx, 5*time.Second); err != nil {
+			return "", "", "", err
+		}
 	}
 }
 
@@ -662,7 +724,7 @@ func apiProviderDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 		return fmt.Errorf("%s.%s: %w", provider, tool, err)
 	}
 	if res == nil || !res.Success {
-		if status := upstreamStatus(res); status == 404 || status == 410 {
+		if status := upstreamStatus(res); status == 404 || status == 410 || (provider == "aws-ec2" && strings.Contains(upstreamErrorString(res), "InvalidInstanceID.NotFound")) {
 			return nil
 		}
 		return fmt.Errorf("%s.%s returned: %s", provider, tool, upstreamErrorString(res))
@@ -733,7 +795,9 @@ func scalewayStandardDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 			if time.Now().After(deadline) {
 				return fmt.Errorf("scaleway server %s did not stop before deletion", inst.ProviderID)
 			}
-			time.Sleep(5 * time.Second)
+			if err := sleepOperation(ctx, 5*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 	if _, _, err = call("server_delete", serverArgs); err != nil {
@@ -819,7 +883,9 @@ func deleteScalewayBootVolumesAfterServer(
 			if time.Now().After(deadline) {
 				return fmt.Errorf("Scaleway boot volume %s did not become available after server deletion (state=%s)", volume.ProviderVolumeID, status)
 			}
-			time.Sleep(5 * time.Second)
+			if err := sleepOperation(ctx, 5*time.Second); err != nil {
+				return err
+			}
 		}
 		if volume.ID > 0 {
 			if _, err := ctx.AppDB().Exec(`DELETE FROM instance_volumes WHERE id=?`, volume.ID); err != nil {
@@ -849,18 +915,27 @@ func scalewaySSHProbeError(ctx *sdk.AppCtx, inst *Instance, probeErr error) erro
 }
 
 func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
-	go func() {
+	if !finishInstanceCreation(ctx, id) {
+		return
+	}
+	probe := probeSSHReadyFn
+	startInstanceWorker(ctx, id, func(work context.Context) {
 		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil || fresh.Status != "provisioning" {
 			return
 		}
 		if fresh.PublicIPv4 == "" && fresh.PublicIPv6 == "" {
 			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Network"})
+			provider := fresh.Provider
 			fresh, err = waitAPIProviderNetwork(ctx, fresh, 5*time.Minute)
 			if err != nil {
-				failInstanceStage(ctx, id, "Network", fmt.Errorf("%s network: %w", fresh.Provider, err))
+				failInstanceStage(ctx, id, "Network", fmt.Errorf("%s network: %w", provider, err))
 				return
 			}
+		}
+		if err = reconcileAWSBootStorage(ctx, fresh); err != nil {
+			failInstanceStage(ctx, id, "Storage", err)
+			return
 		}
 		var requestedBoot *BootStorageRequest
 		if fresh.Provider == "scaleway" && !isScalewayAppleInstance(fresh) && !isScalewayDediboxInstance(fresh) && !isScalewayElasticMetalInstance(fresh) {
@@ -875,12 +950,13 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 			}
 		}
 		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "SSH"})
-		if err := probeSSHWithRetries(fresh, 3, 2*time.Minute); err != nil {
+		fresh.workContext = work
+		if err := probeSSHWithRetriesUsing(probe, fresh, 3, 2*time.Minute); err != nil {
 			failInstanceStage(ctx, id, "SSH", scalewaySSHProbeError(ctx, fresh, err))
 			return
 		}
 		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "CloudInit"})
-		if fresh.Platform != "macos" {
+		if usesCloudInit(fresh) {
 			if err := verifyCloudInitComplete(fresh); err != nil {
 				failInstanceStage(ctx, id, "CloudInit", err)
 				return
@@ -893,20 +969,29 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
+		if work.Err() != nil {
+			return
+		}
 		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": "", "primary_error": "", "cleanup_error": "", "lifecycle_stage": "Ready"})
-	}()
+	})
 }
 
 func probeSSHWithRetries(inst *Instance, attempts int, timeout time.Duration) error {
+	return probeSSHWithRetriesUsing(probeSSHReadyFn, inst, attempts, timeout)
+}
+
+func probeSSHWithRetriesUsing(probe func(*Instance, time.Duration) error, inst *Instance, attempts int, timeout time.Duration) error {
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		if err := probeSSHReadyFn(inst, timeout); err == nil {
+		if err := probe(inst, timeout); err == nil {
 			return nil
 		} else {
 			last = err
 		}
 		if attempt < attempts {
-			time.Sleep(time.Duration(attempt) * 5 * time.Second)
+			if err := sleepContext(inst.workContext, time.Duration(attempt)*5*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 	return last
@@ -916,7 +1001,7 @@ func verifyCloudInitComplete(inst *Instance) error {
 	cmd := `command -v cloud-init >/dev/null 2>&1 || { echo "cloud-init is not installed" >&2; exit 127; }; cloud-init status --wait --long`
 	output, exitCode, err := runSSH(inst, cmd, 11*time.Minute)
 	if err != nil || exitCode != 0 {
-		return fmt.Errorf("cloud-init did not complete successfully (exit=%d): %s: %w", exitCode, strings.TrimSpace(output), err)
+		return fmt.Errorf("cloud-init did not complete successfully (exit=%d): %s: %v", exitCode, strings.TrimSpace(output), err)
 	}
 	return nil
 }
@@ -925,31 +1010,41 @@ func failInstanceStage(ctx *sdk.AppCtx, id int64, stage string, failure error) {
 	if failure == nil {
 		return
 	}
-	message := failure.Error()
-	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
-		"status": "error", "lifecycle_stage": stage, "primary_error": message, "error_message": message,
-	})
-	inst, err := dbGetInstance(ctx.AppDB(), id)
-	if err != nil || inst.RetainOnFailure || inst.ProviderID == "" {
+	inst, claimed, err := transitionInstanceAndEmit(ctx, id, []string{"pending", "provisioning"}, "error", map[string]any{"lifecycle_stage": stage, "primary_error": failure.Error(), "error_message": failure.Error()})
+	if err != nil || !claimed || inst.RetainOnFailure || inst.ProviderID == "" {
 		return
 	}
-	_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Rollback"})
-	if cleanupErr := prepareVolumesForInstanceDestroy(ctx, id, true); cleanupErr == nil {
-		cleanupErr = destroyProviderInstance(ctx, inst)
-		if cleanupErr == nil {
-			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{
-				"provider_id": "", "public_ipv4": "", "public_ipv6": "", "cleanup_error": "", "lifecycle_stage": stage,
-			})
-			return
-		}
-		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"cleanup_error": cleanupErr.Error(), "lifecycle_stage": "Rollback"})
-	} else {
-		_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"cleanup_error": cleanupErr.Error(), "lifecycle_stage": "Rollback"})
+	inst, claimed, err = transitionInstanceAndEmit(ctx, id, []string{"error"}, "rolling_back", map[string]any{"lifecycle_stage": "Rollback"})
+	if err != nil || !claimed {
+		return
 	}
+	cleanupErr := prepareVolumesForInstanceDestroy(ctx, id, true)
+	if cleanupErr == nil {
+		cleanupErr = destroyProviderInstance(ctx, inst)
+	}
+	fields := map[string]any{"lifecycle_stage": stage}
+	if cleanupErr != nil {
+		fields["cleanup_error"] = cleanupErr.Error()
+	} else {
+		fields["provider_id"] = ""
+		fields["public_ipv4"] = ""
+		fields["public_ipv6"] = ""
+		fields["cleanup_error"] = ""
+	}
+	_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"rolling_back"}, "error", fields)
+}
+
+func usesCloudInit(inst *Instance) bool {
+	if inst.Platform == "macos" || isScalewayDediboxInstance(inst) {
+		return false
+	}
+	// Linode and OVH install keys through their native image/config APIs.
+	return inst.Provider != "linode" && inst.Provider != "ovhcloud"
 }
 
 func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (*Instance, error) {
 	deadline := time.Now().Add(timeout)
+	work := instanceWorkerContext(ctx, inst.ID)
 	for {
 		tool, args, err := apiProviderGetRequest(inst)
 		if err != nil {
@@ -957,7 +1052,13 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 		}
 		data, err := executeProviderToolOnConnection(ctx, inst.ProviderConnectionID, inst.Provider, tool, args)
 		if err != nil {
-			return nil, err
+			if time.Now().After(deadline) || !(strings.Contains(err.Error(), "status=5") || strings.Contains(err.Error(), "status=429")) {
+				return nil, err
+			}
+			if err = sleepContext(work, 2*time.Second); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		_, ipv4, ipv6 := parseProviderResource(inst.Provider, data)
 		if ipv4 != "" || ipv6 != "" {
@@ -975,7 +1076,9 @@ func waitAPIProviderNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Durati
 		if time.Now().After(deadline) {
 			return nil, errors.New("timed out waiting for public IP")
 		}
-		time.Sleep(5 * time.Second)
+		if err = sleepContext(work, 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
 }
 
@@ -1153,4 +1256,26 @@ func numericOrString(value string) any {
 		return n
 	}
 	return value
+}
+
+func imageMatchesType(image Image, server *ServerType, region string) bool {
+	if len(image.AvailableIn) > 0 && !containsString(image.AvailableIn, region) {
+		return false
+	}
+	if server == nil {
+		return true
+	}
+	if len(image.CompatibleTypes) > 0 && !containsString(image.CompatibleTypes, server.Name) {
+		return false
+	}
+	if image.Architecture != "" && server.Architecture != "" && normalizeArchitecture(image.Architecture) != normalizeArchitecture(server.Architecture) {
+		return false
+	}
+	if image.Platform != "" && server.Platform != "" && image.Platform != server.Platform {
+		return false
+	}
+	if image.ResourceClass != "" && server.ResourceClass != "" && image.ResourceClass != server.ResourceClass {
+		return false
+	}
+	return !containsString(server.IncompatibleImages, image.Name)
 }
