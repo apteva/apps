@@ -50,7 +50,7 @@ func newMultiOrgCtx(t *testing.T) (*sdk.AppCtx, string) {
 	// Create the multi-org client by NOT passing organization_slug.
 	out, err := app.toolClientsCreate(ctx, map[string]any{
 		"name": "shared-saas",
-		"type": "web",
+		"type": "spa",
 	})
 	if err != nil {
 		t.Fatalf("create multi-org client: %v", err)

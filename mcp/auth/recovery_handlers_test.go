@@ -52,7 +52,7 @@ func insertRecoveryToken(t *testing.T, orgID, userID int64, kind, raw, clientID 
 	}
 }
 
-func TestEmailVerifyMintsSessionAndIsSingleUse(t *testing.T) {
+func TestEmailVerifyRequiresLoginAndIsSingleUse(t *testing.T) {
 	app, clientID, org, _, uid := seedRecoveryUser(t, "verify@example.com", "Before!Password123")
 	insertRecoveryToken(t, org.ID, uid, "verify_email", "verify-token", clientID)
 
@@ -63,8 +63,8 @@ func TestEmailVerifyMintsSessionAndIsSingleUse(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("verify status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if token, _ := decode(t, rec)["access_token"].(string); token == "" {
-		t.Fatal("verification did not mint an access token")
+	if token, _ := decode(t, rec)["access_token"].(string); token != "" {
+		t.Fatal("verification must require a fresh login")
 	}
 	user, err := dbGetUserByID(globalCtx.AppDB(), "test-proj", org.ID, uid)
 	if err != nil || user.EmailVerifiedAt == "" {
@@ -110,7 +110,7 @@ func TestRecoveryTokenCannotCrossClientsOrBeBurnedByWrongClient(t *testing.T) {
 	}
 }
 
-func TestPasswordResetChangesPasswordAndMintsSession(t *testing.T) {
+func TestPasswordResetChangesPasswordAndRequiresLogin(t *testing.T) {
 	app, clientID, org, _, uid := seedRecoveryUser(t, "reset@example.com", "Before!Password123")
 	insertRecoveryToken(t, org.ID, uid, "reset_password", "reset-token", clientID)
 
@@ -122,8 +122,8 @@ func TestPasswordResetChangesPasswordAndMintsSession(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("reset status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if token, _ := decode(t, rec)["access_token"].(string); token == "" {
-		t.Fatal("password reset did not mint an access token")
+	if token, _ := decode(t, rec)["access_token"].(string); token != "" {
+		t.Fatal("password reset must require a fresh login")
 	}
 
 	rec = callJSON(app.handleLogin, http.MethodPost, "/login", map[string]any{

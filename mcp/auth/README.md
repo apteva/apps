@@ -1,171 +1,185 @@
-# Auth (v0.9.4)
+# Auth v0.11.0
 
-Identity and authorization layer for Apteva-deployed SaaS. One project-scoped
-install owns multiple organizations; each has isolated users, clients, signing
-keys, sessions, roles, and permissions.
+First-party authentication for Apteva SaaS applications. Each project install
+contains separate organizations, users, clients, signing keys, roles and
+permissions. This release fixes the v0.10.0 security and correctness audit.
 
-## Trusted authorization context
+## Upgrade contract
 
-Login, session-creating signup, refresh, and `/me` return a server-managed
-`authorization` object, and the same fields are signed into the access JWT:
+This is a **minor release with intentional compatibility changes**, not an
+automatic patch. Migration `006_security.sql` invalidates existing sessions
+and recovery links, increments authorization versions, and removes recovery
+URLs from historical audit events. Users must sign in again. Back up the
+application database before an operator deploys this release.
 
-```json
-{
-  "user_id": "123",
-  "organization_id": "8",
-  "organization_slug": "acme",
-  "roles": ["supervisor"],
-  "permissions": ["calls:view_team", "commercials:supervise"],
-  "authorization_version": 4
-}
-```
+- Password changes always revoke all sessions and outstanding recovery links;
+  the legacy `revoke_sessions: false` option no longer preserves access.
+- Email verification and password reset return `{ "ok": true,
+  "login_required": true }`, without access or refresh tokens.
+- Confidential `web` clients must supply `client_secret` with signup, login and
+  refresh, or use HTTP Basic authentication with their client ID and secret.
+- M2M/client-credentials clients cannot use user authentication. OAuth/OIDC,
+  PKCE authorization flows, magic-link login and MFA challenges are not
+  implemented. Discovery explicitly reports these capabilities as unsupported.
+  A client requiring MFA, or a user with a confirmed MFA factor, cannot obtain
+  a session until a supported challenge flow is implemented.
+- Guest upgrade revokes guest sessions, invalidates recovery links, and removes
+  linked identities. An old device starts a new guest rather than entering the
+  upgraded account. Pending verification applies to every account login path.
+- Auth no longer issues independent `apteva_access_token` credentials. The
+  platform mint callback has no Auth-session binding/revocation contract. Tokens
+  previously issued by the platform remain subject to the platform's own
+  expiry and revocation policy; this database migration cannot revoke them.
+- Empty `allowed_origins` denies browser requests carrying an Origin header.
+  Server/native calls without an Origin header are still subject to client and
+  credential checks. The built-in recovery page is allowed from the canonical
+  Auth origin because it requires a mailbox token.
 
-Auth never derives trusted authorization from self-service user metadata.
-Changing a user's roles, changing an assigned role's permissions, or deleting
-an effective role or permission increments affected users'
-`authorization_version`. Auth rejects stale access tokens on its authenticated
-routes; refresh tokens mint a current context. Offline consumers that require
-immediate revocation must compare the signed version with current server state.
+See [SECURITY_FIXES.md](SECURITY_FIXES.md) for the audit mapping and validation.
 
-The dashboard **Roles** tab manages roles and permissions, and the user drawer
-manages role assignments. The equivalent MCP tools are
-`auth_roles_{list,create,update,delete}`,
-`auth_permissions_{list,create,update,delete}`,
-`auth_role_permissions_set`, and `auth_user_roles_set`.
+## Public API and canonical URL
 
-## Optional delegated Apteva access
+Set `app_url` to the complete public Auth route, without a query or fragment,
+for example `https://agents.example.com/api/apps/auth/_install/42`. Otherwise
+Auth uses the platform's public URL plus `/api/apps/auth/_install/<install-id>`
+when the install ID is available. It never derives an issuer from request Host.
+The server's install-path proxy selects the project-scoped sidecar. An explicit
+project selector must agree with the installation.
 
-Auth can also return an `apteva_access_token` alongside its own identity token.
-This is opt-in: add at least one `allowed_origin` to the OAuth client and
-configure a matching delegated-access policy on the Apteva server. Auth sends
-the platform only:
+| Method | Path | Behavior |
+|---|---|---|
+| POST | `/signup` | Register; issue a session or require verification |
+| POST | `/login` | Email/password authentication |
+| POST | `/refresh` | Refresh the same logical session |
+| POST | `/logout` | Revoke the entire refresh family; returns 204 |
+| GET | `/me` | Validate access and return current identity/authorization |
+| PATCH | `/me/metadata` | Update untrusted profile metadata |
+| POST | `/password/reset/request` | Queue delivery; always returns 202 for a valid request |
+| POST | `/password/reset/confirm` | Atomically replace password and require login |
+| POST | `/email/verification/resend` | Queue verification delivery |
+| POST | `/email/verify` | Verify mailbox ownership and require login |
+| GET | `/orgs/{slug}/password/reset` | Built-in password recovery form |
+| GET | `/orgs/{slug}/email/verify` | Built-in verification form |
+| GET | `/orgs/{slug}/.well-known/jwks.json` | Active and draining public keys |
+| GET | `/orgs/{slug}/.well-known/openid-configuration` | Legacy URL for proprietary Auth discovery; not OIDC |
 
-- the authenticated user and organization identity;
-- the OAuth client's stable `client_id`; and
-- the OAuth client's complete validated `allowed_origins` list.
+Requests creating or refreshing sessions include `client_id`. A multi-org
+client also requires `organization_slug` when starting a session. A supplied
+organization must match a single-org client's binding. Invalid selectors
+never fall back to project-wide access. Legacy default-org discovery URLs
+remain available.
 
-Auth does not send apps, actions, resource IDs, token lifetime, or rate limits.
-The server resolves those fields from its owner-managed policy for the Auth
-install, project, and OAuth client. Policies can authorize any installed app
-that supports delegated scopes and preserve app-specific resource constraints
-without coupling Auth to that app. If the client has no policy or origins—or
-if the platform mint callback is unavailable—the Auth signup, login, refresh,
-password-reset, and email-verification flows still succeed and simply omit
-`apteva_access_token`.
-This is independent of organization RBAC: existing users with no roles continue
-to authenticate normally.
+Client grant/auth-method registry fields remain for compatibility with older
+records; they do not implement an OAuth token endpoint. `refresh_token` must be
+allowed to refresh. Client-credentials policy cannot authorize user login.
 
-The generic policy exchange requires Apteva Server `0.14.1` or newer. Auth also
-verifies the server echoed the requested OAuth client policy, so a legacy
-server response is discarded rather than returned to the browser.
+## Session and authorization semantics
 
-## Platform-managed browser origins
+Access tokens use Ed25519 and include issuer, audience, authorized client,
+subject, organization, `sid`, `token_use: access`, issued-at, expiry,
+`authorization_version`, roles and permissions. Auth's online routes check the
+user, organization, client, verification/MFA/lockout policy, logical session
+and current authorization version. Password changes and disable/re-enable
+transitions cannot resurrect older sessions.
 
-`clients.allowed_origins` remains the source of truth for browser access. Auth
-registers every active OAuth client with Apteva's platform-managed CORS service
-under `oauth-client-<client_id>`. Client creation registers the complete set,
-`auth_clients_update` replaces the resulting complete set after additions or
-removals, disabling a client deletes its registration, and mount reconciles
-existing clients while deleting stale Auth-owned keys.
+Refresh rotation is transactional. Reusing a spent credential revokes its
+entire family, including a concurrently issued successor. **Clients must
+serialize refreshes**; duplicate retries can require a new login. Refreshes
+never extend the family's original absolute expiry. With rotation disabled,
+refresh returns the same credential and does not insert another refresh row.
 
-Registration errors are reported as `browser_origins_synced: false` with
-`browser_origins_error` after the database mutation succeeds. This preserves
-one-time confidential client secrets and makes reconciliation retryable from
-the database. Platforms and test doubles without the optional SDK capability
-continue unchanged.
+Role/permission reads use a consistent snapshot. Assignments use strict positive
+integer arrays; only an explicit empty array clears a set. Token size and
+assignment limits reject oversized contexts. Profile metadata never supplies
+trusted permissions.
 
-## Pipeline of an Apteva-deployed SaaS
+Offline JWT consumers must validate issuer, audience, purpose and expiry and
+use the correct organization's keys. They cannot observe immediate session
+revocation by signature alone: use Auth's `/me` when immediate revocation is
+required. Previously cached keys/tokens retain their offline lifetime.
 
-```
-SaaS frontend ─POST /apps/auth/signup──▶  auth-app sidecar ──▶ users.db (SQLite)
-                                                │
-                                                ├──▶ /.well-known/jwks.json (public)
-                                                │
-                                                └──▶ messaging app (verify, reset, magic link)
-```
+`POST /admin/signing_keys/rotate?organization_slug=…` with
+`{"emergency": false}` creates a new signing key and drains the old public key
+for at most 24 hours. `{"emergency": true}` removes all old verification keys
+and revokes organization sessions. Retired private material is cleared on
+rotation. Active private keys remain in the application database: protect DB
+and backup access; external key wrapping/HSM integration is a separate change.
 
-Agents administer the pool via MCP tools; deployed frontends use the HTTP
-routes; the dashboard manages organizations, users, roles, permissions,
-clients, and OIDC settings.
+## Recovery and delivery
 
-## Core capabilities
+Configure the messaging app and `from_email`. Missing delivery configuration
+is an error, never a successful "sent" result. Admin provisioning preserves the
+created user and returns `delivery_error` when its requested email fails.
+Verification-required signup also returns a delivery error without losing the
+registered account.
 
-**Identity** — email/password signup and login, verification, password reset,
-magic links, TOTP MFA, rotating refresh tokens, per-organization EdDSA signing
-keys and JWKS, and an audit trail.
+Public reset/resend requests write a durable queue containing user/client
+references, not raw tokens. The worker attempts up to 20 jobs per minute, leases
+jobs atomically, retries failures up to five times at five-minute intervals,
+and expires jobs after seven days. Mail-provider latency is outside the public
+request. Tokens are generated at delivery time, stored only as hashes, scoped
+to organization/client, and never placed in audit records. Failed delivery
+invalidates its generated credential.
 
-**Organizations** — users, OAuth clients, sessions, signing keys, roles,
-permissions, and audit events are partitioned by `(project_id,
-organization_id)`.
+Default email links use URL fragments. The built-in page removes the fragment,
+uses a restrictive CSP and no-referrer policy, and posts the mailbox token to
+Auth. A custom `continue_url` must pass the client's registered redirect/origin
+validation; it receives a `#verify=…` or `#reset=…` fragment and must implement
+the corresponding confirmation form.
 
-**Authorization** — organization-owned roles and permissions with atomic
-role-permission and user-role replacement. Machine keys are immutable.
+## Policy, administration and maintenance
 
-**Crypto** — argon2id passwords (PHC string format, portable), EdDSA JWTs with rotating signing keys, sha256-hashed refresh + verification tokens. JWT verification uses JWKS — every consumer (other apps, the SaaS's own backend) verifies offline, no network call to auth.
+Validated organization overrides take precedence over installation settings:
+password character minimum/classes, email verification, access/refresh
+lifetimes and lockout thresholds/durations. Password bytes, including leading
+and trailing spaces, are preserved; minimum length counts Unicode characters.
+Lockout updates are atomic with bounded exponential backoff.
 
-## Local development
+Public JSON bodies are capped at 128 KiB; passwords at 4096 bytes. At most four
+Argon2 operations run concurrently (normal hashes use 64 MiB each). Fixed-window
+SQLite quotas cover requests per network peer, login attempts per client/email,
+signups per client and recovery requests. The default request cap is 300/minute
+per peer; behind a proxy this may be shared by many users. Production capacity
+planning must account for the proxy topology and edge limits. Caller-supplied
+forwarding headers do not override this trusted peer identity.
 
-```bash
-cd mcp/auth
-go build .
-APTEVA_PROJECT_ID=test-proj ./auth          # binds :8080
-curl http://localhost:8080/health
-```
+The dashboard scopes requests by project and install. Switching project,
+organization or user resets relevant state; stale fetches are discarded.
+Passwords are masked; failed edits stay open. Clients expose origin editing
+and synchronization retry status. Browser-origin changes serialize; mount and
+hourly maintenance reconcile failed platform updates.
 
-## Tests (three tiers)
+User search applies MFA in SQL, uses indexed descending-ID cursor pagination,
+and performs one query per page. Role listing batches permissions. Session
+views are capped at 200 records, prioritize active credentials and check expiry.
+Hourly cleanup removes expired families/credentials and recovery tokens after
+a one-day grace period, expired quotas, old delivery jobs and audit events
+older than `audit_retention_days` (default 90; range 7–3650). Spent credentials
+are retained while their family is live so replay detection continues working.
 
-| Tier | Where | What | Speed |
-|---|---|---|---|
-| 1 | `handlers_test.go`, `crypto_test.go`, `manifest_test.go` | Direct handler calls against in-memory SQLite. Real argon2id, real EdDSA, real migrations. | ~1s |
-| 2 | `integration_test.go` (build tag `integration`) | `tk.SpawnSidecar` boots the real binary. Tests sign up, log in, refresh, JWKS, OIDC discovery, and MCP tools over HTTP. | ~3s |
-| 3 | `scenarios/*.yaml` | Real apteva-core spawned, real LLM tool calls. Each scenario gives an agent a directive and asserts on outcomes via the REST surface. | ~minutes, real $$ |
+Trusted identity login remains an SDK `app_only` tool. Bound sibling apps are
+trusted to prove provider/device identity. Do not bind an untrusted application
+that can assert arbitrary provider subjects; per-caller provider/client
+allowlists and possession proofs belong in that integration boundary.
 
-```bash
-go test ./...                    # Tier 1
-go test -tags integration ./...  # Tier 1 + Tier 2
-apteva test ./scenarios/         # Tier 3 — needs an LLM key + apteva runner
-```
+## Development and tests
 
-Tier 3 covers: register a client, disable a spam user, revoke sessions during an incident, audit-trail investigation (read-only), rotate a client secret.
+Use the pinned Go 1.25.13+ toolchain and SDK v0.74.1. `GOWORK=off` prevents the
+workspace overlay from replacing the release SDK dependency.
 
-`/me`'s JWT-verification path is exercised in Tier 1 only: the testkit's HTTP helpers always send the sidecar's `APTEVA_APP_TOKEN` as the Authorization header, so a Tier 2 sidecar can't receive a *user* JWT. Tier 1's `httptest.NewRequest` route can.
+```sh
+# From mcp/auth
+GOWORK=off go test ./...
+GOWORK=off go test -race -tags integration -coverprofile=coverage.out ./...
+GOWORK=off go vet ./...
+GOWORK=off go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+GOWORK=off go test -run '^$' -bench Benchmark -benchmem
 
-## Auth flow at a glance
+# From mcp/auth/ui
+bun install --frozen-lockfile
+bun run typecheck
+bun test
 
-```
-POST /signup    { email, password, client_id }        → 201 { user, authorization, access_token, refresh_token, expires_in }
-                                                      → 202 { user } when email_verification_required=true
-POST /login     { email, password, client_id }        → 200 { user, authorization, access_token, refresh_token, expires_in }
-                                                      → 401 invalid_grant
-                                                      → 423 account_locked
-POST /refresh   { refresh_token, client_id }          → 200 { authorization, access_token, refresh_token, expires_in } (rotated)
-POST /logout    { refresh_token }                     → 204
-GET  /me        Authorization: Bearer <access_token>  → 200 { user, authorization }
-GET  /.well-known/jwks.json                           → public keys for JWT verification
-```
-
-## Composing with messaging
-
-`auth` declares `messaging` as an optional dep. When messaging is installed and bound, transactional emails go through `ctx.PlatformAPI().CallApp("messaging", "send", …)`. When it isn't, links are written to the audit log only — a development escape hatch (see `mail.go`).
-
-## Schema scope
-
-Every table carries `project_id` so the same code would serve `scope: global` later if shared user pools across projects ever become useful. v0.1 ships project-only.
-
-## File layout
-
-```
-mcp/auth/
-├── apteva.yaml          ← manifest (single source of truth for tool list)
-├── main.go              ← App, embedded manifest, route + tool wiring, helpers
-├── crypto.go            ← argon2id, sha256, EdDSA JWT sign/verify, JWKS, randSlug
-├── types.go             ← User / Client / Session / AuditEvent JSON shapes
-├── db.go                ← all SQL (no business logic)
-├── handlers.go          ← HTTP handlers
-├── tools.go             ← MCP tool handlers
-├── mail.go              ← composes with messaging app
-├── migrations/001_init.sql
-├── manifest_test.go     ← drift between disk + embedded + implementation
-├── crypto_test.go       ← password / JWT / token round-trips
-└── integration_test.go  ← signup→login→refresh→me→logout end-to-end
+# From repository root; rebuilds AuthPanel.mjs and its source map
+bun run scripts/build-panels.ts --app auth
 ```

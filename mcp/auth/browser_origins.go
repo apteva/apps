@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -39,6 +40,8 @@ func deleteClientBrowserOrigins(ctx *sdk.AppCtx, clientID string) (bool, error) 
 // every active client is replaced under a stable key, then stale Auth-owned
 // registrations are deleted. All clients are attempted before errors return.
 func reconcileBrowserOrigins(ctx *sdk.AppCtx, projectID string) error {
+	browserOriginMu.Lock()
+	defer browserOriginMu.Unlock()
 	if ctx.BrowserOriginsAPI() == nil || projectID == "" {
 		return nil
 	}
@@ -92,3 +95,5 @@ func recordBrowserOriginSync(out map[string]any, attempted bool, err error) {
 		out["browser_origins_error"] = err.Error()
 	}
 }
+
+var browserOriginMu sync.Mutex

@@ -39,11 +39,11 @@ func TestValidatePassword(t *testing.T) {
 		classes  int
 		wantPass bool
 	}{
-		{"short", 12, 2, false},                         // too short
-		{"alllowercaseword", 12, 2, false},              // 1 class, want 2
-		{"AllMixedCase12!", 12, 2, true},                // 4 classes
-		{"abcDEF123456", 12, 2, true},                   // 3 classes, ok
-		{"abcdefghijkl", 12, 1, true},                   // 1 class, ok at minimum 1
+		{"short", 12, 2, false},            // too short
+		{"alllowercaseword", 12, 2, false}, // 1 class, want 2
+		{"AllMixedCase12!", 12, 2, true},   // 4 classes
+		{"abcDEF123456", 12, 2, true},      // 3 classes, ok
+		{"abcdefghijkl", 12, 1, true},      // 1 class, ok at minimum 1
 	}
 	for _, c := range cases {
 		got := validatePassword(c.pw, c.minLen, c.classes)
