@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: neural
 display_name: Neural Studio
-version: 0.1.0
+version: 0.1.1
 description: Train small neural networks on your CPU. Watch neuron activations and spike encoding, explore decision boundaries, save model versions, and serve predictions.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/neural
@@ -40,7 +40,7 @@ provides:
     - { name: neural.deployment.ready, description: An inference endpoint is ready. }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: neural/v0.1.0, entry: mcp/neural }
+  source: { repo: github.com/apteva/apps, ref: neural/v0.1.1, entry: mcp/neural }
   port: 8080
   health_check: /health
 db:

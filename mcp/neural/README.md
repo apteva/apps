@@ -27,9 +27,9 @@ The generated panel and source map ship with this app. Changes to this panel
 do not require a dashboard or server rebuild.
 
 Install **Neural Studio** from Apteva's Marketplace, or use the
-[v0.1.0 manifest](https://raw.githubusercontent.com/apteva/apps/neural/v0.1.0/mcp/neural/apteva.yaml)
+[v0.1.1 manifest](https://raw.githubusercontent.com/apteva/apps/neural/v0.1.1/mcp/neural/apteva.yaml)
 through Apteva's Apps page. Source entry: `github.com/apteva/apps`,
-`mcp/neural`, pinned to `neural/v0.1.0`. For local installation testing, use Apteva's source installer
+`mcp/neural`, pinned to `neural/v0.1.1`. For local installation testing, use Apteva's source installer
 with a local git snapshot. The same installer builds the sidecar, wires its
 SQLite database, serves its panel, registers MCP tools, and schedules training.
 
@@ -89,3 +89,5 @@ manifest/tool/panel consistency, and frontend activation/spike mathematics.
 ## Theme integration
 
 The native panel inherits Apteva’s Terminal and Clean themes in light and dark modes. Surfaces, text, borders, controls, focus rings, chart colors, fonts, shadows, and corner radii use host CSS tokens. Canvas plots resolve the current tokens and redraw on theme changes, including while animation is paused. Custom themes use the same token contract. Class A uses squares and class B uses circles, so the decision map does not rely on color alone.
+
+Network activity, loss curves, class markers, prediction values, and normal status badges use the active accent and a tonal variation mixed with the host text color. The Terminal/dev theme therefore uses oranges throughout; changing the accent recolors the entire panel. Negative weights and validation curves are dashed, and class markers retain distinct shapes. Error messages use the host error token.
