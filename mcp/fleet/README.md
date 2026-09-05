@@ -4,7 +4,7 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 ## Current behavior
 
-This worktree is based on **fleet/v0.10.5**. The audit patch is not yet a published release; see [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
+**Fleet v0.10.6** includes the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.74.1**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
 
 - `tenant_create` provisions a local or hosted process, registers its administrator and returns credentials. Generated credentials and setup progress are encrypted and persisted before registration so **Resume setup** can recover a partial failure.
 - Setup readiness, clone quarantine, health failure streaks and lifecycle operations are durable state, independent of process status and audit-log retention. Interrupted operations block activation until recovery fences their recorded runtimes.

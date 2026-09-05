@@ -1,6 +1,6 @@
-# Fleet v0.10.5 audit patch
+# Fleet v0.10.6 audit fixes
 
-Base: `fleet/v0.10.5` (`608c9aebed61d314e40e1aeff2c6f572afe72b30`). Working branch: `fix/fleet-0.10.5-audit`. This is an unreleased patch; the published version and production installations have not changed.
+Release: `fleet/v0.10.6`. Audit base: `fleet/v0.10.5` (`608c9aebed61d314e40e1aeff2c6f572afe72b30`). Publishing this release does not itself perform live tenant recovery or credential rotation.
 
 ## Changes against the audit
 
@@ -50,6 +50,6 @@ Validation includes Go unit, race and integration tests on macOS and Linux; SDK 
 
 No live VPS, tenant, DNS record or production credentials were changed. The tests do not establish complete fault coverage: live systemd/cgroup behavior, SSH interruption at every migration phase, provider-specific DNS propagation and large production backup downtime still need staging validation.
 
-The companion SDK change is on `fix/fleet-signed-route-auth`, based on `app-sdk v0.73.0`. Fleet remains pinned to that published tag and is protected by its own route checks now; publish the SDK fix and update the dependency pin as part of release preparation. Existing signed-download consumers of the SDK must explicitly declare their signed routes `NoAuth` and verify signatures there.
+Fleet pins `app-sdk v0.74.1`, which removes the generic signature-query authentication bypass. Fleet also retains its own route checks. Existing signed-download consumers of the SDK must explicitly declare their signed routes `NoAuth` and verify signatures there.
 
-Before rollout, back up Fleet's database/master key and use a fresh release version/ref. Apply migration 014, restart tenant processes to replace inherited environments, and rotate the old Fleet installation credential that previous tenant environments contained. Existing backups need the original master key to decrypt their control state. A DNS capability has no independent expiry: revocation uses a durable tenant epoch and live grant checks so long-running tenants do not lose delegation on a timer. Old hosted app-port assignments may need reconciliation before changing tenant environments. Hosted backup/restore and remote cache-retention management remain outside the existing local-backup feature set.
+Before rollout, back up Fleet's database/master key. Apply migration 014, restart tenant processes to replace inherited environments, and rotate the old Fleet installation credential that previous tenant environments contained. Existing backups need the original master key to decrypt their control state. A DNS capability has no independent expiry: revocation uses a durable tenant epoch and live grant checks so long-running tenants do not lose delegation on a timer. Old hosted app-port assignments may need reconciliation before changing tenant environments. Hosted backup/restore and remote cache-retention management remain outside the existing local-backup feature set.

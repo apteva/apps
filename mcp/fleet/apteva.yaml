@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.5
+version: 0.10.6
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -45,6 +45,11 @@ description: |
   v0.10.5 makes hosted updates fail closed: Fleet stops all validated tenant
   session processes, verifies ambiguous SSH results, and persists an update
   lease across restarts to prevent duplicate auto-respawns.
+
+  v0.10.6 hardens authentication, tenant-scoped credentials, archive extraction,
+  lifecycle recovery, resource ownership, DNS cleanup, setup and restore state.
+  It bounds health polling and logs, paginates tenant lists, and adds operation
+  recovery and local storage cleanup controls. Uses app-sdk v0.74.1.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -138,7 +143,7 @@ provides:
     - name: tenant_attach_domain
       description: "Attach a public hostname to a tenant. Managed DNS writes the record through Domains; routing and exact-host certs are registered through server-native ingress. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine and only registers ingress. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
     - name: tenant_detach_domain
-      description: "Clear a tenant's domain link — DNS delete when Fleet owns the record, ingress unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
+      description: "Clear a tenant's domain link after deleting Fleet-owned DNS and unregistering ingress. Failed cleanup retains metadata for retry. Args: tenant_id."
     - name: tenant_domain_grant
       description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS; application hostnames are registered individually with tenant_host_attach. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
     - name: tenant_domain_list
@@ -204,7 +209,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.5
+    ref: fleet/v0.10.6
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
