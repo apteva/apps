@@ -718,14 +718,20 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.setStatus(t.ID, StatusSuspended, "user")
 		return map[string]any{"tenant_id": t.ID, "status": StatusSuspended}, nil
 	}
-	// Hosted: stop only the process whose command line contains this
-	// tenant's exact managed data directory.
+	// Persist stop intent before issuing signals. A controller crash or
+	// unknown SSH outcome must keep health-driven auto-respawn fenced.
+	if err := a.checkpointOperation(t.ID, "recovery_required", nil); err != nil {
+		return nil, fmt.Errorf("persist stop intent: %w", err)
+	}
 	if t.IsHosted() {
 		port, _ := portFromBaseURL(t.BaseURL)
 		if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
+			a.requireRecovery(t.ID, err)
 			return nil, fmt.Errorf("stop hosted: %w", err)
 		}
-		_ = a.store.setStatus(t.ID, StatusStopped, "user")
+		if err := a.completeStop(t.ID); err != nil {
+			return nil, err
+		}
 		_ = a.store.recordEvent(t.ID, "stopped", "user", nil)
 		return map[string]any{"tenant_id": t.ID, "status": StatusStopped}, nil
 	}
@@ -733,9 +739,12 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// orphan-pid-by-port (fleet was upgraded since the tenant spawned).
 	port, _ := portFromBaseURL(t.BaseURL)
 	if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
+		a.requireRecovery(t.ID, err)
 		return nil, fmt.Errorf("stop: %w", err)
 	}
-	_ = a.store.setStatus(t.ID, StatusStopped, "user")
+	if err := a.completeStop(t.ID); err != nil {
+		return nil, err
+	}
 	_ = a.store.recordEvent(t.ID, "stopped", "user", nil)
 	return map[string]any{"tenant_id": t.ID, "status": StatusStopped}, nil
 }

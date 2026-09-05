@@ -121,6 +121,64 @@ func runHostedStopHelper(mode string) {
 	}
 }
 
+func TestHostedStopFindsOldSessionsWithoutPIDFiles(t *testing.T) {
+	dataDir := t.TempDir()
+	versionDir := filepath.Join(t.TempDir(), "versions", "0.29.1")
+	if err := os.MkdirAll(versionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	core := filepath.Join(versionDir, "apteva-core")
+	binary, err := os.ReadFile("/bin/sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(core, binary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	instanceDir := filepath.Join(dataDir, "instance_3")
+	if err = os.MkdirAll(instanceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	start := func(exe, cwd, home string, args ...string) *exec.Cmd {
+		cmd := exec.Command(exe, args...)
+		cmd.Dir = cwd
+		cmd.Env = []string{"PATH=/usr/bin:/bin"}
+		if home != "" {
+			cmd.Env = append(cmd.Env, "APTEVA_HOME="+home)
+		}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		return cmd
+	}
+	legacy := start(core, instanceDir, "", "60")
+	orphan := start("/bin/sleep", dataDir, dataDir, "60")
+	other := start("/bin/sleep", dataDir, dataDir+"-other", "60")
+	static := start("/bin/sh", dataDir, dataDir, "-c", "while :; do sleep 60; done", "--static-server")
+	script := hostedProcessControlScript(dataDir, freeTCPPort(t), 2, true)
+	script = strings.ReplaceAll(script, "/var/lib/apteva-fleet/versions/", filepath.Dir(versionDir)+"/")
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Env = append(os.Environ(), "APTEVA_HOME="+dataDir)
+	if out, err := cmd.CombinedOutput(); err != nil || hostedStopState(string(out)) != "stopped" {
+		t.Fatalf("orphan stop: %v %s", err, out)
+	}
+	for _, child := range []*exec.Cmd{legacy, orphan} {
+		if processAlive(child.Process.Pid) {
+			t.Fatalf("owned old-session PID %d survived", child.Process.Pid)
+		}
+	}
+	for _, child := range []*exec.Cmd{other, static} {
+		if !processAlive(child.Process.Pid) {
+			t.Fatalf("protected PID %d killed", child.Process.Pid)
+		}
+	}
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil || hostedStopState(string(out)) != "stopped" {
+		t.Fatalf("idempotent stop: %v %s", err, out)
+	}
+}
+
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

@@ -483,8 +483,15 @@ func isSSHConnError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, ok := err.(*ssh.ExitError); ok {
+	var exitErr *ssh.ExitError
+	if errors.As(err, &exitErr) {
 		return false
+	}
+	// An uncertain completion must not poison the next verification. Evict
+	// the transport, but never replay a command that may have executed.
+	var missing *ssh.ExitMissingError
+	if errors.As(err, &missing) || errors.Is(err, context.DeadlineExceeded) {
+		return true
 	}
 	s := err.Error()
 	for _, hint := range []string{
@@ -495,6 +502,7 @@ func isSSHConnError(err error) bool {
 		"EOF",
 		"channel",
 		"ssh session",
+		"command timed out after",
 	} {
 		if strings.Contains(s, hint) {
 			return true

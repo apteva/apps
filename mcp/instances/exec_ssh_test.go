@@ -15,9 +15,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -91,11 +95,41 @@ func TestIsSSHConnError_Classification(t *testing.T) {
 		{"eof", &stringErr{"EOF"}, true},
 		{"channel reset", &stringErr{"ssh: channel open failed"}, true},
 		{"random", &stringErr{"some other error"}, false},
+		{"missing exit status", &ssh.ExitMissingError{}, true},
+		{"wrapped missing status", fmt.Errorf("wait: %w", &ssh.ExitMissingError{}), true},
+		{"normal command failure", &ssh.ExitError{}, false},
+		{"wrapped command failure", fmt.Errorf("wait: %w", &ssh.ExitError{}), false},
 	}
 	for _, c := range cases {
 		if got := isSSHConnError(c.err); got != c.want {
 			t.Errorf("%s: isSSHConnError(%v) = %v, want %v", c.name, c.err, got, c.want)
 		}
+	}
+}
+
+func TestMissingSSHExitEvictsWithoutReplayingCommand(t *testing.T) {
+	dir := t.TempDir()
+	client := auditSSHClient(t, dir, true)
+	previous := globalSSHPool
+	globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{731: client}}
+	t.Cleanup(func() { globalSSHPool.closeAll(); globalSSHPool = previous })
+	out, exit, err := runSSH(&Instance{ID: 731}, "printf x >> executions", 3*time.Second)
+	var missing *ssh.ExitMissingError
+	if !errors.As(err, &missing) || exit != -1 {
+		t.Fatalf("output=%q exit=%d err=%v", out, exit, err)
+	}
+	if _, retained := globalSSHPool.clients[731]; retained {
+		t.Fatal("uncertain transport retained")
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "executions"))
+	if err != nil || string(data) != "x" {
+		t.Fatalf("command replayed or missing: %q %v", data, err)
+	}
+	// Verification is a NEW explicit call, never a replay of the lost write.
+	globalSSHPool.clients[731] = auditSSHClient(t, dir)
+	out, exit, err = runSSH(&Instance{ID: 731}, "cat executions", 3*time.Second)
+	if err != nil || exit != 0 || out != "x" {
+		t.Fatalf("fresh verification: %q %d %v", out, exit, err)
 	}
 }
 

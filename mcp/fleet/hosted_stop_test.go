@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
@@ -19,7 +21,8 @@ func TestHostedProcessControlScriptCoversWholeSessionSafely(t *testing.T) {
 		`proc_sid`,
 		`for proc in /proc/[0-9]*`,
 		`is_static_group "$pid" && continue`,
-		`kill -TERM $OWNED`,
+		`signal_owned TERM`,
+		`CONTROL_PIDS`,
 		`FLEET_STOP_STATE`,
 	} {
 		if !strings.Contains(script, required) {
@@ -98,3 +101,66 @@ func TestStopHostedTenantVerifiesAmbiguousCompletion(t *testing.T) {
 }
 
 var _ sdk.PlatformClient = (*hostedStopPlatform)(nil)
+
+func TestFailedHostedStopDurablyFencesHealthAndRestart(t *testing.T) {
+	platform := &hostedStopPlatform{replies: []hostedStopReply{
+		{exitCode: -1, errText: "wait: remote command exited without exit status or exit signal"},
+		{exitCode: -1, errText: "wait: remote command exited without exit status or exit signal"},
+	}}
+	a, ctx := newTestApp(t, tk.WithPlatform(platform))
+	id := seedTenant(t, a, "stop-recovery", StatusActive)
+	_, err := a.store.db.Exec(`UPDATE fleet_tenants SET instance_id=3,config_dir='/var/lib/apteva-fleet/stop-recovery' WHERE id=?`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.toolStop(ctx, map[string]any{"tenant_id": id}); !errors.Is(err, errHostedStopIndeterminate) {
+		t.Fatalf("stop error=%v", err)
+	}
+	for _, controller := range []*App{a, {store: a.store, keys: a.keys}} {
+		op, err := controller.store.activeOperation(id)
+		if err != nil || op == nil || op.Operation != "stop" || op.Phase != "recovery_required" {
+			t.Fatalf("stop intent lost: %+v, %v", op, err)
+		}
+		tenant, _, _ := controller.store.get(id)
+		controller.probeOnce(context.Background(), ctx, tenant)
+		controller.tryRespawnHosted(context.Background(), ctx, tenant)
+		if platform.calls != 2 {
+			t.Fatalf("health tried to contact/restart tenant: %d calls", platform.calls)
+		}
+		if _, err := controller.toolStart(ctx, map[string]any{"tenant_id": id}); err == nil {
+			t.Fatal("start bypassed recovery fence")
+		}
+	}
+	// The existing explicit recovery path retries idempotent stop/inspection,
+	// then permits Start only after all recorded runtimes are stopped.
+	platform.replies = append(platform.replies,
+		hostedStopReply{output: "FLEET_STOP_STATE stopped"},
+		hostedStopReply{output: "FLEET_STOP_STATE stopped"},
+	)
+	w := httptest.NewRecorder()
+	a.httpRecoverOperation(w, httptest.NewRequest("POST", "/tenants/"+id+"/recover-operation", strings.NewReader(`{"confirm":true}`)))
+	if w.Code != 200 {
+		t.Fatalf("recovery: %d %s", w.Code, w.Body.String())
+	}
+	tenant, _, _ := a.store.get(id)
+	if tenant.Status != StatusStopped || a.tenantOperation(id) != "" {
+		t.Fatalf("recovery did not commit stopped state: %+v", tenant)
+	}
+}
+
+func TestSuccessfulHostedStopReleasesFence(t *testing.T) {
+	platform := &hostedStopPlatform{replies: []hostedStopReply{{output: "FLEET_STOP_STATE stopped"}}}
+	a, ctx := newTestApp(t, tk.WithPlatform(platform))
+	id := seedTenant(t, a, "stop-ok", StatusActive)
+	if _, err := a.store.db.Exec(`UPDATE fleet_tenants SET instance_id=3 WHERE id=?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.toolStop(ctx, map[string]any{"tenant_id": id}); err != nil {
+		t.Fatal(err)
+	}
+	op, err := a.store.activeOperation(id)
+	tenant, _, _ := a.store.get(id)
+	if err != nil || op != nil || tenant.Status != StatusStopped {
+		t.Fatalf("op=%+v tenant=%+v err=%v", op, tenant, err)
+	}
+}

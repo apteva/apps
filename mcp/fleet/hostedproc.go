@@ -437,10 +437,10 @@ echo "$SID" > "$DATA_DIR/fleet.sid"
 var errHostedStopIndeterminate = errors.New("hosted tenant stop state is indeterminate")
 
 // hostedProcessControlScript identifies a legacy hosted tenant by its exact
-// APTEVA_HOME/data-dir marker and its setsid-created session. It signals
-// individual, revalidated processes instead of a single process group: the
-// CLI, server, cores, and sidecars deliberately use different PGIDs. Detached
-// deploy static servers are excluded because they have their own lifecycle.
+// APTEVA_HOME/data-dir marker, including residual workers from older sessions.
+// The recorded session validates the launcher/listener, but does not bound
+// the ownership scan. Individual processes are revalidated before signalling;
+// SSH control ancestors and independent static deployment groups are excluded.
 func hostedProcessControlScript(dataDir string, port, graceSec int, stop bool) string {
 	action := "inspect"
 	if stop {
@@ -453,6 +453,12 @@ GRACE=%d
 ACTION=%s
 PID_FILE="$DATA_DIR/fleet.pid"
 SID_FILE="$DATA_DIR/fleet.sid"
+CONTROL_PIDS=" $$ "
+control_parent=$PPID
+while [ "${control_parent:-0}" -gt 1 ] 2>/dev/null; do
+  CONTROL_PIDS="$CONTROL_PIDS $control_parent "
+  control_parent=$(ps -o ppid= -p "$control_parent" 2>/dev/null | tr -d ' ')
+done
 numeric() { case "${1:-}" in ''|*[!0-9]*) return 1;; *) return 0;; esac; }
 proc_sid() { ps -o sid= -p "$1" 2>/dev/null | tr -d ' '; }
 proc_pgid() { ps -o pgid= -p "$1" 2>/dev/null | tr -d ' '; }
@@ -470,11 +476,21 @@ is_static_group() {
 }
 is_owned() {
   pid="$1"
+  case "$CONTROL_PIDS" in *" $pid "*) return 1;; esac
   proc_live "$pid" || return 1
   if (tr '\000' '\n' < "/proc/$pid/environ") 2>/dev/null | grep -Fxq -- "APTEVA_HOME=$DATA_DIR"; then return 0; fi
   if (tr '\000' '\n' < "/proc/$pid/cmdline") 2>/dev/null | grep -Fxq -- "$DATA_DIR"; then return 0; fi
   exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
   case "$exe" in "$DATA_DIR"/*) return 0;; esac
+  # Older cores may lack APTEVA_HOME and belong to a previous session.
+  # Require BOTH the managed core binary and an exact instance directory.
+  case "$exe" in /var/lib/apteva-fleet/versions/*/apteva-core)
+    cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)
+    case "$cwd" in "$DATA_DIR"/instance_*)
+      instance_number=${cwd#"$DATA_DIR"/instance_}
+      numeric "$instance_number" && return 0;;
+    esac;;
+  esac
   return 1
 }
 listener_pids() {
@@ -505,27 +521,31 @@ refresh() {
     else SID="$listener_sid"; fi
   done
   STATIC_PGIDS=''
-  if numeric "$SID" && [ "$SID" -gt 1 ]; then
-    for proc in /proc/[0-9]*; do
+  for proc in /proc/[0-9]*; do
       pid=${proc#/proc/}
       proc_live "$pid" || continue
-      [ "$(proc_sid "$pid")" = "$SID" ] || continue
       is_static "$pid" || continue
       pgid=$(proc_pgid "$pid")
       numeric "$pgid" && STATIC_PGIDS="$STATIC_PGIDS $pgid"
-    done
-  fi
+  done
   OWNED=''
-  if numeric "$SID" && [ "$SID" -gt 1 ]; then
-    for proc in /proc/[0-9]*; do
+  for proc in /proc/[0-9]*; do
       pid=${proc#/proc/}
       proc_live "$pid" || continue
-      [ "$(proc_sid "$pid")" = "$SID" ] || continue
       is_owned "$pid" || continue
       is_static_group "$pid" && continue
       OWNED="$OWNED $pid"
-    done
-  fi
+  done
+}
+signal_owned() {
+  # Revalidate each candidate immediately before signalling, and protect
+  # the SSH control ancestry and independently managed static deployments.
+  for candidate in $OWNED; do
+    is_owned "$candidate" || continue
+    is_static "$candidate" && continue
+    is_static_group "$candidate" && continue
+    kill -"$1" "$candidate" 2>/dev/null || true
+  done
 }
 emit_state() {
   refresh
@@ -542,19 +562,18 @@ refresh
 if [ "$ACTION" = inspect ]; then emit_state; exit $?; fi
 if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
 if [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
-if ! numeric "$SID" || [ "$SID" -le 1 ]; then UNKNOWN='no validated tenant session'; emit_state; exit $?; fi
-printf '%%s\n' "$SID" > "$SID_FILE"
-if [ -n "${OWNED# }" ]; then kill -TERM $OWNED 2>/dev/null || true; fi
+if numeric "$SID" && [ "$SID" -gt 1 ]; then printf '%%s\n' "$SID" > "$SID_FILE"; fi
+signal_owned TERM
 for i in $(seq 1 "$GRACE"); do
   sleep 1
   refresh
   if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
   if [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
-  if [ -n "${OWNED# }" ]; then kill -TERM $OWNED 2>/dev/null || true; fi
+  signal_owned TERM
 done
 refresh
 if [ -n "$UNKNOWN" ]; then emit_state; exit $?; fi
-if [ -n "${OWNED# }" ]; then kill -KILL $OWNED 2>/dev/null || true; fi
+signal_owned KILL
 sleep 1
 refresh
 if [ -z "$UNKNOWN" ] && [ -z "$LISTENERS" ] && [ -z "${OWNED# }" ]; then rm -f "$PID_FILE" "$SID_FILE"; emit_state; exit 0; fi
