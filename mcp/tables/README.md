@@ -77,8 +77,13 @@ See [CHANGELOG.md](CHANGELOG.md) for compatibility and upgrade notes, and
   `number` deliberately remains an IEEE-754 double. IDs and file IDs accept
   decimal strings for exact int64 values; unsafe floating-point IDs are rejected.
 - SQLite authorization checks compiled table/index access as well as enforcing
-  read-only connections. Raw physical/internal table names and virtual tables
-  are inaccessible; JSON scalar functions, CTEs, joins and window functions work.
+  read-only connections. Raw physical/internal tables and arbitrary virtual
+  tables are inaccessible. The built-in `json_each()` and `json_tree()` readers
+  are permitted, including correlated JSON-array queries; JSON scalar functions,
+  CTEs, joins and window functions also work. The JSON readers are identified
+  from SQLite bytecode on the same connection, not authorized by a caller-supplied
+  table name or alias. JSON inputs remain subject to the same project access,
+  timeout, row and byte limits.
   Duplicate output labels require explicit aliases.
 - `indexes_create` and automatic upsert indexes share a 64-index budget.
   `indexes_drop` needs `confirm: true`; removing a managed uniqueness constraint
@@ -131,3 +136,27 @@ SDK dependency directly, with no local module replacement.
 through HTTP's `?select=id,_revision`. This allows small edits to otherwise very
 wide rows. Update events carry that returned projection plus the changed fields.
 Expanded default values count toward `max_batch_bytes`, not only caller input.
+
+### Querying JSON arrays
+
+SQLite's built-in [JSON table-valued functions](https://www.sqlite.org/json1.html#jeach)
+expand a JSON value into computed rows. For example, this finds records whose
+recording list has no stored audio attachment:
+
+```sql
+SELECT a.id
+FROM {calls} a
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM json_each(
+    CASE WHEN json_valid(a.audio_files) THEN a.audio_files ELSE '[]' END
+  ) audio
+  WHERE COALESCE(json_extract(audio.value, '$.storage_file_id'), '') <> ''
+     OR COALESCE(json_extract(audio.value, '$.storage_file.id'), '') <> ''
+)
+```
+
+This support does not create persisted virtual tables or grant access to other
+SQLite modules. Tables referenced inside JSON arguments must still pass the
+project placeholder authorization checks. An invalid JSON value without a guard
+still produces SQLite's normal query error.

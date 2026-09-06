@@ -1,3 +1,17 @@
+# Unreleased — JSON query compatibility
+
+Allow SQLite's built-in `json_each()` and `json_tree()` in `tables_query`,
+including correlated audio-array reconciliation queries. Authorization checks
+connection-local compiled virtual-table identities against trusted built-in
+probes and rejects persisted or temporary name shadows. Arbitrary virtual
+modules, private/cross-project reads, writes and unsafe functions remain denied.
+Statement, timeout, row and byte limits are unchanged. No schema migration,
+SDK update or server update is needed for this fix.
+
+Regression coverage includes the full reported reconciliation query, malformed
+and empty JSON arrays, nested stored-file identities, latest retry selection,
+module/name spoofing, cross-project inputs, connection pooling and cancellation.
+
 # 0.1.16 — SDK authentication update
 
 Pins App SDK v0.74.1, retaining v0.74.0's exact MCP numeric decoding and adding

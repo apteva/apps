@@ -126,7 +126,8 @@ func placeholderNames(s string) ([]string, error) {
 
 // The driver has no public authorizer API. Inspect SQLite's compiled program
 // before executing it, allowing only B-tree roots of explicitly resolved tables
-// and their indexes. This fails closed for virtual tables and dynamic roots.
+// and their indexes, plus the built-in JSON readers identified on this connection.
+// Other virtual tables and dynamic roots fail closed.
 // query_only remains enabled as an independent write barrier.
 func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *App, pid, raw, resolved string, args []any) error {
 	names, err := placeholderNames(raw)
@@ -162,6 +163,7 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 		return err
 	}
 	defer plan.Close()
+	virtualReaders := map[string]bool{}
 	for plan.Next() {
 		var addr, p1, p2, p3, p5 int64
 		var opcode string
@@ -174,7 +176,13 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 			if p3 != 0 || p5&16 != 0 || !allowed[p2] {
 				return errf("query accesses a table outside the requested project placeholders")
 			}
-		case "VOpen", "VUpdate", "VCreate", "VDestroy":
+		case "VOpen":
+			identity := stringValue(p4)
+			if !strings.HasPrefix(identity, "vtab:") || len(identity) == len("vtab:") {
+				return errf("unrecognized virtual table in tables_query")
+			}
+			virtualReaders[identity] = true
+		case "VUpdate", "VCreate", "VDestroy":
 			return errf("virtual tables are not available in tables_query")
 		case "OpenWrite", "CreateBtree", "Destroy", "Clear", "SetCookie", "Vacuum", "JournalMode", "Checkpoint", "ParseSchema", "LoadAnalysis", "SqlExec":
 			return errf("only read-only SELECT statements are allowed")
@@ -185,7 +193,25 @@ func authorizeQuery(qctx context.Context, conn *sql.Conn, ctx *sdk.AppCtx, a *Ap
 			}
 		}
 	}
-	return plan.Err()
+	if err := plan.Err(); err != nil {
+		return err
+	}
+	if err := plan.Close(); err != nil {
+		return err
+	}
+	if len(virtualReaders) == 0 {
+		return nil
+	}
+	allowedReaders, err := jsonReaderIdentities(qctx, conn)
+	if err != nil {
+		return err
+	}
+	for identity := range virtualReaders {
+		if !allowedReaders[identity] {
+			return errf("only built-in json_each and json_tree virtual tables are available in tables_query")
+		}
+	}
+	return nil
 }
 func stringValue(v any) string {
 	switch x := v.(type) {
@@ -195,4 +221,56 @@ func stringValue(v any) string {
 		return string(x)
 	}
 	return ""
+}
+
+// VOpen.P4 is SQLite's virtual-table identity, not the SQL alias or function
+// spelling (https://sqlite.org/opcode.html#VOpen). Derive the two permitted
+// identities from trusted, schema-qualified EXPLAIN statements on the SAME
+// connection. Never cache these addresses across connections or dereference them.
+// Probes only compile constant JSON; they do not execute caller data or modules.
+func jsonReaderIdentities(ctx context.Context, conn *sql.Conn) (map[string]bool, error) {
+	allowed := map[string]bool{}
+	for _, name := range []string{"json_each", "json_tree"} {
+		// A persisted table/view with this name could shadow an eponymous built-in.
+		// Do not trust its VOpen identity, even if it is another virtual table.
+		var shadowed int
+		if err := conn.QueryRowContext(ctx, "SELECT count(*) FROM main.sqlite_schema WHERE type IN ('table','view') AND name=? COLLATE NOCASE", name).Scan(&shadowed); err != nil {
+			return nil, err
+		}
+		if shadowed != 0 {
+			continue
+		}
+		plan, err := conn.QueryContext(ctx, "EXPLAIN SELECT value FROM main."+name+"('[]')")
+		if err != nil {
+			return nil, err
+		}
+		found := false
+		for plan.Next() {
+			var addr, p1, p2, p3, p5 int64
+			var opcode string
+			var p4, comment any
+			if err := plan.Scan(&addr, &opcode, &p1, &p2, &p3, &p4, &p5, &comment); err != nil {
+				plan.Close()
+				return nil, err
+			}
+			if opcode == "VOpen" {
+				identity := stringValue(p4)
+				if !strings.HasPrefix(identity, "vtab:") || len(identity) == len("vtab:") {
+					plan.Close()
+					return nil, errf("cannot identify built-in JSON reader")
+				}
+				allowed[identity] = true
+				found = true
+			}
+		}
+		err = plan.Err()
+		plan.Close()
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, errf("cannot identify built-in JSON reader")
+		}
+	}
+	return allowed, nil
 }

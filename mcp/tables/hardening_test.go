@@ -124,7 +124,7 @@ func TestSQLPhysicalAuthorization(t *testing.T) {
 	if _, err := ctx.AppDB().Exec("CREATE TABLE future_internal(secret TEXT); INSERT INTO future_internal VALUES('private')"); err != nil {
 		t.Fatal(err)
 	}
-	denied := []string{`SELECT * FROM future_internal`, `SELECT * FROM "future_internal"`, `SELECT * FROM 'future_internal'`, `WITH q AS (SELECT * FROM future_internal) SELECT * FROM q`, `SELECT (SELECT secret FROM future_internal) FROM {books}`, `SELECT * FROM pragma_table_info('tables_meta')`, `SELECT * FROM sqlite_master`, `SELECT * FROM json_each('[1,2]')`, `WITH q AS (SELECT 1) DELETE FROM {books} RETURNING *`, `SELECT load_extension('x')`, `SELECT 1; SELECT 2`}
+	denied := []string{`SELECT * FROM future_internal`, `SELECT * FROM "future_internal"`, `SELECT * FROM 'future_internal'`, `WITH q AS (SELECT * FROM future_internal) SELECT * FROM q`, `SELECT (SELECT secret FROM future_internal) FROM {books}`, `SELECT * FROM pragma_table_info('tables_meta')`, `SELECT * FROM sqlite_master`, `WITH q AS (SELECT 1) DELETE FROM {books} RETURNING *`, `SELECT load_extension('x')`, `SELECT 1; SELECT 2`}
 	for _, q := range denied {
 		if out, err := callTool(app, ctx, "tables_query", map[string]any{"sql": q}); err == nil {
 			t.Errorf("unauthorized query succeeded: %s => %v", q, out)
