@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.7.0
+version: 0.7.1
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -1338,7 +1338,7 @@ func searchRankingsForKeywordsProvider(db *sql.DB, pid string, keywordIDs []int6
 	q := `WITH matched_snapshots AS (
 		SELECT k.id AS resolved_keyword_id, s.id AS snapshot_id, s.search_engine, s.keyword_text,
 		       s.location_id, s.provider, s.ts,
-		       ROW_NUMBER() OVER (PARTITION BY k.id ORDER BY s.ts DESC, s.id DESC) AS snapshot_rank
+		       ROW_NUMBER() OVER (PARTITION BY k.id, s.provider, s.location_id ORDER BY s.ts DESC, s.id DESC) AS snapshot_rank
 		  FROM keywords k
 		  JOIN search_serp_snapshots s
 		    ON s.project_id = k.project_id
@@ -1405,6 +1405,17 @@ func legacyGoogleRankingsAsSearchResultsProvider(db *sql.DB, pid string, keyword
 		providerFilter = " AND r.provider = ?"
 		args = append(args, provider)
 	}
+	snapshotFilter := ""
+	if !history {
+		snapshotFilter = ` AND NOT EXISTS (
+		    SELECT 1 FROM search_serp_snapshots s
+		     WHERE s.project_id = k.project_id AND s.search_engine = k.search_engine
+		       AND s.provider = r.provider AND s.ts >= ?
+		       AND (s.keyword_id = k.id OR
+		           (s.keyword_id IS NULL AND s.keyword_text = k.text AND s.location_id = k.location_id))
+		)`
+		args = append(args, since)
+	}
 	observationJoin := ""
 	if !history {
 		observationJoin = `JOIN (
@@ -1424,7 +1435,7 @@ func legacyGoogleRankingsAsSearchResultsProvider(db *sql.DB, pid string, keyword
 	        JOIN keywords k ON k.id = r.keyword_id
 	        JOIN domains d ON d.id = r.domain_id
 	        ` + observationJoin + `
-	       WHERE k.project_id = ? AND k.id IN (` + placeholders(len(keywordIDs)) + `) AND r.ts >= ?` + providerFilter + `
+	       WHERE k.project_id = ? AND k.id IN (` + placeholders(len(keywordIDs)) + `) AND r.ts >= ?` + providerFilter + snapshotFilter + `
 	       ORDER BY r.ts DESC, r.keyword_id, r.rank ASC
 	       LIMIT ?`
 	args = append(args, limit)
@@ -1645,19 +1656,13 @@ func cachedBacklinkMovement(db *sql.DB, domainID int64, provider string, days in
 	fromDay := toDay.AddDate(0, 0, -(days - 1))
 	endExclusive := toDay.AddDate(0, 0, 1)
 
-	query := `SELECT first_seen, last_seen, is_lost FROM backlinks WHERE domain_id = ?`
-	queryArgs := []any{domainID}
 	provider = strings.ToLower(strings.TrimSpace(provider))
+	where := ` FROM backlinks WHERE domain_id = ?`
+	args := []any{domainID}
 	if provider != "" {
-		query += ` AND provider = ?`
-		queryArgs = append(queryArgs, provider)
+		where += ` AND provider = ?`
+		args = append(args, provider)
 	}
-	rows, err := db.Query(query, queryArgs...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	result := &BacklinkMovement{
 		DomainID: domainID, Provider: provider, Days: days,
 		FromDate: fromDay.Format("2006-01-02"), ToDate: toDay.Format("2006-01-02"),
@@ -1666,40 +1671,41 @@ func cachedBacklinkMovement(db *sql.DB, domainID int64, provider string, days in
 	if result.Provider == "" {
 		result.Provider = "all"
 	}
-	pointByDate := make(map[string]*BacklinkMovementPoint, days)
-	for i := 0; i < days; i++ {
-		point := &result.Points[i]
-		point.Date = fromDay.AddDate(0, 0, i).Format("2006-01-02")
-		pointByDate[point.Date] = point
+	for i := range result.Points {
+		result.Points[i].Date = fromDay.AddDate(0, 0, i).Format("2006-01-02")
 	}
+	// Aggregate by UTC day on the covering index. Avoid decoding each link's
+	// timestamps into Go values and allocating date strings for every row.
+	query := `SELECT first_seen / 86400, last_seen / 86400, is_lost, COUNT(*),
+		COUNT(CASE WHEN first_seen > 0 THEN 1 END),
+		COUNT(CASE WHEN last_seen > 0 THEN 1 END)` + where + `
+		GROUP BY provider, first_seen / 86400, last_seen / 86400, is_lost`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	firstDay, lastDay := fromDay.Unix()/86400, endExclusive.Unix()/86400
 	for rows.Next() {
-		var firstSeen, lastSeen sql.NullInt64
-		var isLost int64
-		if err := rows.Scan(&firstSeen, &lastSeen, &isLost); err != nil {
+		var gainedDay, lostDay sql.NullInt64
+		var isLost, count, knownFirst, knownLast int64
+		if err := rows.Scan(&gainedDay, &lostDay, &isLost, &count, &knownFirst, &knownLast); err != nil {
 			return nil, err
 		}
-		if isLost != 0 {
-			result.LostLinks++
+		if isLost == 0 {
+			result.ActiveLinks += count
 		} else {
-			result.ActiveLinks++
+			result.LostLinks += count
+			result.KnownLostDate += knownLast
 		}
-		if firstSeen.Valid && firstSeen.Int64 > 0 {
-			result.KnownFirstSeen++
-			seenAt := time.Unix(firstSeen.Int64, 0).UTC()
-			if !seenAt.Before(fromDay) && seenAt.Before(endExclusive) {
-				date := seenAt.Format("2006-01-02")
-				pointByDate[date].Gained++
-				result.GainedInRange++
-			}
+		result.KnownFirstSeen += knownFirst
+		if gainedDay.Valid && gainedDay.Int64 >= firstDay && gainedDay.Int64 < lastDay {
+			result.Points[gainedDay.Int64-firstDay].Gained += knownFirst
+			result.GainedInRange += knownFirst
 		}
-		if isLost != 0 && lastSeen.Valid && lastSeen.Int64 > 0 {
-			result.KnownLostDate++
-			lostAt := time.Unix(lastSeen.Int64, 0).UTC()
-			if !lostAt.Before(fromDay) && lostAt.Before(endExclusive) {
-				date := lostAt.Format("2006-01-02")
-				pointByDate[date].Lost++
-				result.LostInRange++
-			}
+		if isLost != 0 && lostDay.Valid && lostDay.Int64 >= firstDay && lostDay.Int64 < lastDay {
+			result.Points[lostDay.Int64-firstDay].Lost += knownLast
+			result.LostInRange += knownLast
 		}
 	}
 	if err := rows.Err(); err != nil {

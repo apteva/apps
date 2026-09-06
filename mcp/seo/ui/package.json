@@ -1,0 +1,10 @@
+{
+  "name": "@apteva/seo-panel-tests",
+  "private": true,
+  "scripts": { "test": "bun test" },
+  "devDependencies": {
+    "happy-dom": "20.14.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  }
+}

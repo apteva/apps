@@ -395,28 +395,30 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   );
 
   const api = useCallback(
-    async <T,>(method: string, path: string, params: Record<string, string> = {}, body?: unknown): Promise<T> => {
-      const opts: RequestInit = { method, credentials: "same-origin", headers: {} };
+    async <T,>(method: string, path: string, params: Record<string, string> = {}, body?: unknown, signal?: AbortSignal): Promise<T> => {
+      const opts: RequestInit = { method, signal, credentials: "same-origin", headers: {} };
       if (body !== undefined) {
         (opts.headers as Record<string, string>)["Content-Type"] = "application/json";
         opts.body = JSON.stringify(body);
       }
       const res = await fetch(`${API}${path}?${withParams(params)}`, opts);
       if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
-      return res.json();
+      const data = await res.json();
+      signal?.throwIfAborted();
+      return data;
     },
     [withParams],
   );
 
   const callTool = useCallback(
-    async <T,>(tool: string, args: Record<string, unknown> = {}): Promise<T> => {
-      return api<T>("POST", "/tools/call", {}, { tool, args: { ...args, _project_id: projectId } });
+    async <T,>(tool: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> => {
+      return api<T>("POST", "/tools/call", {}, { tool, args: { ...args, _project_id: projectId } }, signal);
     },
     [api, projectId],
   );
 
-  const reloadProviders = useCallback(async () => {
-    const resp = await api<ProviderStatus>("GET", "/providers");
+  const reloadProviders = useCallback(async (signal?: AbortSignal) => {
+    const resp = await api<ProviderStatus>("GET", "/providers", {}, undefined, signal);
     const available = (resp.providers || []).filter((value) => value === "dataforseo" || value === "yepapi");
     setProviders(available);
     setProvider((current) => {
@@ -426,26 +428,27 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     });
   }, [api]);
 
-	const reloadLocations = useCallback(async () => {
-		const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { provider: "all", limit: "500" });
+  const reloadLocations = useCallback(async (signal?: AbortSignal) => {
+    const resp = await api<{ locations: SEOLocation[] }>("GET", "/locations", { provider: "all", limit: "500" }, undefined, signal);
     setLocations(resp.locations || []);
   }, [api]);
 
-  const reloadDomains = useCallback(async () => {
-    const rows = await callTool<Domain[]>("domains_list");
+  const reloadDomains = useCallback(async (signal?: AbortSignal) => {
+    const rows = await callTool<Domain[]>("domains_list", {}, signal);
     setDomains(rows || []);
     setSelectedDomain((current) => {
-      if (current && rows?.some((domain) => domain.id === current.id)) return current;
+      const updated = rows?.find((domain) => domain.id === current?.id);
+      if (updated) return updated;
       return rows?.find((domain) => !isCompetitorDomain(domain)) || rows?.[0] || null;
     });
   }, [callTool]);
 
-  const reloadBacklinkInsights = useCallback(async (domainId: number) => {
+  const reloadBacklinkInsights = useCallback(async (domainId: number, signal?: AbortSignal) => {
     const providerArgs = provider ? { provider } : {};
     const [movement, active, lost] = await Promise.all([
-      callTool<BacklinkMovement>("backlink_movement", { domain_id: domainId, ...providerArgs, days: 90 }),
-      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: false, limit: 20 }),
-      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: true, limit: 20 }),
+      callTool<BacklinkMovement>("backlink_movement", { domain_id: domainId, ...providerArgs, days: 90 }, signal),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: false, limit: 20 }, signal),
+      callTool<Backlink[]>("backlinks_list", { domain_id: domainId, ...providerArgs, lost: true, limit: 20 }, signal),
     ]);
     setBacklinkMovement(movement);
     setActiveBacklinks(active || []);
@@ -460,28 +463,28 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     });
   }, [callTool, provider]);
 
-  const reloadKeywords = useCallback(async () => {
+  const reloadKeywords = useCallback(async (signal?: AbortSignal) => {
     const rows = await callTool<Keyword[]>("keywords_list", {
       ...(provider ? { provider } : {}),
       search_engine: searchEngine,
       limit: 300,
-    });
+    }, signal);
     setKeywords(rows || []);
-    setSelectedKeyword((cur) => (cur && rows?.some((r) => r.id === cur.id) ? cur : rows?.[0] || null));
+    setSelectedKeyword((cur) => (rows?.find((r) => r.id === cur?.id) || rows?.[0] || null));
   }, [callTool, provider, searchEngine]);
 
-  const reloadEntities = useCallback(async () => {
-    const rows = await callTool<SearchEntity[]>("entities_list", { search_engine: searchEngine, limit: 300 });
+  const reloadEntities = useCallback(async (signal?: AbortSignal) => {
+    const rows = await callTool<SearchEntity[]>("entities_list", { search_engine: searchEngine, limit: 300 }, signal);
     setEntities(rows || []);
-    setSelectedEntity((cur) => (cur && rows?.some((r) => r.id === cur.id) ? cur : rows?.[0] || null));
+    setSelectedEntity((cur) => (rows?.find((r) => r.id === cur?.id) || rows?.[0] || null));
   }, [callTool, searchEngine]);
 
-  const reloadOpportunities = useCallback(async () => {
+  const reloadOpportunities = useCallback(async (signal?: AbortSignal) => {
     const resp = await callTool<{ items: ContentOpportunity[] }>("content_opportunities", {
       search_engine: searchEngine,
       ...(provider ? { provider } : {}),
       limit: 25,
-    });
+    }, signal);
     setOpportunities(resp.items || []);
   }, [callTool, provider, searchEngine]);
 
@@ -493,25 +496,25 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     });
   }, []);
 
-  const reloadMetricJobs = useCallback(async () => {
-    const response = await api<{ jobs: KeywordMetricJob[] }>("GET", "/keyword-metric-jobs");
+  const reloadMetricJobs = useCallback(async (signal?: AbortSignal) => {
+    const response = await api<{ jobs: KeywordMetricJob[] }>("GET", "/keyword-metric-jobs", {}, undefined, signal);
     setMetricJobs(response.jobs || []);
   }, [api]);
 
-  const reloadTrackingSettings = useCallback(async () => {
-    const settings = await api<RankTrackingSettings>("GET", "/rank-tracking/settings");
+  const reloadTrackingSettings = useCallback(async (signal?: AbortSignal) => {
+    const settings = await api<RankTrackingSettings>("GET", "/rank-tracking/settings", {}, undefined, signal);
     setTrackingSettings(settings);
   }, [api]);
 
-  const reloadRankTracking = useCallback(async (keywordId: number) => {
-    const response = await api<{ trackers: RankTracker[] }>("GET", "/rank-tracking", { keyword_id: String(keywordId) });
+  const reloadRankTracking = useCallback(async (keywordId: number, signal?: AbortSignal) => {
+    const response = await api<{ trackers: RankTracker[] }>("GET", "/rank-tracking", { keyword_id: String(keywordId) }, undefined, signal);
     const trackers = response.trackers || [];
     setRankTrackers(trackers);
     const entries = await Promise.all(trackers.map(async (tracker) => {
       const result = await api<{ history: RankObservation[] }>("GET", "/rank-history", {
         tracker_id: String(tracker.id),
         limit: "400",
-      });
+      }, undefined, signal);
       return [tracker.id, result.history || []] as const;
     }));
     setRankHistory(Object.fromEntries(entries));
@@ -541,30 +544,51 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   }, [provider, searchEngine]);
 
   useEffect(() => {
-    reloadAll();
-  }, [reloadAll]);
+    const controller = new AbortController();
+    setBusy(true);
+    setErr("");
+    Promise.all([
+      reloadProviders(controller.signal), reloadLocations(controller.signal),
+      reloadDomains(controller.signal), reloadMetricJobs(controller.signal),
+      reloadTrackingSettings(controller.signal),
+    ]).catch((e) => {
+      if (!controller.signal.aborted) setErr((e as Error).message);
+    }).finally(() => {
+      if (!controller.signal.aborted) setBusy(false);
+    });
+    return () => controller.abort();
+  }, [reloadProviders, reloadLocations, reloadDomains, reloadMetricJobs, reloadTrackingSettings]);
 
   useEffect(() => {
-    if (!selectedDomain) {
-      setDomainMetrics(null);
-      setDomainRankings([]);
-      setBacklinkMovement(null);
-      setActiveBacklinks([]);
-      setLostBacklinks([]);
-      setSelectedRankURL(null);
-      return;
-    }
-    callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id, ...(provider ? { provider } : {}) })
-      .then((r) => setDomainMetrics(r.metrics || null))
-      .catch((e) => setErr((e as Error).message));
-    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, ...(provider ? { provider } : {}), limit: 500 })
-      .then((rows) => {
-        setDomainRankings(rows || []);
-        setSelectedRankURL(null);
-      })
-      .catch((e) => setErr((e as Error).message));
-    reloadBacklinkInsights(selectedDomain.id).catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, reloadBacklinkInsights, selectedDomain]);
+    const controller = new AbortController();
+    Promise.all([
+      reloadKeywords(controller.signal), reloadEntities(controller.signal),
+      reloadOpportunities(controller.signal),
+    ]).catch((e) => {
+      if (!controller.signal.aborted) setErr((e as Error).message);
+    });
+    return () => controller.abort();
+  }, [reloadKeywords, reloadEntities, reloadOpportunities]);
+
+  useEffect(() => {
+    setDomainMetrics(null);
+    setDomainRankings([]);
+    setBacklinkMovement(null);
+    setActiveBacklinks([]);
+    setLostBacklinks([]);
+    setSelectedRankURL(null);
+    if (!selectedDomain || view !== "domains") return;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    Promise.all([
+      callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id, ...(provider ? { provider } : {}) }, signal)
+        .then((r) => setDomainMetrics(r.metrics || null)),
+      callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, ...(provider ? { provider } : {}), limit: 500 }, signal)
+        .then((rows) => setDomainRankings(rows || [])),
+      reloadBacklinkInsights(selectedDomain.id, signal),
+    ]).catch((e) => { if (!signal.aborted) setErr((e as Error).message); });
+    return () => controller.abort();
+  }, [callTool, provider, reloadBacklinkInsights, selectedDomain, view]);
 
   useEffect(() => {
     if (!selectedRankURL && domainRankings.length > 0) {
@@ -574,48 +598,50 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   }, [domainRankings, selectedRankURL]);
 
   useEffect(() => {
-    if (!selectedRankURL) {
-      setPageSerpRows([]);
-      return;
+    setPageSerpRows([]);
+    if (!selectedRankURL || view !== "domains") return;
+    const ids = Array.from(new Set(domainRankings.filter((r) => cleanURL(r.rank_url) === selectedRankURL).map((r) => r.keyword_id)));
+    if (ids.length === 0) return;
+    const controller = new AbortController();
+    // The tool accepts at most 200 IDs, even when a page ranks for more keywords.
+    const batches = [];
+    for (let start = 0; start < ids.length; start += 200) {
+      batches.push(callTool<SearchRanking[]>("rankings_for_keywords", {
+        keyword_ids: ids.slice(start, start + 200), ...(provider ? { provider } : {}), limit: 1000,
+      }, controller.signal));
     }
-    const ids = Array.from(
-      new Set(domainRankings.filter((r) => cleanURL(r.rank_url) === selectedRankURL).map((r) => r.keyword_id)),
-    );
-    if (ids.length === 0) {
-      setPageSerpRows([]);
-      return;
-    }
-    callTool<SearchRanking[]>("rankings_for_keywords", { keyword_ids: ids, ...(provider ? { provider } : {}), limit: 1000 })
-      .then((rows) => setPageSerpRows(rows || []))
-      .catch((e) => setErr((e as Error).message));
-  }, [callTool, domainRankings, provider, selectedRankURL]);
+    Promise.all(batches).then((rows) => setPageSerpRows(rows.flat()))
+      .catch((e) => { if (!controller.signal.aborted) setErr((e as Error).message); });
+    return () => controller.abort();
+  }, [callTool, domainRankings, provider, selectedRankURL, view]);
 
   useEffect(() => {
-    if (!selectedKeyword) {
-      setKeywordMetrics(null);
-      setSerpResults([]);
-      setRankTrackers([]);
-      setRankHistory({});
-      return;
-    }
-    callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) })
-      .then((r) => setKeywordMetrics(r.metrics || null))
-      .catch((e) => setErr((e as Error).message));
-    callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 })
-      .then((rows) => setSerpResults(rows || []))
-      .catch((e) => setErr((e as Error).message));
-    reloadRankTracking(selectedKeyword.id).catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, reloadRankTracking, searchEngine, selectedKeyword]);
+    setKeywordMetrics(null);
+    setSerpResults([]);
+    setRankTrackers([]);
+    setRankHistory({});
+    if (!selectedKeyword || (view !== "keywords" && view !== "explorer")) return;
+    const controller = new AbortController();
+    const signal = controller.signal;
+    Promise.all([
+      callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id, ...(provider ? { provider } : {}) }, signal)
+        .then((r) => setKeywordMetrics(r.metrics || null)),
+      callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, ...(provider ? { provider } : {}), limit: 100 }, signal)
+        .then((rows) => setSerpResults(rows || [])),
+      ...(view === "keywords" ? [reloadRankTracking(selectedKeyword.id, signal)] : []),
+    ]).catch((e) => { if (!signal.aborted) setErr((e as Error).message); });
+    return () => controller.abort();
+  }, [callTool, provider, reloadRankTracking, searchEngine, selectedKeyword, view]);
 
   useEffect(() => {
-    if (!selectedEntity) {
-      setEntityRankings([]);
-      return;
-    }
-    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, ...(provider ? { provider } : {}), limit: 200 })
+    setEntityRankings([]);
+    if (!selectedEntity || view !== "explorer") return;
+    const controller = new AbortController();
+    callTool<SearchRanking[]>("rankings_for_entity", { entity_id: selectedEntity.id, ...(provider ? { provider } : {}), limit: 200 }, controller.signal)
       .then((rows) => setEntityRankings(rows || []))
-      .catch((e) => setErr((e as Error).message));
-  }, [callTool, provider, selectedEntity]);
+      .catch((e) => { if (!controller.signal.aborted) setErr((e as Error).message); });
+    return () => controller.abort();
+  }, [callTool, provider, selectedEntity, view]);
 
   const filteredLocations = useMemo(
     () => locations.filter((l) => l.search_engine === searchEngine && (!provider || l.provider === provider)),
@@ -654,8 +680,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     setBusy(true);
     setErr("");
     try {
-      const configured = domain.default_location_id ? locationById.get(domain.default_location_id) : undefined;
-      const loc = configured?.provider === provider ? configured.id : defaultLocation?.id;
+      const loc = domain.default_location_id || locations.find((l) => l.search_engine === "google" && (!provider || l.provider === provider))?.id;
       const params = {
         ...(loc ? { location_id: String(loc) } : {}),
         ...(provider ? { provider } : {}),
@@ -1154,7 +1179,7 @@ function OverviewView(props: {
           {[
             ["Your sites", sites.length, "Domains you added"],
             ["Competitors", competitors.length, "Discovered from search results"],
-            ["Keywords", props.keywords.length, "Across Google and YouTube"],
+            ["Keywords", props.keywords.length, "In the selected search engine"],
             ["Opportunities", props.opportunities.length, "From cached search research"],
           ].map(([label, value, hint]) => (
             <div key={String(label)} className="border border-border rounded p-4 bg-surface-1">

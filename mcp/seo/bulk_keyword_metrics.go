@@ -81,31 +81,31 @@ func (a *App) handleKeywordMetricJobs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		jobs, err := createKeywordMetricJobs(mustCtx(r).AppDB(), pid, body.KeywordIDs)
+		balance := float64(0)
+		checked := map[int64]bool{}
+		jobs, err := createKeywordMetricJobsWithPreflight(mustCtx(r).AppDB(), pid, body.KeywordIDs, func(slug string) error {
+			if body.Provider != "" && !strings.EqualFold(body.Provider, slug) {
+				return &requestValidationError{Message: fmt.Sprintf("keyword metric job uses provider %q, not requested provider %q", slug, body.Provider)}
+			}
+			if slug != "dataforseo" {
+				return &requestValidationError{Message: fmt.Sprintf("bulk keyword metrics are not implemented for provider %q", slug)}
+			}
+			provider, err := selectProvider(mustCtx(r), slug)
+			if err != nil {
+				return err
+			}
+			if !checked[provider.ConnectionID()] {
+				balance, err = preflightDataForSEO(mustCtx(r), provider.ConnectionID())
+				if err != nil {
+					return err
+				}
+				checked[provider.ConnectionID()] = true
+			}
+			return nil
+		})
 		if err != nil {
 			writeJSONOrErr(w, nil, err)
 			return
-		}
-		balance := float64(0)
-		for _, job := range jobs {
-			if body.Provider != "" && !strings.EqualFold(body.Provider, job.Provider) {
-				writeJSONOrErr(w, nil, fmt.Errorf("keyword metric job uses provider %q, not requested provider %q", job.Provider, body.Provider))
-				return
-			}
-			provider, err := selectProvider(mustCtx(r), job.Provider)
-			if err != nil {
-				writeJSONOrErr(w, nil, err)
-				return
-			}
-			if provider.Slug() != "dataforseo" {
-				writeJSONOrErr(w, nil, fmt.Errorf("bulk keyword metrics are not implemented for provider %q", provider.Slug()))
-				return
-			}
-			balance, err = preflightDataForSEO(mustCtx(r), provider.ConnectionID())
-			if err != nil {
-				writeJSONOrErr(w, nil, err)
-				return
-			}
 		}
 		for _, job := range jobs {
 			go func(id int64) { _ = runKeywordMetricJob(globalCtx, id) }(job.ID)
@@ -199,6 +199,12 @@ func preflightDataForSEO(ctx *sdk.AppCtx, connID int64) (float64, error) {
 }
 
 func createKeywordMetricJobs(db *sql.DB, pid string, keywordIDs []int64) ([]keywordMetricJob, error) {
+	return createKeywordMetricJobsWithPreflight(db, pid, keywordIDs, nil)
+}
+
+// Validate every group and its provider before creating any jobs. A rejected
+// request must not leave permanently queued rows with no worker to run them.
+func createKeywordMetricJobsWithPreflight(db *sql.DB, pid string, keywordIDs []int64, preflight func(string) error) ([]keywordMetricJob, error) {
 	keywordIDs = uniquePositiveInt64s(keywordIDs)
 	if len(keywordIDs) == 0 {
 		return nil, errors.New("keyword_ids required")
@@ -234,6 +240,14 @@ func createKeywordMetricJobs(db *sql.DB, pid string, keywordIDs []int64) ([]keyw
 			groups[key] = &group{LocationID: locationID, Provider: provider}
 		}
 		groups[key].IDs = append(groups[key].IDs, id)
+	}
+
+	if preflight != nil {
+		for _, group := range groups {
+			if err := preflight(group.Provider); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	now := time.Now().Unix()

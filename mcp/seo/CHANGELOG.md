@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.1
+
+- Preserve paid rank-tracking costs through queue submission, failed tasks,
+  and collection so monthly budget accounting retains committed spending.
+- Keep empty latest SERPs authoritative and select current snapshots separately
+  for each provider and locale.
+- Validate bulk keyword-refresh provider bindings and account credit before
+  creating jobs, avoiding permanently pending jobs after rejected requests.
+- Cancel obsolete panel reads when selections change and defer hidden detail
+  requests until their workspace is opened.
+- Preserve configured domain refresh locales and split page ranking reads
+  into batches of at most 200 keyword IDs.
+- Aggregate cached backlink summaries through a covering SQLite index; a local
+  100,000-link benchmark improved from 67.7 ms to 22.4 ms per summary.
+- Update app-sdk to v0.76.0 and add backend and panel regression coverage.
+
 ## 0.7.0
 
 - Replaced the seed-first panel with a project overview showing tracked sites,

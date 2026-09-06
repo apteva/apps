@@ -256,7 +256,7 @@ func createDueRefreshJobs(db *sql.DB, pid string, settings rankTrackingSettings,
 	var committed float64
 	if err := db.QueryRow(`SELECT COALESCE(SUM(CASE WHEN actual_cost_usd > 0 THEN actual_cost_usd ELSE estimated_cost_usd END), 0)
 		FROM serp_refresh_jobs WHERE project_id = ? AND substr(observed_date, 1, 7) = ?
-		AND status IN ('pending', 'submitted', 'complete')`, pid, month).Scan(&committed); err != nil {
+		AND (status IN ('pending', 'submitted', 'complete') OR provider_task_id != '' OR actual_cost_usd > 0)`, pid, month).Scan(&committed); err != nil {
 		return err
 	}
 	for key, value := range groups {
@@ -374,12 +374,13 @@ func submitPendingRefreshJobs(ctx *sdk.AppCtx, pid string, now time.Time) error 
 		return err
 	}
 	for _, job := range jobs {
+		var chargedCost float64
 		loc, err := getLocation(ctx.AppDB(), job.LocationID)
 		if err == nil {
 			if loc.LocationCode == nil {
 				err = errors.New("DataForSEO location has no location_code")
 			} else {
-				job.TaskID, _, err = submitDataForSEOSERPTask(ctx, dfs.connID, job.KeywordText, loc, job.Depth, job.Device)
+				job.TaskID, chargedCost, err = submitDataForSEOSERPTask(ctx, dfs.connID, job.KeywordText, loc, job.Depth, job.Device)
 			}
 		}
 		if err != nil {
@@ -394,8 +395,8 @@ func submitPendingRefreshJobs(ctx *sdk.AppCtx, pid string, now time.Time) error 
 			continue
 		}
 		_, err = ctx.AppDB().Exec(`UPDATE serp_refresh_jobs SET status = 'submitted',
-			provider_task_id = ?, attempts = attempts + 1, submitted_at = ?, last_error = '',
-			updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`, job.TaskID, now.Unix(), job.ID)
+			provider_task_id = ?, actual_cost_usd = ?, attempts = attempts + 1, submitted_at = ?, last_error = '',
+			updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending'`, job.TaskID, chargedCost, now.Unix(), job.ID)
 		if err != nil {
 			return err
 		}
@@ -523,7 +524,7 @@ func completeRefreshJob(db *sql.DB, job refreshJob, response *providerSERPRespon
 		cost = estimateStandardSERPCost(job.Depth)
 	}
 	_, err = tx.Exec(`UPDATE serp_refresh_jobs SET status = 'complete', snapshot_id = ?,
-		actual_cost_usd = ?, completed_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
+		actual_cost_usd = MAX(actual_cost_usd, ?), completed_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`, snapshotID, cost, now, job.ID)
 	if err != nil {
 		return err

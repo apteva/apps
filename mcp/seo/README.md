@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.7.0)
+## Schema (v0.7.1)
 
 Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -41,7 +41,7 @@ provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.7.0 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.7.1 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.

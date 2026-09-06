@@ -713,7 +713,7 @@ func insertTestLocation(t *testing.T, db *sql.DB, searchEngine string, locationC
 	return id
 }
 
-func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
+func newSEOTestDB(t testing.TB, migrations ...string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -729,7 +729,7 @@ func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 	return db
 }
 
-func applySEOMigration(t *testing.T, db *sql.DB, migration string) {
+func applySEOMigration(t testing.TB, db *sql.DB, migration string) {
 	t.Helper()
 	body, err := os.ReadFile(migration)
 	if err != nil {
