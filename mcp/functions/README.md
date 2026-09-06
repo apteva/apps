@@ -1,10 +1,41 @@
-# Functions 1.8.1
+# Functions 1.9.0
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
 processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
+
+## Runtime preparation in 1.9.0
+
+Active functions are prepared automatically after startup and checked again every 30 seconds. A bounded pool (two preparation workers by default) validates the current runtime artifact, rebuilds missing or incompatible artifacts from the immutable source snapshot, and boots a worker without invoking the business handler. Explicit priority functions run first, followed by public Function URLs and other active functions. One failed function does not prevent the app's management API from starting.
+
+Function list/detail responses expose `runtime_readiness` independently of deployment `build_status`:
+
+- `preparing`: waiting or preparing the active version/configuration.
+- `prepared`: artifacts are available; worker boot has not been validated (build-only operation).
+- `ready`: current artifacts are available and worker boot was validated.
+- `failed`: preparation failed; `error` explains what to fix before retrying.
+- `inactive`: disabled or has no active deployment.
+
+The object also includes `version_id`, `fingerprint`, `build_ms`, `worker_start_ms`, `boot_validated` and a snapshot of `warm_workers`. Ready does not guarantee a worker remains warm: normal idle eviction only starts a process on the next request, without recompiling. App `/health` covers the management service; callers switching critical endpoint traffic should check that function's runtime readiness first. Requests arriving before readiness can wait on the shared background preparation job within their invocation deadline. Canceling one request does not cancel preparation for other callers. Queue saturation is explicit and bounded.
+
+Use `functions_prepare` with `id` or `name`, optional `warm` (default true), and `wait` (default false). `warm:false` prepares artifacts only; `warm:true` also validates/starts a worker. HTTP equivalent: `POST /functions/<id>/prepare?project_id=<project>&warm=true&wait=true`. The response contains `runtime_readiness`; a successful HTTP response acknowledges the operation, so check its state. Failed preparation can be retried after correcting the cause. This operation creates no invocation row and does not call the handler. Dependency installation scripts, Node module initialization, and Go `init()` may execute during build/boot; it is not a guarantee of zero external side effects.
+
+Persistent artifacts live below `APTEVA_DATA_DIR/functions-build`. Without `APTEVA_DATA_DIR`, the temporary cache cannot survive restart. Fingerprints are runtime-specific and use executable contents instead of absolute paths or timestamps; an unrelated Go/npm change no longer invalidates dependency-free Node artifacts. The 1.9.0 fingerprint format causes a one-time background rebuild of older artifacts. Relocated compatible artifacts are reused and saved build paths refreshed. Legacy repository source snapshots can be recovered from verified relocated artifacts. Restore the database and its artifact storage together, then restart the app.
+
+Operator settings:
+
+| Setting | Meaning |
+|---|---|
+| `APTEVA_FUNCTIONS_PREPARE_WORKERS=2` | Background preparation concurrency (1–8), additionally bounded by global build/worker/memory limits |
+| `APTEVA_FUNCTIONS_PREPARE_FIRST=project/name,project/other` | Explicit dashboard/webhook entry points to prioritize before other functions |
+
+Preparation queues hold at most 32 priority and 64 ordinary jobs. The scanner reads functions in pages of 100 and applies backpressure. `/capabilities` includes the current preparation queue length and actual artifact build count. No new database migration is required for 1.9.0.
+
+The panel exposes preparation controls, actionable failures, runtime readiness and invocation timings. For 1.9.0 invocations, the existing `build_ms` field measures time waiting for shared preparation; the preparation result contains the actual build duration. `queue_ms` is worker admission, `cold_start_ms` is request-time worker startup, and `execution_ms` includes handler execution **and downstream app calls**. These fields do not claim to isolate upstream service latency. Cancellation statuses distinguish `canceled` (caller cancellation/runtime shutdown), `upstream_timeout` (parent deadline), and `timeout` (the function's own deadline).
+
+See [preparation regression and performance results](PREPARATION_RESULTS.md). These changes move cold-build work ahead of traffic; they do not make the compiler or downstream apps inherently faster.
 
 ## Upgrading to 1.8.1
 

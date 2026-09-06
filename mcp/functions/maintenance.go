@@ -256,26 +256,39 @@ func (p *pool) recoverLegacySnapshots() error {
 		return err
 	}
 	for _, v := range versions {
-		dir, err := filepath.EvalSymlinks(v.BuildDir)
-		if err != nil || !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
-			continue
+		candidates := []string{v.BuildDir}
+		moved, _ := filepath.Glob(filepath.Join(root, v.ArtifactKey, fmt.Sprintf("v%d-*", v.Version)))
+		candidates = append(candidates, moved...)
+		if v.BuildDir != "" {
+			candidates = append(candidates, filepath.Join(root, filepath.Base(filepath.Dir(v.BuildDir)), filepath.Base(v.BuildDir)))
 		}
-		for _, entry := range []string{"entry.mjs", "entry.go"} {
-			file, err := filepath.EvalSymlinks(filepath.Join(dir, entry))
-			if err != nil || !strings.HasPrefix(file, dir+string(os.PathSeparator)) {
+		recovered := false
+		for _, candidate := range candidates {
+			dir, err := filepath.EvalSymlinks(candidate)
+			if err != nil || !strings.HasPrefix(dir, root+string(os.PathSeparator)) {
 				continue
 			}
-			src, err := os.ReadFile(file)
-			if err != nil || hashSource(src) != v.SourceHash {
-				continue
+			for _, entry := range []string{"entry.mjs", "entry.go"} {
+				file, err := filepath.EvalSymlinks(filepath.Join(dir, entry))
+				if err != nil || !strings.HasPrefix(file, dir+string(os.PathSeparator)) {
+					continue
+				}
+				src, err := os.ReadFile(file)
+				if err != nil || hashSource(src) != v.SourceHash {
+					continue
+				}
+				if _, err = p.ctx.AppDB().ExecContext(p.ctx.StartupContext(), `UPDATE function_versions SET source=?,build_dir=? WHERE id=? AND artifact_key=?`, string(src), dir, v.ID, v.ArtifactKey); err != nil {
+					return err
+				}
+				recovered = true
+				break
 			}
-			_, err = p.ctx.AppDB().Exec(`UPDATE function_versions SET source=? WHERE id=? AND artifact_key=?`, string(src), v.ID, v.ArtifactKey)
-			if err != nil {
-				return err
+			if recovered {
+				break
 			}
-			break
 		}
 	}
+
 	return nil
 }
 func (a *App) handleHTTPCapabilities(w http.ResponseWriter, r *http.Request) {
@@ -292,5 +305,5 @@ func (a *App) handleHTTPCapabilities(w http.ResponseWriter, r *http.Request) {
 	live := len(p.all)
 	memory := p.liveMB
 	p.mu.Unlock()
-	httpJSON(w, map[string]any{"sandbox_platform_supported": platformSandboxSupported(), "sandbox_required": envBool("APTEVA_FUNCTIONS_REQUIRE_SANDBOX", sandboxRequiredByDefault()), "cgroup_required": envBool("APTEVA_FUNCTIONS_REQUIRE_CGROUP", sandboxRequiredByDefault()), "live_workers": live, "reserved_memory_mb": memory, "max_workers": cap(p.globalSem), "protocol_frame_bytes": maxFrame, "protocol_reserved_bytes": protocolBytes.Load(), "downstream_inflight": len(p.downstream), "hard_disk_quota": "configure on the artifact and temporary filesystems"})
+	httpJSON(w, map[string]any{"sandbox_platform_supported": platformSandboxSupported(), "sandbox_required": envBool("APTEVA_FUNCTIONS_REQUIRE_SANDBOX", sandboxRequiredByDefault()), "cgroup_required": envBool("APTEVA_FUNCTIONS_REQUIRE_CGROUP", sandboxRequiredByDefault()), "artifact_builds": p.artifactBuilds.Load(), "preparation_queue": len(p.prepareHigh) + len(p.prepareNormal), "live_workers": live, "reserved_memory_mb": memory, "max_workers": cap(p.globalSem), "protocol_frame_bytes": maxFrame, "protocol_reserved_bytes": protocolBytes.Load(), "downstream_inflight": len(p.downstream), "hard_disk_quota": "configure on the artifact and temporary filesystems"})
 }

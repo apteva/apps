@@ -86,10 +86,12 @@ interface NativePanelProps {
 }
 
 type Status = "active" | "disabled";
-type InvStatus = "ok" | "error" | "timeout";
+type InvStatus = "ok" | "error" | "timeout" | "canceled" | "upstream_timeout" | "running";
 type BuildStatus = "pending" | "building" | "ready" | "failed";
 
+interface RuntimeReadiness {state:"preparing"|"prepared"|"ready"|"failed"|"inactive";error?:string;build_ms:number;worker_start_ms:number;boot_validated:boolean;warm_workers:number}
 interface FunctionRow {
+ runtime_readiness?:RuntimeReadiness;
   id: number;
   name: string;
   runtime: string;
@@ -128,6 +130,7 @@ interface Version {
 }
 
 interface Invocation {
+ build_ms?:number;queue_ms?:number;cold_start_ms?:number;execution_ms?:number;
   id: number;
   function_id: number;
   started_at: string;
@@ -196,6 +199,7 @@ function invStatusTone(s: InvStatus): string {
   switch (s) {
     case "ok":      return "bg-green/15 text-green";
     case "error":   return "bg-red/15 text-red";
+    case "upstream_timeout":
     case "timeout": return "bg-blue/15 text-blue";
     default:        return "bg-border text-text-muted";
   }
@@ -343,6 +347,8 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   );
 
   useEffect(() => { loadList(); }, [loadList]);
+  const preparing = functions.some(f=>f.status==="active" && f.runtime_readiness?.state==="preparing");
+  useEffect(()=>{if(!preparing)return;const timer=setInterval(()=>{if(document.visibilityState!=="hidden")loadList();},2000);return()=>clearInterval(timer);},[preparing,loadList]);
   useEffect(() => { ++detailGeneration.current; ++listGeneration.current; setSelectedId(null);setDetail(null);setVersions([]);setInvocations([]);loadList();return()=>{++detailGeneration.current;++listGeneration.current;}; }, [projectId, installId]);
 
   useEffect(() => {
@@ -457,6 +463,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${fnStatusTone(f.status)}`}>
                       {f.status}
                     </span>
+ <div className="text-[10px] text-text-muted mt-1">Runtime: {f.runtime_readiness?.state || "preparing"}</div>
                   </td>
                   <td className="px-4 py-2 text-text-muted">{(f.timeout_ms / 1000).toFixed(0)}s</td>
                   <td className="px-4 py-2 text-text-dim text-xs font-mono truncate">/fn/{f.name}</td>
@@ -601,6 +608,7 @@ function DetailDialog({
           onChanged={onChanged}
         />
 
+        <RuntimePreparation fn={fn} api={api} onChanged={onChanged}/>
         <InvokeConsole fn={fn} withParams={withParams} onInvoked={onChanged} />
 
         {/* Versions */}
@@ -723,10 +731,10 @@ function DetailDialog({
                     >
                       <td className="px-3 py-2 text-text-muted">{relTime(inv.started_at)}</td>
                       <td className="px-3 py-2 text-text-dim text-xs">{inv.trigger_kind}</td>
-                      <td className="px-3 py-2 text-text-muted">{inv.duration_ms} ms</td>
+                      <td className="px-3 py-2 text-text-muted">{inv.duration_ms} ms<div className="text-[10px] text-text-dim">Execution {inv.execution_ms ?? 0} ms</div></td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${invStatusTone(inv.status)}`}>
-                          {inv.status}
+                          {{canceled:"Caller canceled",upstream_timeout:"Upstream timeout",timeout:"Function timeout"}[inv.status] || inv.status}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-text-muted">{inv.exit_code}</td>
@@ -770,6 +778,7 @@ function DetailDialog({
 function InvocationDetail({ inv }: { inv: Invocation }) {
   return (
     <div className="flex flex-col gap-2">
+ <InvocationTimings inv={inv}/>
       {inv.event_json && (
         <div>
           <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Event</div>
@@ -1405,4 +1414,15 @@ function LoadedInvocation({inv,api}:{inv:Invocation;api:ApiFn}) {
  const [detail,setDetail]=useState(inv),[error,setError]=useState("");
  useEffect(()=>{let active=true;api<{invocation:Invocation}>("GET",`/invocations/${inv.id}`).then(r=>{if(active)setDetail(r.invocation)}).catch(e=>{if(active)setError(e.message)});return()=>{active=false};},[inv.id,api]);
  return error?<p className="text-red">{error}</p>:<InvocationDetail inv={detail}/>;
+}
+
+function InvocationTimings({inv}:{inv:Invocation}) {
+ return <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs" aria-label="Invocation timing breakdown">{[["Preparation wait",inv.build_ms],["Worker queue",inv.queue_ms],["Worker start",inv.cold_start_ms],["Execution (includes app calls)",inv.execution_ms]].map(([label,value])=><div key={String(label)} className="rounded border border-border p-2"><div className="text-text-muted">{label}</div><strong>{value ?? 0} ms</strong></div>)}</div>;
+}
+function RuntimePreparation({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:()=>void|Promise<void>}) {
+ const [busy,setBusy]=useState(false),[error,setError]=useState("");
+ const state=fn.runtime_readiness;
+ useEffect(()=>{if(state?.state!=="preparing")return;const timer=setInterval(()=>onChanged(),2000);return()=>clearInterval(timer);},[state?.state,onChanged]);
+ const prepare=async(warm:boolean)=>{setBusy(true);setError("");try{await api("POST",`/functions/${fn.id}/prepare`,undefined,{warm:String(warm)});await onChanged();}catch(e){setError((e as Error).message);}finally{setBusy(false);}};
+ return <section className="border border-border rounded-lg p-3 text-sm" aria-label="Runtime preparation"><div className="flex flex-wrap items-center gap-3"><strong>Runtime: {state?.state || "preparing"}</strong><span className="text-text-muted">{state?.warm_workers ?? 0} warm workers</span><button disabled={busy||fn.status!=="active"} className="text-accent" onClick={()=>prepare(false)}>Prepare artifacts</button><button disabled={busy||fn.status!=="active"} className="text-accent" onClick={()=>prepare(true)}>Prepare and start worker</button></div><p className="text-xs text-text-muted mt-2">Preparation does not invoke the handler. Dependency scripts and module initialization may run when building or starting workers.</p>{(state?.state==="ready"||state?.state==="prepared")&&<p className="text-xs mt-2">Build {state.build_ms} ms · worker start {state.worker_start_ms} ms · {state.boot_validated?"Boot validated":"Artifacts prepared; worker not validated"}</p>}{(error||state?.error)&&<p role="alert" className="text-red mt-2">{error||state?.error}</p>}</section>;
 }

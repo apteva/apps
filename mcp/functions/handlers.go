@@ -141,6 +141,9 @@ func (a *App) handleHTTPFunctionItem(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) == 2 {
 		switch parts[1] {
+		case "prepare":
+			a.handleHTTPPrepare(w, r, id)
+			return
 		case "invocations":
 			if r.Method != http.MethodGet {
 				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -229,7 +232,7 @@ func (a *App) handleHTTPCreateFunction(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"function": fn})
+	httpJSON(w, map[string]any{"function": withReadiness(fn)})
 }
 
 func (a *App) handleHTTPGetFunction(w http.ResponseWriter, r *http.Request, id int64) {
@@ -250,7 +253,7 @@ func (a *App) handleHTTPGetFunction(w http.ResponseWriter, r *http.Request, id i
 	if r.URL.Query().Get("include_secrets") != "1" {
 		fn = maskFunction(fn)
 	}
-	httpJSON(w, map[string]any{"function": fn})
+	httpJSON(w, map[string]any{"function": withReadiness(fn)})
 }
 
 func (a *App) handleHTTPUpdateFunction(w http.ResponseWriter, r *http.Request, id int64) {
@@ -269,7 +272,7 @@ func (a *App) handleHTTPUpdateFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"function": fn})
+	httpJSON(w, map[string]any{"function": withReadiness(fn)})
 }
 
 // handleHTTPDeployFunction builds a new version and makes it active.
@@ -895,7 +898,7 @@ func (a *App) toolCreateContext(parent context.Context, ctx *sdk.AppCtx, args ma
 			"runtime": fn.Runtime,
 		})
 	}
-	return map[string]any{"function": fn}, nil
+	return map[string]any{"function": withReadiness(fn)}, nil
 }
 
 func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -914,7 +917,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if ctx != nil {
 		ctx.Emit("function.updated", map[string]any{"id": fn.ID, "name": fn.Name})
 	}
-	return map[string]any{"function": fn}, nil
+	return map[string]any{"function": withReadiness(fn)}, nil
 }
 
 // toolDeploy builds a new version of an existing function and makes
@@ -1037,7 +1040,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if args["include_secrets"] != true {
 		fn = maskFunction(fn)
 	}
-	return map[string]any{"function": fn, "found": true}, nil
+	return map[string]any{"function": withReadiness(fn), "found": true}, nil
 }
 
 func (a *App) toolInvoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1064,8 +1067,9 @@ func (a *App) toolInvokeContext(parent context.Context, ctx *sdk.AppCtx, args ma
 		"invocation_id": res.InvocationID,
 		"status":        res.Status,
 		"duration_ms":   res.DurationMS,
-		"exit_code":     res.ExitCode,
-		"response":      res.Response,
+		"build_ms":      res.BuildMS, "queue_ms": res.QueueMS, "cold_start_ms": res.ColdStartMS, "execution_ms": res.ExecutionMS,
+		"exit_code": res.ExitCode,
+		"response":  res.Response,
 	}
 	if res.Stderr != "" {
 		out["stderr"] = res.Stderr

@@ -17,6 +17,7 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Function struct {
+	RuntimeReadiness   *RuntimeReadiness  `json:"runtime_readiness,omitempty"`
 	InstanceKey        string             `json:"-"`
 	DeploymentRevision int64              `json:"-"`
 	Access             *FunctionAccess    `json:"access,omitempty"`
@@ -50,6 +51,7 @@ type FunctionURLConfig struct {
 // functions_deploy (and by functions_create for v1); built once;
 // becomes the function's active version on a successful build.
 type FunctionVersion struct {
+	Runtime            string `json:"-"`
 	ArtifactKey        string `json:"-"`
 	DeploymentRevision int64  `json:"-"`
 	PackageLock        string `json:"-"`
@@ -432,7 +434,7 @@ const fnVerColumns = `id, project_id, function_id, version,
 		source_kind, COALESCE(source,''), repo_id, COALESCE(repo_path,''),
 		source_hash, COALESCE(package_json,''),
 		build_status, COALESCE(build_log,''), COALESCE(build_dir,''),
-		created_at, artifact_key, deployment_revision, COALESCE(package_lock,'')`
+		created_at, artifact_key, deployment_revision, COALESCE(package_lock,''), (SELECT runtime FROM functions WHERE functions.id=function_id)`
 
 func scanVersion(row scanRow) (*FunctionVersion, error) {
 	v := &FunctionVersion{}
@@ -442,7 +444,7 @@ func scanVersion(row scanRow) (*FunctionVersion, error) {
 		&v.SourceKind, &v.Source, &repoID, &v.RepoPath,
 		&v.SourceHash, &v.PackageJSON,
 		&v.BuildStatus, &v.BuildLog, &v.BuildDir,
-		&v.CreatedAt, &v.ArtifactKey, &v.DeploymentRevision, &v.PackageLock)
+		&v.CreatedAt, &v.ArtifactKey, &v.DeploymentRevision, &v.PackageLock, &v.Runtime)
 	if err != nil {
 		return nil, err
 	}

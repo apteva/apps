@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,12 +38,80 @@ func versionDir(base string, v *FunctionVersion) string {
 	return filepath.Join(base, v.ArtifactKey, fmt.Sprintf("v%d-%s", v.Version, artifactHash(v)[:16]))
 }
 
-var harnessFingerprint = sync.OnceValue(func() string {
-	return hashSource([]byte(string(nodeHarness) + string(goHarness) + runtime.Version() + runtime.GOOS + runtime.GOARCH + toolchainFingerprint()))
-})
+// Runtime-specific, content-based compatibility survives toolchain relocation.
+// A Go or npm change does not invalidate dependency-free Node artifacts.
+var runtimeFingerprints sync.Map
 
+func runtimeFingerprint(kind string, dependencies bool) string {
+	key := fmt.Sprintf("%s/%t", kind, dependencies)
+	if cached, ok := runtimeFingerprints.Load(key); ok {
+		return cached.(string)
+	}
+	harness := nodeHarness
+	tools := []string{"node"}
+	if kind == "go" {
+		harness = goHarness
+		tools = []string{"go"}
+	} else if dependencies {
+		tools = append(tools, "npm")
+	}
+	parts := []string{"artifact-v2", kind, runtime.GOOS, runtime.GOARCH, string(harness)}
+	for _, name := range tools {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			parts = append(parts, name+":missing")
+			continue
+		}
+		parts = append(parts, name+":"+toolContentIdentity(path))
+		// npm's launcher can be unchanged when its implementation is upgraded.
+		if name == "npm" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			out, err := exec.CommandContext(ctx, path, "--version").Output()
+			cancel()
+			if err != nil {
+				parts = append(parts, "npm-version-unavailable")
+			} else {
+				parts = append(parts, string(out))
+			}
+		}
+	}
+	fingerprint := hashSource([]byte(strings.Join(parts, "\x00")))
+	actual, _ := runtimeFingerprints.LoadOrStore(key, fingerprint)
+	return actual.(string)
+}
+func toolContentIdentity(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "unavailable"
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err = io.Copy(h, f); err != nil {
+		return "unreadable"
+	}
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
 func artifactHash(v *FunctionVersion) string {
-	return hashSource([]byte(v.SourceHash + "\x00" + v.PackageJSON + "\x00" + harnessFingerprint()))
+	return hashSource([]byte(v.SourceHash + "\x00" + v.PackageJSON + "\x00" + runtimeFingerprint(v.Runtime, strings.TrimSpace(v.PackageJSON) != "")))
+}
+
+// Validate the expected files, not just an in-memory flag or a stale DB path.
+func artifactAvailable(dir string, v *FunctionVersion) bool {
+	b, err := os.ReadFile(filepath.Join(dir, ".ready"))
+	if err != nil || string(b) != artifactHash(v) {
+		return false
+	}
+	files := []string{"entry.mjs", "node_harness.mjs"}
+	if v.Runtime == "go" {
+		files = []string{"entry.go", "worker"}
+	}
+	for _, name := range files {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+	}
+	return true
 }
 
 // ensureBuilt makes sure version v's artifact dir exists and is fully
@@ -61,7 +131,7 @@ func ensureBuiltContext(ctx context.Context, base string, v *FunctionVersion, sp
 	}
 	dir := versionDir(base, v)
 	if p != nil {
-		if _, ok := p.artifacts.Load(dir); ok {
+		if _, ok := p.artifacts.Load(dir); ok && artifactAvailable(dir, v) {
 			return dir, nil
 		}
 	}
@@ -70,8 +140,7 @@ func ensureBuiltContext(ctx context.Context, base string, v *FunctionVersion, sp
 		return "", err
 	}
 	defer release()
-	marker := filepath.Join(dir, ".ready")
-	if contents, err := os.ReadFile(marker); err == nil && string(contents) == artifactHash(v) {
+	if artifactAvailable(dir, v) {
 		if p != nil {
 			p.artifacts.Store(dir, true)
 		}
@@ -104,6 +173,9 @@ func ensureBuiltContext(ctx context.Context, base string, v *FunctionVersion, sp
 		if err := os.WriteFile(filepath.Join(tmp, "package-lock.json"), []byte(v.PackageLock), 0600); err != nil {
 			return "", err
 		}
+	}
+	if p != nil {
+		p.artifactBuilds.Add(1)
 	}
 	if err := spec.Build(ctx, tmp, v.PackageJSON); err != nil {
 		return "", err
@@ -344,25 +416,3 @@ func removeTree(root string) error {
 	})
 	return os.RemoveAll(root)
 }
-
-// Binary identity changes on toolchain upgrades without spawning a process on
-// every invocation. One snapshot is taken per sidecar process.
-var toolchainFingerprint = sync.OnceValue(func() string {
-	var parts []string
-	for _, name := range []string{"node", "go", "npm"} {
-		path, err := exec.LookPath(name)
-		if err != nil {
-			continue
-		}
-		resolved, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			continue
-		}
-		info, err := os.Stat(resolved)
-		if err != nil {
-			continue
-		}
-		parts = append(parts, fmt.Sprintf("%s:%s:%d:%d", name, resolved, info.Size(), info.ModTime().UnixNano()))
-	}
-	return hashSource([]byte(strings.Join(parts, "\n")))
-})

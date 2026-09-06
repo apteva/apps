@@ -1,4 +1,4 @@
-// Functions v1.8.1 — Lambda-style serverless functions.
+// Functions v1.9.0 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -117,6 +117,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "functions_prepare", Description: "Prepare the active runtime artifact without invoking the handler. Optional warm (default true) boots and validates a worker; module initialization and dependency build scripts may run. wait (default false) waits for preparation.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}, "warm": map[string]any{"type": "boolean"}, "wait": map[string]any{"type": "boolean"}}}, HandlerCtx: a.toolPrepare},
 		{
 			Name:        "functions_create",
 			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?.",

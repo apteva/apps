@@ -3,7 +3,7 @@ package main
 import "fmt"
 
 func maskFunction(fn *Function) *Function {
-	c := *fn
+	c := *withReadiness(fn)
 	c.Env = map[string]string{}
 	for k := range fn.Env {
 		c.Env[k] = "[redacted]"

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.8.1
+version: 1.9.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -11,6 +11,10 @@ description: |
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
+
+  v1.9.0 prepares active functions in the background after startup, reports
+  runtime readiness and preparation failures, and reuses compatible artifacts
+  across restarts and restores. Includes safe handler-free preparation tools.
 
   v1.8.1 recovers interrupted 1.8.0 schema upgrades atomically and reports
   startup progress with an extended migration budget.
@@ -49,6 +53,8 @@ provides:
     - prefix: /url/
       no_auth: true
   mcp_tools:
+    - name: functions_prepare
+      description: "Prepare active runtime artifacts without invoking the handler. Args: id or name, warm (default true) to start a worker, wait (default false). Initialization and build scripts can run."
     - name: functions_create
       description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?."
     - name: functions_update

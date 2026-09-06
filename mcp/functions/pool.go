@@ -36,6 +36,12 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	initialPreparationScan                                   chan struct{}
+	artifactBuilds                                           atomic.Uint64
+	prepareMu                                                sync.Mutex
+	prepareWG                                                sync.WaitGroup
+	preparations                                             map[string]*preparation
+	prepareHigh, prepareNormal                               chan *preparation
 	versionRefs                                              map[string]int
 	collecting                                               map[string]bool
 	goCacheMu                                                sync.Mutex
@@ -106,6 +112,7 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		removeTree(stage)
 		return nil, err
 	}
+	p.startPreparation()
 	go p.reapLoop()
 	return p, nil
 }
@@ -304,6 +311,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	t.execution = time.Since(executionStart)
 	if err == nil && w.alive() {
 		p.put(fn, fp, w)
+		p.markBootValidated(fn, t.cold)
 	} else {
 		p.discard(w)
 	}
@@ -429,6 +437,9 @@ func (p *pool) activateVersion(fnID, versionID int64) {
 	}
 }
 func (p *pool) removeFunction(fn *Function) {
+	p.prepareMu.Lock()
+	delete(p.preparations, fn.InstanceKey)
+	p.prepareMu.Unlock()
 	p.functions.Delete(functionCacheKey(fn.ProjectID, fn.ID, ""))
 	p.functions.Delete(functionCacheKey(fn.ProjectID, 0, fn.Name))
 	p.versions.Range(func(k, v any) bool {
@@ -528,6 +539,7 @@ func (p *pool) shutdown() {
 	for _, w := range workers {
 		p.discard(w)
 	}
+	p.prepareWG.Wait()
 	_ = removeTree(p.stageDir)
 }
 func (p *pool) retainInvocations() {

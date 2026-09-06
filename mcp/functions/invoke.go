@@ -24,14 +24,15 @@ const (
 // columns recorded on function_invocations plus the bits the MCP /
 // HTTP handlers surface to callers.
 type invokeResult struct {
-	InvocationID int64
-	Status       string // ok | error | timeout
-	ExitCode     int
-	DurationMS   int64
-	Response     string
-	Stderr       string
-	Error        string
-	Streamed     bool
+	BuildMS, QueueMS, ColdStartMS, ExecutionMS int64
+	InvocationID                               int64
+	Status                                     string // ok | error | timeout
+	ExitCode                                   int
+	DurationMS                                 int64
+	Response                                   string
+	Stderr                                     string
+	Error                                      string
+	Streamed                                   bool
 }
 
 // invocationStream receives response metadata and body chunks while a worker
@@ -98,14 +99,27 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		}
 		deadline, hasDeadline := invokeCtx.Deadline()
 		if invokeCtx.Err() != nil || hasDeadline && !time.Now().Before(deadline) {
-			res.Status = "timeout"
 			res.ExitCode = -1
-			if invokeCtx.Err() != nil {
-				res.Error = invokeCtx.Err().Error()
-			} else {
-				res.Error = context.DeadlineExceeded.Error()
+			switch {
+			case parent.Err() == context.Canceled:
+				res.Status = "canceled"
+				res.Error = "Caller canceled the invocation"
+			case parent.Err() == context.DeadlineExceeded:
+				res.Status = "upstream_timeout"
+				res.Error = "Upstream request deadline exceeded"
+			case p.life.Err() != nil:
+				res.Status = "canceled"
+				res.Error = "Functions runtime stopped"
+			default:
+				res.Status = "timeout"
+				res.Error = "Function execution deadline exceeded"
 			}
 		}
+		res.BuildMS = timings.build.Milliseconds()
+		res.QueueMS = timings.queue.Milliseconds()
+		res.ColdStartMS = timings.cold.Milliseconds()
+		res.ExecutionMS = timings.execution.Milliseconds()
+
 		res.InvocationID = id
 		res.DurationMS = time.Since(started).Milliseconds()
 		res.Stderr = redactSecrets(res.Stderr, fn.Env)
@@ -143,19 +157,14 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		return nil, err
 	}
 	defer releaseVersion()
-	if _, built := p.artifacts.Load(dir); !built {
-		buildStart := time.Now()
-
-		src, err := resolveVersionSourceContext(invokeCtx, ctx, v)
-		if err != nil {
-			return nil, err
-		}
-		dir, err = ensureBuiltContext(invokeCtx, p.buildBase, v, spec, src)
-		timings.build = time.Since(buildStart)
-		if err != nil {
-			return nil, err
-		}
+	// Preparation is owned by the runtime, not the customer request. Concurrent
+	// callers share one bounded job; cancellation only stops this caller's wait.
+	prepStart := time.Now()
+	if err := p.awaitPreparation(invokeCtx, fn); err != nil {
+		return nil, err
 	}
+	timings.build = time.Since(prepStart)
+
 	return p.invoke(ctx, invokeCtx, fn, v, spec, dir, json.RawMessage(eventBytes), timeout, stream)
 }
 

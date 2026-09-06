@@ -111,6 +111,7 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 		}
 		p.refreshFunction(updated)
 		p.put(updated, p.poolFor(fn.ID), candidate)
+		p.markPrepared(updated, ver)
 	}
 	ctx.WithProject(fn.ProjectID).Emit("function.deployed", map[string]any{"id": fn.ID, "version": ver.Version})
 	return ver, nil
@@ -188,6 +189,7 @@ func rollbackFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string
 		p.refreshFunction(updated)
 		if updated != nil {
 			p.put(updated, p.poolFor(fnID), candidate)
+			p.markPrepared(updated, ver)
 			kept = true
 		}
 	}
