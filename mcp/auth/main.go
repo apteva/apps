@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.11.0
+version: 0.11.1
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -52,6 +52,10 @@ description: |
   implemented; accounts requiring MFA fail closed. v0.11.0 invalidates old
   sessions and recovery links and requires login after recovery.
 author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/auth
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [auth, identity, jwt, rbac, security, saas]
 scopes: [project]
 min_apteva_version: "0.14.1"
 requires:
