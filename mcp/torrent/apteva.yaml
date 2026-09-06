@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: torrent
 display_name: Torrent
-version: 0.2.3
+version: 0.2.4
 description: |
   BitTorrent client + indexer-search frontend. Search across
   configured Jackett / Prowlarr / RSS sources, add downloads by
@@ -44,7 +44,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: torrent_search,            description: "Fan-out search across configured indexers; dedupe by infohash; rank by seeders. Args: query, category?, min_seeders?, sort?." }
+    - { name: torrent_search,            description: "Search keywords across configured indexers, or resolve magnet/infohash metadata through peers and DHT without downloading files (up to 25 seconds). Native availability is unknown; filters apply to keywords. Args: query, category?, min_seeders?, sort?." }
     - { name: torrent_search_save,       description: "Save a recurring search. Matching results auto-add to the queue if auto_add_top_n>0; otherwise just emit torrent.search_match. Args: name?, query, category?, min_seeders?, max_size_bytes?, exclude_terms?, auto_add_top_n?, run_interval_minutes?." }
     - { name: torrent_search_save_list,  description: "List saved searches." }
     - { name: torrent_search_save_delete,description: "Delete a saved search by id." }
@@ -67,7 +67,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: torrent/v0.2.4
     entry: mcp/torrent
   port: 8080
   health_check: /health

@@ -32,13 +32,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/anacrolix/torrent"
 	"github.com/anacrolix/torrent/metainfo"
-	"github.com/anacrolix/torrent/storage"
 	"github.com/anacrolix/torrent/types"
 	"golang.org/x/sys/unix"
 	"golang.org/x/time/rate"
@@ -219,7 +219,7 @@ func NewEngine(cfg EngineConfig, log func(string, string)) (*Engine, error) {
 	tcfg.NoUpload = false
 	tcfg.ListenPort = cfg.ListenPort
 	tcfg.NoDHT = !cfg.DHTEnabled
-	tcfg.DisableAcceptRateLimiting = true
+	tcfg.DisableAcceptRateLimiting = false
 	if cfg.GlobalDownKiBps > 0 {
 		bps := cfg.GlobalDownKiBps * 1024
 		tcfg.DownloadRateLimiter = rate.NewLimiter(rate.Limit(bps), max(64<<10, min(bps, 1<<20)))
@@ -247,7 +247,8 @@ func NewEngine(cfg EngineConfig, log func(string, string)) (*Engine, error) {
 
 	// File storage resumes completed pieces from the bytes already in
 	// working_dir after the DB-backed torrent definitions are re-added.
-	tcfg.DefaultStorage = storage.NewFile(cfg.WorkingDir)
+	// Leave DefaultStorage nil: the client creates file storage and owns its close.
+	// Passing a custom file store here leaked the piece-completion DB on shutdown.
 
 	cli, err := torrent.NewClient(tcfg)
 	if err != nil && cfg.ListenPort != 0 {
@@ -302,6 +303,9 @@ func (e *Engine) Close() { e.cli.Close() }
 // infohash — re-adding an existing torrent returns the existing
 // handle and snapshot.
 func (e *Engine) AddMagnet(magnet string) (*TorrentSnapshot, error) {
+	if infohashFromMagnet(magnet) == "" {
+		return nil, errors.New("a valid v1 or hybrid magnet with a btih hash is required")
+	}
 	t, err := e.cli.AddMagnet(magnet)
 	if err != nil {
 		return nil, err
@@ -314,7 +318,7 @@ func (e *Engine) AddMagnet(magnet string) (*TorrentSnapshot, error) {
 // indexers split them).
 func (e *Engine) AddInfohash(hex string) (*TorrentSnapshot, error) {
 	var hash metainfo.Hash
-	if err := hash.FromHexString(strings.TrimSpace(hex)); err != nil {
+	if err := hash.FromHexString(normalizeInfohash(hex)); err != nil {
 		return nil, fmt.Errorf("invalid infohash: %w", err)
 	}
 	t, _ := e.cli.AddTorrentInfoHash(hash)
@@ -347,6 +351,13 @@ func (e *Engine) AddTorrentURL(rawURL string) (*TorrentSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	info, err := mi.UnmarshalInfo()
+	if err != nil {
+		return nil, err
+	}
+	if !info.HasV1() {
+		return nil, errors.New("v2-only torrents are not supported; use a v1 or hybrid torrent")
+	}
 	t, err := e.cli.AddTorrent(mi)
 	if err != nil {
 		return nil, err
@@ -367,6 +378,7 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 			infohash:     hash,
 			addedAt:      time.Now().UTC(),
 			prevState:    "queued",
+			queued:       true,
 			priorityHint: map[int]types.PiecePriority{},
 		}
 		e.torrents[hash] = mt
@@ -381,12 +393,12 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 	go func() {
 		select {
 		case <-t.GotInfo():
-			e.onMetadataReady(hash)
+			e.onMetadataReadyTorrent(hash, t)
 		case <-time.After(60 * time.Second):
 			// Magnet didn't resolve in time. Engine keeps trying;
 			// surface the wait as an error in snapshots.
 			e.mu.Lock()
-			if mt, ok := e.torrents[hash]; ok && mt.lastErr == "" {
+			if mt, ok := e.torrents[hash]; ok && mt.t == t && mt.lastErr == "" {
 				mt.lastErr = "info not received yet (peers / DHT may be cold)"
 			}
 			e.mu.Unlock()
@@ -395,7 +407,7 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 			// app restart.
 			select {
 			case <-t.GotInfo():
-				e.onMetadataReady(hash)
+				e.onMetadataReadyTorrent(hash, t)
 			case <-t.Closed():
 			}
 		case <-t.Closed():
@@ -406,11 +418,14 @@ func (e *Engine) track(t *torrent.Torrent) *TorrentSnapshot {
 	return e.Snapshot(hash)
 }
 
-func (e *Engine) onMetadataReady(infohash string) {
+func (e *Engine) onMetadataReadyTorrent(infohash string, expected *torrent.Torrent) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	mt, ok := e.torrents[infohash]
 	if !ok {
+		return
+	}
+	if mt.t != expected {
 		return
 	}
 	mt.lastErr = ""
@@ -425,8 +440,7 @@ func (e *Engine) onMetadataReady(infohash string) {
 	if e.downloadSlotAvailableLocked(mt) {
 		e.startDownloadLocked(mt)
 	} else {
-		mt.queued = true
-		mt.t.SetMaxEstablishedConns(0)
+		e.queueDownloadLocked(mt)
 	}
 }
 
@@ -436,10 +450,10 @@ func (e *Engine) downloadSlotAvailableLocked(candidate *managedTorrent) bool {
 	}
 	active := 0
 	for _, mt := range e.torrents {
-		if mt == candidate || mt.paused || mt.queued || mt.seedStopped || mt.t.Info() == nil {
+		if mt == candidate || mt.paused || mt.queued || mt.seedStopped || mt.lastErr != "" || mt.t.Info() == nil {
 			continue
 		}
-		if mt.t.BytesMissing() > 0 {
+		if _, _, missing := selectedProgress(mt); missing > 0 {
 			active++
 		}
 	}
@@ -448,47 +462,95 @@ func (e *Engine) downloadSlotAvailableLocked(candidate *managedTorrent) bool {
 
 func (e *Engine) startDownloadLocked(mt *managedTorrent) {
 	mt.queued = false
+	mt.lastErr = ""
 	mt.t.SetMaxEstablishedConns(80)
-	files := mt.t.Files()
-	for i, f := range files {
-		if p, ok := mt.priorityHint[i]; ok {
-			f.SetPriority(p)
-		}
+	mt.t.AllowDataDownload()
+	if !mt.seedStopped {
+		mt.t.AllowDataUpload()
 	}
-	mt.t.DownloadAll()
-	for i, f := range files {
-		if p, ok := mt.priorityHint[i]; ok {
-			f.SetPriority(p)
+	// DownloadAll sets explicit piece priorities, which override file-level skip.
+	// Set only file priorities so selective downloads and pause actually work.
+	for i, f := range mt.t.Files() {
+		p, ok := mt.priorityHint[i]
+		if !ok {
+			p = types.PiecePriorityNormal
 		}
+		f.SetPriority(p)
 	}
 }
 
 func (e *Engine) startQueuedLocked() {
+	queue := make([]*managedTorrent, 0)
 	for _, mt := range e.torrents {
-		if !mt.queued || mt.paused || mt.lastErr != "" || mt.t.Info() == nil {
-			continue
+		if mt.queued && !mt.paused && mt.lastErr == "" && mt.t.Info() != nil {
+			queue = append(queue, mt)
 		}
+	}
+	sort.Slice(queue, func(i, j int) bool { return queue[i].addedAt.Before(queue[j].addedAt) })
+	for _, mt := range queue {
 		if !e.downloadSlotAvailableLocked(mt) {
 			return
+		}
+		if !e.hasDiskCapacityLocked(mt) {
+			continue
 		}
 		e.startDownloadLocked(mt)
 	}
 }
 
-func (e *Engine) hasDiskCapacityLocked(mt *managedTorrent) bool {
-	pct := e.cfg.FreeDiskSafetyPercent
-	if pct <= 0 || mt.t.Info() == nil {
-		return true
+// Selected files determine progress and completion, not skipped bytes.
+func selectedProgress(mt *managedTorrent) (length, completed, missing int64) {
+	if mt.t.Info() == nil {
+		return
 	}
-	if pct >= 100 {
-		return false
+	hasSkip := false
+	for _, p := range mt.priorityHint {
+		if p == types.PiecePriorityNone {
+			hasSkip = true
+			break
+		}
+	}
+	if !hasSkip {
+		return mt.t.Length(), mt.t.BytesCompleted(), mt.t.BytesMissing()
+	}
+	for i, f := range mt.t.Files() {
+		if p, ok := mt.priorityHint[i]; ok && p == types.PiecePriorityNone {
+			continue
+		}
+		length += f.Length()
+		completed += f.BytesCompleted()
+	}
+	missing = max(int64(0), length-completed)
+	return
+}
+
+func (e *Engine) hasDiskCapacityLocked(mt *managedTorrent) bool {
+	if mt.t.Info() == nil {
+		return true
 	}
 	free, err := availableDiskBytes(e.cfg.WorkingDir)
 	if err != nil {
 		return false
 	}
-	missing := mt.t.BytesMissing()
-	return missing <= free*int64(100-pct)/100
+	_, _, required := selectedProgress(mt)
+	// Reserve remaining bytes for downloads already admitted to the queue.
+	for _, other := range e.torrents {
+		if other == mt || other.paused || other.queued || other.lastErr != "" {
+			continue
+		}
+		_, _, missing := selectedProgress(other)
+		required += missing
+	}
+	return required <= free*int64(100-e.cfg.FreeDiskSafetyPercent)/100
+}
+
+func (e *Engine) queueDownloadLocked(mt *managedTorrent) {
+	mt.queued = true
+	mt.t.DisallowDataDownload()
+	mt.t.SetMaxEstablishedConns(0)
+	for _, f := range mt.t.Files() {
+		f.SetPriority(types.PiecePriorityNone)
+	}
 }
 
 // RestoreState reapplies persisted user intent after the torrent is
@@ -500,6 +562,7 @@ func (e *Engine) RestoreState(infohash string, paused bool, priorities map[int]s
 	if !ok {
 		return
 	}
+	mt.priorityHint = map[int]types.PiecePriority{}
 	for i, value := range priorities {
 		if p, err := parsePriority(value); err == nil {
 			mt.priorityHint[i] = p
@@ -507,6 +570,8 @@ func (e *Engine) RestoreState(infohash string, paused bool, priorities map[int]s
 	}
 	mt.paused = paused
 	if paused {
+		mt.t.DisallowDataDownload()
+		mt.t.DisallowDataUpload()
 		mt.queued = false
 		mt.t.SetMaxEstablishedConns(0)
 		if mt.t.Info() != nil {
@@ -515,11 +580,18 @@ func (e *Engine) RestoreState(infohash string, paused bool, priorities map[int]s
 			}
 		}
 	} else if mt.t.Info() != nil {
-		if e.downloadSlotAvailableLocked(mt) {
+		if _, _, missing := selectedProgress(mt); missing > 0 {
+			mt.seedStopped = false
+			mt.completedAt = time.Time{}
+		}
+		if e.downloadSlotAvailableLocked(mt) && e.hasDiskCapacityLocked(mt) {
 			e.startDownloadLocked(mt)
 		} else {
-			mt.queued = true
+			e.queueDownloadLocked(mt)
 		}
+	} else {
+		mt.queued = true
+		mt.t.SetMaxEstablishedConns(80)
 	}
 }
 
@@ -540,6 +612,8 @@ func (e *Engine) Pause(infohash string) error {
 			f.SetPriority(types.PiecePriorityNone)
 		}
 	}
+	mt.t.DisallowDataDownload()
+	mt.t.DisallowDataUpload()
 	mt.t.SetMaxEstablishedConns(0)
 	mt.paused = true
 	mt.queued = false
@@ -560,14 +634,15 @@ func (e *Engine) Resume(infohash string) error {
 		return nil
 	}
 	mt.paused = false
+	mt.lastErr = ""
 	if mt.t.Info() == nil {
 		mt.t.SetMaxEstablishedConns(80)
 		return nil
 	}
-	if e.downloadSlotAvailableLocked(mt) {
+	if e.downloadSlotAvailableLocked(mt) && e.hasDiskCapacityLocked(mt) {
 		e.startDownloadLocked(mt)
 	} else {
-		mt.queued = true
+		e.queueDownloadLocked(mt)
 	}
 	return nil
 }
@@ -620,8 +695,18 @@ func (e *Engine) SetFilePriority(infohash string, fileIndex int, priority string
 	if fileIndex < 0 || fileIndex >= len(files) {
 		return fmt.Errorf("file_index %d out of range (0..%d)", fileIndex, len(files)-1)
 	}
-	files[fileIndex].SetPriority(prio)
 	mt.priorityHint[fileIndex] = prio
+	if _, _, missing := selectedProgress(mt); missing > 0 {
+		mt.seedStopped = false
+		mt.completedAt = time.Time{}
+	}
+	if !mt.paused && !mt.queued && mt.lastErr == "" {
+		if e.downloadSlotAvailableLocked(mt) && e.hasDiskCapacityLocked(mt) {
+			e.startDownloadLocked(mt)
+		} else {
+			e.queueDownloadLocked(mt)
+		}
+	}
 	return nil
 }
 
@@ -724,9 +809,7 @@ func (e *Engine) snapshotLocked(mt *managedTorrent, now time.Time) *TorrentSnaps
 	missing := int64(0)
 	progress := 0.0
 	if hasInfo {
-		length = t.Length()
-		completed = t.BytesCompleted()
-		missing = t.BytesMissing()
+		length, completed, missing = selectedProgress(mt)
 		if length > 0 {
 			progress = float64(completed) / float64(length)
 		}
@@ -806,9 +889,10 @@ func (e *Engine) pollTransitions() {
 	for _, mt := range e.torrents {
 		if mt.lastErr == "insufficient free disk for torrent and configured safety margin" && e.hasDiskCapacityLocked(mt) {
 			mt.lastErr = ""
-			mt.queued = true
+			e.queueDownloadLocked(mt)
 		}
-		if mt.t.Info() != nil && mt.t.BytesMissing() == 0 {
+		length, _, missing := selectedProgress(mt)
+		if mt.t.Info() != nil && missing == 0 && length > 0 && !mt.paused {
 			if mt.completedAt.IsZero() {
 				mt.completedAt = now.UTC()
 			}

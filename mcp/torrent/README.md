@@ -38,11 +38,33 @@ you download is entirely up to you, and entirely your responsibility.
 4. Open the *Downloads* tab, click `+ add torrent`, paste a magnet,
    or use *Searches* to run a query and pick a result.
 
+## Native lookup and search
+
+Paste a magnet URI or a 40-character hex / 32-character base32 infohash into
+Search (or `torrent_search.query`) to resolve its name and size directly from
+BitTorrent peers using BEP 9 metadata exchange and DHT peer discovery. No indexer
+is needed. Lookups are limited to two at a time, time out after 25 seconds, and
+use isolated temporary clients that never request file payload. They preserve
+`bind_interface` and DHT settings. Seed/leech counts are unknown, so category
+and minimum-seeder filters apply only to keyword searches. A hash requires DHT;
+a magnet may also supply trackers or explicit peers. v1 and hybrid torrents
+are supported; v2-only torrents are rejected explicitly.
+
+DHT is a hash-to-peer lookup system, not a keyword search service. Network-wide
+keyword search requires a continuously maintained metadata catalog, for example
+a BEP 51 crawler plus BEP 9 metadata collection and a local text index. This app
+does not run a crawler. Keyword queries use your configured indexers.
+
+ApiBay accepts either a host URL or a full `/q.php` URL, including proxy paths
+and query parameters. An HTML/block/challenge response is surfaced as an
+upstream error rather than an empty result list. ApiBay availability can differ
+between the desktop and the server hosting the app.
+
 ## MCP tools (13)
 
 | Tool | Purpose |
 |---|---|
-| `torrent_search` | Fan out across indexers, dedupe by infohash, rank by seeders |
+| `torrent_search` | Keyword search via indexers, or native magnet/hash metadata lookup |
 | `torrent_search_save` | Save a search to run on a schedule |
 | `torrent_search_save_list` / `..._delete` | Manage saved searches |
 | `torrent_add` | Start a download (magnet / infohash / .torrent URL) |
@@ -80,8 +102,8 @@ Three apps composing without any direct knowledge of each other.
 ## Open questions / caveats
 
 1. **Legal posture.** This is a tool. The user supplies sources and
-   chooses what to download. We don't ship indexers, lists, or
-   recommendations.
+   chooses what to download. ApiBay is the default source; no curated
+   lists or download recommendations are supplied.
 
 2. **NAT / port forwarding.** The default listen port is
    kernel-assigned. Configure a fixed `listen_port` and forward that

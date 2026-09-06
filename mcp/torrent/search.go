@@ -44,17 +44,18 @@ import (
 
 // SearchResult is the agent-facing normalised shape.
 type SearchResult struct {
-	Name        string `json:"name"`
-	Infohash    string `json:"infohash"`
-	Magnet      string `json:"magnet"`
-	TorrentURL  string `json:"torrent_url,omitempty"`
-	SizeBytes   int64  `json:"size_bytes"`
-	Seeders     int    `json:"seeders"`
-	Leechers    int    `json:"leechers"`
-	PublishedAt string `json:"published_at,omitempty"`
-	Category    string `json:"category,omitempty"`
-	Indexer     string `json:"indexer"`
-	Tracker     string `json:"tracker,omitempty"`
+	AvailabilityUnknown bool   `json:"availability_unknown,omitempty"`
+	Name                string `json:"name"`
+	Infohash            string `json:"infohash"`
+	Magnet              string `json:"magnet"`
+	TorrentURL          string `json:"torrent_url,omitempty"`
+	SizeBytes           int64  `json:"size_bytes"`
+	Seeders             int    `json:"seeders"`
+	Leechers            int    `json:"leechers"`
+	PublishedAt         string `json:"published_at,omitempty"`
+	Category            string `json:"category,omitempty"`
+	Indexer             string `json:"indexer"`
+	Tracker             string `json:"tracker,omitempty"`
 }
 
 // Search is the top-level aggregator. minSeeders=0 disables the
@@ -78,12 +79,17 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 	if pid == "" {
 		return nil, errors.New("torrent: missing project context")
 	}
-	// A project created after a global app process started may not have
-	// passed through the one-shot initializer yet. Repair that first-use
-	// race lazily so search remains zero-configuration.
+	if magnet, native, err := nativeMagnet(query); native {
+		if err != nil {
+			return nil, err
+		}
+		return a.engine.resolveMetadata(ctx, magnet)
+	}
+	// Preserve zero-configuration keyword search for new projects.
 	if _, err := ensureDefaultIndexer(a.ctx.AppDB(), pid); err != nil {
 		return nil, fmt.Errorf("initialize default indexer: %w", err)
 	}
+
 	indexers, err := listIndexers(a.ctx.AppDB(), pid, true)
 	if err != nil {
 		return nil, err
@@ -92,7 +98,7 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 		return nil, fmt.Errorf("no enabled indexers — add at least one in the panel's Indexers tab")
 	}
 
-	timeout := time.Duration(configInt(a.ctx, "indexer_query_timeout_seconds", 8)) * time.Second
+	timeout := time.Duration(max(1, min(60, configInt(a.ctx, "indexer_query_timeout_seconds", 8)))) * time.Second
 	cctx, cancel := context.WithTimeout(ctx, timeout+2*time.Second)
 	defer cancel()
 
@@ -120,7 +126,12 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 	succeeded := 0
 	failures := make([]string, 0, len(indexers))
 	for i := 0; i < len(indexers); i++ {
-		out := <-resCh
+		var out indexerOutcome
+		select {
+		case out = <-resCh:
+		case <-cctx.Done():
+			return nil, cctx.Err()
+		}
 		if out.err != nil {
 			a.ctx.Logger().Warn("indexer", "name", out.name, "err", out.err.Error())
 			failures = append(failures, out.name+": "+out.err.Error())
@@ -156,6 +167,12 @@ func (a *App) searchIndexers(ctx context.Context, appCtx *sdk.AppCtx, query, cat
 }
 
 func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category string, timeout time.Duration) ([]SearchResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := a.acquireSearchSlot(ctx); err != nil {
+		return nil, err
+	}
+	defer func() { <-a.searchSlots }()
 	apiKey, err := decryptSecret(ix.APIKeyEnc)
 	if err != nil {
 		return nil, fmt.Errorf("api key: %w", err)
@@ -178,19 +195,19 @@ func (a *App) queryIndexer(ctx context.Context, ix Indexer, query, category stri
 // ─── Apibay (TPB public JSON) ───────────────────────────────────────
 //
 // apibay.org/q.php is The Pirate Bay's public JSON search frontend.
-// No API key or self-hosting is required, but it is never configured
-// automatically. Users can add it explicitly like any other source.
+// No API key or self-hosting is required. Fresh projects receive this
+// default source; existing configured sources are preserved.
 
 type apibayItem struct {
-	Name     string `json:"name"`
-	InfoHash string `json:"info_hash"`
-	Seeders  string `json:"seeders"`
-	Leechers string `json:"leechers"`
-	NumFiles string `json:"num_files"`
-	Size     string `json:"size"`
-	Added    string `json:"added"`
-	Category string `json:"category"`
-	Username string `json:"username"`
+	Name     string         `json:"name"`
+	InfoHash string         `json:"info_hash"`
+	Seeders  flexibleString `json:"seeders"`
+	Leechers flexibleString `json:"leechers"`
+	NumFiles flexibleString `json:"num_files"`
+	Size     flexibleString `json:"size"`
+	Added    flexibleString `json:"added"`
+	Category flexibleString `json:"category"`
+	Username string         `json:"username"`
 }
 
 // publicTrackers — UDP tracker list grafted onto apibay magnets.
@@ -209,41 +226,42 @@ func queryApibay(ctx context.Context, httpc *http.Client, baseURL, query, catego
 	if baseURL == "" {
 		baseURL = "https://apibay.org"
 	}
-	u := strings.TrimRight(baseURL, "/") + "/q.php?cat=0&q=" + url.QueryEscape(query)
-	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
-	resp, err := httpc.Do(req)
+	u, err := indexerURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("apibay status %d", resp.StatusCode)
+	if !strings.HasSuffix(u.Path, "/q.php") {
+		u.Path = strings.TrimRight(u.Path, "/") + "/q.php"
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
+	q := u.Query()
+	q.Set("q", query)
+	q.Set("cat", "0")
+	u.RawQuery = q.Encode()
+	body, err := getJSON(ctx, httpc, u.String())
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apibay: %w", err)
 	}
-	if len(body) > 10<<20 {
-		return nil, errors.New("apibay response exceeds 10 MiB")
+	if strings.HasPrefix(strings.TrimSpace(string(body)), "<") {
+		return nil, errors.New("apibay returned HTML instead of JSON (upstream block or challenge); check the source URL or use another indexer")
 	}
 	var items []apibayItem
 	if err := json.Unmarshal(body, &items); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("apibay invalid JSON: %w", err)
 	}
 	out := make([]SearchResult, 0, len(items))
 	for _, it := range items {
 		// apibay returns one synthetic row when there are no matches.
 		if it.Name == "No results returned" || it.InfoHash == "" || it.InfoHash == "0000000000000000000000000000000000000000" {
-			break
+			continue
 		}
-		seeders, _ := strconv.Atoi(it.Seeders)
-		leechers, _ := strconv.Atoi(it.Leechers)
-		size, _ := strconv.ParseInt(it.Size, 10, 64)
+		seeders, _ := strconv.Atoi(string(it.Seeders))
+		leechers, _ := strconv.Atoi(string(it.Leechers))
+		size, _ := strconv.ParseInt(string(it.Size), 10, 64)
 		published := ""
-		if ts, err := strconv.ParseInt(it.Added, 10, 64); err == nil && ts > 0 {
+		if ts, err := strconv.ParseInt(string(it.Added), 10, 64); err == nil && ts > 0 {
 			published = time.Unix(ts, 0).UTC().Format(time.RFC3339)
 		}
-		normalizedCategory := apibayCategory(it.Category)
+		normalizedCategory := apibayCategory(string(it.Category))
 		if category != "" && normalizedCategory != strings.ToLower(category) {
 			continue
 		}
@@ -281,6 +299,9 @@ func apibayCategory(cat string) string {
 	if cat == "" {
 		return ""
 	}
+	if cat == "601" {
+		return "book"
+	}
 	if cat == "205" || cat == "208" {
 		return "tv"
 	}
@@ -314,12 +335,17 @@ type jackettResp struct {
 }
 
 func queryJackett(ctx context.Context, httpc *http.Client, baseURL, apiKey, query, category, indexer string) ([]SearchResult, error) {
-	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	u, err := indexerURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(u.Path, "/results") {
-		u.Path = strings.TrimRight(u.Path, "/") + "/api/v2.0/indexers/all/results"
+	u.Path = strings.TrimRight(u.Path, "/")
+	if !strings.HasSuffix(u.Path, "/results") {
+		if strings.Contains(u.Path, "/api/v2.0/indexers/") {
+			u.Path += "/results"
+		} else {
+			u.Path += "/api/v2.0/indexers/all/results"
+		}
 	}
 	q := u.Query()
 	q.Set("apikey", apiKey)
@@ -397,12 +423,15 @@ type prowlarrResult struct {
 }
 
 func queryProwlarr(ctx context.Context, httpc *http.Client, baseURL, apiKey, query, category, indexer string) ([]SearchResult, error) {
-	u, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	u, err := indexerURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
-	if !strings.Contains(u.Path, "/api/v1") {
-		u.Path = strings.TrimRight(u.Path, "/") + "/api/v1/search"
+	u.Path = strings.TrimRight(u.Path, "/")
+	if strings.HasSuffix(u.Path, "/api/v1") {
+		u.Path += "/search"
+	} else if !strings.HasSuffix(u.Path, "/api/v1/search") {
+		u.Path += "/api/v1/search"
 	}
 	q := u.Query()
 	q.Set("apikey", apiKey)
@@ -479,8 +508,9 @@ type torznabItem struct {
 	PubDate   string `xml:"pubDate"`
 	Size      int64  `xml:"size"`
 	Enclosure struct {
-		URL  string `xml:"url,attr"`
-		Type string `xml:"type,attr"`
+		URL    string `xml:"url,attr"`
+		Type   string `xml:"type,attr"`
+		Length int64  `xml:"length,attr"`
 	} `xml:"enclosure"`
 	// Torznab-specific extension attributes are encoded as <torznab:attr name="seeders" value="42"/>
 	Attrs []struct {
@@ -490,7 +520,7 @@ type torznabItem struct {
 }
 
 func queryTorznabRSS(ctx context.Context, httpc *http.Client, baseURL, apiKey, query, category, indexer string) ([]SearchResult, error) {
-	u, err := url.Parse(baseURL)
+	u, err := indexerURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -517,20 +547,36 @@ func queryTorznabRSS(ctx context.Context, httpc *http.Client, baseURL, apiKey, q
 	}
 	out := make([]SearchResult, 0, len(feed.Channel.Item))
 	for _, it := range feed.Channel.Item {
-		seeders, leechers, ih := 0, 0, ""
+		seeders, leechers, peers, ih := 0, -1, 0, ""
+		size := it.Size
+		mag := ""
 		for _, a := range it.Attrs {
 			switch strings.ToLower(a.Name) {
 			case "seeders":
 				seeders, _ = strconv.Atoi(a.Value)
-			case "leechers", "peers":
+			case "leechers":
 				leechers, _ = strconv.Atoi(a.Value)
+			case "peers":
+				peers, _ = strconv.Atoi(a.Value)
+			case "size":
+				size, _ = strconv.ParseInt(a.Value, 10, 64)
+			case "magneturl":
+				mag = a.Value
 			case "infohash":
 				ih = normalizeInfohash(a.Value)
 			}
 		}
-		size := it.Size
-		mag := ""
+		if size == 0 {
+			size = it.Enclosure.Length
+		}
+		if leechers < 0 {
+			leechers = max0(peers - seeders)
+		}
 		torURL := it.Link
+		if strings.HasPrefix(it.Link, "magnet:") {
+			mag = it.Link
+			torURL = ""
+		}
 		if strings.HasPrefix(it.Enclosure.URL, "magnet:") {
 			mag = it.Enclosure.URL
 		} else if it.Enclosure.URL != "" {
@@ -547,7 +593,7 @@ func queryTorznabRSS(ctx context.Context, httpc *http.Client, baseURL, apiKey, q
 			SizeBytes:   size,
 			Seeders:     seeders,
 			Leechers:    leechers,
-			PublishedAt: it.PubDate,
+			PublishedAt: normalizeDate(it.PubDate),
 			Indexer:     indexer,
 		})
 	}
@@ -585,15 +631,18 @@ func getRaw(ctx context.Context, httpc *http.Client, u string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Apteva-torrent/0.1")
+	req.Header.Set("User-Agent", "Apteva-torrent/0.2")
 	resp, err := httpc.Do(req)
 	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			return nil, fmt.Errorf("indexer request: %w", ue.Err)
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("HTTP %d from indexer (check availability, credentials, or upstream access restrictions)", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, (10<<20)+1))
 	if err != nil {
@@ -762,4 +811,64 @@ func (a *App) markIndexerOK(id int64) {
 	_, _ = a.ctx.AppDB().Exec(
 		`UPDATE indexers SET last_ok_at = ?, last_error = '' WHERE id = ?`,
 		time.Now().UTC().Format(time.RFC3339), id)
+}
+
+// Some ApiBay-compatible sources encode counts as JSON numbers, others as strings.
+type flexibleString string
+
+func (s *flexibleString) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		*s = ""
+		return nil
+	}
+	if len(b) > 0 && b[0] == '"' {
+		var v string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		*s = flexibleString(v)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*s = flexibleString(n.String())
+	return nil
+}
+func indexerURL(raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return nil, errors.New("indexer URL must be an absolute http(s) URL")
+	}
+	u.Fragment = ""
+	return u, nil
+}
+func normalizeDate(raw string) string {
+	for _, layout := range []string{time.RFC3339, time.RFC1123Z, time.RFC1123, time.RFC822Z, time.RFC822} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC().Format(time.RFC3339)
+		}
+	}
+	return raw
+}
+func (a *App) acquireSearchSlot(ctx context.Context) error {
+	a.searchOnce.Do(func() { a.searchSlots = make(chan struct{}, 6) })
+	select {
+	case a.searchSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// addSource selects exactly one source; the add API deliberately rejects ambiguous input.
+func (r SearchResult) addSource() (magnet, infohash, torrentURL string) {
+	if r.Magnet != "" {
+		return r.Magnet, "", ""
+	}
+	if r.TorrentURL != "" {
+		return "", "", r.TorrentURL
+	}
+	return "", r.Infohash, ""
 }

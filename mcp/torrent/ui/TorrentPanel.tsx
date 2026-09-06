@@ -155,6 +155,7 @@ interface SearchResult {
   torrent_url?: string;
   size_bytes: number;
   seeders: number;
+  availability_unknown?: boolean;
   leechers: number;
   indexer: string;
   category?: string;
@@ -430,7 +431,10 @@ function AddTorrentModal({ projectId, installId, onClose, onAdded }: {
       if (override?.magnet) body.magnet = override.magnet;
       else if (override?.torrent_url) body.torrent_url = override.torrent_url;
 			else if (override?.infohash) body.infohash = override.infohash;
-      else if (mode === "magnet") body.magnet = magnet;
+      else if (mode === "magnet") {
+        if (/^(?:[a-f0-9]{40}|[a-z2-7]{32})$/i.test(magnet.trim())) body.infohash = magnet.trim();
+        else body.magnet = magnet.trim();
+      }
       else if (mode === "url") body.torrent_url = url;
 			await apiRequest<TorrentRow>("/torrents", projectId, installId, {
         method: "POST",
@@ -454,7 +458,7 @@ function AddTorrentModal({ projectId, installId, onClose, onAdded }: {
             className={`px-2 py-1 rounded ${mode === m ? "bg-accent text-bg" : "text-text-dim"}`}
             onClick={() => setMode(m)}
           >
-            {m === "magnet" ? "Magnet" : m === "url" ? ".torrent URL" : "Search"}
+            {m === "magnet" ? "Magnet / hash" : m === "url" ? ".torrent URL" : "Search"}
           </button>
         ))}
       </div>
@@ -463,7 +467,7 @@ function AddTorrentModal({ projectId, installId, onClose, onAdded }: {
         <textarea
           value={magnet}
           onChange={(e) => setMagnet(e.target.value)}
-          placeholder="magnet:?xt=urn:btih:…"
+          placeholder="magnet:?xt=urn:btih:… or infohash"
           className="w-full bg-bg-elev border border-border rounded p-2 text-sm font-mono h-24"
         />
       )}
@@ -512,7 +516,8 @@ function InlineSearch({ projectId, installId, onPick }: {
   const [err, setErr] = useState("");
 
   const run = async () => {
-		if (!q.trim()) return;
+		if (!q.trim() || busy) return;
+    setResults([]);
     setBusy(true);
     setErr("");
     try {
@@ -530,7 +535,7 @@ function InlineSearch({ projectId, installId, onPick }: {
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="query"
+          placeholder="Keywords, magnet link, or infohash"
           className="flex-1 bg-bg-elev border border-border rounded p-2 text-sm"
           onKeyDown={(e) => e.key === "Enter" && run()}
         />
@@ -555,6 +560,7 @@ function InlineSearch({ projectId, installId, onPick }: {
         </button>
       </div>
       {err && <div className="text-error text-sm mt-2">{err}</div>}
+      <p className="text-xs text-text-dim mt-2">Keywords use your indexers. Magnets and hashes resolve metadata through BitTorrent peers and DHT without downloading files (up to 25 seconds).</p>
       <div className="mt-3 border border-border rounded max-h-72 overflow-auto">
         {results.length === 0 ? (
           <div className="text-text-dim text-xs italic p-3">No results yet.</div>
@@ -567,8 +573,9 @@ function InlineSearch({ projectId, installId, onPick }: {
             <div className="text-sm truncate">{r.name}</div>
             <div className="text-xs text-text-dim flex gap-3 mt-0.5">
               <span>{formatBytes(r.size_bytes)}</span>
-              <span className="text-success">↑ {r.seeders}</span>
-              <span>↓ {r.leechers}</span>
+              {r.availability_unknown ? <span>Availability unknown</span> : <>
+                <span className="text-success">↑ {r.seeders}</span><span>↓ {r.leechers}</span>
+              </>}
               <span>{r.indexer}</span>
               {r.category && <span>· {r.category}</span>}
             </div>

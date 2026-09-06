@@ -58,6 +58,8 @@ type App struct {
 	statsScannedAt time.Time
 	statsDirBytes  int64
 	bootOnce       sync.Once
+	searchOnce     sync.Once
+	searchSlots    chan struct{}
 }
 
 type addTorrentRequest struct {
@@ -559,7 +561,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 	return []sdk.Tool{
 		{Name: "torrent_search",
-			Description: "Multi-indexer search. Aggregates across enabled indexers, dedupes by infohash, sorts by seeders descending. Args: query (required), category? (movie|tv|music|book|software), min_seeders? (default 0), sort? (seeders|size|newest, default seeders).",
+			Description: "Search keywords across enabled indexers, or resolve a magnet/infohash directly through BitTorrent peers and DHT (metadata only, up to 25 seconds, no indexer required). Native results report unknown availability; category/min_seeders filters apply only to keyword search. Args: query (required), category? (movie|tv|music|book|software), min_seeders? (default 0), sort? (seeders|size|newest, default seeders).",
 			InputSchema: obj(map[string]any{
 				"query": str, "category": str, "min_seeders": num, "sort": str,
 			}, []string{"query"}),
@@ -799,7 +801,7 @@ func (a *App) addTorrent(ctx *sdk.AppCtx, magnet, infohash, torrentURL, targetFo
 		row.State = "paused"
 		snap.State = "paused"
 		snap.IsPaused = true
-	} else if err := a.engine.Resume(snap.Infohash); err != nil {
+	} else if err := a.syncSharedEngineIntent(snap.Infohash); err != nil {
 		return nil, err
 	}
 	emitCtx := ctx
@@ -899,18 +901,7 @@ func (a *App) syncSharedEngineIntent(infohash string) error {
 			break
 		}
 	}
-	if allPaused {
-		if err := a.engine.Pause(infohash); err != nil {
-			return err
-		}
-	} else if err := a.engine.Resume(infohash); err != nil {
-		return err
-	}
-	for index, priority := range effectivePriorities(rows) {
-		if err := a.engine.SetFilePriority(infohash, index, priority); err != nil && !strings.Contains(err.Error(), "metadata not available") {
-			return err
-		}
-	}
+	a.engine.RestoreState(infohash, allPaused, effectivePriorities(rows))
 	return nil
 }
 
@@ -920,9 +911,11 @@ func (a *App) setPriority(ctx *sdk.AppCtx, id int64, fileIndex int, priority str
 	if err != nil {
 		return err
 	}
-	if _, err := parsePriority(priority); err != nil {
+	p, err := parsePriority(priority)
+	if err != nil {
 		return err
 	}
+	priority = priorityToString(p)
 	files, err := a.engine.FileSnapshots(row.Infohash)
 	if err != nil {
 		return err
@@ -990,7 +983,7 @@ func (a *App) combinedTorrentList(ctx *sdk.AppCtx, stateFilter string) ([]combin
 	default:
 		return nil, fmt.Errorf("unsupported state %q", stateFilter)
 	}
-	rows, err := listTorrentRows(a.ctx.AppDB(), projectScope(ctx), stateFilter)
+	rows, err := listTorrentRows(a.ctx.AppDB(), projectScope(ctx), "all")
 	if err != nil {
 		return nil, err
 	}
@@ -1288,7 +1281,8 @@ func (a *App) runDueSearches(ctx context.Context) {
 				n = len(filtered)
 			}
 			for _, r := range filtered[:n] {
-				_, err := a.addTorrent(scoped, r.Magnet, r.Infohash, r.TorrentURL, "", false)
+				magnet, infohash, torrentURL := r.addSource()
+				_, err := a.addTorrent(scoped, magnet, infohash, torrentURL, "", false)
 				if err != nil {
 					a.ctx.Logger().Warn("auto-add", "name", r.Name, "err", err.Error())
 				}
@@ -1512,6 +1506,9 @@ func addIndexer(db *sql.DB, pid, name, kind, baseURL, apiKey string, categories 
 	case "jackett", "prowlarr", "rss", "apibay":
 	default:
 		return nil, fmt.Errorf("unsupported indexer kind %q", kind)
+	}
+	if kind == "apibay" && strings.TrimSpace(baseURL) == "" {
+		baseURL = "https://apibay.org"
 	}
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {

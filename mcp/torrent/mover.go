@@ -100,12 +100,12 @@ func (a *App) persistSnapshot(projectID, infohash string, s TorrentSnapshot) {
 		        total_bytes = ?,
 		        downloaded_bytes = ?,
 		        state = CASE
-		          WHEN state = 'error' AND last_error <> '' AND ? = '' THEN state
+		          WHEN state = 'error' AND last_error <> '' AND last_error NOT IN ('info not received yet (peers / DHT may be cold)', 'insufficient free disk for torrent and configured safety margin') AND ? = '' THEN state
 		          WHEN state = 'paused' AND ? <> 'error' THEN state
 		          ELSE ?
 		        END,
 		        last_error = CASE
-		          WHEN state = 'error' AND last_error <> '' AND ? = '' THEN last_error
+		          WHEN state = 'error' AND last_error <> '' AND last_error NOT IN ('info not received yet (peers / DHT may be cold)', 'insufficient free disk for torrent and configured safety margin') AND ? = '' THEN last_error
 		          ELSE ?
 		        END
 		  WHERE project_id = ? AND infohash = ?`,
@@ -143,6 +143,9 @@ func (a *App) handleCompletion(projectID, infohash string, snap TorrentSnapshot)
 	row, err := getTorrentRow(a.ctx.AppDB(), projectID, infohash)
 	if err != nil {
 		a.ctx.Logger().Warn("completion: row lookup", "err", err.Error())
+		return
+	}
+	if row.State == "paused" {
 		return
 	}
 	var existing []int64
@@ -424,6 +427,7 @@ func (a *App) uploadOneFile(requestCtx context.Context, ctx *sdk.AppCtx, root st
 				abortUpload(requestCtx, httpc, base, q, token, initOut.UploadID)
 				return 0, fmt.Errorf("upload part %d: HTTP %d: %s", partNum, presp.StatusCode, strings.TrimSpace(string(body)))
 			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(presp.Body, 64<<10))
 			presp.Body.Close()
 			partNum++
 		}
@@ -568,7 +572,7 @@ func (a *App) retryPendingCompletions() {
 			continue
 		}
 		snap := a.engine.Snapshot(row.Infohash)
-		if snap == nil || !snap.HasInfo || snap.BytesMissing != 0 {
+		if row.State == "paused" || snap == nil || !snap.HasInfo || snap.Length == 0 || snap.BytesMissing != 0 {
 			continue
 		}
 		go a.handleCompletion(row.ProjectID, row.Infohash, *snap)
