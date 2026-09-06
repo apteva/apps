@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -18,22 +19,17 @@ import (
 
 // trackEvent forwards telemetry to the Analytics app when installed and
 // enabled. Failures are swallowed: telemetry never blocks gameplay.
-func trackEvent(ctx *sdk.AppCtx, pid, event string, player *Player, props map[string]any) {
-	if ctx == nil || ctx.PlatformAPI() == nil || player == nil || !cfgBool(ctx, "analytics_enabled", true) {
+func trackEvent(ctx *sdk.AppCtx, scope GameScope, event string, player *Player, props map[string]any) {
+	if ctx == nil || player == nil || !cfgBool(ctx, "analytics_enabled", true) {
 		return
 	}
 	if props == nil {
 		props = map[string]any{}
 	}
 	props["player_id"] = player.ID
-	var out map[string]any
-	_ = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", map[string]any{
-		"_project_id": pid,
-		"event":       "games." + event,
-		"app":         "games",
-		"user_id":     fmt.Sprintf("player:%d", player.ID),
-		"props":       props,
-	}, &out)
+	if err := queueEvent(ctx.AppDB(), scope, "games."+event, props, true); err != nil {
+		ctx.Logger().Warn("analytics queue failed", "error", err)
+	}
 }
 
 func publicProfile(p *Player) map[string]any {
@@ -45,7 +41,7 @@ func publicProfile(p *Player) map[string]any {
 
 // ─── bans ────────────────────────────────────────────────────────────
 
-func banPlayer(ctx *sdk.AppCtx, pid string, player *Player, reason, expiresAt, source string) (*Ban, error) {
+func banPlayer(ctx *sdk.AppCtx, scope GameScope, player *Player, reason, expiresAt, source string) (*Ban, error) {
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return nil, errors.New("reason required")
@@ -60,133 +56,207 @@ func banPlayer(ctx *sdk.AppCtx, pid string, player *Player, reason, expiresAt, s
 		}
 		expiresAt = t.UTC().Format(time.RFC3339)
 	}
-	db := ctx.AppDB()
-	id, err := dbCreateBan(db, pid, player.ID, reason, source, expiresAt)
+	db, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
-	if err := dbSetPlayerStatus(db, pid, player.ID, "banned"); err != nil {
+	defer db.Rollback()
+	id, err := dbCreateBan(db, scope, player.ID, reason, source, expiresAt)
+	if err != nil {
 		return nil, err
 	}
-	if err := authDisableUser(ctx, pid, player.AuthUserID, "games ban: "+reason); err != nil {
-		ctx.Logger().Warn("auth disable failed; ban is enforced locally", "player_id", player.ID, "err", err)
+	if err := dbSetPlayerStatus(db, scope, player.ID, "banned"); err != nil {
+		return nil, err
 	}
-	dbAudit(db, pid, player.ID, "player.banned", source, map[string]any{"reason": reason, "expires_at": expiresAt})
-	ctx.Emit("player.banned", map[string]any{"player_id": player.ID, "reason": reason, "expires_at": expiresAt, "source": source})
+	if err := dbAudit(db, scope, player.ID, "player.banned", source, map[string]any{"reason": reason, "expires_at": expiresAt}); err != nil {
+		return nil, err
+	}
+	if err := queueEvent(db, scope, "player.banned", map[string]any{"player_id": player.ID, "reason": reason, "expires_at": expiresAt, "source": source}, false); err != nil {
+		return nil, err
+	}
+	if err := db.Commit(); err != nil {
+		return nil, err
+	}
 	player.Status = "banned"
 	return &Ban{ID: id, PlayerID: player.ID, Reason: reason, Source: source, ExpiresAt: expiresAt, CreatedAt: nowRFC()}, nil
 }
 
-func unbanPlayer(ctx *sdk.AppCtx, pid string, player *Player, source string) (int64, error) {
-	db := ctx.AppDB()
-	n, err := dbLiftBans(db, pid, player.ID)
+func unbanPlayer(ctx *sdk.AppCtx, scope GameScope, player *Player, source string) (int64, error) {
+	if _, err := recoverLegacyBan(ctx, scope, player.AuthUserID, true); err != nil {
+		return 0, err
+	}
+	db, err := ctx.AppDB().Begin()
 	if err != nil {
 		return 0, err
 	}
-	if err := dbSetPlayerStatus(db, pid, player.ID, "active"); err != nil {
+	defer db.Rollback()
+	n, err := dbLiftBans(db, scope, player.ID)
+	if err != nil {
 		return 0, err
 	}
-	if err := authEnableUser(ctx, pid, player.AuthUserID); err != nil {
-		ctx.Logger().Warn("auth enable failed", "player_id", player.ID, "err", err)
+	if err := dbSetPlayerStatus(db, scope, player.ID, "active"); err != nil {
+		return 0, err
 	}
-	dbAudit(db, pid, player.ID, "player.unbanned", source, map[string]any{"lifted": n})
-	ctx.Emit("player.unbanned", map[string]any{"player_id": player.ID, "source": source})
+	if err := dbAudit(db, scope, player.ID, "player.unbanned", source, map[string]any{"lifted": n}); err != nil {
+		return 0, err
+	}
+	if err := queueEvent(db, scope, "player.unbanned", map[string]any{"player_id": player.ID, "source": source}, false); err != nil {
+		return 0, err
+	}
+	if err := db.Commit(); err != nil {
+		return 0, err
+	}
 	player.Status = "active"
 	return n, nil
 }
 
 // activeBanFor returns the ban currently blocking the player, lifting an
-// expired one lazily (the Auth user is re-enabled at the same time).
-func activeBanFor(ctx *sdk.AppCtx, pid string, player *Player) (*Ban, error) {
+// expired one lazily. Auth recovery applies only to verified legacy bans.
+func activeBanFor(ctx *sdk.AppCtx, scope GameScope, player *Player) (*Ban, error) {
 	if player.Status != "banned" {
-		return nil, nil
+		return dbActiveBan(ctx.AppDB(), scope, player.ID)
 	}
-	ban, err := dbActiveBan(ctx.AppDB(), pid, player.ID)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	ban, err := dbActiveBan(tx, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
 	if ban != nil {
 		return ban, nil
 	}
-	if _, err := unbanPlayer(ctx, pid, player, "expiry"); err != nil {
+	// Lift only expired bans under the same write lock as the status change.
+	// A concurrent new ban must never be lifted by lazy expiry.
+	if _, err = tx.Exec(`UPDATE player_bans SET lifted_at=? WHERE project_id=? AND game_id=? AND player_id=? AND lifted_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?`, nowRFC(), scope.ProjectID, scope.GameID, player.ID, nowRFC()); err != nil {
 		return nil, err
 	}
+	fresh, err := dbGetPlayer(tx, scope, player.ID)
+	if err != nil {
+		return nil, err
+	}
+	if fresh == nil {
+		return nil, errors.New("player not found")
+	}
+	if fresh.Status == "banned" {
+		if err = dbSetPlayerStatus(tx, scope, player.ID, "active"); err != nil {
+			return nil, err
+		}
+		if err = dbAudit(tx, scope, player.ID, "player.unbanned", "expiry", nil); err != nil {
+			return nil, err
+		}
+		if err = queueEvent(tx, scope, "player.unbanned", map[string]any{"player_id": player.ID, "source": "expiry"}, false); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	player.Status = "active"
 	return nil, nil
 }
 
 // ─── erase / export / context ────────────────────────────────────────
 
-func erasePlayer(ctx *sdk.AppCtx, pid string, player *Player, source string) error {
-	if err := authDisableUser(ctx, pid, player.AuthUserID, "games: player erased"); err != nil {
-		ctx.Logger().Warn("auth disable on erase failed", "player_id", player.ID, "err", err)
-	}
-	if err := authRevokeSessions(ctx, pid, player.AuthUserID); err != nil {
-		ctx.Logger().Warn("auth session revoke on erase failed", "player_id", player.ID, "err", err)
-	}
-	if err := dbDeletePlayer(ctx.AppDB(), pid, player.ID); err != nil {
+func erasePlayer(ctx *sdk.AppCtx, scope GameScope, player *Player, source string) error {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
 		return err
 	}
-	ctx.Emit("player.erased", map[string]any{"player_id": player.ID, "auth_user_id": player.AuthUserID, "source": source})
-	return nil
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT OR IGNORE INTO game_tombstones(project_id,game_id,auth_user_id) VALUES(?,?,?)`, scope.ProjectID, scope.GameID, player.AuthUserID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM game_outbox WHERE project_id=? AND game_id=? AND json_extract(payload,'$.player_id')=?`, scope.ProjectID, scope.GameID, player.ID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM game_operations WHERE project_id=? AND game_id=? AND key LIKE ?`, scope.ProjectID, scope.GameID, fmt.Sprintf("stats:%d:%%", player.ID)); err != nil {
+		return err
+	}
+	if err = dbDeletePlayer(tx, scope, player.ID); err != nil {
+		return err
+	}
+	if err = queueEvent(tx, scope, "player.erased", map[string]any{"player_id": player.ID, "auth_user_id": player.AuthUserID, "source": source}, false); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func exportPlayer(ctx *sdk.AppCtx, pid string, player *Player) (map[string]any, error) {
-	db := ctx.AppDB()
-	bans, err := dbListBans(db, pid, player.ID)
+func exportPlayer(ctx *sdk.AppCtx, scope GameScope, player *Player) (map[string]any, error) {
+	db, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
 	}
-	data, err := dbListData(db, pid, player.ID, nil)
+	defer db.Rollback()
+	player, err = dbGetPlayer(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := dbGetPlayerStats(db, pid, player.ID)
+	if player == nil {
+		return nil, errors.New("player not found")
+	}
+	bans, err := dbListBans(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
-	achievements, err := dbPlayerAchievements(db, pid, player.ID)
+	data, err := dbListData(db, scope, player.ID, nil)
 	if err != nil {
 		return nil, err
 	}
-	audit, err := dbListAudit(db, pid, player.ID, 500)
+	stats, err := dbGetPlayerStats(db, scope, player.ID)
+	if err != nil {
+		return nil, err
+	}
+	achievements, err := dbPlayerAchievements(db, scope, player.ID)
+	if err != nil {
+		return nil, err
+	}
+	audit, err := dbListAudit(db, scope, player.ID, 0)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := exportEntries(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"exported_at":  nowRFC(),
-		"player":       player,
-		"bans":         bans,
-		"data":         data,
-		"stats":        stats,
-		"achievements": achievements,
-		"audit":        audit,
-		"note":         "Identity records (device and custom ids, sessions) are held by the Auth app under auth_user_id.",
+		"exported_at":         nowRFC(),
+		"leaderboard_entries": entries,
+		"player":              player,
+		"bans":                bans,
+		"data":                data,
+		"stats":               stats,
+		"achievements":        achievements,
+		"audit":               audit,
+		"note":                "Identity records (device and custom ids, sessions) are held by the Auth app under auth_user_id.",
 	}, nil
 }
 
-func playerContext(ctx *sdk.AppCtx, pid string, player *Player) (map[string]any, error) {
+func playerContext(ctx *sdk.AppCtx, scope GameScope, player *Player) (map[string]any, error) {
 	db := ctx.AppDB()
-	ban, err := activeBanFor(ctx, pid, player)
+	ban, err := activeBanFor(ctx, scope, player)
 	if err != nil {
 		return nil, err
 	}
-	bans, err := dbListBans(db, pid, player.ID)
+	bans, err := dbListBans(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := dbGetPlayerStats(db, pid, player.ID)
+	stats, err := dbGetPlayerStats(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
-	data, err := dbListData(db, pid, player.ID, nil)
+	data, err := dbListData(db, scope, player.ID, nil)
 	if err != nil {
 		return nil, err
 	}
-	achievements, err := dbPlayerAchievements(db, pid, player.ID)
+	achievements, err := dbPlayerAchievements(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
-	audit, err := dbListAudit(db, pid, player.ID, 20)
+	audit, err := dbListAudit(db, scope, player.ID, 20)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +268,7 @@ func playerContext(ctx *sdk.AppCtx, pid string, player *Player) (map[string]any,
 
 // ─── profile ─────────────────────────────────────────────────────────
 
-func applyProfilePatch(ctx *sdk.AppCtx, pid string, player *Player, in map[string]any, source string) (*Player, error) {
+func applyProfilePatch(ctx *sdk.AppCtx, scope GameScope, player *Player, in map[string]any, source string) (*Player, error) {
 	var patch playerPatch
 	changed := map[string]any{}
 	if v, ok := in["display_name"]; ok {
@@ -254,16 +324,42 @@ func applyProfilePatch(ctx *sdk.AppCtx, pid string, player *Player, in map[strin
 	if len(changed) == 0 {
 		return nil, errors.New("nothing to update (display_name, avatar_url, region, locale, metadata)")
 	}
-	if err := dbUpdatePlayer(ctx.AppDB(), pid, player.ID, patch); err != nil {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, player.ID, "player.updated", source, changed)
-	return dbGetPlayer(ctx.AppDB(), pid, player.ID)
+	defer tx.Rollback()
+	if err := checkActiveGame(tx, scope); err != nil {
+		return nil, err
+	}
+	if source == "client" {
+		ban, err := dbActiveBan(tx, scope, player.ID)
+		if err != nil {
+			return nil, err
+		}
+		if ban != nil {
+			return nil, errors.New("banned")
+		}
+	}
+	if err := dbUpdatePlayer(tx, scope, player.ID, patch); err != nil {
+		return nil, err
+	}
+	if err := dbAudit(tx, scope, player.ID, "player.updated", source, changed); err != nil {
+		return nil, err
+	}
+	out, err := dbGetPlayer(tx, scope, player.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ─── definitions ─────────────────────────────────────────────────────
 
-func defineStat(ctx *sdk.AppCtx, pid, name, aggregation string, clientWritable bool, description string) (*StatDef, error) {
+func defineStat(ctx *sdk.AppCtx, scope GameScope, name, aggregation string, clientWritable bool, description string) (*StatDef, error) {
 	name = strings.TrimSpace(name)
 	if !statNameRe.MatchString(name) {
 		return nil, errors.New("name must be lowercase letters, digits, or underscores (max 64), starting with a letter")
@@ -274,36 +370,39 @@ func defineStat(ctx *sdk.AppCtx, pid, name, aggregation string, clientWritable b
 	if !validAggregation(aggregation) {
 		return nil, errors.New("aggregation must be last, max, min, or sum")
 	}
-	return dbUpsertStatDef(ctx.AppDB(), pid, name, aggregation, clientWritable, strings.TrimSpace(description))
+	return dbUpsertStatDef(ctx.AppDB(), scope, name, aggregation, clientWritable, strings.TrimSpace(description))
 }
 
-func createLeaderboard(ctx *sdk.AppCtx, pid, name, displayName, stat, sort, reset string, seasonDays int) (*Leaderboard, error) {
+func createLeaderboard(ctx *sdk.AppCtx, scope GameScope, name, displayName, stat, sort, reset string, seasonDays int) (*Leaderboard, error) {
 	lb, err := newLeaderboard(name, displayName, stat, sort, reset, seasonDays, time.Now())
 	if err != nil {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	if existing, err := dbGetLeaderboard(db, pid, lb.Name); err != nil {
+	if existing, err := dbGetLeaderboard(db, scope, lb.Name); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return nil, fmt.Errorf("leaderboard %q already exists", lb.Name)
 	}
-	if def, err := dbGetStatDef(db, pid, lb.Stat); err != nil {
+	if def, err := dbGetStatDef(db, scope, lb.Stat); err != nil {
 		return nil, err
 	} else if def == nil {
 		// A leaderboard over an unknown stat defines it as a server-only
 		// high score. Define the stat first for sum/min semantics.
-		if _, err := dbUpsertStatDef(db, pid, lb.Stat, "max", false, "auto-defined by leaderboard "+lb.Name); err != nil {
+		if _, err := dbUpsertStatDef(db, scope, lb.Stat, "max", false, "auto-defined by leaderboard "+lb.Name); err != nil {
 			return nil, err
 		}
 	}
-	return dbCreateLeaderboard(db, pid, lb)
+	return dbCreateLeaderboard(db, scope, lb)
 }
 
-func defineAchievement(ctx *sdk.AppCtx, pid string, d AchievementDef) (*AchievementDef, error) {
+func defineAchievement(ctx *sdk.AppCtx, scope GameScope, d AchievementDef) (*AchievementDef, error) {
 	d.Key = strings.ToLower(strings.TrimSpace(d.Key))
 	if !slugRe.MatchString(d.Key) {
 		return nil, errors.New("key must be a slug (lowercase letters, digits, - or _; max 64)")
+	}
+	if math.IsNaN(d.Threshold) || math.IsInf(d.Threshold, 0) {
+		return nil, errors.New("threshold must be finite")
 	}
 	d.Name = strings.TrimSpace(d.Name)
 	if d.Name == "" {
@@ -321,24 +420,40 @@ func defineAchievement(ctx *sdk.AppCtx, pid string, d AchievementDef) (*Achievem
 	default:
 		return nil, errors.New("op must be gte, gt, lte, lt, or eq")
 	}
-	return dbUpsertAchievementDef(ctx.AppDB(), pid, d)
+	return dbUpsertAchievementDef(ctx.AppDB(), scope, d)
 }
 
-func grantAchievement(ctx *sdk.AppCtx, pid string, player *Player, key, source string) (bool, error) {
+func grantAchievement(ctx *sdk.AppCtx, scope GameScope, player *Player, key, source string) (bool, error) {
 	key = strings.ToLower(strings.TrimSpace(key))
-	def, err := dbGetAchievementDef(ctx.AppDB(), pid, key)
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if err := checkActiveGame(tx, scope); err != nil {
+		return false, err
+	}
+	def, err := dbGetAchievementDef(tx, scope, key)
 	if err != nil {
 		return false, err
 	}
 	if def == nil {
 		return false, fmt.Errorf("achievement %q not defined", key)
 	}
-	ok, err := dbUnlockAchievement(ctx.AppDB(), pid, player.ID, key, source)
+	ok, err := dbUnlockAchievement(tx, scope, player.ID, key, source)
 	if err != nil || !ok {
 		return false, err
 	}
-	dbAudit(ctx.AppDB(), pid, player.ID, "achievement.unlocked", source, map[string]any{"key": key, "manual": true})
-	ctx.Emit("achievement.unlocked", map[string]any{"player_id": player.ID, "key": key, "source": source})
-	trackEvent(ctx, pid, "achievement_unlocked", player, map[string]any{"key": key, "manual": true})
-	return true, nil
+	if err := dbAudit(tx, scope, player.ID, "achievement.unlocked", source, map[string]any{"key": key, "manual": true}); err != nil {
+		return false, err
+	}
+	if err := queueEvent(tx, scope, "achievement.unlocked", map[string]any{"player_id": player.ID, "key": key, "source": source}, false); err != nil {
+		return false, err
+	}
+	if cfgBool(ctx, "analytics_enabled", true) {
+		if err := queueEvent(tx, scope, "games.achievement_unlocked", map[string]any{"player_id": player.ID, "key": key, "manual": true}, true); err != nil {
+			return false, err
+		}
+	}
+	return true, tx.Commit()
 }

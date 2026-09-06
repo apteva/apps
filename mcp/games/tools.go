@@ -1,7 +1,7 @@
 package main
 
 // tools.go — MCP tools. Agents call these; the dashboard panel uses the
-// /admin routes; game builds use /v1. All three meet in ops.go and
+// /admin routes; game builds use /v2/games/{game_id} (or legacy /v1). All three meet in ops.go and
 // progression.go so behaviour and audit rows do not depend on the caller.
 
 import (
@@ -18,11 +18,11 @@ import (
 // player_id (or id), auth_user_id, device_id, or custom_id; the last two
 // are resolved through Auth so support staff can look a player up from
 // what the game client knows.
-func playerFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Player, error) {
+func playerFromArgs(ctx *sdk.AppCtx, scope GameScope, args map[string]any) (*Player, error) {
 	db := ctx.AppDB()
 	for _, key := range []string{"player_id", "id"} {
 		if id, ok := intReq(args, key); ok {
-			p, err := dbGetPlayer(db, pid, id)
+			p, err := dbGetPlayer(db, scope, id)
 			if err != nil {
 				return nil, err
 			}
@@ -33,7 +33,7 @@ func playerFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Player, 
 		}
 	}
 	if uid, ok := intReq(args, "auth_user_id"); ok {
-		p, err := dbGetPlayerByAuthUser(db, pid, uid)
+		p, err := dbGetPlayerByAuthUser(db, scope, uid)
 		if err != nil {
 			return nil, err
 		}
@@ -47,14 +47,14 @@ func playerFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Player, 
 		if raw == "" {
 			continue
 		}
-		uid, err := authResolveIdentity(ctx, pid, pv.provider, identitySubject(raw))
+		uid, err := authResolveIdentity(ctx, scope, pv.provider, gameIdentity(ctx, scope, raw))
 		if err != nil {
 			return nil, err
 		}
 		if uid == 0 {
 			return nil, fmt.Errorf("no player with that %s", pv.key)
 		}
-		p, err := dbGetPlayerByAuthUser(db, pid, uid)
+		p, err := dbGetPlayerByAuthUser(db, scope, uid)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +97,7 @@ func parseStatUpdates(args map[string]any) ([]statUpdate, error) {
 	return out, nil
 }
 
-func (a *App) MCPTools() []sdk.Tool {
+func (a *App) domainTools() []sdk.Tool {
 	playerSelector := map[string]any{
 		"player_id":    map[string]any{"type": "integer"},
 		"auth_user_id": map[string]any{"type": "integer"},
@@ -153,7 +153,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "players_ban",
-			Description: "Ban a player: records the ban, disables the Auth user, and revokes sessions. Args: player selector, reason (required), expires_at (RFC3339, omit for permanent). Read the player's context first and confirm with the operator when the request is ambiguous.",
+			Description: "Ban a player: records the ban, blocks access to this game. Args: player selector, reason (required), expires_at (RFC3339, omit for permanent). Read the player's context first and confirm with the operator when the request is ambiguous.",
 			InputSchema: schemaObject(withPlayer(map[string]any{
 				"reason":     map[string]any{"type": "string"},
 				"expires_at": map[string]any{"type": "string"},
@@ -174,7 +174,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "players_erase",
-			Description: "IRREVERSIBLE. Delete a player's rows and disable the Auth user. Requires confirm=true. Export first when the request is a data-subject request.",
+			Description: "IRREVERSIBLE. Delete a player's Games rows and prevent this game membership from being recreated. Requires confirm=true. Export first when the request is a data-subject request.",
 			InputSchema: schemaObject(withPlayer(map[string]any{
 				"confirm": map[string]any{"type": "boolean"},
 			}), []string{"confirm"}),
@@ -330,7 +330,7 @@ func (a *App) MCPTools() []sdk.Tool {
 // ─── players ─────────────────────────────────────────────────────────
 
 func (a *App) toolPlayersSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +340,7 @@ func (a *App) toolPlayersSearch(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	limit := intArg(args, "limit", 25, 1, 200)
 	offset := intArg(args, "offset", 0, 0, 1_000_000)
-	players, total, err := dbSearchPlayers(ctx.AppDB(), pid, stringArg(args, "q", ""), status, limit, offset)
+	players, total, err := dbSearchPlayers(ctx.AppDB(), scope, stringArg(args, "q", ""), status, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -348,15 +348,15 @@ func (a *App) toolPlayersSearch(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolPlayersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	ban, err := activeBanFor(ctx, pid, p)
+	ban, err := activeBanFor(ctx, scope, p)
 	if err != nil {
 		return nil, err
 	}
@@ -364,23 +364,23 @@ func (a *App) toolPlayersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolPlayersGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	return playerContext(ctx, pid, p)
+	return playerContext(ctx, scope, p)
 }
 
 func (a *App) toolPlayersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
@@ -390,7 +390,7 @@ func (a *App) toolPlayersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			fields[k] = v
 		}
 	}
-	updated, err := applyProfilePatch(ctx, pid, p, fields, "agent")
+	updated, err := applyProfilePatch(ctx, scope, p, fields, "agent")
 	if err != nil {
 		return nil, err
 	}
@@ -398,15 +398,15 @@ func (a *App) toolPlayersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolPlayersBan(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	ban, err := banPlayer(ctx, pid, p, stringArg(args, "reason", ""), stringArg(args, "expires_at", ""), "agent")
+	ban, err := banPlayer(ctx, scope, p, stringArg(args, "reason", ""), stringArg(args, "expires_at", ""), "agent")
 	if err != nil {
 		return nil, err
 	}
@@ -414,15 +414,15 @@ func (a *App) toolPlayersBan(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolPlayersUnban(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	n, err := unbanPlayer(ctx, pid, p, "agent")
+	n, err := unbanPlayer(ctx, scope, p, "agent")
 	if err != nil {
 		return nil, err
 	}
@@ -430,35 +430,35 @@ func (a *App) toolPlayersUnban(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolPlayersExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	out, err := exportPlayer(ctx, pid, p)
+	out, err := exportPlayer(ctx, scope, p)
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, p.ID, "player.exported", "agent", nil)
+	dbAudit(ctx.AppDB(), scope, p.ID, "player.exported", "agent", nil)
 	return map[string]any{"export": out}, nil
 }
 
 func (a *App) toolPlayersErase(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 	if !boolArg(args, "confirm", false) {
 		return nil, errors.New("pass confirm=true to erase a player; this cannot be undone")
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	if err := erasePlayer(ctx, pid, p, "agent"); err != nil {
+	if err := erasePlayer(ctx, scope, p, "agent"); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "player_id": p.ID, "auth_user_id": p.AuthUserID}, nil
@@ -467,16 +467,16 @@ func (a *App) toolPlayersErase(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── player data ─────────────────────────────────────────────────────
 
 func (a *App) toolDataGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
 	if key := stringArg(args, "key", ""); key != "" {
-		e, err := dbGetData(ctx.AppDB(), pid, p.ID, key)
+		e, err := dbGetData(ctx.AppDB(), scope, p.ID, key)
 		if err != nil {
 			return nil, err
 		}
@@ -485,7 +485,7 @@ func (a *App) toolDataGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return map[string]any{"data": []DataEntry{*e}, "found": true}, nil
 	}
-	entries, err := dbListData(ctx.AppDB(), pid, p.ID, nil)
+	entries, err := dbListData(ctx.AppDB(), scope, p.ID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -493,11 +493,11 @@ func (a *App) toolDataGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolDataSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
@@ -526,9 +526,9 @@ func (a *App) toolDataSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := intReq(args, "version"); ok {
 		version = v
 	}
-	e, err := dbSetData(ctx.AppDB(), pid, p.ID, key, string(value), visibility, version)
+	e, err := dbSetData(ctx.AppDB(), scope, p.ID, key, string(value), visibility, version)
 	if errors.Is(err, errVersionConflict) {
-		current, _ := dbGetData(ctx.AppDB(), pid, p.ID, key)
+		current, _ := dbGetData(ctx.AppDB(), scope, p.ID, key)
 		if current != nil {
 			return nil, fmt.Errorf("version_conflict: key %q is at version %d", key, current.Version)
 		}
@@ -537,16 +537,16 @@ func (a *App) toolDataSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	dbAudit(ctx.AppDB(), pid, p.ID, "data.set", "agent", map[string]any{"key": key, "visibility": e.Visibility, "version": e.Version})
+	dbAudit(ctx.AppDB(), scope, p.ID, "data.set", "agent", map[string]any{"key": key, "visibility": e.Visibility, "version": e.Version})
 	return map[string]any{"data": e}, nil
 }
 
 func (a *App) toolDataDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
@@ -554,12 +554,12 @@ func (a *App) toolDataDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if key == "" {
 		return nil, errors.New("key required")
 	}
-	deleted, err := dbDeleteData(ctx.AppDB(), pid, p.ID, key)
+	deleted, err := dbDeleteData(ctx.AppDB(), scope, p.ID, key)
 	if err != nil {
 		return nil, err
 	}
 	if deleted {
-		dbAudit(ctx.AppDB(), pid, p.ID, "data.deleted", "agent", map[string]any{"key": key})
+		dbAudit(ctx.AppDB(), scope, p.ID, "data.deleted", "agent", map[string]any{"key": key})
 	}
 	return map[string]any{"deleted": deleted}, nil
 }
@@ -567,11 +567,11 @@ func (a *App) toolDataDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // ─── statistics ──────────────────────────────────────────────────────
 
 func (a *App) toolStatsDefine(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	def, err := defineStat(ctx, pid, stringArg(args, "name", ""), stringArg(args, "aggregation", ""),
+	def, err := defineStat(ctx, scope, stringArg(args, "name", ""), stringArg(args, "aggregation", ""),
 		boolArg(args, "client_writable", false), stringArg(args, "description", ""))
 	if err != nil {
 		return nil, err
@@ -580,11 +580,11 @@ func (a *App) toolStatsDefine(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolStatsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	defs, err := dbListStatDefs(ctx.AppDB(), pid)
+	defs, err := dbListStatDefs(ctx.AppDB(), scope)
 	if err != nil {
 		return nil, err
 	}
@@ -592,15 +592,15 @@ func (a *App) toolStatsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolStatsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	stats, err := dbGetPlayerStats(ctx.AppDB(), pid, p.ID)
+	stats, err := dbGetPlayerStats(ctx.AppDB(), scope, p.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -608,11 +608,11 @@ func (a *App) toolStatsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolStatsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
@@ -620,17 +620,17 @@ func (a *App) toolStatsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	return applyStatUpdates(ctx, pid, p, updates, "agent", false)
+	return applyStatUpdates(ctx, scope, p, updates, "agent", false, stringArg(args, "operation_id", ""))
 }
 
 // ─── leaderboards ────────────────────────────────────────────────────
 
 func (a *App) toolLeaderboardsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	lb, err := createLeaderboard(ctx, pid, stringArg(args, "name", ""), stringArg(args, "display_name", ""),
+	lb, err := createLeaderboard(ctx, scope, stringArg(args, "name", ""), stringArg(args, "display_name", ""),
 		stringArg(args, "stat", ""), stringArg(args, "sort", ""), stringArg(args, "reset", ""),
 		intArg(args, "season_days", 0, 0, 3650))
 	if err != nil {
@@ -640,28 +640,28 @@ func (a *App) toolLeaderboardsCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolLeaderboardsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	boards, err := dbListLeaderboards(ctx.AppDB(), pid)
+	boards, err := dbListLeaderboards(ctx.AppDB(), scope)
 	if err != nil {
 		return nil, err
 	}
 	for i := range boards {
-		if changed, prev := ensureCurrentPeriod(ctx, pid, &boards[i], time.Now()); changed {
-			emitReset(ctx, &boards[i], prev, false)
+		if err := ensureCurrentPeriod(ctx, scope, &boards[i], time.Now()); err != nil {
+			return nil, err
 		}
 	}
 	return map[string]any{"leaderboards": boards, "count": len(boards)}, nil
 }
 
-func (a *App) leaderboardFromArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Leaderboard, error) {
+func (a *App) leaderboardFromArgs(ctx *sdk.AppCtx, scope GameScope, args map[string]any) (*Leaderboard, error) {
 	name := strings.ToLower(stringArg(args, "name", ""))
 	if name == "" {
 		return nil, errors.New("name required")
 	}
-	lb, err := dbGetLeaderboard(ctx.AppDB(), pid, name)
+	lb, err := dbGetLeaderboard(ctx.AppDB(), scope, name)
 	if err != nil {
 		return nil, err
 	}
@@ -672,63 +672,62 @@ func (a *App) leaderboardFromArgs(ctx *sdk.AppCtx, pid string, args map[string]a
 }
 
 func (a *App) toolLeaderboardsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	lb, err := a.leaderboardFromArgs(ctx, pid, args)
+	lb, err := a.leaderboardFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
 	var me int64
-	if p, err := playerFromArgs(ctx, pid, args); err == nil && p != nil {
+	if p, err := playerFromArgs(ctx, scope, args); err == nil && p != nil {
 		me = p.ID
 	}
-	return leaderboardPageFor(ctx, pid, lb, stringArg(args, "period", ""),
+	return leaderboardPageFor(ctx, scope, lb, stringArg(args, "period", ""),
 		intArg(args, "limit", 50, 1, 200), intArg(args, "offset", 0, 0, 1_000_000), me)
 }
 
 func (a *App) toolLeaderboardsAroundPlayer(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	lb, err := a.leaderboardFromArgs(ctx, pid, args)
+	lb, err := a.leaderboardFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	return leaderboardAround(ctx, pid, lb, stringArg(args, "period", ""), p.ID, intArg(args, "radius", 5, 1, 50))
+	return leaderboardAround(ctx, scope, lb, stringArg(args, "period", ""), p.ID, intArg(args, "radius", 5, 1, 50))
 }
 
 func (a *App) toolLeaderboardsResetNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	lb, err := a.leaderboardFromArgs(ctx, pid, args)
+	lb, err := a.leaderboardFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	previous := lb.CurrentPeriod
-	if err := resetLeaderboardNow(ctx, pid, lb, time.Now()); err != nil {
+	if err := resetLeaderboardNow(ctx, scope, lb, time.Now(), stringArg(args, "operation_id", "")); err != nil {
 		return nil, err
 	}
-	return map[string]any{"leaderboard": lb, "previous_period": previous}, nil
+	return map[string]any{"leaderboard": lb, "previous_period": lb.PreviousPeriod}, nil
 }
 
 // ─── achievements ────────────────────────────────────────────────────
 
 func (a *App) toolAchievementsDefine(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 	threshold, _ := floatArg(args, "threshold")
-	def, err := defineAchievement(ctx, pid, AchievementDef{
+	def, err := defineAchievement(ctx, scope, AchievementDef{
 		Key: stringArg(args, "key", ""), Name: stringArg(args, "name", ""),
 		Description: stringArg(args, "description", ""), Stat: stringArg(args, "stat", ""),
 		Threshold: threshold, Op: stringArg(args, "op", ""), Hidden: boolArg(args, "hidden", false),
@@ -740,11 +739,11 @@ func (a *App) toolAchievementsDefine(ctx *sdk.AppCtx, args map[string]any) (any,
 }
 
 func (a *App) toolAchievementsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	defs, err := dbListAchievementDefs(ctx.AppDB(), pid)
+	defs, err := dbListAchievementDefs(ctx.AppDB(), scope)
 	if err != nil {
 		return nil, err
 	}
@@ -752,17 +751,29 @@ func (a *App) toolAchievementsList(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolAchievementsGrant(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
+	scope, err := resolveGameFromArgs(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	p, err := playerFromArgs(ctx, pid, args)
+	p, err := playerFromArgs(ctx, scope, args)
 	if err != nil {
 		return nil, err
 	}
-	unlocked, err := grantAchievement(ctx, pid, p, stringArg(args, "key", ""), "agent")
+	unlocked, err := grantAchievement(ctx, scope, p, stringArg(args, "key", ""), "agent")
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"unlocked": unlocked, "player_id": p.ID}, nil
+}
+
+func (a *App) MCPTools() []sdk.Tool {
+	out := a.domainTools()
+	for i := range out {
+		props := out[i].InputSchema["properties"].(map[string]any)
+		props["operation_id"] = map[string]any{"type": "string", "description": "Idempotency key for stat updates (7-day replay window)."}
+		props["game_id"] = map[string]any{"type": "string", "description": "Required when the project has multiple active games."}
+	}
+	out = append(out, sdk.Tool{Name: "games_login_ticket", Description: "Issue a one-time custom login ticket after the trusted server has authenticated the external player.", InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}, "custom_id": map[string]any{"type": "string"}}, []string{"game_id", "custom_id"}), Handler: createLoginTicket})
+	out = append(out, sdk.Tool{Name: "games_events_retry", Description: "Retry failed event deliveries for one game.", InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}}, []string{"game_id"}), Handler: retryGameEvents})
+	return append(out, gameTools()...)
 }

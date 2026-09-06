@@ -13,6 +13,8 @@ setup:
     path: ./
 
 directive: |
+  First use games_list and select the sole active legacy game, passing its game_id
+  on every subsequent Games call.
   Create a monthly leaderboard "monthly-kills" over the "kills" statistic,
   then reset it immediately so we start clean for the launch event.
 

@@ -30,17 +30,21 @@ import (
 // and signs JWTs with a key it also serves through auth_jwks_get.
 type fakeAuth struct {
 	tk.BasePlatformClient
-	mu        sync.Mutex
-	priv      ed25519.PrivateKey
-	pub       ed25519.PublicKey
-	kid       string
-	users     map[string]int64
-	kinds     map[int64]string
-	names     map[int64]string
-	disabled  map[int64]bool
-	nextID    int64
-	calls     []string
-	analytics []map[string]any
+	mu             sync.Mutex
+	priv           ed25519.PrivateKey
+	pub            ed25519.PublicKey
+	kid            string
+	users          map[string]int64
+	kinds          map[int64]string
+	names          map[int64]string
+	disabled       map[int64]bool
+	disableReasons map[int64]string
+	failTool       string
+	nextID         int64
+	clients        map[string][]map[string]any
+	orgs           map[string]bool
+	calls          []string
+	analytics      []map[string]any
 }
 
 func newFakeAuth(t *testing.T) *fakeAuth {
@@ -51,8 +55,8 @@ func newFakeAuth(t *testing.T) *fakeAuth {
 	}
 	return &fakeAuth{
 		priv: priv, pub: pub, kid: "kid-test",
-		users: map[string]int64{}, kinds: map[int64]string{}, names: map[int64]string{}, disabled: map[int64]bool{},
-		nextID: 100,
+		users: map[string]int64{}, kinds: map[int64]string{}, names: map[int64]string{}, disabled: map[int64]bool{}, disableReasons: map[int64]string{},
+		nextID: 100, clients: map[string][]map[string]any{}, orgs: map[string]bool{"default": true},
 	}
 }
 
@@ -60,7 +64,7 @@ func signTestToken(priv ed25519.PrivateKey, kid string, uid int64, kind, org str
 	h, _ := json.Marshal(map[string]string{"alg": "EdDSA", "typ": "JWT", "kid": kid})
 	c, _ := json.Marshal(map[string]any{
 		"sub": strconv.FormatInt(uid, 10), "org": org, "kind": kind,
-		"iat": time.Now().Unix(), "exp": exp.Unix(),
+		"iat": time.Now().Unix(), "exp": exp.Unix(), "iss": "http://test/orgs/" + org, "aud": "akc_test", "azp": "akc_test",
 	})
 	enc := base64.RawURLEncoding.EncodeToString
 	signing := enc(h) + "." + enc(c)
@@ -95,15 +99,41 @@ func (f *fakeAuth) CallAppResult(app, tool string, in map[string]any, out any) e
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, app+"."+tool)
+	if f.failTool == app+"."+tool {
+		return fmt.Errorf("forced dependency outage")
+	}
 	identityKey := func() string {
 		p, _ := in["provider"].(string)
 		s, _ := in["provider_user_id"].(string)
-		return p + "|" + s
+		org, _ := in["organization_slug"].(string)
+		if org == "default" {
+			return p + "|" + s
+		}
+		return org + "|" + p + "|" + s
 	}
+	org, _ := in["organization_slug"].(string)
 	var res any
 	switch app + "." + tool {
+	case "auth.auth_orgs_list":
+		orgs := []map[string]any{}
+		for slug := range f.orgs {
+			orgs = append(orgs, map[string]any{"slug": slug})
+		}
+		res = map[string]any{"organizations": orgs}
+	case "auth.auth_orgs_create":
+		slug, _ := in["slug"].(string)
+		f.orgs[slug] = true
+		res = map[string]any{"organization": map[string]any{"slug": slug}}
+	case "auth.auth_clients_list":
+		res = map[string]any{"clients": f.clients[org]}
 	case "auth.auth_clients_create":
-		res = map[string]any{"client_id": "akc_test"}
+		id := "akc_test"
+		if org != "default" {
+			id = "akc_" + org
+		}
+		client := map[string]any{"client_id": id, "name": in["name"], "status": "active"}
+		f.clients[org] = append(f.clients[org], client)
+		res = client
 	case "auth.auth_public_login_identity":
 		key := identityKey()
 		uid, ok := f.users[key]
@@ -124,16 +154,20 @@ func (f *fakeAuth) CallAppResult(app, tool string, in map[string]any, out any) e
 		if f.disabled[uid] {
 			return fmt.Errorf("user_inactive")
 		}
+		token := signTestToken(f.priv, f.kid, uid, f.kinds[uid], org, time.Now().Add(15*time.Minute))
+		if org != "default" {
+			token = resignClaims(f.priv, token, map[string]any{"aud": in["client_id"], "azp": in["client_id"]})
+		}
 		res = map[string]any{
 			"user":          map[string]any{"id": uid, "kind": f.kinds[uid], "display_name": f.names[uid]},
 			"created":       created,
-			"access_token":  signTestToken(f.priv, f.kid, uid, f.kinds[uid], "default", time.Now().Add(15*time.Minute)),
+			"access_token":  token,
 			"refresh_token": fmt.Sprintf("refresh-%d", uid),
-			"expires_in":    900, "token_type": "Bearer", "client_id": "akc_test", "organization_slug": "default",
+			"expires_in":    900, "token_type": "Bearer", "client_id": in["client_id"], "organization_slug": org,
 		}
 	case "auth.auth_jwks_get":
 		res = map[string]any{
-			"organization_slug": "default", "issuer": "http://test/orgs/default",
+			"organization_slug": org, "issuer": "http://test/orgs/" + org,
 			"keys": []map[string]any{{
 				"kid": f.kid, "kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig",
 				"x": base64.RawURLEncoding.EncodeToString(f.pub),
@@ -155,7 +189,11 @@ func (f *fakeAuth) CallAppResult(app, tool string, in map[string]any, out any) e
 		res = map[string]any{"identities": ids, "count": len(ids)}
 	case "auth.auth_users_disable":
 		f.disabled[argInt(in, "user_id")] = true
+		f.disableReasons[argInt(in, "user_id")], _ = in["reason"].(string)
 		res = map[string]any{"ok": true}
+	case "auth.auth_audit_search":
+		metadata, _ := json.Marshal(map[string]any{"reason": f.disableReasons[argInt(in, "user_id")]})
+		res = map[string]any{"events": []map[string]any{{"metadata": string(metadata)}}}
 	case "auth.auth_users_enable":
 		f.disabled[argInt(in, "user_id")] = false
 		res = map[string]any{"ok": true}
@@ -179,7 +217,7 @@ type fixture struct {
 	auth   *fakeAuth
 	events *tk.EmitRecorder
 	app    *App
-	pid    string
+	pid    GameScope
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -191,10 +229,13 @@ func newFixture(t *testing.T) *fixture {
 		tk.WithPlatform(fake),
 		tk.WithEmitter(rec),
 		tk.WithConfig(map[string]string{"analytics_enabled": "false"}))
+	if err := initializeGames(ctx); err != nil {
+		t.Fatal(err)
+	}
 	resetJWKSCache()
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = nil; resetJWKSCache() })
-	return &fixture{ctx: ctx, auth: fake, events: rec, app: &App{}, pid: "test-proj"}
+	return &fixture{ctx: ctx, auth: fake, events: rec, app: &App{}, pid: GameScope{"test-proj", "legacy-test-proj"}}
 }
 
 func doReq(h http.HandlerFunc, method, path string, body any, pathValues map[string]string, headers ...string) *httptest.ResponseRecorder {
@@ -290,7 +331,7 @@ func TestLoginDevice_CreatesPlayerThenReturns(t *testing.T) {
 	if n := f.auth.callCount("auth.auth_clients_create"); n != 1 {
 		t.Errorf("auth client registered %d times, want once", n)
 	}
-	if n := len(f.events.EventsByTopic("player.created")); n != 1 {
+	if n := len(f.delivered(t).EventsByTopic("player.created")); n != 1 {
 		t.Errorf("player.created emitted %d times", n)
 	}
 }
@@ -378,7 +419,7 @@ func TestLoginLink_DeviceResolvesSamePlayer(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("unsupported provider status=%d", rec.Code)
 	}
-	if n := len(f.events.EventsByTopic("player.linked")); n != 1 {
+	if n := len(f.delivered(t).EventsByTopic("player.linked")); n != 1 {
 		t.Errorf("player.linked emitted %d times", n)
 	}
 }
@@ -529,7 +570,7 @@ func TestStats_ClientGateAndAggregation(t *testing.T) {
 	if level == nil || level.Value != 2 {
 		t.Errorf("last stat = %+v, want 2", level)
 	}
-	if n := len(f.events.EventsByTopic("stat.updated")); n < 5 {
+	if n := len(f.delivered(t).EventsByTopic("stat.updated")); n < 5 {
 		t.Errorf("stat.updated emitted %d times", n)
 	}
 }
@@ -602,8 +643,8 @@ func TestLeaderboards_RanksAroundAndHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	tp := toolPage.(*leaderboardPage)
-	if tp.Total != 3 || tp.Me == nil || tp.Me.Rank != 1 || tp.Me.Score != 100 {
-		t.Errorf("tool page = total %d me %+v", tp.Total, tp.Me)
+	if (tp.Total == nil || *tp.Total != 3) || tp.Me == nil || tp.Me.Rank != 1 || tp.Me.Score != 100 {
+		t.Errorf("tool page = total %d me %+v", *tp.Total, tp.Me)
 	}
 	if err := dbUpsertEntry(f.ctx.AppDB(), f.pid, lb.ID, "2000-W01", ids[1], 999); err != nil {
 		t.Fatal(err)
@@ -641,7 +682,7 @@ func TestLeaderboards_RolloverEmitsResetAndSumRestarts(t *testing.T) {
 	if err := rolloverLeaderboards(f.ctx, f.pid, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	resets := f.events.EventsByTopic("leaderboard.reset")
+	resets := f.delivered(t).EventsByTopic("leaderboard.reset")
 	if len(resets) != 1 {
 		t.Fatalf("leaderboard.reset emitted %d times", len(resets))
 	}
@@ -699,14 +740,14 @@ func TestLeaderboards_ManualResetStartsFreshPeriod(t *testing.T) {
 		t.Fatal(err)
 	}
 	cur, _ := f.app.toolLeaderboardsGet(f.ctx, map[string]any{"name": "alltime"})
-	if p := cur.(*leaderboardPage); p.Total != 1 || p.Entries[0].Score != 20 {
+	if p := cur.(*leaderboardPage); (p.Total == nil || *p.Total != 1) || p.Entries[0].Score != 20 {
 		t.Errorf("current period page = %+v", p)
 	}
 	old, _ := f.app.toolLeaderboardsGet(f.ctx, map[string]any{"name": "alltime", "period": "all"})
-	if p := old.(*leaderboardPage); p.Total != 1 || p.Entries[0].Score != 10 {
+	if p := old.(*leaderboardPage); (p.Total == nil || *p.Total != 1) || p.Entries[0].Score != 10 {
 		t.Errorf("old period page = %+v", p)
 	}
-	resets := f.events.EventsByTopic("leaderboard.reset")
+	resets := f.delivered(t).EventsByTopic("leaderboard.reset")
 	if len(resets) != 1 || resets[0].Data.(map[string]any)["manual"] != true {
 		t.Errorf("manual reset events = %v", resets)
 	}
@@ -758,7 +799,7 @@ func TestAchievements_UnlockOnThresholdAndHidden(t *testing.T) {
 			t.Errorf("achievement %v not unlocked", m)
 		}
 	}
-	if n := len(f.events.EventsByTopic("achievement.unlocked")); n != 2 {
+	if n := len(f.delivered(t).EventsByTopic("achievement.unlocked")); n != 2 {
 		t.Errorf("achievement.unlocked emitted %d times", n)
 	}
 	if _, err := f.app.toolAchievementsDefine(f.ctx, map[string]any{"key": "beta", "name": "Beta tester"}); err != nil {
@@ -800,8 +841,8 @@ func TestBan_BlocksPlayerAndSyncsAuth(t *testing.T) {
 	if ban := res.(map[string]any)["ban"].(*Ban); ban.Reason != "cheating" || ban.ExpiresAt == "" {
 		t.Errorf("ban = %+v", ban)
 	}
-	if !f.auth.disabled[uid] {
-		t.Error("auth user should be disabled")
+	if f.auth.disabled[uid] {
+		t.Error("game ban must not disable the Auth account")
 	}
 	rec := doReq(f.app.handleMe, "GET", "/v1/me", nil, nil, bearer(tok)...)
 	if rec.Code != http.StatusForbidden || decode(t, rec)["reason"] != "cheating" {
@@ -831,7 +872,7 @@ func TestBan_BlocksPlayerAndSyncsAuth(t *testing.T) {
 	if rec := doReq(f.app.handleMe, "GET", "/v1/me", nil, nil, bearer(tok)...); rec.Code != http.StatusOK {
 		t.Errorf("unbanned /v1/me status=%d", rec.Code)
 	}
-	if b, u := len(f.events.EventsByTopic("player.banned")), len(f.events.EventsByTopic("player.unbanned")); b != 1 || u != 1 {
+	if b, u := len(f.delivered(t).EventsByTopic("player.banned")), len(f.delivered(t).EventsByTopic("player.unbanned")); b != 1 || u != 1 {
 		t.Errorf("ban events = %d/%d", b, u)
 	}
 }
@@ -854,10 +895,10 @@ func TestBan_ExpiredLiftsLazily(t *testing.T) {
 	if p, _ := dbGetPlayer(db, f.pid, pid); p.Status != "active" {
 		t.Errorf("status = %s", p.Status)
 	}
-	if f.auth.disabled[uid] {
-		t.Error("auth user should be re-enabled on expiry")
+	if !f.auth.disabled[uid] {
+		t.Error("expiry must not re-enable an independently disabled Auth account")
 	}
-	if ev := f.events.EventsByTopic("player.unbanned"); len(ev) != 1 || ev[0].Data.(map[string]any)["source"] != "expiry" {
+	if ev := f.delivered(t).EventsByTopic("player.unbanned"); len(ev) != 1 || ev[0].Data.(map[string]any)["source"] != "expiry" {
 		t.Errorf("unban events = %v", ev)
 	}
 }
@@ -891,13 +932,13 @@ func TestExportAndErase(t *testing.T) {
 	if rec.Code != http.StatusUnauthorized || decode(t, rec)["error"] != "player_not_found" {
 		t.Errorf("erased /v1/me status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !f.auth.disabled[uid] || f.auth.callCount("auth.auth_users_revoke_sessions") != 1 {
-		t.Error("erase must disable the auth user and revoke sessions")
+	if f.auth.disabled[uid] || f.auth.callCount("auth.auth_users_revoke_sessions") != 0 {
+		t.Error("game erasure must not modify the shared Auth account")
 	}
 	if p, _ := dbGetPlayer(f.ctx.AppDB(), f.pid, pid); p != nil {
 		t.Error("player row should be gone")
 	}
-	if n := len(f.events.EventsByTopic("player.erased")); n != 1 {
+	if n := len(f.delivered(t).EventsByTopic("player.erased")); n != 1 {
 		t.Errorf("player.erased emitted %d times", n)
 	}
 }
@@ -1011,4 +1052,31 @@ func TestAdminRoutes_PanelSurface(t *testing.T) {
 	if rec := doReq(f.app.handleAdminPlayerGet, "GET", "/admin/players/99999", nil, map[string]string{"id": "99999"}); rec.Code != http.StatusNotFound {
 		t.Errorf("missing player status=%d", rec.Code)
 	}
+}
+
+func (f *fixture) delivered(t *testing.T) *tk.EmitRecorder {
+	t.Helper()
+	if err := drainOutbox(f.ctx, func(scope GameScope, topic string, payload map[string]any) error {
+		f.ctx.EmitWithProject(topic, scope.ProjectID, payload)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return f.events
+}
+func resignClaims(priv ed25519.PrivateKey, token string, changes map[string]any) string {
+	parts := strings.Split(token, ".")
+	raw, _ := base64.RawURLEncoding.DecodeString(parts[1])
+	var claims map[string]any
+	_ = json.Unmarshal(raw, &claims)
+	for k, v := range changes {
+		if v == nil {
+			delete(claims, k)
+		} else {
+			claims[k] = v
+		}
+	}
+	b, _ := json.Marshal(claims)
+	input := parts[0] + "." + base64.RawURLEncoding.EncodeToString(b)
+	return input + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, []byte(input)))
 }

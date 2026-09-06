@@ -13,6 +13,8 @@ setup:
     path: ./
 
 directive: |
+  First use games_list and select the sole active legacy game, passing its game_id
+  on every subsequent Games call.
   A player called "Nova" says they lost their save. Find their player
   record and tell me what data keys and statistics we hold for them. If
   no such player exists, say so plainly. Then stop.

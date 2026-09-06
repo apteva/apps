@@ -2,16 +2,12 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.1.0
+version: 0.2.0
 description: |
-  Game backend for Apteva: players and progression, run by an agent.
-  v0.1 ships guest and custom-ID login through the Auth app, player
-  profiles and bans, versioned player data (cloud save), server-authoritative
-  statistics with last, max, min, and sum aggregation, leaderboards with
-  daily, weekly, monthly, and season periods, and achievements evaluated
-  from statistics. Game clients use the /v1 player API with Auth-issued
-  JWTs; agents use the MCP tools; the dashboard panel shows players,
-  leaderboards, and definitions.
+  Multi-game backend for Apteva: independent games, players, cloud saves,
+  transactional statistics, leaderboards and achievements within each project.
+  Game-specific Auth clients and login tickets protect player APIs. Legacy
+  clients remain bound to their migrated game. Agents use scoped MCP tools.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/games
 icon: /ui/icon.svg
@@ -28,7 +24,7 @@ requires:
   apps:
     - name: auth
       version: ">=0.10.0"
-      reason: Owns player accounts, sessions, and tokens. Games logs players in by device or custom ID through Auth and verifies Auth-issued JWTs on every player request.
+      reason: Owns accounts, game-specific sessions, organizations and signing keys.
     - name: analytics
       optional: true
       reason: Records session_start, stat, and achievement events for retention queries. Without it, telemetry is skipped.
@@ -37,8 +33,26 @@ provides:
   http_routes:
     - prefix: /v1/
       no_auth: true
+    - prefix: /v2/
+      no_auth: true
     - prefix: /admin/
   mcp_tools:
+    - name: games_login_ticket
+      description: Issue a one-time custom login ticket after the trusted server authenticates the external player.
+    - name: games_events_retry
+      description: Retry failed event deliveries for one game.
+    - name: games_create
+      description: Create a game with a title (name), slug, and optional description within this project.
+    - name: games_list
+      description: List games within this project.
+    - name: games_get
+      description: Get games within this project.
+    - name: games_update
+      description: Edit a game title (name) and description independently.
+    - name: games_archive
+      description: Archive games within this project.
+    - name: games_restore
+      description: Restore games within this project.
     - name: players_search
       description: Search players by display name, player id, or auth user id; filter by status (active | banned). Paged.
     - name: players_get
@@ -48,13 +62,13 @@ provides:
     - name: players_update
       description: Update a player's display_name, avatar_url, region, locale, or public metadata.
     - name: players_ban
-      description: Ban a player with a reason and optional expires_at (RFC3339). Disables the Auth user and revokes sessions.
+      description: Ban a player with a reason and optional expires_at (RFC3339). Applies only to this game; shared Auth accounts stay enabled.
     - name: players_unban
-      description: Lift a player's active bans and re-enable the Auth user.
+      description: Lift this game's bans without changing unrelated Auth suspensions.
     - name: players_export
       description: Export everything stored about one player as JSON (data-subject access request).
     - name: players_erase
-      description: Delete a player's rows and disable the Auth user. Requires confirm=true. Irreversible.
+      description: Erase this game's player data and prevent automatic recreation; shared Auth accounts remain intact. Requires confirm=true. Irreversible.
     - name: data_get
       description: Read a player's data keys (all visibilities), or one key.
     - name: data_set
@@ -98,12 +112,17 @@ provides:
         category: games
         agent_plugins: "1.0.0"
   workers:
+    - name: event-delivery
+      schedule: "@every 1s"
     - name: leaderboard-rollover
       schedule: "@every 1m"
   publishes:
     - name: player.created
       description: A player row was created on first login.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         auth_user_id: integer
         provider: string
@@ -112,11 +131,17 @@ provides:
     - name: player.linked
       description: A player linked an additional device or custom identity.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         provider: string
     - name: player.banned
-      description: A player was banned; the Auth user is disabled.
+      description: A player was banned in this game.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         reason: string
         expires_at: string
@@ -124,16 +149,25 @@ provides:
     - name: player.unbanned
       description: A player's bans were lifted; the Auth user is re-enabled.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         source: string
     - name: player.erased
       description: A player's data was deleted and the Auth user disabled.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         auth_user_id: integer
     - name: stat.updated
       description: A player's statistic changed after aggregation.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         stat: string
         value: number
@@ -142,6 +176,9 @@ provides:
     - name: leaderboard.reset
       description: A leaderboard started a new period, by schedule or by hand.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         leaderboard: string
         previous_period: string
         period: string
@@ -149,6 +186,9 @@ provides:
     - name: achievement.unlocked
       description: A player unlocked an achievement.
       payload:
+        project_id: string
+        game_id: string
+        event_id: integer
         player_id: integer
         key: string
         source: string
@@ -172,7 +212,7 @@ config_schema:
     type: text
     default: "default"
     label: Auth organization
-    description: Auth organization that holds this title's players. Games registers its own native OAuth client in it on first login.
+    description: Existing Auth organization for the migrated legacy game. New games provision separate organizations.
   - name: analytics_enabled
     type: text
     default: "true"
@@ -183,5 +223,20 @@ config_schema:
     default: "Player"
     label: Default display name prefix
     description: New players without a display name are called "<prefix> <id>".
+  - name: legacy_custom_login_enabled
+    type: text
+    default: "true"
+    label: Allow legacy custom-ID login
+    description: Compatibility for existing v1 clients. Disable after migrating them to server-issued login tickets. V2 always requires tickets.
+  - name: audit_retention_days
+    type: text
+    default: "0"
+    label: Audit retention days
+    description: 0 retains existing audit history. A positive number enables pruning older audit rows.
+  - name: history_retention_days
+    type: text
+    default: "0"
+    label: Leaderboard history retention days
+    description: 0 retains all historic periods. A positive number prunes old entries outside the current period.
 
 upgrade_policy: auto-patch

@@ -4,14 +4,16 @@ description: Use Games tools for players, bans, player data, statistics, leaderb
 compatibility: Requires the Games MCP tools supplied by an Apteva app installation, with the Auth app installed alongside.
 metadata:
   author: apteva
-  version: "1.0"
+  version: "2.0"
 ---
 
 # Games
 
 Use the Games tools as the authoritative, project-scoped source for
-players, player data, statistics, leaderboards, and achievements. One
-Apteva project is one game title.
+players, player data, statistics, leaderboards, and achievements. A project
+can contain multiple games. Start with `games_list`, select the intended game,
+and pass its immutable `game_id` on every scoped call. Never infer the target
+from a player name shared by several games.
 
 ## Operating rules
 
@@ -39,6 +41,14 @@ Apteva project is one game title.
    periods (daily, weekly, monthly, season) roll over on their own and
    past periods stay readable.
 
+Use `operation_id` for stat updates and manual resets, reusing it only for
+retries of the same operation within seven days. Bans and erasures apply to the
+selected game; they do not disable a shared Auth account. Archive games with
+`games_archive` and restore them with `games_restore`.
+
+V2 custom login requires `games_login_ticket`, issued only after a trusted
+backend authenticates the external player. Treat guest device IDs as secrets.
+
 ## Finding players
 
 - `players_search` by display name or exact ids; `players_get` also
@@ -53,4 +63,6 @@ Apteva project is one game title.
 Games publishes `player.created`, `player.linked`, `player.banned`,
 `player.unbanned`, `player.erased`, `stat.updated`, `leaderboard.reset`,
 and `achievement.unlocked` on the AppBus. Subscribe to react to
-milestones or moderation changes instead of polling.
+milestones or moderation changes instead of polling. Filter by `game_id` and
+deduplicate `event_id` per installation. Delivery is at least once; inspect
+`games_get` for failed delivery counts and use `games_events_retry` after repair.

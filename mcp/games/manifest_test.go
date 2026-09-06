@@ -97,7 +97,7 @@ func TestManifest_PublicRoutesOnlyUnderV1(t *testing.T) {
 		t.Fatalf("manifest must declare /v1/ and /admin/ routes")
 	}
 	for _, r := range (&App{}).HTTPRoutes() {
-		if r.NoAuth && !strings.HasPrefix(r.Pattern, "/v1/") {
+		if r.NoAuth && !strings.HasPrefix(r.Pattern, "/v1/") && !strings.HasPrefix(r.Pattern, "/v2/games/") {
 			t.Errorf("NoAuth route outside /v1: %s", r.Pattern)
 		}
 		if !r.NoAuth && !strings.HasPrefix(r.Pattern, "/admin/") {

@@ -1,6 +1,6 @@
 package main
 
-// public.go — the /v1 player API game clients call.
+// public.go — v1/v2 player APIs game clients call.
 //
 // Every route is NoAuth at the SDK gate (the platform token never
 // reaches a game build). Login routes talk to Auth and return an Auth
@@ -34,49 +34,54 @@ func bearerToken(r *http.Request) string {
 
 // requirePlayer verifies the bearer token, resolves the player row, and
 // enforces bans. It writes the error response itself on failure.
-func (a *App) requirePlayer(w http.ResponseWriter, r *http.Request) (*sdk.AppCtx, string, *Player, bool) {
+func (a *App) requirePlayer(w http.ResponseWriter, r *http.Request) (*sdk.AppCtx, GameScope, *Player, bool) {
 	ctx := getAppCtx(r)
-	pid, err := resolveProjectFromRequest(r)
+	scope, err := resolveGameFromRequest(getAppCtx(r), r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
 	token := bearerToken(r)
 	if token == "" {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "missing_bearer"})
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
-	claims, err := verifyPlayerToken(ctx, pid, token)
+	claims, err := verifyPlayerToken(ctx, scope, token)
 	if err != nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": err.Error()})
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
-	player, err := dbGetPlayerByAuthUser(ctx.AppDB(), pid, claims.AuthUserID)
+	player, err := dbGetPlayerByAuthUser(ctx.AppDB(), scope, claims.AuthUserID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
 	if player == nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{
-			"error": "player_not_found", "hint": "call /v1/login/device or /v1/login/custom first",
+			"error": "player_not_found", "hint": "log in to this game first",
 		})
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
-	ban, err := activeBanFor(ctx, pid, player)
+	ban, err := activeBanFor(ctx, scope, player)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
 	if ban != nil {
 		httpStatus(w, http.StatusForbidden, map[string]any{"error": "banned", "reason": ban.Reason, "expires_at": ban.ExpiresAt})
-		return nil, "", nil, false
+		return nil, GameScope{}, nil, false
 	}
-	return ctx, pid, player, true
+	if !allowRequest(ctx, scope, fmt.Sprintf("player:%d", player.ID), 300) {
+		httpErr(w, 429, "rate_limited")
+		return nil, GameScope{}, nil, false
+	}
+	return ctx, scope, player, true
 }
 
 // ─── login ───────────────────────────────────────────────────────────
 
 type loginBody struct {
+	LoginTicket string `json:"login_ticket"`
 	DeviceID    string `json:"device_id"`
 	CustomID    string `json:"custom_id"`
 	DisplayName string `json:"display_name"`
@@ -87,7 +92,7 @@ func (a *App) handleLoginCustom(w http.ResponseWriter, r *http.Request) { a.logi
 
 func (a *App) login(w http.ResponseWriter, r *http.Request, provider string) {
 	ctx := getAppCtx(r)
-	pid, err := resolveProjectFromRequest(r)
+	scope, err := resolveGameFromRequest(getAppCtx(r), r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -102,29 +107,73 @@ func (a *App) login(w http.ResponseWriter, r *http.Request, provider string) {
 		raw = body.CustomID
 	}
 	raw = strings.TrimSpace(raw)
+	generated := ""
+	if isV2(r) && provider == "device" {
+		if raw == "" {
+			raw = randomID() + randomID()
+			generated = raw
+		}
+		if len(raw) < 32 {
+			httpErr(w, 400, "device_id must be a random installation secret of at least 32 bytes")
+			return
+		}
+	}
+	if provider == "custom" && body.LoginTicket != "" {
+		raw = "ticket"
+	}
+	if isV2(r) && provider == "custom" && body.LoginTicket == "" {
+		httpErr(w, 403, "login_ticket required from the trusted game server")
+		return
+	}
+	if !isV2(r) && provider == "custom" && body.LoginTicket == "" && !cfgBool(ctx, "legacy_custom_login_enabled", true) {
+		httpErr(w, 403, "login_ticket required")
+		return
+	}
 	if raw == "" || len(raw) > maxIdentityLen {
 		httpErr(w, http.StatusBadRequest, provider+"_id required (max 256 characters)")
 		return
 	}
-	subject := identitySubject(raw)
-	res, err := authLoginIdentity(ctx, pid, provider, subject, strings.TrimSpace(body.DisplayName), clientIP(r), r.UserAgent())
-	if err != nil {
-		a.loginFailed(w, ctx, pid, provider, subject, err)
+	if len(strings.TrimSpace(body.DisplayName)) > 64 {
+		httpErr(w, 400, "display_name must be at most 64 bytes")
 		return
 	}
-	a.finishLogin(w, ctx, pid, provider, res)
+	subject := gameIdentity(ctx, scope, raw)
+	if !allowRequest(ctx, scope, "login:"+identitySubject(subject+body.LoginTicket), 30) || !allowRequest(ctx, scope, "login-total", 1000) {
+		httpErr(w, 429, "rate_limited")
+		return
+	}
+	if provider == "custom" && body.LoginTicket != "" {
+		subject, err = consumeLoginTicket(ctx, scope, body.LoginTicket)
+		if err != nil {
+			httpErr(w, 401, err.Error())
+			return
+		}
+	}
+	res, err := authLoginIdentity(ctx, scope, provider, subject, strings.TrimSpace(body.DisplayName), clientIP(r), r.UserAgent())
+	if err != nil && strings.Contains(err.Error(), "user_inactive") {
+		if uid, e := authResolveIdentity(ctx, scope, provider, subject); e == nil && uid > 0 {
+			if recovered, e := recoverLegacyBan(ctx, scope, uid, false); e == nil && recovered {
+				res, err = authLoginIdentity(ctx, scope, provider, subject, strings.TrimSpace(body.DisplayName), clientIP(r), r.UserAgent())
+			}
+		}
+	}
+	if err != nil {
+		a.loginFailed(w, ctx, scope, provider, subject, err)
+		return
+	}
+	a.finishLogin(w, ctx, scope, provider, res, generated)
 }
 
-func (a *App) loginFailed(w http.ResponseWriter, ctx *sdk.AppCtx, pid, provider, subject string, err error) {
+func (a *App) loginFailed(w http.ResponseWriter, ctx *sdk.AppCtx, scope GameScope, provider, subject string, err error) {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "rate_limited"):
 		httpStatus(w, http.StatusTooManyRequests, map[string]string{"error": "rate_limited", "detail": msg})
 	case strings.Contains(msg, "user_inactive"), strings.Contains(msg, "account_locked"):
 		// Disabled in Auth — usually one of our bans. Surface the reason.
-		if uid, rerr := authResolveIdentity(ctx, pid, provider, subject); rerr == nil && uid > 0 {
-			if p, _ := dbGetPlayerByAuthUser(ctx.AppDB(), pid, uid); p != nil {
-				if ban, _ := dbActiveBan(ctx.AppDB(), pid, p.ID); ban != nil {
+		if uid, rerr := authResolveIdentity(ctx, scope, provider, subject); rerr == nil && uid > 0 {
+			if p, _ := dbGetPlayerByAuthUser(ctx.AppDB(), scope, uid); p != nil {
+				if ban, _ := dbActiveBan(ctx.AppDB(), scope, p.ID); ban != nil {
 					httpStatus(w, http.StatusForbidden, map[string]any{"error": "banned", "reason": ban.Reason, "expires_at": ban.ExpiresAt})
 					return
 				}
@@ -136,64 +185,29 @@ func (a *App) loginFailed(w http.ResponseWriter, ctx *sdk.AppCtx, pid, provider,
 	}
 }
 
-func (a *App) finishLogin(w http.ResponseWriter, ctx *sdk.AppCtx, pid, provider string, res *authLoginResult) {
-	db := ctx.AppDB()
-	kind := res.User.Kind
-	if kind == "" {
-		kind = "guest"
-	}
-	player, err := dbGetPlayerByAuthUser(db, pid, res.User.ID)
+func (a *App) finishLogin(w http.ResponseWriter, ctx *sdk.AppCtx, scope GameScope, provider string, res *authLoginResult, credential ...string) {
+	player, created, err := finishLoginState(ctx, scope, provider, res)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	created := false
-	if player == nil {
-		name := strings.TrimSpace(res.User.DisplayName)
-		id, err := dbCreatePlayer(db, pid, res.User.ID, name, kind)
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
-			return
+		var banned *loginBanError
+		if errors.As(err, &banned) {
+			httpStatus(w, 403, map[string]any{"error": "banned", "reason": banned.ban.Reason, "expires_at": banned.ban.ExpiresAt})
+		} else if errors.Is(err, errPlayerErased) {
+			httpErr(w, 403, "player_erased")
+		} else {
+			httpErr(w, 500, err.Error())
 		}
-		if name == "" {
-			name = fmt.Sprintf("%s %d", cfgStr(ctx, "default_display_name_prefix", "Player"), id)
-			_ = dbUpdatePlayer(db, pid, id, playerPatch{DisplayName: &name})
-		}
-		player, err = dbGetPlayer(db, pid, id)
-		if err != nil || player == nil {
-			httpErr(w, http.StatusInternalServerError, "player row missing after create")
-			return
-		}
-		created = true
-	}
-	ban, err := activeBanFor(ctx, pid, player)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if ban != nil {
-		httpStatus(w, http.StatusForbidden, map[string]any{"error": "banned", "reason": ban.Reason, "expires_at": ban.ExpiresAt})
-		return
-	}
-	if err := dbTouchLogin(db, pid, player.ID, kind); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if refreshed, err := dbGetPlayer(db, pid, player.ID); err == nil && refreshed != nil {
-		player = refreshed
-	}
-	if created {
-		dbAudit(db, pid, player.ID, "player.created", "login:"+provider, map[string]any{"auth_user_id": res.User.ID})
-		ctx.Emit("player.created", map[string]any{
-			"player_id": player.ID, "auth_user_id": res.User.ID, "provider": provider, "kind": kind, "display_name": player.DisplayName,
-		})
-	}
-	trackEvent(ctx, pid, "session_start", player, map[string]any{"provider": provider, "created": created})
 	code := http.StatusOK
 	if created {
 		code = http.StatusCreated
 	}
+	secret := ""
+	if len(credential) > 0 {
+		secret = credential[0]
+	}
 	httpStatus(w, code, map[string]any{
+		"device_id": secret, "game_id": scope.GameID,
 		"player":        player,
 		"created":       created,
 		"access_token":  res.AccessToken,
@@ -209,7 +223,7 @@ func (a *App) finishLogin(w http.ResponseWriter, ctx *sdk.AppCtx, pid, provider 
 }
 
 func (a *App) handleLoginLink(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
@@ -233,6 +247,10 @@ func (a *App) handleLoginLink(w http.ResponseWriter, r *http.Request) {
 			provider, raw = "custom", body.CustomID
 		}
 	}
+	if isV2(r) && provider == "custom" {
+		httpErr(w, 403, "custom identity linking requires the trusted server Auth workflow")
+		return
+	}
 	if provider != "device" && provider != "custom" {
 		httpErr(w, http.StatusBadRequest, "provider must be device or custom (pass device_id or custom_id)")
 		return
@@ -242,7 +260,11 @@ func (a *App) handleLoginLink(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "identity required (max 256 characters)")
 		return
 	}
-	if err := authLinkIdentity(ctx, pid, player.AuthUserID, provider, identitySubject(raw)); err != nil {
+	if isV2(r) && len(raw) < 32 {
+		httpErr(w, 400, "device credential must be at least 32 bytes")
+		return
+	}
+	if err := authLinkIdentity(ctx, scope, player.AuthUserID, provider, gameIdentity(ctx, scope, raw)); err != nil {
 		if strings.Contains(err.Error(), "identity_already_linked") {
 			httpStatus(w, http.StatusConflict, map[string]string{"error": "identity_already_linked"})
 			return
@@ -250,8 +272,8 @@ func (a *App) handleLoginLink(w http.ResponseWriter, r *http.Request) {
 		httpStatus(w, http.StatusBadGateway, map[string]string{"error": "auth_unavailable", "detail": err.Error()})
 		return
 	}
-	dbAudit(ctx.AppDB(), pid, player.ID, "player.linked", "client", map[string]any{"provider": provider})
-	ctx.Emit("player.linked", map[string]any{"player_id": player.ID, "provider": provider})
+	dbAudit(ctx.AppDB(), scope, player.ID, "player.linked", "client", map[string]any{"provider": provider})
+	emitGame(ctx, scope, "player.linked", map[string]any{"player_id": player.ID, "provider": provider})
 	httpJSON(w, map[string]any{"ok": true, "provider": provider})
 }
 
@@ -259,7 +281,7 @@ func (a *App) handleLoginLink(w http.ResponseWriter, r *http.Request) {
 // needs one base URL. Sessions are Auth's; games adds nothing here.
 func (a *App) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
-	pid, err := resolveProjectFromRequest(r)
+	scope, err := resolveGameFromRequest(getAppCtx(r), r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -279,14 +301,14 @@ func (a *App) handleSessionRefresh(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	clientID, err := ensureAuthClient(ctx, pid)
+	clientID, err := ensureAuthClient(ctx, scope)
 	if err != nil {
 		httpStatus(w, http.StatusBadGateway, map[string]string{"error": "auth_unavailable", "detail": err.Error()})
 		return
 	}
 	payload, _ := json.Marshal(map[string]string{"refresh_token": body.RefreshToken, "client_id": clientID})
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-		base+"/api/apps/auth/refresh?project_id="+url.QueryEscape(pid), bytes.NewReader(payload))
+		base+"/api/apps/auth/refresh?project_id="+url.QueryEscape(scope.ProjectID), bytes.NewReader(payload))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -314,7 +336,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleMePatch(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
@@ -329,7 +351,7 @@ func (a *App) handleMePatch(w http.ResponseWriter, r *http.Request) {
 			allowed[k] = v
 		}
 	}
-	updated, err := applyProfilePatch(ctx, pid, player, allowed, "client")
+	updated, err := applyProfilePatch(ctx, scope, player, allowed, "client")
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -338,7 +360,7 @@ func (a *App) handleMePatch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublicPlayer(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, _, ok := a.requirePlayer(w, r)
+	ctx, scope, _, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
@@ -347,7 +369,7 @@ func (a *App) handlePublicPlayer(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid player id")
 		return
 	}
-	p, err := dbGetPlayer(ctx.AppDB(), pid, id)
+	p, err := dbGetPlayer(ctx.AppDB(), scope, id)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -356,7 +378,7 @@ func (a *App) handlePublicPlayer(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "player not found")
 		return
 	}
-	data, err := dbListData(ctx.AppDB(), pid, p.ID, []string{"public"})
+	data, err := dbListData(ctx.AppDB(), scope, p.ID, []string{"public"})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -367,11 +389,11 @@ func (a *App) handlePublicPlayer(w http.ResponseWriter, r *http.Request) {
 // ─── player data ─────────────────────────────────────────────────────
 
 func (a *App) handleDataList(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
-	entries, err := dbListData(ctx.AppDB(), pid, player.ID, []string{"public", "private"})
+	entries, err := dbListData(ctx.AppDB(), scope, player.ID, []string{"public", "private"})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -380,12 +402,12 @@ func (a *App) handleDataList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDataGet(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
 	key := r.PathValue("key")
-	e, err := dbGetData(ctx.AppDB(), pid, player.ID, key)
+	e, err := dbGetData(ctx.AppDB(), scope, player.ID, key)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -398,7 +420,7 @@ func (a *App) handleDataGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDataPut(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
@@ -434,7 +456,7 @@ func (a *App) handleDataPut(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "visibility must be public or private")
 		return
 	}
-	existing, err := dbGetData(ctx.AppDB(), pid, player.ID, key)
+	existing, err := dbGetData(ctx.AppDB(), scope, player.ID, key)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -445,7 +467,11 @@ func (a *App) handleDataPut(w http.ResponseWriter, r *http.Request) {
 	}
 	var compact bytes.Buffer
 	_ = json.Compact(&compact, value)
-	e, err := dbSetData(ctx.AppDB(), pid, player.ID, key, compact.String(), body.Visibility, body.Version)
+	e, err := dbSetData(ctx.AppDB(), scope, player.ID, key, compact.String(), body.Visibility, body.Version, true)
+	if errors.Is(err, errServerOnly) {
+		httpErr(w, 403, err.Error())
+		return
+	}
 	if errors.Is(err, errVersionConflict) {
 		httpStatus(w, http.StatusConflict, map[string]any{"error": "version_conflict", "current": existing})
 		return
@@ -458,12 +484,12 @@ func (a *App) handleDataPut(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDataDelete(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
 	key := r.PathValue("key")
-	existing, err := dbGetData(ctx.AppDB(), pid, player.ID, key)
+	existing, err := dbGetData(ctx.AppDB(), scope, player.ID, key)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -476,8 +502,13 @@ func (a *App) handleDataDelete(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusForbidden, "this key is server-only")
 		return
 	}
-	if _, err := dbDeleteData(ctx.AppDB(), pid, player.ID, key); err != nil {
+	deleted, err := dbDeleteData(ctx.AppDB(), scope, player.ID, key, true)
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !deleted {
+		httpErr(w, 409, "key changed or is now protected")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -486,11 +517,11 @@ func (a *App) handleDataDelete(w http.ResponseWriter, r *http.Request) {
 // ─── statistics ──────────────────────────────────────────────────────
 
 func (a *App) handleStatsGet(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
-	stats, err := dbGetPlayerStats(ctx.AppDB(), pid, player.ID)
+	stats, err := dbGetPlayerStats(ctx.AppDB(), scope, player.ID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -499,7 +530,7 @@ func (a *App) handleStatsGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleStatsPost(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
@@ -514,7 +545,7 @@ func (a *App) handleStatsPost(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "updates must hold 1-50 entries of {stat, value}")
 		return
 	}
-	out, err := applyStatUpdates(ctx, pid, player, body.Updates, "client", true)
+	out, err := applyStatUpdates(ctx, scope, player, body.Updates, "client", true, r.Header.Get("Idempotency-Key"))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -525,11 +556,11 @@ func (a *App) handleStatsPost(w http.ResponseWriter, r *http.Request) {
 // ─── leaderboards ────────────────────────────────────────────────────
 
 func (a *App) handleLeaderboardGet(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
-	lb, err := dbGetLeaderboard(ctx.AppDB(), pid, strings.ToLower(r.PathValue("name")))
+	lb, err := dbGetLeaderboard(ctx.AppDB(), scope, strings.ToLower(r.PathValue("name")))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -538,8 +569,12 @@ func (a *App) handleLeaderboardGet(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "leaderboard not found")
 		return
 	}
-	page, err := leaderboardPageFor(ctx, pid, lb, r.URL.Query().Get("period"),
-		queryInt(r, "limit", 50, 1, 200), queryInt(r, "offset", 0, 0, 1_000_000), player.ID)
+	meID := player.ID
+	if isV2(r) && r.URL.Query().Get("include_me") != "true" {
+		meID = 0
+	}
+	page, err := leaderboardPageFor(ctx, scope, lb, r.URL.Query().Get("period"),
+		queryInt(r, "limit", 50, 1, 200), queryInt(r, "offset", 0, 0, 1_000_000), meID, leaderboardReadOptions{Cursor: r.URL.Query().Get("cursor"), OmitTotal: isV2(r) && r.URL.Query().Get("include_total") != "true"})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -548,11 +583,11 @@ func (a *App) handleLeaderboardGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleLeaderboardAround(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
-	lb, err := dbGetLeaderboard(ctx.AppDB(), pid, strings.ToLower(r.PathValue("name")))
+	lb, err := dbGetLeaderboard(ctx.AppDB(), scope, strings.ToLower(r.PathValue("name")))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -561,7 +596,7 @@ func (a *App) handleLeaderboardAround(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "leaderboard not found")
 		return
 	}
-	page, err := leaderboardAround(ctx, pid, lb, r.URL.Query().Get("period"), player.ID, queryInt(r, "radius", 5, 1, 50))
+	page, err := leaderboardAround(ctx, scope, lb, r.URL.Query().Get("period"), player.ID, queryInt(r, "radius", 5, 1, 50), !isV2(r) || r.URL.Query().Get("include_rank") == "true", !isV2(r) || r.URL.Query().Get("include_total") == "true")
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -572,16 +607,16 @@ func (a *App) handleLeaderboardAround(w http.ResponseWriter, r *http.Request) {
 // ─── achievements ────────────────────────────────────────────────────
 
 func (a *App) handleAchievementsGet(w http.ResponseWriter, r *http.Request) {
-	ctx, pid, player, ok := a.requirePlayer(w, r)
+	ctx, scope, player, ok := a.requirePlayer(w, r)
 	if !ok {
 		return
 	}
-	defs, err := dbListAchievementDefs(ctx.AppDB(), pid)
+	defs, err := dbListAchievementDefs(ctx.AppDB(), scope)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	mine, err := dbPlayerAchievements(ctx.AppDB(), pid, player.ID)
+	mine, err := dbPlayerAchievements(ctx.AppDB(), scope, player.ID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

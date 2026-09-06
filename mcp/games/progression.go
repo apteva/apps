@@ -15,7 +15,8 @@ package main
 // from zero every week while the all-time stat keeps counting.
 
 import (
-	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"regexp"
@@ -96,8 +97,56 @@ func achievementMet(d AchievementDef, value float64) bool {
 // stats; server callers (tools, dashboard) auto-define unknown stats as
 // server-only last-value stats so an agent can start recording without
 // a setup step.
-func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []statUpdate, source string, clientCall bool) (*statOutcome, error) {
-	db := ctx.AppDB()
+func applyStatUpdates(ctx *sdk.AppCtx, scope GameScope, player *Player, updates []statUpdate, source string, clientCall bool, operation ...string) (*statOutcome, error) {
+	db, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer db.Rollback()
+	if err := checkActiveGame(db, scope); err != nil {
+		return nil, err
+	}
+	current, err := dbGetPlayer(db, scope, player.ID)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, errors.New("player not found")
+	}
+	if clientCall {
+		ban, err := dbActiveBan(db, scope, player.ID)
+		if err != nil {
+			return nil, err
+		}
+		if ban != nil {
+			return nil, errors.New("banned")
+		}
+	}
+	key := ""
+	if len(operation) > 0 && operation[0] != "" {
+		if len(operation[0]) > 128 {
+			return nil, errors.New("idempotency key too long")
+		}
+		key = fmt.Sprintf("stats:%d:%s:%s", player.ID, source, operation[0])
+	}
+	fingerprint, _ := marshalResult(updates)
+	if key != "" {
+		var saved, fp string
+		err := db.QueryRow(`SELECT fingerprint,result FROM game_operations WHERE project_id=? AND game_id=? AND key=?`, scope.ProjectID, scope.GameID, key).Scan(&fp, &saved)
+		if err == nil {
+			if fp != fingerprint {
+				return nil, errors.New("idempotency key reused with different updates")
+			}
+			var out statOutcome
+			if err = json.Unmarshal([]byte(saved), &out); err != nil {
+				return nil, err
+			}
+			return &out, nil
+		}
+		if !isNoRows(err) {
+			return nil, err
+		}
+	}
 	out := &statOutcome{Applied: []string{}, Unlocked: []string{}, Rejected: []map[string]string{}}
 	reject := func(stat, reason string) {
 		out.Rejected = append(out.Rejected, map[string]string{"stat": stat, "reason": reason})
@@ -113,7 +162,7 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 			reject(name, "value must be a finite number")
 			continue
 		}
-		def, err := dbGetStatDef(db, pid, name)
+		def, err := dbGetStatDef(db, scope, name)
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +171,7 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 				reject(name, "unknown stat")
 				continue
 			}
-			if def, err = dbUpsertStatDef(db, pid, name, "last", false, ""); err != nil {
+			if def, err = dbUpsertStatDef(db, scope, name, "last", false, ""); err != nil {
 				return nil, err
 			}
 		}
@@ -130,7 +179,7 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 			reject(name, "stat is server-only")
 			continue
 		}
-		cur, err := dbGetPlayerStat(db, pid, player.ID, name)
+		cur, err := dbGetPlayerStat(db, scope, player.ID, name)
 		if err != nil {
 			return nil, err
 		}
@@ -140,25 +189,24 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 			old = cur.Value
 		}
 		newVal := aggregate(def.Aggregation, existing, old, u.Value)
-		if existing && newVal == old {
-			out.Applied = append(out.Applied, name)
-			continue
+		if math.IsNaN(newVal) || math.IsInf(newVal, 0) {
+			return nil, errors.New("stat aggregate overflow")
 		}
-		if _, err := dbUpsertPlayerStat(db, pid, player.ID, name, newVal); err != nil {
+		if _, err := dbUpsertPlayerStat(db, scope, player.ID, name, newVal); err != nil {
 			return nil, err
 		}
 		out.Applied = append(out.Applied, name)
 
-		boards, err := dbListLeaderboardsForStat(db, pid, name)
+		boards, err := dbListLeaderboardsForStat(db, scope, name)
 		if err != nil {
 			return nil, err
 		}
 		for i := range boards {
 			lb := &boards[i]
-			if changed, prev := ensureCurrentPeriod(ctx, pid, lb, now); changed {
-				emitReset(ctx, lb, prev, false)
+			if _, _, err := advancePeriod(db, scope, lb, now); err != nil {
+				return nil, err
 			}
-			entry, err := dbGetEntry(db, pid, lb.ID, lb.CurrentPeriod, player.ID)
+			entry, err := dbGetEntry(db, scope, lb.ID, lb.CurrentPeriod, player.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -168,14 +216,17 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 				eOld = entry.Score
 			}
 			eNew := aggregate(def.Aggregation, eExisting, eOld, u.Value)
+			if math.IsNaN(eNew) || math.IsInf(eNew, 0) {
+				return nil, errors.New("leaderboard aggregate overflow")
+			}
 			if !eExisting || eNew != eOld {
-				if err := dbUpsertEntry(db, pid, lb.ID, lb.CurrentPeriod, player.ID, eNew); err != nil {
+				if err := dbUpsertEntry(db, scope, lb.ID, lb.CurrentPeriod, player.ID, eNew); err != nil {
 					return nil, err
 				}
 			}
 		}
 
-		defs, err := dbListAchievementDefsForStat(db, pid, name)
+		defs, err := dbListAchievementDefsForStat(db, scope, name)
 		if err != nil {
 			return nil, err
 		}
@@ -183,26 +234,50 @@ func applyStatUpdates(ctx *sdk.AppCtx, pid string, player *Player, updates []sta
 			if !achievementMet(ad, newVal) {
 				continue
 			}
-			ok, err := dbUnlockAchievement(db, pid, player.ID, ad.Key, source)
+			ok, err := dbUnlockAchievement(db, scope, player.ID, ad.Key, source)
 			if err != nil {
 				return nil, err
 			}
 			if ok {
 				out.Unlocked = append(out.Unlocked, ad.Key)
-				dbAudit(db, pid, player.ID, "achievement.unlocked", source, map[string]any{"key": ad.Key, "stat": name, "value": newVal})
-				ctx.Emit("achievement.unlocked", map[string]any{"player_id": player.ID, "key": ad.Key, "source": source})
-				trackEvent(ctx, pid, "achievement_unlocked", player, map[string]any{"key": ad.Key})
+				if err := dbAudit(db, scope, player.ID, "achievement.unlocked", source, map[string]any{"key": ad.Key, "stat": name, "value": newVal}); err != nil {
+					return nil, err
+				}
+				if err := queueEvent(db, scope, "achievement.unlocked", map[string]any{"player_id": player.ID, "key": ad.Key, "source": source}, false); err != nil {
+					return nil, err
+				}
+				if cfgBool(ctx, "analytics_enabled", true) {
+					if err := queueEvent(db, scope, "games.achievement_unlocked", map[string]any{"player_id": player.ID, "key": ad.Key}, true); err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 
-		dbAudit(db, pid, player.ID, "stat.updated", source, map[string]any{"stat": name, "value": newVal, "previous": old})
-		ctx.Emit("stat.updated", map[string]any{"player_id": player.ID, "stat": name, "value": newVal, "previous": old, "source": source})
+		if err := dbAudit(db, scope, player.ID, "stat.updated", source, map[string]any{"stat": name, "value": newVal, "previous": old}); err != nil {
+			return nil, err
+		}
+		if err := queueEvent(db, scope, "stat.updated", map[string]any{"player_id": player.ID, "stat": name, "value": newVal, "previous": old, "source": source}, false); err != nil {
+			return nil, err
+		}
 	}
-	stats, err := dbGetPlayerStats(db, pid, player.ID)
+	stats, err := dbGetPlayerStats(db, scope, player.ID)
 	if err != nil {
 		return nil, err
 	}
 	out.Stats = stats
+	if key != "" {
+		saved, err := marshalResult(out)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = db.Exec(`INSERT INTO game_operations(project_id,game_id,key,fingerprint,result,created_at) VALUES(?,?,?,?,?,?)`, scope.ProjectID, scope.GameID, key, fingerprint, saved, nowRFC()); err != nil {
+			return nil, err
+		}
+	}
+	if err := db.Commit(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -250,7 +325,7 @@ func periodKey(lb *Leaderboard, now time.Time) string {
 		}
 		n := seasonNumber(lb.CurrentPeriod)
 		if now.Sub(started) >= time.Duration(days)*24*time.Hour {
-			return fmt.Sprintf("season-%d", n+1)
+			return fmt.Sprintf("season-%d", n+int(now.Sub(started)/(time.Duration(days)*24*time.Hour)))
 		}
 		return fmt.Sprintf("season-%d", n)
 	default:
@@ -261,50 +336,132 @@ func periodKey(lb *Leaderboard, now time.Time) string {
 // ensureCurrentPeriod moves lb to the period it should be in. A manual
 // reset names its period "<expected>-r<stamp>", which keeps the board on
 // that period until the schedule itself advances.
-func ensureCurrentPeriod(ctx *sdk.AppCtx, pid string, lb *Leaderboard, now time.Time) (bool, string) {
+func ensureCurrentPeriod(ctx *sdk.AppCtx, scope GameScope, lb *Leaderboard, now time.Time) error {
 	expected := periodKey(lb, now)
 	if lb.CurrentPeriod == expected || strings.HasPrefix(lb.CurrentPeriod, expected+"-r") {
-		return false, ""
+		return nil
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, _, err = advancePeriod(tx, scope, lb, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func advancePeriod(db DBTX, scope GameScope, lb *Leaderboard, now time.Time) (bool, string, error) {
+	fresh, err := dbGetLeaderboard(db, scope, lb.Name)
+	if err != nil {
+		return false, "", err
+	}
+	if fresh == nil {
+		return false, "", errors.New("leaderboard not found")
+	}
+	*lb = *fresh
+	expected := periodKey(lb, now)
+	if lb.CurrentPeriod == expected || strings.HasPrefix(lb.CurrentPeriod, expected+"-r") {
+		return false, "", nil
 	}
 	prev := lb.CurrentPeriod
-	started := now.UTC().Format(time.RFC3339)
-	if err := dbSetLeaderboardPeriod(ctx.AppDB(), pid, lb.ID, expected, started); err != nil {
-		ctx.Logger().Warn("leaderboard period rollover failed", "leaderboard", lb.Name, "err", err)
-		return false, ""
+	startedAt := now.UTC()
+	if lb.Reset == "season" {
+		if start, err := time.Parse(time.RFC3339, lb.PeriodStartedAt); err == nil {
+			days := lb.SeasonDays
+			if days <= 0 {
+				days = 30
+			}
+			duration := time.Duration(days) * 24 * time.Hour
+			startedAt = start.Add(time.Duration(now.Sub(start)/duration) * duration)
+		}
+	}
+	if err := dbSetLeaderboardPeriod(db, scope, lb.ID, expected, startedAt.Format(time.RFC3339)); err != nil {
+		return false, "", err
 	}
 	lb.CurrentPeriod = expected
-	lb.PeriodStartedAt = started
-	return true, prev
+	lb.PeriodStartedAt = startedAt.Format(time.RFC3339)
+	return true, prev, queueEvent(db, scope, "leaderboard.reset", map[string]any{"leaderboard": lb.Name, "previous_period": prev, "period": expected, "manual": false}, false)
 }
 
-func emitReset(ctx *sdk.AppCtx, lb *Leaderboard, previous string, manual bool) {
-	ctx.Emit("leaderboard.reset", map[string]any{
-		"leaderboard": lb.Name, "previous_period": previous, "period": lb.CurrentPeriod, "manual": manual,
-	})
-}
+func resetLeaderboardNow(ctx *sdk.AppCtx, scope GameScope, lb *Leaderboard, now time.Time, operation ...string) error {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := checkActiveGame(tx, scope); err != nil {
+		return err
+	}
+	key := ""
+	if len(operation) > 0 && operation[0] != "" {
+		if len(operation[0]) > 128 {
+			return errors.New("idempotency key too long")
+		}
+		key = fmt.Sprintf("reset:%d:%s", lb.ID, operation[0])
+		var saved string
+		err := tx.QueryRow(`SELECT result FROM game_operations WHERE project_id=? AND game_id=? AND key=?`, scope.ProjectID, scope.GameID, key).Scan(&saved)
+		if err == nil {
+			return json.Unmarshal([]byte(saved), lb)
+		}
+		if !isNoRows(err) {
+			return err
+		}
+	}
 
-func resetLeaderboardNow(ctx *sdk.AppCtx, pid string, lb *Leaderboard, now time.Time) error {
+	fresh, err := dbGetLeaderboard(tx, scope, lb.Name)
+	if err != nil {
+		return err
+	}
+	if fresh == nil {
+		return errors.New("leaderboard not found")
+	}
+	*lb = *fresh
 	prev := lb.CurrentPeriod
-	period := periodKey(lb, now) + "-r" + strconv.FormatInt(now.Unix(), 36)
-	started := now.UTC().Format(time.RFC3339)
-	if err := dbSetLeaderboardPeriod(ctx.AppDB(), pid, lb.ID, period, started); err != nil {
+	period := periodKey(lb, now) + "-r" + randomID()
+	if err = dbSetLeaderboardPeriod(tx, scope, lb.ID, period, now.UTC().Format(time.RFC3339)); err != nil {
+		return err
+	}
+	if err = queueEvent(tx, scope, "leaderboard.reset", map[string]any{"leaderboard": lb.Name, "previous_period": prev, "period": period, "manual": true}, false); err != nil {
 		return err
 	}
 	lb.CurrentPeriod = period
-	lb.PeriodStartedAt = started
-	emitReset(ctx, lb, prev, true)
+	lb.PreviousPeriod = prev
+	lb.PeriodStartedAt = now.UTC().Format(time.RFC3339)
+	if key != "" {
+		saved, err := marshalResult(lb)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO game_operations(project_id,game_id,key,fingerprint,result,created_at) VALUES(?,?,?,?,?,?)`, scope.ProjectID, scope.GameID, key, "reset", saved, nowRFC()); err != nil {
+			return err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	lb.CurrentPeriod = period
+	lb.PreviousPeriod = prev
+	lb.PeriodStartedAt = now.UTC().Format(time.RFC3339)
 	return nil
 }
-
-func rolloverLeaderboards(ctx *sdk.AppCtx, pid string, now time.Time) error {
-	boards, err := dbListLeaderboards(ctx.AppDB(), pid)
+func rolloverLeaderboards(ctx *sdk.AppCtx, scope GameScope, now time.Time) error {
+	boards, err := dbListLeaderboards(ctx.AppDB(), scope)
 	if err != nil {
 		return err
 	}
 	for i := range boards {
-		lb := &boards[i]
-		if changed, prev := ensureCurrentPeriod(ctx, pid, lb, now); changed {
-			emitReset(ctx, lb, prev, false)
+		tx, err := ctx.AppDB().Begin()
+		if err != nil {
+			return err
+		}
+		_, _, err = advancePeriod(tx, scope, &boards[i], now)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -331,6 +488,9 @@ func newLeaderboard(name, displayName, stat, sort, reset string, seasonDays int,
 	if !validReset(reset) {
 		return Leaderboard{}, fmt.Errorf("reset must be none, daily, weekly, monthly, or season")
 	}
+	if seasonDays > 3650 {
+		return Leaderboard{}, fmt.Errorf("season_days must be at most 3650")
+	}
 	if reset == "season" && seasonDays <= 0 {
 		seasonDays = 30
 	}
@@ -350,30 +510,56 @@ func newLeaderboard(name, displayName, stat, sort, reset string, seasonDays int,
 type leaderboardPage struct {
 	Leaderboard *Leaderboard       `json:"leaderboard"`
 	Period      string             `json:"period"`
-	Total       int                `json:"total"`
+	Total       *int               `json:"total,omitempty"`
 	Entries     []LeaderboardEntry `json:"entries"`
 	Me          *LeaderboardEntry  `json:"me,omitempty"`
+	NextCursor  string             `json:"next_cursor,omitempty"`
 }
 
-func leaderboardPageFor(ctx *sdk.AppCtx, pid string, lb *Leaderboard, period string, limit, offset int, mePlayerID int64) (*leaderboardPage, error) {
+type leaderboardReadOptions struct {
+	Cursor    string
+	OmitTotal bool
+}
+
+func leaderboardPageFor(ctx *sdk.AppCtx, scope GameScope, lb *Leaderboard, period string, limit, offset int, mePlayerID int64, options ...leaderboardReadOptions) (*leaderboardPage, error) {
 	db := ctx.AppDB()
-	if changed, prev := ensureCurrentPeriod(ctx, pid, lb, time.Now()); changed {
-		emitReset(ctx, lb, prev, false)
+	if err := ensureCurrentPeriod(ctx, scope, lb, time.Now()); err != nil {
+		return nil, err
 	}
 	if period == "" {
 		period = lb.CurrentPeriod
 	}
-	entries, err := dbTopEntries(db, pid, lb.ID, period, lb.Sort, limit, offset)
+	var entries []LeaderboardEntry
+	var err error
+	opts := leaderboardReadOptions{}
+	if len(options) > 0 {
+		opts = options[0]
+	}
+	if opts.Cursor != "" {
+		anchor, e := decodeEntryCursor(scope, lb.ID, period, opts.Cursor)
+		if e != nil {
+			return nil, e
+		}
+		entries, err = seekEntries(db, scope, lb, period, anchor, false, limit)
+	} else {
+		entries, err = dbTopEntries(db, scope, lb.ID, period, lb.Sort, limit, offset)
+	}
 	if err != nil {
 		return nil, err
 	}
-	total, err := dbEntryCount(db, pid, lb.ID, period)
-	if err != nil {
-		return nil, err
+	page := &leaderboardPage{Leaderboard: lb, Period: period, Entries: entries}
+	if !opts.OmitTotal {
+		total, err := dbEntryCount(db, scope, lb.ID, period)
+		if err != nil {
+			return nil, err
+		}
+		page.Total = &total
 	}
-	page := &leaderboardPage{Leaderboard: lb, Period: period, Total: total, Entries: entries}
+	if len(entries) == limit {
+		page.NextCursor = makeEntryCursor(scope, lb.ID, period, entries[len(entries)-1])
+	}
 	if mePlayerID > 0 {
-		page.Me, err = rankedEntry(db, pid, lb, period, mePlayerID)
+		page.Me, err = rankedEntry(db, scope, lb, period, mePlayerID)
 		if err != nil {
 			return nil, err
 		}
@@ -381,12 +567,12 @@ func leaderboardPageFor(ctx *sdk.AppCtx, pid string, lb *Leaderboard, period str
 	return page, nil
 }
 
-func rankedEntry(db *sql.DB, pid string, lb *Leaderboard, period string, playerID int64) (*LeaderboardEntry, error) {
-	entry, err := dbGetEntry(db, pid, lb.ID, period, playerID)
+func rankedEntry(db DBTX, scope GameScope, lb *Leaderboard, period string, playerID int64) (*LeaderboardEntry, error) {
+	entry, err := dbGetEntry(db, scope, lb.ID, period, playerID)
 	if err != nil || entry == nil {
 		return nil, err
 	}
-	rank, err := dbEntryRank(db, pid, lb.ID, period, lb.Sort, entry.Score, entry.UpdatedAt)
+	rank, err := dbEntryRank(db, scope, lb.ID, period, lb.Sort, entry.Score, entry.UpdatedAt, entry.PlayerID)
 	if err != nil {
 		return nil, err
 	}
@@ -394,20 +580,26 @@ func rankedEntry(db *sql.DB, pid string, lb *Leaderboard, period string, playerI
 	return entry, nil
 }
 
-func leaderboardAround(ctx *sdk.AppCtx, pid string, lb *Leaderboard, period string, playerID int64, radius int) (*leaderboardPage, error) {
+func leaderboardAround(ctx *sdk.AppCtx, scope GameScope, lb *Leaderboard, period string, playerID int64, radius int, includeRank ...bool) (*leaderboardPage, error) {
 	db := ctx.AppDB()
-	if changed, prev := ensureCurrentPeriod(ctx, pid, lb, time.Now()); changed {
-		emitReset(ctx, lb, prev, false)
+	if err := ensureCurrentPeriod(ctx, scope, lb, time.Now()); err != nil {
+		return nil, err
 	}
 	if period == "" {
 		period = lb.CurrentPeriod
 	}
-	total, err := dbEntryCount(db, pid, lb.ID, period)
-	if err != nil {
-		return nil, err
+	page := &leaderboardPage{Leaderboard: lb, Period: period, Entries: []LeaderboardEntry{}}
+	if len(includeRank) < 2 || includeRank[1] {
+		total, err := dbEntryCount(db, scope, lb.ID, period)
+		if err != nil {
+			return nil, err
+		}
+		page.Total = &total
 	}
-	page := &leaderboardPage{Leaderboard: lb, Period: period, Total: total, Entries: []LeaderboardEntry{}}
-	me, err := rankedEntry(db, pid, lb, period, playerID)
+	me, err := dbGetEntry(db, scope, lb.ID, period, playerID)
+	if err == nil && me != nil && (len(includeRank) == 0 || includeRank[0]) {
+		me, err = rankedEntry(db, scope, lb, period, playerID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -415,10 +607,20 @@ func leaderboardAround(ctx *sdk.AppCtx, pid string, lb *Leaderboard, period stri
 		return page, nil
 	}
 	page.Me = me
-	start := int(me.Rank) - 1 - radius
-	if start < 0 {
-		start = 0
+	before, err := seekEntries(db, scope, lb, period, me, true, radius)
+	if err != nil {
+		return nil, err
 	}
-	page.Entries, err = dbTopEntries(db, pid, lb.ID, period, lb.Sort, 2*radius+1, start)
-	return page, err
+	after, err := seekEntries(db, scope, lb, period, me, false, radius)
+	if err != nil {
+		return nil, err
+	}
+	page.Entries = append(append(before, *me), after...)
+	if me.Rank > 0 {
+		start := me.Rank - int64(len(before))
+		for i := range page.Entries {
+			page.Entries[i].Rank = start + int64(i)
+		}
+	}
+	return page, nil
 }

@@ -13,6 +13,7 @@ import (
 )
 
 var errVersionConflict = errors.New("version_conflict")
+var errServerOnly = errors.New("this key is server-only")
 
 func nowRFC() string { return time.Now().UTC().Format(time.RFC3339) }
 
@@ -76,12 +77,13 @@ type Leaderboard struct {
 	Reset           string `json:"reset"`
 	SeasonDays      int    `json:"season_days,omitempty"`
 	CurrentPeriod   string `json:"current_period"`
+	PreviousPeriod  string `json:"previous_period,omitempty"`
 	PeriodStartedAt string `json:"period_started_at,omitempty"`
 	CreatedAt       string `json:"created_at,omitempty"`
 }
 
 type LeaderboardEntry struct {
-	Rank        int64   `json:"rank"`
+	Rank        int64   `json:"rank,omitempty"`
 	PlayerID    int64   `json:"player_id"`
 	DisplayName string  `json:"display_name"`
 	Score       float64 `json:"score"`
@@ -117,20 +119,20 @@ type AuditEvent struct {
 
 // ─── settings ────────────────────────────────────────────────────────
 
-func dbGetSetting(db *sql.DB, pid, key string) (string, error) {
+func dbGetSetting(db DBTX, scope GameScope, key string) (string, error) {
 	var v string
-	err := db.QueryRow(`SELECT value FROM settings WHERE project_id = ? AND key = ?`, pid, key).Scan(&v)
+	err := db.QueryRow(`SELECT value FROM settings WHERE project_id = ? AND game_id = ? AND key = ?`, scope.ProjectID, scope.GameID, key).Scan(&v)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
 	return v, err
 }
 
-func dbSetSetting(db *sql.DB, pid, key, value string) error {
+func dbSetSetting(db DBTX, scope GameScope, key, value string) error {
 	_, err := db.Exec(`
-		INSERT INTO settings(project_id, key, value, updated_at) VALUES(?,?,?,?)
-		ON CONFLICT(project_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		pid, key, value, nowRFC())
+		INSERT INTO settings(project_id, game_id, key, value, updated_at) VALUES(?,?,?,?,?)
+		ON CONFLICT(project_id, game_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		scope.ProjectID, scope.GameID, key, value, nowRFC())
 	return err
 }
 
@@ -157,42 +159,42 @@ func scanPlayer(sc rowScanner) (*Player, error) {
 	return &p, nil
 }
 
-func dbGetPlayer(db *sql.DB, pid string, id int64) (*Player, error) {
-	p, err := scanPlayer(db.QueryRow(`SELECT `+playerCols+` FROM players WHERE project_id = ? AND id = ?`, pid, id))
+func dbGetPlayer(db DBTX, scope GameScope, id int64) (*Player, error) {
+	p, err := scanPlayer(db.QueryRow(`SELECT `+playerCols+` FROM players WHERE project_id = ? AND game_id = ? AND id = ?`, scope.ProjectID, scope.GameID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return p, err
 }
 
-func dbGetPlayerByAuthUser(db *sql.DB, pid string, authUserID int64) (*Player, error) {
-	p, err := scanPlayer(db.QueryRow(`SELECT `+playerCols+` FROM players WHERE project_id = ? AND auth_user_id = ?`, pid, authUserID))
+func dbGetPlayerByAuthUser(db DBTX, scope GameScope, authUserID int64) (*Player, error) {
+	p, err := scanPlayer(db.QueryRow(`SELECT `+playerCols+` FROM players WHERE project_id = ? AND game_id = ? AND auth_user_id = ?`, scope.ProjectID, scope.GameID, authUserID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return p, err
 }
 
-func dbCreatePlayer(db *sql.DB, pid string, authUserID int64, displayName, kind string) (int64, error) {
+func dbCreatePlayer(db DBTX, scope GameScope, authUserID int64, displayName, kind string) (int64, error) {
 	now := nowRFC()
 	res, err := db.Exec(`
-		INSERT INTO players(project_id, auth_user_id, display_name, kind, created_at, updated_at)
-		VALUES(?,?,?,?,?,?)`,
-		pid, authUserID, displayName, kind, now, now)
+		INSERT INTO players(project_id, game_id, auth_user_id, display_name, kind, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		scope.ProjectID, scope.GameID, authUserID, displayName, kind, now, now)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-func dbTouchLogin(db *sql.DB, pid string, id int64, kind string) error {
+func dbTouchLogin(db DBTX, scope GameScope, id int64, kind string) error {
 	now := nowRFC()
 	_, err := db.Exec(`
 		UPDATE players
 		   SET login_count = login_count + 1, last_login_at = ?, first_login_at = COALESCE(first_login_at, ?),
 		       kind = ?, updated_at = ?
-		 WHERE project_id = ? AND id = ?`,
-		now, now, kind, now, pid, id)
+		 WHERE project_id = ? AND game_id = ? AND id = ?`,
+		now, now, kind, now, scope.ProjectID, scope.GameID, id)
 	return err
 }
 
@@ -204,7 +206,7 @@ type playerPatch struct {
 	Metadata    *string
 }
 
-func dbUpdatePlayer(db *sql.DB, pid string, id int64, patch playerPatch) error {
+func dbUpdatePlayer(db DBTX, scope GameScope, id int64, patch playerPatch) error {
 	sets := []string{"updated_at = ?"}
 	args := []any{nowRFC()}
 	if patch.DisplayName != nil {
@@ -230,20 +232,20 @@ func dbUpdatePlayer(db *sql.DB, pid string, id int64, patch playerPatch) error {
 	if len(sets) == 1 {
 		return nil
 	}
-	args = append(args, pid, id)
-	_, err := db.Exec(`UPDATE players SET `+strings.Join(sets, ", ")+` WHERE project_id = ? AND id = ?`, args...)
+	args = append(args, scope.ProjectID, scope.GameID, id)
+	_, err := db.Exec(`UPDATE players SET `+strings.Join(sets, ", ")+` WHERE project_id = ? AND game_id = ? AND id = ?`, args...)
 	return err
 }
 
-func dbSetPlayerStatus(db *sql.DB, pid string, id int64, status string) error {
-	_, err := db.Exec(`UPDATE players SET status = ?, updated_at = ? WHERE project_id = ? AND id = ?`,
-		status, nowRFC(), pid, id)
+func dbSetPlayerStatus(db DBTX, scope GameScope, id int64, status string) error {
+	_, err := db.Exec(`UPDATE players SET status = ?, updated_at = ? WHERE project_id = ? AND game_id = ? AND id = ?`,
+		status, nowRFC(), scope.ProjectID, scope.GameID, id)
 	return err
 }
 
-func dbSearchPlayers(db *sql.DB, pid, q, status string, limit, offset int) ([]Player, int, error) {
-	conds := []string{"project_id = ?"}
-	args := []any{pid}
+func dbSearchPlayers(db DBTX, scope GameScope, q, status string, limit, offset int) ([]Player, int, error) {
+	conds := []string{"project_id = ? AND game_id = ?"}
+	args := []any{scope.ProjectID, scope.GameID}
 	if q = strings.TrimSpace(q); q != "" {
 		conds = append(conds, "(LOWER(display_name) LIKE ? OR CAST(id AS TEXT) = ? OR CAST(auth_user_id AS TEXT) = ?)")
 		args = append(args, "%"+strings.ToLower(q)+"%", q, q)
@@ -275,11 +277,11 @@ func dbSearchPlayers(db *sql.DB, pid, q, status string, limit, offset int) ([]Pl
 	return out, total, rows.Err()
 }
 
-func dbDeletePlayer(db *sql.DB, pid string, id int64) error {
-	if _, err := db.Exec(`DELETE FROM player_audit WHERE project_id = ? AND player_id = ?`, pid, id); err != nil {
+func dbDeletePlayer(db DBTX, scope GameScope, id int64) error {
+	if _, err := db.Exec(`DELETE FROM player_audit WHERE project_id = ? AND game_id = ? AND player_id = ?`, scope.ProjectID, scope.GameID, id); err != nil {
 		return err
 	}
-	_, err := db.Exec(`DELETE FROM players WHERE project_id = ? AND id = ?`, pid, id)
+	_, err := db.Exec(`DELETE FROM players WHERE project_id = ? AND game_id = ? AND id = ?`, scope.ProjectID, scope.GameID, id)
 	return err
 }
 
@@ -292,14 +294,14 @@ type playerCounts struct {
 	Active7d  int `json:"active_7d"`
 }
 
-func dbPlayerCounts(db *sql.DB, pid string) (playerCounts, error) {
+func dbPlayerCounts(db DBTX, scope GameScope) (playerCounts, error) {
 	var c playerCounts
 	dayAgo := time.Now().Add(-24 * time.Hour).UTC().Format(time.RFC3339)
 	weekAgo := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(time.RFC3339)
 	q := func(extra string, extraArgs ...any) (int, error) {
 		var n int
-		args := append([]any{pid}, extraArgs...)
-		err := db.QueryRow(`SELECT COUNT(*) FROM players WHERE project_id = ?`+extra, args...).Scan(&n)
+		args := append([]any{scope.ProjectID, scope.GameID}, extraArgs...)
+		err := db.QueryRow(`SELECT COUNT(*) FROM players WHERE project_id = ? AND game_id = ?`+extra, args...).Scan(&n)
 		return n, err
 	}
 	var err error
@@ -324,11 +326,11 @@ func dbPlayerCounts(db *sql.DB, pid string) (playerCounts, error) {
 
 // ─── bans ────────────────────────────────────────────────────────────
 
-func dbCreateBan(db *sql.DB, pid string, playerID int64, reason, source, expiresAt string) (int64, error) {
+func dbCreateBan(db DBTX, scope GameScope, playerID int64, reason, source, expiresAt string) (int64, error) {
 	res, err := db.Exec(`
-		INSERT INTO player_bans(project_id, player_id, reason, source, expires_at, created_at)
-		VALUES(?,?,?,?,?,?)`,
-		pid, playerID, nullStr(reason), nullStr(source), nullStr(expiresAt), nowRFC())
+		INSERT INTO player_bans(project_id, game_id, player_id, reason, source, expires_at, created_at)
+		VALUES(?,?,?,?,?,?,?)`,
+		scope.ProjectID, scope.GameID, playerID, nullStr(reason), nullStr(source), nullStr(expiresAt), nowRFC())
 	if err != nil {
 		return 0, err
 	}
@@ -345,28 +347,28 @@ func scanBan(sc rowScanner) (*Ban, error) {
 	return &b, nil
 }
 
-func dbActiveBan(db *sql.DB, pid string, playerID int64) (*Ban, error) {
+func dbActiveBan(db DBTX, scope GameScope, playerID int64) (*Ban, error) {
 	b, err := scanBan(db.QueryRow(`
 		SELECT `+banCols+` FROM player_bans
-		WHERE project_id = ? AND player_id = ? AND lifted_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
-		ORDER BY created_at DESC LIMIT 1`, pid, playerID, nowRFC()))
+		WHERE project_id = ? AND game_id = ? AND player_id = ? AND lifted_at IS NULL AND (expires_at IS NULL OR expires_at > ?)
+		ORDER BY created_at DESC LIMIT 1`, scope.ProjectID, scope.GameID, playerID, nowRFC()))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return b, err
 }
 
-func dbLiftBans(db *sql.DB, pid string, playerID int64) (int64, error) {
-	res, err := db.Exec(`UPDATE player_bans SET lifted_at = ? WHERE project_id = ? AND player_id = ? AND lifted_at IS NULL`,
-		nowRFC(), pid, playerID)
+func dbLiftBans(db DBTX, scope GameScope, playerID int64) (int64, error) {
+	res, err := db.Exec(`UPDATE player_bans SET lifted_at = ? WHERE project_id = ? AND game_id = ? AND player_id = ? AND lifted_at IS NULL`,
+		nowRFC(), scope.ProjectID, scope.GameID, playerID)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
 }
 
-func dbListBans(db *sql.DB, pid string, playerID int64) ([]Ban, error) {
-	rows, err := db.Query(`SELECT `+banCols+` FROM player_bans WHERE project_id = ? AND player_id = ? ORDER BY created_at DESC`, pid, playerID)
+func dbListBans(db DBTX, scope GameScope, playerID int64) ([]Ban, error) {
+	rows, err := db.Query(`SELECT `+banCols+` FROM player_bans WHERE project_id = ? AND game_id = ? AND player_id = ? ORDER BY created_at DESC`, scope.ProjectID, scope.GameID, playerID)
 	if err != nil {
 		return nil, err
 	}
@@ -384,22 +386,26 @@ func dbListBans(db *sql.DB, pid string, playerID int64) ([]Ban, error) {
 
 // ─── audit ───────────────────────────────────────────────────────────
 
-func dbAudit(db *sql.DB, pid string, playerID int64, event, source string, meta map[string]any) {
+func dbAudit(db DBTX, scope GameScope, playerID int64, event, source string, meta map[string]any) error {
 	var m any
 	if len(meta) > 0 {
 		if b, err := json.Marshal(meta); err == nil {
 			m = string(b)
 		}
 	}
-	_, _ = db.Exec(`INSERT INTO player_audit(project_id, player_id, event, source, metadata, occurred_at) VALUES(?,?,?,?,?,?)`,
-		pid, playerID, event, nullStr(source), m, nowRFC())
+	_, err := db.Exec(`INSERT INTO player_audit(project_id, game_id, player_id, event, source, metadata, occurred_at) VALUES(?,?,?,?,?,?,?)`,
+		scope.ProjectID, scope.GameID, playerID, event, nullStr(source), m, nowRFC())
+	return err
 }
 
-func dbListAudit(db *sql.DB, pid string, playerID int64, limit int) ([]AuditEvent, error) {
+func dbListAudit(db DBTX, scope GameScope, playerID int64, limit int) ([]AuditEvent, error) {
+	if limit == 0 {
+		limit = -1
+	}
 	rows, err := db.Query(`
 		SELECT id, player_id, event, IFNULL(source,''), IFNULL(metadata,''), occurred_at
-		FROM player_audit WHERE project_id = ? AND player_id = ? ORDER BY occurred_at DESC, id DESC LIMIT ?`,
-		pid, playerID, limit)
+		FROM player_audit WHERE project_id = ? AND game_id = ? AND player_id = ? ORDER BY occurred_at DESC, id DESC LIMIT ?`,
+		scope.ProjectID, scope.GameID, playerID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -430,9 +436,9 @@ func scanData(sc rowScanner) (*DataEntry, error) {
 }
 
 // dbListData — visibilities filters the result; nil = every row.
-func dbListData(db *sql.DB, pid string, playerID int64, visibilities []string) ([]DataEntry, error) {
-	q := `SELECT ` + dataCols + ` FROM player_data WHERE project_id = ? AND player_id = ?`
-	args := []any{pid, playerID}
+func dbListData(db DBTX, scope GameScope, playerID int64, visibilities []string) ([]DataEntry, error) {
+	q := `SELECT ` + dataCols + ` FROM player_data WHERE project_id = ? AND game_id = ? AND player_id = ?`
+	args := []any{scope.ProjectID, scope.GameID, playerID}
 	if len(visibilities) > 0 {
 		marks := make([]string, len(visibilities))
 		for i, v := range visibilities {
@@ -457,8 +463,8 @@ func dbListData(db *sql.DB, pid string, playerID int64, visibilities []string) (
 	return out, rows.Err()
 }
 
-func dbGetData(db *sql.DB, pid string, playerID int64, key string) (*DataEntry, error) {
-	e, err := scanData(db.QueryRow(`SELECT `+dataCols+` FROM player_data WHERE project_id = ? AND player_id = ? AND key = ?`, pid, playerID, key))
+func dbGetData(db DBTX, scope GameScope, playerID int64, key string) (*DataEntry, error) {
+	e, err := scanData(db.QueryRow(`SELECT `+dataCols+` FROM player_data WHERE project_id = ? AND game_id = ? AND player_id = ? AND key = ?`, scope.ProjectID, scope.GameID, playerID, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -469,17 +475,42 @@ func dbGetData(db *sql.DB, pid string, playerID int64, key string) (*DataEntry, 
 // concurrency: the row must currently be at that version (a missing
 // row counts as a conflict too). visibility "" keeps the current one
 // (private for a new row).
-func dbSetData(db *sql.DB, pid string, playerID int64, key, value, visibility string, expectVersion int64) (*DataEntry, error) {
+func dbSetData(db *sql.DB, scope GameScope, playerID int64, key, value, visibility string, expectVersion int64, client ...bool) (*DataEntry, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := checkActiveGame(tx, scope); err != nil {
+		return nil, err
+	}
+	if len(client) > 0 && client[0] {
+		ban, err := dbActiveBan(tx, scope, playerID)
+		if err != nil {
+			return nil, err
+		}
+		if ban != nil {
+			return nil, errors.New("banned")
+		}
+	}
 	var curVersion int64
 	var curVis string
-	err = tx.QueryRow(`SELECT version, visibility FROM player_data WHERE project_id = ? AND player_id = ? AND key = ?`,
-		pid, playerID, key).Scan(&curVersion, &curVis)
+	err = tx.QueryRow(`SELECT version, visibility FROM player_data WHERE project_id = ? AND game_id = ? AND player_id = ? AND key = ?`,
+		scope.ProjectID, scope.GameID, playerID, key).Scan(&curVersion, &curVis)
 	now := nowRFC()
+	if expectVersion < 0 {
+		return nil, errors.New("version must be non-negative")
+	}
+	if len(client) > 0 && client[0] && (curVis == "server" || visibility == "server") {
+		return nil, errServerOnly
+	}
+	var count, used int64
+	if err := tx.QueryRow(`SELECT COUNT(*),COALESCE(SUM(length(CAST(value AS BLOB))),0) FROM player_data WHERE project_id=? AND game_id=? AND player_id=? AND key<>?`, scope.ProjectID, scope.GameID, playerID, key).Scan(&count, &used); err != nil {
+		return nil, err
+	}
+	if count >= 128 || used+int64(len(value)) > 16*1024*1024 {
+		return nil, errors.New("cloud save quota exceeded (128 keys / 16 MiB)")
+	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if expectVersion > 0 {
@@ -489,8 +520,8 @@ func dbSetData(db *sql.DB, pid string, playerID int64, key, value, visibility st
 			visibility = "private"
 		}
 		if _, err := tx.Exec(`
-			INSERT INTO player_data(project_id, player_id, key, value, visibility, version, created_at, updated_at)
-			VALUES(?,?,?,?,?,1,?,?)`, pid, playerID, key, value, visibility, now, now); err != nil {
+			INSERT INTO player_data(project_id, game_id, player_id, key, value, visibility, version, created_at, updated_at)
+			VALUES(?,?,?,?,?,?,1,?,?)`, scope.ProjectID, scope.GameID, playerID, key, value, visibility, now, now); err != nil {
 			return nil, err
 		}
 	case err != nil:
@@ -504,18 +535,26 @@ func dbSetData(db *sql.DB, pid string, playerID int64, key, value, visibility st
 		}
 		if _, err := tx.Exec(`
 			UPDATE player_data SET value = ?, visibility = ?, version = version + 1, updated_at = ?
-			WHERE project_id = ? AND player_id = ? AND key = ?`, value, visibility, now, pid, playerID, key); err != nil {
+			WHERE project_id = ? AND game_id = ? AND player_id = ? AND key = ?`, value, visibility, now, scope.ProjectID, scope.GameID, playerID, key); err != nil {
 			return nil, err
 		}
+	}
+	entry, err := dbGetData(tx, scope, playerID, key)
+	if err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return dbGetData(db, pid, playerID, key)
+	return entry, nil
 }
 
-func dbDeleteData(db *sql.DB, pid string, playerID int64, key string) (bool, error) {
-	res, err := db.Exec(`DELETE FROM player_data WHERE project_id = ? AND player_id = ? AND key = ?`, pid, playerID, key)
+func dbDeleteData(db DBTX, scope GameScope, playerID int64, key string, client ...bool) (bool, error) {
+	restriction := ""
+	if len(client) > 0 && client[0] {
+		restriction = " AND visibility != 'server' AND EXISTS(SELECT 1 FROM games g WHERE g.project_id=player_data.project_id AND g.id=player_data.game_id AND g.status='active') AND NOT EXISTS(SELECT 1 FROM player_bans b WHERE b.project_id=player_data.project_id AND b.game_id=player_data.game_id AND b.player_id=player_data.player_id AND b.lifted_at IS NULL AND (b.expires_at IS NULL OR b.expires_at>strftime('%Y-%m-%dT%H:%M:%SZ','now')))"
+	}
+	res, err := db.Exec(`DELETE FROM player_data WHERE project_id = ? AND game_id = ? AND player_id = ? AND key = ?`+restriction, scope.ProjectID, scope.GameID, playerID, key)
 	if err != nil {
 		return false, err
 	}
@@ -537,33 +576,33 @@ func scanStatDef(sc rowScanner) (*StatDef, error) {
 	return &d, nil
 }
 
-func dbUpsertStatDef(db *sql.DB, pid, name, aggregation string, clientWritable bool, description string) (*StatDef, error) {
+func dbUpsertStatDef(db DBTX, scope GameScope, name, aggregation string, clientWritable bool, description string) (*StatDef, error) {
 	cw := 0
 	if clientWritable {
 		cw = 1
 	}
 	now := nowRFC()
 	if _, err := db.Exec(`
-		INSERT INTO stat_defs(project_id, name, aggregation, client_writable, description, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?)
-		ON CONFLICT(project_id, name) DO UPDATE SET aggregation = excluded.aggregation,
+		INSERT INTO stat_defs(project_id, game_id, name, aggregation, client_writable, description, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id, game_id, name) DO UPDATE SET aggregation = excluded.aggregation,
 			client_writable = excluded.client_writable, description = excluded.description, updated_at = excluded.updated_at`,
-		pid, name, aggregation, cw, nullStr(description), now, now); err != nil {
+		scope.ProjectID, scope.GameID, name, aggregation, cw, nullStr(description), now, now); err != nil {
 		return nil, err
 	}
-	return dbGetStatDef(db, pid, name)
+	return dbGetStatDef(db, scope, name)
 }
 
-func dbGetStatDef(db *sql.DB, pid, name string) (*StatDef, error) {
-	d, err := scanStatDef(db.QueryRow(`SELECT `+statDefCols+` FROM stat_defs WHERE project_id = ? AND name = ?`, pid, name))
+func dbGetStatDef(db DBTX, scope GameScope, name string) (*StatDef, error) {
+	d, err := scanStatDef(db.QueryRow(`SELECT `+statDefCols+` FROM stat_defs WHERE project_id = ? AND game_id = ? AND name = ?`, scope.ProjectID, scope.GameID, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return d, err
 }
 
-func dbListStatDefs(db *sql.DB, pid string) ([]StatDef, error) {
-	rows, err := db.Query(`SELECT `+statDefCols+` FROM stat_defs WHERE project_id = ? ORDER BY name ASC`, pid)
+func dbListStatDefs(db DBTX, scope GameScope) ([]StatDef, error) {
+	rows, err := db.Query(`SELECT `+statDefCols+` FROM stat_defs WHERE project_id = ? AND game_id = ? ORDER BY name ASC`, scope.ProjectID, scope.GameID)
 	if err != nil {
 		return nil, err
 	}
@@ -581,8 +620,8 @@ func dbListStatDefs(db *sql.DB, pid string) ([]StatDef, error) {
 
 // ─── player statistics ───────────────────────────────────────────────
 
-func dbGetPlayerStats(db *sql.DB, pid string, playerID int64) ([]PlayerStat, error) {
-	rows, err := db.Query(`SELECT stat, value, version, updated_at FROM player_stats WHERE project_id = ? AND player_id = ? ORDER BY stat ASC`, pid, playerID)
+func dbGetPlayerStats(db DBTX, scope GameScope, playerID int64) ([]PlayerStat, error) {
+	rows, err := db.Query(`SELECT stat, value, version, updated_at FROM player_stats WHERE project_id = ? AND game_id = ? AND player_id = ? ORDER BY stat ASC`, scope.ProjectID, scope.GameID, playerID)
 	if err != nil {
 		return nil, err
 	}
@@ -598,10 +637,10 @@ func dbGetPlayerStats(db *sql.DB, pid string, playerID int64) ([]PlayerStat, err
 	return out, rows.Err()
 }
 
-func dbGetPlayerStat(db *sql.DB, pid string, playerID int64, stat string) (*PlayerStat, error) {
+func dbGetPlayerStat(db DBTX, scope GameScope, playerID int64, stat string) (*PlayerStat, error) {
 	var s PlayerStat
-	err := db.QueryRow(`SELECT stat, value, version, updated_at FROM player_stats WHERE project_id = ? AND player_id = ? AND stat = ?`,
-		pid, playerID, stat).Scan(&s.Stat, &s.Value, &s.Version, &s.UpdatedAt)
+	err := db.QueryRow(`SELECT stat, value, version, updated_at FROM player_stats WHERE project_id = ? AND game_id = ? AND player_id = ? AND stat = ?`,
+		scope.ProjectID, scope.GameID, playerID, stat).Scan(&s.Stat, &s.Value, &s.Version, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -611,14 +650,14 @@ func dbGetPlayerStat(db *sql.DB, pid string, playerID int64, stat string) (*Play
 	return &s, nil
 }
 
-func dbUpsertPlayerStat(db *sql.DB, pid string, playerID int64, stat string, value float64) (*PlayerStat, error) {
+func dbUpsertPlayerStat(db DBTX, scope GameScope, playerID int64, stat string, value float64) (*PlayerStat, error) {
 	if _, err := db.Exec(`
-		INSERT INTO player_stats(project_id, player_id, stat, value, version, updated_at) VALUES(?,?,?,?,1,?)
+		INSERT INTO player_stats(project_id, game_id, player_id, stat, value, version, updated_at) VALUES(?,?,?,?,?,1,?)
 		ON CONFLICT(player_id, stat) DO UPDATE SET value = excluded.value, version = player_stats.version + 1, updated_at = excluded.updated_at`,
-		pid, playerID, stat, value, nowRFC()); err != nil {
+		scope.ProjectID, scope.GameID, playerID, stat, value, nowRFC()); err != nil {
 		return nil, err
 	}
-	return dbGetPlayerStat(db, pid, playerID, stat)
+	return dbGetPlayerStat(db, scope, playerID, stat)
 }
 
 // ─── leaderboards ────────────────────────────────────────────────────
@@ -634,34 +673,34 @@ func scanLeaderboard(sc rowScanner) (*Leaderboard, error) {
 	return &l, nil
 }
 
-func dbCreateLeaderboard(db *sql.DB, pid string, l Leaderboard) (*Leaderboard, error) {
+func dbCreateLeaderboard(db DBTX, scope GameScope, l Leaderboard) (*Leaderboard, error) {
 	now := nowRFC()
 	if _, err := db.Exec(`
-		INSERT INTO leaderboards(project_id, name, display_name, stat, sort, reset, season_days, current_period, period_started_at, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		pid, l.Name, nullStr(l.DisplayName), l.Stat, l.Sort, l.Reset, l.SeasonDays, l.CurrentPeriod, nullStr(l.PeriodStartedAt), now, now); err != nil {
+		INSERT INTO leaderboards(project_id, game_id, name, display_name, stat, sort, reset, season_days, current_period, period_started_at, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		scope.ProjectID, scope.GameID, l.Name, nullStr(l.DisplayName), l.Stat, l.Sort, l.Reset, l.SeasonDays, l.CurrentPeriod, nullStr(l.PeriodStartedAt), now, now); err != nil {
 		return nil, err
 	}
-	return dbGetLeaderboard(db, pid, l.Name)
+	return dbGetLeaderboard(db, scope, l.Name)
 }
 
-func dbGetLeaderboard(db *sql.DB, pid, name string) (*Leaderboard, error) {
-	l, err := scanLeaderboard(db.QueryRow(`SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? AND name = ?`, pid, name))
+func dbGetLeaderboard(db DBTX, scope GameScope, name string) (*Leaderboard, error) {
+	l, err := scanLeaderboard(db.QueryRow(`SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? AND game_id = ? AND name = ?`, scope.ProjectID, scope.GameID, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return l, err
 }
 
-func dbListLeaderboards(db *sql.DB, pid string) ([]Leaderboard, error) {
-	return dbQueryLeaderboards(db, `SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? ORDER BY name ASC`, pid)
+func dbListLeaderboards(db DBTX, scope GameScope) ([]Leaderboard, error) {
+	return dbQueryLeaderboards(db, `SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? AND game_id = ? ORDER BY name ASC`, scope.ProjectID, scope.GameID)
 }
 
-func dbListLeaderboardsForStat(db *sql.DB, pid, stat string) ([]Leaderboard, error) {
-	return dbQueryLeaderboards(db, `SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? AND stat = ? ORDER BY name ASC`, pid, stat)
+func dbListLeaderboardsForStat(db DBTX, scope GameScope, stat string) ([]Leaderboard, error) {
+	return dbQueryLeaderboards(db, `SELECT `+lbCols+` FROM leaderboards WHERE project_id = ? AND game_id = ? AND stat = ? ORDER BY name ASC`, scope.ProjectID, scope.GameID, stat)
 }
 
-func dbQueryLeaderboards(db *sql.DB, q string, args ...any) ([]Leaderboard, error) {
+func dbQueryLeaderboards(db DBTX, q string, args ...any) ([]Leaderboard, error) {
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -678,19 +717,19 @@ func dbQueryLeaderboards(db *sql.DB, q string, args ...any) ([]Leaderboard, erro
 	return out, rows.Err()
 }
 
-func dbSetLeaderboardPeriod(db *sql.DB, pid string, id int64, period, startedAt string) error {
-	_, err := db.Exec(`UPDATE leaderboards SET current_period = ?, period_started_at = ?, updated_at = ? WHERE project_id = ? AND id = ?`,
-		period, startedAt, nowRFC(), pid, id)
+func dbSetLeaderboardPeriod(db DBTX, scope GameScope, id int64, period, startedAt string) error {
+	_, err := db.Exec(`UPDATE leaderboards SET current_period = ?, period_started_at = ?, updated_at = ? WHERE project_id = ? AND game_id = ? AND id = ?`,
+		period, startedAt, nowRFC(), scope.ProjectID, scope.GameID, id)
 	return err
 }
 
-func dbGetEntry(db *sql.DB, pid string, lbID int64, period string, playerID int64) (*LeaderboardEntry, error) {
+func dbGetEntry(db DBTX, scope GameScope, lbID int64, period string, playerID int64) (*LeaderboardEntry, error) {
 	var e LeaderboardEntry
 	err := db.QueryRow(`
 		SELECT e.player_id, p.display_name, e.score, e.updated_at
 		FROM leaderboard_entries e JOIN players p ON p.id = e.player_id
-		WHERE e.project_id = ? AND e.leaderboard_id = ? AND e.period = ? AND e.player_id = ?`,
-		pid, lbID, period, playerID).Scan(&e.PlayerID, &e.DisplayName, &e.Score, &e.UpdatedAt)
+		WHERE e.project_id = ? AND e.game_id = ? AND e.leaderboard_id = ? AND e.period = ? AND e.player_id = ?`,
+		scope.ProjectID, scope.GameID, lbID, period, playerID).Scan(&e.PlayerID, &e.DisplayName, &e.Score, &e.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -700,28 +739,28 @@ func dbGetEntry(db *sql.DB, pid string, lbID int64, period string, playerID int6
 	return &e, nil
 }
 
-func dbUpsertEntry(db *sql.DB, pid string, lbID int64, period string, playerID int64, score float64) error {
+func dbUpsertEntry(db DBTX, scope GameScope, lbID int64, period string, playerID int64, score float64) error {
 	_, err := db.Exec(`
-		INSERT INTO leaderboard_entries(project_id, leaderboard_id, period, player_id, score, updated_at) VALUES(?,?,?,?,?,?)
+		INSERT INTO leaderboard_entries(project_id, game_id, leaderboard_id, period, player_id, score, updated_at) VALUES(?,?,?,?,?,?,?)
 		ON CONFLICT(leaderboard_id, period, player_id) DO UPDATE SET score = excluded.score, updated_at = excluded.updated_at`,
-		pid, lbID, period, playerID, score, nowRFC())
+		scope.ProjectID, scope.GameID, lbID, period, playerID, score, nowRFC())
 	return err
 }
 
 func orderForSort(sort string) string {
 	if sort == "asc" {
-		return "e.score ASC, e.updated_at ASC, e.id ASC"
+		return "e.score ASC, e.updated_at ASC, e.player_id ASC"
 	}
-	return "e.score DESC, e.updated_at ASC, e.id ASC"
+	return "e.score DESC, e.updated_at ASC, e.player_id ASC"
 }
 
-func dbTopEntries(db *sql.DB, pid string, lbID int64, period, sort string, limit, offset int) ([]LeaderboardEntry, error) {
+func dbTopEntries(db DBTX, scope GameScope, lbID int64, period, sort string, limit, offset int) ([]LeaderboardEntry, error) {
 	rows, err := db.Query(`
 		SELECT e.player_id, p.display_name, e.score, e.updated_at
 		FROM leaderboard_entries e JOIN players p ON p.id = e.player_id
-		WHERE e.project_id = ? AND e.leaderboard_id = ? AND e.period = ?
+		WHERE e.project_id = ? AND e.game_id = ? AND e.leaderboard_id = ? AND e.period = ?
 		ORDER BY `+orderForSort(sort)+` LIMIT ? OFFSET ?`,
-		pid, lbID, period, limit, offset)
+		scope.ProjectID, scope.GameID, lbID, period, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +779,7 @@ func dbTopEntries(db *sql.DB, pid string, lbID int64, period, sort string, limit
 
 // dbEntryRank — 1 + the number of entries that sort ahead of the given
 // score (ties broken by earlier update, matching dbTopEntries).
-func dbEntryRank(db *sql.DB, pid string, lbID int64, period, sort string, score float64, updatedAt string) (int64, error) {
+func dbEntryRank(db DBTX, scope GameScope, lbID int64, period, sort string, score float64, updatedAt string, playerID int64) (int64, error) {
 	op := ">"
 	if sort == "asc" {
 		op = "<"
@@ -748,23 +787,23 @@ func dbEntryRank(db *sql.DB, pid string, lbID int64, period, sort string, score 
 	var n int64
 	err := db.QueryRow(`
 		SELECT COUNT(*) FROM leaderboard_entries
-		WHERE project_id = ? AND leaderboard_id = ? AND period = ?
-		  AND (score `+op+` ? OR (score = ? AND updated_at < ?))`,
-		pid, lbID, period, score, score, updatedAt).Scan(&n)
+		WHERE project_id = ? AND game_id = ? AND leaderboard_id = ? AND period = ?
+		  AND (score `+op+` ? OR (score = ? AND (updated_at < ? OR (updated_at = ? AND player_id < ?))))`,
+		scope.ProjectID, scope.GameID, lbID, period, score, score, updatedAt, updatedAt, playerID).Scan(&n)
 	return n + 1, err
 }
 
-func dbEntryCount(db *sql.DB, pid string, lbID int64, period string) (int, error) {
+func dbEntryCount(db DBTX, scope GameScope, lbID int64, period string) (int, error) {
 	var n int
-	err := db.QueryRow(`SELECT COUNT(*) FROM leaderboard_entries WHERE project_id = ? AND leaderboard_id = ? AND period = ?`,
-		pid, lbID, period).Scan(&n)
+	err := db.QueryRow(`SELECT COUNT(*) FROM leaderboard_entries INDEXED BY v2_lb_desc WHERE project_id = ? AND game_id = ? AND leaderboard_id = ? AND period = ?`,
+		scope.ProjectID, scope.GameID, lbID, period).Scan(&n)
 	return n, err
 }
 
-func dbListPeriods(db *sql.DB, pid string, lbID int64, limit int) ([]string, error) {
+func dbListPeriods(db DBTX, scope GameScope, lbID int64, limit int) ([]string, error) {
 	rows, err := db.Query(`
 		SELECT period, MAX(updated_at) AS last FROM leaderboard_entries
-		WHERE project_id = ? AND leaderboard_id = ? GROUP BY period ORDER BY last DESC LIMIT ?`, pid, lbID, limit)
+		WHERE project_id = ? AND game_id = ? AND leaderboard_id = ? GROUP BY period ORDER BY last DESC LIMIT ?`, scope.ProjectID, scope.GameID, lbID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -794,7 +833,7 @@ func scanAchievementDef(sc rowScanner) (*AchievementDef, error) {
 	return &d, nil
 }
 
-func dbUpsertAchievementDef(db *sql.DB, pid string, d AchievementDef) (*AchievementDef, error) {
+func dbUpsertAchievementDef(db DBTX, scope GameScope, d AchievementDef) (*AchievementDef, error) {
 	hidden := 0
 	if d.Hidden {
 		hidden = 1
@@ -805,33 +844,33 @@ func dbUpsertAchievementDef(db *sql.DB, pid string, d AchievementDef) (*Achievem
 		threshold = d.Threshold
 	}
 	if _, err := db.Exec(`
-		INSERT INTO achievement_defs(project_id, key, name, description, stat, threshold, op, hidden, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(project_id, key) DO UPDATE SET name = excluded.name, description = excluded.description,
+		INSERT INTO achievement_defs(project_id, game_id, key, name, description, stat, threshold, op, hidden, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(project_id, game_id, key) DO UPDATE SET name = excluded.name, description = excluded.description,
 			stat = excluded.stat, threshold = excluded.threshold, op = excluded.op, hidden = excluded.hidden, updated_at = excluded.updated_at`,
-		pid, d.Key, d.Name, nullStr(d.Description), nullStr(d.Stat), threshold, d.Op, hidden, now, now); err != nil {
+		scope.ProjectID, scope.GameID, d.Key, d.Name, nullStr(d.Description), nullStr(d.Stat), threshold, d.Op, hidden, now, now); err != nil {
 		return nil, err
 	}
-	return dbGetAchievementDef(db, pid, d.Key)
+	return dbGetAchievementDef(db, scope, d.Key)
 }
 
-func dbGetAchievementDef(db *sql.DB, pid, key string) (*AchievementDef, error) {
-	d, err := scanAchievementDef(db.QueryRow(`SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? AND key = ?`, pid, key))
+func dbGetAchievementDef(db DBTX, scope GameScope, key string) (*AchievementDef, error) {
+	d, err := scanAchievementDef(db.QueryRow(`SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? AND game_id = ? AND key = ?`, scope.ProjectID, scope.GameID, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return d, err
 }
 
-func dbListAchievementDefs(db *sql.DB, pid string) ([]AchievementDef, error) {
-	return dbQueryAchievementDefs(db, `SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? ORDER BY key ASC`, pid)
+func dbListAchievementDefs(db DBTX, scope GameScope) ([]AchievementDef, error) {
+	return dbQueryAchievementDefs(db, `SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? AND game_id = ? ORDER BY key ASC`, scope.ProjectID, scope.GameID)
 }
 
-func dbListAchievementDefsForStat(db *sql.DB, pid, stat string) ([]AchievementDef, error) {
-	return dbQueryAchievementDefs(db, `SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? AND stat = ? ORDER BY key ASC`, pid, stat)
+func dbListAchievementDefsForStat(db DBTX, scope GameScope, stat string) ([]AchievementDef, error) {
+	return dbQueryAchievementDefs(db, `SELECT `+achCols+` FROM achievement_defs WHERE project_id = ? AND game_id = ? AND stat = ? ORDER BY key ASC`, scope.ProjectID, scope.GameID, stat)
 }
 
-func dbQueryAchievementDefs(db *sql.DB, q string, args ...any) ([]AchievementDef, error) {
+func dbQueryAchievementDefs(db DBTX, q string, args ...any) ([]AchievementDef, error) {
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
@@ -848,8 +887,8 @@ func dbQueryAchievementDefs(db *sql.DB, q string, args ...any) ([]AchievementDef
 	return out, rows.Err()
 }
 
-func dbPlayerAchievements(db *sql.DB, pid string, playerID int64) ([]PlayerAchievement, error) {
-	rows, err := db.Query(`SELECT key, IFNULL(source,''), unlocked_at FROM player_achievements WHERE project_id = ? AND player_id = ? ORDER BY unlocked_at ASC`, pid, playerID)
+func dbPlayerAchievements(db DBTX, scope GameScope, playerID int64) ([]PlayerAchievement, error) {
+	rows, err := db.Query(`SELECT key, IFNULL(source,''), unlocked_at FROM player_achievements WHERE project_id = ? AND game_id = ? AND player_id = ? ORDER BY unlocked_at ASC`, scope.ProjectID, scope.GameID, playerID)
 	if err != nil {
 		return nil, err
 	}
@@ -865,9 +904,9 @@ func dbPlayerAchievements(db *sql.DB, pid string, playerID int64) ([]PlayerAchie
 	return out, rows.Err()
 }
 
-func dbUnlockAchievement(db *sql.DB, pid string, playerID int64, key, source string) (bool, error) {
-	res, err := db.Exec(`INSERT OR IGNORE INTO player_achievements(project_id, player_id, key, source, unlocked_at) VALUES(?,?,?,?,?)`,
-		pid, playerID, key, nullStr(source), nowRFC())
+func dbUnlockAchievement(db DBTX, scope GameScope, playerID int64, key, source string) (bool, error) {
+	res, err := db.Exec(`INSERT OR IGNORE INTO player_achievements(project_id, game_id, player_id, key, source, unlocked_at) VALUES(?,?,?,?,?,?)`,
+		scope.ProjectID, scope.GameID, playerID, key, nullStr(source), nowRFC())
 	if err != nil {
 		return false, err
 	}

@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "games",
-  "version": "0.1.0",
-  "description": "Games tools and operating guidance for players, bans, player data, statistics, leaderboards, and achievements.",
+  "version": "0.2.0",
+  "description": "Multi-game tools and operating guidance for game catalogs, players, cloud saves, moderation, statistics, leaderboards, and achievements.",
   "author": {
     "name": "Apteva",
     "url": "https://apteva.com"
