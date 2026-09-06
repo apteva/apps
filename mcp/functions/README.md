@@ -1,4 +1,4 @@
-# Functions 1.8.0
+# Functions 1.8.1
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
@@ -6,7 +6,19 @@ processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
 
-## Upgrading to 1.8.0
+## Upgrading to 1.8.1
+
+Requires Apteva **0.50.2 or newer**. This patch embeds app-sdk v0.76.0 and declares a **1,800-second startup budget**. Health stays HTTP 503 with initialization progress until schema recovery and mounting finish; it becomes 200 only when the app is ready. Initialization cancellation rolls back the active migration transaction.
+
+Migration 005 from 1.8.0 could leave committed columns without its completion receipt after a timeout. Version 1.8.1 recovers every committed prefix of that migration automatically: it checks existing column definitions, preserves existing function and artifact identities, fills only missing identities, creates and validates the invocation index, and commits the repair with the original receipt. A completed 005 is skipped. No invocation history is deleted to speed up the upgrade.
+
+For a failed 1.7.0 → 1.8.0 upgrade, take a consistent database backup and upgrade directly to 1.8.1. Do not manually add the 005 receipt or regenerate existing identities. Index creation scans invocation history and needs free space for its index, SQLite temporary files and transaction journal; startup time depends on data and storage performance. A binary fallback does not reverse previously committed schema changes.
+
+The SQL runner now handles migrations 001–004; `migration.go` applies 005 inside `OnMount`, before any app route is available. Keep future migrations that depend on 005 in that ordered schema-aware runner. The original 1.8.0 SQL is retained under `testdata/` for interruption regression tests, not startup execution.
+
+Run `GOWORK=off go test -run TestExecutionMigration -race .` for every interrupted statement prefix, cancellation rollback and schema conflict tests. `scripts/test-migration-upgrade.py` boots actual app binaries, recreates the reported partial state, kills the app during index creation, verifies rollback, holds a real SQLite writer past the old timeout, retries, checks integrity/identities/receipt, and creates and invokes a function. See its command-line help for a 9.42 GB synthetic fixture.
+
+## Upgrading from 1.7.0
 
 This release improves execution and callback performance and fixes deployment, concurrency, isolation, streaming and panel issues. See [the audit and performance report](AUDIT_FIXES.md) for measurements and validation.
 
@@ -246,7 +258,7 @@ Panel source is `ui/FunctionsPanel.tsx`; the worker harness is
 
 ## Execution limits, cancellation and access
 
-The request deadline covers admission, rebuild, worker boot and execution. Production app/integration callbacks use context-aware HTTP with a shared keep-alive transport. This app-local adapter uses the public SDK callback endpoints because SDK v0.73.0 still lacks context parameters. Custom legacy SDK clients keep a downstream slot until their actual operation returns. Cancellation cannot undo an upstream side effect already accepted; use atomic operations/idempotency for retries.
+The request deadline covers admission, rebuild, worker boot and execution. Production app/integration callbacks use context-aware HTTP with a shared keep-alive transport. This app-local adapter uses the public SDK callback endpoints because SDK v0.76.0 still lacks context parameters. Custom legacy SDK clients keep a downstream slot until their actual operation returns. Cancellation cannot undo an upstream side effect already accepted; use atomic operations/idempotency for retries.
 
 `access` optionally narrows installation grants: `{"apps":["tables.rows_list"],"integrations":["pushover.*"]}`. An explicit empty array denies that class of call; `null` inherits installation grants. Numeric connection IDs require matching numeric policy rules. Updating environment, memory or access drains workers with stale configuration. Handler background work after completion is unsupported; invocation-scoped logging, calls and streams reject it.
 

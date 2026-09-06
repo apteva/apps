@@ -90,13 +90,17 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 	}
 	life, cancel := context.WithCancel(context.Background())
 	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)), globalQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000)), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
-	_, err = ctx.AppDB().Exec(`UPDATE function_versions SET build_status='failed',build_log='Build interrupted by restart' WHERE build_status IN ('pending','building')`)
+	_, err = ctx.AppDB().ExecContext(ctx.StartupContext(), `UPDATE function_versions SET build_status='failed',build_log='Build interrupted by restart' WHERE build_status IN ('pending','building')`)
 	if err != nil {
 		cancel()
 		removeTree(stage)
 		return nil, err
 	}
-	_, _ = ctx.AppDB().Exec(`UPDATE function_invocations SET status='error',error='Invocation interrupted by restart' WHERE status='running'`)
+	if _, err = ctx.AppDB().ExecContext(ctx.StartupContext(), `UPDATE function_invocations SET status='error',error='Invocation interrupted by restart' WHERE status='running'`); err != nil {
+		cancel()
+		removeTree(stage)
+		return nil, fmt.Errorf("recover interrupted invocations: %w", err)
+	}
 	if err := p.recoverLegacySnapshots(); err != nil {
 		cancel()
 		removeTree(stage)

@@ -76,3 +76,13 @@ func TestMCPToolsHaveSchemas(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrationStartupContract(t *testing.T) {
+	m := (&App{}).Manifest()
+	if m.Runtime.StartupTimeoutSeconds != 1800 || m.MinAptevaVersion != "0.50.2" {
+		t.Fatalf("startup contract: %+v", m.Runtime)
+	}
+	if _, err := os.Stat("migrations/005_execution_identity.sql"); !os.IsNotExist(err) {
+		t.Fatal("005 must run through schema-aware OnMount recovery")
+	}
+}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
@@ -12,6 +13,9 @@ const testProj = "test-proj"
 // source, hash gets stamped, GetByID + GetByName both find it.
 func TestCreateAndGet(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	db := ctx.AppDB()
 
 	src := []byte("console.log(JSON.stringify({hello:'world'}))")
@@ -52,6 +56,9 @@ func TestCreateAndGet(t *testing.T) {
 // name can't become an unrouteable /fn/<name> later.
 func TestNameValidation(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	bad := []string{"", "Has-Caps", "starts/with/slash", "has spaces", "x", strRepeat("x", 64)}
 	for _, name := range bad {
 		_, err := dbCreateFunction(ctx.AppDB(), testProj, &Function{
@@ -67,6 +74,9 @@ func TestNameValidation(t *testing.T) {
 // TestRuntimeValidation only accepts the four supported runtimes.
 func TestRuntimeValidation(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	_, err := dbCreateFunction(ctx.AppDB(), testProj, &Function{
 		Name: "bad", Runtime: "ruby",
 		SourceKind: "inline", Source: "puts 1", SourceHash: "x",
@@ -80,6 +90,9 @@ func TestRuntimeValidation(t *testing.T) {
 // to a query for project B. Same shape as every other app.
 func TestProjectPartition(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("a"))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	_, err := dbCreateFunction(ctx.AppDB(), "a", &Function{
 		Name: "fn", Runtime: "node",
 		SourceKind: "inline", Source: "x", SourceHash: "h",
@@ -100,6 +113,9 @@ func TestProjectPartition(t *testing.T) {
 // recomputed hash from the caller — verify it lands in the DB.
 func TestUpdateRehashesOnSourceChange(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	db := ctx.AppDB()
 
 	fn, err := dbCreateFunction(db, testProj, &Function{
@@ -126,6 +142,9 @@ func TestUpdateRehashesOnSourceChange(t *testing.T) {
 
 func TestFunctionURLConfigRoundtrip(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	db := ctx.AppDB()
 
 	fn, err := dbCreateFunction(db, testProj, &Function{
@@ -172,6 +191,9 @@ func TestFunctionURLConfigRoundtrip(t *testing.T) {
 // it singly. The most-recently-started should sort first.
 func TestInvocationsRoundtrip(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	if err := migrateExecutionIdentity(context.Background(), ctx.AppDB(), nil); err != nil {
+		t.Fatal(err)
+	}
 	db := ctx.AppDB()
 
 	fn, err := dbCreateFunction(db, testProj, &Function{

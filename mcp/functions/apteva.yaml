@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.8.0
+version: 1.8.1
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -11,6 +11,9 @@ description: |
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
+
+  v1.8.1 recovers interrupted 1.8.0 schema upgrades atomically and reports
+  startup progress with an extended migration budget.
 
   v1.8.0 improves warm execution and app-call performance, validates
   deployments before activation, and hardens resource limits, isolation,
@@ -23,7 +26,7 @@ icon_style: monochrome
 tags: [functions, faas, serverless, scripts, agent]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.50.2"
 
 requires:
   permissions:
@@ -82,6 +85,7 @@ runtime:
     entry: mcp/functions
   port: 8080
   health_check: /health
+  startup_timeout_seconds: 1800
 
 db:
   driver: sqlite

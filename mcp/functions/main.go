@@ -1,4 +1,4 @@
-// Functions v1.7 — Lambda-style serverless functions.
+// Functions v1.8.1 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -66,6 +66,12 @@ func (a *App) Manifest() sdk.Manifest {
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("functions requires a db block")
+	}
+	if err := migrateExecutionIdentity(ctx.StartupContext(), ctx.AppDB(), func(done, total int) {
+		ctx.ReportStartupProgress("schema-upgrade", int64(done), int64(total))
+		ctx.Logger().Info("schema upgrade progress", "completed", done, "total", total)
+	}); err != nil {
+		return fmt.Errorf("upgrade execution schema: %w", err)
 	}
 	globalCtx = ctx
 	p, err := newPool(ctx)

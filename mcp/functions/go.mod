@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/functions
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.73.0
+	github.com/apteva/app-sdk v0.76.0
 	golang.org/x/sys v0.42.0
 	modernc.org/sqlite v1.50.0
 )
