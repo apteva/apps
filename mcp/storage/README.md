@@ -1,9 +1,15 @@
-# Storage 0.11.2
+# Storage 0.11.3
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.73.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+Version 0.11.3 fixes large uploads being refused by a smaller default pending
+allowance. The automatic allowance is at least the configured maximum file size
+(minimum 1 GiB); explicit pending limits remain respected. The panel checks hard
+limits before reading a large file and shows preparation and completion stages.
+It also adds Scaleway Object Storage as a selectable backend integration.
 
 Version 0.11.2 fixes the panel/card `jsxDEV` module-load crash. The build explicitly
 uses production JSX and checks the generated modules against the host import
@@ -59,8 +65,9 @@ in localStorage. Selecting the same file in the same project/install resumes
 verified parts after a transient failure. Cancel deletes the session; closing
 an interrupted browser leaves it available until the idle TTL expires.
 
-The install defaults to 64 pending sessions and 1024 MiB of combined declared
-size (`max_upload_sessions`, `max_pending_upload_mb`). Direct uploads retain
+The install defaults to 64 pending sessions and an automatic combined declared
+size allowance of max(1024 MiB, configured file limit)
+(`max_upload_sessions`, `max_pending_upload_mb=auto`). Direct uploads retain
 reservations until their PUT URL expires. Aborting a session releases its
 reservation. Four full-file transfers run concurrently per process.
 
@@ -72,6 +79,18 @@ compensate object writes, and the sweeper retries remaining cleanup. It stops
 when the sidecar unmounts.
 
 ## Backend selection and migration
+
+Supported backend bindings are `aws-s3`, `cloudflare-r2`, `backblaze-b2`,
+`hetzner-object-storage`, and `scaleway-object-storage`.
+
+For Scaleway, connect the **Scaleway Object Storage** integration with
+`access_key_id`, `secret_access_key`, and the bucket's `region`. Bind that
+connection to Storage's `backend` role and set `s3_bucket` in Storage settings.
+Storage uses HTTPS at `s3.<region>.scw.cloud` with regional AWS SigV4 signing;
+it does not require a custom endpoint. This follows the
+[Scaleway S3 configuration](https://www.scaleway.com/en/docs/object-storage/api-cli/object-storage-aws-cli/).
+Use the Object Storage integration, not the general `scaleway` integration.
+Setting `S3_*` environment variables alone does not select a backend.
 
 Mount requires successful platform identity discovery. Missing or unavailable
 binding data cannot silently select disk. The first mount pins the backend
@@ -138,4 +157,4 @@ docker stop storage-test-minio
 The profile verifies actual signed PUTs, checksum validation, immutable
 publication, completion retries, ranged reads, revocation, and deletion.
 Provider-specific connection/endpoint behavior also has unit fixtures. MinIO
-coverage does not certify live AWS, R2, B2, or Hetzner accounts.
+coverage does not certify live AWS, R2, B2, Hetzner, or Scaleway accounts.

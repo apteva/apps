@@ -229,8 +229,16 @@ func validUploadID(id string) bool {
 // ─── HTTP routing ────────────────────────────────────────────────────
 
 func (a *App) handleUploadsCollection(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		if _, err := resolveProjectFromRequest(r); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"max_file_bytes": maxUploadBytes(globalCtx), "max_pending_bytes": maxPendingUploadBytes(globalCtx)})
+		return
+	}
 	if r.Method != http.MethodPost {
-		httpErr(w, http.StatusMethodNotAllowed, "POST only")
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST only")
 		return
 	}
 	a.handleUploadInit(w, r)

@@ -165,6 +165,8 @@ interface UploadJob {
   name: string;
   total: number;
   loaded: number;
+  prepared?: number;
+  phase?: "checking" | "preparing" | "uploading" | "finalizing";
   status: "uploading" | "done" | "error" | "cancelled";
   error?: string;
   // Set when the user clicks the row's Cancel button. The
@@ -286,6 +288,8 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
             projectId,
             installId,
             signal: job.controller!.signal,
+            onPhase: (phase) => updateJob(job.id, { phase }),
+            onPreparationProgress: (prepared) => updateJob(job.id, { prepared }),
             onUploadIdAssigned: (sid) => {
               updateJob(job.id, { serverUploadId: sid });
             },
@@ -1016,7 +1020,8 @@ function UploadProgressRow({
   onDismiss: () => void;
   onCancel: () => void;
 }) {
-  const pct = job.total > 0 ? Math.min(100, Math.floor((job.loaded / job.total) * 100)) : 0;
+  const shownBytes = job.phase === "preparing" ? (job.prepared || 0) : job.loaded;
+  const pct = job.total > 0 ? Math.min(100, Math.floor((shownBytes / job.total) * 100)) : 0;
   const isError = job.status === "error";
   const isDone = job.status === "done";
   const isCancelled = job.status === "cancelled";
@@ -1036,6 +1041,12 @@ function UploadProgressRow({
     ? "uploaded"
     : isCancelled
     ? "cancelled"
+    : job.phase === "checking"
+    ? "Checking upload…"
+    : job.phase === "preparing"
+    ? `Preparing file · ${pct}%`
+    : job.phase === "finalizing"
+    ? "Finishing upload…"
     : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`;
   return (
     <div className="flex items-center gap-3 text-xs">

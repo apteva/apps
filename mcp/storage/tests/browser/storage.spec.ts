@@ -40,6 +40,7 @@ test('resuming reuses verified parts after a transient failure',async({page})=>{
  await page.route('**/api/apps/storage/**',async route=>{if(new URL(route.request().url()).pathname.includes("/ui/"))return route.continue();const req=route.request(),u=new URL(req.url());
  if(u.pathname.endsWith('/folders'))return route.fulfill({json:{folders:[]}});
  if(u.pathname.endsWith('/files'))return route.fulfill({json:{files:[]}});
+ if(u.pathname.endsWith('/uploads')&&req.method()==='GET')return route.fulfill({json:{max_file_bytes:4*1024**3,max_pending_bytes:4*1024**3}});
  if(u.pathname.endsWith('/uploads')){inits++;return route.fulfill({json:{upload_id:'00000000000000000000000001',part_size:5*1024*1024,max_parallel:1,max_parts:100}})}
  if(u.pathname.includes('/parts/')){const n=Number(u.pathname.split('/').at(-1));if(n===1)firstPartWrites++;if(n===2&&fail)return route.fulfill({status:503,body:'temporary'});const size=req.postDataBuffer()!.length;parts.push({n,size});return route.fulfill({json:{size}})}
  if(u.pathname.endsWith('/complete'))return route.fulfill({json:{file:row(7,'large.bin')}});
@@ -48,4 +49,49 @@ test('resuming reuses verified parts after a transient failure',async({page})=>{
  await page.goto('/');
  const run=()=>page.evaluate(async()=>{const f=new File([new Uint8Array(30*1024*1024)],'large.bin',{type:'application/octet-stream'});try{return await (window as any).uploadResumable(f,{projectId:'p1',installId:42,parallel:1})}catch(e){return {error:String(e)}}});
  const first=await run();expect(first.error).toContain('failed');fail=false;const second=await run();expect(second.id).toBe(7);expect(inits).toBe(1);expect(firstPartWrites).toBe(1);
+});
+
+test('oversized pending allowance fails before reading a large file',async({page})=>{
+ let posts=0;
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(r.method()==='POST')posts++;
+  if(u.pathname.endsWith('/uploads'))return route.fulfill({json:{max_file_bytes:4*1024**3,max_pending_bytes:1024**3}});
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');await expect(page.getByRole('button',{name:'+ Folder',exact:true})).toBeVisible();
+ const result=await page.evaluate(async()=>{
+  let read=false;const file={name:'large.bin',size:3*1024**3,type:'application/octet-stream',stream(){read=true;throw Error('File should not be read')}};
+  try{await (window as any).uploadResumable(file,{projectId:'p1',installId:42});return {error:'accepted',read}}
+  catch(e){return {error:String(e),read}}
+ });
+ expect(result.error).toContain('pending-upload allowance (1024 MiB)');expect(result.read).toBe(false);expect(posts).toBe(0);
+});
+
+test('shipped panel shows preparation before uploading large files',async({page})=>{
+ await page.addInitScript(()=>{
+  const original=File.prototype.stream;
+  File.prototype.stream=function(){
+   const file=this;
+   return new ReadableStream({async start(controller){
+    await new Promise<void>(resolve=>{(window as any).releasePreparation=resolve});
+    const reader=original.call(file).getReader();
+    try{while(true){const {done,value}=await reader.read();if(done)break;controller.enqueue(value)}controller.close()}
+    catch(error){controller.error(error)}finally{reader.releaseLock()}
+   }});
+  };
+ });
+ let posts=0;
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(u.pathname.endsWith('/uploads')){
+   if(r.method()==='GET')return route.fulfill({json:{max_file_bytes:4*1024**3,max_pending_bytes:4*1024**3}});
+   posts++;return route.fulfill({json:{was_existing:true,file:row(8,'prepared.bin')}});
+  }
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');await page.locator('input[type=file]').setInputFiles({name:'prepared.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(26*1024*1024)});
+ await expect(page.getByText('Preparing file · 0%',{exact:true})).toBeVisible();expect(posts).toBe(0);
+ await page.evaluate(()=>{(window as any).releasePreparation()});await expect.poll(()=>posts).toBe(1);
+ await expect(page.getByText('uploaded',{exact:true})).toBeVisible();
 });

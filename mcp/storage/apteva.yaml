@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.11.2
+version: 0.11.3
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
-  local disk by default, S3-compatible (AWS / R2 / B2 / Wasabi /
-  MinIO) when configured. On S3, presigned upload + download URLs
+  local disk by default, S3-compatible (AWS / R2 / B2 / Hetzner /
+  Scaleway) through integration bindings. On S3, presigned upload + download URLs
   support direct transfer. Upload finalization verifies bytes before
   publishing; downloads use revocable Storage delivery by default. Three visibility tiers:
   private (auth-only), signed (time-limited URL), public (open).
@@ -48,11 +48,11 @@ requires:
     # credentials + endpoint info.
     - role: backend
       kind: integration
-      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2, hetzner-object-storage]
+      compatible_slugs: [aws-s3, cloudflare-r2, backblaze-b2, hetzner-object-storage, scaleway-object-storage]
       capabilities: []
       required: false
       label: "S3-compatible backend (optional)"
-      hint: "Bind an S3 / R2 / B2 / Hetzner connection to host blobs in the cloud. Without this, files live on local disk."
+      hint: "Bind an S3 / R2 / B2 / Hetzner / Scaleway Object Storage connection to host blobs in the cloud. Without this, files live on local disk."
 
 provides:
   http_routes:
@@ -215,9 +215,9 @@ config_schema:
     description: Install-wide limit across HTTP, MCP and direct upload sessions.
   - name: max_pending_upload_mb
     type: text
-    default: "1024"
+    default: "auto"
     label: Pending upload allowance (MiB)
-    description: Combined declared size of pending sessions. Direct sessions reserve their allowance until the PUT URL expires.
+    description: Combined declared size of pending sessions. Auto allows at least one maximum-size file, with a minimum of 1024 MiB. Set an explicit MiB value to override. Direct sessions reserve their allowance until the PUT URL expires.
   - name: default_visibility
     type: select
     options: [private, signed, public]

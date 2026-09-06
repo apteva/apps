@@ -161,9 +161,20 @@ func writeUploadPart(c context.Context, app *sdk.AppCtx, id string, n int, r io.
 	return written, nil
 }
 
+func maxPendingUploadBytes(app *sdk.AppCtx) int64 {
+	value := strings.TrimSpace(app.Config().Get("max_pending_upload_mb"))
+	if value == "" || value == "auto" {
+		return max(1024*1024*1024, maxUploadBytes(app))
+	}
+	return int64(configIntClamped(value, 1024, 1, 102400)) * 1024 * 1024
+}
+
 func reserveUpload(app *sdk.AppCtx, id, pid string, size, expires int64) error {
 	maxSessions := configIntClamped(app.Config().Get("max_upload_sessions"), 64, 1, 1024)
-	maxBytes := int64(configIntClamped(app.Config().Get("max_pending_upload_mb"), 1024, 1, 102400)) * 1024 * 1024
+	maxBytes := maxPendingUploadBytes(app)
+	if size > maxBytes {
+		return fmt.Errorf("file exceeds pending-upload allowance (%d MiB); increase max_pending_upload_mb in Storage settings", maxBytes/(1024*1024))
+	}
 	// One SQLite statement makes admission atomic across all session protocols.
 	res, err := app.AppDB().Exec(`INSERT INTO upload_reservations(upload_id,project_id,size_bytes,expires_at)
  SELECT ?,?,?,? WHERE (SELECT count(*) FROM upload_reservations)< ? AND
@@ -176,7 +187,7 @@ func reserveUpload(app *sdk.AppCtx, id, pid string, size, expires int64) error {
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("upload session or pending-byte quota exceeded; finish or abort existing uploads")
+		return fmt.Errorf("pending-upload quota exceeded (limit %d MiB across %d sessions); finish or abort existing uploads, or adjust Storage settings", maxBytes/(1024*1024), maxSessions)
 	}
 	return nil
 }

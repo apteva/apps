@@ -12,8 +12,8 @@ import { sha256 as createSHA256 } from "@noble/hashes/sha2.js";
 //     (max 5). Other parts continue uninflueced — that's the
 //     point of parts vs offset.
 //
-// We don't compute SHA256 client-side. Pre-dedup short-circuit is
-// available if the caller already has a hash on hand.
+// Large files are hashed incrementally for safe resume and deduplication.
+// Check hard limits before reading bytes and surface preparation progress.
 
 const STORAGE_API = "/api/apps/storage";
 const simpleUploadCap = 25 * 1024 * 1024;
@@ -42,6 +42,8 @@ export interface UploadResumableOptions {
   /** Fired with cumulative bytes uploaded (sum across in-flight
    *  parts). The total includes parts not yet started. */
   onProgress?: (bytesUploaded: number, total: number) => void;
+  onPhase?: (phase: "checking" | "preparing" | "uploading" | "finalizing") => void;
+  onPreparationProgress?: (bytesRead: number, total: number) => void;
   /** Override the parallelism. Default 4. */
   parallel?: number;
   signal?: AbortSignal;
@@ -90,6 +92,7 @@ async function uploadSimple(
   file: File,
   opts: UploadResumableOptions,
 ): Promise<UploadedFile> {
+  opts.onPhase?.("uploading");
   const fd = new FormData();
   fd.append("file", file);
   fd.append("folder", opts.folder ?? "/");
@@ -127,8 +130,19 @@ async function uploadChunked(
   file: File,
   opts: UploadResumableOptions,
 ): Promise<UploadedFile> {
-  const sha256 = opts.sha256 || await hashFile(file, opts.signal);
+  opts.onPhase?.("checking");
+  const limitsResponse = await fetch(`${STORAGE_API}/uploads${scopeQS(opts)}`, { credentials: "same-origin", signal: opts.signal });
+  // Older installed backends do not expose the read-only limits endpoint.
+  if (limitsResponse.status !== 405) {
+    if (!limitsResponse.ok) throw new Error(`Cannot check upload limits (HTTP ${limitsResponse.status}): ${await limitsResponse.text()}`);
+    const limits = await limitsResponse.json();
+    if (file.size > limits.max_file_bytes) throw new Error(`File exceeds Storage's file limit (${Math.floor(limits.max_file_bytes / 1048576)} MiB). Adjust max_upload_size_mb in Storage settings.`);
+    if (file.size > limits.max_pending_bytes) throw new Error(`File exceeds Storage's pending-upload allowance (${Math.floor(limits.max_pending_bytes / 1048576)} MiB). Adjust max_pending_upload_mb in Storage settings.`);
+  }
+  opts.onPhase?.("preparing");
+  const sha256 = opts.sha256 || await hashFile(file, opts.signal, opts.onPreparationProgress);
   opts.signal?.throwIfAborted();
+  opts.onPhase?.("checking");
   const resumeKey = "storage-upload:" + JSON.stringify([opts.projectId, opts.installId, opts.folder || "/", file.name, file.size, file.type, sha256, opts.visibility, opts.tags]);
   let init: InitResponse | undefined;
   let confirmed: { n: number; size: number }[] = [];
@@ -199,6 +213,7 @@ async function uploadChunked(
   const partBytes = new Map<number, number>(confirmed.map(p => [p.n, p.size]));
   let confirmedBytes = [...partBytes.values()].reduce((a,b) => a+b, 0);
   const reportProgress = () => opts.onProgress?.(confirmedBytes, file.size);
+  opts.onPhase?.("uploading");
   reportProgress();
 
   // Worker drains the queue. On error we retry with exp backoff;
@@ -256,6 +271,7 @@ async function uploadChunked(
       throw new DOMException("upload aborted", "AbortError");
     }
     // All parts are on the server. Complete.
+    opts.onPhase?.("finalizing");
     const completion = (await jsonFetch<{ file: UploadedFile; was_existing: boolean }>(
       "POST",
       `${STORAGE_API}/uploads/${id}/complete${scopeQS(opts)}`,
@@ -330,9 +346,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function hashFile(file: File, signal?: AbortSignal): Promise<string> {
+async function hashFile(file: File, signal?: AbortSignal, progress?: (read: number, total: number) => void): Promise<string> {
  const hash = createSHA256.create(); const reader = file.stream().getReader();
- try { while (true) { signal?.throwIfAborted(); const {done,value} = await reader.read(); if (done) break; hash.update(value); } }
+ let read = 0, updated = performance.now();
+ progress?.(0, file.size);
+ try { while (true) {
+   signal?.throwIfAborted(); const {done,value} = await reader.read(); if (done) break;
+   hash.update(value); read += value.length;
+   if (performance.now() - updated >= 50) {
+     progress?.(read, file.size);
+     await sleep(0); // Let progress paint and Cancel run during large hashes.
+     updated = performance.now();
+   }
+ } }
  finally { await reader.cancel(); reader.releaseLock(); }
+ signal?.throwIfAborted();
+ progress?.(read, file.size);
  return Array.from(hash.digest(), b => b.toString(16).padStart(2,"0")).join("");
 }

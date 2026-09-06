@@ -7,7 +7,8 @@ package main
 //
 // v0.9 model: credentials come from a bound integration, NOT
 // config_schema. The operator picks an aws-s3 / cloudflare-r2 /
-// backblaze-b2 connection at install time; this file reads
+// backblaze-b2 / hetzner-object-storage / scaleway-object-storage
+// connection at install time; this file reads
 // connection.Fields via PlatformAPI().GetConnectionCredentials and
 // resolves slug-specific endpoint construction.
 //
@@ -22,6 +23,8 @@ package main
 //   backblaze-b2:   endpoint = "s3.<region>.backblazeb2.com"
 //                   region   = catalog field
 //                   path-style = false
+//   scaleway-object-storage: endpoint = "s3.<region>.scw.cloud"
+//                   region = catalog field, path-style = true
 //
 // The bucket name lives in install config (`s3_bucket`) — one R2
 // account commonly hosts many buckets, so it's per-install state, not
@@ -157,6 +160,19 @@ func resolveS3Connection(creds *sdk.ConnectionCredentials) (*s3ResolvedConnectio
 			return nil, fmt.Errorf("s3 backend: backblaze-b2 connection %d has no region (e.g. us-west-004)", creds.ConnectionID)
 		}
 		out.endpoint = "s3." + out.region + ".backblazeb2.com"
+	case "scaleway-object-storage":
+		if out.region == "" {
+			return nil, fmt.Errorf("s3 backend: scaleway-object-storage connection %d has no region (e.g. fr-par)", creds.ConnectionID)
+		}
+		// The catalog supplies a region, not a custom endpoint. Keep it
+		// a DNS label so credentials can only target Scaleway's domain.
+		if len(out.region) > 63 || strings.HasPrefix(out.region, "-") || strings.HasSuffix(out.region, "-") || strings.IndexFunc(out.region, func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-')
+		}) >= 0 {
+			return nil, fmt.Errorf("s3 backend: scaleway-object-storage connection %d has an invalid region", creds.ConnectionID)
+		}
+		out.endpoint = "s3." + out.region + ".scw.cloud"
+		out.forcePathStyle = true
 	case "hetzner-object-storage":
 		// Hetzner uses one endpoint per data centre at <region>.your-
 		// objectstorage.com. Three regions: fsn1 (Falkenstein, DE),
