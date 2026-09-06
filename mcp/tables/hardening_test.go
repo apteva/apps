@@ -219,18 +219,22 @@ func TestLegacyUpgradeFirstOperations(t *testing.T) {
 	}
 }
 
-func TestLegacyUpgradeRollback(t *testing.T) {
+func TestLegacyUpgradePreservesRepairableInvalidDates(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 	seedLegacyTable(t, ctx, true)
-	if err := app.upgradeAll(ctx); err == nil {
-		t.Fatal("invalid datetime silently migrated")
+	if err := app.upgradeAll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err := ctx.AppDB().QueryRow("SELECT at FROM t_41").Scan(&raw); err != nil || raw != "invalid" {
+		t.Fatalf("legacy data rewritten: %q %v", raw, err)
 	}
 	var version, count int
 	if err := ctx.AppDB().QueryRow("SELECT storage_version FROM tables_meta WHERE id=41").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 0 {
+	if version != 1 {
 		t.Fatal(version)
 	}
 	if err := ctx.AppDB().QueryRow("SELECT count(*) FROM t_41").Scan(&count); err != nil || count != 1 {

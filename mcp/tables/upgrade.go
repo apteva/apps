@@ -3,14 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
-	"strings"
+	"modernc.org/sqlite"
 	"time"
 )
 
 func (a *App) upgradeAll(ctx *sdk.AppCtx) error {
-	parent, cancel := context.WithTimeout(context.Background(), time.Duration(cfgInt64Range(ctx, "migration_timeout_ms", 300000, 1, 3600000))*time.Millisecond)
+	parent, cancel := context.WithTimeout(ctx.StartupContext(), time.Duration(cfgInt64Range(ctx, "migration_timeout_ms", 300000, 1, 3600000))*time.Millisecond)
 	defer cancel()
 	scoped := ctx.WithProject(ctx.CurrentProject())
 	activeContexts.Store(scoped, parent)
@@ -20,7 +21,7 @@ func (a *App) upgradeAll(ctx *sdk.AppCtx) error {
 	}
 	defer a.schemaMu.Unlock()
 
-	rows, err := ctx.AppReadDB().QueryContext(parent, "SELECT project_id,name FROM tables_meta WHERE project_id<>'' AND (storage_version<>1 OR row_count IS NULL)")
+	rows, err := ctx.AppReadDB().QueryContext(parent, "SELECT project_id,name FROM tables_meta WHERE project_id<>'' AND (storage_version<>1 OR row_count IS NULL) ORDER BY id")
 	if err != nil {
 		return err
 	}
@@ -38,14 +39,31 @@ func (a *App) upgradeAll(ctx *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
-	for _, key := range pending {
-		table, err := a.loadTableSchema(scoped, key.projectID, key.tableName)
+	ctx.ReportStartupProgress("tables", 0, int64(len(pending)))
+	for i, key := range pending {
+		var table *Table
+		var err error
+		for {
+			table, err = a.loadTableSchema(scoped, key.projectID, key.tableName)
+			var busy *sqlite.Error
+			if !errors.As(err, &busy) || busy.Code()&255 != 5 {
+				break
+			}
+			ctx.ReportStartupProgress("waiting_for_writer", int64(i), int64(len(pending)))
+			select {
+			case <-parent.Done():
+				return parent.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
 		if err != nil {
 			return fmt.Errorf("upgrade table %s: %w", key.tableName, err)
 		}
 		if _, err := currentRowCount(scoped, table); err != nil {
 			return err
 		}
+		ctx.ReportStartupProgress("tables", int64(i+1), int64(len(pending)))
+		ctx.Logger().Info("migration progress", "completed", i+1, "total", len(pending))
 	}
 
 	return nil
@@ -97,7 +115,7 @@ func normalizeTimestamp(v any) (any, error) {
 // New tables already use version 1. Called only on cache misses and at mount.
 func upgradeTable(ctx *sdk.AppCtx, t *Table) error {
 	var version int
-	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), "SELECT storage_version FROM tables_meta WHERE id=?", t.ID).Scan(&version); err != nil {
+	if err := ctx.AppReadDB().QueryRowContext(requestContext(ctx), "SELECT storage_version,legacy_storage FROM tables_meta WHERE id=?", t.ID).Scan(&version, &t.LegacyStorage); err != nil {
 		return err
 	}
 	if version == 1 {
@@ -114,95 +132,32 @@ func upgradeTable(ctx *sdk.AppCtx, t *Table) error {
 	if _, err = tx.Exec("UPDATE tables_meta SET storage_version=storage_version WHERE id=?", t.ID); err != nil {
 		return err
 	}
-	if err = tx.QueryRow("SELECT storage_version FROM tables_meta WHERE id=?", t.ID).Scan(&version); err != nil {
+	if err = tx.QueryRow("SELECT storage_version,legacy_storage FROM tables_meta WHERE id=?", t.ID).Scan(&version, &t.LegacyStorage); err != nil {
 		return err
 	}
 	if version == 1 {
 		return tx.Commit()
 	}
-	indexes, err := tx.Query("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", t.PhysicalName)
-	if err != nil {
-		return err
-	}
-	definitions := []string{}
-	for indexes.Next() {
-		var ddl string
-		if err = indexes.Scan(&ddl); err != nil {
-			indexes.Close()
-			return err
-		}
-		definitions = append(definitions, ddl)
-	}
-	err = indexes.Err()
-	indexes.Close()
-	if err != nil {
-		return err
-	}
-	temp := t.PhysicalName + "_upgrade"
-	ddl, err := buildCreateTableSQL(temp, t.Columns)
-	if err != nil {
-		return err
-	}
-	if _, err = tx.Exec(ddl); err != nil {
-		return err
-	}
-	cols := []string{"id", "created_at", "updated_at"}
-	for _, col := range t.Columns {
-		cols = append(cols, col.Name)
-	}
-	quoted := make([]string, len(cols))
-	for i, c := range cols {
-		quoted[i] = quote(c)
-	}
-	source, err := tx.Query("SELECT " + strings.Join(quoted, ",") + " FROM " + quote(t.PhysicalName))
-	if err != nil {
-		return err
-	}
-	insert, err := tx.Prepare("INSERT INTO " + quote(temp) + " (" + strings.Join(quoted, ",") + ") VALUES (" + strings.TrimSuffix(strings.Repeat("?,", len(cols)), ",") + ")")
-	if err != nil {
-		source.Close()
-		return err
-	}
-	defer insert.Close()
-	for source.Next() {
-		values := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
-		if err = source.Scan(ptrs...); err != nil {
-			source.Close()
-			return err
-		}
-		for i := 1; i < len(values); i++ {
-			if i < 3 || t.Columns[i-3].Type == "datetime" {
-				values[i], err = normalizeTimestamp(values[i])
-				if err != nil {
-					source.Close()
-					return err
-				}
-			}
-		}
-		if _, err = insert.ExecContext(tx.ctx, values...); err != nil {
-			source.Close()
-			return err
+	// SQLite adds this constant-default column without copying existing rows.
+	// Preserve timestamp bytes and index roots so a 0.1.14 fallback remains usable.
+	for _, c := range t.Columns {
+		if c.Name == "_revision" {
+			return errf("legacy user column _revision conflicts with reserved revision column")
 		}
 	}
-	err = source.Err()
-	source.Close()
-	if err != nil {
+	if _, err = tx.Exec("ALTER TABLE " + quote(t.PhysicalName) + " ADD COLUMN _revision INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("DROP TABLE " + quote(t.PhysicalName)); err != nil {
+	if _, err = tx.Exec("INSERT INTO row_identity(table_id,last_id) SELECT ?,COALESCE(MAX(id),0) FROM "+quote(t.PhysicalName), t.ID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("ALTER TABLE " + quote(temp) + " RENAME TO " + quote(t.PhysicalName)); err != nil {
+	// Old writers omit revision and identity bookkeeping. SQL-only triggers remain
+	// executable by the old binary and keep the new binary's invariants current.
+	if _, err = tx.Exec(fmt.Sprintf("CREATE TRIGGER %s AFTER UPDATE ON %s WHEN NEW._revision=OLD._revision BEGIN UPDATE %s SET _revision=OLD._revision+1 WHERE id=NEW.id; END", quote(t.PhysicalName+"_revision_update"), quote(t.PhysicalName), quote(t.PhysicalName))); err != nil {
 		return err
 	}
-	for _, ddl := range definitions {
-		if _, err = tx.Exec(ddl); err != nil {
-			return err
-		}
+	if _, err = tx.Exec(fmt.Sprintf("CREATE TRIGGER %s AFTER INSERT ON %s BEGIN UPDATE row_identity SET last_id=MAX(last_id,NEW.id) WHERE table_id=%d; END", quote(t.PhysicalName+"_identity_insert"), quote(t.PhysicalName), t.ID)); err != nil {
+		return err
 	}
 	if _, err = initializeCountTx(tx, t); err != nil {
 		return err
@@ -210,10 +165,14 @@ func upgradeTable(ctx *sdk.AppCtx, t *Table) error {
 	if err = reconcileIndexes(tx, t); err != nil {
 		return err
 	}
-	if _, err = tx.Exec("UPDATE tables_meta SET storage_version=1 WHERE id=?", t.ID); err != nil {
+	if _, err = tx.Exec("UPDATE tables_meta SET storage_version=1,legacy_storage=1 WHERE id=?", t.ID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	t.LegacyStorage = true
+	return nil
 }
 
 // Record historical managed indexes even if their key has never been upserted

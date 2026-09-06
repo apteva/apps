@@ -77,7 +77,7 @@ func cursorWhere(pid string, t *Table, args map[string]any) (string, []any, erro
 	if col == "id" {
 		return `"id" ` + op + " ?", []any{c.ID}, nil
 	}
-	q := quote(col)
+	q := storageExpression(t, col)
 	if c.Value == nil {
 		if dir == "asc" {
 			return "(" + q + " IS NOT NULL OR (" + q + ` IS NULL AND "id" > ?))`, []any{c.ID}, nil

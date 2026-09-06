@@ -76,7 +76,7 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 					continue // skip — sqlite stores NULL implicitly
 				}
 			}
-			coerced, err := coerceForStorage(col, v)
+			coerced, err := coerceForTableStorage(t, col, v)
 			if err != nil {
 				return nil, fmt.Errorf("rows[%d]: %w", i, err)
 			}
@@ -106,7 +106,7 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 	ids := make([]int64, 0, len(rawRows))
 	for i, vals := range prepared {
-		res, err := statements.insert(t.PhysicalName, colsUsed[i], vals)
+		res, err := statements.insert(t, colsUsed[i], vals)
 		if err != nil {
 			return nil, fmt.Errorf("rows[%d]: insert failed: %w", i, err)
 		}
@@ -218,7 +218,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			if !present || v == nil {
 				return nil, errf("rows[%d]: key column %q is required", i, key)
 			}
-			coerced, err := coerceForStorage(colByName[key], v)
+			coerced, err := coerceForTableStorage(t, colByName[key], v)
 			if err != nil {
 				return nil, errf("rows[%d] key %q: %v", i, key, err)
 			}
@@ -272,7 +272,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				if !present {
 					continue
 				}
-				coerced, err := coerceForStorage(col, v)
+				coerced, err := coerceForTableStorage(t, col, v)
 				if err != nil {
 					return nil, fmt.Errorf("rows[%d]: %w", i, err)
 				}
@@ -286,7 +286,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				vals = append(vals, coerced)
 			}
 			if len(setCols) > 0 {
-				setCols = append(setCols, `"updated_at" = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), "_revision" = "_revision" + 1`)
+				setCols = append(setCols, updateTimestampSQL(t))
 				vals = append(vals, existingID)
 				stmt := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", quote(t.PhysicalName), strings.Join(setCols, ", "))
 				if _, err := statements.exec(stmt, vals...); err != nil {
@@ -313,7 +313,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 					continue
 				}
 			}
-			coerced, err := coerceForStorage(col, v)
+			coerced, err := coerceForTableStorage(t, col, v)
 			if err != nil {
 				return nil, fmt.Errorf("rows[%d]: %w", i, err)
 			}
@@ -330,7 +330,7 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		if err := reserveRows(tx, t, 1, maxRowsPerTable(ctx)); err != nil {
 			return nil, err
 		}
-		res, err := statements.insert(t.PhysicalName, usedCols, usedVals)
+		res, err := statements.insert(t, usedCols, usedVals)
 		if err != nil {
 			return nil, fmt.Errorf("rows[%d]: insert failed: %w", i, err)
 		}
@@ -552,7 +552,7 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		if idx < 0 {
 			return nil, errf("unknown column %q", k)
 		}
-		coerced, err := coerceForStorage(t.Columns[idx], v)
+		coerced, err := coerceForTableStorage(t, t.Columns[idx], v)
 		if err != nil {
 			return nil, err
 		}
@@ -565,7 +565,7 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		setCols = append(setCols, fmt.Sprintf("%s = ?", quote(k)))
 		vals = append(vals, coerced)
 	}
-	setCols = append(setCols, `"updated_at" = (strftime('%Y-%m-%dT%H:%M:%f','now') || '000000Z'), "_revision" = "_revision" + 1`)
+	setCols = append(setCols, updateTimestampSQL(t))
 	vals = append(vals, id)
 
 	stmt := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", quote(t.PhysicalName), strings.Join(setCols, ", "))
@@ -1145,10 +1145,10 @@ func scanRowsBudget(rows *sql.Rows, t *Table, byteCap int64, rowCap int) ([]map[
 			row["_revision"] = scalarOrInt(dest[i])
 		}
 		if i, ok := colIdx["created_at"]; ok {
-			row["created_at"] = scalarString(dest[i])
+			row["created_at"] = resultTimestamp(dest[i])
 		}
 		if i, ok := colIdx["updated_at"]; ok {
-			row["updated_at"] = scalarString(dest[i])
+			row["updated_at"] = resultTimestamp(dest[i])
 		}
 		for _, c := range t.Columns {
 			i, ok := colIdx[c.Name]
@@ -1156,6 +1156,9 @@ func scanRowsBudget(rows *sql.Rows, t *Table, byteCap int64, rowCap int) ([]map[
 				continue
 			}
 			row[c.Name] = hydrateForResult(c, dest[i])
+			if c.Type == "datetime" {
+				row[c.Name] = resultTimestamp(dest[i])
+			}
 		}
 		size, err := jsonSize(row, byteCap)
 		if err != nil {
@@ -1362,7 +1365,7 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 		if !ok {
 			return "", nil, errf("where[%d]: unknown column %q", i, p.Col)
 		}
-		q := quote(col.Name)
+		q := storageExpression(t, col.Name)
 		switch p.Op {
 		case "eq", "neq", "lt", "lte", "gt", "gte":
 			coerced, err := coerceForStorage(col, p.Value)
@@ -1462,7 +1465,7 @@ func buildAggregateGroups(t *Table, raw []any) ([]aggregateGroup, error) {
 		if err != nil {
 			return nil, errf("group_by[%d]: %w", i, err)
 		}
-		expr := quote(col.Name)
+		expr := storageExpression(t, col.Name)
 		if bucket != "" {
 			if col.Type != "datetime" {
 				return nil, errf("group_by[%d]: bucket requires datetime column, got %s", i, col.Type)
@@ -1529,9 +1532,9 @@ func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
 					return nil, errf("metrics[%d]: %w", i, err)
 				}
 				if boolArg(obj, "distinct") {
-					expr = "COUNT(DISTINCT " + quote(col.Name) + ")"
+					expr = "COUNT(DISTINCT " + storageExpression(t, col.Name) + ")"
 				} else {
-					expr = "COUNT(" + quote(col.Name) + ")"
+					expr = "COUNT(" + storageExpression(t, col.Name) + ")"
 				}
 			}
 		case "sum", "avg":
@@ -1542,13 +1545,13 @@ func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
 			if col.Type != "number" && col.Type != "integer" {
 				return nil, errf("metrics[%d]: op %s requires number column, got %s", i, op, col.Type)
 			}
-			expr = strings.ToUpper(op) + "(" + quote(col.Name) + ")"
+			expr = strings.ToUpper(op) + "(" + storageExpression(t, col.Name) + ")"
 		case "min", "max":
 			col, err := aggregateColumn(t, strArg(obj, "col"))
 			if err != nil {
 				return nil, errf("metrics[%d]: %w", i, err)
 			}
-			expr = strings.ToUpper(op) + "(" + quote(col.Name) + ")"
+			expr = strings.ToUpper(op) + "(" + storageExpression(t, col.Name) + ")"
 		case "avg_ratio":
 			num, err := aggregateColumn(t, strArg(obj, "numerator"))
 			if err != nil {
@@ -1771,7 +1774,7 @@ func buildOrderBy(t *Table, raw string) (string, error) {
 	if !reservedColumns[col] && columnIndex(t.Columns, col) < 0 {
 		return "", errf("order_by: unknown column %q", col)
 	}
-	out := "ORDER BY " + quote(col) + " " + dir
+	out := "ORDER BY " + storageExpression(t, col) + " " + dir
 	if col != "id" {
 		out += ", \"id\" " + dir
 	}
@@ -1813,7 +1816,20 @@ func (b *batchStatements) close() {
 	}
 }
 
-func (b *batchStatements) insert(physical string, columns []string, values []any) (sql.Result, error) {
+func (b *batchStatements) insert(t *Table, columns []string, values []any) (sql.Result, error) {
+	physical := t.PhysicalName
+	stamp := b.timestamp
+	if t.LegacyStorage {
+		var id int64
+		if err := b.tx.QueryRow("UPDATE row_identity SET last_id=last_id+1 WHERE table_id=? RETURNING last_id", t.ID).Scan(&id); err != nil {
+			return nil, err
+		}
+		columns = append([]string{"id"}, columns...)
+		values = append([]any{id}, values...)
+		parsed, _ := time.Parse(timestampLayout, stamp)
+		stamp = parsed.Format("2006-01-02 15:04:05")
+	}
+
 	key := strings.Join(columns, ",")
 	query := b.insertSQL[key]
 	if query == "" {
@@ -1825,7 +1841,7 @@ func (b *batchStatements) insert(physical string, columns []string, values []any
 		b.insertSQL[key] = query
 	}
 	args := make([]any, 1, len(values)+1)
-	args[0] = b.timestamp
+	args[0] = stamp
 	args = append(args, values...)
 	return b.exec(query, args...)
 }

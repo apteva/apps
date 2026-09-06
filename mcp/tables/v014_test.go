@@ -263,7 +263,7 @@ func TestMigration004_UpgradesV013DataAndRegistersExistingUpsertIndex(t *testing
 	if _, err := db.Exec("CREATE UNIQUE INDEX " + quote(legacyPhysical) + " ON t_1(title)"); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"002_row_count.sql", "003_project_gate_tables.sql", "004_indexes.sql", "005_storage_version.sql"} {
+	for _, name := range []string{"002_row_count.sql", "003_project_gate_tables.sql", "004_indexes.sql", "005_storage_version.sql", "006_legacy_storage.sql"} {
 		execTableMigration(t, db, name)
 	}
 	if _, err := db.Exec(`UPDATE tables_meta SET row_count = 1 WHERE id = 1`); err != nil {

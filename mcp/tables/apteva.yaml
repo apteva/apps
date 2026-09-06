@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.16
+version: 0.1.17
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -128,10 +128,12 @@ provides:
         deleted: integer
 
 runtime:
+  startup_timeout_seconds: 600
+  database_upgrade: backward_compatible
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: tables/v0.1.17
     entry: mcp/tables
   port: 8080
   health_check: /health
