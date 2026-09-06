@@ -13,7 +13,7 @@ func TestManifestMatchesRuntimeAndHasNoAppDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse manifest: %v", err)
 	}
-	if m.Name != "currencies" || m.Version != "0.2.0" {
+	if m.Name != "currencies" || m.Version != "0.3.0" {
 		t.Fatalf("unexpected identity %s %s", m.Name, m.Version)
 	}
 	if len(m.Requires.Apps) != 0 {
