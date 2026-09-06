@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.14.0
+version: 0.15.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -77,7 +77,18 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
+  apps:
+    - name: currencies
+      version: ">=0.3.0"
+      optional: true
+      reason: Optional ECB reference rates for automatic financial reporting.
 provides:
+  workers:
+    - name: analytics-retention
+      schedule: "@every 5m"
+    - name: analytics-financial-refresh
+      schedule: "@every 1m"
   http_routes:
     - prefix: /
     - method: GET
@@ -224,7 +235,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.14.0
+    ref: analytics/v0.15.0
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -276,6 +287,9 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 // Agents use the MCP tools; these endpoints are panel-only aggregates.
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Pattern: "/financial-refresh", Handler: a.handleFinancialRefresh},
+		{Pattern: "/financial-shares", Handler: a.handleFinancialShares},
+		{Pattern: "/financial-mappings", Handler: a.handleFinancialMappings},
 		{Pattern: "/references", Handler: a.handleReferences},
 		{Pattern: "/fx-rates", Handler: a.handleFX},
 		{Pattern: "/retention", Handler: a.handleRetention},
@@ -331,7 +345,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "analytics-retention", Schedule: "@every 5m", Run: a.retentionWorker}}
+	return []sdk.Worker{{Name: "analytics-retention", Schedule: "@every 5m", Run: a.retentionWorker}, {Name: "analytics-financial-refresh", Schedule: "@every 1m", Run: a.financialRefreshWorker}}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 

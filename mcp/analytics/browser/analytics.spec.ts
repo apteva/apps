@@ -236,3 +236,90 @@ test("switching projects resets dashboard state without old data", async ({
   await expect(page.getByLabel("Analytics dashboard")).toHaveCount(0);
   expect(errors).toEqual([]);
 });
+test("background financial worker updates an open Objectives tab", async ({
+  page,
+  request,
+}) => {
+  const start = Date.UTC(2026, 8, 1),
+    end = Date.UTC(2026, 9, 1);
+  const created = await request.post(
+    "/api/apps/analytics/objectives?project_id=p1",
+    {
+      data: {
+        name: "Background revenue",
+        status: "active",
+        targets: [
+          {
+            name: "Automatic EUR",
+            metric_key: "money_sum",
+            target_value: 100,
+            unit: "money",
+            currency: "EUR",
+            direction: "at_least",
+            period_start: start,
+            period_end: end,
+            timezone: "UTC",
+            query: {
+              aggregation: "sum_money",
+              app: "browser-financial",
+              topic: "payment",
+              value: "props.amount",
+              currency_field: "props.currency",
+              reporting_currency: "EUR",
+              amount_unit: "major",
+            },
+          },
+        ],
+      },
+    },
+  );
+  expect(created.ok()).toBeTruthy();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Objectives", exact: true }).click();
+  const section = page
+    .locator("section")
+    .filter({ has: page.getByText("Background revenue", { exact: true }) });
+  await expect(
+    section.getByText("Automatic EUR", { exact: true }),
+  ).toBeVisible();
+  const tracked = await request.post("/__test/track", {
+    data: {
+      app: "browser-financial",
+      event: "payment",
+      ts: start + 3600000,
+      props: { amount: 42, currency: "EUR" },
+    },
+  });
+  expect(tracked.ok()).toBeTruthy();
+  const worker = await request.post("/__test/financial-worker");
+  expect(worker.ok()).toBeTruthy();
+  const result = await worker.json();
+  expect(
+    result.events.some(
+      (e: any) => (e.topic || e.Topic) === "objective.progress.updated",
+    ),
+  ).toBeTruthy();
+  // Deliver the actual worker notification through the host event bridge.
+  for (const event of result.events)
+    await page.evaluate(
+      (e) =>
+        (window as any).emitAnalytics({
+          topic: e.topic || e.Topic,
+          project_id: e.project_id || e.ProjectID,
+          seq: Date.now(),
+        }),
+      event,
+    );
+  await expect(section.getByText(/42/).first()).toBeVisible();
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Automatic financial reporting" }),
+  ).toBeVisible();
+  const queued = page.waitForResponse(
+    (r) =>
+      r.url().includes("/financial-refresh") && r.request().method() === "POST",
+  );
+  await page.getByRole("button", { name: "Refresh now", exact: true }).click();
+  expect((await queued).status()).toBe(202);
+  await expect(page.getByText("Refresh pending").first()).toBeVisible();
+});

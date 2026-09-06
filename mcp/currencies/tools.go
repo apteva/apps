@@ -39,8 +39,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			"effective_at": typ("string"), "reason": typ("string"), "source_ref": typ("string"), "supersedes_rate_id": typ("integer"),
 		}, []string{"base", "quote", "rate", "reason"}), Handler: a.toolRateSetManual},
 		{Name: "currencies_sources_status", Description: "List bound FX providers, health, tracked pairs, and latest observations.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolSourcesStatus},
-		{Name: "currencies_sync_now", Description: "Fetch and ingest provider observations for one pair or every tracked pair.", InputSchema: schemaObject(map[string]any{
-			"base": typ("string"), "quote": typ("string"), "as_of": typ("string"), "provider": typ("string"),
+		{Name: "currencies_sync_now", Description: "Fetch provider observations; ECB also supports from/to historical windows of at most 31 days.", InputSchema: schemaObject(map[string]any{
+			"base": typ("string"), "quote": typ("string"), "as_of": typ("string"), "provider": typ("string"), "from": typ("string"), "to": typ("string"),
 		}, nil), Handler: a.toolSyncNow},
 	}
 }
@@ -265,6 +265,15 @@ func (a *App) toolSyncNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	projectID := scopeKey(ctx, args)
 	requestedProvider := strings.ToLower(strings.TrimSpace(stringArg(args, "provider")))
 	if requestedProvider == ecbProviderSlug {
+		if stringArg(args, "from") != "" || stringArg(args, "to") != "" {
+			syncCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			observations, err := syncECBHistory(syncCtx, ctx, stringArg(args, "base"), stringArg(args, "quote"), stringArg(args, "from"), stringArg(args, "to"))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"observations": observations, "count": len(observations)}, nil
+		}
 		syncCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		created, latest, err := a.refreshECBIfDue(syncCtx, ctx, true)
 		cancel()

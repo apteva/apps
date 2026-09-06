@@ -18,7 +18,8 @@ func TestBrowserHarness(t *testing.T) {
 	if os.Getenv("ANALYTICS_BROWSER_HARNESS") != "1" {
 		t.Skip("browser fixture only")
 	}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithEmitter(rec))
 	globalCtx = ctx
 	a := &App{}
 	routes := http.NewServeMux()
@@ -49,13 +50,21 @@ func TestBrowserHarness(t *testing.T) {
 	})
 	mux.HandleFunc("/api/apps", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, []any{}) })
 	mux.HandleFunc("/__test/reset", func(w http.ResponseWriter, r *http.Request) {
-		for _, table := range []string{"dashboard_target_links", "dashboard_widgets", "dashboards", "objective_progress", "objective_targets", "objectives", "reference_values", "reference_sets", "event_spec_violations", "event_property_specs", "event_specs", "ingest_receipts", "events", "write_keys", "fx_rates"} {
+		for _, table := range []string{"financial_mappings", "financial_shares", "financial_targets", "financial_fx_requests", "financial_projects", "dashboard_target_links", "dashboard_widgets", "dashboards", "objective_progress", "objective_targets", "objectives", "reference_values", "reference_sets", "event_spec_violations", "event_property_specs", "event_specs", "ingest_receipts", "events", "write_keys", "fx_rates"} {
 			if _, err := ctx.AppDB().Exec("DELETE FROM " + table); err != nil {
 				http.Error(w, err.Error(), 500)
 				return
 			}
 		}
 		writeJSON(w, map[string]any{"ok": true})
+	})
+	mux.HandleFunc("POST /__test/financial-worker", func(w http.ResponseWriter, r *http.Request) {
+		before := len(rec.Events())
+		if err := a.financialRefreshWorker(r.Context(), ctx); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		writeJSON(w, map[string]any{"events": rec.Events()[before:]})
 	})
 	mux.HandleFunc("/__test/track", func(w http.ResponseWriter, r *http.Request) {
 		var args map[string]any

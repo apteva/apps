@@ -78,25 +78,28 @@ type ObjectiveWrite struct {
 }
 
 type TargetProgress struct {
-	TargetID    int64                `json:"target_id"`
-	ObjectiveID int64                `json:"objective_id"`
-	Name        string               `json:"name"`
-	ActualValue *float64             `json:"actual_value,omitempty"`
-	TargetValue float64              `json:"target_value"`
-	Unit        string               `json:"unit"`
-	Currency    string               `json:"currency,omitempty"`
-	Direction   string               `json:"direction"`
-	ProgressPct *float64             `json:"progress_percent,omitempty"`
-	Achieved    bool                 `json:"achieved"`
-	PeriodState string               `json:"period_state"`
-	PeriodStart int64                `json:"period_start"`
-	PeriodEnd   int64                `json:"period_end"`
-	Query       ObjectiveMetricQuery `json:"query"`
-	Status      string               `json:"status"`
-	Error       string               `json:"error,omitempty"`
-	Details     map[string]any       `json:"details,omitempty"`
-	MeasuredAt  *int64               `json:"measured_at,omitempty"`
-	UpdatedAt   int64                `json:"updated_at"`
+	DataVerified    bool                 `json:"data_verified"`
+	VerifiedThrough int64                `json:"verified_through,omitempty"`
+	Freshness       string               `json:"freshness,omitempty"`
+	TargetID        int64                `json:"target_id"`
+	ObjectiveID     int64                `json:"objective_id"`
+	Name            string               `json:"name"`
+	ActualValue     *float64             `json:"actual_value,omitempty"`
+	TargetValue     float64              `json:"target_value"`
+	Unit            string               `json:"unit"`
+	Currency        string               `json:"currency,omitempty"`
+	Direction       string               `json:"direction"`
+	ProgressPct     *float64             `json:"progress_percent,omitempty"`
+	Achieved        bool                 `json:"achieved"`
+	PeriodState     string               `json:"period_state"`
+	PeriodStart     int64                `json:"period_start"`
+	PeriodEnd       int64                `json:"period_end"`
+	Query           ObjectiveMetricQuery `json:"query"`
+	Status          string               `json:"status"`
+	Error           string               `json:"error,omitempty"`
+	Details         map[string]any       `json:"details,omitempty"`
+	MeasuredAt      *int64               `json:"measured_at,omitempty"`
+	UpdatedAt       int64                `json:"updated_at"`
 }
 
 type ObjectiveMetricDefinition struct {
@@ -563,6 +566,9 @@ func measureObjectiveTarget(db sqlRunner, projectID string, target ObjectiveTarg
 		actual = float64(count)
 		details["by"] = target.Query.By
 	}
+	if err == nil {
+		err = combinedTargetError(db, projectID, target.ID)
+	}
 	if err != nil {
 		progress.Status = "error"
 		progress.Error = err.Error()
@@ -837,6 +843,24 @@ func cachedTargetProgress(db sqlRunner, target ObjectiveTarget) (*TargetProgress
 		p.MeasuredAt = &measured.Int64
 	}
 	_ = json.Unmarshal([]byte(detailsJSON), &p.Details)
+	var state string
+	var input, revision, definition, lastSuccess, verified, through int64
+	if err := db.QueryRow(`SELECT f.state,f.input_revision,p.revision,f.definition_revision,f.last_success,f.verified_revision,f.verified_through FROM financial_targets f JOIN objective_targets t ON t.id=f.target_id JOIN objectives o ON o.id=t.objective_id JOIN financial_projects p ON p.project_id=o.project_id WHERE t.id=?`, target.ID).Scan(&state, &input, &revision, &definition, &lastSuccess, &verified, &through); err == nil {
+		required := time.Now().Add(-financialReconcile).UnixMilli()
+		if target.PeriodEnd < required {
+			required = target.PeriodEnd
+		}
+		p.DataVerified = verified == revision && through >= required
+		p.VerifiedThrough = through
+		p.Freshness = state
+		if input != revision || definition != target.UpdatedAt {
+			p.Freshness = "pending"
+		} else if oneOf(state, "current", "confirmed_zero") && lastSuccess < time.Now().Add(-financialReconcile-time.Minute).UnixMilli() {
+			p.Freshness = "stale"
+		}
+	} else {
+		p.Freshness = "pending"
+	}
 	return &p, nil
 }
 

@@ -73,6 +73,7 @@ func pruneProject(ctx context.Context, db *sql.DB, project string, now int64) (i
 		// rollup inputs cannot starve older raw events.
 		rows, err := tx.Query(`SELECT e.id,json_object('id',e.id,'ts',e.ts,'app',e.app,'topic',e.topic,'project_id',e.project_id,'install_id',e.install_id,'user_id',e.user_id,'session_id',e.session_id,'source',e.source,'upsert_key',e.upsert_key,'props',json(e.props))
           FROM events e WHERE e.project_id=? AND e.ts<? AND e.source!='rollup'
+          AND NOT EXISTS(SELECT 1 FROM financial_mappings fm WHERE fm.component_event_id=e.id)
           AND NOT EXISTS(SELECT 1 FROM event_specs s WHERE s.project_id=e.project_id AND s.app=e.app AND s.topic=e.topic AND s.ingest_mode IN ('upsert','raw_plus_rollup')) ORDER BY e.ts,e.id LIMIT 1000`, project, now-int64(policy.EventDays)*86400000)
 		if err != nil {
 			return 0, err
@@ -114,32 +115,19 @@ func pruneProject(ctx context.Context, db *sql.DB, project string, now int64) (i
 	return archived, tx.Commit()
 }
 func (a *App) retentionWorker(ctx context.Context, app *sdk.AppCtx) error {
-	rows, err := readPool(app).QueryContext(ctx, `SELECT project_id FROM retention_policy UNION SELECT DISTINCT project_id FROM event_spec_violations WHERE project_id!=''`)
-	if err != nil {
+	project := app.CurrentProject()
+	if project == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := pruneProject(ctx, app.AppDB(), project, time.Now().UnixMilli()); err != nil {
 		return err
 	}
-	projects := []string{}
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		projects = append(projects, id)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return err
-	}
-	for _, project := range projects {
-		if _, err := pruneProject(ctx, app.AppDB(), project, time.Now().UnixMilli()); err != nil {
-			return err
-		}
-	}
-	_, err = app.AppDB().ExecContext(ctx, `DELETE FROM capture_inbox WHERE identity IN (SELECT identity FROM capture_inbox WHERE processed_at IS NOT NULL AND processed_at<? LIMIT 1000)`, time.Now().Add(-7*24*time.Hour).UnixMilli())
+	_, err := app.AppDB().ExecContext(ctx, `DELETE FROM capture_inbox WHERE identity IN (SELECT identity FROM capture_inbox WHERE CASE WHEN json_valid(payload) THEN json_extract(payload,'$.project_id') END=? AND processed_at IS NOT NULL AND processed_at<? LIMIT 1000)`, project, time.Now().Add(-7*24*time.Hour).UnixMilli())
 	return err
 }
+
 func (a *App) handleArchiveRestore(w http.ResponseWriter, r *http.Request) {
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", 401)

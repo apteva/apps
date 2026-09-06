@@ -9,9 +9,9 @@ const callbacks = new Set<(ev: unknown) => void>();
     return () => callbacks.delete(fn);
   },
 };
-(window as any).emitAnalytics = () =>
+(window as any).emitAnalytics = (event?: any) =>
   callbacks.forEach((fn) =>
-    fn({ seq: Date.now(), topic: "event.recorded", project_id: "p1" }),
+    fn(event || { seq: Date.now(), topic: "event.recorded", project_id: "p1" }),
   );
 const root = createRoot(document.getElementById("root")!);
 (window as any).renderAnalytics = (props: any = {}) =>

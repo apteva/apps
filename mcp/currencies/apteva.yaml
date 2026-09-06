@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: currencies
 display_name: Currencies
-version: 0.2.0
+version: 0.3.0
 description: |
   Provider-neutral ISO currency metadata, current and historical exchange
   rates, and deterministic minor-unit conversion. Rates retain source,
@@ -61,7 +61,7 @@ provides:
     - name: currencies_sources_status
       description: "List bound FX providers, last sync state, tracked pairs, and newest observations."
     - name: currencies_sync_now
-      description: "Fetch and ingest provider observations for one pair or all tracked pairs. Use provider=ecb-reference-rates to refresh the built-in public feed. Args: base?, quote?, as_of?, provider?."
+      description: "Fetch provider observations. ECB supports bounded historical windows with base, quote, from and to (YYYY-MM-DD, at most 31 days). Without a window it refreshes the public rolling feed. Args: base?, quote?, as_of?, provider?, from?, to?."
   ui_panels:
     - slot: project.page
       label: Currencies
@@ -91,7 +91,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: currencies/v0.3.0
     entry: mcp/currencies
   port: 8080
   health_check: /health

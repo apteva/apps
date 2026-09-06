@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.14.0
+version: 0.15.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -111,8 +111,19 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - platform.apps.call
+  apps:
+    - name: currencies
+      version: ">=0.3.0"
+      optional: true
+      reason: Optional ECB reference rates for automatic financial reporting.
 
 provides:
+  workers:
+    - name: analytics-retention
+      schedule: "@every 5m"
+    - name: analytics-financial-refresh
+      schedule: "@every 1m"
   http_routes:
     - prefix: /
     - method: GET
@@ -260,7 +271,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.14.0
+    ref: analytics/v0.15.0
     entry: mcp/analytics
   port: 8080
   health_check: /health
