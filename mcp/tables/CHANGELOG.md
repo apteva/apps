@@ -1,4 +1,4 @@
-# Unreleased — JSON query compatibility
+# 0.1.18 — JSON query compatibility
 
 Allow SQLite's built-in `json_each()` and `json_tree()` in `tables_query`,
 including correlated audio-array reconciliation queries. Authorization checks

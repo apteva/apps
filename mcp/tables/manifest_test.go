@@ -8,8 +8,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "tables" {
 		t.Errorf("name=%q", m.Name)
 	}
-	if m.Version != "0.1.17" {
-		t.Errorf("version=%q, want 0.1.17", m.Version)
+	if m.Version != "0.1.18" {
+		t.Errorf("version=%q, want 0.1.18", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
