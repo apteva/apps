@@ -259,6 +259,11 @@ func TestAuditRetainedBootVolumeCanBeDeleted(t *testing.T) {
 
 func auditSSHClient(t *testing.T, dir string, loseResponse ...bool) *ssh.Client {
 	t.Helper()
+	return auditSSHClientWithForwardDelay(t, dir, 0, loseResponse...)
+}
+
+func auditSSHClientWithForwardDelay(t *testing.T, dir string, delay time.Duration, loseResponse ...bool) *ssh.Client {
+	t.Helper()
 	priv, _, err := generateSSHKeypair()
 	if err != nil {
 		t.Fatal(err)
@@ -283,6 +288,13 @@ func auditSSHClient(t *testing.T, dir string, loseResponse ...bool) *ssh.Client 
 		defer server.Close()
 		go ssh.DiscardRequests(reqs)
 		for next := range chs {
+			if next.ChannelType() != "session" {
+				go func(ch ssh.NewChannel) {
+					time.Sleep(delay)
+					_ = ch.Reject(ssh.ConnectionFailed, "connect failed: Connection refused")
+				}(next)
+				continue
+			}
 			ch, requests, err := next.Accept()
 			if err != nil {
 				continue

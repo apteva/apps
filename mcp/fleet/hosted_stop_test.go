@@ -47,8 +47,9 @@ type hostedStopReply struct {
 
 type hostedStopPlatform struct {
 	tk.BasePlatformClient
-	replies []hostedStopReply
-	calls   int
+	replies  []hostedStopReply
+	calls    int
+	commands []string
 }
 
 func (p *hostedStopPlatform) CallApp(appName, tool string, input map[string]any) (json.RawMessage, error) {
@@ -60,6 +61,7 @@ func (p *hostedStopPlatform) CallApp(appName, tool string, input map[string]any)
 	}
 	reply := p.replies[p.calls]
 	p.calls++
+	p.commands = append(p.commands, input["cmd"].(string))
 	return wrappedToolResult(map[string]any{
 		"output": reply.output, "exit_code": reply.exitCode, "error": reply.errText,
 	}), nil
@@ -106,6 +108,8 @@ func TestFailedHostedStopDurablyFencesHealthAndRestart(t *testing.T) {
 	platform := &hostedStopPlatform{replies: []hostedStopReply{
 		{exitCode: -1, errText: "wait: remote command exited without exit status or exit signal"},
 		{exitCode: -1, errText: "wait: remote command exited without exit status or exit signal"},
+		{exitCode: -1, errText: "verification connection lost"},
+		{exitCode: -1, errText: "verification connection lost"},
 	}}
 	a, ctx := newTestApp(t, tk.WithPlatform(platform))
 	id := seedTenant(t, a, "stop-recovery", StatusActive)
@@ -124,7 +128,7 @@ func TestFailedHostedStopDurablyFencesHealthAndRestart(t *testing.T) {
 		tenant, _, _ := controller.store.get(id)
 		controller.probeOnce(context.Background(), ctx, tenant)
 		controller.tryRespawnHosted(context.Background(), ctx, tenant)
-		if platform.calls != 2 {
+		if platform.calls != 4 {
 			t.Fatalf("health tried to contact/restart tenant: %d calls", platform.calls)
 		}
 		if _, err := controller.toolStart(ctx, map[string]any{"tenant_id": id}); err == nil {

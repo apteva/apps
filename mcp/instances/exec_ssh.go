@@ -140,26 +140,10 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 
 // ─── SSH client pool ──────────────────────────────────────────────
 //
-// Fresh dial per call cost ~0.5–2s (TCP + crypto handshake + key auth +
-// across-Atlantic RTT). The vitals poller hits this every 5s; agent-
-// driven run_command bursts hit it even harder. Caching one *ssh.Client
-// per host_id and multiplexing many channels through it makes warm
-// calls sub-100ms locally.
-//
-// crypto/ssh handles concurrent sessions on a single client correctly
-// — each NewSession is its own channel. The remote sshd's MaxSessions
-// (default 10) is the only ceiling and our usage stays well under it.
-//
-// Cache invalidation: any session-level error drops the client so the
-// next call redials. Reasons a cached client can go stale:
-//   - sshd idle timeout (default off, but some images set it)
-//   - VPS rebooted / network blip
-//   - we hit MaxSessions
-// All surface as a session.NewSession or session.Run error; we treat
-// any of them by closing + evicting the cached client and returning
-// the error. The next call gets a fresh dial. No auto-retry — one
-// failure is invisible to the panel (5s cache + "Loading vitals…"),
-// and silent retries would mask real connectivity issues.
+// Only ingress forwarding uses this pool. Administrative commands,
+// metrics and file transfers own independent connections, so an ingress
+// failure cannot interrupt a lifecycle operation. Backend channel refusals
+// do not evict healthy clients; only transport failures reconnect.
 //
 // No GC for v1: typical setups have a handful of hosts, and idle
 // clients cost only one TCP socket each. Connections die naturally
@@ -317,10 +301,13 @@ func (w *lockedWriter) String() string {
 	return w.b.String()
 }
 
-// runSSH executes a command on the remote instance. CombinedOutput-
-// style — stdout+stderr returned together to match runLocal's shape.
-// Uses the global pool for connection reuse; on any session-level
-// error the cached client is evicted so the next call redials.
+// Administrative operations own their transport. Ingress forwarding and
+// metrics must never cancel a lifecycle command by evicting a shared client.
+// Keep this injectable for localhost SSH regression tests.
+var dialAdministrativeSSH = dialSSH
+
+// runSSH executes exactly once on a dedicated connection. A timeout can
+// safely close this transport without affecting another command or tunnel.
 func runSSH(inst *Instance, cmd string, timeout time.Duration) (output string, exitCode int, err error) {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
@@ -329,33 +316,17 @@ func runSSH(inst *Instance, cmd string, timeout time.Duration) (output string, e
 	if inst.workContext != nil && inst.workContext.Err() != nil {
 		return "", -1, inst.workContext.Err()
 	}
-	client, fresh, err := globalSSHPool.getWithTimeout(inst, timeout)
+	client, err := dialAdministrativeSSH(inst, timeout)
 	if err != nil {
 		return "", -1, fmt.Errorf("ssh dial: %w", err)
 	}
+	defer client.Close()
 	if inst.workContext != nil {
 		boundClient := client
 		stop := context.AfterFunc(inst.workContext, func() { _ = boundClient.Close() })
 		defer stop()
 	}
-	out, exit, runErr := runSSHOnce(client, cmd, timeout-time.Since(started))
-	var opening *sshSessionOpenError
-	if runErr != nil && !fresh && errors.As(runErr, &opening) && time.Since(started) < timeout {
-		// Cached client went stale (idle timeout, VPS reboot, etc.).
-		// Evict + redial once. Pure session errors (non-zero exit
-		// code from the user's command) don't trigger this branch
-		// — those are returned as-is.
-		globalSSHPool.drop(inst.ID, client)
-		client, _, err = globalSSHPool.getWithTimeout(inst, timeout-time.Since(started))
-		if err != nil {
-			return "", -1, fmt.Errorf("ssh redial after stale connection: %w", err)
-		}
-		out, exit, runErr = runSSHOnce(client, cmd, timeout-time.Since(started))
-	}
-	if runErr != nil && isSSHConnError(runErr) {
-		globalSSHPool.drop(inst.ID, client)
-	}
-	return out, exit, runErr
+	return runSSHOnce(client, cmd, timeout-time.Since(started))
 }
 
 type sshSessionOpenError struct{ error }
@@ -483,6 +454,12 @@ func isSSHConnError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// The peer successfully answered a channel request. A refused backend
+	// or forwarding policy is not a failed SSH transport.
+	var channelErr *ssh.OpenChannelError
+	if errors.As(err, &channelErr) {
+		return false
+	}
 	var exitErr *ssh.ExitError
 	if errors.As(err, &exitErr) {
 		return false
@@ -517,9 +494,8 @@ func isSSHConnError(err error) bool {
 // to scp), but works on every Linux that has bash + base64 (every
 // Ubuntu / Debian / Alpine the VPS providers serve).
 //
-// Uses the shared SSH pool — repeated uploads to the same host
-// (e.g. media render workers staging multiple sources) reuse the
-// connection.
+// File transfers also own their transport; their deadlines cannot interrupt
+// lifecycle commands or public tunnels.
 func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err error) {
 	if len(contentB64) > maxEncodedFileBytes {
 		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
@@ -528,24 +504,15 @@ func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err e
 	if err != nil {
 		return 0, fmt.Errorf("invalid base64: %w", err)
 	}
-	client, fresh, err := globalSSHPool.get(inst)
-	if err != nil {
-		return 0, fmt.Errorf("ssh dial: %w", err)
-	}
 	if len(body) > maxFileTransferBytes {
 		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
 	}
-	n, runErr := uploadSSHOnce(client, path, contentB64, len(body))
-	var opening *sshSessionOpenError
-	if runErr != nil && !fresh && errors.As(runErr, &opening) {
-		globalSSHPool.drop(inst.ID, client)
-		client, _, err = globalSSHPool.get(inst)
-		if err != nil {
-			return 0, fmt.Errorf("ssh redial after stale connection: %w", err)
-		}
-		n, runErr = uploadSSHOnce(client, path, contentB64, len(body))
+	client, err := dialAdministrativeSSH(inst, 10*time.Second)
+	if err != nil {
+		return 0, fmt.Errorf("ssh dial: %w", err)
 	}
-	return n, runErr
+	defer client.Close()
+	return uploadSSHOnce(client, path, contentB64, len(body))
 }
 
 func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedLen int) (int, error) {
@@ -586,19 +553,12 @@ mv -f "$tmp" "$path"`
 }
 
 func downloadSSH(inst *Instance, path string) (contentB64 string, bytesRead int, err error) {
-	client, fresh, err := globalSSHPool.get(inst)
+	client, err := dialAdministrativeSSH(inst, 10*time.Second)
 	if err != nil {
 		return "", 0, fmt.Errorf("ssh dial: %w", err)
 	}
+	defer client.Close()
 	body, runErr := downloadSSHOnce(client, path)
-	if runErr != nil && !fresh && isSSHConnError(runErr) {
-		globalSSHPool.drop(inst.ID, client)
-		client, _, err = globalSSHPool.get(inst)
-		if err != nil {
-			return "", 0, fmt.Errorf("ssh redial after stale connection: %w", err)
-		}
-		body, runErr = downloadSSHOnce(client, path)
-	}
 	if runErr != nil {
 		return "", 0, runErr
 	}

@@ -626,15 +626,29 @@ func stopHostedTenant(ctx *sdk.AppCtx, instanceID int64, slug string, port int, 
 		firstDetail = fmt.Sprintf("remote stop: %v (exit %d): %s", err, code, strings.TrimSpace(out))
 	}
 	inspect := hostedProcessControlScript(dataDir, port, 1, false)
-	checkOut, checkCode, checkErr := instanceRunCommand(ctx, instanceID, inspect, 15)
-	switch hostedStopState(checkOut) {
-	case "stopped":
-		return nil
-	case "running":
-		return fmt.Errorf("%s; verified tenant is still running (exit %d): %s", firstDetail, checkCode, strings.TrimSpace(checkOut))
-	default:
-		return fmt.Errorf("%w: %s; follow-up inspection failed (exit %d): %s", errHostedStopIndeterminate, firstDetail, checkCode, strings.TrimSpace(checkOut)+" "+errorString(checkErr))
+	var checkOut string
+	var checkCode int
+	var checkErr error
+	// Instances >=0.4.44 owns a fresh administrative transport for each call.
+	// Only re-read state after a transient transport failure. Never replay
+	// the stop mutation, and never override an explicit ownership ambiguity.
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 250 * time.Millisecond)
+		}
+		checkOut, checkCode, checkErr = instanceRunCommand(ctx, instanceID, inspect, 15)
+		state := hostedStopState(checkOut)
+		if state == "stopped" && checkErr == nil && checkCode == 0 {
+			return nil
+		}
+		if state == "running" && checkCode == 3 {
+			return fmt.Errorf("%s; verified tenant is still running (exit %d): %s", firstDetail, checkCode, strings.TrimSpace(checkOut))
+		}
+		if state != "" || checkCode >= 0 {
+			break
+		}
 	}
+	return fmt.Errorf("%w: %s; follow-up inspection failed (exit %d): %s", errHostedStopIndeterminate, firstDetail, checkCode, strings.TrimSpace(checkOut)+" "+errorString(checkErr))
 }
 
 // destroyHostedTenant wipes the tenant's remote data dir. Called from

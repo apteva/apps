@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"golang.org/x/crypto/ssh"
@@ -52,7 +53,7 @@ func dialInstanceLoopback(inst *Instance, target string) (net.Conn, error) {
 	if err == nil {
 		return conn, nil
 	}
-	if !fresh {
+	if !fresh && !errors.Is(err, context.DeadlineExceeded) && isSSHConnError(err) {
 		globalSSHPool.drop(inst.ID, client)
 		client, _, redialErr := globalSSHPool.get(inst)
 		if redialErr != nil {
@@ -250,7 +251,11 @@ func (a *App) toolCloseTunnel(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func dialTunnelWithDeadline(client *ssh.Client, target string) (net.Conn, error) {
-	timer := time.AfterFunc(10*time.Second, func() { _ = client.Close() })
-	defer timer.Stop()
-	return client.Dial("tcp", target)
+	return dialTunnelWithTimeout(client, target, 10*time.Second)
+}
+
+func dialTunnelWithTimeout(client *ssh.Client, target string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return client.DialContext(ctx, "tcp", target)
 }

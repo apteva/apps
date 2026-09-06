@@ -15,6 +15,20 @@ import (
 	"time"
 )
 
+func TestEmbeddedManifestVersionMatchesDistribution(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	distribution, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := (&App{}).Manifest().Version; got != distribution.Version {
+		t.Fatalf("embedded version %q differs from install manifest %q", got, distribution.Version)
+	}
+}
+
 func TestRotationRetainsFailedRevocationAndRecovers(t *testing.T) {
 	p := &objectStoragePlatform{provider: "scaleway"}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
@@ -218,9 +232,9 @@ func TestBenchmarkPreservesExistingFileAndLiteralDirectory(t *testing.T) {
 func TestSSHLostResponseDoesNotReplayCommand(t *testing.T) {
 	dir := t.TempDir()
 	client := auditSSHClient(t, dir, true)
-	old := globalSSHPool
-	globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{991: client}}
-	t.Cleanup(func() { globalSSHPool = old })
+	old := dialAdministrativeSSH
+	dialAdministrativeSSH = func(*Instance, time.Duration) (*ssh.Client, error) { return client, nil }
+	t.Cleanup(func() { dialAdministrativeSSH = old })
 	_, _, err := runSSH(&Instance{ID: 991}, "echo once >> counter", time.Second)
 	if err == nil {
 		t.Fatal("lost command result should be unknown")

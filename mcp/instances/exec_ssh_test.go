@@ -94,6 +94,8 @@ func TestIsSSHConnError_Classification(t *testing.T) {
 		{"closed network", &stringErr{"use of closed network connection"}, true},
 		{"eof", &stringErr{"EOF"}, true},
 		{"channel reset", &stringErr{"ssh: channel open failed"}, true},
+		{"backend refusal", &ssh.OpenChannelError{Reason: ssh.ConnectionFailed}, false},
+		{"forwarding prohibited", fmt.Errorf("wrapped: %w", &ssh.OpenChannelError{Reason: ssh.Prohibited}), false},
 		{"random", &stringErr{"some other error"}, false},
 		{"missing exit status", &ssh.ExitMissingError{}, true},
 		{"wrapped missing status", fmt.Errorf("wait: %w", &ssh.ExitMissingError{}), true},
@@ -107,26 +109,27 @@ func TestIsSSHConnError_Classification(t *testing.T) {
 	}
 }
 
-func TestMissingSSHExitEvictsWithoutReplayingCommand(t *testing.T) {
+func TestMissingSSHExitClosesDedicatedTransportWithoutReplayingCommand(t *testing.T) {
 	dir := t.TempDir()
 	client := auditSSHClient(t, dir, true)
-	previous := globalSSHPool
-	globalSSHPool = &sshPool{clients: map[int64]*ssh.Client{731: client}}
-	t.Cleanup(func() { globalSSHPool.closeAll(); globalSSHPool = previous })
+	previous := dialAdministrativeSSH
+	dials := 0
+	dialAdministrativeSSH = func(*Instance, time.Duration) (*ssh.Client, error) { dials++; return client, nil }
+	t.Cleanup(func() { dialAdministrativeSSH = previous })
 	out, exit, err := runSSH(&Instance{ID: 731}, "printf x >> executions", 3*time.Second)
 	var missing *ssh.ExitMissingError
 	if !errors.As(err, &missing) || exit != -1 {
 		t.Fatalf("output=%q exit=%d err=%v", out, exit, err)
 	}
-	if _, retained := globalSSHPool.clients[731]; retained {
-		t.Fatal("uncertain transport retained")
+	if dials != 1 {
+		t.Fatal("uncertain command was redialed/replayed")
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "executions"))
 	if err != nil || string(data) != "x" {
 		t.Fatalf("command replayed or missing: %q %v", data, err)
 	}
 	// Verification is a NEW explicit call, never a replay of the lost write.
-	globalSSHPool.clients[731] = auditSSHClient(t, dir)
+	client = auditSSHClient(t, dir)
 	out, exit, err = runSSH(&Instance{ID: 731}, "cat executions", 3*time.Second)
 	if err != nil || exit != 0 || out != "x" {
 		t.Fatalf("fresh verification: %q %d %v", out, exit, err)
