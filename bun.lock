@@ -14,7 +14,7 @@
         "yaml": "^2.6.0",
       },
       "devDependencies": {
-        "@apteva/web-sdk": "0.6.0",
+        "@apteva/web-sdk": "0.7.0",
         "@playwright/test": "^1.63.0",
         "@tailwindcss/cli": "^4.1.0",
         "@types/bun": "^1.4.1",
@@ -31,7 +31,7 @@
     },
   },
   "packages": {
-    "@apteva/web-sdk": ["@apteva/web-sdk@0.6.0", "", {}, "sha512-crRWUCKQm/VKu0uBI30j7688TbRBIOKUxLZfEvfgB5svaqx85MFAk0obB5pjF6ObiVxxL7xFdS1p1xbMGzXgxw=="],
+    "@apteva/web-sdk": ["@apteva/web-sdk@0.7.0", "", {}, "sha512-O4eL675bBkTbbDKFUXmQ7AwUq/rXJKiZ3dhIrrddhAOgEV3Ik1E3rXVNZhptOXPoZJSXjY9InXz1Zm70lgQKyQ=="],
 
     "@jridgewell/gen-mapping": ["@jridgewell/gen-mapping@0.3.13", "", { "dependencies": { "@jridgewell/sourcemap-codec": "^1.5.0", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA=="],
 

@@ -1,6 +1,6 @@
 {
   "name": "@apteva/conversations",
-  "version": "0.20.0",
+  "version": "0.21.0",
   "type": "module",
   "description": "App-owned Conversations client and shared React surfaces",
   "exports": {
@@ -22,7 +22,7 @@
     "README.md"
   ],
   "peerDependencies": {
-    "@apteva/web-sdk": "^0.6.0",
+    "@apteva/web-sdk": "^0.7.0",
     "react": ">=19"
   },
   "dependencies": {
@@ -30,14 +30,13 @@
     "marked": "^18.0.10"
   },
   "scripts": {
-    "build": "bun run build.ts"
+    "build": "bun run build.ts",
+    "build:app": "bun run build-app.ts"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/apteva/apps.git",
     "directory": "mcp/conversations/frontend"
   },
-  "publishConfig": {
-    "access": "public"
-  }
+  "private": true
 }

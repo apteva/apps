@@ -8,11 +8,16 @@ remain inert history.
 ## Shared frontend
 
 `frontend/src` owns the React implementation and the `conversationsExtension`
-headless client. Public entry points are `@apteva/conversations`, `/react` and
-`/styles.css`. Thin `ui` wrappers preserve dashboard manifests, cookie auth and
-layout. Web SDK 0.6.0 supplies scoped HTTP, bearer refresh and SSE transport; it
+headless client. External hosts use the shared Web SDK `apps.load` API and `/ui/frontend.json`.
+The app ships content-addressed client, UI factory and CSS assets with its release. Thin `ui` wrappers preserve dashboard manifests, cookie auth and
+layout. Web SDK 0.7.0 supplies scoped HTTP, bearer refresh and SSE transport; it
 is bundled into dashboard assets, so the dashboard has no new SDK dependency.
 REST change cursors and client message identities retain their original contracts.
+
+The dashboard continues to import its normal self-contained bundles; it does not
+use the external loader. External UI factories receive the host’s React instance.
+The loader fetches metadata once, downloads assets in parallel, validates SHA-256
+and reuses immutable assets from the browser cache. No per-app npm package is needed.
 
 Application-user tokens carry issuer/subject/organization identity. Migration
 010 maps that tuple per project to a negative app-local user ID, distinct from

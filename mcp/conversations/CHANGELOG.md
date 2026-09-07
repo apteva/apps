@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.21.0 — 2026-09-07
+
+- Ship the headless client, shared React UI and scoped styles with the app under `/ui/frontend.json`.
+- External hosts use Web SDK 0.7.0 `apps.load` without installing or publishing a Conversations npm package.
+- Keep dashboard wrappers, component names and authorization behavior. Frontend assets use content hashes and the host’s React instance.
+- Build app frontend assets automatically with the normal panel build; mark the app frontend package private.
+
+
 ## 0.20.0 — 2026-09-07
 
 - Export `@apteva/conversations`: a headless Web SDK extension, the existing chat,

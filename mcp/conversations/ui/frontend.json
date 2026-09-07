@@ -1,0 +1,28 @@
+{
+  "schema": "apteva-app-frontend/v1",
+  "app": "conversations",
+  "version": "0.21.0",
+  "client": {
+    "path": "/ui/frontend/client-96a846c760b0735b.mjs",
+    "sha256": "96a846c760b0735b9f5a4216841f1dcd15370c5b20b6c3e9ecf453530e9cb338"
+  },
+  "ui": {
+    "path": "/ui/frontend/react-d3d241e68bb11825.mjs",
+    "sha256": "d3d241e68bb1182544c0369e4d61d43f307fd2e05805746391d2c2b0902ed23c",
+    "reactMajor": 19,
+    "components": [
+      "agent-conversations",
+      "inbox-overview",
+      "conversation-chat",
+      "conversation-thread",
+      "conversations-panel",
+      "approval-card",
+      "report-card",
+      "alert-card"
+    ]
+  },
+  "styles": {
+    "path": "/ui/frontend/styles-b3fb6ac30f540a05.css",
+    "sha256": "b3fb6ac30f540a0558c4b512e3e02edf3e0261447db5efd6efef65d28488604d"
+  }
+}

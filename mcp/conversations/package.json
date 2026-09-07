@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "scripts": {
+    "build:frontend": "bun run frontend/build-app.ts"
+  }
+}

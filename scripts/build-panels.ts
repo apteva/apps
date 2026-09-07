@@ -109,6 +109,10 @@ async function main() {
     const manifestPath = join(appDir, "package.json");
     if (existsSync(manifestPath)) {
       const manifest = await Bun.file(manifestPath).json();
+      if (manifest.scripts?.["build:frontend"]) {
+        const frontend = Bun.spawn(["bun", "run", "build:frontend"], { cwd: appDir, stdout: "inherit", stderr: "inherit" });
+        if (await frontend.exited !== 0) throw new Error(`Frontend build failed: ${appDir}`);
+      }
       if (manifest.scripts?.typecheck) {
         const check = Bun.spawn(["bun", "run", "typecheck"], { cwd: appDir, stdout: "inherit", stderr: "inherit" });
         if (await check.exited !== 0) throw new Error(`Type checking failed: ${appDir}`);

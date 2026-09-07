@@ -1,17 +1,23 @@
+import * as React from "react";
 import { createRoot } from "react-dom/client";
-import { useMemo } from "react";
-import { AptevaClient } from "@apteva/web-sdk";
-import { conversationsExtension } from "../dist/index.js";
-import { ConversationChat, Inbox } from "../dist/react.js";
-import DashboardInbox from "../../ui/InboxWidget";
-import DashboardChat from "../../ui/AgentConversationsWidget";
-const params=new URLSearchParams(location.search);
-// Credentials enter through a host login flow, never a URL or source file.
+import { AptevaClient, type LoadedAppFrontend } from "@apteva/web-sdk";
+// The host supplies these values after login. No app package imports or tokens in URLs.
 const config=(window as any).CONVERSATIONS_EXAMPLE as {baseURL:string;projectId:string;installId:number;agentId:number;accessToken?:string};
 function Example(){
- const conversations=useMemo(()=>new AptevaClient({baseURL:config.baseURL,accessToken:config.accessToken}).use(conversationsExtension({audience:"public"}),{projectId:config.projectId,installId:config.installId}),[]);
- return <main style={{height:"100vh",padding:16}}>{params.get("surface")==="inbox" ? (params.get("host")==="dashboard" ? <DashboardInbox projectId={config.projectId} installId={config.installId}/> : <Inbox conversations={conversations}/>) : params.get("host")==="dashboard"
-  ? <DashboardChat appName="conversations" projectId={config.projectId} installId={config.installId} instanceId={config.agentId} widgetSettings={{display_mode:"single"}}/>
-  : <ConversationChat conversations={conversations} agentId={config.agentId}/>}</main>;
+ const [loaded,setLoaded]=React.useState<LoadedAppFrontend<any,React.ComponentType<any>> | null>(null);
+ const [error,setError]=React.useState("");
+ React.useEffect(()=>{
+  const controller=new AbortController();let frontend:LoadedAppFrontend<any,React.ComponentType<any>>|undefined;
+  const client=new AptevaClient({baseURL:config.baseURL,accessToken:config.accessToken});
+  client.apps.load<any,React.ComponentType<any>>("conversations",{projectId:config.projectId,installId:config.installId,react:React,signal:controller.signal})
+   .then(value=>{if(controller.signal.aborted){value.dispose();return;}frontend=value;setLoaded(value);})
+   .catch(error=>{if(!controller.signal.aborted)setError(String(error));});
+  return ()=>{controller.abort();frontend?.dispose();};
+ },[]);
+ if(error)return <p role="alert">{error}</p>;
+ if(!loaded)return <p>Loading Conversations…</p>;
+ const name=new URLSearchParams(location.search).get("surface")==="inbox"?"inbox-overview":"conversation-chat";
+ const Component=loaded.components[name];
+ return <main style={{height:"100vh",padding:16}}><Component conversations={loaded.client} agentId={config.agentId}/></main>;
 }
 createRoot(document.getElementById("root")!).render(<Example/>);

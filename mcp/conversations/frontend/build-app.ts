@@ -1,0 +1,37 @@
+import * as React from "react";
+import { join } from "node:path";
+import { readdir, unlink, mkdir } from "node:fs/promises";
+const root = import.meta.dir;
+const destination = join(root, "../ui/frontend");
+await mkdir(destination, { recursive: true });
+const version = (await Bun.file(join(root, "../apteva.yaml")).text()).match(/^version:\s*(\S+)/m)![1];
+const sha = (source: string) => new Bun.CryptoHasher("sha256").update(source).digest("hex");
+const created = new Set<string>();
+async function asset(name: string, extension: string, source: string) {
+  const hash = sha(source), filename = `${name}-${hash.slice(0,16)}.${extension}`;
+  await Bun.write(join(destination, filename), source);created.add(filename);
+  return { path: `/ui/frontend/${filename}`, sha256: hash };
+}
+const headless = await Bun.build({entrypoints:[join(root,"client-entry.ts")],target:"browser",format:"esm",minify:true,define:{"process.env.NODE_ENV":'"production"'}});
+if (!headless.success) throw new AggregateError(headless.logs,"Headless frontend build failed");
+const client = await asset("client","mjs",await headless.outputs[0].text());
+// Resolve every React import to the host runtime inside the factory. No second
+// React copy, global registration, import maps or runtime dependency downloads.
+const ui = await Bun.build({entrypoints:[join(root,"ui-entry.ts")],target:"browser",format:"cjs",minify:true,define:{"process.env.NODE_ENV":'"production"'},plugins:[{
+  name:"host-react",
+  setup(build) {
+    build.onResolve({filter:/^react(?:\/jsx-runtime|\/jsx-dev-runtime)?$/},args=>({path:args.path,namespace:"host-react"}));
+    build.onLoad({filter:/.*/,namespace:"host-react"},args=>({loader:"js",contents:args.path==="react"
+      ? `const React=__APTEVA_RUNTIME__.react;export default React;${Object.keys(React).filter(key=>key!=="default"&&/^[A-Za-z_$][\w$]*$/.test(key)).map(key=>`export const ${key}=React.${key};`).join("")}`
+      : 'const React=__APTEVA_RUNTIME__.react;export const Fragment=React.Fragment;export function jsx(type,props,key){return React.createElement(type,key===undefined?props:{...props,key});}export const jsxs=jsx;export const jsxDEV=jsx;'}));
+  }
+}]});
+if (!ui.success) throw new AggregateError(ui.logs,"Shared UI factory build failed");
+const bundle=await ui.outputs[0].text();
+const uiAsset=await asset("react","mjs",`export function createFrontend(__APTEVA_RUNTIME__){const module={exports:{}};const exports=module.exports;${bundle}\nreturn module.exports;}`);
+const cssProcess=Bun.spawn(["bunx","--no-install","tailwindcss","-i",join(root,"styles.css"),"--minify"],{cwd:root,stdout:"pipe",stderr:"inherit"});
+const css=await new Response(cssProcess.stdout).text();if(await cssProcess.exited)throw new Error("Styles build failed");
+const styles=await asset("styles","css",css);
+await Bun.write(join(root,"../ui/frontend.json"),JSON.stringify({schema:"apteva-app-frontend/v1",app:"conversations",version,client,ui:{...uiAsset,reactMajor:19,components:["agent-conversations","inbox-overview","conversation-chat","conversation-thread","conversations-panel","approval-card","report-card","alert-card"]},styles},null,2)+"\n");
+for(const file of await readdir(destination))if(!created.has(file)&&/^(client|react|styles)-[a-f0-9]{16}\.(mjs|css)$/.test(file))await unlink(join(destination,file));
+console.log(`Built Conversations ${version} app-served frontend (no npm app package).`);
