@@ -42,12 +42,39 @@ func settingsFrom(q rowQuerier, id int64) (EventSettings, error) {
 	err = json.Unmarshal([]byte(raw), &s)
 	return s, err
 }
+func settingsInput(in map[string]any) (map[string]any, error) {
+	value, exists := in["settings"]
+	if !exists {
+		return map[string]any{}, nil
+	}
+	settings, ok := value.(map[string]any)
+	if !ok {
+		return nil, errors.New("settings must be an object")
+	}
+	return settings, nil
+}
 func saveSettings(id int64, in map[string]any) (EventSettings, error) {
-	e, err := getEvent(id)
+	tx, err := db().Begin()
 	if err != nil {
 		return EventSettings{}, err
 	}
-	s, err := settingsFrom(db(), id)
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE events SET id=id WHERE id=? AND project_id=?`, id, projectID()); err != nil {
+		return EventSettings{}, err
+	}
+	e, err := getEventFrom(tx, id)
+	if err != nil {
+		return EventSettings{}, err
+	}
+	settings, err := saveSettingsTx(tx, e, in)
+	if err != nil {
+		return settings, err
+	}
+	return settings, tx.Commit()
+}
+func saveSettingsTx(tx *sql.Tx, e *Event, in map[string]any) (EventSettings, error) {
+	id := e.ID
+	s, err := settingsFrom(tx, id)
 	if err != nil {
 		return s, err
 	}
@@ -76,12 +103,19 @@ func saveSettings(id int64, in map[string]any) (EventSettings, error) {
 	if len(s.Instructions) > 10000 || len(s.CancellationReason) > 2000 {
 		return s, errors.New("text is too long")
 	}
+	var count int64
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM performance_slots WHERE event_id=? AND status='scheduled'`, id).Scan(&count); err != nil {
+		return s, err
+	}
+	if s.PerformerCapacity > 0 && count > s.PerformerCapacity {
+		return s, errors.New("performer capacity is below the scheduled lineup; remove slots first")
+	}
 	if s.Cancelled {
 		s.ApplicationsOpen = false
 		s.LineupPublished = false
 	}
 	raw, _ = json.Marshal(s)
-	_, err = db().Exec(`INSERT INTO event_settings(event_id,settings_json) VALUES(?,?) ON CONFLICT(event_id) DO UPDATE SET settings_json=excluded.settings_json`, id, string(raw))
+	_, err = tx.Exec(`INSERT INTO event_settings(event_id,settings_json) VALUES(?,?) ON CONFLICT(event_id) DO UPDATE SET settings_json=excluded.settings_json`, id, string(raw))
 	return s, err
 }
 func applicationClosed(e *Event, s EventSettings) string {
@@ -141,17 +175,17 @@ func (a *App) handleWorkflow(w http.ResponseWriter, r *http.Request) bool {
 			if e.VenueID != nil {
 				in["venue_id"] = *e.VenueID
 			}
+			s.ApplicationsOpen = false
+			s.LineupPublished = false
+			s.Cancelled = false
+			s.CancellationReason = ""
+			s.OpensAt = ""
+			s.ClosesAt = ""
+			raw, _ := json.Marshal(s)
+			var copiedSettings map[string]any
+			json.Unmarshal(raw, &copiedSettings)
+			in["settings"] = copiedSettings
 			copied, err := createEvent(in)
-			if err == nil {
-				s.ApplicationsOpen = false
-				s.LineupPublished = false
-				s.Cancelled = false
-				s.CancellationReason = ""
-				s.OpensAt = ""
-				s.ClosesAt = ""
-				raw, _ := json.Marshal(s)
-				_, err = db().Exec(`INSERT INTO event_settings(event_id,settings_json) VALUES(?,?)`, copied.ID, string(raw))
-			}
 			writeResult(w, copied, err)
 			return true
 		}
@@ -337,15 +371,6 @@ func (a *App) handleSlotItem(w http.ResponseWriter, r *http.Request) {
 		if !decodeJSON(w, r, &in) {
 			return
 		}
-		for key, target := range map[string]*string{"starts_at": &slot.StartsAt, "ends_at": &slot.EndsAt, "title": &slot.Title, "performer_name": &slot.PerformerName, "notes": &slot.Notes} {
-			if _, ok := in[key]; ok {
-				*target = argString(in, key)
-			}
-		}
-		if strings.TrimSpace(slot.PerformerName) == "" {
-			http.Error(w, "performer name required", 400)
-			return
-		}
 		tx, txErr := db().Begin()
 		if txErr != nil {
 			writeResult[any](w, nil, txErr)
@@ -354,6 +379,19 @@ func (a *App) handleSlotItem(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback()
 		if _, err = tx.Exec(`UPDATE events SET id=id WHERE id=? AND project_id=?`, slot.EventID, projectID()); err != nil {
 			writeResult[any](w, nil, err)
+			return
+		}
+		if err = tx.QueryRow(`SELECT performer_name,title,starts_at,ends_at,notes FROM performance_slots WHERE id=?`, id).Scan(&slot.PerformerName, &slot.Title, &slot.StartsAt, &slot.EndsAt, &slot.Notes); err != nil {
+			writeResult[any](w, nil, err)
+			return
+		}
+		for key, target := range map[string]*string{"starts_at": &slot.StartsAt, "ends_at": &slot.EndsAt, "title": &slot.Title, "performer_name": &slot.PerformerName, "notes": &slot.Notes} {
+			if _, ok := in[key]; ok {
+				*target = argString(in, key)
+			}
+		}
+		if strings.TrimSpace(slot.PerformerName) == "" {
+			http.Error(w, "performer name required", 400)
 			return
 		}
 		e, err := getEventFrom(tx, slot.EventID)
@@ -406,6 +444,66 @@ func validateSlotTimesFrom(q rowQuerier, e *Event, start, end string, except int
 	}
 	if n > 0 {
 		return errors.New("this slot overlaps another performer")
+	}
+	return nil
+}
+
+// Scheduled slots retain their offset from the show's start. All shifts and
+// boundary checks run in the same transaction as the show and its settings.
+func rescheduleSlots(tx *sql.Tx, e *Event, oldStart string) error {
+	rows, err := tx.Query(`SELECT id,starts_at,ends_at FROM performance_slots WHERE event_id=? AND status='scheduled'`, e.ID)
+	if err != nil {
+		return err
+	}
+	type span struct {
+		id         int64
+		start, end string
+	}
+	var slots []span
+	for rows.Next() {
+		var s span
+		if err = rows.Scan(&s.id, &s.start, &s.end); err != nil {
+			rows.Close()
+			return err
+		}
+		slots = append(slots, s)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	var delta time.Duration
+	if oldStart != e.StartsAt && oldStart != "" && e.StartsAt != "" {
+		before, _ := time.Parse(time.RFC3339, oldStart)
+		after, _ := time.Parse(time.RFC3339, e.StartsAt)
+		delta = after.Sub(before)
+	}
+	for i := range slots {
+		s := &slots[i]
+		if s.start == "" && s.end == "" {
+			continue
+		}
+		if e.StartsAt == "" {
+			return errors.New("remove scheduled slot times before clearing the show date")
+		}
+		if delta != 0 {
+			start, a := time.Parse(time.RFC3339, s.start)
+			end, b := time.Parse(time.RFC3339, s.end)
+			if a != nil || b != nil {
+				return errors.New("fix invalid lineup times before rescheduling")
+			}
+			s.start = start.Add(delta).UTC().Format(time.RFC3339)
+			s.end = end.Add(delta).UTC().Format(time.RFC3339)
+			if _, err = tx.Exec(`UPDATE performance_slots SET starts_at=?,ends_at=?,updated_at=? WHERE id=?`, s.start, s.end, now(), s.id); err != nil {
+				return err
+			}
+		}
+	}
+	for _, s := range slots {
+		if err = validateSlotTimesFrom(tx, e, s.start, s.end, s.id); err != nil {
+			return fmt.Errorf("lineup does not fit the show: %w", err)
+		}
 	}
 	return nil
 }

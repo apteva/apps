@@ -45,6 +45,9 @@ func normalizeDate(raw string, loc *time.Location) (string, error) {
 }
 
 func validateEventInput(in map[string]any, current *Event) error {
+	return validateEventInputFrom(db(), in, current)
+}
+func validateEventInputFrom(q rowQuerier, in map[string]any, current *Event) error {
 	if title, ok := in["title"]; ok && strings.TrimSpace(fmt.Sprint(title)) == "" {
 		return errors.New("title required")
 	}
@@ -89,7 +92,8 @@ func validateEventInput(in map[string]any, current *Event) error {
 		return errors.New("checkout URL must be an http or https URL")
 	}
 	if id := argInt(in, "venue_id"); id > 0 {
-		if _, err := getVenue(id); err != nil {
+		var found int64
+		if err := q.QueryRow(`SELECT id FROM venues WHERE id=? AND project_id=?`, id, projectID()).Scan(&found); err != nil {
 			return errors.New("venue not found in this project")
 		}
 	}

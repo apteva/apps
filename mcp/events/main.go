@@ -292,7 +292,12 @@ func createEvent(in map[string]any) (*Event, error) {
 	if id := argInt(in, "venue_id"); id > 0 {
 		venue = id
 	}
-	res, err := db().Exec(`
+	tx, err := db().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`
 		INSERT INTO events
 			(project_id, title, slug, description, status, visibility, timezone, starts_at, ends_at, venue_id, capacity, external_checkout_url, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -303,7 +308,21 @@ func createEvent(in map[string]any) (*Event, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return getEvent(id)
+	e, err := getEventFrom(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := settingsInput(in)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = saveSettingsTx(tx, e, settings); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return e, nil
 }
 
 type rowQuerier interface {
@@ -360,13 +379,22 @@ func listEvents(status string, limit int64) ([]Event, error) {
 }
 
 func updateEvent(id int64, in map[string]any) (*Event, error) {
-	current, err := getEvent(id)
+	tx, err := db().Begin()
 	if err != nil {
 		return nil, err
 	}
-	if err := validateEventInput(in, current); err != nil {
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE events SET id=id WHERE id=? AND project_id=?`, id, projectID()); err != nil {
 		return nil, err
 	}
+	current, err := getEventFrom(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEventInputFrom(tx, in, current); err != nil {
+		return nil, err
+	}
+	oldStart := current.StartsAt
 	if v, ok := in["title"]; ok {
 		current.Title = strings.TrimSpace(fmt.Sprint(v))
 	}
@@ -409,7 +437,7 @@ func updateEvent(id int64, in map[string]any) (*Event, error) {
 			venue = nil
 		}
 	}
-	_, err = db().Exec(`
+	_, err = tx.Exec(`
 		UPDATE events SET title=?, slug=?, description=?, status=?, visibility=?, timezone=?, starts_at=?, ends_at=?,
 			venue_id=?, capacity=?, external_checkout_url=?, updated_at=?
 		WHERE id=? AND project_id=?`,
@@ -418,7 +446,24 @@ func updateEvent(id int64, in map[string]any) (*Event, error) {
 	if err != nil {
 		return nil, err
 	}
-	return getEvent(id)
+	settings, err := settingsInput(in)
+	if err != nil {
+		return nil, err
+	}
+	if err = rescheduleSlots(tx, current, oldStart); err != nil {
+		return nil, err
+	}
+	if _, err = saveSettingsTx(tx, current, settings); err != nil {
+		return nil, err
+	}
+	result, err := getEventFrom(tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 type scanner interface{ Scan(dest ...any) error }

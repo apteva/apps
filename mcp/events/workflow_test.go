@@ -216,3 +216,59 @@ func TestPublicPhotoValidationAndProjectIsolation(t *testing.T) {
 		t.Fatal("cross-project settings access")
 	}
 }
+
+func TestAtomicShowSaveAndReschedule(t *testing.T) {
+	setupEvents(t)
+	start := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	input := map[string]any{"title": "Atomic show", "slug": "atomic-show", "starts_at": start.Format(time.RFC3339), "ends_at": start.Add(time.Hour).Format(time.RFC3339), "settings": map[string]any{"closes_at": start.Add(time.Minute).Format(time.RFC3339)}}
+	if _, err := createEvent(input); err == nil {
+		t.Fatal("invalid settings created a show")
+	}
+	var count int
+	db().QueryRow(`SELECT COUNT(*) FROM events WHERE slug='atomic-show'`).Scan(&count)
+	if count != 0 {
+		t.Fatal("orphaned show")
+	}
+	input["settings"] = map[string]any{"applications_open": true, "closes_at": start.Add(-time.Hour).Format(time.RFC3339)}
+	e, err := createEvent(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot, err := createSlot(map[string]any{"event_id": e.ID, "performer_name": "Artist", "starts_at": start.Add(10 * time.Minute).Format(time.RFC3339), "ends_at": start.Add(15 * time.Minute).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := start.Add(24 * time.Hour)
+	if _, err = updateEvent(e.ID, map[string]any{"title": "Rejected edit", "starts_at": moved.Format(time.RFC3339), "ends_at": moved.Add(time.Hour).Format(time.RFC3339), "settings": map[string]any{"closes_at": moved.Add(time.Hour).Format(time.RFC3339)}}); err == nil {
+		t.Fatal("invalid settings accepted")
+	}
+	unchanged, _ := getEvent(e.ID)
+	if unchanged.Title != e.Title || unchanged.StartsAt != e.StartsAt {
+		t.Fatal("partial show save")
+	}
+	var actual string
+	db().QueryRow(`SELECT starts_at FROM performance_slots WHERE id=?`, slot.ID).Scan(&actual)
+	if actual != slot.StartsAt {
+		t.Fatal("partial lineup shift")
+	}
+	if _, err = updateEvent(e.ID, map[string]any{"starts_at": moved.Format(time.RFC3339), "ends_at": moved.Add(time.Hour).Format(time.RFC3339)}); err != nil {
+		t.Fatal(err)
+	}
+	db().QueryRow(`SELECT starts_at FROM performance_slots WHERE id=?`, slot.ID).Scan(&actual)
+	if actual != moved.Add(10*time.Minute).Format(time.RFC3339) {
+		t.Fatal("lineup did not move")
+	}
+	for _, bad := range []map[string]any{{"ends_at": moved.Add(12 * time.Minute).Format(time.RFC3339)}, {"starts_at": "", "ends_at": ""}} {
+		if _, err = updateEvent(e.ID, bad); err == nil {
+			t.Fatal("invalid show boundary accepted")
+		}
+	}
+	again, _ := getEvent(e.ID)
+	if again.StartsAt != moved.Format(time.RFC3339) || again.EndsAt != moved.Add(time.Hour).Format(time.RFC3339) {
+		t.Fatal("failed edit changed show")
+	}
+	settings, _ := settingsFrom(db(), e.ID)
+	if !settings.ApplicationsOpen {
+		t.Fatal("settings lost")
+	}
+}
