@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.15.0
+version: 0.15.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -271,7 +271,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.15.0
+    ref: analytics/v0.15.1
     entry: mcp/analytics
   port: 8080
   health_check: /health

@@ -339,7 +339,10 @@ func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *Ev
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil {
+	// Replacement is a complete observation, not a patch. Only numeric
+	// aggregation operations inherit previous state; replacement regenerates
+	// its bucket/dimensions below and keeps the row identity in the upsert key.
+	if existing != nil && policy.Operation != "replace" {
 		for k, v := range existing {
 			props[k] = v
 		}

@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.15.0
+version: 0.15.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -235,7 +235,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.15.0
+    ref: analytics/v0.15.1
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -546,7 +546,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status":              map[string]any{"type": "string"},
 				"validation_mode":     map[string]any{"type": "string"},
 				"ingest_mode":         map[string]any{"type": "string"},
-				"upsert_policy":       map[string]any{"type": "object"},
+				"upsert_policy":       map[string]any{"type": "object", "description": "replace (the default operation) replaces all observation properties: send every required field; omitted optional fields are removed, explicit optional null is stored. Row identity is preserved separately. Numeric aggregation operations retain their accumulation behavior."},
 				"rollup_policy":       map[string]any{"type": "object"},
 				"properties":          map[string]any{"type": "array"},
 				"updated_at":          map[string]any{"type": "integer", "description": "Version from the fetched spec; stale edits are rejected."},
