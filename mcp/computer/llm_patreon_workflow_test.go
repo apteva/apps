@@ -71,6 +71,166 @@ func TestLLMPatreonMediaPublishLive(t *testing.T) {
 	t.Logf("Verified published test post: %s", u)
 }
 
+// Exercise the combination that separate media-publish and text-schedule tests
+// cannot prove: the same Bunny video survives scheduling and is automatically
+// published when its deadline arrives. All mutations are chosen by the model;
+// the harness only observes, reloads, and checks the immutable post identity.
+func TestLLMPatreonScheduledVideoPublicationLive(t *testing.T) {
+	requirePatreonTier3(t)
+	c := newLocalComputerMCPClient(t)
+	opened := c.call(t, "browser_session", map[string]any{"action": "open", "context_id": os.Getenv("COMPUTER_PATREON_CONTEXT_ID"), "url": requireLiveEnv(t, "COMPUTER_PATREON_CREATOR_URL")})
+	sid := stringValue(opened["session_id"])
+	if sid == "" {
+		t.Fatalf("open: %v", opened)
+	}
+	defer closePatreonTestSession(t, c, sid)
+	writePatreonEvidence(t, "opened.json", []byte(mustJSON(patreonEvidence(opened))))
+	if intFromAny(opened["effective_timeout_seconds"]) < 1800 {
+		t.Fatal("scheduled video requires the normal long session lifetime")
+	}
+	zone := stringValue(opened["effective_timezone"])
+	if zone == "" {
+		t.Fatal("browser did not report its timezone; cannot safely choose a near-term schedule")
+	}
+	location, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	title := "Computer tier 3 scheduled video " + time.Now().UTC().Format("20060102-150405")
+	var draft map[string]any
+	if !t.Run("prepare_video", func(t *testing.T) {
+		goal := fmt.Sprintf("On this disposable Patreon test creator, create exactly ONE video draft titled %q using embed URL %s. Verify that the Bunny player loaded and the draft saved. Do not add the URL again once media has loaded. Stop in this draft editor BEFORE Publish or Schedule. Do not create other posts or change account settings.", title, patreonMediaPublishFixtureURL)
+		draft = runPatreonAgent(t, c, sid, goal, 20)
+		assertPatreonTitle(t, draft, title)
+		assertRealMediaLoaded(t, draft, false)
+		if stringValue(draft["draft_save_state"]) != "saved" {
+			t.Fatalf("video draft not saved: %s", mustJSON(patreonEvidence(draft)))
+		}
+	}) {
+		return
+	}
+	draftURL := firstNonEmpty(stringValue(draft["current_url"]), stringValue(draft["url"]))
+	host, postID := patreonPostIdentity(draftURL)
+	if postID == "" || !strings.HasSuffix(draftURL, "/edit") {
+		t.Fatalf("video draft has no editable post identity: %s", draftURL)
+	}
+	// Choose the deadline after media preparation, leaving time for model-driven
+	// settings and commit. Minute precision matches the site's time control.
+	scheduledAt := time.Now().In(location).Add(6 * time.Minute).Truncate(time.Minute).Add(time.Minute)
+	date, clock := scheduledAt.Format("2006-01-02"), scheduledAt.Format("3:04 PM")
+	writePatreonEvidence(t, "schedule.json", []byte(mustJSON(map[string]any{"title": title, "post_id": postID, "draft_url": draftURL, "timezone": zone, "scheduled_at": scheduledAt.Format(time.RFC3339)})))
+	t.Logf("Scheduling Bunny video post=%s at %s (%s)", postID, scheduledAt.Format(time.RFC3339), zone)
+	assertIdentity := func(t *testing.T, result map[string]any) {
+		t.Helper()
+		actualHost, actualID := patreonPostIdentity(firstNonEmpty(stringValue(result["current_url"]), stringValue(result["url"])))
+		if actualHost != host || actualID != postID {
+			t.Fatalf("observation belongs to another post: host=%s id=%s, want %s/%s", actualHost, actualID, host, postID)
+		}
+	}
+	if !t.Run("configure_schedule", func(t *testing.T) {
+		goal := fmt.Sprintf("Configure this existing video draft %q for Free access and Set publish date %s at %s in the page timezone (%s). Preserve the loaded Bunny video. Verify the values and stop BEFORE the final Schedule or Publish action. Do not create another draft.", title, date, clock, zone)
+		shot := runPatreonAgent(t, c, sid, goal, 16)
+		assertIdentity(t, shot)
+		assertPatreonTitle(t, shot, title)
+		assertRealMediaLoaded(t, shot, false)
+		shot = observePatreonScheduleFields(t, c, sid, shot)
+		for kind, want := range map[string]string{"date": date, "time": scheduledAt.Format("15:04")} {
+			target := findTemporalLiveTarget(t, mapsFromAny(shot["som"]), kind, kind == "date")
+			if stringValue(target["current_value"]) != want {
+				t.Fatalf("schedule %s=%v, want %s", kind, target["current_value"], want)
+			}
+		}
+		audience := c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "wait_for", "timeout_ms": 1000, "conditions": []any{map[string]any{"type": "selector_present", "selector": `input[value="public"]:checked`}}})
+		if !boolFromAny(audience["matched"]) {
+			t.Fatal("scheduled video did not retain Free access")
+		}
+		writePatreonEvidence(t, "configured.json", []byte(mustJSON(patreonEvidence(shot))))
+	}) {
+		return
+	}
+	if time.Until(scheduledAt) < 2*time.Minute {
+		t.Fatal("insufficient time remains to commit and independently verify the scheduled state")
+	}
+	if !t.Run("commit_and_reload", func(t *testing.T) {
+		goal := fmt.Sprintf("The user authorizes final scheduling of this exact disposable video post %q, post ID %s. Its Bunny video, Free access, and publish date %s at %s (%s) have been independently verified. Click the final Schedule action once, complete any required confirmation, dismiss the success dialog with OK, and reopen this same post editor to verify Scheduled for and its loaded video. Do not publish immediately, change the date/time, duplicate the video, or create another post.", title, postID, date, clock, zone)
+		runPatreonAgent(t, c, sid, goal, 12)
+		for _, stage := range []string{"scheduled-confirmation", "scheduled-after-reload"} {
+			if stage == "scheduled-after-reload" {
+				c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "reload"})
+			}
+			result := c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "wait_for", "match": "all", "timeout_ms": 30000, "conditions": []any{
+				map[string]any{"type": "text_present", "value": "Scheduled for " + scheduledAt.Format("Jan 2, 2006") + " at " + clock},
+				map[string]any{"type": "media_present"},
+			}})
+			writePatreonEvidence(t, stage+".json", []byte(mustJSON(patreonEvidence(result))))
+			if !boolFromAny(result["matched"]) {
+				t.Fatalf("scheduled video confirmation failed: %s", mustJSON(patreonEvidence(result)))
+			}
+			assertIdentity(t, result)
+			assertRealMediaLoaded(t, result, false)
+			assertPatreonTitle(t, liveScreenshot(t, c, sid), title)
+		}
+		if !time.Now().Before(scheduledAt) {
+			t.Fatal("scheduled state was not verified before the publication deadline")
+		}
+	}) {
+		return
+	}
+	// No LLM calls or mutating browser actions during the wait: only the site's
+	// scheduler can publish the post between these two independently checked states.
+	// Patreon uses Update for a published post, Save for a scheduled post, and
+	// Publish for a draft. The published editor has no literal Published banner.
+	for time.Now().Before(scheduledAt) {
+		remaining := time.Until(scheduledAt)
+		t.Logf("Waiting for automatic publication in %s", remaining.Round(time.Second))
+		time.Sleep(min(remaining, 30*time.Second))
+	}
+	t.Run("automatic_publication", func(t *testing.T) {
+		deadline := scheduledAt.Add(5 * time.Minute)
+		published := false
+		for attempt := 0; time.Now().Before(deadline); attempt++ {
+			c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "reload"})
+			result := c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "wait_for", "match": "all", "timeout_ms": 10000, "conditions": []any{
+				map[string]any{"type": "text_present", "value": "Update"},
+				map[string]any{"type": "text_absent", "value": "Scheduled for"},
+				map[string]any{"type": "media_present"},
+			}})
+			writePatreonEvidence(t, fmt.Sprintf("publication-check-%02d.json", attempt), []byte(mustJSON(patreonEvidence(result))))
+			shot := liveScreenshot(t, c, sid)
+			writePatreonEvidence(t, fmt.Sprintf("publication-state-%02d.json", attempt), []byte(mustJSON(patreonEvidence(shot))))
+			if boolFromAny(result["matched"]) {
+				findLiveTarget(t, mapsFromAny(shot["som"]), "Update", true)
+				assertIdentity(t, result)
+				assertPatreonTitle(t, shot, title)
+				assertRealMediaLoaded(t, result, false)
+				published = true
+				break
+			}
+			t.Logf("Post has not yet independently confirmed Published; retrying within the five-minute grace period")
+			time.Sleep(20 * time.Second)
+		}
+		if !published {
+			t.Fatal("scheduled Bunny video did not automatically reach Published within five minutes of its deadline")
+		}
+		goal := fmt.Sprintf("This exact video post %q (post ID %s) has now automatically published, independently verified by the harness. Navigate to its published reader-facing post page and verify its exact title and loaded Bunny video. Read-only navigation only: do not edit, save, schedule, or publish anything and do not create another post.", title, postID)
+		shot := runPatreonAgent(t, c, sid, goal, 12)
+		assertIdentity(t, shot)
+		u := firstNonEmpty(stringValue(shot["current_url"]), stringValue(shot["url"]))
+		if strings.Contains(u, "/edit") || strings.Contains(u, "/new") {
+			t.Fatalf("agent did not reach the published post page: %s", u)
+		}
+		c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "reload"})
+		result := c.call(t, "computer_use", map[string]any{"session_id": sid, "action": "wait_for", "match": "all", "timeout_ms": 30000, "conditions": []any{map[string]any{"type": "text_present", "value": title}, map[string]any{"type": "media_present"}}})
+		writePatreonEvidence(t, "published-after-reload.json", []byte(mustJSON(patreonEvidence(result))))
+		if !boolFromAny(result["matched"]) {
+			t.Fatalf("published title/media missing after reload: %s", mustJSON(patreonEvidence(result)))
+		}
+		assertIdentity(t, result)
+		assertRealMediaLoaded(t, result, false)
+		t.Logf("Verified automatically published Bunny video: title=%q url=%s scheduled_at=%s verified_at=%s", title, u, scheduledAt.Format(time.RFC3339), time.Now().Format(time.RFC3339))
+	})
+}
+
 func TestLLMPatreonSchedulingLive(t *testing.T) {
 	requirePatreonTier3(t)
 	c := newLocalComputerMCPClient(t)
@@ -274,7 +434,7 @@ type patreonAgentDecision struct {
 	Reason    string `json:"reason"`
 }
 
-func runPatreonAgent(t *testing.T, c *localComputerMCPClient, sid, goal string, maxSteps int) map[string]any {
+func runPatreonAgent(t *testing.T, c *localComputerMCPClient, sid, goal string, maxSteps int, observers ...func(map[string]any, map[string]any)) map[string]any {
 	t.Helper()
 	var toolDescription string
 	for _, tool := range (&App{}).MCPTools() {
@@ -303,6 +463,9 @@ func runPatreonAgent(t *testing.T, c *localComputerMCPClient, sid, goal string, 
 		args["session_id"] = sid
 		start := time.Now()
 		result := c.call(t, "computer_use", args)
+		for _, observe := range observers {
+			observe(args, result)
+		}
 		observed := patreonObservedFields(shot)
 		entry := map[string]any{"arguments": args, "reason": d.Reason, "observed_fields_before_action": observed, "result": patreonEvidence(result), "elapsed_ms": time.Since(start).Milliseconds()}
 		compact := map[string]any{}
@@ -313,7 +476,7 @@ func runPatreonAgent(t *testing.T, c *localComputerMCPClient, sid, goal string, 
 		}
 		history = append(history, map[string]any{"arguments": args, "reason": d.Reason, "observed_fields_before_action": observed, "result": compact})
 		writePatreonEvidence(t, fmt.Sprintf("%02d-action.json", step), []byte(mustJSON(entry)))
-		t.Logf("RESULT step=%d action=%v elapsed=%s error=%v dispatched=%v verified=%v", step, args["action"], time.Since(start).Round(time.Millisecond), result["error_code"], result["action_dispatched"], result["outcome_verified"])
+		t.Logf("RESULT step=%d action=%v elapsed=%s error=%v dispatched=%v verified=%v", step, args["action"], time.Since(start).Round(time.Millisecond), firstNonEmpty(stringValue(result["error_code"]), stringValue(result["error"])), result["action_dispatched"], result["outcome_verified"])
 	}
 	t.Fatalf("agent exceeded %d actions; inspect decision/state/action artifacts", maxSteps)
 	return nil

@@ -10,15 +10,32 @@ outcome waits, and these Patreon cases:
 
 | Test | Independent verification |
 | --- | --- |
+| `TestLLMFileChooserImageUploadLive` | Model uploads PNG bytes through Browse; a dynamically created input receives the image, an unrelated input stays unused, and the browser decodes the expected filename and dimensions |
+| `TestLLMFileChooserImageUploadRecoveryLive` | Starts with stale-revision and click-only-argument upload rejections; the model must request a fresh screenshot itself and upload exactly once with its current label/target ID and revision |
+| `TestLLMPatreonNativeImageUploadLive` | Model selects Patreon's native image composer and uploads a PNG from `source_url` through Browse; exactly one upload, saved draft identity/title, and native post image persistence after reload are checked |
 | `TestLLMPatreonReliabilityFixtureLive` | Long audience label and schedule switches enabled; final scheduling remains uncommitted |
 | `TestLLMPatreonRealContenteditableLive` | Exact body edit/readback/restoration and paywall preservation in the saved draft |
 | `TestLLMPatreonMediaPublishLive` | Model navigates the composer and publishes a video test post; final URL, title, and media checked independently |
 | `TestLLMPatreonSchedulingLive` | Model configures audience/date/time, commits final Schedule, verifies scheduled status after reload, and checks session survival beyond five minutes |
+| `TestLLMPatreonScheduledVideoPublicationLive` | Model embeds Bunny video and schedules it; exact post ID, title, schedule and media survive reload; the post automatically publishes at its deadline and the published video survives another reload |
 
 The deterministic `TestComputerPatreonRealSite` and
 `TestComputerPatreonRealMediaPublish` scripts remain available separately.
 The new tier 3 versions let the model choose actions rather than replaying
 their scripted control selections.
+
+Native image attachment is separate from video URL embedding. The native-image
+case creates a disposable draft and leaves it unpublished. The generic chooser
+fixture runs without a Patreon account. Both exercise the shared uploader's
+file-chooser resolution; no Patreon selectors or workflow rules are added to the
+production uploader. Stale target IDs and unsupported upload arguments remain
+errors. Resolver browser regressions additionally cover local file paths,
+payload uploads, multiple hidden inputs, dynamic inputs, cleared file fields,
+and rejection of stale, ambiguous, unrelated, submit, or occluded controls.
+`TestUploadRejectionsAndFreshTargetRecovery` additionally proves that stale
+revision 15 versus 16, unsupported `expected_text`, missing labels, and a
+contradictory `expected_name` cannot download or dispatch a file; a refreshed
+Browse label with the supported identity guard uploads exactly once.
 
 ## Saved test account profile
 
@@ -61,6 +78,18 @@ perform the final Schedule action in a separate phase. It verifies the immutable
 date/time both before and after reload. Cosmetic URL slugs may change.
 The scheduling lifetime check waits until at least
 6 minutes 15 seconds after opening its browser, counting workflow time.
+
+The scheduled-video test chooses a publish time six to seven minutes after
+the video draft is ready, using the browser-reported timezone. The model
+configures and commits it; the harness checks the scheduled state before the
+deadline and after reload. It then waits without model calls or publishing
+actions, allowing up to five minutes after the deadline for the site's
+scheduler. The editor must change from the scheduled Save state to the published Update
+state, with the scheduled banner absent, for the same post
+before the model navigates to the published reader page. The final checks
+require the original post ID, exact title and Bunny asset identity after reload.
+Allow roughly 10–15 minutes for this test; a skipped account test does not count
+as publication coverage.
 
 ```sh
 bash scripts/test-tiers.sh 3

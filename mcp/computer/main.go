@@ -60,11 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.88
+version: 0.7.89
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.88 improves stable
-  control targeting, framework input state, tab activation, session cleanup,
-  and observation efficiency, with expanded live LLM regression coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.89 fixes native
+  file-chooser uploads, rejects ambiguous upload targets, and improves upload
+  recovery guidance, with live LLM image-upload and recovery coverage.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -650,7 +650,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, semantic-target, or media conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. For an embed, use media_present and media_error together with match=any to wait for a terminal rendered-player-or-error outcome. Computer reports the visible provider/source and player state but does not decide whether the media is the intended asset. Use action=wait_for_stable only when the whole page must become quiet. " +
-				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
+				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with a fresh label or target_id and its som_revision, plus source_url/base64/file_path. Optional expected_name and expected_role must copy accessible_name and role from the current semantic target; omit an expectation when that field is absent, and never infer role from tag/type; omit expected_text, expected_effect, and confirm_consequence, which are click/double_click-only. A compatibility selector must match exactly one element. After a stale-target rejection, take action=screenshot with include_som=true and retry upload_file with the new target and original file source; do not click Browse or operate the native OS file picker. For native image uploads, verify the visible image preview and draft-save state afterward; media_present checks an audio/video player, not a still-image preview. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native or masked date/time fields, use action=set_temporal with a current target_id (preferred), label, or selector plus an ISO value such as 2026-07-01 or a time such as 11:00 AM. Computer converts ISO dates when placeholder/pattern/locale makes the displayed format clear and reports requested, actual, format_hint, and validity. A detected text mask gets one trusted-key fallback after setter reversion. If direct entry is still rejected, use returned recovery_targets or choose the desired visible role=gridcell by target_id and expected_name; never guess an aria-label CSS selector from the accessible name. Calendar-grid clicks return changed rendered values with the compact semantic observation. If the UI shows separate date and time fields, call set_temporal separately on each field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
@@ -675,12 +675,12 @@ func (a *App) MCPTools() []sdk.Tool {
 				"label":               map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
 				"target_id":           map[string]any{"type": "string", "description": "Stable target id from som/som_delta, or semantic region id from scroll_regions. Prefer this over a mutable numeric label when available."},
 				"som_revision":        map[string]any{"type": "integer", "minimum": 1, "description": "Optional revision returned by som_delta. Rejects a label/target_id if a newer screenshot has replaced its target map."},
-				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
-				"expected_text":       map[string]any{"type": "string", "description": "For click/double_click, the intended exact accessible name, verified atomically at dispatch time along with loading/disabled state. Always pass it for actions that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
+				"selector":            map[string]any{"type": "string", "description": "CSS selector for action=click, upload_file, select_option, set_checked, set_text, or set_temporal. For upload_file it must match exactly one element; prefer a fresh label/target_id. For click this is a compatibility target for deterministic app flows; agents should keep using a fresh screenshot label when available."},
+				"expected_text":       map[string]any{"type": "string", "description": "For click/double_click only; omit for upload_file (use expected_name with a fresh label/target_id instead). The intended exact accessible name is verified atomically at dispatch time along with loading/disabled state. Always pass it for clicks that save, submit, publish, delete, send, pay, or navigate. Required when a raw coordinate lands on a consequential control; recommended for label/target_id/selector clicks."},
 				"expected_effect":     map[string]any{"type": "string", "enum": []string{"navigation_only", "open_configuration", "save_draft", "immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For click/double_click only. State the intended semantic effect. Required when the live target is consequential; omit for ordinary clicks unless distinguishing navigation/configuration intent."},
 				"confirm_consequence": map[string]any{"type": "string", "enum": []string{"immediate_external_commit", "scheduled_external_commit", "message_send", "financial_action", "delete", "permission_change", "account_change"}, "description": "For a consequential click only. Explicitly repeat the exact expected_effect to acknowledge the externally visible or irreversible consequence. Omit for ordinary navigation/editing."},
-				"expected_name":       map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, especially scroll."},
-				"expected_role":       map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, especially scroll."},
+				"expected_name":       map[string]any{"type": "string", "description": "Optional semantic accessible-name guard for target_id/label actions, including upload_file and scroll. This checks the observed semantic target; selector-only calls do not use this guard."},
+				"expected_role":       map[string]any{"type": "string", "description": "Optional semantic role guard for target_id/label actions, including upload_file and scroll. Copy the exact reported role; omit when role is absent. Do not infer it from tag or type."},
 				"checked":             map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
 				"source_url":          map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
 				"base64":              map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
@@ -2622,7 +2622,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 				"Choose a stable id from scroll_regions and pass target_id, optionally with expected_name and expected_role.", nil)
 		}
 	}
-	if (action == "click" || action == "double_click") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
+	if (action == "click" || action == "double_click" || action == "upload_file") && act.Selector == "" && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			fmt.Sprintf("Set-of-Mark label %d is not present in the latest annotated screenshot", act.Label),
 			"Take a fresh screenshot with annotate=true, then use one of its current labels.",
@@ -5490,6 +5490,9 @@ func isActionTimeoutError(err error) bool {
 }
 
 func computerUseFailure(code, id string, sess *session, action, message, recover string, cause error) error {
+	if action == "upload_file" && (code == "invalid_target" || code == "stale_or_mismatched_target") {
+		recover = "Upload was not dispatched. Call computer_use(action=\"screenshot\", include_som=true), then retry action=upload_file using the visible Browse/upload control's fresh label or target_id and som_revision, plus the original source_url/base64/file_path and filename. Optional expected_name/expected_role guard a label/target_id; omit expected_text, expected_effect, and confirm_consequence. Do not click Browse or reuse a broad selector such as button."
+	}
 	parts := []string{fmt.Sprintf("%s: %s", code, message)}
 	if id != "" {
 		parts = append(parts, "session_id="+id)

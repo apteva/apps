@@ -203,17 +203,27 @@ func callComputerLLM(t *testing.T, frame []byte, prompt, schema string, out any)
 	args = append(args, "--output-schema", schemaPath, "--output-last-message", resultPath, prompt)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, computerLLMBinary(), args...)
-	cmd.Dir = tmp
-	if raw, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("LLM semantic decision failed: %v\n%s", err, conciseLLMLog(raw))
-	}
-	raw, err := os.ReadFile(resultPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		t.Fatalf("decode LLM output %q: %v", raw, err)
+	for attempt := 0; attempt < 2; attempt++ {
+		cmd := exec.CommandContext(ctx, computerLLMBinary(), args...)
+		cmd.Dir = tmp
+		log, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("LLM semantic decision failed: %v\n%s", err, conciseLLMLog(log))
+		}
+		raw, err := os.ReadFile(resultPath)
+		if os.IsNotExist(err) && attempt == 0 {
+			// No decision was dispatched to the browser, so retrying inference
+			// cannot duplicate an upload or other application action.
+			t.Logf("LLM returned no decision file; retrying inference once: %s", conciseLLMLog(log))
+			continue
+		}
+		if err != nil {
+			t.Fatalf("read LLM decision: %v\n%s", err, conciseLLMLog(log))
+		}
+		if err := json.Unmarshal(raw, out); err != nil {
+			t.Fatalf("decode LLM output %q: %v", raw, err)
+		}
+		return
 	}
 }
 

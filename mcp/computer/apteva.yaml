@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.88
+version: 0.7.89
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.88 improves stable
-  control targeting, framework input state, tab activation, session cleanup,
-  and observation efficiency, with expanded live LLM regression coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.89 fixes native
+  file-chooser uploads, rejects ambiguous upload targets, and improves upload
+  recovery guidance, with live LLM image-upload and recovery coverage.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
