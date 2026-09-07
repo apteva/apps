@@ -1,6 +1,6 @@
 # Capacity and deadline validation
 
-Implementation after Functions 1.9.0, validated locally on 2026-09-07. Not published or deployed. No production AI requests, transcripts or recordings were replayed.
+Functions 1.10.0 release validation, performed locally on 2026-09-07. Publishing the release does not upgrade existing installations. The companion server changes are prepared separately. No production AI requests, transcripts or recordings were replayed.
 
 ## Behavior and evidence
 
@@ -44,3 +44,7 @@ The Functions changes live on `feat/functions-capacity-api`. The accompanying se
 Deploy both Functions and the server changes for end-to-end provider cancellation. Mark AI job functions as background and choose validated protected allocations; existing functions default to interactive. Provider/catalog deadlines may still be stricter. Direct Functions-to-Functions calls have trusted ancestry; indirect calls through unrelated apps do not.
 
 See [CAPACITY_API.md](CAPACITY_API.md) for settings and API payloads. Raw verification logs and the focused server patch are saved in `/Users/marcoschwartz/Documents/code/audit-reports/functions-capacity/`.
+
+## Release candidate verification
+
+The final 1.10.0 manifest was tested with `GOWORK=off go test -race -count=1 -timeout 300s ./...` against published SDK v0.76.0: `ok   github.com/apteva/apps/mcp/functions 112.707s`. Darwin arm64 and Linux amd64/arm64 binaries were built, and module metadata confirms the embedded SDK version.

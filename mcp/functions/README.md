@@ -1,4 +1,4 @@
-# Functions 1.9.0
+# Functions 1.10.0
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
@@ -6,9 +6,9 @@ processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
 
-## Pending capacity and deadline changes
+## Capacity and integration deadlines in 1.10.0
 
-See [Capacity and memory API](CAPACITY_API.md) for per-call measurements, live function usage, configurable admission limits and integration deadlines. These changes are not yet released.
+See [Capacity and memory API](CAPACITY_API.md) for per-call measurements, live function usage, configurable admission limits and integration deadlines. The Functions changes ship in 1.10.0. End-to-end provider cancellation also requires the accompanying server patch; upgrading Functions alone does not update the gateway.
 
 ## Runtime preparation in 1.9.0
 

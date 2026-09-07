@@ -1,6 +1,6 @@
 # Capacity, memory and deadlines
 
-These changes are implemented after Functions 1.9.0. They are not yet published or deployed. See [CAPACITY_VALIDATION.md](CAPACITY_VALIDATION.md) for test evidence and rollout notes.
+These Functions changes ship in 1.10.0. The companion server cancellation patch requires a separate platform release; Functions alone cannot cancel provider work inside an older gateway. See [CAPACITY_VALIDATION.md](CAPACITY_VALIDATION.md) for test evidence and rollout notes.
 
 ## Read usage through HTTP or MCP
 
