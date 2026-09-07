@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: events
 display_name: Events
-version: 0.1.3
+version: 0.2.0
 description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
 author: Apteva
 icon: /ui/icon.svg
@@ -34,6 +34,8 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /public/
+      no_auth: true
   mcp_tools:
     - { name: events_create, description: "Create a show/event." }
     - { name: events_list, description: "List events." }
@@ -52,7 +54,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: events/v0.2.0
     entry: mcp/events
   port: 8080
   health_check: /health
@@ -91,8 +93,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/events", Handler: a.handleEvents},
-		{Pattern: "/events/", Handler: a.handleEventsItem},
+		{Pattern: "/shows", Handler: a.handleEvents},
+		{Pattern: "/shows/", Handler: a.handleEventsItem},
 		{Pattern: "/venues", Handler: a.handleVenues},
 		{Pattern: "/ticket_types", Handler: a.handleTicketTypes},
 		{Pattern: "/tickets", Handler: a.handleTickets},
@@ -271,6 +273,9 @@ func now() string { return time.Now().UTC().Format(time.RFC3339) }
 // --- event storage ----------------------------------------------------------
 
 func createEvent(in map[string]any) (*Event, error) {
+	if err := validateEventInput(in, nil); err != nil {
+		return nil, err
+	}
 	title := strings.TrimSpace(argString(in, "title"))
 	if title == "" {
 		return nil, errors.New("title required")
@@ -300,8 +305,14 @@ func createEvent(in map[string]any) (*Event, error) {
 	return getEvent(id)
 }
 
-func getEvent(id int64) (*Event, error) {
-	row := db().QueryRow(`
+type rowQuerier interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+func getEvent(id int64) (*Event, error) { return getEventFrom(db(), id) }
+
+func getEventFrom(q rowQuerier, id int64) (*Event, error) {
+	row := q.QueryRow(`
 		SELECT e.id, e.project_id, e.title, e.slug, e.description, e.status, e.visibility, e.timezone,
 		       e.starts_at, e.ends_at, e.venue_id, e.capacity, e.external_checkout_url,
 		       (SELECT COUNT(*) FROM tickets t WHERE t.event_id=e.id AND t.status='active'),
@@ -350,6 +361,9 @@ func listEvents(status string, limit int64) ([]Event, error) {
 func updateEvent(id int64, in map[string]any) (*Event, error) {
 	current, err := getEvent(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateEventInput(in, current); err != nil {
 		return nil, err
 	}
 	if v, ok := in["title"]; ok {
@@ -467,6 +481,9 @@ func listVenues() ([]Venue, error) {
 }
 
 func createTicketType(in map[string]any) (*TicketType, error) {
+	if err := validateTicketTypeInput(in); err != nil {
+		return nil, err
+	}
 	eventID := argInt(in, "event_id")
 	if eventID == 0 {
 		return nil, errors.New("event_id required")
@@ -549,35 +566,77 @@ func issueTickets(in issueTicketsInput) ([]Ticket, error) {
 	if in.Source == "" {
 		in.Source = "manual"
 	}
-	event, err := getEvent(in.EventID)
-	if err != nil {
+	if err := validateBuyer(in.BuyerName, in.BuyerEmail); err != nil {
 		return nil, err
-	}
-	var price int64
-	var currency = "USD"
-	var tt any
-	if in.TicketTypeID > 0 {
-		t, err := getTicketType(in.TicketTypeID)
-		if err != nil {
-			return nil, err
-		}
-		price = t.PriceCents
-		currency = t.Currency
-		tt = in.TicketTypeID
-		var sold int64
-		_ = db().QueryRow(`SELECT COUNT(*) FROM tickets WHERE ticket_type_id=? AND status='active'`, in.TicketTypeID).Scan(&sold)
-		if t.Capacity > 0 && sold+in.Quantity > t.Capacity {
-			return nil, fmt.Errorf("ticket type capacity exceeded: %d sold, %d capacity", sold, t.Capacity)
-		}
-	}
-	if event.Capacity > 0 && event.TicketCount+in.Quantity > event.Capacity {
-		return nil, fmt.Errorf("event capacity exceeded: %d sold, %d capacity", event.TicketCount, event.Capacity)
 	}
 	tx, err := db().Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	// Acquire SQLite's writer lock before reading inventory. All availability
+	// checks and inserts use this transaction, including across app processes.
+	if _, err := tx.Exec(`UPDATE events SET id=id WHERE id=? AND project_id=?`, in.EventID, projectID()); err != nil {
+		return nil, err
+	}
+	event, err := getEventFrom(tx, in.EventID)
+	if err != nil {
+		return nil, err
+	}
+	if event.Status == "closed" || event.Status == "archived" {
+		return nil, errors.New("event is closed")
+	}
+	if in.Source == "public" {
+		if event.Status != "published" || event.Visibility != "public" {
+			return nil, errors.New("event is not open for public registration")
+		}
+		if event.ExternalCheckoutURL != "" {
+			return nil, errors.New("register using this event's external checkout")
+		}
+	}
+	var price int64
+	var currency = "USD"
+	var tt any
+	if in.TicketTypeID > 0 {
+		t := &TicketType{}
+		err := tx.QueryRow(`SELECT event_id, price_cents, currency, capacity, status, sales_start_at, sales_end_at FROM ticket_types WHERE id=?`, in.TicketTypeID).Scan(&t.EventID, &t.PriceCents, &t.Currency, &t.Capacity, &t.Status, &t.SalesStartAt, &t.SalesEndAt)
+		if err != nil {
+			return nil, err
+		}
+		if t.EventID != in.EventID {
+			return nil, errors.New("ticket type belongs to another event")
+		}
+		if err := ticketTypeAvailable(*t, time.Now()); err != nil {
+			return nil, err
+		}
+		if t.PriceCents < 0 {
+			return nil, errors.New("invalid ticket price")
+		}
+		if in.Source == "public" && t.PriceCents != 0 {
+			return nil, errors.New("paid tickets require external checkout")
+		}
+		price = t.PriceCents
+		currency = t.Currency
+		tt = in.TicketTypeID
+		var sold int64
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM tickets WHERE ticket_type_id=? AND status='active'`, in.TicketTypeID).Scan(&sold); err != nil {
+			return nil, err
+		}
+		if t.Capacity > 0 && sold+in.Quantity > t.Capacity {
+			return nil, fmt.Errorf("ticket type capacity exceeded: %d sold, %d capacity", sold, t.Capacity)
+		}
+	} else {
+		var types int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM ticket_types WHERE event_id=?`, in.EventID).Scan(&types); err != nil {
+			return nil, err
+		}
+		if types > 0 {
+			return nil, errors.New("select a ticket type")
+		}
+	}
+	if event.Capacity > 0 && event.TicketCount+in.Quantity > event.Capacity {
+		return nil, fmt.Errorf("event capacity exceeded: %d sold, %d capacity", event.TicketCount, event.Capacity)
+	}
 	res, err := tx.Exec(`INSERT INTO orders (event_id, buyer_name, buyer_email, status, total_cents, currency, source, updated_at) VALUES (?, ?, ?, 'confirmed', ?, ?, ?, ?)`,
 		in.EventID, in.BuyerName, in.BuyerEmail, price*in.Quantity, currency, in.Source, now())
 	if err != nil {
@@ -638,11 +697,15 @@ func checkInTicket(id int64, code string) (*Ticket, error) {
 	if _, err := getEvent(eventID); err != nil {
 		return nil, err
 	}
-	_, err := db().Exec(`UPDATE tickets SET checkin_status='checked_in', checked_in_at=?, updated_at=? WHERE `+where, now(), now(), arg)
+	_, err := db().Exec(`UPDATE tickets SET checkin_status='checked_in', checked_in_at=?, updated_at=? WHERE status='active' AND checkin_status='not_checked_in' AND `+where, now(), now(), arg)
 	if err != nil {
 		return nil, err
 	}
-	return getTicketBy(where, arg)
+	ticket, err := getTicketBy(where, arg)
+	if err == nil && ticket.Status != "active" {
+		return nil, errors.New("only active tickets can be checked in")
+	}
+	return ticket, err
 }
 
 func getTicketBy(where string, arg any) (*Ticket, error) {
@@ -906,7 +969,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleEventsItem(w http.ResponseWriter, r *http.Request) {
-	id, _ := parseIDAction(r.URL.Path, "/events/")
+	id, _ := parseIDAction(r.URL.Path, "/shows/")
 	switch r.Method {
 	case http.MethodGet:
 		writeAppResult(w, resultOf(getEvent(id)))
@@ -1025,44 +1088,6 @@ func (a *App) handleSlots(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
-	}
-}
-
-func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
-	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/public/"), "/")
-	parts := strings.Split(rest, "/")
-	if len(parts) == 0 || parts[0] == "" {
-		http.NotFound(w, r)
-		return
-	}
-	event, err := getPublicEvent(parts[0])
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	if len(parts) == 1 && r.Method == http.MethodGet {
-		types, _ := listTicketTypes(event.ID)
-		slots, _ := listSlots(event.ID)
-		writeJSON(w, map[string]any{"event": event, "ticket_types": types, "schedule": slots})
-		return
-	}
-	var in map[string]any
-	if !decodeJSON(w, r, &in) {
-		return
-	}
-	in["event_id"] = event.ID
-	switch {
-	case len(parts) == 2 && parts[1] == "apply" && r.Method == http.MethodPost:
-		writeAppResult(w, resultOf(submitApplication(in)))
-	case len(parts) == 2 && parts[1] == "register" && r.Method == http.MethodPost:
-		issue := issueTicketsInput{
-			EventID: event.ID, BuyerName: argString(in, "buyer_name"), BuyerEmail: argString(in, "buyer_email"),
-			AttendeeName: argString(in, "attendee_name"), AttendeeEmail: argString(in, "attendee_email"),
-			TicketTypeID: argInt(in, "ticket_type_id"), Quantity: argInt(in, "quantity"), Source: "public",
-		}
-		writeAppResult(w, resultOf(issueTickets(issue)))
-	default:
-		http.NotFound(w, r)
 	}
 }
 
