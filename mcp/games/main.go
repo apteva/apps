@@ -1,4 +1,4 @@
-// Games v0.2 — players and progression.
+// Games v0.3 — game studio, players and progression.
 //
 // The Games app is the game-domain layer of Apteva: the pieces a studio
 // would otherwise get from PlayFab, Nakama, or Unity Gaming Services,
@@ -63,6 +63,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := initializeGames(ctx); err != nil {
 		return err
 	}
+	if err := initializeStudio(ctx); err != nil {
+		return err
+	}
 	globalCtx = ctx
 	ctx.Logger().Info("games mounted", "scope_project_id", envProject())
 	return nil
@@ -77,7 +80,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // when no player writes a score. Reads and writes also roll over
 // lazily, so the worker is about timeliness, not correctness.
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "event-delivery", Schedule: "@every 1s", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return drainOutbox(ctx) }}, {
+	return []sdk.Worker{{Name: "metric-sync", Schedule: "@every 5m", Run: studioMetricsWorker}, {Name: "event-delivery", Schedule: "@every 1s", Run: func(_ context.Context, ctx *sdk.AppCtx) error { return drainOutbox(ctx) }}, {
 		Name:     "leaderboard-rollover",
 		Schedule: "@every 1m",
 		Run: func(_ context.Context, app *sdk.AppCtx) error {
@@ -165,6 +168,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		routes = append(routes, sdk.Route{Method: spec.method, Pattern: spec.path, Handler: a.handleGames})
 	}
 	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/admin/games/{game_id}/login-ticket", Handler: a.handleLoginTicket})
+	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/v2/games/{game_id}/events", Handler: a.handleTelemetry, NoAuth: true})
+	for _, method := range []string{"GET", "POST"} {
+		routes = append(routes, sdk.Route{Method: method, Pattern: "/admin/games/{game_id}/studio/{action}", Handler: a.handleStudio})
+	}
+	for _, method := range []string{"GET", "POST"} {
+		routes = append(routes, sdk.Route{Method: method, Pattern: "/admin/studio/{action}", Handler: a.handleStudio})
+	}
 	return routes
 }
 

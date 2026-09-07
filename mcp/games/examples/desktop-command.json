@@ -1,0 +1,13 @@
+{
+  "target_kind": "artifact",
+  "framework": "command",
+  "source_kind": "code",
+  "build_cmd": "sh ci/build-desktop.sh",
+  "target_config": {
+    "pipeline": {
+      "prepare": [{"name": "prepare", "command": ["sh", "ci/prepare.sh"], "timeout_seconds": 1800}],
+      "outputs": ["game"],
+      "tests": [{"name": "smoke", "command": ["./game", "--self-test"], "timeout_seconds": 120}]
+    }
+  }
+}

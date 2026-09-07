@@ -775,5 +775,6 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	out = append(out, sdk.Tool{Name: "games_login_ticket", Description: "Issue a one-time custom login ticket after the trusted server has authenticated the external player.", InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}, "custom_id": map[string]any{"type": "string"}}, []string{"game_id", "custom_id"}), Handler: createLoginTicket})
 	out = append(out, sdk.Tool{Name: "games_events_retry", Description: "Retry failed event deliveries for one game.", InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}}, []string{"game_id"}), Handler: retryGameEvents})
-	return append(out, gameTools()...)
+	out = append(out, gameTools()...)
+	return append(out, studioTools()...)
 }

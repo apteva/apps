@@ -2,17 +2,19 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.2.0
+version: 0.3.0
 description: |
   Multi-game backend for Apteva: independent games, players, cloud saves,
   transactional statistics, leaderboards and achievements within each project.
+  Links Code source and Deploy releases to each game, imports reporting from
+  AdMob, GA4 and Apple sales, and provides bounded gameplay telemetry.
   Game-specific Auth clients and login tickets protect player APIs. Legacy
   clients remain bound to their migrated game. Agents use scoped MCP tools.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/games
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [games, players, progression, leaderboards, liveops, backend]
+tags: [games, players, progression, leaderboards, liveops, backend, delivery, analytics]
 
 scopes: [project]
 min_apteva_version: "0.14.1"
@@ -21,13 +23,44 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.connections.execute
   apps:
     - name: auth
       version: ">=0.10.0"
       reason: Owns accounts, game-specific sessions, organizations and signing keys.
     - name: analytics
       optional: true
-      reason: Records session_start, stat, and achievement events for retention queries. Without it, telemetry is skipped.
+      reason: Stores game telemetry and imported provider reports. Unconfigured delivery waits without exhausting retries.
+    - name: code
+      version: ">=0.10.0"
+      optional: true
+      reason: Owns repositories and immutable source snapshots for game builds.
+    - name: deploy
+      version: ">=0.26.0"
+      optional: true
+      reason: Owns command pipelines, artifacts, store releases and release policies.
+  integrations:
+    - role: code
+      kind: app
+      required: false
+      compatible_app_names: [code]
+      label: Game source
+    - role: deploy
+      kind: app
+      required: false
+      compatible_app_names: [deploy]
+      label: Game delivery
+    - role: analytics
+      kind: app
+      required: false
+      compatible_app_names: [analytics]
+      label: Game reporting
+    - role: reporting
+      kind: integration
+      mode: multiple
+      required: false
+      compatible_slugs: [admob, google-analytics, app-store-connect]
+      label: Reporting providers
 
 provides:
   http_routes:
@@ -37,6 +70,52 @@ provides:
       no_auth: true
     - prefix: /admin/
   mcp_tools:
+    - name: games_halt
+      description: Halt an Android rollout or expire a TestFlight build through Deploy.
+    - name: games_rollout
+      description: Change an Android rollout fraction through Deploy policy.
+    - name: games_logs
+      description: Read recent logs for a linked build or release.
+    - name: games_source_set
+      description: Link an existing Code repository to this game.
+    - name: games_sources_list
+      description: List this game's source links.
+    - name: games_target_set
+      description: Link an existing Deploy environment to the game's source.
+    - name: games_targets_list
+      description: List this game's platform targets.
+    - name: games_release_plan
+      description: Read target configuration, build evidence and store readiness.
+    - name: games_build
+      description: Request a build once using request_key; unknown results require reconciliation.
+    - name: games_release
+      description: Publish an exact build through Deploy policy; channel and request_key required.
+    - name: games_promote
+      description: Promote an exact release through Deploy policy.
+    - name: games_release_status
+      description: Read builds, releases and availability for a linked target.
+    - name: games_release_sync
+      description: Refresh provider observations for an exact linked release.
+    - name: games_delivery_history
+      description: Page through game delivery requests.
+    - name: games_delivery_reconcile
+      description: Resolve an ambiguous request with a verified ID and confirm=true.
+    - name: games_store_get
+      description: Read canonical Deploy store metadata.
+    - name: games_store_update
+      description: Explicitly update canonical Deploy store metadata.
+    - name: games_metric_source_set
+      description: Connect an authorized reporting source to this game.
+    - name: games_metric_sources
+      description: Read reporting sources and refresh status.
+    - name: games_metrics_sync
+      description: Import up to 31 days with deduplication.
+    - name: games_metrics_query
+      description: Query Analytics with enforced game scope.
+    - name: games_studio_discover
+      description: Discover bound repositories, deployments or provider inventory.
+    - name: games_portfolio
+      description: Read a paginated portfolio without calling external providers.
     - name: games_login_ticket
       description: Issue a one-time custom login ticket after the trusted server authenticates the external player.
     - name: games_events_retry
@@ -106,12 +185,14 @@ provides:
       entry: /ui/GamesPanel.mjs
   skills:
     - name: games
-      description: Use Games tools for players, bans, player data, statistics, leaderboards, and achievements. Activate when the user asks about players, scores, rankings, saves, or a game's backend.
+      description: Game catalogs, source links, deployments, metrics, players, saves and progression.
       body_file: skills/games/SKILL.md
       metadata:
         category: games
         agent_plugins: "1.0.0"
   workers:
+    - name: metric-sync
+      schedule: "@every 5m"
     - name: event-delivery
       schedule: "@every 1s"
     - name: leaderboard-rollover

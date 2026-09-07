@@ -1,0 +1,12 @@
+{
+  "target_kind": "ios",
+  "framework": "ios",
+  "source_kind": "code",
+  "target_config": {
+    "pipeline": {
+      "os": "darwin",
+      "prepare": [{"name": "export", "command": ["sh", "ci/export-ios.sh"], "outputs": ["generated/ios"], "timeout_seconds": 3600}],
+      "build_directory": "generated/ios"
+    }
+  }
+}

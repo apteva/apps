@@ -84,8 +84,19 @@ func drainOutbox(ctx *sdk.AppCtx, delivery ...EventDelivery) error {
 		}
 		payload["event_id"] = it.id
 		if it.analytics {
-			var out any
-			err = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", map[string]any{"_project_id": it.p, "event": it.topic, "app": "games", "user_id": fmt.Sprintf("game:%s:player:%v", it.g, payload["player_id"]), "props": payload}, &out)
+			// An absent optional dependency is not a failed delivery attempt.
+			if _, unavailable := studioBinding(ctx, "analytics"); unavailable != nil {
+				_, e := ctx.AppDB().Exec(`UPDATE game_outbox SET last_error='Analytics is not connected',next_attempt=? WHERE id=?`, time.Now().Add(5*time.Minute).UTC().Format(time.RFC3339), it.id)
+				if e != nil {
+					return e
+				}
+				continue
+			}
+			var out map[string]any
+			err = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", analyticsEventInput(ctx, it.id, GameScope{it.p, it.g}, it.topic, payload), &out)
+			if err == nil && (out["reject"] == true || out["rejected"] == true || out["valid"] == false) {
+				err = errors.New("Analytics rejected event")
+			}
 		} else {
 			if len(delivery) > 0 {
 				err = delivery[0](GameScope{it.p, it.g}, it.topic, payload)
@@ -168,6 +179,7 @@ func maintainGames(ctx *sdk.AppCtx, project string, now time.Time) error {
 		days int
 	}{
 		{`DELETE FROM game_operations WHERE project_id=? AND created_at<?`, 7},
+		{`DELETE FROM game_telemetry_receipts WHERE project_id=? AND created_at<?`, 8},
 
 		{`DELETE FROM player_audit WHERE project_id=? AND occurred_at<?`, configDays(ctx, "audit_retention_days")},
 		{`DELETE FROM leaderboard_entries WHERE project_id=? AND updated_at<? AND NOT EXISTS(SELECT 1 FROM leaderboards b WHERE b.id=leaderboard_entries.leaderboard_id AND b.current_period=leaderboard_entries.period)`, configDays(ctx, "history_retention_days")},

@@ -4,7 +4,7 @@ description: Use Games tools for players, bans, player data, statistics, leaderb
 compatibility: Requires the Games MCP tools supplied by an Apteva app installation, with the Auth app installed alongside.
 metadata:
   author: apteva
-  version: "2.0"
+  version: "3.0"
 ---
 
 # Games
@@ -66,3 +66,33 @@ and `achievement.unlocked` on the AppBus. Subscribe to react to
 milestones or moderation changes instead of polling. Filter by `game_id` and
 deduplicate `event_id` per installation. Delivery is at least once; inspect
 `games_get` for failed delivery counts and use `games_events_retry` after repair.
+
+## Source, delivery and reporting
+
+Use `games_sources_list` and `games_targets_list` to discover links for the chosen
+game. `games_studio_discover` lists authorized Code repositories, Deploy targets
+or reporting inventories; never guess repository, deployment or provider IDs.
+Use `games_source_set` and `games_target_set` to attach existing resources.
+
+Before a build or release, inspect `games_release_plan`. Keep engine commands,
+signing, publisher accounts and release policy in Deploy. `games_build`,
+`games_release` and `games_promote` require a unique request key; retain and reuse
+it only for a retry of the same request. An unknown/dispatching result is not an
+invitation to create a new request. Inspect its downstream outcome and reconcile
+with the exact verified build/release ID. Use `resolution: not_created` only after
+verifying that no operation was created, with explicit confirmation and notes.
+
+Approval remains with the authorized Deploy caller. Do not invent or forward an
+approver identity in Games arguments. Publication is not proof of availability;
+report Deploy's observation state without promoting an unknown result to live.
+
+Use `games_metric_source_set` for authorized AdMob, GA4 or Apple sales sources.
+`games_metrics_sync` is bounded to 31 completed provider-local dates and upserts
+reports; `games_metrics_query` always enforces game scope. Show missing/delayed
+reports as unavailable, not zero. Preserve report currencies and estimated versus
+sales-proceeds bases. Network and mediation totals overlap; daily active users
+cannot be summed into monthly unique users. Connecting AdMob does not authorize
+adding an advertising SDK or changing a paid game's monetization.
+
+`games_portfolio` reads cached release summaries with timestamps and does not
+contact providers. Use `games_release_status` for a current Deploy view.

@@ -8,6 +8,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { StudioPanel, Portfolio } from "./StudioViews";
+
 const API = "/api/apps/games";
 
 function apiUrl(path: string, projectId: string): string {
@@ -267,7 +269,15 @@ function Pill({
 
 // ─── panel ───────────────────────────────────────────────────────────
 
-type Tab = "players" | "leaderboards" | "definitions" | "settings";
+type Tab =
+  | "players"
+  | "leaderboards"
+  | "definitions"
+  | "settings"
+  | "source"
+  | "releases"
+  | "store"
+  | "metrics";
 
 interface Game {
   description: string;
@@ -291,6 +301,7 @@ function GameCatalog({ projectId }: { projectId: string }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [portfolio, setPortfolio] = useState(false);
   const load = useCallback(async () => {
     try {
       const out = await apiRequest<{ games: Game[] }>(
@@ -345,6 +356,10 @@ function GameCatalog({ projectId }: { projectId: string }) {
     <div className="p-4 overflow-auto h-full space-y-4 text-sm">
       <div>
         <h2 className="text-lg font-medium">Games</h2>
+        <button className={quietBtn} onClick={() => setPortfolio(!portfolio)}>
+          {portfolio ? "Hide portfolio" : "Show portfolio"}
+        </button>
+        {portfolio && <Portfolio projectId={projectId} />}
         <p className="text-text-muted text-xs">
           Each game has its own players, saves, progression and login
           configuration.
@@ -537,6 +552,10 @@ function GamesWorkspace({
   );
 
   const tabs: { key: Tab; label: string }[] = [
+    { key: "source", label: "Source" },
+    { key: "releases", label: "Releases" },
+    { key: "store", label: "Store listing" },
+    { key: "metrics", label: "Metrics" },
     { key: "players", label: "Players" },
     { key: "leaderboards", label: "Leaderboards" },
     { key: "definitions", label: "Definitions" },
@@ -588,6 +607,14 @@ function GamesWorkspace({
         </div>
       </header>
       <div className="flex-1 min-h-0 overflow-hidden">
+        {["source", "releases", "store", "metrics"].includes(tab) && (
+          <StudioPanel
+            key={gameId + tab}
+            projectId={projectId}
+            gameId={gameId}
+            view={tab as "source" | "releases" | "store" | "metrics"}
+          />
+        )}
         {tab === "players" && (
           <PlayersTab
             gameName={gameName}

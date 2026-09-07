@@ -1,8 +1,8 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "games",
-  "version": "0.2.0",
-  "description": "Multi-game tools and operating guidance for game catalogs, players, cloud saves, moderation, statistics, leaderboards, and achievements.",
+  "version": "0.3.0",
+  "description": "Multi-game backend and studio tools for game catalogs, players, progression, Code source links, Deploy releases, provider reporting, and gameplay telemetry.",
   "author": {
     "name": "Apteva",
     "url": "https://apteva.com"
@@ -13,7 +13,9 @@
     "games",
     "players",
     "leaderboards",
-    "progression"
+    "progression",
+    "delivery",
+    "analytics"
   ],
   "extensions": {
     "com.apteva": {

@@ -232,6 +232,9 @@ func newFixture(t *testing.T) *fixture {
 	if err := initializeGames(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if err := initializeStudio(ctx); err != nil {
+		t.Fatal(err)
+	}
 	resetJWKSCache()
 	globalCtx = ctx
 	t.Cleanup(func() { globalCtx = nil; resetJWKSCache() })
@@ -1079,4 +1082,8 @@ func resignClaims(priv ed25519.PrivateKey, token string, changes map[string]any)
 	b, _ := json.Marshal(claims)
 	input := parts[0] + "." + base64.RawURLEncoding.EncodeToString(b)
 	return input + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(priv, []byte(input)))
+}
+
+func (f *fakeAuth) WhoAmI() (*sdk.InstallIdentity, error) {
+	return &sdk.InstallIdentity{InstallID: 1, ProjectID: "test-proj", Bindings: map[string]any{"analytics": int64(3)}}, nil
 }

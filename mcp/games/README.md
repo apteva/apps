@@ -1,9 +1,16 @@
-# Games v0.2
+# Games v0.3
 
 A game backend for Apteva with multiple independent games per project: players,
 cloud saves, statistics, leaderboards, achievements, and moderation. Identity and
 sessions come from the Auth app. The dashboard opens with a game catalog; every
 workspace shows the selected game and keeps its data separate.
+
+## Studio workspace
+
+Source links, Deploy release controls, portfolio status, gameplay telemetry and
+AdMob/GA4/Apple sales reporting are described in [STUDIO.md](STUDIO.md).
+Code 0.10.0 and Deploy 0.26.0 provide the build/publishing foundation. No engine
+or store publisher implementation is duplicated in Games.
 
 ## Games and isolation
 

@@ -1,0 +1,11 @@
+{
+  "target_kind": "android",
+  "framework": "android",
+  "source_kind": "code",
+  "target_config": {
+    "pipeline": {
+      "prepare": [{"name": "export", "command": ["sh", "ci/export-android.sh"], "outputs": ["generated/android"], "timeout_seconds": 3600}],
+      "build_directory": "generated/android"
+    }
+  }
+}
