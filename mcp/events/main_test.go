@@ -31,6 +31,13 @@ func setupEvents(t *testing.T) {
 	if _, err = database.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
+	extra, err := os.ReadFile("migrations/002_artist_workflow.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Exec(string(extra)); err != nil {
+		t.Fatal(err)
+	}
 	manifest := (&App{}).Manifest()
 	globalCtx = sdk.NewAppCtxForTest(&manifest, database, sdk.Config{}, nil, nil)
 	t.Cleanup(func() { database.Close(); globalCtx = nil })
@@ -215,6 +222,9 @@ func TestPublicPageFormsAndSafeJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := saveSettings(e.ID, map[string]any{"applications_open": true, "lineup_published": true}); err != nil {
+		t.Fatal(err)
+	}
 	w := publicRequest("GET", "/public/friday", "")
 	if w.Code != 200 || !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("page: %d %s", w.Code, w.Body.String())
@@ -332,7 +342,7 @@ func TestManifestPublicRouteAndVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []sdk.Manifest{*manifest, (&App{}).Manifest()} {
-		if m.Version != "0.2.0" {
+		if m.Version != "0.3.0-local.1" {
 			t.Fatalf("version mismatch: %s", m.Version)
 		}
 		public := false

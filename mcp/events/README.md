@@ -84,3 +84,22 @@ To run against a disposable local database:
 DB_PATH=/tmp/events-preview.db APTEVA_APP_PORT=18197 \
   APTEVA_PROJECT_ID=preview ./events
 ```
+
+## Local artist workflow development
+
+The `0.3.0-local.1` worktree adds migration `002_artist_workflow.sql` and a self-contained native binary with embedded UI/migrations. It is a local development build, not a published release. Existing source delivery references must be updated as part of a future release.
+
+New HTTP operations (authenticated unless under `/public/`):
+
+- `GET /public/`: upcoming published/closed public shows; cancelled links remain readable.
+- `GET /shows/{id}/settings`, `PATCH /shows/{id}/settings`: application open flag, opening/deadline times (RFC3339), performer capacity, set minutes, performer instructions, email requirement, lineup publication, cancellation and cancellation reason.
+- `POST /shows/{id}/duplicate`: copy settings and event details into a new private draft, clearing dates, application windows and publication.
+- `GET /shows/{id}/export`: protected CSV of applications with spreadsheet formula escaping.
+- `GET /applications/{id}/photo?download=1`: protected photo download.
+- `PATCH /slots/{id}`, `DELETE /slots/{id}`: edit or remove a performance slot.
+- `POST /public/{slug}/apply`: accepts a name and at least one contact method (email, phone, Instagram), plus optional stage name, bio, technical notes, and consented JPEG/PNG photo as base64. Email is configurable per event.
+- `GET /public/{slug}/photos/{application_id}`: only consented photos from accepted applications with active slots on a published lineup.
+
+Applications use transactional per-event contact identity deduplication and receive a generic acknowledgement. Performer capacity limits the lineup, not application intake. Applications may stay open for waitlist consideration. Scheduling checks capacity, event ownership, duplicate slots and overlap in the same transaction as insertion and acceptance. Changing a decision away from accepted cancels that artist's active slots. Slugs are permanent after creation.
+
+The local photo store is private SQLite storage (2 MB maximum per image); production Storage-backed photo delivery and platform-user website authentication remain rollout work. The branded owner website uses these Events HTTP routes rather than a second event database.

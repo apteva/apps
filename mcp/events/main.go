@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: events
 display_name: Events
-version: 0.2.0
+version: 0.3.0-local.1
 description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
 author: Apteva
 icon: /ui/icon.svg
@@ -102,6 +102,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/applications", Handler: a.handleApplications},
 		{Pattern: "/applications/", Handler: a.handleApplicationsItem},
 		{Pattern: "/slots", Handler: a.handleSlots},
+		{Pattern: "/slots/", Handler: a.handleSlotItem},
 		{Pattern: "/public/", Handler: a.handlePublic, NoAuth: true},
 	}
 }
@@ -369,8 +370,8 @@ func updateEvent(id int64, in map[string]any) (*Event, error) {
 	if v, ok := in["title"]; ok {
 		current.Title = strings.TrimSpace(fmt.Sprint(v))
 	}
-	if v, ok := in["slug"]; ok {
-		current.Slug = slugify(fmt.Sprint(v))
+	if v, ok := in["slug"]; ok && slugify(fmt.Sprint(v)) != current.Slug {
+		return nil, errors.New("event links are permanent; duplicate the event for a new link")
 	}
 	if v, ok := in["description"]; ok {
 		current.Description = fmt.Sprint(v)
@@ -594,6 +595,13 @@ func issueTickets(in issueTicketsInput) ([]Ticket, error) {
 			return nil, errors.New("register using this event's external checkout")
 		}
 	}
+	settings, err := settingsFrom(tx, event.ID)
+	if err != nil {
+		return nil, err
+	}
+	if settings.Cancelled {
+		return nil, errors.New("event is cancelled")
+	}
 	var price int64
 	var currency = "USD"
 	var tt any
@@ -747,8 +755,16 @@ func submitApplication(in map[string]any) (*Application, error) {
 	if eventID == 0 || strings.TrimSpace(argString(in, "applicant_name")) == "" || strings.TrimSpace(argString(in, "email")) == "" {
 		return nil, errors.New("event_id, applicant_name and email required")
 	}
-	if _, err := getEvent(eventID); err != nil {
+	event, err := getEvent(eventID)
+	if err != nil {
 		return nil, err
+	}
+	settings, err := settingsFrom(db(), eventID)
+	if err != nil {
+		return nil, err
+	}
+	if settings.Cancelled || event.Status == "closed" || event.Status == "archived" {
+		return nil, errors.New("event is closed")
 	}
 	social := jsonString(in["social_links"], "{}")
 	availability := jsonString(in["availability"], "{}")
@@ -765,14 +781,15 @@ func submitApplication(in map[string]any) (*Application, error) {
 	return getApplication(id)
 }
 
-func getApplication(id int64) (*Application, error) {
+func getApplication(id int64) (*Application, error) { return getApplicationFrom(db(), id) }
+func getApplicationFrom(q rowQuerier, id int64) (*Application, error) {
 	var a Application
-	err := db().QueryRow(`SELECT id, event_id, applicant_name, stage_name, email, phone, bio, set_length_minutes, video_url, social_links_json, availability_json, tech_needs, notes, status, score, reviewer_notes, submitted_at, decided_at, created_at, updated_at FROM performer_applications WHERE id=?`, id).
+	err := q.QueryRow(`SELECT id, event_id, applicant_name, stage_name, email, phone, bio, set_length_minutes, video_url, social_links_json, availability_json, tech_needs, notes, status, score, reviewer_notes, submitted_at, decided_at, created_at, updated_at FROM performer_applications WHERE id=?`, id).
 		Scan(&a.ID, &a.EventID, &a.ApplicantName, &a.StageName, &a.Email, &a.Phone, &a.Bio, &a.SetLengthMinutes, &a.VideoURL, &a.SocialLinksJSON, &a.AvailabilityJSON, &a.TechNeeds, &a.Notes, &a.Status, &a.Score, &a.ReviewerNotes, &a.SubmittedAt, &a.DecidedAt, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := getEvent(a.EventID); err != nil {
+	if _, err := getEventFrom(q, a.EventID); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -819,6 +836,11 @@ func reviewApplication(id int64, in map[string]any) (*Application, error) {
 	decided := app.DecidedAt
 	if v, ok := in["status"]; ok {
 		status = strings.TrimSpace(fmt.Sprint(v))
+		switch status {
+		case "submitted", "shortlisted", "accepted", "rejected", "withdrawn":
+		default:
+			return nil, errors.New("invalid application decision")
+		}
 		if status == "accepted" || status == "rejected" {
 			decided = now()
 		}
@@ -829,9 +851,22 @@ func reviewApplication(id int64, in map[string]any) (*Application, error) {
 	if v, ok := in["reviewer_notes"]; ok {
 		notes = fmt.Sprint(v)
 	}
-	_, err = db().Exec(`UPDATE performer_applications SET status=?, score=?, reviewer_notes=?, decided_at=?, updated_at=? WHERE id=?`,
+	tx, err := db().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE performer_applications SET status=?, score=?, reviewer_notes=?, decided_at=?, updated_at=? WHERE id=?`,
 		status, score, notes, decided, now(), id)
 	if err != nil {
+		return nil, err
+	}
+	if status != "accepted" {
+		if _, err = tx.Exec(`UPDATE performance_slots SET status='cancelled',updated_at=? WHERE application_id=? AND status='scheduled'`, now(), id); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return getApplication(id)
@@ -842,57 +877,91 @@ func scheduleApplication(in map[string]any) (*Slot, error) {
 	if err != nil {
 		return nil, err
 	}
-	if app.Status != "accepted" {
-		if _, err := reviewApplication(app.ID, map[string]any{"status": "accepted"}); err != nil {
-			return nil, err
-		}
-	}
-	name := strings.TrimSpace(app.StageName)
-	if name == "" {
-		name = app.ApplicantName
-	}
-	slotIn := map[string]any{
-		"event_id":       app.EventID,
-		"application_id": app.ID,
-		"performer_name": name,
-		"title":          argString(in, "title"),
-		"starts_at":      argString(in, "starts_at"),
-		"ends_at":        argString(in, "ends_at"),
-		"notes":          argString(in, "notes"),
-	}
-	if venue := argInt(in, "venue_id"); venue > 0 {
-		slotIn["venue_id"] = venue
-	}
-	return createSlot(slotIn)
+	in["event_id"] = app.EventID
+	in["performer_name"] = defaultString(app.StageName, app.ApplicantName)
+	return saveNewSlot(in, true)
 }
-
-func createSlot(in map[string]any) (*Slot, error) {
-	eventID := argInt(in, "event_id")
-	if eventID == 0 {
-		return nil, errors.New("event_id required")
-	}
-	if _, err := getEvent(eventID); err != nil {
+func createSlot(in map[string]any) (*Slot, error) { return saveNewSlot(in, false) }
+func saveNewSlot(in map[string]any, accept bool) (*Slot, error) {
+	tx, err := db().Begin()
+	if err != nil {
 		return nil, err
 	}
-	name := strings.TrimSpace(argString(in, "performer_name"))
+	defer tx.Rollback()
+	eventID := argInt(in, "event_id")
+	if _, err = tx.Exec(`UPDATE events SET id=id WHERE id=? AND project_id=?`, eventID, projectID()); err != nil {
+		return nil, err
+	}
+	e, err := getEventFrom(tx, eventID)
+	if err != nil {
+		return nil, err
+	}
+	settings, err := settingsFrom(tx, e.ID)
+	if err != nil {
+		return nil, err
+	}
+	if settings.Cancelled || e.Status == "closed" || e.Status == "archived" {
+		return nil, errors.New("event is closed")
+	}
+	if err := validateSlotTimesFrom(tx, e, argString(in, "starts_at"), argString(in, "ends_at"), 0); err != nil {
+		return nil, err
+	}
+	name := argString(in, "performer_name")
 	if name == "" {
 		return nil, errors.New("performer_name required")
 	}
-	var venue, app any
+	var venue, appID any
 	if id := argInt(in, "venue_id"); id > 0 {
+		var n int
+		err := tx.QueryRow(`SELECT COUNT(*) FROM venues WHERE id=? AND project_id=?`, id, projectID()).Scan(&n)
+		if err != nil {
+			return nil, err
+		}
+		if n != 1 {
+			return nil, errors.New("venue not found")
+		}
 		venue = id
 	}
 	if id := argInt(in, "application_id"); id > 0 {
-		app = id
+		app, err := getApplicationFrom(tx, id)
+		if err != nil {
+			return nil, err
+		}
+		if app.EventID != e.ID {
+			return nil, errors.New("application belongs to another event")
+		}
+		var n int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM performance_slots WHERE application_id=? AND status='scheduled'`, id).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			return nil, errors.New("artist is already in the lineup")
+		}
+		appID = id
 	}
-	res, err := db().Exec(`
-		INSERT INTO performance_slots (event_id, venue_id, application_id, performer_name, title, starts_at, ends_at, notes, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		eventID, venue, app, name, argString(in, "title"), argString(in, "starts_at"), argString(in, "ends_at"), argString(in, "notes"), now())
+	if settings.PerformerCapacity > 0 {
+		var n int64
+		err := tx.QueryRow(`SELECT COUNT(*) FROM performance_slots WHERE event_id=? AND status='scheduled'`, e.ID).Scan(&n)
+		if err != nil {
+			return nil, err
+		}
+		if n >= settings.PerformerCapacity {
+			return nil, errors.New("all performer spots are filled")
+		}
+	}
+	res, err := tx.Exec(`INSERT INTO performance_slots(event_id,venue_id,application_id,performer_name,title,starts_at,ends_at,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, eventID, venue, appID, name, argString(in, "title"), argString(in, "starts_at"), argString(in, "ends_at"), argString(in, "notes"), now())
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if accept {
+		if _, err = tx.Exec(`UPDATE performer_applications SET status='accepted',decided_at=?,updated_at=? WHERE id=?`, now(), now(), appID); err != nil {
+			return nil, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
 	return getSlot(id)
 }
 
@@ -969,6 +1038,9 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleEventsItem(w http.ResponseWriter, r *http.Request) {
+	if a.handleWorkflow(w, r) {
+		return
+	}
 	id, _ := parseIDAction(r.URL.Path, "/shows/")
 	switch r.Method {
 	case http.MethodGet:
@@ -1056,6 +1128,10 @@ func (a *App) handleApplications(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleApplicationsItem(w http.ResponseWriter, r *http.Request) {
 	id, action := parseIDAction(r.URL.Path, "/applications/")
+	if action == "photo" && r.Method == "GET" {
+		serveApplicationPhoto(w, r, id)
+		return
+	}
 	switch {
 	case r.Method == http.MethodPatch || r.Method == http.MethodPut:
 		var in map[string]any
@@ -1099,7 +1175,7 @@ func getPublicEvent(slug string) (*Event, error) {
 		       (SELECT COUNT(*) FROM performer_applications a WHERE a.event_id=e.id),
 		       (SELECT COUNT(*) FROM performance_slots s WHERE s.event_id=e.id),
 		       e.created_at, e.updated_at
-		FROM events e WHERE e.slug = ? AND e.project_id = ? AND e.status='published' AND e.visibility='public'`,
+		FROM events e WHERE e.slug = ? AND e.project_id = ? AND e.status IN ('published','closed') AND e.visibility='public'`,
 		slug, projectID())
 	return scanEvent(row)
 }
@@ -1289,5 +1365,10 @@ func newCode() (string, error) {
 }
 
 func main() {
+	cleanup, err := prepareAssets()
+	if err != nil {
+		panic(err)
+	}
+	defer cleanup()
 	sdk.Run(&App{})
 }

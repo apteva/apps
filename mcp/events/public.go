@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"html/template"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -36,6 +37,7 @@ type publicSlot struct {
 	Title         string `json:"title"`
 	StartsAt      string `json:"starts_at"`
 	EndsAt        string `json:"ends_at"`
+	PhotoURL      string `json:"photo_url,omitempty"`
 }
 type publicTicketType struct {
 	ID         int64  `json:"id"`
@@ -45,12 +47,16 @@ type publicTicketType struct {
 	Available  bool   `json:"available"`
 }
 type publicPage struct {
-	Event       publicEvent        `json:"event"`
-	Venue       *publicVenue       `json:"venue,omitempty"`
-	Schedule    []publicSlot       `json:"schedule"`
-	TicketTypes []publicTicketType `json:"ticket_types"`
-	CanRegister bool               `json:"can_register"`
-	When        string             `json:"-"`
+	Event              publicEvent        `json:"event"`
+	Venue              *publicVenue       `json:"venue,omitempty"`
+	Schedule           []publicSlot       `json:"schedule"`
+	TicketTypes        []publicTicketType `json:"ticket_types"`
+	CanRegister        bool               `json:"can_register"`
+	When               string             `json:"-"`
+	Settings           EventSettings      `json:"settings"`
+	Status             string             `json:"status"`
+	CanApply           bool               `json:"can_apply"`
+	ApplicationMessage string             `json:"application_message"`
 }
 
 func makePublicPage(event *Event) (*publicPage, error) {
@@ -71,6 +77,17 @@ func makePublicPage(event *Event) (*publicPage, error) {
 		Schedule: []publicSlot{}, TicketTypes: []publicTicketType{},
 		When: "Date to be announced",
 	}
+	settings, err := settingsFrom(db(), event.ID)
+	if err != nil {
+		return nil, err
+	}
+	page.Settings = settings
+	page.Status = event.Status
+	if settings.Cancelled {
+		page.Status = "cancelled"
+	}
+	page.ApplicationMessage = applicationClosed(event, settings)
+	page.CanApply = page.ApplicationMessage == ""
 	loc, err := time.LoadLocation(event.Timezone)
 	if err != nil {
 		loc = time.UTC
@@ -90,10 +107,21 @@ func makePublicPage(event *Event) (*publicPage, error) {
 		page.Venue = &publicVenue{venue.Name, venue.Address, venue.City, venue.Country}
 	}
 	for _, slot := range slots {
-		if slot.Status == "cancelled" {
+		if slot.Status == "cancelled" || !settings.LineupPublished || settings.Cancelled {
 			continue
 		}
-		page.Schedule = append(page.Schedule, publicSlot{slot.PerformerName, slot.Title, slot.StartsAt, slot.EndsAt})
+		photo := ""
+		if slot.ApplicationID != nil {
+			app, err := getApplication(*slot.ApplicationID)
+			if err != nil || app.Status != "accepted" {
+				continue
+			}
+			var consent int
+			if db().QueryRow(`SELECT consent FROM application_photos WHERE application_id=?`, app.ID).Scan(&consent) == nil && consent == 1 {
+				photo = "/public/" + event.Slug + "/photos/" + strconv.FormatInt(app.ID, 10)
+			}
+		}
+		page.Schedule = append(page.Schedule, publicSlot{slot.PerformerName, slot.Title, slot.StartsAt, slot.EndsAt, photo})
 	}
 	room := event.Capacity == 0 || event.TicketCount < event.Capacity
 	page.CanRegister = len(types) == 0 && room && event.ExternalCheckoutURL == ""
@@ -110,6 +138,10 @@ func makePublicPage(event *Event) (*publicPage, error) {
 		page.TicketTypes = append(page.TicketTypes, publicTicketType{tt.ID, tt.Name, tt.PriceCents, tt.Currency, available})
 		page.CanRegister = page.CanRegister || available
 	}
+	if settings.Cancelled || event.Status != "published" {
+		page.CanRegister = false
+		page.Event.ExternalCheckoutURL = ""
+	}
 	return page, nil
 }
 
@@ -119,12 +151,55 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/public/"), "/")
 	parts := strings.Split(rest, "/")
-	if len(parts) > 2 || parts[0] == "" {
+	if rest == "" && r.Method == "GET" {
+		events, err := listEvents("", 500)
+		if err != nil {
+			http.Error(w, "Unable to list events", 500)
+			return
+		}
+		pages := []*publicPage{}
+		for _, e := range events {
+			if e.Visibility != "public" || (e.Status != "published" && e.Status != "closed") {
+				continue
+			}
+			end := e.EndsAt
+			if end == "" {
+				end = e.StartsAt
+			}
+			if end != "" && end < now() {
+				continue
+			}
+			page, err := makePublicPage(&e)
+			if err != nil {
+				http.Error(w, "Unable to load events", 500)
+				return
+			}
+			pages = append(pages, page)
+		}
+		writeJSON(w, pages)
+		return
+	}
+	if len(parts) > 3 || parts[0] == "" {
 		http.NotFound(w, r)
 		return
 	}
 	event, err := getPublicEvent(parts[0])
 	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "photos" && r.Method == "GET" {
+		id, _ := strconv.ParseInt(parts[2], 10, 64)
+		page, err := makePublicPage(event)
+		if err == nil {
+			expected := "/public/" + event.Slug + "/photos/" + parts[2]
+			for _, slot := range page.Schedule {
+				if slot.PhotoURL == expected {
+					serveApplicationPhoto(w, r, id)
+					return
+				}
+			}
+		}
 		http.NotFound(w, r)
 		return
 	}
@@ -151,7 +226,7 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 3<<20)
 	var in map[string]any
 	if !decodeJSON(w, r, &in) {
 		return
@@ -162,16 +237,11 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	in["event_id"] = event.ID
 	if parts[1] == "apply" {
-		if err := validateBuyer(argString(in, "applicant_name"), argString(in, "email")); err != nil {
+		if err := submitPublicApplication(event, in); err != nil {
 			writeResult[any](w, nil, err)
 			return
 		}
-		app, err := submitApplication(in)
-		if err != nil {
-			writeResult[any](w, nil, err)
-			return
-		}
-		writeJSON(w, map[string]any{"status": app.Status, "message": "Application received"})
+		writeJSON(w, map[string]any{"status": "received", "message": "Application received. Your spot is not confirmed yet; the organiser will contact you."})
 		return
 	}
 	tickets, err := issueTickets(issueTicketsInput{

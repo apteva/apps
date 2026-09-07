@@ -9,20 +9,22 @@
 </head>
 <body><main>
   <div class="brand">Events / You're invited</div>
-  <header><span class="tag">Join us</span><h1>{{.Event.Title}}</h1><div class="date">{{.When}}</div><div class="muted">{{.Event.Timezone}}</div></header>
+  <header><span class="tag">{{if .Settings.Cancelled}}Cancelled{{else if eq .Status "closed"}}Closed{{else}}Join us{{end}}</span><h1>{{.Event.Title}}</h1><div class="date">{{.When}}</div><div class="muted">{{.Event.Timezone}}</div></header>
+  {{if .Settings.Cancelled}}<section class="card"><h2>This event has been cancelled</h2><p>{{.Settings.CancellationReason}}</p></section>{{end}}
   <div class="layout"><div>
     <section class="card"><h2>About this event</h2><div class="description">{{if .Event.Description}}{{.Event.Description}}{{else}}More details coming soon.{{end}}</div>
       {{with .Venue}}<hr style="border:0;border-top:1px solid #e0e7df;margin:24px 0"><h3>{{.Name}}</h3><div class="muted">{{.Address}}<br>{{.City}} {{.Country}}</div>{{end}}
     </section>
     {{if .Schedule}}<section class="card"><h2>The lineup</h2>{{range .Schedule}}<div class="slot"><h3>{{.PerformerName}}</h3><div>{{.Title}}</div>{{if .StartsAt}}<time datetime="{{.StartsAt}}">{{.StartsAt}}</time>{{end}}</div>{{end}}</section>{{end}}
     <section class="card"><h2>Want to perform?</h2><p class="muted">Tell the organizer a little about yourself. Your application will be reviewed.</p>
-      <form data-action="apply"><label for="applicant">Your name</label><input id="applicant" name="applicant_name" required maxlength="200" autocomplete="name">
-        <label for="email">Email</label><input id="email" name="email" type="email" required autocomplete="email">
+      {{if .CanApply}}<form data-action="apply"><label for="applicant">Your name</label><input id="applicant" name="applicant_name" required maxlength="200" autocomplete="name">
+        <p>{{.Settings.Instructions}}</p><p>Set length: {{.Settings.SetMinutes}} minutes.</p><label for="email">Email {{if not .Settings.EmailRequired}}(optional){{end}}</label><input id="email" name="email" type="email" {{if .Settings.EmailRequired}}required{{end}} autocomplete="email">
+ <label for="phone">WhatsApp (optional)</label><input id="phone" name="phone" type="tel"><label for="instagram">Instagram (optional)</label><input id="instagram" name="instagram"><p class="small">Include at least one contact method. Applying does not confirm a spot.</p>
         <label for="stage">Stage name <span class="muted">(optional)</span></label><input id="stage" name="stage_name" maxlength="200">
         <label for="bio">About your performance</label><textarea id="bio" name="bio" maxlength="8000"></textarea>
         <label for="video">Video link <span class="muted">(optional)</span></label><input id="video" name="video_url" type="url">
         <button type="submit">Send application</button><div class="result" role="status" aria-live="polite"></div>
-      </form>
+      </form>{{else}}<p>{{.ApplicationMessage}}</p>{{end}}
     </section>
   </div><aside>
     <section class="card"><h2>Reserve your place</h2>
