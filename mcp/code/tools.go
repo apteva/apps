@@ -2,15 +2,12 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
+	"io"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -79,13 +76,26 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolReposSetWorkspaceImage,
 		},
 		{
-			Name: "repos_export",
-			Description: "Export a repo as a zip archive. Returns {slug, sha256, size, zip_b64} where zip_b64 is the " +
-				"base64-encoded zip bytes — used by the deploy app over PlatformAPI.CallApp.",
+			Name:        "repos_export",
+			Description: "Capture immutable source as zip-v1 with snapshot_id, source_revision, sha256, size and expiry. Small exports include zip_b64; large exports use repos_snapshot_read or the authenticated immutable download_url. snapshot_id reopens an existing revision; metadata_only avoids inline bytes. subdir optionally exports a relative project directory at the ZIP root when capturing new source.",
 			InputSchema: schemaObject(map[string]any{
-				"slug": map[string]any{"type": "string"},
+				"slug":          map[string]any{"type": "string"},
+				"snapshot_id":   map[string]any{"type": "string"},
+				"subdir":        map[string]any{"type": "string", "description": "Optional relative directory to capture, e.g. games/client. Cannot be combined with snapshot_id."},
+				"metadata_only": map[string]any{"type": "boolean"},
 			}, []string{"slug"}),
-			Handler: a.toolReposExport,
+			HandlerCtx: a.toolReposExportContext,
+		},
+		{
+			Name:        "repos_snapshot_read",
+			Description: "Read a bounded chunk of an immutable repo export through authenticated app RPC. Requires slug and snapshot_id; offset is a byte offset; limit is at most 1048576. Returns data_b64, size, sha256, next_offset and eof.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":        map[string]any{"type": "string"},
+				"snapshot_id": map[string]any{"type": "string"},
+				"offset":      map[string]any{"type": "integer", "minimum": 0},
+				"limit":       map[string]any{"type": "integer", "minimum": 1, "maximum": snapshotChunkBytes},
+			}, []string{"slug", "snapshot_id"}),
+			HandlerCtx: a.toolSnapshotRead,
 		},
 		{
 			Name:        "code_list_files",
@@ -1504,6 +1514,9 @@ func (a *App) toolReposSetWorkspaceImage(ctx *sdk.AppCtx, args map[string]any) (
 }
 
 func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolReposExportContext(context.Background(), ctx, args)
+}
+func (a *App) toolReposExportContext(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -1516,20 +1529,50 @@ func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	buf := inlineExportBuffer{limit: int(envLimit("CODE_EXPORT_INLINE_BYTES", 8<<20))}
-	if err := zipRepo(&buf, a.storeFor(repo), slug); err != nil {
-		if errors.Is(err, errInlineExportLimit) {
-			return map[string]any{"inline": false, "download_url": "/api/apps/code/api/repos/" + url.PathEscape(slug) + "/export?project_id=" + url.QueryEscape(pid) + "&install_id=" + url.QueryEscape(os.Getenv("APTEVA_INSTALL_ID")), "format": "zip", "hint": errInlineExportLimit.Error()}, nil
-		}
-		return nil, fmt.Errorf("zip repo: %w", err)
+	subdir, err := snapshotSubdir(strArg(args, "subdir"))
+	if err != nil {
+		return nil, err
 	}
-	sum := sha256.Sum256(buf.Bytes())
-	return map[string]any{
-		"slug":    slug,
-		"size":    buf.Len(),
-		"sha256":  hex.EncodeToString(sum[:]),
-		"zip_b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
-	}, nil
+	var desc *repoSourceExport
+	if id := strArg(args, "snapshot_id"); id != "" {
+		if subdir != "" {
+			return nil, errors.New("subdir is only used when capturing a new snapshot; reopen with snapshot_id alone")
+		}
+		snapshotMu.Lock()
+		f, current, e := a.openSourceSnapshot(repo, id)
+		if f != nil {
+			f.Close()
+		}
+		snapshotMu.Unlock()
+		if e != nil {
+			return nil, e
+		}
+		desc = current
+	} else {
+		desc, err = a.createSourceSnapshotSubdir(callCtx, repo, subdir)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if desc.Size <= envLimit("CODE_EXPORT_INLINE_BYTES", 8<<20) && !boolArg(args, "metadata_only") {
+		snapshotMu.Lock()
+		f, _, e := a.openSourceSnapshot(repo, desc.SnapshotID)
+		snapshotMu.Unlock()
+		if e != nil {
+			return nil, e
+		}
+		defer f.Close()
+		body, e := io.ReadAll(io.LimitReader(f, desc.Size+1))
+		if e != nil {
+			return nil, e
+		}
+		if int64(len(body)) != desc.Size {
+			return nil, errors.New("snapshot size changed")
+		}
+		desc.Inline = true
+		desc.ZipB64 = base64.StdEncoding.EncodeToString(body)
+	}
+	return desc, nil
 }
 
 // ─── code_* file handlers ──────────────────────────────────────────

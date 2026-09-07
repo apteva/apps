@@ -574,6 +574,10 @@ func (a *App) httpRepoExport(w http.ResponseWriter, r *http.Request, slug string
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	if r.URL.Query().Get("snapshot_id") != "" {
+		a.serveSourceSnapshot(w, r, repo)
+		return
+	}
 	if err := writeZip(w, a.storeFor(repo), slug); err != nil {
 		// Headers already written; the client gets a truncated zip
 		// which they'll catch via CRC. Log + move on.

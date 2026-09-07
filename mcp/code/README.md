@@ -1,7 +1,7 @@
 # Apteva Code
 
 Code provides project-scoped source repositories, native Git, issues, templates,
-editing and development previews through 55 MCP tools, REST routes and four
+editing and development previews through 56 MCP tools, REST routes and four
 React panels. `apteva.yaml` is the single embedded manifest source.
 
 ## Source integrity
@@ -133,11 +133,11 @@ budgeted; source walks prune generated directories before traversing them.
 names; `.git` always remains excluded. Configure this when real source lives
 under a normally generated directory such as `build`, `dist` or `vendor`.
 
-HTTP ZIP exports stream. Small MCP exports return `zip_b64`; larger ones return
-`inline:false`, `format:"zip"` and a relative authenticated gateway `download_url`
-with project/install scope. Consumers must handle both forms and use existing
-authorization to download; the URL is not publicly signed. ZIP import rejects
-duplicate normalized paths and uses transactional writes.
+HTTP ZIP exports stream. MCP `repos_export` captures an immutable archive;
+small exports include `zip_b64`, and all exports include revision, checksum,
+size and an authenticated download URL. `repos_snapshot_read` supports bounded
+chunk transfers. See [the source export contract](SOURCE_EXPORTS.md).
+ZIP import rejects duplicate normalized paths and uses transactional writes.
 
 ## Build and test
 
