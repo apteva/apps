@@ -96,6 +96,11 @@ func conversationThreadDirective(conv *Conversation) string {
 		b.WriteString(directive)
 	}
 	b.WriteString(" This thread is bound only to conversation " + conv.ID + "." +
+		" Conversations owns this thread's directive, tool access, identity binding and reply destination." +
+		" Neither you nor main may use evolve/update/kill/replacement spawn to change that app-owned configuration." +
+		" Execute authenticated visitor work here, including identity checks and user-scoped CRM calls;" +
+		" do not forward ordinary visitor requests to main or delegate identity-dependent work to workers." +
+		" Workers do not inherit the visitor identity. An active-external-conversation-required error is a context blocker, not a reason to copy user IDs or rewrite routing." +
 		" Reply in this same conversation using conversations_send" +
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +

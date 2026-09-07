@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.21.1
+version: 0.21.2
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -46,12 +46,20 @@ requires:
       label: "Telegram bots (optional)"
       hint: "Bind the Telegram integration connections Conversations may use for project chat routes."
 
+config_schema:
+  - name: identity_resolver_install_ids
+    type: text
+    required: false
+    label: Trusted identity resolver app installation IDs
+    description: Comma-separated backend app install IDs. Empty denies all resolution. These apps must derive agent/thread from trusted caller context, never model arguments.
+
 provides:
   http_routes:
     - prefix: /
     - prefix: /telegram-webhook/
       no_auth: true
   mcp_tools:
+    - { name: resolve_thread_identity, exposure: app_only, description: "Resolve the external principal bound to an agent thread. Restricted to configured trusted sibling app installations and the authenticated project." }
     - { name: send,             description: "Reply from the originating conversation thread to that exact conversation. Args: conversation_id, text, phase? (acknowledgement|progress|final), components?, attachments?. Main routes requested outcomes back to the originating thread; generic workers report to their parent and are never granted Conversations tools. Use short paragraphs and simple lists; avoid Markdown tables, raw HTML, and transport-specific syntax. Basic formatting is adapted per bound surface." }
     - { name: request_approval, description: "Ask the operator to approve gated work owned by main or by the originating conversation thread, using that conversation's exact id. Generic workers report the blocked decision to their parent instead. Refused in public conversations. Args: conversation_id, title, body?, actions? (default Approve/Deny). The verdict returns to the asking thread as approval.result." }
     - { name: report,           description: "Main-thread global output only: file a substantive report into an operator conversation. Conversation threads and generic workers report results to their parent/main instead. Refused in public conversations. Args: conversation_id, title, summary, period?, sections?." }

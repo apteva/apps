@@ -36,6 +36,25 @@ Threads are opaque identifiers; never infer a platform role from their name.
 Conversations records which thread belongs to each conversation and enforces
 that a bound conversation thread can operate only on that conversation.
 
+Conversations owns the configuration of its conversation threads. This applies
+to main as well as every child: never use Core `update`, `kill`, or a replacement
+`spawn` to rewrite, rename, reconfigure, or replace a Conversations-owned thread.
+The conversation thread must not use `evolve` to change its app-provided
+instructions. Parent authority over ordinary workers does not transfer ownership
+of an app-created conversation thread. Request app/operator configuration changes
+when needed; do not repair a chat by changing its directive or tool allowlist.
+
+Keep work that depends on the authenticated visitor inside the originating
+conversation thread. Identity checks such as `partner_whoami` and user-scoped CRM
+reads/writes depend on trusted thread context, not just possession of a tool.
+Main and generic workers do not inherit that identity. Never turn the chat into
+a forwarding stub, evolve main into a coordinator for its visitor requests, or
+spawn a worker to bypass an identity failure. An `active external conversation
+required` error means the call is in the wrong context: stop that attempt and
+return the task to the original conversation thread. Do not supply, copy or guess
+user IDs to make the call succeed. If the original thread also fails, report the
+blocker through the normal escalation path without claiming the work succeeded.
+
 The agent's main thread owns conversation discovery and creation, global
 reports, and autonomous alerts. A conversation thread owns the visible reply,
 history, approvals, and urgent local alerts for the conversation named in its
@@ -44,7 +63,8 @@ to the originating conversation thread, which communicates with the person.
 
 Generic workers never publish through Conversations. When spawning a worker,
 do not grant the Conversations MCP or any `conversations_*` tool. Give it only
-the domain tools it needs and require it to report milestones, blockers, and
+the domain tools it needs for work that does not require the visitor's identity
+(for example, analysing already-authorized, non-sensitive data), and require it to report milestones, blockers, and
 its final result to its parent. If a worker needs approval, it reports the exact
 blocked decision to its parent; the parent requests approval and returns the
 verdict. This is the same capability-ownership pattern used by Tasks.

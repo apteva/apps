@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.21.2 — 2026-09-07
+
+- Add an app-only identity resolver for explicitly trusted backend installations. Resolve external principals from active conversation bindings; deny unbound workers, wrong scopes and archived conversations. Resolution is disabled until trusted installation IDs are configured.
+
+- Clarify in the skill, chat instructions and MCP descriptions that Conversations owns chat configuration, including when the caller is main. Keep visitor-dependent work in its authenticated conversation and explain recovery from an unbound-worker identity failure.
+- Add a real-Codex ownership regression that audits mutation attempts and configuration, challenges main and the visitor thread, and verifies history and restart/resume. This is a behavioral mitigation, not a new Core enforcement mechanism.
+
 ## 0.21.1 — 2026-09-07
 
 - Allow main to acknowledge its own resolved approval with an explicit approval message ID; keep ordinary replies restricted to conversation threads.

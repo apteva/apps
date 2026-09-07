@@ -144,10 +144,12 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
 			Name: "send",
-			Description: "Reply from the originating conversation thread to that exact conversation. Main routes " +
-				"requested outcomes back to the originating thread; generic workers report to their parent and are " +
+			Description: "Reply from the originating conversation thread to that exact conversation. Authenticated visitor " +
+				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
+				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
 				"acknowledgement, progress, or final. Exception: main may acknowledge its own resolved approval " +
 				"with phase=acknowledgement and approval_message_id from approval.result.",
@@ -218,6 +220,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "list",
 			Description: "Main-thread conversation management only. List conversations this agent participates in. " +
+				"Discovery does not grant ownership of their Core threads: never update, rename, kill or replace them. " +
 				"Conversation threads already have their exact id; generic workers report to their parent. Pass query " +
 				"to filter by title (case-insensitive substring) — search before creating.",
 			InputSchema: schemaObject(map[string]any{

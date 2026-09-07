@@ -33,6 +33,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -69,6 +70,9 @@ func (c *liveClient) do(method, path string, body any, out any) int {
 			separator = "&"
 		}
 		path += separator + "project_id=" + projectID
+		if installID := strings.TrimSpace(os.Getenv("APTEVA_LIVE_INSTALL_ID")); installID != "" {
+			path += "&install_id=" + url.QueryEscape(installID)
+		}
 	}
 	var reader *bytes.Reader
 	if body != nil {
