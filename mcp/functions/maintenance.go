@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -43,22 +42,8 @@ func seedGoCache(ctx context.Context, dst string) error {
 			if err != nil {
 				return err
 			}
-			cmd := exec.CommandContext(ctx, compiler, "build", "-trimpath", "fmt", "encoding/json", "net", "runtime/debug")
-			cmd.Dir = dir
-			cmd.Env = append(buildCmdEnv(dir, filepath.Join(dir, "tmp")), "GOCACHE="+cache, "GO111MODULE=off")
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Cancel = func() error {
-				if cmd.Process != nil {
-					return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				}
-				return nil
-			}
-			cmd.WaitDelay = 2 * time.Second
-			logs := newCapBuffer(stderrCap)
-			cmd.Stdout = logs
-			cmd.Stderr = logs
-			if err = cmd.Run(); err != nil {
-				return fmt.Errorf("prepare standard library cache: %w: %s", err, logs.String())
+			if err = runBuildCmdEnv(ctx, dir, "prepare standard library cache", compiler, []string{"GOCACHE=" + cache, "GO111MODULE=off"}, "build", "-trimpath", "fmt", "encoding/json", "net", "runtime/debug"); err != nil {
+				return err
 			}
 			if err = os.WriteFile(filepath.Join(dir, ".ready"), []byte("ready"), 0600); err != nil {
 				return err
@@ -211,6 +196,9 @@ func treeBytes(root string, limit int64) (int64, error) {
 // Admission + periodic enforcement bound normal growth. A filesystem quota is
 // required for a hard instantaneous limit against concurrent hostile writers.
 func watchDisk(ctx context.Context, root string, limit int64, exceeded func()) func() {
+	return watchDiskCause(ctx, root, limit, func(error) { exceeded() })
+}
+func watchDiskCause(ctx context.Context, root string, limit int64, exceeded func(error)) func() {
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -223,7 +211,7 @@ func watchDisk(ctx context.Context, root string, limit int64, exceeded func()) f
 				return
 			case <-ticker.C:
 				if _, err := treeBytes(root, limit); err != nil {
-					exceeded()
+					exceeded(err)
 					return
 				}
 			}

@@ -388,7 +388,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_app_call",
-			Description: "Call an MCP tool exposed by an installed tenant app. Use install_id or project_id to disambiguate multiple installs. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?.",
+			Description: "Call an MCP tool exposed by an installed tenant app. Use install_id or project_id to disambiguate multiple installs. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?, timeout_ms? (1–300000). Functions deployments default to 150 seconds; other calls to 10 seconds. Parent cancellation always applies.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -399,10 +399,11 @@ func (a *App) MCPTools() []sdk.Tool {
 					"input":      map[string]any{"type": "object"},
 					"install_id": map[string]any{"type": "integer"},
 					"project_id": map[string]any{"type": "string"},
+					"timeout_ms": map[string]any{"type": "integer", "minimum": 1, "maximum": 300000},
 				},
 				"required": []string{"tenant_id", "app", "tool"},
 			},
-			Handler: a.toolTenantAppCall,
+			HandlerCtx: a.toolTenantAppCallContext,
 		},
 		{
 			Name:        "tenant_attach_domain",

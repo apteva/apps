@@ -22,7 +22,7 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 		return nil, errors.New("pool unavailable")
 	}
 	parent = context.WithValue(parent, poolContextKey{}, p)
-	parent, cancel := context.WithTimeout(parent, buildTimeout)
+	parent, cancel := context.WithTimeoutCause(parent, buildTimeout, errBuildDeadline)
 	defer cancel()
 	stop := context.AfterFunc(p.life, cancel)
 	defer stop()
@@ -128,7 +128,7 @@ func rollbackFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string
 		return nil, errors.New("pool unavailable")
 	}
 	parent = context.WithValue(parent, poolContextKey{}, p)
-	parent, cancel := context.WithTimeout(parent, buildTimeout)
+	parent, cancel := context.WithTimeoutCause(parent, buildTimeout, errBuildDeadline)
 	defer cancel()
 	stop := context.AfterFunc(p.life, cancel)
 	defer stop()

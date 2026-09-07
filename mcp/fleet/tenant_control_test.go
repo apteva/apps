@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func seedTenantWithKey(t *testing.T, app *App, baseURL, apiKey string) string {
@@ -236,5 +240,56 @@ func TestTenantInventoryBestEffort(t *testing.T) {
 	}
 	if _, ok := out.(map[string]any)["errors"]; ok {
 		t.Fatalf("unexpected inventory errors: %#v", out)
+	}
+}
+
+func TestTenantAppDeadlinePolicy(t *testing.T) {
+	for _, tool := range []string{"functions_create", "functions_deploy", "functions_rollback", "functions_prepare"} {
+		d, e := tenantAppTimeout("functions", tool, nil)
+		if e != nil || d != 150*time.Second {
+			t.Fatalf("%s %s %v", tool, d, e)
+		}
+	}
+	if d, _ := tenantAppTimeout("crm", "contacts_list", nil); d != 10*time.Second {
+		t.Fatal(d)
+	}
+	for _, v := range []any{0, -1, 300001, 1.5, "1000", nil} {
+		if _, e := tenantAppTimeout("functions", "functions_create", map[string]any{"timeout_ms": v}); e == nil {
+			t.Fatalf("accepted %v", v)
+		}
+	}
+}
+func TestTenantAppCallPreservesCancellation(t *testing.T) {
+	app, ctx := newTestApp(t)
+	entered, stopped := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		close(entered)
+		<-r.Context().Done()
+		close(stopped)
+	}))
+	defer srv.Close()
+	id := seedTenantWithKey(t, app, srv.URL, "test")
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, e := app.toolTenantAppCallContext(parent, ctx, map[string]any{"tenant_id": id, "app": "functions", "tool": "functions_deploy"})
+		done <- e
+	}()
+	<-entered
+	cancel()
+	select {
+	case e := <-done:
+		if !errors.Is(e, context.Canceled) {
+			t.Fatal(e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Fleet did not cancel")
+	}
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("downstream did not cancel")
 	}
 }

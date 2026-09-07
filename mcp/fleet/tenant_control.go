@@ -137,12 +137,39 @@ func (a *App) toolTenantAppTools(appCtx *sdk.AppCtx, args map[string]any) (any, 
 }
 
 func (a *App) toolTenantAppCall(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.toolTenantAppCallContext(context.Background(), appCtx, args)
+}
+func tenantAppTimeout(app, tool string, args map[string]any) (time.Duration, error) {
+	timeout := 10 * time.Second
+	if app == "functions" {
+		switch tool {
+		case "functions_create", "functions_deploy", "functions_rollback", "functions_prepare":
+			timeout = 150 * time.Second
+		}
+	}
+	if value, ok := args["timeout_ms"]; ok {
+		raw, err := json.Marshal(value)
+		var ms int64
+		if err != nil || json.Unmarshal(raw, &ms) != nil || ms < 1 || ms > 300000 {
+			return 0, errors.New("timeout_ms must be an integer between 1 and 300000")
+		}
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	return timeout, nil
+}
+func (a *App) toolTenantAppCallContext(parent context.Context, appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	tenantID := getStr(args, "tenant_id")
 	appName := strings.TrimSpace(getStr(args, "app"))
 	tool := strings.TrimSpace(getStr(args, "tool"))
 	if tenantID == "" || appName == "" || tool == "" {
 		return nil, errors.New("tenant_id, app, tool are required")
 	}
+	timeout, err := tenantAppTimeout(appName, tool, args)
+	if err != nil {
+		return nil, err
+	}
+	parent, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	input := mapArg(args, "arguments")
 	if input == nil {
 		input = mapArg(args, "input")
@@ -156,7 +183,7 @@ func (a *App) toolTenantAppCall(appCtx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	result, err := a.tenantAppRPC(appCtx, t, key, appName, installID, projectID, "tools/call", map[string]any{
+	result, err := a.tenantAppRPCContext(parent, appCtx, t, key, appName, installID, projectID, "tools/call", map[string]any{
 		"name":      tool,
 		"arguments": input,
 	})
@@ -229,6 +256,11 @@ func (a *App) tenantControlAuth(tenantID string) (*Tenant, string, error) {
 }
 
 func (a *App) tenantAppRPC(appCtx *sdk.AppCtx, t *Tenant, key, appName string, installID int64, projectID, method string, params map[string]any) (any, error) {
+	parent, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return a.tenantAppRPCContext(parent, appCtx, t, key, appName, installID, projectID, method, params)
+}
+func (a *App) tenantAppRPCContext(parent context.Context, appCtx *sdk.AppCtx, t *Tenant, key, appName string, installID int64, projectID, method string, params map[string]any) (any, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -253,18 +285,26 @@ func (a *App) tenantAppRPC(appCtx *sdk.AppCtx, t *Tenant, key, appName string, i
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, baseURL+path, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(parent, http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
+	client := *httpClient
+	client.Timeout = 0 // The operation context bounds headers and body reads.
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, tenantControlMaxBody))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, tenantControlMaxBody+1))
+	if err != nil {
+		return nil, fmt.Errorf("read tenant app response: %w", err)
+	}
+	if len(raw) > tenantControlMaxBody {
+		return nil, errors.New("tenant app response exceeds limit")
+	}
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("tenant returned %d: %s", resp.StatusCode, string(raw))
 	}

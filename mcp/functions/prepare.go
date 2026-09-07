@@ -208,7 +208,7 @@ func (p *pool) requestPreparation(fn *Function, warm, retry, high bool) (*prepar
 	}
 }
 func (p *pool) runPreparation(job *preparation) {
-	ctx, cancel := context.WithTimeout(context.WithValue(p.life, poolContextKey{}, p), buildTimeout)
+	ctx, cancel := context.WithTimeoutCause(context.WithValue(p.life, poolContextKey{}, p), buildTimeout, errBuildDeadline)
 	defer cancel()
 	result := RuntimeReadiness{State: "failed", VersionID: versionID(job.fn)}
 	defer func() {

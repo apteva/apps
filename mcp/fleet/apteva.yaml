@@ -139,7 +139,7 @@ provides:
     - name: tenant_app_tools
       description: "List MCP tools exposed by an installed tenant app. Args: tenant_id, app?, install_id?, project_id?."
     - name: tenant_app_call
-      description: "Call an MCP tool exposed by an installed tenant app. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?."
+      description: "Call an MCP tool exposed by an installed tenant app. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?, timeout_ms? (1..300000). Functions deployments default to 150s, other calls to 10s; caller cancellation applies."
     - name: tenant_attach_domain
       description: "Attach a public hostname to a tenant. Managed DNS writes the record through Domains; routing and exact-host certs are registered through server-native ingress. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine and only registers ingress. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
     - name: tenant_detach_domain

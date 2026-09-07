@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -147,7 +148,7 @@ func ensureBuiltContext(ctx context.Context, base string, v *FunctionVersion, sp
 		return dir, nil
 	}
 	if p != nil {
-		ctx, cancel := context.WithTimeout(ctx, buildTimeout)
+		ctx, cancel := context.WithTimeoutCause(ctx, buildTimeout, errBuildDeadline)
 		defer cancel()
 		if err := p.acquireBuild(ctx); err != nil {
 			return "", fmt.Errorf("build queue: %w", err)
@@ -245,21 +246,24 @@ func lockBuild(ctx context.Context, key string) (func(), error) {
 
 // runBuildCmd runs a runtime build step in dir, capturing combined
 // output for the error message. Bounded by buildTimeout.
-func runBuildCmd(ctx context.Context, dir, label, bin string, args ...string) error {
+func runBuildCmd(parent context.Context, dir, label, bin string, args ...string) error {
+	return runBuildCmdEnv(parent, dir, label, bin, nil, args...)
+}
+func runBuildCmdEnv(parent context.Context, dir, label, bin string, extraEnv []string, args ...string) error {
 	resolved, err := exec.LookPath(bin)
 	if err != nil {
 		return fmt.Errorf("%s needs %q on PATH", label, bin)
 	}
-	ctx, cancel := context.WithTimeout(ctx, buildTimeout)
-	defer cancel()
+	deadline, stop := context.WithTimeoutCause(parent, buildTimeout, errBuildDeadline)
+	defer stop()
+	ctx, cancel := context.WithCancelCause(deadline)
+	defer cancel(nil)
+	started := time.Now()
 	tmpDir := filepath.Join(dir, ".sandbox-tmp")
-	if err := os.MkdirAll(tmpDir, 0o700); err != nil {
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
 		return err
 	}
-	cmd, err := sandboxCommand(resolved, args, sandboxSpec{
-		Mode: sandboxBuild, Root: dir, TempDir: tmpDir,
-		MemoryMB: envInt("APTEVA_FUNCTIONS_BUILD_MEMORY_MB", 1024, 128, 8192),
-	})
+	cmd, err := sandboxCommand(resolved, args, sandboxSpec{Mode: sandboxBuild, Root: dir, TempDir: tmpDir, MemoryMB: envInt("APTEVA_FUNCTIONS_BUILD_MEMORY_MB", 1024, 128, 8192)})
 	if err != nil {
 		return err
 	}
@@ -271,26 +275,33 @@ func runBuildCmd(ctx context.Context, dir, label, bin string, args ...string) er
 		return nil
 	}
 	cmd.Dir = dir
-	cmd.Env = buildCmdEnv(dir, tmpDir)
+	cmd.Env = append(buildCmdEnv(dir, tmpDir), extraEnv...)
+	if err := disableBuildTelemetry(dir); err != nil {
+		return fmt.Errorf("isolate Go telemetry: %w", err)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = 2 * time.Second
-	stopDisk := watchDisk(ctx, dir, int64(envInt("APTEVA_FUNCTIONS_BUILD_DISK_MB", 1024, 64, 8192))<<20, cancel)
+	stopDisk := watchDiskCause(ctx, dir, int64(envInt("APTEVA_FUNCTIONS_BUILD_DISK_MB", 1024, 64, 8192))<<20, func(err error) { cancel(errors.Join(errBuildDisk, err)) })
 	defer stopDisk()
 	out := newCapBuffer(16 * 1024)
 	cmd.Stdout, cmd.Stderr = out, out
-	if err := cmd.Run(); err != nil {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			cleanupSandboxProcess(cmd.Process.Pid, sandboxBuild)
-		}
-		return fmt.Errorf("%s failed: %v\n%s", label, err, out.String())
-	}
+	runErr := cmd.Run()
+	pid := 0
 	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		cleanupSandboxProcess(cmd.Process.Pid, sandboxBuild)
+		pid = cmd.Process.Pid
+	}
+	// Snapshot before cleanup removes the cgroup; never infer OOM from SIGKILL alone.
+	diagnostics := captureBuildDiagnostics(pid, time.Since(started), context.Cause(ctx), runErr)
+	if pid != 0 {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		cleanupSandboxProcess(pid, sandboxBuild)
+	}
+	if p := poolFrom(parent); p != nil {
+		data, _ := json.Marshal(diagnostics)
+		p.ctx.Logger().Info("build completed", "step", label, "diagnostics", string(data))
+	}
+	if runErr != nil {
+		return &BuildCommandError{Step: label, Diagnostics: diagnostics, Cause: errors.Join(context.Cause(ctx), runErr), Output: out.String()}
 	}
 	return nil
 }
@@ -331,6 +342,8 @@ func buildCmdEnv(dir, tmpDir string) []string {
 		"TMP="+tmpDir,
 		"TEMP="+tmpDir,
 		"XDG_CACHE_HOME="+cache,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"GOENV=off",
 		"GOCACHE="+goCache,
 		"npm_config_cache="+filepath.Join(cache, "npm"),
 		"npm_config_update_notifier=false",
