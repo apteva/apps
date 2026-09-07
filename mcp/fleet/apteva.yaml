@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.8
+version: 0.10.9
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -50,6 +50,10 @@ description: |
   lifecycle recovery, resource ownership, DNS cleanup, setup and restore state.
   It bounds health polling and logs, paginates tenant lists, and adds operation
   recovery and local storage cleanup controls. Uses app-sdk v0.74.1.
+
+  v0.10.9 gives Functions deployments a bounded 150-second timeout through
+  tenant_app_call, preserves caller cancellation, supports timeout_ms overrides,
+  and uses app-sdk v0.76.0. Existing lifecycle and transfer protections remain.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet

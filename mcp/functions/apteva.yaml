@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.10.0
+version: 1.10.1
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -11,6 +11,11 @@ description: |
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
+
+  v1.10.1 disables Go telemetry inside isolated build homes, preserves build
+  cancellation and cgroup diagnostics before cleanup, and applies the same
+  sandbox limits to standard-library cache preparation. Pair with Fleet 0.10.9
+  for deployment calls that can exceed ten seconds.
 
   v1.10.0 adds separate app/integration deadlines, configurable worker capacity,
   protected interactive and nested budgets, and per-call memory telemetry through

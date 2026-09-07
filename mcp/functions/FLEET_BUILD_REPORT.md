@@ -1,6 +1,6 @@
 # Fleet deployment timeout and Functions build diagnostics
 
-Verified on 2026-09-07 against Fleet 0.10.8 and Functions 1.10.0 source. Fixes are on `fix/fleet-functions-builds`, not yet released. The original production logs do not conclusively identify the cause of `signal: killed`.
+Verified on 2026-09-07 against Fleet 0.10.8 and Functions 1.10.0 source. Fixes ship in Fleet **0.10.9** and Functions **1.10.1**, preserving their previous release history. Publishing these versions does not upgrade an existing installation. The original production logs do not conclusively identify the cause of `signal: killed`.
 
 ## Findings
 
@@ -32,8 +32,8 @@ Build diagnostics are captured before cgroup cleanup. Failures retain an error t
 
 ## Verification
 
-- Real Functions sidecar reached through Fleet's actual `tenant_app_call` implementation and a local tenant HTTP proxy. A fresh Go cache and an explicit 11-second compiler gate guarantee a cold deployment exceeds the former cap; deployment completed successfully in **16.58 seconds** on the final code. The controlled delay is part of the duration, not a claim that Go spent all that time compiling. This does not replay production or emulate every production gateway timeout.
-- Full short race suites for Fleet and Functions passed; focused tests cover ordinary/deployment timeout policy, invalid limits, caller cancellation, telemetry mode, build cancellation and disk-watchdog diagnostics.
+- Real Functions sidecar reached through Fleet's actual `tenant_app_call` implementation and a local tenant HTTP proxy. A fresh Go cache and an explicit 11-second compiler gate guarantee a cold deployment exceeds the former cap; deployment completed successfully in **14.74 seconds** against the final 1.10.1 release binary. The controlled delay is part of the duration, not a claim that Go spent all that time compiling. This does not replay production or emulate every production gateway timeout.
+- Full race suites for Functions (109.321 seconds) and Fleet with integration tags (33.547 seconds) passed; focused tests cover ordinary/deployment timeout policy, invalid limits, caller cancellation, telemetry mode, build cancellation and disk-watchdog diagnostics.
 - Native Linux arm64 checks ran with delegated cgroups, Landlock and seccomp enforced: telemetry off, cancellation, disk watchdog, cgroup counter capture and real Go worker memory/OOM tests all passed.
 - A failing sandboxed build saved `memory_peak_bytes: 593920`, memory event counters including `oom_kill: 0`, and PID events including `max: 0` before cgroup deletion. These are real observed counters, not fabricated zeros for missing data.
 - Both apps pass `go vet`; no production state was changed.

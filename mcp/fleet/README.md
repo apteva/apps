@@ -4,7 +4,7 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 ## Current behavior
 
-**Fleet v0.10.6** includes the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.74.1**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
+**Fleet v0.10.9** retains the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.76.0**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
 
 - `tenant_create` provisions a local or hosted process, registers its administrator and returns credentials. Generated credentials and setup progress are encrypted and persisted before registration so **Resume setup** can recover a partial failure.
 - Setup readiness, clone quarantine, health failure streaks and lifecycle operations are durable state, independent of process status and audit-log retention. Interrupted operations block activation until recovery fences their recorded runtimes.
@@ -13,6 +13,12 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 - Snapshots stream by default. Local snapshot staging uses filesystem cloning where available and consistent SQLite copies; compression happens after the tenant restarts. Restores retain the prior directory and restore matching credentials/runtime metadata.
 - The panel provides paginated search, operation recovery, template project selection and local storage cleanup. Child logs rotate on the one-minute maintenance cadence, retaining five 10 MiB tails. Copy/truncate preserves descriptors held by children that outlive Fleet; a small concurrent-write window and temporary growth between ticks remain possible.
 - `tenant_connect`, tenant control, support login, DNS/ingress, templates and optional A2A remain available. Remote monitoring can be suspended and resumed separately from managed process lifecycle.
+
+## Functions deployments in 0.10.9
+
+`tenant_app_call` now gives Functions create/deploy/rollback/prepare calls a **150-second** default budget. Ordinary app calls retain **10 seconds**. Optional top-level `timeout_ms` accepts 1..300000; caller cancellation and shorter parent deadlines always apply. The timeout belongs outside the target tool's `arguments`. Functions 1.10.1 adds build telemetry isolation and persistent failure diagnostics. Existing UI, lifecycle recovery, hosted transfers and stop protections are retained.
+
+See [the cross-app regression report](../functions/FLEET_BUILD_REPORT.md). A real Functions sidecar with a cold Go cache and an 11-second controlled compiler delay completes through Fleet beyond the former ten-second cutoff.
 
 ## Verification
 

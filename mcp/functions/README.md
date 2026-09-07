@@ -1,10 +1,14 @@
-# Functions 1.10.0
+# Functions 1.10.1
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker
 processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
+
+## Build diagnostics in 1.10.1
+
+Go telemetry is disabled inside the isolated build home. Build errors preserve cancellation/disk-watchdog causes and cgroup memory/OOM/PID counters before cleanup; standard-library cache preparation uses the same sandbox limits. Pair with Fleet 0.10.9 for deployment calls with a 150-second budget. See [findings and regression evidence](FLEET_BUILD_REPORT.md).
 
 ## Capacity and integration deadlines in 1.10.0
 
