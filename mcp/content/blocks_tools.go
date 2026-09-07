@@ -64,7 +64,7 @@ func (a *App) toolBlocksInsert(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("inserted block %s", newID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("inserted block %s", newID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": newID, "blocks": doc}, nil
@@ -114,7 +114,7 @@ func (a *App) toolBlocksUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: post.BodyBlocks.Blocks}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("updated block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("updated block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": blockID, "blocks": doc}, nil
@@ -150,7 +150,7 @@ func (a *App) toolBlocksMove(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("moved block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("moved block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": blockID, "blocks": doc}, nil
@@ -182,7 +182,7 @@ func (a *App) toolBlocksDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("deleted block %s", blockID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("deleted block %s", blockID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"ok": true, "blocks": doc}, nil
@@ -209,7 +209,14 @@ func (a *App) toolBlocksReplaceAll(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), "replaced all blocks"); err != nil {
+	post, err := dbGetPost(ctx.AppDB(), pid, siteID, id)
+	if err != nil {
+		return nil, err
+	}
+	if v, ok := asInt64(args["expected_version"]); ok {
+		post.EditVersion = v
+	}
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), "replaced all blocks"); err != nil {
 		return nil, err
 	}
 	return map[string]any{"blocks": doc}, nil
@@ -241,7 +248,7 @@ func (a *App) toolBlocksDuplicate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	doc := Document{Version: documentVersion, Blocks: updated}
-	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("duplicated block %s → %s", blockID, newID)); err != nil {
+	if _, err := dbUpdatePost(ctx.AppDB(), pid, siteID, id, PostPatch{Blocks: &doc, ExpectedVersion: &post.EditVersion}, "", asStringDefault(args["source"], "agent"), fmt.Sprintf("duplicated block %s → %s", blockID, newID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"block_id": newID, "blocks": doc}, nil

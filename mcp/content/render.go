@@ -311,6 +311,9 @@ func renderFeed(data PageData) (string, error) {
 	fmt.Fprintf(&b, "<description>%s</description>\n", xmlEscape(data.SiteTagline))
 	for _, p := range data.Posts {
 		link := data.PublicBaseURL + "/posts/" + p.Slug
+		if data.ResourceQuery != "" {
+			link += data.ResourceQuery
+		}
 		b.WriteString("<item>\n")
 		fmt.Fprintf(&b, "<title>%s</title>\n", xmlEscape(p.Title))
 		fmt.Fprintf(&b, "<link>%s</link>\n", xmlEscape(link))

@@ -88,7 +88,7 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := validateFormPayload(fields, payload); err != nil {
 		_, _ = dbInsertFormSubmission(ctx.AppDB(), FormSubmission{
 			ProjectID: pid, SiteID: post.SiteID, PostID: post.ID, BlockID: blockID,
-			Payload: payload, IPHash: ipHash, UserAgent: limitedUserAgent(r),
+			Payload: privateFormPayload(payload, fields), IPHash: ipHash, UserAgent: limitedUserAgent(r),
 			Status: "rejected_validation", Results: []ActionResult{},
 			Error: err.Error(), CreatedAt: nowUnix(),
 		})
@@ -108,17 +108,21 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 		SiteID:    post.SiteID,
 		PostID:    post.ID,
 		BlockID:   blockID,
-		Payload:   payload,
+		Payload:   privateFormPayload(payload, fields),
 		IPHash:    ipHash,
 		UserAgent: limitedUserAgent(r),
 		Status:    status,
-		Results:   results,
+		Results:   privateFormResults(results),
 		CreatedAt: nowUnix(),
 	}
 	if runErr != nil {
-		sub.Error = runErr.Error()
+		sub.Error = "action failed"
 	}
-	subID, _ := dbInsertFormSubmission(ctx.AppDB(), sub)
+	subID, err := dbInsertFormSubmission(ctx.AppDB(), sub)
+	if err != nil {
+		respondFormError(w, r, http.StatusInternalServerError, "could not record submission")
+		return
+	}
 
 	ctx.EmitWithProject("form.submitted", pid, map[string]any{
 		"submission_id": subID,

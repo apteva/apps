@@ -231,7 +231,7 @@ func extensionContentSecurityPolicy(policy ExtensionBrowserPolicy) string {
 	}, "; ")
 }
 
-func dbExtensionsList(db *sql.DB, pid string, siteID int64) ([]Extension, error) {
+func dbExtensionsList(db contentQuerier, pid string, siteID int64) ([]Extension, error) {
 	rows, err := db.Query(`SELECT id, project_id, site_id, extension_key, provider_app, display_name,
 		version, status, draft_manifest, published_manifest, created_at, updated_at, published_at
 		FROM content_extensions WHERE project_id=? AND site_id=? ORDER BY display_name, extension_key`, pid, siteID)
@@ -250,7 +250,7 @@ func dbExtensionsList(db *sql.DB, pid string, siteID int64) ([]Extension, error)
 	return out, rows.Err()
 }
 
-func dbExtensionGet(db *sql.DB, pid string, siteID int64, key string) (*Extension, error) {
+func dbExtensionGet(db contentQuerier, pid string, siteID int64, key string) (*Extension, error) {
 	row := db.QueryRow(`SELECT id, project_id, site_id, extension_key, provider_app, display_name,
 		version, status, draft_manifest, published_manifest, created_at, updated_at, published_at
 		FROM content_extensions WHERE project_id=? AND site_id=? AND extension_key=?`, pid, siteID, key)
@@ -285,10 +285,15 @@ func dbExtensionUpsert(db *sql.DB, pid string, siteID int64, key, provider strin
 	if err := validateExtensionManifest(key, provider, manifest); err != nil {
 		return nil, err
 	}
-	if err := validateExtensionRouteOwnership(db, pid, siteID, key, manifest); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
 		return nil, err
 	}
-	existing, lookupErr := dbExtensionGet(db, pid, siteID, key)
+	defer tx.Rollback()
+	if err := validateExtensionRouteOwnership(tx, pid, siteID, key, manifest); err != nil {
+		return nil, err
+	}
+	existing, lookupErr := dbExtensionGet(tx, pid, siteID, key)
 	if lookupErr != nil && !errors.Is(lookupErr, sql.ErrNoRows) {
 		return nil, lookupErr
 	}
@@ -317,7 +322,7 @@ func dbExtensionUpsert(db *sql.DB, pid string, siteID int64, key, provider strin
 	if publish {
 		status, published, publishedAt = "published", string(body), nowStamp()
 	}
-	_, err = db.Exec(`INSERT INTO content_extensions
+	_, err = tx.Exec(`INSERT INTO content_extensions
 		(project_id, site_id, extension_key, provider_app, display_name, version, status,
 		 draft_manifest, published_manifest, published_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -332,38 +337,48 @@ func dbExtensionUpsert(db *sql.DB, pid string, siteID int64, key, provider strin
 	if err != nil {
 		return nil, err
 	}
-	ext, err := dbExtensionGet(db, pid, siteID, key)
+	ext, err := dbExtensionGet(tx, pid, siteID, key)
 	if err != nil {
 		return nil, err
 	}
 	if publish {
-		if _, err := db.Exec(`INSERT INTO content_extension_versions(extension_id, version, manifest)
+		if _, err := tx.Exec(`INSERT INTO content_extension_versions(extension_id, version, manifest)
 			VALUES (?, ?, ?)`, ext.ID, manifest.Version, string(body)); err != nil {
 			return nil, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	invalidateExtensionCache(db, pid, siteID)
+	invalidatePageCacheForSite(siteID)
 	return ext, nil
 }
 
-func validateExtensionRouteOwnership(db *sql.DB, pid string, siteID int64, key string, manifest ExtensionManifest) error {
+func validateExtensionRouteOwnership(db contentQuerier, pid string, siteID int64, key string, manifest ExtensionManifest) error {
 	extensions, err := dbExtensionsList(db, pid, siteID)
 	if err != nil {
 		return err
 	}
-	claimed := map[string]string{}
 	for _, ext := range extensions {
 		if ext.Key == key {
 			continue
 		}
-		for _, route := range ext.DraftManifest.Routes {
-			claimed[extensionRouteShape(route.Pattern)] = ext.Key
+		manifests := []ExtensionManifest{ext.DraftManifest}
+		if ext.Status == "published" {
+			manifests = append(manifests, ext.PublishedManifest)
+		}
+		for _, other := range manifests {
+			for _, owned := range other.Routes {
+				for _, route := range manifest.Routes {
+					if extensionPatternsOverlap(owned.Pattern, route.Pattern) {
+						return fmt.Errorf("route %q conflicts with extension %q", route.Pattern, ext.Key)
+					}
+				}
+			}
 		}
 	}
-	for _, route := range manifest.Routes {
-		if owner := claimed[extensionRouteShape(route.Pattern)]; owner != "" {
-			return fmt.Errorf("route %q conflicts with extension %q", route.Pattern, owner)
-		}
-	}
+
 	return nil
 }
 
@@ -414,16 +429,22 @@ func dbExtensionUpdateSettings(db *sql.DB, pid string, siteID int64, key string,
 }
 
 func dbExtensionPublish(db *sql.DB, pid string, siteID int64, key string) (*Extension, error) {
-	ext, err := dbExtensionGet(db, pid, siteID, key)
-	if err != nil {
-		return nil, err
-	}
-	body, _ := json.Marshal(ext.DraftManifest)
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	ext, err := dbExtensionGet(tx, pid, siteID, key)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateExtensionManifest(key, ext.ProviderApp, ext.DraftManifest); err != nil {
+		return nil, err
+	}
+	if err := validateExtensionRouteOwnership(tx, pid, siteID, key, ext.DraftManifest); err != nil {
+		return nil, err
+	}
+	body, _ := json.Marshal(ext.DraftManifest)
 	if _, err := tx.Exec(`UPDATE content_extensions SET status='published',
 		published_manifest=draft_manifest, published_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
 		WHERE id=?`, ext.ID); err != nil {
@@ -436,6 +457,8 @@ func dbExtensionPublish(db *sql.DB, pid string, siteID int64, key string) (*Exte
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	invalidateExtensionCache(db, pid, siteID)
+	invalidatePageCacheForSite(siteID)
 	return dbExtensionGet(db, pid, siteID, key)
 }
 
@@ -519,6 +542,7 @@ func (a *App) toolExtensionsRemove(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	n, _ := result.RowsAffected()
+	invalidateExtensionCache(ctx.AppDB(), pid, siteID)
 	invalidatePageCacheForSite(siteID)
 	return map[string]any{"ok": n > 0}, nil
 }
@@ -665,7 +689,7 @@ func invokeExtensionCall(ctx *sdk.AppCtx, pid, provider string, call ExtensionCa
 }
 
 func (a *App) tryHandleExtensionRoute(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64) bool {
-	extensions, err := dbExtensionsList(ctx.AppDB(), pid, siteID)
+	extensions, err := cachedPublishedExtensions(ctx.AppDB(), pid, siteID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return true
@@ -764,9 +788,8 @@ func renderExtensionTemplate(ext Extension, route ExtensionRoute, data extension
 	return renderExtensionSource(ext, route.Template, data)
 }
 
-func renderExtensionSource(ext Extension, templateName string, data extensionPageData) (string, error) {
-	source := ext.PublishedManifest.Templates[templateName]
-	funcs := template.FuncMap{
+func extensionTemplateFuncs(ext Extension, data extensionPageData) template.FuncMap {
+	return template.FuncMap{
 		"asset": func(name string) string {
 			cleanName := strings.TrimPrefix(name, "/")
 			revision := ""
@@ -828,7 +851,17 @@ func renderExtensionSource(ext Extension, templateName string, data extensionPag
 		},
 		"safeHTML": sanitizeHTML,
 	}
-	tpl, err := template.New(ext.Key + ":" + templateName).Funcs(funcs).Parse(source)
+}
+
+func renderExtensionSource(ext Extension, templateName string, data extensionPageData) (string, error) {
+	base, err := cachedExtensionTemplate(ext, templateName)
+	if err != nil {
+		return "", err
+	}
+	tpl, err := base.Clone()
+	if err == nil {
+		tpl = tpl.Funcs(extensionTemplateFuncs(ext, data))
+	}
 	if err != nil {
 		return "", err
 	}
@@ -840,7 +873,7 @@ func renderExtensionSource(ext Extension, templateName string, data extensionPag
 }
 
 func publishedExtensionLayout(db *sql.DB, pid string, siteID int64) (*Extension, error) {
-	extensions, err := dbExtensionsList(db, pid, siteID)
+	extensions, err := cachedPublishedExtensions(db, pid, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -965,18 +998,35 @@ func (a *App) handleExtensionAsset(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	extensionRateMu  sync.Mutex
-	extensionRateLog = map[string][]int64{}
+	extensionRateMu        sync.Mutex
+	extensionRateLog       = map[string][]int64{}
+	extensionRateLastPrune int64
 )
 
+const maxExtensionRateKeys = 10000
+
 func extensionRateLimitOK(key string) bool {
-	now := time.Now().Unix()
+	return extensionRateLimitAt(key, time.Now().Unix())
+}
+func extensionRateLimitAt(key string, now int64) bool {
 	cutoff := now - 60
 	extensionRateMu.Lock()
 	defer extensionRateMu.Unlock()
-	entries := extensionRateLog[key][:0]
-	for _, stamp := range extensionRateLog[key] {
-		if stamp >= cutoff {
+	if now-extensionRateLastPrune >= 60 || (len(extensionRateLog) >= maxExtensionRateKeys && now > extensionRateLastPrune) {
+		for k, stamps := range extensionRateLog {
+			if len(stamps) == 0 || stamps[len(stamps)-1] <= cutoff {
+				delete(extensionRateLog, k)
+			}
+		}
+		extensionRateLastPrune = now
+	}
+	prior, exists := extensionRateLog[key]
+	if !exists && len(extensionRateLog) >= maxExtensionRateKeys {
+		return false
+	}
+	entries := prior[:0]
+	for _, stamp := range prior {
+		if stamp > cutoff {
 			entries = append(entries, stamp)
 		}
 	}
@@ -1034,7 +1084,7 @@ func (a *App) handleExtensionAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	rateKey := extractIPHash(r) + "|" + ext.Key + "|" + parts[1]
+	rateKey := fmt.Sprintf("%s|%d|%s|%s|%s", pid, siteID, extractIPHash(r), ext.Key, parts[1])
 	if !extensionRateLimitOK(rateKey) {
 		httpErr(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
@@ -1095,7 +1145,7 @@ func (a *App) handleHTTPExtensions(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		extensions, err := dbExtensionsList(ctx.AppDB(), pid, siteID)
+		extensions, err := cachedPublishedExtensions(ctx.AppDB(), pid, siteID)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return

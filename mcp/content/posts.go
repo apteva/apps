@@ -24,6 +24,8 @@ import (
 
 // Post is the Go-side representation of a posts row.
 type Post struct {
+	EditVersion     int64    `json:"edit_version"`
+	PublicURL       string   `json:"-"`
 	ID              int64    `json:"id"`
 	ProjectID       string   `json:"project_id,omitempty"`
 	SiteID          int64    `json:"site_id"`
@@ -72,6 +74,7 @@ type PostCreate struct {
 
 // PostPatch is a partial-update bag; nil fields mean "leave alone".
 type PostPatch struct {
+	ExpectedVersion *int64
 	Title           *string
 	Excerpt         *string
 	Blocks          *Document
@@ -120,7 +123,7 @@ func slugify(s string) string {
 	return s
 }
 
-func ensureUniqueSlug(db *sql.DB, projectID string, siteID int64, locale, kind, base string, excludingID int64) (string, error) {
+func ensureUniqueSlug(db contentQuerier, projectID string, siteID int64, locale, kind, base string, excludingID int64) (string, error) {
 	if base == "" {
 		base = "untitled"
 	}
@@ -201,7 +204,7 @@ func nullableInt(p *int64) any {
 	return *p
 }
 
-func dbGetPost(db *sql.DB, projectID string, siteID int64, id int64) (*Post, error) {
+func dbGetPost(db contentQuerier, projectID string, siteID int64, id int64) (*Post, error) {
 	row := db.QueryRow(postSelectSQL+` WHERE project_id=? AND site_id=? AND id=? AND deleted_at IS NULL`,
 		projectID, siteID, id)
 	return scanPost(row)
@@ -219,7 +222,7 @@ SELECT id, project_id, COALESCE(site_id, 0), kind, slug, locale, status,
        title, excerpt, body_blocks, body_html, author,
        featured_media_id, parent_id, menu_order, template,
        seo_title, seo_description, seo_canonical, og_image_media_id,
-       published_at, scheduled_at, created_at, updated_at
+       published_at, scheduled_at, created_at, updated_at, edit_version
   FROM posts`
 
 type rowScanner interface {
@@ -235,7 +238,7 @@ func scanPost(row rowScanner) (*Post, error) {
 		&p.Title, &p.Excerpt, &bodyJSON, &p.BodyHTML, &p.Author,
 		&featured, &parent, &p.MenuOrder, &p.Template,
 		&p.SEOTitle, &p.SEODescription, &p.SEOCanonical, &ogImg,
-		&publishedAt, &scheduledAt, &createdAt, &updatedAt,
+		&publishedAt, &scheduledAt, &createdAt, &updatedAt, &p.EditVersion,
 	); err != nil {
 		return nil, err
 	}
@@ -272,19 +275,20 @@ func scanPost(row rowScanner) (*Post, error) {
 }
 
 func dbUpdatePost(db *sql.DB, projectID string, siteID int64, id int64, patch PostPatch, author, source, note string) (*Post, error) {
-	prior, err := dbGetPost(db, projectID, siteID, id)
+	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
-
-	priorBodyJSON, _ := encodeDocument(prior.BodyBlocks)
-	if _, err := db.Exec(`INSERT INTO revisions (post_id, body_blocks, title, excerpt, author, source, note)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, priorBodyJSON, prior.Title, prior.Excerpt, author, source, note); err != nil {
-		return nil, fmt.Errorf("snapshot revision: %w", err)
+	defer tx.Rollback()
+	prior, err := dbGetPost(tx, projectID, siteID, id)
+	if err != nil {
+		return nil, err
+	}
+	if patch.ExpectedVersion != nil && *patch.ExpectedVersion != prior.EditVersion {
+		return nil, errEditConflict
 	}
 
-	sets := []string{"updated_at = CURRENT_TIMESTAMP", "body_html = ''"}
+	sets := []string{"updated_at = CURRENT_TIMESTAMP", "body_html = ''", "edit_version = edit_version + 1"}
 	args := []any{}
 	if patch.Title != nil {
 		sets = append(sets, "title = ?")
@@ -327,7 +331,7 @@ func dbUpdatePost(db *sql.DB, projectID string, siteID int64, id int64, patch Po
 		if prior.Kind == "page" && reservedSlugs[newSlug] {
 			return nil, fmt.Errorf("slug %q is reserved", newSlug)
 		}
-		newSlug, err = ensureUniqueSlug(db, projectID, siteID, prior.Locale, prior.Kind, newSlug, id)
+		newSlug, err = ensureUniqueSlug(tx, projectID, siteID, firstPatchedLocale(patch.Locale, prior.Locale), prior.Kind, newSlug, id)
 		if err != nil {
 			return nil, err
 		}
@@ -355,47 +359,88 @@ func dbUpdatePost(db *sql.DB, projectID string, siteID int64, id int64, patch Po
 		args = append(args, *patch.OGImageMediaID)
 	}
 
+	priorBodyJSON, err := encodeDocument(prior.BodyBlocks)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`INSERT INTO revisions (post_id, body_blocks, title, excerpt, author, source, note) VALUES (?, ?, ?, ?, ?, ?, ?)`, id, priorBodyJSON, prior.Title, prior.Excerpt, author, source, note); err != nil {
+		return nil, fmt.Errorf("snapshot revision: %w", err)
+	}
 	args = append(args, projectID, siteID, id)
 	q := "UPDATE posts SET " + strings.Join(sets, ", ") + " WHERE project_id=? AND site_id=? AND id=?"
-	if _, err := db.Exec(q, args...); err != nil {
+	if _, err := tx.Exec(q, args...); err != nil {
 		return nil, fmt.Errorf("update post: %w", err)
 	}
+	updated, err := dbGetPost(tx, projectID, siteID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	invalidatePageCacheForSite(siteID)
-	return dbGetPost(db, projectID, siteID, id)
+	return updated, nil
 }
 
-func dbPublishPost(db *sql.DB, projectID string, siteID int64, id int64, scheduledAt string, source string) (*Post, error) {
+func dbPublishPost(db *sql.DB, projectID string, siteID int64, id int64, scheduledAt string, source string, expectedVersion ...int64) (*Post, error) {
+	if scheduledAt != "" {
+		parsed, err := time.Parse(time.RFC3339, scheduledAt)
+		if err != nil {
+			return nil, fmt.Errorf("scheduled_at must be RFC3339: %w", err)
+		}
+		scheduledAt = parsed.UTC().Format("2006-01-02 15:04:05")
+	}
 	now := nowStamp()
 	var event string
 	var q string
 	var args []any
 	if scheduledAt != "" {
 		event = "scheduled"
-		q = `UPDATE posts SET status='scheduled', scheduled_at=?, updated_at=? WHERE project_id=? AND site_id=? AND id=?`
+		q = `UPDATE posts SET status='scheduled', scheduled_at=?, updated_at=?, edit_version=edit_version+1 WHERE project_id=? AND site_id=? AND id=?`
 		args = []any{scheduledAt, now, projectID, siteID, id}
 	} else {
 		event = "published"
-		q = `UPDATE posts SET status='published', published_at=COALESCE(published_at, ?), scheduled_at=NULL, updated_at=? WHERE project_id=? AND site_id=? AND id=?`
+		q = `UPDATE posts SET status='published', published_at=COALESCE(published_at, ?), scheduled_at=NULL, updated_at=?, edit_version=edit_version+1 WHERE project_id=? AND site_id=? AND id=?`
 		args = []any{now, now, projectID, siteID, id}
 		if source == "scheduler" {
 			q += ` AND status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ?`
 			args = append(args, now)
 		}
 	}
-	result, err := db.Exec(q, args...)
+	q += ` AND deleted_at IS NULL`
+	if len(expectedVersion) > 0 {
+		q += ` AND edit_version=?`
+		args = append(args, expectedVersion[0])
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("publish: %w", err)
 	}
 	if changed, _ := result.RowsAffected(); changed == 0 {
+		if len(expectedVersion) > 0 {
+			return nil, errEditConflict
+		}
 		return nil, fmt.Errorf("publish: post %d not found or no longer eligible", id)
 	}
-	logPublishEvent(db, id, event, source, nil)
+	logPublishEvent(tx, id, event, source, nil)
+	post, err := dbGetPost(tx, projectID, siteID, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	invalidatePageCacheForSite(siteID)
-	return dbGetPost(db, projectID, siteID, id)
+	return post, nil
 }
 
 func dbUnpublishPost(db *sql.DB, projectID string, siteID int64, id int64, source string) (*Post, error) {
-	if _, err := db.Exec(`UPDATE posts SET status='draft', scheduled_at=NULL, updated_at=CURRENT_TIMESTAMP
+	if _, err := db.Exec(`UPDATE posts SET status='draft', scheduled_at=NULL, updated_at=CURRENT_TIMESTAMP, edit_version=edit_version+1
 		WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id); err != nil {
 		return nil, err
 	}
@@ -405,7 +450,7 @@ func dbUnpublishPost(db *sql.DB, projectID string, siteID int64, id int64, sourc
 }
 
 func dbArchivePost(db *sql.DB, projectID string, siteID int64, id int64, source string) (*Post, error) {
-	if _, err := db.Exec(`UPDATE posts SET status='archived', updated_at=CURRENT_TIMESTAMP
+	if _, err := db.Exec(`UPDATE posts SET status='archived', updated_at=CURRENT_TIMESTAMP, edit_version=edit_version+1
 		WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id); err != nil {
 		return nil, err
 	}
@@ -420,7 +465,7 @@ func dbArchivePost(db *sql.DB, projectID string, siteID int64, id int64, source 
 // integrity but is functionally gone. A future posts_purge tool could
 // drop the bytes if disk pressure ever matters.
 func dbDeletePost(db *sql.DB, projectID string, siteID int64, id int64, source string) error {
-	if _, err := db.Exec(`UPDATE posts SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+	if _, err := db.Exec(`UPDATE posts SET deleted_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP, edit_version=edit_version+1
 		WHERE project_id=? AND site_id=? AND id=?`, projectID, siteID, id); err != nil {
 		return err
 	}
@@ -429,7 +474,9 @@ func dbDeletePost(db *sql.DB, projectID string, siteID int64, id int64, source s
 	return nil
 }
 
-func logPublishEvent(db *sql.DB, postID int64, event, source string, metadata map[string]any) {
+func logPublishEvent(db interface {
+	Exec(string, ...any) (sql.Result, error)
+}, postID int64, event, source string, metadata map[string]any) {
 	meta := "{}"
 	if metadata != nil {
 		b, _ := json.Marshal(metadata)
@@ -442,6 +489,8 @@ func logPublishEvent(db *sql.DB, postID int64, event, source string, metadata ma
 // ── search ──────────────────────────────────────────────────────────
 
 type PostSearch struct {
+	TermID   int64
+	TermKind string
 	Q        string
 	Status   string
 	Kind     string
@@ -485,12 +534,20 @@ func dbSearchPosts(db *sql.DB, projectID string, siteID int64, s PostSearch) ([]
 		args = append(args, like, like, like)
 	}
 	join := ""
-	if s.TermSlug != "" {
-		join = `JOIN post_terms pt ON pt.post_id = p.id
-		        JOIN terms t ON t.id = pt.term_id AND t.slug = ? AND t.project_id = ? AND t.site_id = ?`
-		// Term-filter args come before the WHERE args in the prepared
-		// statement.
-		args = append([]any{s.TermSlug, projectID, siteID}, args...)
+	if s.TermID > 0 || s.TermSlug != "" {
+		filter := `EXISTS (SELECT 1 FROM post_terms pt JOIN terms t ON t.id=pt.term_id WHERE pt.post_id=p.id AND t.project_id=p.project_id AND t.site_id=p.site_id`
+		if s.TermID > 0 {
+			filter += ` AND t.id=?`
+			args = append(args, s.TermID)
+		} else {
+			filter += ` AND t.slug=?`
+			args = append(args, s.TermSlug)
+		}
+		if s.TermKind != "" {
+			filter += ` AND t.kind=?`
+			args = append(args, s.TermKind)
+		}
+		where = append(where, filter+")")
 	}
 
 	countQ := "SELECT COUNT(*) FROM posts p " + join + " WHERE " + strings.Join(where, " AND ")
@@ -524,7 +581,7 @@ SELECT p.id, p.project_id, COALESCE(p.site_id, 0), p.kind, p.slug, p.locale, p.s
        p.title, p.excerpt, p.body_blocks, p.body_html, p.author,
        p.featured_media_id, p.parent_id, p.menu_order, p.template,
        p.seo_title, p.seo_description, p.seo_canonical, p.og_image_media_id,
-       p.published_at, p.scheduled_at, p.created_at, p.updated_at
+       p.published_at, p.scheduled_at, p.created_at, p.updated_at, p.edit_version
   FROM posts p`
 
 // ── revisions ────────────────────────────────────────────────────────
@@ -732,6 +789,13 @@ func asStringDefault(v any, def string) string {
 
 func buildPostPatch(args map[string]any) (PostPatch, error) {
 	var p PostPatch
+	if raw, exists := args["expected_version"]; exists {
+		v, ok := asInt64(raw)
+		if !ok || v < 1 {
+			return p, errors.New("expected_version must be a positive integer")
+		}
+		p.ExpectedVersion = &v
+	}
 	if v, ok := args["title"].(string); ok {
 		p.Title = &v
 	}
@@ -864,6 +928,7 @@ func (a *App) toolPostsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Status:   asString(args["status"]),
 		Kind:     asString(args["kind"]),
 		TermSlug: asString(args["term_slug"]),
+		TermKind: asString(args["term_kind"]),
 		Author:   asString(args["author"]),
 		Locale:   asString(args["locale"]),
 	}
@@ -897,7 +962,15 @@ func (a *App) toolPostsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, errors.New("id required")
 	}
 	scheduled := asString(args["scheduled_at"])
-	post, err := dbPublishPost(ctx.AppDB(), pid, siteID, id, scheduled, asStringDefault(args["source"], "agent"))
+	var versions []int64
+	if raw, exists := args["expected_version"]; exists {
+		v, ok := asInt64(raw)
+		if !ok || v < 1 {
+			return nil, errors.New("expected_version must be a positive integer")
+		}
+		versions = append(versions, v)
+	}
+	post, err := dbPublishPost(ctx.AppDB(), pid, siteID, id, scheduled, asStringDefault(args["source"], "agent"), versions...)
 	if err != nil {
 		return nil, err
 	}
@@ -1042,12 +1115,12 @@ func (a *App) handleHTTPPostsCollection(w http.ResponseWriter, r *http.Request) 
 	ctx := getAppCtx(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpContentError(w, err)
 		return
 	}
 	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpContentError(w, err)
 		return
 	}
 	switch r.Method {
@@ -1057,6 +1130,7 @@ func (a *App) handleHTTPPostsCollection(w http.ResponseWriter, r *http.Request) 
 			Status:   r.URL.Query().Get("status"),
 			Kind:     r.URL.Query().Get("kind"),
 			TermSlug: r.URL.Query().Get("term_slug"),
+			TermKind: r.URL.Query().Get("term_kind"),
 			Author:   r.URL.Query().Get("author"),
 			Locale:   r.URL.Query().Get("locale"),
 		}
@@ -1084,7 +1158,7 @@ func (a *App) handleHTTPPostsCollection(w http.ResponseWriter, r *http.Request) 
 		body["_site_id"] = siteID
 		out, err := a.toolPostsCreate(ctx, body)
 		if err != nil {
-			httpErr(w, http.StatusBadRequest, err.Error())
+			httpContentError(w, err)
 			return
 		}
 		httpJSON(w, out)
@@ -1097,12 +1171,12 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpContentError(w, err)
 		return
 	}
 	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpContentError(w, err)
 		return
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/admin/posts/")
@@ -1115,6 +1189,11 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 	// Sub-routes: /admin/posts/<id>/publish, /unpublish, /archive,
 	// /revisions, /blocks
 	if len(parts) >= 2 {
+		if (parts[1] == "publish" || parts[1] == "unpublish" || parts[1] == "archive") && r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			httpErr(w, http.StatusMethodNotAllowed, "POST required")
+			return
+		}
 		switch parts[1] {
 		case "publish":
 			var body map[string]any
@@ -1127,7 +1206,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 			body["_site_id"] = siteID
 			out, err := a.toolPostsPublish(ctx, body)
 			if err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
+				httpContentError(w, err)
 				return
 			}
 			httpJSON(w, out)
@@ -1135,7 +1214,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 		case "unpublish":
 			out, err := a.toolPostsUnpublish(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
 			if err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
+				httpContentError(w, err)
 				return
 			}
 			httpJSON(w, out)
@@ -1143,7 +1222,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 		case "archive":
 			out, err := a.toolPostsArchive(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
 			if err != nil {
-				httpErr(w, http.StatusBadRequest, err.Error())
+				httpContentError(w, err)
 				return
 			}
 			httpJSON(w, out)
@@ -1180,7 +1259,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 		body["_site_id"] = siteID
 		out, err := a.toolPostsUpdate(ctx, body)
 		if err != nil {
-			httpErr(w, http.StatusBadRequest, err.Error())
+			httpContentError(w, err)
 			return
 		}
 		httpJSON(w, out)
@@ -1195,7 +1274,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 			out, err = a.toolPostsArchive(ctx, map[string]any{"id": id, "_project_id": pid, "_site_id": siteID})
 		}
 		if err != nil {
-			httpErr(w, http.StatusBadRequest, err.Error())
+			httpContentError(w, err)
 			return
 		}
 		httpJSON(w, out)
@@ -1245,7 +1324,7 @@ func (a *App) handleHTTPBlocks(w http.ResponseWriter, r *http.Request, ctx *sdk.
 		return
 	}
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+		httpContentError(w, err)
 		return
 	}
 	httpJSON(w, out)

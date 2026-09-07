@@ -11,6 +11,7 @@
 // importmap. The dashboard host imports the default export and mounts
 // it — the panel must NOT self-mount.
 
+import { persistEditor } from "./editor-persistence";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 // Inlined app-event subscription. Each app ships its own copy because
@@ -109,6 +110,7 @@ interface Document {
 
 interface Post {
   id: number;
+  edit_version: number;
   kind: string;
   slug: string;
   status: string;
@@ -1524,45 +1526,35 @@ function Editor({
     setDirty(true);
   };
 
-  const save = async () => {
-    if (!post) return;
+  const operation = useRef(false);
+  const commit = async (publish: boolean) => {
+    if (!post || operation.current) return;
+    operation.current = true;
     setSaving(true);
     setError(null);
-    try {
-      await api(`/admin/posts/${postId}`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          title: post.title,
-          excerpt: post.excerpt ?? "",
-          blocks,
-        }),
-      });
+    const acceptSaved = (saved: Post) => {
+      setPost(saved);
+      setBlocks(saved.body_blocks?.blocks ?? []);
       setDirty(false);
+    };
+    try {
+      const saved = await persistEditor(api, post, blocks, dirty, publish, acceptSaved);
+      acceptSaved(saved);
     } catch (e) {
       setError(String(e));
     } finally {
+      operation.current = false;
       setSaving(false);
     }
   };
-
-  const publish = async () => {
-    if (!post) return;
-    if (dirty) {
-      await save();
-    }
-    try {
-      const r = await api<{ post: Post }>(`/admin/posts/${postId}/publish`, { method: "POST" });
-      setPost(r.post);
-    } catch (e) {
-      setError(String(e));
-    }
-  };
+  const save = () => commit(false);
+  const publish = () => commit(true);
 
   if (loading) return <div className="p-4 text-text-muted">Loading…</div>;
   if (!post) return <div className="p-4">Post not found.</div>;
 
   return (
-    <div className="p-4 text-sm">
+    <fieldset disabled={saving} className="p-4 text-sm border-0 min-w-0">
       <header className="flex items-center justify-between gap-2 mb-3">
         <button
           onClick={onExit}
@@ -1627,7 +1619,7 @@ function Editor({
           <div className="text-text-muted text-center py-8">Empty post — add a block above.</div>
         )}
       </div>
-    </div>
+    </fieldset>
   );
 }
 

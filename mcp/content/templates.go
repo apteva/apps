@@ -341,30 +341,14 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 
 	existing, _ := countExisting(ctx.AppDB(), projectID, siteID)
 
-	if dryRun {
-		// Walk the body and report what would be created without
-		// touching the DB. Annotate would_refuse so the panel can
-		// show a warning before the user clicks Apply.
-		summary.Created["pages"] = len(body.Pages)
-		summary.Created["posts"] = len(body.Posts)
-		summary.Created["terms"] = len(body.Terms)
-		summary.Created["menus"] = len(body.Menus)
-		summary.Created["settings"] = len(body.Settings)
-		summary.Created["redirects"] = len(body.Redirects)
-		if body.HomepageSlug != "" {
-			summary.HomepagePinned = true
-		}
-		summary.ExistingCount = existing
-		if mode == ApplyEmptyOnly && existing > 0 {
-			summary.WouldRefuse = true
-			summary.RefuseReason = fmt.Sprintf("Mode 'empty_only' refuses on populated sites — %d existing posts/pages/menus/terms. Switch to append or overwrite.", existing)
-		}
-		return summary, nil
-	}
-
-	// Real apply — the empty_only guard blocks writes here.
 	if mode == ApplyEmptyOnly && existing > 0 {
-		return nil, fmt.Errorf("install is not empty (%d posts/pages/menus/terms exist); switch mode to append or overwrite to proceed", existing)
+		if !dryRun {
+			return nil, fmt.Errorf("install is not empty (%d posts/pages/menus/terms exist); switch mode to append or overwrite to proceed", existing)
+		}
+		summary.WouldRefuse = true
+		summary.RefuseReason = fmt.Sprintf("Mode 'empty_only' refuses on populated sites — %d existing posts/pages/menus/terms.", existing)
+		summary.ExistingCount = existing
+		return summary, nil
 	}
 
 	tx, err := ctx.AppDB().Begin()
@@ -373,14 +357,22 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 	}
 	defer tx.Rollback()
 
-	// 1. Settings — site-scoped UPSERT.
+	// Append never changes existing configuration.
 	for k, v := range body.Settings {
-		if _, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, ?, ?)
-			ON CONFLICT(project_id, site_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
-			projectID, siteID, k, v); err != nil {
+		conflict := `DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`
+		if mode == ApplyAppend {
+			conflict = `DO NOTHING`
+		}
+		res, err := tx.Exec(`INSERT INTO settings(project_id,site_id,key,value) VALUES (?,?,?,?) ON CONFLICT(project_id,site_id,key) `+conflict, projectID, siteID, k, v)
+		if err != nil {
 			return nil, fmt.Errorf("settings %q: %w", k, err)
 		}
-		summary.Created["settings"]++
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			summary.Skipped["settings"]++
+		} else {
+			summary.Created["settings"]++
+		}
 	}
 
 	// 2. Terms — build slug→id map for menu items + post joins.
@@ -456,20 +448,22 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 		}
 		if id > 0 {
 			postIDs[post.Slug] = id
-			// Attach terms.
-			for _, slug := range post.Terms {
-				var tid int64
-				if v, ok := termIDs["category/"+slug]; ok {
-					tid = v
-				} else if v, ok := termIDs["tag/"+slug]; ok {
-					tid = v
-				} else {
-					summary.Warnings = append(summary.Warnings,
-						fmt.Sprintf("post %q references term %q which isn't in the template; skipped", post.Slug, slug))
-					continue
-				}
-				if _, err := tx.Exec(`INSERT OR IGNORE INTO post_terms (post_id, term_id) VALUES (?, ?)`, id, tid); err != nil {
-					return nil, fmt.Errorf("post_terms %d/%d: %w", id, tid, err)
+			// Preserve relationships on existing posts in append mode.
+			if !skipped {
+				for _, slug := range post.Terms {
+					var tid int64
+					if v, ok := termIDs["category/"+slug]; ok {
+						tid = v
+					} else if v, ok := termIDs["tag/"+slug]; ok {
+						tid = v
+					} else {
+						summary.Warnings = append(summary.Warnings,
+							fmt.Sprintf("post %q references term %q which isn't in the template; skipped", post.Slug, slug))
+						continue
+					}
+					if _, err := tx.Exec(`INSERT OR IGNORE INTO post_terms (post_id, term_id) VALUES (?, ?)`, id, tid); err != nil {
+						return nil, fmt.Errorf("post_terms %d/%d: %w", id, tid, err)
+					}
 				}
 			}
 		}
@@ -483,6 +477,17 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 
 	// 5. Menus — replace items atomically per menu.
 	for _, menu := range body.Menus {
+		if mode == ApplyAppend {
+			var id int64
+			err := tx.QueryRow(`SELECT id FROM menus WHERE project_id=? AND site_id=? AND slug=?`, projectID, siteID, menu.Slug).Scan(&id)
+			if err == nil {
+				summary.Skipped["menus"]++
+				continue
+			}
+			if err != sql.ErrNoRows {
+				return nil, err
+			}
+		}
 		menuID, err := upsertMenuInTx(tx, projectID, siteID, menu.Slug, menu.Name)
 		if err != nil {
 			return nil, err
@@ -504,30 +509,49 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 		if code != 301 && code != 302 {
 			code = 301
 		}
-		if _, err := tx.Exec(`INSERT INTO redirects (project_id, site_id, from_path, to_path, code)
+		conflict := `DO UPDATE SET to_path=excluded.to_path, code=excluded.code`
+		if mode == ApplyAppend {
+			conflict = `DO NOTHING`
+		}
+		res, err := tx.Exec(`INSERT INTO redirects (project_id, site_id, from_path, to_path, code)
 			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(project_id, site_id, from_path) DO UPDATE SET to_path=excluded.to_path, code=excluded.code`,
-			projectID, siteID, red.From, red.To, code); err != nil {
+			ON CONFLICT(project_id, site_id, from_path) `+conflict,
+			projectID, siteID, red.From, red.To, code)
+		if err != nil {
 			return nil, fmt.Errorf("redirect %q: %w", red.From, err)
 		}
-		summary.Created["redirects"]++
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			summary.Skipped["redirects"]++
+		} else {
+			summary.Created["redirects"]++
+		}
 	}
 
 	// 7. Homepage pin.
 	if body.HomepageSlug != "" {
 		if id, ok := pageIDs[body.HomepageSlug]; ok {
-			if _, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, 'homepage_page_id', ?)
-				ON CONFLICT(project_id, site_id, key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`,
-				projectID, siteID, fmt.Sprintf("%d", id)); err != nil {
+			conflict := `DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`
+			if mode == ApplyAppend {
+				conflict = `DO NOTHING`
+			}
+			res, err := tx.Exec(`INSERT INTO settings (project_id, site_id, key, value) VALUES (?, ?, 'homepage_page_id', ?)
+				ON CONFLICT(project_id, site_id, key) `+conflict,
+				projectID, siteID, fmt.Sprintf("%d", id))
+			if err != nil {
 				return nil, fmt.Errorf("set homepage: %w", err)
 			}
-			summary.HomepagePinned = true
+			n, _ := res.RowsAffected()
+			summary.HomepagePinned = n > 0
 		} else {
 			summary.Warnings = append(summary.Warnings,
 				fmt.Sprintf("homepage_slug %q didn't match any created page", body.HomepageSlug))
 		}
 	}
 
+	if dryRun {
+		return summary, nil
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -583,7 +607,7 @@ func upsertPostInTx(tx *sql.Tx, projectID string, siteID int64, kind string, p T
 			parentVal = *parentID
 		}
 		if _, uerr := tx.Exec(`UPDATE posts SET title=?, excerpt=?, body_blocks=?, body_html='',
-			parent_id=?, template=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			parent_id=?, template=?, updated_at=CURRENT_TIMESTAMP, edit_version=edit_version+1 WHERE id=?`,
 			p.Title, p.Excerpt, bodyJSON, parentVal, p.Template, existingID); uerr != nil {
 			err = fmt.Errorf("update %s %q: %w", kind, slug, uerr)
 			return

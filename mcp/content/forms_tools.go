@@ -30,15 +30,15 @@ func (a *App) toolFormsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	defer rows.Close()
 	type formRow struct {
-		PostID            int64  `json:"post_id"`
-		PostKind          string `json:"post_kind"`
-		PostSlug          string `json:"post_slug"`
-		PostTitle         string `json:"post_title"`
-		BlockID           string `json:"block_id"`
-		FieldsCount       int    `json:"fields_count"`
-		ActionsCount      int    `json:"actions_count"`
-		SubmissionsCount  int    `json:"submissions_count"`
-		LastSubmissionAt  int64  `json:"last_submission_at,omitempty"`
+		PostID           int64  `json:"post_id"`
+		PostKind         string `json:"post_kind"`
+		PostSlug         string `json:"post_slug"`
+		PostTitle        string `json:"post_title"`
+		BlockID          string `json:"block_id"`
+		FieldsCount      int    `json:"fields_count"`
+		ActionsCount     int    `json:"actions_count"`
+		SubmissionsCount int    `json:"submissions_count"`
+		LastSubmissionAt int64  `json:"last_submission_at,omitempty"`
 	}
 	var out []formRow
 	for rows.Next() {
@@ -60,18 +60,39 @@ func (a *App) toolFormsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				FieldsCount:  len(fc),
 				ActionsCount: len(ac),
 			}
-			// Cheap per-form aggregate query — fine for project-sized
-			// catalogs; if a project ever has hundreds of forms we'd
-			// switch to a single GROUP BY join, but the panel reads
-			// this rarely (open + occasional refresh).
-			r := ctx.AppDB().QueryRow(`
-                SELECT COUNT(*), COALESCE(MAX(created_at), 0)
-                FROM form_submissions
-                WHERE project_id = ? AND block_id = ?
-            `, pid, b.ID)
-			_ = r.Scan(&row.SubmissionsCount, &row.LastSubmissionAt)
+
 			out = append(out, row)
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	counts, err := ctx.AppDB().Query(`SELECT block_id,COUNT(*),COALESCE(MAX(created_at),0) FROM form_submissions WHERE project_id=? GROUP BY block_id`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer counts.Close()
+	type aggregate struct {
+		count int
+		last  int64
+	}
+	totals := map[string]aggregate{}
+	for counts.Next() {
+		var id string
+		var v aggregate
+		if err := counts.Scan(&id, &v.count, &v.last); err != nil {
+			return nil, err
+		}
+		totals[id] = v
+	}
+	if err := counts.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		v := totals[out[i].BlockID]
+		out[i].SubmissionsCount = v.count
+		out[i].LastSubmissionAt = v.last
 	}
 	return map[string]any{"forms": out, "count": len(out)}, nil
 }

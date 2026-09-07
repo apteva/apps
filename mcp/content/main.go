@@ -52,6 +52,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("content requires a db block")
 	}
+	if err := scrubHistoricalFormSecrets(ctx.AppDB()); err != nil {
+		return fmt.Errorf("redact historical forms: %w", err)
+	}
 	globalCtx = ctx
 
 	if err := initializeThemes(); err != nil {

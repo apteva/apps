@@ -69,8 +69,8 @@ type ActionResult struct {
 }
 
 func dbInsertFormSubmission(db *sql.DB, s FormSubmission) (int64, error) {
-	payloadJSON, _ := json.Marshal(s.Payload)
-	resultsJSON, _ := json.Marshal(s.Results)
+	payloadJSON, _ := json.Marshal(redactFormValue(s.Payload, nil))
+	resultsJSON, _ := json.Marshal(privateFormResults(s.Results))
 	res, err := db.Exec(`
         INSERT INTO form_submissions
         (project_id, site_id, post_id, block_id, payload, ip_hash, user_agent, status, results, error, created_at)

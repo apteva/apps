@@ -8,8 +8,10 @@
 package main
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -59,10 +61,10 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r = withPublicLocale(r, ctx, pid, siteID)
 	// Page cache. Site segments the key alongside prefix/host/path so
 	// no two sites can return each other's cached body.
-	prefix := computeURLPrefix(r)
-	key := cacheKeyMulti(r.Host, r.URL.Path, "", prefix, siteID)
+	key := publicCacheKey(r, siteID)
 	if e, ok := cacheGet(key); ok {
 		trackCachedPageView(ctx, pid, siteID, r)
 		w.Header().Set("Content-Type", e.contentType)
@@ -151,13 +153,14 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	per := 10
 	if v := settings["posts_per_page"]; v != "" {
-		if n, _ := strconv.Atoi(v); n > 0 {
+		if n, _ := strconv.Atoi(v); n > 0 && n <= 200 {
 			per = n
 		}
 	}
 	posts, total, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{
 		Status: "published",
 		Kind:   "post",
+		Locale: selectedPublicLocale(ctx, pid, siteID, r),
 		Limit:  per,
 		Offset: (page - 1) * per,
 	})
@@ -166,7 +169,7 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		return
 	}
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Posts = posts
+	data.Posts = publicPostLinks(posts, data)
 	data.ListTitle = ""
 	if total > per {
 		var pag Pagination
@@ -182,6 +185,8 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 		if page*per < total {
 			pag.Next = fmt.Sprintf("/page/%d", page+1)
 		}
+		pag.Prev = publicPageLink(pag.Prev, data)
+		pag.Next = publicPageLink(pag.Next, data)
 		data.Pagination = &pag
 	}
 	body, policy, err := renderListForSite(ctx, pid, siteID, data)
@@ -194,7 +199,7 @@ func (a *App) renderBlogIndex(w http.ResponseWriter, r *http.Request, ctx *sdk.A
 }
 
 func (a *App) renderPost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64, slug string) {
-	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "post", "en", slug)
+	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "post", selectedPublicLocale(ctx, pid, siteID, r), slug)
 	if err != nil || post.Status != "published" {
 		http.NotFound(w, r)
 		return
@@ -210,7 +215,7 @@ func (a *App) renderPage(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx
 	}
 	parts := strings.Split(slug, "/")
 	leaf := parts[len(parts)-1]
-	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "page", "en", leaf)
+	post, err := dbGetPostBySlug(ctx.AppDB(), pid, siteID, "page", selectedPublicLocale(ctx, pid, siteID, r), leaf)
 	if err != nil || post.Status != "published" {
 		http.NotFound(w, r)
 		return
@@ -290,10 +295,11 @@ func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk
 		return
 	}
 	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{
-		Status:   "published",
-		Kind:     "post",
-		TermSlug: slug,
-		Limit:    50,
+		Status: "published",
+		Kind:   "post",
+		TermID: term.ID,
+		Locale: selectedPublicLocale(ctx, pid, siteID, r),
+		Limit:  50,
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -301,7 +307,7 @@ func (a *App) renderTermArchive(w http.ResponseWriter, r *http.Request, ctx *sdk
 	}
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Posts = posts
+	data.Posts = publicPostLinks(posts, data)
 	data.ListTitle = term.Name
 	data.PageTitle = term.Name
 	body, policy, err := renderListForSite(ctx, pid, siteID, data)
@@ -325,14 +331,18 @@ func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Kind: "post", Limit: 20})
+	r = withPublicLocale(r, ctx, pid, siteID)
+	if serveCachedPublic(w, r, siteID) {
+		return
+	}
+	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Kind: "post", Locale: selectedPublicLocale(ctx, pid, siteID, r), Limit: 20})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Posts = posts
+	data.Posts = publicPostLinks(posts, data)
 	body, err := renderFeed(data)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -353,18 +363,35 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	r = withPublicLocale(r, ctx, pid, siteID)
+	if serveCachedPublic(w, r, siteID) {
+		return
+	}
+	rows, err := ctx.AppDB().Query(`SELECT kind,slug,updated_at,published_at FROM posts WHERE project_id=? AND site_id=? AND status='published' AND deleted_at IS NULL AND locale=? ORDER BY id`, pid, siteID, selectedPublicLocale(ctx, pid, siteID, r))
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	var posts []Post
-	for offset := 0; ; offset += 200 {
-		batch, total, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Limit: 200, Offset: offset})
-		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
+	for rows.Next() {
+		var p Post
+		var updated, published sql.NullString
+		if err := rows.Scan(&p.Kind, &p.Slug, &updated, &published); err != nil {
+			rows.Close()
+			httpErr(w, 500, err.Error())
 			return
 		}
-		posts = append(posts, batch...)
-		if len(posts) >= total || len(batch) == 0 {
-			break
-		}
+		p.UpdatedAt = updated.String
+		p.PublishedAt = published.String
+		posts = append(posts, p)
 	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	base := strings.TrimRight(settings["public_base_url"], "/")
 	if base == "" {
@@ -391,6 +418,9 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 			loc += "/posts/" + p.Slug
 		case "page":
 			loc += "/" + p.Slug
+		}
+		if locale := r.URL.Query().Get("locale"); locale != "" {
+			loc += "?locale=" + url.QueryEscape(locale)
 		}
 		mod := p.UpdatedAt
 		if mod == "" {
@@ -645,16 +675,16 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 	mainMenu, _ := dbGetMenuBySlug(ctx.AppDB(), pid, siteID, "primary")
 	var rendered []RenderedMenuItem
 	if mainMenu != nil {
-		rendered = renderMenuItems(mainMenu.Items, prefix, proxiedRenderQuery(r))
+		rendered = renderMenuItems(mainMenu.Items, prefix, publicResourceQuery(r))
 	}
 	return PageData{
 		Theme:         activeThemeForSite(ctx, pid, siteID),
 		SiteTitle:     firstNonEmpty(settings["site_title"], "My Site"),
 		SiteTagline:   settings["site_tagline"],
-		Locale:        firstNonEmpty(settings["default_locale"], "en"),
+		Locale:        selectedPublicLocale(ctx, pid, siteID, r),
 		PublicBaseURL: settings["public_base_url"],
 		URLPrefix:     prefix,
-		ResourceQuery: proxiedRenderQuery(r),
+		ResourceQuery: publicResourceQuery(r),
 		SiteID:        siteID,
 		PrimaryMenu:   rendered,
 		Now:           time.Now().UTC().Format(time.RFC3339),
@@ -753,7 +783,7 @@ func cacheKeyMulti(host, path, locale, prefix string, siteID int64) string {
 func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType string, siteID int64) {
 	sum := sha256.Sum256([]byte(body))
 	etag := `"` + hex.EncodeToString(sum[:8]) + `"`
-	key := cacheKeyMulti(r.Host, r.URL.Path, "", computeURLPrefix(r), siteID)
+	key := publicCacheKey(r, siteID)
 	cacheSet(key, body, contentType, etag, w.Header().Get("Content-Security-Policy"),
 		w.Header().Get("X-Content-Type-Options") == "nosniff")
 	w.Header().Set("Content-Type", contentType)
@@ -763,4 +793,60 @@ func cacheAndWrite(w http.ResponseWriter, r *http.Request, body, contentType str
 		return
 	}
 	_, _ = io.WriteString(w, body)
+}
+
+type publicLocaleKey struct{}
+
+func selectedPublicLocale(ctx *sdk.AppCtx, pid string, siteID int64, r *http.Request) string {
+	if v, ok := r.Context().Value(publicLocaleKey{}).(string); ok {
+		return v
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("locale")); v != "" {
+		return v
+	}
+	settings, _ := effectiveSettings(ctx, pid, siteID)
+	return firstNonEmpty(settings["default_locale"], "en")
+}
+func withPublicLocale(r *http.Request, ctx *sdk.AppCtx, pid string, siteID int64) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), publicLocaleKey{}, selectedPublicLocale(ctx, pid, siteID, r)))
+}
+func publicResourceQuery(r *http.Request) string {
+	q, _ := url.ParseQuery(strings.TrimPrefix(proxiedRenderQuery(r), "?"))
+	if v := r.URL.Query().Get("locale"); v != "" {
+		q.Set("locale", v)
+	}
+	if len(q) > 0 {
+		return "?" + q.Encode()
+	}
+	return ""
+}
+func publicCacheKey(r *http.Request, siteID int64) string {
+	locale, _ := r.Context().Value(publicLocaleKey{}).(string)
+	return cacheKeyMulti(r.Host, r.URL.Path, locale+publicResourceQuery(r), computeURLPrefix(r), siteID)
+}
+func serveCachedPublic(w http.ResponseWriter, r *http.Request, siteID int64) bool {
+	e, ok := cacheGet(publicCacheKey(r, siteID))
+	if !ok {
+		return false
+	}
+	w.Header().Set("Content-Type", e.contentType)
+	w.Header().Set("ETag", e.etag)
+	if r.Header.Get("If-None-Match") == e.etag {
+		w.WriteHeader(http.StatusNotModified)
+	} else if r.Method != http.MethodHead {
+		_, _ = io.WriteString(w, e.body)
+	}
+	return true
+}
+func publicPostLinks(posts []Post, data PageData) []Post {
+	for i := range posts {
+		posts[i].PublicURL = data.URLPrefix + "posts/" + posts[i].Slug + data.ResourceQuery
+	}
+	return posts
+}
+func publicPageLink(path string, data PageData) string {
+	if path == "" {
+		return ""
+	}
+	return data.URLPrefix + strings.TrimPrefix(path, "/") + data.ResourceQuery
 }

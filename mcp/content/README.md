@@ -1,8 +1,38 @@
-# Content (v1)
+# Content
 
 Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
 revisions, redirects — rendered server-side as themed HTML and exposed
 as a headless REST API from the same database.
+
+## v2.14.4 reliability update
+
+- Form logs redact password fields and credential-like keys. Stored action results
+  contain status only; raw provider output and errors are not retained. On first
+  startup, existing submission logs are scrubbed in bounded batches. Existing
+  backups are not rewritten.
+- `forms_list` works with the SDK's single SQLite connection.
+- Post responses include `edit_version`. Send it as `expected_version` on
+  `posts_update`, `posts_publish`, or the equivalent REST request to reject stale
+  operations (HTTP 409). The editor sends it automatically, retains generated
+  block IDs, and aborts publishing if a save fails. Structured block mutations
+  also detect edits that race their read/modify/write operation.
+- RFC3339 schedules are validated and normalized to UTC. Migration 008 fixes
+  previously stored valid RFC3339 schedules.
+- Template append preserves existing settings, menus, redirects, relationships,
+  and homepage selection. Previews use the real apply path in a rolled-back
+  transaction so their counts match the changes that would be made.
+- Extension route ownership includes both published and draft routes and is
+  checked in the publication transaction.
+- Public posts, pages, lists, archives, feeds, and sitemaps use `default_locale`,
+  with an optional `?locale=` override. Category and tag filtering is distinct.
+- Publish, unpublish, and archive REST actions require POST.
+- Extension rate-limit keys expire and have a fixed capacity. Published manifests
+  and parsed templates use bounded caches; session-dependent HTML is not cached.
+  Sitemaps read metadata only and honor cached responses and ETags.
+
+Validation: `GOWORK=off go test -race ./...`, `go vet ./...`,
+`bun test mcp/content/ui/editor-persistence.test.ts`, and
+`bun run scripts/build-panels.ts --app content` from the appropriate directories.
 
 ## What's in v1.0
 
