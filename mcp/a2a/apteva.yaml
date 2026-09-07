@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: a2a
 display_name: Agent to Agent
-version: 0.4.0
+version: 0.5.1
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
-  configured A2A peers, and maps standard A2A messages and tasks into the
+  configured nodes and public Agent Cards, and maps standard A2A messages and tasks into the
   existing durable local task ledger and live agent threads.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/a2a
@@ -27,11 +27,12 @@ requires:
 provides:
   http_routes:
     - { prefix: /tasks }
+    - { prefix: /connections }
     - { prefix: /directory, no_auth: true }
     - { prefix: /agent-cards, no_auth: true }
     - { prefix: /agents, no_auth: true }
   mcp_tools:
-    - { name: agents_discover, description: "Discover local and configured remote agents; every returned address can be messaged immediately." }
+    - { name: agents_discover, description: "Discover local, connected, or directly supplied public Agent Card agents; every returned address can be messaged immediately." }
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
@@ -53,7 +54,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.5.1, entry: mcp/a2a }
   port: 8080
   health_check: /health
 
@@ -78,6 +79,12 @@ config_schema:
     type: text
     description: Operator-facing name for this A2A installation.
     default: Apteva
+    required: false
+  - name: allow_loopback_public_agents
+    label: Allow loopback public agents (development only)
+    type: text
+    default: "false"
+    description: Explicitly allow local Agent Card test servers. Keep disabled on production installations.
     required: false
   - name: peer_timeout_seconds
     label: Peer timeout seconds

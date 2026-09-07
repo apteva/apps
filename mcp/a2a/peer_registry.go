@@ -44,8 +44,7 @@ func peerConfigs(app *sdk.AppCtx) ([]peerConfig, error) {
 }
 
 // syncConfiguredPeers keeps peers_json as a backwards-compatible desired-state
-// source for operator-managed peers. App-managed rows have an owner_install_id
-// and are never overwritten or removed by configuration reconciliation.
+// source. UI, app, and agent-created rows are independent of that reconciliation.
 func syncConfiguredPeers(app *sdk.AppCtx) error {
 	desired, err := parseConfiguredPeers(app.Config().Get("peers_json"))
 	if err != nil {
@@ -58,21 +57,26 @@ func syncConfiguredPeers(app *sdk.AppCtx) error {
 
 	desiredIDs := make(map[string]bool, len(desired))
 	for _, peer := range desired {
+		peer.ManagedBy = "config"
 		desiredIDs[peer.ID] = true
 		var owner sql.NullInt64
-		err := app.AppDB().QueryRow(`SELECT owner_install_id FROM a2a_peers WHERE id = ?`, peer.ID).Scan(&owner)
+		var managedBy string
+		err := app.AppDB().QueryRow(`SELECT owner_install_id, managed_by FROM a2a_peers WHERE id = ?`, peer.ID).Scan(&owner, &managedBy)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
 		if err == nil && owner.Valid {
 			return fmt.Errorf("configured peer %q is managed by app install %d", peer.ID, owner.Int64)
 		}
+		if err == nil && managedBy != "config" {
+			return fmt.Errorf("configured peer %q is managed by %s", peer.ID, managedBy)
+		}
 		if err := storePeer(app.AppDB(), keys, peer, nil); err != nil {
 			return fmt.Errorf("store configured peer %q: %w", peer.ID, err)
 		}
 	}
 
-	rows, err := app.AppDB().Query(`SELECT id FROM a2a_peers WHERE owner_install_id IS NULL`)
+	rows, err := app.AppDB().Query(`SELECT id FROM a2a_peers WHERE managed_by = 'config' AND owner_install_id IS NULL`)
 	if err != nil {
 		return err
 	}
@@ -94,7 +98,7 @@ func syncConfiguredPeers(app *sdk.AppCtx) error {
 		if _, err := app.AppDB().Exec(`DELETE FROM a2a_remote_agents WHERE peer_id = ?`, id); err != nil {
 			return err
 		}
-		if _, err := app.AppDB().Exec(`DELETE FROM a2a_peers WHERE id = ? AND owner_install_id IS NULL`, id); err != nil {
+		if _, err := app.AppDB().Exec(`DELETE FROM a2a_peers WHERE id = ? AND managed_by = 'config' AND owner_install_id IS NULL`, id); err != nil {
 			return err
 		}
 	}
@@ -125,12 +129,14 @@ func parseConfiguredPeers(raw string) ([]peerConfig, error) {
 		if seenID[peers[i].ID] {
 			return nil, fmt.Errorf("duplicate peer id %q", peers[i].ID)
 		}
-		hash := sha256.Sum256([]byte(peers[i].Token))
-		if seenToken[hash] {
-			return nil, errors.New("peer tokens must be unique")
+		if peers[i].Token != "" {
+			hash := sha256.Sum256([]byte(peers[i].Token))
+			if seenToken[hash] {
+				return nil, errors.New("peer tokens must be unique")
+			}
+			seenToken[hash] = true
 		}
 		seenID[peers[i].ID] = true
-		seenToken[hash] = true
 	}
 	return peers, nil
 }
@@ -140,10 +146,29 @@ func normalizePeer(peer *peerConfig) error {
 	peer.Name = strings.TrimSpace(peer.Name)
 	peer.BaseURL = strings.TrimRight(strings.TrimSpace(peer.BaseURL), "/")
 	peer.Token = strings.TrimSpace(peer.Token)
+	peer.Kind = strings.ToLower(strings.TrimSpace(peer.Kind))
+	peer.DiscoveryURL = strings.TrimSpace(peer.DiscoveryURL)
+	peer.ProtocolVersion = strings.TrimSpace(peer.ProtocolVersion)
+	peer.ManagedBy = strings.ToLower(strings.TrimSpace(peer.ManagedBy))
+	if peer.Kind == "" {
+		peer.Kind = "node"
+	}
+	if peer.ManagedBy == "" {
+		peer.ManagedBy = "config"
+	}
 	peer.DiscoverAgents = normalizeRules(peer.DiscoverAgents)
 	peer.InvokeAgents = normalizeRules(peer.InvokeAgents)
-	if peer.ID == "" || peer.BaseURL == "" || peer.Token == "" {
-		return errors.New("id, base_url, and token are required")
+	if peer.ID == "" || peer.BaseURL == "" {
+		return errors.New("id and base_url are required")
+	}
+	if peer.Kind != "node" && peer.Kind != "agent_card" {
+		return errors.New("kind must be node or agent_card")
+	}
+	if peer.Kind == "node" && peer.Token == "" {
+		return errors.New("token is required for node connections")
+	}
+	if peer.Kind == "agent_card" && peer.DiscoveryURL == "" {
+		return errors.New("card_url is required for Agent Card connections")
 	}
 	if peer.Name == "" {
 		peer.Name = peer.ID
@@ -167,14 +192,16 @@ func normalizeRules(rules []string) []string {
 	return out
 }
 
-func loadPeerRecords(app *sdk.AppCtx) ([]peerRecord, error) {
+func loadPeerRecords(app *sdk.AppCtx) ([]peerRecord, error) { return loadPeerRecordsWhere(app, "") }
+func loadPeerRecordsWhere(app *sdk.AppCtx, where string, args ...any) ([]peerRecord, error) {
 	keys, err := loadPeerKeyring(app)
 	if err != nil {
 		return nil, fmt.Errorf("peer registry key: %w", err)
 	}
 	rows, err := app.AppDB().Query(`SELECT id, name, base_url, encrypted_token,
-		discover_agents_json, invoke_agents_json, owner_install_id
-		FROM a2a_peers ORDER BY id`)
+		discover_agents_json, invoke_agents_json, owner_install_id,
+		kind, discovery_url, protocol_version, managed_by
+		FROM a2a_peers `+where+` ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +212,8 @@ func loadPeerRecords(app *sdk.AppCtx) ([]peerRecord, error) {
 		var encrypted []byte
 		var discoverJSON, invokeJSON string
 		if err := rows.Scan(&record.ID, &record.Name, &record.BaseURL, &encrypted,
-			&discoverJSON, &invokeJSON, &record.OwnerInstallID); err != nil {
+			&discoverJSON, &invokeJSON, &record.OwnerInstallID, &record.Kind,
+			&record.DiscoveryURL, &record.ProtocolVersion, &record.ManagedBy); err != nil {
 			return nil, err
 		}
 		token, err := keys.open(record.ID, encrypted)
@@ -207,14 +235,21 @@ func loadPeerRecords(app *sdk.AppCtx) ([]peerRecord, error) {
 func storePeer(db *sql.DB, keys *peerKeyring, peer peerConfig, owner *int64) error {
 	discoverJSON, _ := json.Marshal(peer.DiscoverAgents)
 	invokeJSON, _ := json.Marshal(peer.InvokeAgents)
-	hash := sha256.Sum256([]byte(peer.Token))
+	hashInput := peer.Token
+	if hashInput == "" {
+		hashInput = "anonymous:" + peer.ID
+	}
+	hash := sha256.Sum256([]byte(hashInput))
 
 	var existingName, existingURL, existingDiscover, existingInvoke string
+	var existingKind, existingDiscoveryURL, existingVersion, existingManagedBy string
 	var existingHash []byte
 	var existingOwner sql.NullInt64
 	err := db.QueryRow(`SELECT name, base_url, token_hash, discover_agents_json,
-		invoke_agents_json, owner_install_id FROM a2a_peers WHERE id = ?`, peer.ID).
-		Scan(&existingName, &existingURL, &existingHash, &existingDiscover, &existingInvoke, &existingOwner)
+		invoke_agents_json, owner_install_id, kind, discovery_url, protocol_version, managed_by
+		FROM a2a_peers WHERE id = ?`, peer.ID).
+		Scan(&existingName, &existingURL, &existingHash, &existingDiscover, &existingInvoke,
+			&existingOwner, &existingKind, &existingDiscoveryURL, &existingVersion, &existingManagedBy)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -224,7 +259,9 @@ func storePeer(db *sql.DB, keys *peerKeyring, peer peerConfig, owner *int64) err
 	}
 	if err == nil && existingName == peer.Name && existingURL == peer.BaseURL &&
 		string(existingHash) == string(hash[:]) && existingDiscover == string(discoverJSON) &&
-		existingInvoke == string(invokeJSON) && existingOwner == wantedOwner {
+		existingInvoke == string(invokeJSON) && existingOwner == wantedOwner &&
+		existingKind == peer.Kind && existingDiscoveryURL == peer.DiscoveryURL &&
+		existingVersion == peer.ProtocolVersion && existingManagedBy == peer.ManagedBy {
 		return nil
 	}
 
@@ -235,8 +272,9 @@ func storePeer(db *sql.DB, keys *peerKeyring, peer peerConfig, owner *int64) err
 	now := nowUTC()
 	result, err := db.Exec(`INSERT INTO a2a_peers
 		(id, name, base_url, encrypted_token, token_hash, discover_agents_json,
-		 invoke_agents_json, owner_install_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 invoke_agents_json, owner_install_id, kind, discovery_url, protocol_version,
+		 managed_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 		 name = excluded.name,
 		 base_url = excluded.base_url,
@@ -245,10 +283,15 @@ func storePeer(db *sql.DB, keys *peerKeyring, peer peerConfig, owner *int64) err
 		 discover_agents_json = excluded.discover_agents_json,
 		 invoke_agents_json = excluded.invoke_agents_json,
 		 owner_install_id = excluded.owner_install_id,
+		 kind = excluded.kind,
+		 discovery_url = excluded.discovery_url,
+		 protocol_version = excluded.protocol_version,
+		 managed_by = excluded.managed_by,
 		 updated_at = excluded.updated_at
 		WHERE a2a_peers.owner_install_id IS excluded.owner_install_id`,
 		peer.ID, peer.Name, peer.BaseURL, encrypted, hash[:], string(discoverJSON),
-		string(invokeJSON), owner, now, now)
+		string(invokeJSON), owner, peer.Kind, peer.DiscoveryURL, peer.ProtocolVersion,
+		peer.ManagedBy, now, now)
 	if err != nil {
 		return err
 	}
@@ -422,6 +465,7 @@ func (a *App) toolPeerUpsert(ctx context.Context, app *sdk.AppCtx, args map[stri
 		BaseURL: stringArg(args, "base_url"), Token: stringArg(args, "token"),
 		DiscoverAgents: stringListArg(args, "discover_agents"),
 		InvokeAgents:   stringListArg(args, "invoke_agents"),
+		Kind:           "node", ManagedBy: "app",
 	}
 	if err := normalizePeer(&peer); err != nil {
 		return nil, err

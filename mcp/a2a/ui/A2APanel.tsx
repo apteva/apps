@@ -113,6 +113,18 @@ interface A2AMessage {
   created_at: string;
 }
 
+interface A2AConnection {
+  id: string;
+  name: string;
+  kind: "node" | "agent_card";
+  base_url: string;
+  card_url?: string;
+  protocol_version?: string;
+  managed_by: string;
+  authenticated: boolean;
+  agents?: string[];
+}
+
 const STATUS_FILTERS = [
   { value: "", label: "All" },
   { value: "open", label: "Open" },
@@ -184,7 +196,104 @@ function ExchangeGlyph({ size = 28 }: { size?: number }) {
   );
 }
 
+function ConnectionsView({ projectId, onTasks }: { projectId: string; onTasks: () => void }) {
+  const [connections, setConnections] = useState<A2AConnection[]>([]);
+  const [kind, setKind] = useState<"agent_card" | "node">("agent_card");
+  const [cardURL, setCardURL] = useState("");
+  const [id, setID] = useState("");
+  const [name, setName] = useState("");
+  const [baseURL, setBaseURL] = useState("");
+  const [token, setToken] = useState("");
+  const [discoverGrants, setDiscoverGrants] = useState("");
+  const [invokeGrants, setInvokeGrants] = useState("");
+  const [adding, setAdding] = useState(false);
+  const grants = (text: string) => text.split(",").map(s => s.trim()).filter(Boolean);
+  const [note, setNote] = useState("");
+  const endpoint = `${API}/connections?project_id=${encodeURIComponent(projectId)}`;
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch(endpoint, { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      setConnections((await res.json()).connections ?? []);
+    } catch (err) { setNote(err instanceof Error ? err.message : String(err)); }
+  }, [endpoint]);
+  useEffect(() => { load(); }, [load]);
+
+  const add = async () => {
+    setAdding(true);
+    setNote("Validating connection…");
+    try {
+      const body = kind === "agent_card"
+        ? { kind, card_url: cardURL, token }
+        : { kind, id, name, base_url: baseURL, token, discover_agents: grants(discoverGrants), invoke_agents: grants(invokeGrants) };
+      const res = await fetch(endpoint, { method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(await res.text());
+      const payload = await res.json();
+      setNote(`${payload.connection?.name ?? "Connection"} added.`);
+      setCardURL(""); setID(""); setName(""); setBaseURL(""); setToken("");
+      await load();
+    } catch (err) { setNote(err instanceof Error ? err.message : String(err)); }
+    finally { setAdding(false); }
+  };
+  const remove = async (connection: A2AConnection) => {
+    const res = await fetch(`${API}/connections/${encodeURIComponent(connection.id)}?project_id=${encodeURIComponent(projectId)}`,
+      { method: "DELETE", credentials: "same-origin" });
+    setNote(res.ok ? `${connection.name} removed.` : await res.text());
+    if (res.ok) await load();
+  };
+
+  const inputClass = "w-full bg-bg-input border border-border rounded px-2.5 py-2 text-sm";
+  return <div className="h-full min-h-0 flex flex-col bg-bg text-text">
+    <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
+      <div><h1 className="text-sm font-semibold">A2A connections</h1>
+        <p className="text-xs text-text-muted">Add a public Agent Card or pair another Apteva A2A node.</p></div>
+      <button type="button" onClick={onTasks} className="ml-auto px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Tasks</button>
+    </header>
+    <main className="flex-1 min-h-0 overflow-auto p-4 grid gap-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+      <section className="border border-border rounded bg-bg-card p-4 h-fit">
+        <h2 className="text-sm font-semibold">Add connection</h2>
+        <select value={kind} onChange={(e) => setKind(e.target.value as typeof kind)} className={`${inputClass} mt-3`}>
+          <option value="agent_card">Public Agent Card</option><option value="node">A2A node</option>
+        </select>
+        {kind === "agent_card" ? <input value={cardURL} onChange={(e) => setCardURL(e.target.value)}
+          placeholder="https://agent.example/.well-known/agent-card.json" className={`${inputClass} mt-2`} /> : <>
+          <input value={id} onChange={(e) => setID(e.target.value)} placeholder="Node id" className={`${inputClass} mt-2`} />
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" className={`${inputClass} mt-2`} />
+          <input value={baseURL} onChange={(e) => setBaseURL(e.target.value)} placeholder="https://node.example/api/apps/a2a" className={`${inputClass} mt-2`} />
+          <label className="block mt-3 text-xs">Agents this node may discover
+            <input aria-label="Discovery grants" value={discoverGrants} onChange={e => setDiscoverGrants(e.target.value)} placeholder="Agent names or ids, separated by commas" className={`${inputClass} mt-1`} />
+          </label>
+          <label className="block mt-2 text-xs">Agents this node may invoke
+            <input aria-label="Invocation grants" value={invokeGrants} onChange={e => setInvokeGrants(e.target.value)} placeholder="Agent names or ids, separated by commas" className={`${inputClass} mt-1`} />
+          </label>
+          <p className="mt-2 text-xs text-text-muted">Empty grants deny access. Enter * only to grant access to every exposed agent across this installation, including other projects on a global installation.</p>
+        </>}
+        <input type="password" value={token} onChange={(e) => setToken(e.target.value)}
+          placeholder={kind === "node" ? "Pairing token (required)" : "Bearer token (optional)"} className={`${inputClass} mt-2`} />
+        <button type="button" onClick={add} disabled={adding || (kind === "agent_card" ? !cardURL : !id || !baseURL || !token)}
+          className="mt-3 px-3 py-2 text-sm rounded bg-accent text-bg disabled:opacity-40">Validate and add</button>
+        {note && <p className="mt-3 text-xs text-text-muted whitespace-pre-wrap">{note}</p>}
+      </section>
+      <section className="space-y-2">
+        {connections.length === 0 ? <p className="text-sm text-text-muted">No external connections yet.</p> : connections.map((c) =>
+          <article key={c.id} className="border border-border rounded bg-bg-card px-4 py-3 flex gap-3 items-start">
+            <div className="min-w-0"><div className="flex items-center gap-2"><h3 className="text-sm font-semibold truncate">{c.name}</h3>
+              <span className="text-xs px-1.5 py-0.5 border border-border rounded">{c.kind === "node" ? "node" : "public agent"}</span></div>
+              <p className="mt-1 text-xs text-text-muted break-all">{c.card_url || c.base_url}</p>
+              <p className="mt-1 text-xs text-text-dim">{c.protocol_version && `A2A ${c.protocol_version} · `}{c.agents?.join(", ") || "Directory discovered on demand"} · {c.managed_by}</p>
+            </div>
+            {(c.managed_by === "operator" || c.managed_by === "agent") && <button type="button" onClick={() => remove(c)}
+              className="ml-auto text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Remove</button>}
+          </article>)}
+      </section>
+    </main>
+  </div>;
+}
+
 export default function A2APanel({ projectId }: NativePanelProps) {
+	const [view, setView] = useState<"tasks" | "connections">("tasks");
   const [tasks, setTasks] = useState<A2ATask[]>([]);
   const [statusFilter, setStatusFilter] = useState("");
   const [selectedId, setSelectedId] = useState(0);
@@ -199,7 +308,10 @@ export default function A2APanel({ projectId }: NativePanelProps) {
     [projectId],
   );
 
+  const taskRequest = useRef(0);
+  const messageRequest = useRef(0);
   const loadTasks = useCallback(async () => {
+    const request = ++taskRequest.current;
     try {
       const params = new URLSearchParams();
       if (statusFilter) params.set("status", statusFilter);
@@ -208,18 +320,20 @@ export default function A2APanel({ projectId }: NativePanelProps) {
       });
       if (!res.ok) throw new Error(await res.text());
       const list: A2ATask[] = (await res.json()).tasks ?? [];
+      if (request !== taskRequest.current) return;
       setTasks(list);
       setSelectedId((prev) =>
         prev && list.some((t) => t.id === prev) ? prev : (list[0]?.id ?? 0),
       );
       setNote(`${list.length} task${list.length === 1 ? "" : "s"}`);
     } catch (err) {
-      setNote(err instanceof Error ? err.message : String(err));
+      if (request === taskRequest.current) setNote(err instanceof Error ? err.message : String(err));
     }
   }, [statusFilter, url]);
 
   const loadMessages = useCallback(
     async (taskId: number) => {
+      const request = ++messageRequest.current;
       if (!taskId) {
         setMessages([]);
         return;
@@ -229,9 +343,10 @@ export default function A2APanel({ projectId }: NativePanelProps) {
           credentials: "same-origin",
         });
         if (!res.ok) throw new Error(await res.text());
-        setMessages((await res.json()).messages ?? []);
+        const next = (await res.json()).messages ?? [];
+        if (request === messageRequest.current) setMessages(next);
       } catch {
-        setMessages([]);
+        if (request === messageRequest.current) setMessages([]);
       }
     },
     [url],
@@ -239,10 +354,13 @@ export default function A2APanel({ projectId }: NativePanelProps) {
 
   useEffect(() => {
     loadTasks();
+    return () => { taskRequest.current++; };
   }, [loadTasks]);
 
   useEffect(() => {
+    setMessages([]);
     loadMessages(selectedId);
+    return () => { messageRequest.current++; };
   }, [selectedId, loadMessages]);
 
   const selectedIdRef = useRef(selectedId);
@@ -271,6 +389,10 @@ export default function A2APanel({ projectId }: NativePanelProps) {
     [],
   );
 
+  if (view === "connections") {
+    return <ConnectionsView projectId={projectId} onTasks={() => setView("tasks")} />;
+  }
+
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
@@ -298,6 +420,8 @@ export default function A2APanel({ projectId }: NativePanelProps) {
         >
           Refresh
         </button>
+        <button type="button" onClick={() => setView("connections")}
+          className="px-3 py-1.5 text-xs border border-border rounded hover:bg-bg-input">Connections</button>
       </header>
 
       <main className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)]">

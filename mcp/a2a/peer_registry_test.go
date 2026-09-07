@@ -5,6 +5,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -190,5 +192,29 @@ func TestPeerRegistryToolsArePrivateAndRequireAppCaller(t *testing.T) {
 	var nodes int
 	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM a2a_node`).Scan(&nodes); err != nil || nodes != 1 {
 		t.Fatalf("a2a_node count=%d err=%v", nodes, err)
+	}
+}
+
+func TestPublicAgentBearerNeverAuthenticatesInboundPeer(t *testing.T) {
+	ctx, _ := newTestEnv(t)
+	keys, err := loadPeerKeyring(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := peerConfig{
+		ID: "public-test", Name: "Public", BaseURL: "https://public.example",
+		Token: "outbound-only-token", Kind: "agent_card",
+		DiscoveryURL: "https://public.example/.well-known/agent-card.json", ManagedBy: "operator",
+	}
+	if err := normalizePeer(&peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := storePeer(ctx.AppDB(), keys, peer, nil); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/directory/agents", nil)
+	req.Header.Set("Authorization", "Bearer outbound-only-token")
+	if _, err := authenticatePeer(ctx, req); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("public outbound token authenticated inbound: %v", err)
 	}
 }

@@ -44,6 +44,7 @@ type a2aPart struct {
 }
 
 type a2aMessage struct {
+	Kind      string    `json:"kind,omitempty"`
 	MessageID string    `json:"messageId,omitempty"`
 	ContextID string    `json:"contextId,omitempty"`
 	TaskID    string    `json:"taskId,omitempty"`
@@ -52,9 +53,10 @@ type a2aMessage struct {
 }
 
 type sendMessageParams struct {
-	Message   a2aMessage `json:"message"`
-	ContextID string     `json:"contextId,omitempty"`
-	TaskID    string     `json:"taskId,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Message   a2aMessage     `json:"message"`
+	ContextID string         `json:"contextId,omitempty"`
+	TaskID    string         `json:"taskId,omitempty"`
 }
 
 type taskIDParams struct {
@@ -67,9 +69,44 @@ type a2aTaskStatus struct {
 }
 
 type a2aTaskWire struct {
-	ID        string        `json:"id"`
-	ContextID string        `json:"contextId"`
-	Status    a2aTaskStatus `json:"status"`
+	Artifacts []json.RawMessage `json:"artifacts,omitempty"`
+	ID        string            `json:"id"`
+	ContextID string            `json:"contextId"`
+	Status    a2aTaskStatus     `json:"status"`
+}
+
+type remoteSendResult struct {
+	Task    *a2aTaskWire `json:"task,omitempty"`
+	Message *a2aMessage  `json:"message,omitempty"`
+}
+
+type legacySendResult struct {
+	Task    *a2aTaskWire
+	Message *a2aMessage
+}
+
+func (r *legacySendResult) UnmarshalJSON(data []byte) error {
+	var probe struct {
+		ID        string `json:"id"`
+		MessageID string `json:"messageId"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return err
+	}
+	if probe.MessageID != "" {
+		var message a2aMessage
+		if err := json.Unmarshal(data, &message); err != nil {
+			return err
+		}
+		r.Message = &message
+		return nil
+	}
+	var task a2aTaskWire
+	if err := json.Unmarshal(data, &task); err != nil {
+		return err
+	}
+	r.Task = &task
+	return nil
 }
 
 func extractA2AText(message a2aMessage) string {
@@ -84,13 +121,15 @@ func extractA2AText(message a2aMessage) string {
 
 func localStateFromA2A(state string) string {
 	state = strings.ToLower(strings.TrimSpace(state))
-	state = strings.TrimPrefix(state, "task_state_")
+	state = strings.ReplaceAll(strings.TrimPrefix(state, "task_state_"), "-", "_")
 	switch state {
 	case "submitted", "working", "input_required", "completed", "failed", "canceled", "cancelled":
 		if state == "cancelled" {
 			return "canceled"
 		}
 		return state
+	case "auth_required":
+		return "input_required"
 	case "rejected":
 		return "failed"
 	default:
@@ -108,6 +147,7 @@ func taskWire(dbTask *Task, messages []*Message) a2aTaskWire {
 		ContextID: dbTask.ProtocolContextID,
 		Status:    a2aTaskStatus{State: a2aStateFromLocal(dbTask.Status)},
 	}
+	_ = json.Unmarshal(dbTask.Artifacts, &w.Artifacts)
 	for i := len(messages) - 1; i >= 0; i-- {
 		message := messages[i]
 		if message.FromAgentID == dbTask.ToAgentID && strings.TrimSpace(message.Body) != "" {
@@ -215,7 +255,7 @@ func (a *App) handleAgentCard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent, err := app.PlatformAPI().GetAgent(profile.LocalAgentID)
-	if err != nil || agent == nil || !peerAllows(peer, "discover", profile, agent) {
+	if err != nil || agent == nil || (!peerAllows(peer, "discover", profile, agent) || !agentAttached(app, profile)) {
 		http.NotFound(w, r)
 		return
 	}
@@ -244,7 +284,7 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agent, err := app.PlatformAPI().GetAgent(profile.LocalAgentID)
-	if err != nil || agent == nil || !peerAllows(peer, "invoke", profile, agent) {
+	if err != nil || agent == nil || (!peerAllows(peer, "invoke", profile, agent) || !agentAttached(app, profile)) {
 		writeRPCError(w, nil, http.StatusForbidden, -32050, "peer may not invoke this agent")
 		return
 	}
@@ -253,8 +293,13 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, nil, http.StatusBadRequest, -32700, "parse error")
 		return
 	}
+	modern := request.Method == "SendMessage" || request.Method == "GetTask" || request.Method == "CancelTask"
+	if version := r.Header.Get("A2A-Version"); version != "" && version != "1.0" {
+		writeRPCError(w, request.ID, http.StatusBadRequest, -32009, "unsupported A2A version")
+		return
+	}
 	switch request.Method {
-	case "message/send":
+	case "message/send", "SendMessage":
 		var params sendMessageParams
 		if err := json.Unmarshal(request.Params, &params); err != nil {
 			writeRPCError(w, request.ID, http.StatusBadRequest, -32602, "invalid message params")
@@ -265,8 +310,12 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 			writeRPCError(w, request.ID, http.StatusBadRequest, -32602, rpcErr.Error())
 			return
 		}
-		writeRPC(w, request.ID, result)
-	case "tasks/get":
+		if modern {
+			writeRPC(w, request.ID, remoteSendResult{Task: &result})
+		} else {
+			writeRPC(w, request.ID, result)
+		}
+	case "tasks/get", "GetTask":
 		var params taskIDParams
 		_ = json.Unmarshal(request.Params, &params)
 		task, getErr := getTaskByProtocolID(app.AppDB(), params.ID)
@@ -276,7 +325,7 @@ func (a *App) handleAgentProtocol(w http.ResponseWriter, r *http.Request) {
 		}
 		messages, _ := listMessages(app.AppDB(), task.ID)
 		writeRPC(w, request.ID, taskWire(task, messages))
-	case "tasks/cancel":
+	case "tasks/cancel", "CancelTask":
 		var params taskIDParams
 		_ = json.Unmarshal(request.Params, &params)
 		task, getErr := getTaskByProtocolID(app.AppDB(), params.ID)
@@ -320,6 +369,9 @@ func (a *App) receiveRemoteMessage(app *sdk.AppCtx, peer *peerConfig, agent *sdk
 		if err != nil || task == nil || task.Direction != "inbound" || task.PeerID != peer.ID || task.RemoteCardID != profile.CardID {
 			return a2aTaskWire{}, errors.New("task not found")
 		}
+		if !openStatuses[task.Status] {
+			return a2aTaskWire{}, errors.New("task is terminal; start a new exchange")
+		}
 		if task.Status == "input_required" {
 			_ = setTaskStatus(app.AppDB(), task.ProjectID, task.ID, "working")
 			task.Status = "working"
@@ -339,8 +391,12 @@ func (a *App) receiveRemoteMessage(app *sdk.AppCtx, peer *peerConfig, agent *sdk
 	if contextID == "" {
 		contextID = randomID("context_")
 	}
+	kind, status := "ask", "submitted"
+	if oneWay, _ := params.Metadata["apteva.one_way"].(bool); oneWay {
+		kind, status = "message", "completed"
+	}
 	task, err := createTask(app.AppDB(), &Task{
-		ProjectID: agent.ProjectID, Kind: "ask", Status: "submitted", Direction: "inbound",
+		ProjectID: agent.ProjectID, Kind: kind, Status: status, Direction: "inbound",
 		FromAgentName: peer.Name, ToAgentID: agent.ID, ToAgentName: agent.Name,
 		PeerID: peer.ID, RemoteCardID: profile.CardID,
 		ProtocolTaskID: randomID("task_"), ProtocolContextID: contextID,
@@ -348,11 +404,15 @@ func (a *App) receiveRemoteMessage(app *sdk.AppCtx, peer *peerConfig, agent *sdk
 	if err != nil {
 		return a2aTaskWire{}, err
 	}
-	if err := deliver(app, agent.ID, formatAskEvent(task, message)); err != nil {
+	event := formatAskEvent(task, message)
+	if kind == "message" {
+		event = formatMessageEvent(task, message)
+	}
+	if err := deliver(app, agent.ID, event); err != nil {
 		_ = setTaskStatus(app.AppDB(), task.ProjectID, task.ID, "failed")
 		return a2aTaskWire{}, err
 	}
-	_ = recordMessage(app.AppDB(), task.ID, 0, agent.ID, message, "submitted")
+	_ = recordMessage(app.AppDB(), task.ID, 0, agent.ID, message, status)
 	emitTask(app, "task.created", task)
 	messages, _ := listMessages(app.AppDB(), task.ID)
 	return taskWire(task, messages), nil
@@ -368,6 +428,18 @@ func (a *App) callRemoteRPC(ctx context.Context, app *sdk.AppCtx, peer *peerConf
 	if err != nil || target.Scheme != peerBase.Scheme || !strings.EqualFold(target.Host, peerBase.Host) {
 		return errors.New("remote interface is outside the configured peer origin")
 	}
+	originalMethod := method
+	modern := peer.ProtocolVersion != "" && !strings.HasPrefix(peer.ProtocolVersion, "0.")
+	if modern {
+		switch method {
+		case "message/send":
+			method = "SendMessage"
+		case "tasks/get":
+			method = "GetTask"
+		case "tasks/cancel":
+			method = "CancelTask"
+		}
+	}
 	paramsRaw, _ := json.Marshal(params)
 	reqBody, _ := json.Marshal(jsonRPCRequest{
 		JSONRPC: "2.0", ID: json.RawMessage(strconv.Quote(randomID("rpc_"))), Method: method, Params: paramsRaw,
@@ -376,9 +448,18 @@ func (a *App) callRemoteRPC(ctx context.Context, app *sdk.AppCtx, peer *peerConf
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+peer.Token)
+	if peer.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+peer.Token)
+	}
 	req.Header.Set("Content-Type", "application/json")
-	res, err := a.httpClient(app).Do(req)
+	if peer.ProtocolVersion != "" {
+		req.Header.Set("A2A-Version", peer.ProtocolVersion)
+	}
+	client := a.httpClient(app)
+	if peer.Kind == "agent_card" {
+		client = a.publicHTTPClient(app)
+	}
+	res, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -388,6 +469,17 @@ func (a *App) callRemoteRPC(ctx context.Context, app *sdk.AppCtx, peer *peerConf
 		return fmt.Errorf("remote returned HTTP %d with invalid JSON: %w", res.StatusCode, err)
 	}
 	if response.Error != nil {
+		if modern && peer.Kind == "node" && response.Error.Code == -32601 {
+			// Retry only an explicit method-not-found, never ambiguous failures
+			// that may already have started work on the remote installation.
+			legacy := *peer
+			legacy.ProtocolVersion = ""
+			err := a.callRemoteRPC(ctx, app, &legacy, endpoint, originalMethod, params, out)
+			if err == nil {
+				peer.ProtocolVersion = ""
+			}
+			return err
+		}
 		return fmt.Errorf("remote A2A error %d: %s", response.Error.Code, response.Error.Message)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -404,13 +496,18 @@ func (a *App) callRemoteRPC(ctx context.Context, app *sdk.AppCtx, peer *peerConf
 }
 
 func (a *App) ensureRemoteCard(ctx context.Context, app *sdk.AppCtx, remote *remoteAgent, peer *peerConfig) (*remoteAgent, error) {
-	if remote.Card != nil && remote.EndpointURL != "" {
+	if remote.Card != nil && len(remote.Card.SupportedInterfaces) > 0 {
+		peer.ProtocolVersion = remote.Card.SupportedInterfaces[0].ProtocolVersion
+	}
+	expires, _ := time.Parse(time.RFC3339, remote.ExpiresAt)
+	if remote.Card != nil && remote.EndpointURL != "" && time.Now().Before(expires) {
 		return remote, nil
 	}
 	card, err := a.fetchRemoteCard(ctx, app, *peer, remote.CardID)
 	if err != nil {
 		return nil, err
 	}
+	peer.ProtocolVersion = card.SupportedInterfaces[0].ProtocolVersion
 	return upsertRemoteAgent(app.AppDB(), *peer, directoryEntry{
 		CardID: remote.CardID, Name: card.Name, Description: card.Description, Online: true, Skills: skillIDs(card.Skills),
 	}, card, configDuration(app, "card_cache_seconds", defaultCardCacheSeconds))
@@ -421,6 +518,9 @@ func configDuration(app *sdk.AppCtx, key string, fallbackSeconds int) time.Durat
 }
 
 func (a *App) startRemoteTask(ctx context.Context, app *sdk.AppCtx, from *callIdentity, remote *remoteAgent, message string, oneWay bool) (map[string]any, error) {
+	return a.startRemoteTaskInContext(ctx, app, from, remote, message, oneWay, "")
+}
+func (a *App) startRemoteTaskInContext(ctx context.Context, app *sdk.AppCtx, from *callIdentity, remote *remoteAgent, message string, oneWay bool, contextID string) (map[string]any, error) {
 	peer, err := findPeer(app, remote.PeerID)
 	if err != nil {
 		return nil, err
@@ -443,28 +543,61 @@ func (a *App) startRemoteTask(ctx context.Context, app *sdk.AppCtx, from *callId
 	if err != nil {
 		return nil, err
 	}
-	request := sendMessageParams{Message: a2aMessage{
-		MessageID: randomID("message_"), Role: "ROLE_USER",
-		Parts: []a2aPart{{Text: message, MediaType: "text/plain"}},
-	}}
-	var response a2aTaskWire
-	if err := a.callRemoteRPC(ctx, app, peer, remote.EndpointURL, "message/send", request, &response); err != nil {
+	request := remoteMessageParams(peer, message, contextID, "")
+	if oneWay && peer.Kind == "node" {
+		request.Metadata = map[string]any{"apteva.one_way": true}
+	}
+	response, immediate, err := a.sendRemoteMessage(ctx, app, peer, remote.EndpointURL, request)
+	if err != nil {
 		_ = setTaskStatus(app.AppDB(), from.ProjectID, task.ID, "failed")
 		return nil, fmt.Errorf("remote agent %q could not be reached: %w", remote.Name, err)
+	}
+	if err := recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, status); err != nil {
+		return nil, err
+	}
+	if immediate != nil {
+		reply := extractA2AText(*immediate)
+		if reply == "" {
+			reply = "Remote agent completed the exchange without a text reply."
+		}
+		if err := setRemoteTaskCorrelation(app.AppDB(), from.ProjectID, task.ID, "", immediate.ContextID); err != nil {
+			return nil, err
+		}
+		task.Status = "completed"
+		if _, err := saveReply(app.AppDB(), task, 0, from.AgentID, reply, "", nil); err != nil {
+			return nil, err
+		}
+		emitTask(app, "task.created", task)
+		emitTask(app, "task.updated", task)
+		return map[string]any{
+			"task_id": task.ID, "delivered": true, "status": "completed", "reply": reply,
+			"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
+			"note": "the public agent replied synchronously; the exchange is complete",
+		}, nil
 	}
 	if response.ID == "" {
 		_ = setTaskStatus(app.AppDB(), from.ProjectID, task.ID, "failed")
 		return nil, errors.New("remote agent returned no task id")
 	}
-	_ = setRemoteTaskCorrelation(app.AppDB(), from.ProjectID, task.ID, response.ID, response.ContextID)
-	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, status)
+	if err := setRemoteTaskCorrelation(app.AppDB(), from.ProjectID, task.ID, response.ID, response.ContextID); err != nil {
+		return nil, err
+	}
+	if !oneWay && (localStateFromA2A(response.Status.State) != "submitted" || response.Status.Message != nil || len(response.Artifacts) > 0) {
+		if err := applyRemoteResult(app, task, remote.Name, response); err != nil {
+			return nil, err
+		}
+	}
 	emitTask(app, "task.created", task)
 	note := "message accepted by remote agent; no reply is expected"
 	if !oneWay {
-		note = fmt.Sprintf("request accepted as task %d; the reply will arrive asynchronously", task.ID)
+		if openStatuses[task.Status] {
+			note = fmt.Sprintf("request accepted as task %d; further replies arrive asynchronously", task.ID)
+		} else {
+			note = "remote task finished; the result is recorded in the task ledger"
+		}
 	}
 	return map[string]any{
-		"task_id": task.ID, "delivered": true,
+		"task_id": task.ID, "delivered": true, "status": task.Status,
 		"to":   map[string]any{"address": "a2a:" + remote.Ref, "name": remote.Name, "peer": peer.Name},
 		"note": note,
 	}, nil
@@ -498,24 +631,54 @@ func (a *App) continueRemoteTask(ctx context.Context, app *sdk.AppCtx, task *Tas
 	if err != nil {
 		return nil, err
 	}
-	params := sendMessageParams{Message: a2aMessage{
-		MessageID: randomID("message_"), ContextID: task.RemoteContextID, TaskID: task.RemoteTaskID,
-		Role: "ROLE_USER", Parts: []a2aPart{{Text: message, MediaType: "text/plain"}},
-	}}
-	var response a2aTaskWire
-	if err := a.callRemoteRPC(ctx, app, peer, remote.EndpointURL, "message/send", params, &response); err != nil {
+	if !openStatuses[task.Status] {
+		// A2A terminal tasks cannot be reopened. Preserve the old ledger and begin
+		// a separately tracked request so a later answer is still synchronized.
+		from := &callIdentity{AgentID: task.FromAgentID, AgentName: task.FromAgentName, ThreadID: task.FromThreadID, ProjectID: task.ProjectID}
+		if err := checkLimits(app, from, 0, true); err != nil {
+			return nil, err
+		}
+		return a.startRemoteTaskInContext(ctx, app, from, remote, message, false, task.RemoteContextID)
+	}
+	if err := checkLimits(app, &callIdentity{AgentID: task.FromAgentID, ProjectID: task.ProjectID}, 0, false); err != nil {
 		return nil, err
 	}
-	status := task.Status
-	if status == "input_required" {
-		status = "working"
-		_ = setTaskSyncState(app.AppDB(), task.ProjectID, task.ID, status)
+	params := remoteMessageParams(peer, message, task.RemoteContextID, task.RemoteTaskID)
+	response, immediate, err := a.sendRemoteMessage(ctx, app, peer, remote.EndpointURL, params)
+	if err != nil {
+		return nil, err
 	}
-	_ = recordMessage(app.AppDB(), task.ID, task.FromAgentID, 0, message, status)
-	return map[string]any{
-		"task_id": task.ID, "delivered": true, "status": status,
-		"note": "follow-up delivered to the remote A2A task",
-	}, nil
+	if err := recordMessage(app.AppDB(), task.ID, task.FromAgentID, 0, message, task.Status); err != nil {
+		return nil, err
+	}
+	result := map[string]any{"task_id": task.ID, "delivered": true, "note": "follow-up delivered to the remote A2A task"}
+	if immediate != nil {
+		response = a2aTaskWire{ID: task.RemoteTaskID, ContextID: immediate.ContextID, Status: a2aTaskStatus{State: "completed", Message: immediate}}
+		result["reply"] = extractA2AText(*immediate)
+	} else if response.ID == "" {
+		return nil, errors.New("remote agent returned no task id")
+	}
+	if response.ContextID == "" {
+		response.ContextID = task.RemoteContextID
+	}
+	if err := setRemoteTaskCorrelation(app.AppDB(), task.ProjectID, task.ID, response.ID, response.ContextID); err != nil {
+		return nil, err
+	}
+	// A node's acknowledgement may still carry its earlier clarification.
+	// Resume the lifecycle without delivering that old question a second time.
+	var previous string
+	_ = app.AppDB().QueryRow(`SELECT body FROM a2a_messages WHERE task_id=? AND from_agent_id=0 ORDER BY id DESC LIMIT 1`, task.ID).Scan(&previous)
+	if immediate == nil && localStateFromA2A(response.Status.State) == "working" && len(response.Artifacts) == 0 && (response.Status.Message == nil || extractA2AText(*response.Status.Message) == previous) {
+		task.Status = "working"
+		if err := setTaskSyncState(app.AppDB(), task.ProjectID, task.ID, task.Status); err != nil {
+			return nil, err
+		}
+		emitTask(app, "task.updated", task)
+	} else if err := applyRemoteResult(app, task, remote.Name, response); err != nil {
+		return nil, err
+	}
+	result["status"] = task.Status
+	return result, nil
 }
 
 func (a *App) cancelRemoteTask(ctx context.Context, app *sdk.AppCtx, task *Task, message string) (map[string]any, error) {
@@ -540,4 +703,45 @@ func (a *App) cancelRemoteTask(ctx context.Context, app *sdk.AppCtx, task *Task,
 	task.Status = "canceled"
 	emitTask(app, "task.updated", task)
 	return map[string]any{"task_id": task.ID, "status": "canceled", "delivered": true}, nil
+}
+
+func remoteMessageParams(peer *peerConfig, text, contextID, taskID string) sendMessageParams {
+	msg := a2aMessage{MessageID: randomID("message_"), ContextID: contextID, TaskID: taskID, Role: "ROLE_USER", Parts: []a2aPart{{Text: text, MediaType: "text/plain"}}}
+	if peer.Kind == "agent_card" && strings.HasPrefix(peer.ProtocolVersion, "0.") {
+		msg.Role = "user"
+		msg.Kind = "message"
+		msg.Parts[0].Kind = "text"
+		msg.Parts[0].MediaType = ""
+	}
+	return sendMessageParams{Message: msg}
+}
+func (a *App) sendRemoteMessage(ctx context.Context, app *sdk.AppCtx, peer *peerConfig, endpoint string, params sendMessageParams) (a2aTaskWire, *a2aMessage, error) {
+	if peer.ProtocolVersion != "" && !strings.HasPrefix(peer.ProtocolVersion, "0.") {
+		var raw json.RawMessage
+		err := a.callRemoteRPC(ctx, app, peer, endpoint, "message/send", params, &raw)
+		if err != nil {
+			return a2aTaskWire{}, nil, err
+		}
+		var result remoteSendResult
+		if err = json.Unmarshal(raw, &result); err != nil {
+			return a2aTaskWire{}, nil, err
+		}
+		if result.Task == nil && result.Message == nil && peer.Kind == "node" {
+			var legacy legacySendResult
+			err = json.Unmarshal(raw, &legacy)
+			if legacy.Task != nil {
+				return *legacy.Task, legacy.Message, err
+			}
+		}
+		if result.Task != nil {
+			return *result.Task, result.Message, err
+		}
+		return a2aTaskWire{}, result.Message, err
+	}
+	var result legacySendResult
+	err := a.callRemoteRPC(ctx, app, peer, endpoint, "message/send", params, &result)
+	if result.Task != nil {
+		return *result.Task, result.Message, err
+	}
+	return a2aTaskWire{}, result.Message, err
 }

@@ -27,12 +27,16 @@ const (
 )
 
 type peerConfig struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	BaseURL        string   `json:"base_url"`
-	Token          string   `json:"token"`
-	DiscoverAgents []string `json:"discover_agents,omitempty"`
-	InvokeAgents   []string `json:"invoke_agents,omitempty"`
+	ID              string   `json:"id"`
+	Name            string   `json:"name"`
+	BaseURL         string   `json:"base_url"`
+	Token           string   `json:"token"`
+	Kind            string   `json:"kind,omitempty"`
+	DiscoveryURL    string   `json:"card_url,omitempty"`
+	ProtocolVersion string   `json:"protocol_version,omitempty"`
+	ManagedBy       string   `json:"-"`
+	DiscoverAgents  []string `json:"discover_agents,omitempty"`
+	InvokeAgents    []string `json:"invoke_agents,omitempty"`
 }
 
 type localNode struct {
@@ -69,18 +73,19 @@ type AgentProvider struct {
 }
 
 type AgentCard struct {
-	Name                string                       `json:"name"`
-	Description         string                       `json:"description"`
-	URL                 string                       `json:"url,omitempty"`
-	Version             string                       `json:"version"`
-	Provider            AgentProvider                `json:"provider"`
-	SupportedInterfaces []AgentInterface             `json:"supportedInterfaces"`
-	Capabilities        AgentCapabilities            `json:"capabilities"`
-	DefaultInputModes   []string                     `json:"defaultInputModes"`
-	DefaultOutputModes  []string                     `json:"defaultOutputModes"`
-	Skills              []AgentSkill                 `json:"skills"`
-	SecuritySchemes     map[string]map[string]string `json:"securitySchemes,omitempty"`
-	Security            []map[string][]string        `json:"security,omitempty"`
+	Name                 string                     `json:"name"`
+	Description          string                     `json:"description"`
+	URL                  string                     `json:"url,omitempty"`
+	Version              string                     `json:"version"`
+	Provider             AgentProvider              `json:"provider"`
+	SupportedInterfaces  []AgentInterface           `json:"supportedInterfaces"`
+	Capabilities         AgentCapabilities          `json:"capabilities"`
+	DefaultInputModes    []string                   `json:"defaultInputModes"`
+	DefaultOutputModes   []string                   `json:"defaultOutputModes"`
+	Skills               []AgentSkill               `json:"skills"`
+	SecuritySchemes      map[string]json.RawMessage `json:"securitySchemes,omitempty"`
+	SecurityRequirements []json.RawMessage          `json:"securityRequirements,omitempty"`
+	Security             []map[string][]string      `json:"security,omitempty"`
 }
 
 type agentProfile struct {
@@ -161,14 +166,22 @@ func isLoopbackHost(host string) bool {
 }
 
 func findPeer(app *sdk.AppCtx, id string) (*peerConfig, error) {
-	peers, err := peerConfigs(app)
+	records, err := loadPeerRecordsWhere(app, "WHERE id = ?", id)
 	if err != nil {
 		return nil, err
 	}
-	for i := range peers {
-		if peers[i].ID == id || strings.EqualFold(peers[i].Name, id) {
-			return &peers[i], nil
-		}
+	if len(records) == 1 {
+		return &records[0].peerConfig, nil
+	}
+	records, err = loadPeerRecordsWhere(app, "WHERE lower(name) = lower(?)", id)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 1 {
+		return &records[0].peerConfig, nil
+	}
+	if len(records) > 1 {
+		return nil, fmt.Errorf("peer name %q is ambiguous; use its id", id)
 	}
 	return nil, fmt.Errorf("peer %q is not configured", id)
 }
@@ -184,7 +197,7 @@ func authenticatePeer(app *sdk.AppCtx, r *http.Request) (*peerConfig, error) {
 		return nil, err
 	}
 	for i := range peers {
-		if len(token) == len(peers[i].Token) && subtle.ConstantTimeCompare([]byte(token), []byte(peers[i].Token)) == 1 {
+		if peers[i].Kind == "node" && len(token) == len(peers[i].Token) && subtle.ConstantTimeCompare([]byte(token), []byte(peers[i].Token)) == 1 {
 			return &peers[i], nil
 		}
 	}
@@ -262,7 +275,7 @@ func listCardAgents(app *sdk.AppCtx, projectID string) ([]sdk.PlatformAgent, boo
 		}
 	}
 	if !annotated {
-		return agents, false, nil
+		return nil, false, nil
 	}
 	out := make([]sdk.PlatformAgent, 0, len(agents))
 	for _, agent := range agents {
@@ -292,6 +305,10 @@ func buildAgentCard(app *sdk.AppCtx, agent sdk.PlatformAgent, profile *agentProf
 		description = "Apteva agent " + agent.Name
 	}
 	endpoint := publicA2ABaseURL(app) + "/agents/" + url.PathEscape(profile.CardID)
+	skills := profile.Skills
+	if skills == nil {
+		skills = []AgentSkill{}
+	}
 	return &AgentCard{
 		Name:        agent.Name,
 		Description: description,
@@ -303,14 +320,12 @@ func buildAgentCard(app *sdk.AppCtx, agent sdk.PlatformAgent, profile *agentProf
 			ProtocolVersion: "1.0",
 			URL:             endpoint,
 		}},
-		Capabilities:       AgentCapabilities{},
-		DefaultInputModes:  []string{"text/plain"},
-		DefaultOutputModes: []string{"text/plain"},
-		Skills:             profile.Skills,
-		SecuritySchemes: map[string]map[string]string{
-			"peerBearer": {"type": "http", "scheme": "bearer"},
-		},
-		Security: []map[string][]string{{"peerBearer": {}}},
+		Capabilities:         AgentCapabilities{},
+		DefaultInputModes:    []string{"text/plain"},
+		DefaultOutputModes:   []string{"text/plain"},
+		Skills:               skills,
+		SecuritySchemes:      map[string]json.RawMessage{"peerBearer": json.RawMessage(`{"httpAuthSecurityScheme":{"scheme":"bearer"}}`)},
+		SecurityRequirements: []json.RawMessage{json.RawMessage(`{"schemes":{"peerBearer":{"list":[]}}}`)},
 	}
 }
 
@@ -374,7 +389,8 @@ func upsertRemoteAgent(db *sql.DB, peer peerConfig, entry directoryEntry, card *
 			endpoint_url=CASE WHEN excluded.endpoint_url <> '' THEN excluded.endpoint_url ELSE a2a_remote_agents.endpoint_url END,
 			skills_json=excluded.skills_json,
 			card_json=CASE WHEN excluded.card_json <> '' THEN excluded.card_json ELSE a2a_remote_agents.card_json END,
-			fetched_at=excluded.fetched_at, expires_at=excluded.expires_at`,
+			fetched_at=CASE WHEN excluded.card_json <> '' OR a2a_remote_agents.card_json = '' THEN excluded.fetched_at ELSE a2a_remote_agents.fetched_at END,
+            expires_at=CASE WHEN excluded.card_json <> '' OR a2a_remote_agents.card_json = '' THEN excluded.expires_at ELSE a2a_remote_agents.expires_at END`,
 		ref, peer.ID, entry.CardID, entry.Name, entry.Description, endpoint, string(skillsJSON), cardJSON,
 		now.Format(time.RFC3339), now.Add(ttl).Format(time.RFC3339))
 	if err != nil {
@@ -432,6 +448,9 @@ func (a *App) httpClient(app *sdk.AppCtx) *http.Client {
 }
 
 func (a *App) fetchPeerDirectory(ctx context.Context, app *sdk.AppCtx, peer peerConfig, query, capability string) ([]directoryEntry, error) {
+	if peer.Kind != "node" {
+		return nil, errors.New("connection is an Agent Card, not a directory node")
+	}
 	u := peer.BaseURL + "/directory/agents"
 	values := url.Values{}
 	if query != "" {
@@ -466,6 +485,10 @@ func (a *App) fetchPeerDirectory(ctx context.Context, app *sdk.AppCtx, peer peer
 }
 
 func (a *App) fetchRemoteCard(ctx context.Context, app *sdk.AppCtx, peer peerConfig, cardID string) (*AgentCard, error) {
+	if peer.Kind == "agent_card" {
+		card, _, err := a.fetchPublicAgentCard(ctx, app, peer.DiscoveryURL, peer.Token)
+		return card, err
+	}
 	u := peer.BaseURL + "/agent-cards/" + url.PathEscape(cardID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -582,4 +605,17 @@ func (a *App) toolGetAgent(ctx context.Context, app *sdk.AppCtx, args map[string
 func isPositiveInteger(s string) bool {
 	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
 	return err == nil && n > 0
+}
+
+func agentAttached(app *sdk.AppCtx, profile *agentProfile) bool {
+	agents, _, err := listCardAgents(app, profile.ProjectID)
+	if err != nil {
+		return false
+	}
+	for _, agent := range agents {
+		if agent.ID == profile.LocalAgentID && agent.ProjectID == profile.ProjectID {
+			return true
+		}
+	}
+	return false
 }

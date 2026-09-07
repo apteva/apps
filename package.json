@@ -7,7 +7,8 @@
     "verify:icons": "bun run scripts/verify-app-icons.ts",
     "typecheck:code": "tsc -p mcp/code/tsconfig.check.json",
     "test:code:ui": "bun test mcp/code/ui/components/*.test.ts",
-    "test:code:browser": "playwright test --config mcp/code/playwright.config.ts"
+    "test:code:browser": "playwright test --config mcp/code/playwright.config.ts",
+    "test:a2a-ui": "bun test mcp/a2a/ui/A2APanel.test.tsx"
   },
   "dependencies": {
     "dompurify": "^3.4.13",

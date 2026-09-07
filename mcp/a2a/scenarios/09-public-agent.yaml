@@ -1,0 +1,51 @@
+name: a2a-public-agent
+description: A real Apteva agent discovers and talks to a public third-party A2A agent.
+
+timeout: 120s
+max_iterations: 12
+
+setup:
+  mode: autonomous
+  app:
+    path: ./
+
+directive: |
+  Call agents_discover exactly once with card_url
+  "https://donuk-agent.donuk-kitap.workers.dev/.well-known/agent-card.json"
+  and capability "donuk-book-information". Pass the returned address directly
+  to agent_ask without calling agent_get. Ask: "In one short sentence, what is
+  the book Donuk about?" The public agent may reply synchronously. Once you
+  receive its answer, briefly report it and stop. Do not use web search or any
+  non-A2A tool.
+
+outcome_assert:
+  - http: GET /api/apps/a2a/tasks
+    expect_count_at: tasks
+    expect_count: 1
+  - http: GET /api/apps/a2a/tasks
+    expect_field_at: tasks.0.direction
+    expect_field_eq: outbound
+  - http: GET /api/apps/a2a/tasks
+    expect_field_at: tasks.0.status
+    expect_field_eq: completed
+
+trajectory_assert:
+  - tool_called_with:
+      tool: agents_discover
+      args:
+        card_url: https://donuk-agent.donuk-kitap.workers.dev/.well-known/agent-card.json
+        capability: donuk-book-information
+      result_contains: Donuk
+      success: true
+      count: 1
+  - tool_called_with:
+      tool: agent_ask
+      result_contains: Donuk
+      success: true
+      count: 1
+  - tool_not_called_with:
+      tool: agent_get
+
+budget:
+  total_tokens: 40000
+  cost_usd: 0.40

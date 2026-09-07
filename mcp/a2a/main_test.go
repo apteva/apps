@@ -110,6 +110,10 @@ func newTestEnvWithConfig(t *testing.T, config map[string]string) (*sdk.AppCtx, 
 		attached: map[int64]bool{41: true, 42: true, 43: true},
 	}
 	opts := []tk.Option{tk.WithProjectID(testProject), tk.WithPlatform(platform)}
+	if config == nil {
+		config = map[string]string{}
+	}
+	config["allow_loopback_public_agents"] = "true"
 	if config != nil {
 		opts = append(opts, tk.WithConfig(config))
 	}

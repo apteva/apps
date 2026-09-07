@@ -3,7 +3,7 @@ package main
 // a2a — agent-to-agent communication.
 //
 // Local exchanges use the platform's existing event/thread primitives.
-// Remote exchanges use Agent Cards plus the A2A v1 JSON-RPC binding;
+// Remote exchanges use Agent Cards plus negotiated A2A JSON-RPC bindings;
 // the receiving installation owns the authoritative inbound task and
 // the calling installation keeps an outbound task record correlated to
 // it. Both paths share the same durable ledger and agent-facing tools.
@@ -29,11 +29,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.4.0
+version: 0.5.1
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
-  configured A2A peers, and maps standard A2A messages and tasks into the
+  configured nodes and public Agent Cards, and maps standard A2A messages and tasks into the
   existing durable local task ledger and live agent threads.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/a2a
@@ -51,11 +51,12 @@ requires:
 provides:
   http_routes:
     - { prefix: /tasks }
+    - { prefix: /connections }
     - { prefix: /directory, no_auth: true }
     - { prefix: /agent-cards, no_auth: true }
     - { prefix: /agents, no_auth: true }
   mcp_tools:
-    - { name: agents_discover, description: "Discover local and configured remote agents; every returned address can be messaged immediately." }
+    - { name: agents_discover, description: "Discover local, connected, or directly supplied public Agent Card agents; every returned address can be messaged immediately." }
     - { name: agent_get,      description: "Optionally inspect the full Agent Card for an address returned by agents_discover." }
     - { name: agent_send,  description: "Send a one-way message to another agent, or add a message to an existing task." }
     - { name: agent_ask,   description: "Ask another agent to do something; the reply arrives later as an [a2a] event." }
@@ -76,7 +77,7 @@ provides:
       entry: /ui/A2APanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: main, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.5.1, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -99,6 +100,12 @@ config_schema:
     type: text
     description: Operator-facing name for this A2A installation.
     default: Apteva
+    required: false
+  - name: allow_loopback_public_agents
+    label: Allow loopback public agents (development only)
+    type: text
+    default: "false"
+    description: Explicitly allow local Agent Card test servers. Keep disabled on production installations.
     required: false
   - name: peer_timeout_seconds
     label: Peer timeout seconds
@@ -173,6 +180,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/tasks", Handler: a.handleTasks},
 		{Pattern: "/tasks/", Handler: a.handleTaskItem},
+		{Pattern: "/connections", Handler: a.handleConnections},
+		{Pattern: "/connections/", Handler: a.handleConnectionItem},
 		{Pattern: "/directory/agents", Handler: a.handleDirectory, NoAuth: true},
 		{Pattern: "/agent-cards/", Handler: a.handleAgentCard, NoAuth: true},
 		{Pattern: "/agents/", Handler: a.handleAgentProtocol, NoAuth: true},
@@ -183,12 +192,13 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "agents_discover",
-			Description: "Discover local and configured remote agents. Every returned address can be passed directly " +
+			Description: "Discover local agents, connected nodes/public cards, or a directly supplied public Agent Card. Every returned address can be passed directly " +
 				"to agent_send or agent_ask. Use agent_get only when you want the selected agent's complete Agent Card.",
 			InputSchema: schemaObject(map[string]any{
 				"query":      map[string]any{"type": "string", "description": "Optional text matched against names, descriptions, and skills."},
 				"capability": map[string]any{"type": "string", "description": "Optional exact skill id."},
 				"peer":       map[string]any{"type": "string", "description": "Optional generic peer id/name, or local."},
+				"card_url":   map[string]any{"type": "string", "description": "Optional public Agent Card URL (or agent base URL) to discover directly. The returned address is immediately actionable."},
 				"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": 100},
 			}, nil),
 			HandlerCtx: a.toolDiscover,
@@ -456,6 +466,7 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 	query := strings.TrimSpace(stringArg(args, "query"))
 	capability := strings.TrimSpace(stringArg(args, "capability"))
 	peerFilter := strings.TrimSpace(stringArg(args, "peer"))
+	cardURL := strings.TrimSpace(stringArg(args, "card_url"))
 	limit := int(int64Arg(args, "limit"))
 	if limit <= 0 || limit > 100 {
 		limit = 50
@@ -466,6 +477,16 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 	}
 	entries := make([]discoverEntry, 0, len(peers))
 	var warnings []string
+	if cardURL != "" {
+		remote, publicPeer, connectErr := a.connectPublicAgent(ctx, app, cardURL, "", "agent")
+		if connectErr != nil {
+			return nil, fmt.Errorf("public Agent Card unavailable: %w", connectErr)
+		}
+		if matchesAgentQuery(remote.Name, remote.Description, remote.Skills, query, capability) {
+			entries = append(entries, discoverEntry{Address: "a2a:" + remote.Ref, Name: remote.Name,
+				Description: remote.Description, Online: true, Peer: publicPeer.Name, Skills: remote.Skills})
+		}
+	}
 	hidden := 0
 	if peerFilter == "" || strings.EqualFold(peerFilter, "local") {
 		for _, peer := range peers {
@@ -508,6 +529,35 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 		}
 		selected := make([]peerConfig, 0, len(configured))
 		for _, peer := range configured {
+			if peer.Kind != "node" {
+				if peerFilter != "" && peer.ID != peerFilter && !strings.EqualFold(peer.Name, peerFilter) {
+					continue
+				}
+				rows, rowsErr := app.AppDB().Query(`SELECT ref FROM a2a_remote_agents WHERE peer_id = ?`, peer.ID)
+				if rowsErr != nil {
+					warnings = append(warnings, rowsErr.Error())
+					continue
+				}
+				var refs []string
+				for rows.Next() {
+					var ref string
+					if rows.Scan(&ref) == nil {
+						refs = append(refs, ref)
+					}
+				}
+				rows.Close()
+				for _, ref := range refs {
+					cached, cacheErr := getRemoteAgent(app.AppDB(), ref)
+					if cacheErr != nil || cached == nil {
+						continue
+					}
+					if matchesAgentQuery(cached.Name, cached.Description, cached.Skills, query, capability) {
+						entries = append(entries, discoverEntry{Address: "a2a:" + cached.Ref, Name: cached.Name,
+							Description: cached.Description, Online: true, Peer: peer.Name, Skills: cached.Skills})
+					}
+				}
+				continue
+			}
 			if peerFilter == "" || peer.ID == peerFilter || strings.EqualFold(peer.Name, peerFilter) {
 				selected = append(selected, peer)
 			}
@@ -545,6 +595,15 @@ func (a *App) toolDiscover(ctx context.Context, app *sdk.AppCtx, args map[string
 		}
 	}
 
+	deduped := entries[:0]
+	seenAddress := map[string]bool{}
+	for _, entry := range entries {
+		if !seenAddress[entry.Address] {
+			seenAddress[entry.Address] = true
+			deduped = append(deduped, entry)
+		}
+	}
+	entries = deduped
 	sortDiscoverEntries(entries)
 	if len(entries) > limit {
 		entries = entries[:limit]
@@ -614,6 +673,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	if err := deliver(app, target.ID, formatMessageEvent(task, message)); err != nil {
+		_ = setTaskStatus(app.AppDB(), from.ProjectID, task.ID, "failed")
 		return nil, fmt.Errorf("agent %d could not be reached: %w", target.ID, err)
 	}
 	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, target.ID, message, "completed")
@@ -702,6 +762,9 @@ func (a *App) sendFollowUp(ctx context.Context, app *sdk.AppCtx, from *callIdent
 		return a.continueRemoteTask(ctx, app, task, message)
 	}
 	if task.Direction == "inbound" {
+		if !openStatuses[task.Status] {
+			return nil, errors.New("remote exchange is finished; start a new request with agent_ask using an address from agents_discover")
+		}
 		if from.AgentID != task.ToAgentID {
 			return nil, fmt.Errorf("you are not a participant of task %d", taskID)
 		}
@@ -782,11 +845,10 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 		if from.ThreadID != "" && task.ToThreadID == "" {
 			_ = setTaskResponderThread(app.AppDB(), from.ProjectID, task.ID, from.ThreadID)
 		}
-		if err := setTaskStatus(app.AppDB(), from.ProjectID, task.ID, status); err != nil {
+		task.Status = status
+		if _, err := saveReply(app.AppDB(), task, from.AgentID, 0, message, "", nil); err != nil {
 			return nil, err
 		}
-		task.Status = status
-		_ = recordMessage(app.AppDB(), task.ID, from.AgentID, 0, message, status)
 		emitTask(app, "task.updated", task)
 		return map[string]any{
 			"task_id": task.ID, "status": status, "delivered": true,
@@ -831,15 +893,16 @@ func (a *App) toolReply(ctx context.Context, app *sdk.AppCtx, args map[string]an
 			task.ToThreadID = from.ThreadID
 		}
 	}
-	if err := setTaskStatus(app.AppDB(), from.ProjectID, task.ID, status); err != nil {
+	task.Status = status
+	deliveryID, err := saveReply(app.AppDB(), task, from.AgentID, deliverTo, message, formatReplyEvent(task, from, message), nil)
+	if err != nil {
 		return nil, err
 	}
-	task.Status = status
-	if err := deliverToParticipant(app, task, deliverTo, formatReplyEvent(task, from, message)); err != nil {
-		return nil, fmt.Errorf("reply recorded but agent %d could not be reached: %w", deliverTo, err)
-	}
-	_ = recordMessage(app.AppDB(), task.ID, from.AgentID, deliverTo, message, status)
+	delivered := deliverPending(app, deliveryID) == nil
 	emitTask(app, "task.updated", task)
+	if !delivered {
+		return map[string]any{"task_id": task.ID, "status": status, "delivered": false, "pending_delivery": true, "note": "reply saved; delivery will retry automatically"}, nil
+	}
 	note := "reply delivered"
 	if status == "input_required" {
 		note = "question delivered; the task stays open until the requester answers or cancels"
