@@ -92,10 +92,11 @@ interface NativePanelProps {
 interface Deployment {
   id: number;
   name: string;
-  target_kind: "service" | "android" | "ios";
+  target_kind: "service" | "android" | "ios" | "artifact";
   description?: string;
   source_kind: string;
   source_ref: string;
+  source_extra_json?: string;
   framework: string;
   build_cmd: string;
   build_backend: "local" | "runner" | "codemagic" | "github_actions";
@@ -506,9 +507,9 @@ interface UnhealthyEntry {
 
 const API = "/api/apps/deploy/api";
 
-const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
+const FRAMEWORKS = ["command", "", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
-const TARGET_KINDS = ["service", "android", "ios"] as const;
+const TARGET_KINDS = ["service", "android", "ios", "artifact"] as const;
 const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
 
 function statusColor(s: string): string {
@@ -568,6 +569,32 @@ function releaseRolloutFraction(release: Release): number {
   } catch {
     return 0.1;
   }
+}
+
+function ArtifactReleaseList({ releases, busy, onSync, onLog }: {
+  releases: Release[];
+  busy: boolean;
+  onSync: (id: number) => void;
+  onLog: (id: number) => void;
+}) {
+  return (
+    <section className="border-t border-border p-3 max-h-44 overflow-auto">
+      <div className="text-xs text-text-dim uppercase mb-2">Published artifacts</div>
+      {releases.map((release) => {
+        let state: { availability?: { state?: string; publication?: string } } = {};
+        try { state = JSON.parse(release.release_meta_json || "{}"); } catch { /* Legacy metadata has no availability evidence. */ }
+        return (
+          <div key={release.id} className="text-xs flex items-center gap-3 py-1">
+            <span>#{release.id} · {release.channel} · build {release.build_id}</span>
+            <span>{state.availability?.publication || release.external_status}</span>
+            <span>Availability: {state.availability?.state || "unconfirmed"}</span>
+            <button onClick={() => onSync(release.id)} disabled={busy} className="text-accent">Sync</button>
+            <button onClick={() => onLog(release.id)} className="text-accent">Log</button>
+          </div>
+        );
+      })}
+    </section>
+  );
 }
 
 function releaseTesterAccess(release: Release): { status: string; count: number; installURL: string } {
@@ -1353,7 +1380,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   className="text-xs text-accent hover:underline truncate max-w-[260px]"
                 >{detail.url} ↗</a>
               )}
-              {!mobile && (detail.deployment.domain ? (
+              {detail.deployment.target_kind === "service" && (detail.deployment.domain ? (
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -1372,6 +1399,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
                 >+ Attach domain</button>
               ))}
+              {detail.deployment.target_kind === "artifact" && <input aria-label="Release channel" value={mobileChannel} onChange={e=>setMobileChannel(e.target.value)} className="w-32 bg-bg-input border border-border rounded px-2 py-1 text-xs" placeholder="Release channel" />}
               {mobile && (
                 detail.deployment.target_kind === "android" ? (
                   <>
@@ -1796,6 +1824,14 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
               </pre>
             </div>
 
+            {detail.deployment.target_kind === "artifact" && (
+              <ArtifactReleaseList
+                releases={detail.releases}
+                busy={busy}
+                onSync={handleSyncMobileRelease}
+                onLog={(id) => { setLogKind("release"); setLogTargetId(id); }}
+              />
+            )}
             {mobile && (
               <section className="border-t border-border p-3 max-h-44 overflow-auto">
                 <div className="text-xs text-text-dim uppercase mb-2">Store releases</div>
@@ -2111,6 +2147,7 @@ function CreateDeploymentDialog({
   const [targetKind, setTargetKind] = useState<(typeof TARGET_KINDS)[number]>("service");
   const [sourceKind, setSourceKind] = useState<(typeof SOURCE_KINDS)[number]>("code");
   const [sourceRef, setSourceRef] = useState("");
+  const [sourceOptions,setSourceOptions]=useState("{}");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>("");
   const [buildCmd, setBuildCmd] = useState("");
   const [buildBackend, setBuildBackend] = useState<(typeof BUILD_BACKENDS)[number]>("local");
@@ -2192,6 +2229,7 @@ function CreateDeploymentDialog({
         target_kind: targetKind,
         source_kind: sourceKind,
         source_ref: sourceRef.trim(),
+        source_extra_json: sourceOptions,
         framework,
         build_cmd: buildCmd.trim(),
         build_backend: buildBackend,
@@ -2242,7 +2280,7 @@ function CreateDeploymentDialog({
               onChange={(e) => {
                 const next = e.target.value as (typeof TARGET_KINDS)[number];
                 setTargetKind(next);
-                setFramework(next === "service" ? "" : next);
+                setFramework(next === "service" ? "" : next === "artifact" ? "command" : next);
               }}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
@@ -2259,12 +2297,13 @@ function CreateDeploymentDialog({
               {SOURCE_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           </div>
+          <div className="col-span-2"><label className="text-xs text-text-muted block mb-1">Source options (snapshot ID, subdirectory, transfer limits)</label><textarea value={sourceOptions} onChange={e=>setSourceOptions(e.target.value)} rows={2} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" /></div>
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Framework</label>
             <select
               value={framework}
               onChange={(e) => setFramework(e.target.value as (typeof FRAMEWORKS)[number])}
-              disabled={targetKind !== "service"}
+              disabled={targetKind === "android" || targetKind === "ios"}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               {FRAMEWORKS.map((f) => (
@@ -2374,11 +2413,11 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
-          {targetKind !== "service" && (
+          {(
             <div className="col-span-2">
-              <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />
+              {(targetKind === "android" || targetKind === "ios") && <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />}
               <details className="mt-3 text-xs text-text-muted">
-                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <summary className="cursor-pointer">Target configuration (commands, publisher and policy)</summary>
                 <textarea
                   value={targetConfig}
                   onChange={(e) => setTargetConfig(e.target.value)}
@@ -3686,6 +3725,7 @@ function EditConfigDialog({
   );
   const [envJSON, setEnvJSON] = useState(deployment.env_json ?? "");
   const [targetConfigJSON, setTargetConfigJSON] = useState(deployment.target_config_json ?? "{}");
+  const [sourceOptions,setSourceOptions]=useState(deployment.source_extra_json ?? "{}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -3755,6 +3795,7 @@ function EditConfigDialog({
         return;
       }
       if (targetConfig !== (deployment.target_config_json ?? "{}")) body.target_config_json = targetConfig;
+      JSON.parse(sourceOptions);if(sourceOptions!==(deployment.source_extra_json??"{}"))body.source_extra_json=sourceOptions;
 
       if (Object.keys(body).length > 0) {
         await api("PATCH", `/deployments/${deployment.id}`, body);
@@ -3872,11 +3913,12 @@ function EditConfigDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
-          {deployment.target_kind !== "service" && (
+          {(
             <div className="col-span-2">
-              <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />
+              <label className="text-xs text-text-muted block mb-1">Source options</label><textarea value={sourceOptions} onChange={e=>setSourceOptions(e.target.value)} rows={2} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" />
+              {(deployment.target_kind === "android" || deployment.target_kind === "ios") && <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />}
               <details className="mt-3 text-xs text-text-muted">
-                <summary className="cursor-pointer">Advanced mobile target JSON</summary>
+                <summary className="cursor-pointer">Target configuration (commands, publisher and policy)</summary>
                 <textarea
                   value={targetConfigJSON}
                   onChange={(e) => setTargetConfigJSON(e.target.value)}

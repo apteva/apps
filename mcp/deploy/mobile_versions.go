@@ -92,7 +92,7 @@ func (a *App) allocateIOSBuildNumber(d *Deployment, build *Build, cfg mobileTarg
 	if cfg.VersionName == "" {
 		return mobileVersionAllocation{}, errors.New("automatic iOS build-number allocation requires version_name in the store listing or target config")
 	}
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return mobileVersionAllocation{}, err
 	}
@@ -134,7 +134,7 @@ func (a *App) allocateAndroidVersionCode(d *Deployment, build *Build, cfg mobile
 	if cfg.PackageName == "" {
 		return mobileVersionAllocation{}, errors.New("automatic Android version allocation requires package_name")
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return mobileVersionAllocation{}, err
 	}

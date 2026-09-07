@@ -59,3 +59,27 @@ for (const secondary of [false, true]) test(`selection is safe with delayed ${se
     expect(errors).toEqual([]);
   } finally { unblock(); await browser.close(); server.stop(true); }
 }, 15000);
+
+test("artifact targets show channel publication separately from availability", async () => {
+  const artifact = {...deployment(3), name:"Package", target_kind:"artifact", framework:"command"};
+  const release = {id:12,build_id:9,status:"starting",channel:"beta",provider:"steamworks",external_status:"awaiting_confirmation",release_meta_json:JSON.stringify({availability:{publication:"awaiting_confirmation",state:"unconfirmed"}})};
+  const server = Bun.serve({hostname:"127.0.0.1",port:0,fetch(req) {
+    const path = new URL(req.url).pathname;
+    if(path==="/")return new Response('<div id="root"></div><script type="module" src="/host.js"></script>',{headers:{"content-type":"text/html"}});
+    if(path==="/host.js")return new Response(bundle,{headers:{"content-type":"text/javascript"}});
+    if(path.endsWith("/deployments"))return Response.json({deployments:[artifact]});
+    if(path.endsWith("/deployments/3"))return Response.json({deployment:artifact,builds:[],releases:[release],current_release:null,environments:[{id:1,name:"production"}]});
+    return Response.json({});
+  }});
+  const browser=await chromium.launch({headless:true});
+  try {
+    const page=await browser.newPage();await page.goto(server.url.href);
+    await page.getByText("Package",{exact:true}).click();
+    await page.getByText("Published artifacts",{exact:true}).waitFor();
+    expect(await page.getByText("Availability: unconfirmed",{exact:true}).count()).toBe(1);
+    expect(await page.getByText("awaiting_confirmation",{exact:true}).count()).toBe(1);
+    await page.getByLabel("Release channel").fill("candidate");
+    expect(await page.getByLabel("Release channel").inputValue()).toBe("candidate");
+    expect(await page.getByRole("button",{name:"+ Attach domain",exact:true}).count()).toBe(0);
+  } finally {await browser.close();server.stop(true);}
+});

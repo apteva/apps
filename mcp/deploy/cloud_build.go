@@ -279,6 +279,13 @@ func (a *App) submitCloudBuild(ctx context.Context, d *Deployment) (*Build, erro
 }
 
 func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
+	frozen, freezeErr := freezeTargetConnections(d.TargetConfigJSON)
+	if freezeErr != nil {
+		return nil, freezeErr
+	}
+	copyD := *d
+	copyD.TargetConfigJSON = frozen
+	d = &copyD
 	backendName := normalizeBuildBackend(d.BuildBackend)
 	cfg, err := parseCloudBuildConfig(backendName, d.BuildBackendJSON)
 	if err != nil {
@@ -317,6 +324,10 @@ func (a *App) submitCloudBuildWithOptions(ctx context.Context, d *Deployment, re
 			return nil, err
 		}
 	}
+	if err = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"target_config_json": d.TargetConfigJSON}); err != nil {
+		return nil, err
+	}
+	build.TargetConfigJSON = d.TargetConfigJSON
 	d, err = a.prepareMobileBuildTarget(d, build)
 	if err != nil {
 		return a.failBuild(build, "prepare mobile version: "+err.Error()), nil
@@ -692,6 +703,13 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	if status.SourceSHA != "" && cfg.SourceMode != "bundle" {
 		fields["source_sha"] = status.SourceSHA
 	}
+	candidate := *build
+	candidate.ArtifactPath = distDir
+	candidate.ArtifactManifestJSON = manifestJSON
+	if sealErr := sealBuildArtifact(&candidate); sealErr != nil {
+		a.failBuild(build, sealErr.Error())
+		return nil
+	}
 	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, fields); err != nil {
 		_ = os.RemoveAll(distDir)
 		return nil
@@ -700,6 +718,7 @@ func (a *App) finalizeCloudBuild(ctx context.Context, backend cloudBuildBackend,
 	a.removeSourceCapsule(build.ID)
 	_ = appendCloudBuildLog(build.LogPath, fmt.Sprintf("build succeeded artifact=%s size=%d", distDir, size))
 	fresh, _ = dbGetBuild(globalCtx.AppDB(), build.ID)
+
 	emit("deploy.build.succeeded", map[string]any{
 		"deployment_id": build.DeploymentID, "environment_id": build.EnvironmentID,
 		"build_id": build.ID, "backend": build.BuildBackend, "duration_ms": duration, "size": size,

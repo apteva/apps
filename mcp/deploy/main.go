@@ -594,6 +594,17 @@ func (a *App) runLocalBuild(d *Deployment) (*Build, error) {
 func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 	fw := d.Framework
 	var err error
+	frozen, freezeErr := freezeTargetConnections(d.TargetConfigJSON)
+	if freezeErr != nil {
+		return a.failBuild(build, freezeErr.Error()), nil
+	}
+	copyD := *d
+	copyD.TargetConfigJSON = frozen
+	d = &copyD
+	if err = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{"target_config_json": frozen}); err != nil {
+		return nil, err
+	}
+	build.TargetConfigJSON = frozen
 	buildCtx, finishBuild := a.registerLocalBuild(build.ID)
 	defer finishBuild()
 	d, err = a.prepareMobileBuildTarget(d, build)
@@ -649,13 +660,15 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 	// Fetch source.
 	cfg := a.cfg
 	cfg.ProjectID = d.ProjectID
+	cfg.Context = buildCtx
+	cfg.CacheDir = buildDir
 	if err := fetchSource(globalCtx, d, srcDir, cfg); err != nil {
 		fmt.Fprintf(logF, "fetch source failed: %v\n", err)
 		return a.failBuild(build, "fetch source: "+err.Error()), nil
 	}
 	var localBuildCfg cloudBuildConfig
 	_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &localBuildCfg)
-	if localBuildCfg.Preflight != "off" && isMobileDeployment(d, build) {
+	if localBuildCfg.Preflight != "off" && !hasCommandPipeline(d.TargetConfigJSON) && isMobileDeployment(d, build) {
 		localBuildCfg.SourceMode = "bundle"
 		localBuildCfg.ArtifactMode = "file"
 		if err := validateMobileSource(srcDir, d, localBuildCfg); err != nil {
@@ -663,6 +676,13 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 		}
 	}
 	sha, err := hashTree(srcDir)
+	if receipt, readErr := os.ReadFile(filepath.Join(buildDir, "source-receipt.json")); readErr == nil {
+		var r sourceReceipt
+		if json.Unmarshal(receipt, &r) == nil {
+			sha = r.SHA256
+			err = nil
+		}
+	}
 	if err != nil {
 		// Non-fatal — keep going without short-circuit ability.
 		sha = ""
@@ -687,7 +707,7 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 		return a.failBuild(build, "signing credentials: "+err.Error()), nil
 	}
 	defer clearRunnerCredentials(&credentials)
-	entrypoint, err := builder.Build(srcDir, distDir, BuildOverrides{
+	entrypoint, err := buildWithPipeline(builder, srcDir, distDir, BuildOverrides{
 		Context:          buildCtx,
 		BuildCmd:         d.BuildCmd,
 		StartCmd:         d.StartCmd,
@@ -707,6 +727,13 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 	}
 	fmt.Fprintf(logF, "=== build succeeded in %dms, artifact=%s, entrypoint=%q ===\n", durMs, distDir, entrypoint)
 
+	candidate := *build
+	candidate.ArtifactPath = distDir
+	candidate.ArtifactManifestJSON = artifactManifestJSON
+	candidate.TargetConfigJSON = d.TargetConfigJSON
+	if sealErr := sealBuildArtifact(&candidate); sealErr != nil {
+		return a.failBuild(build, sealErr.Error()), nil
+	}
 	if err := dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
 		"status":                 "succeeded",
 		"finished_at":            nowUTC(),
@@ -724,6 +751,7 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 	}); err != nil {
 		return dbGetBuild(globalCtx.AppDB(), build.ID)
 	}
+
 	dbSetMobileVersionStatus(globalCtx.AppDB(), build.ID, "built")
 	// Stash entrypoint via the build's (framework-chosen) BuildCmd
 	// metadata is not enough — the runtime needs entrypoint at
@@ -759,10 +787,28 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 }
 
 func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
-	if isMobileDeployment(d, b) {
-		return a.runMobileRelease(d, b, opts)
+	digest, err := checkReleasePolicy(d, b, opts, false)
+	if err != nil {
+		return nil, err
 	}
-	return a.runServiceRelease(d, b)
+	var rel *Release
+	if d.TargetKind == "artifact" {
+		rel, err = a.runIntegrationRelease(d, b, opts)
+	} else if isMobileDeployment(d, b) {
+		rel, err = a.runMobileRelease(d, b, opts)
+	} else {
+		rel, err = a.runServiceRelease(d, b)
+	}
+	if err == nil && rel != nil && rel.Provider == "" {
+		if channelErr := dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"channel": releaseChannel(d, opts)}); channelErr != nil {
+			return nil, channelErr
+		}
+		rel.Channel = releaseChannel(d, opts)
+	}
+	if err == nil && rel != nil && digest != "" {
+		err = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "release_policy_allowed", mustJSON(map[string]any{"decision_digest": digest, "channel": releaseChannel(d, opts), "build_id": b.ID}))
+	}
+	return rel, err
 }
 
 // runServiceRelease starts a supervised process for the build and
@@ -935,6 +981,12 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 func (a *App) stopReleaseAuthoritative(rel *Release, grace time.Duration) error {
 	if rel == nil {
 		return nil
+	}
+	a.localBuildMu.Lock()
+	cancel := a.localBuilds[-rel.ID]
+	a.localBuildMu.Unlock()
+	if cancel != nil {
+		cancel()
 	}
 	if rr := a.registry.Get(rel.ID); rr != nil {
 		return a.runtime.Stop(rr)

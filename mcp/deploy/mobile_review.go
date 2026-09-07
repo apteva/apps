@@ -255,14 +255,41 @@ func (a *App) syncMobileReleaseState(rel *Release) error {
 	if rel == nil {
 		return errors.New("release required")
 	}
+	var err error
 	switch rel.Provider {
 	case "app_store_connect":
-		return a.syncIOSRelease(rel)
+		err = a.syncIOSRelease(rel)
 	case "google_play":
-		return a.syncGooglePlayReleaseState(rel)
+		err = a.syncGooglePlayReleaseState(rel)
 	default:
-		return fmt.Errorf("release %d has unsupported provider %q", rel.ID, rel.Provider)
+		return a.syncIntegrationRelease(rel)
 	}
+	if err != nil {
+		return err
+	}
+	fresh, err := dbGetRelease(globalCtx.AppDB(), rel.ID)
+	if err != nil {
+		return err
+	}
+	var meta mobileReleaseMeta
+	if err = json.Unmarshal([]byte(fresh.ReleaseMetaJSON), &meta); err != nil {
+		return err
+	}
+	obs := &availabilityObservation{State: "unconfirmed", Publication: fresh.ExternalStatus, Audience: fresh.Channel, CheckedAt: nowUTC()}
+	if fresh.Status == "live" {
+		obs.PublishedAt = nowUTC()
+		if meta.Availability != nil && meta.Availability.PublishedAt != "" {
+			obs.PublishedAt = meta.Availability.PublishedAt
+		}
+	}
+	if fresh.Provider == "app_store_connect" && fresh.Status == "live" {
+		switch fresh.ExternalStatus {
+		case "ready_for_sale", "ready_for_distribution", "in_beta_testing", "available":
+			obs.State = "available"
+		}
+	}
+	meta.Availability = obs
+	return dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{"release_meta_json": mustJSON(meta)})
 }
 
 func (a *App) syncGooglePlayReleaseState(rel *Release) error {
@@ -273,7 +300,7 @@ func (a *App) syncGooglePlayReleaseState(rel *Release) error {
 	if meta.PackageName == "" || rel.Channel == "" {
 		return errors.New("Google Play release sync requires package_name and channel")
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", releaseBindingConfig(&meta))
 	if err != nil {
 		return err
 	}

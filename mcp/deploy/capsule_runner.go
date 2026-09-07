@@ -362,7 +362,7 @@ func (r *capsuleRunner) runJob(ctx context.Context, job *runnerJob, input runner
 		r.finishJob(job.Response.ID, "failed", err)
 		return
 	}
-	_, err = builder.Build(sourceDir, distDir, BuildOverrides{
+	_, err = buildWithPipeline(builder, sourceDir, distDir, BuildOverrides{
 		BuildCmd: input.Build.BuildCmd, Env: input.Build.Env,
 		TargetConfigJSON: input.Build.TargetConfigJSON,
 		Credentials:      input.Credentials, Context: ctx,
@@ -436,8 +436,8 @@ func validateRunnerJobRequest(input runnerJobRequest) error {
 	if input.Source.Format != sourceCapsuleFormat {
 		return fmt.Errorf("unsupported source format %q", input.Source.Format)
 	}
-	if input.Source.Size < 1 || input.Source.Size > maxSourceCapsuleBytes {
-		return fmt.Errorf("source size must be between 1 and %d bytes", maxSourceCapsuleBytes)
+	if input.Source.Size < 1 || input.Source.Size > sourceTransferLimit() {
+		return fmt.Errorf("source size must be between 1 and %d bytes", sourceTransferLimit())
 	}
 	if len(input.Source.SHA256) != sha256.Size*2 {
 		return errors.New("source sha256 must contain 64 hexadecimal characters")
@@ -478,7 +478,7 @@ func extractRunnerSource(archivePath, destination string) error {
 		return err
 	}
 	defer reader.Close()
-	return extractBoundedZip(&reader.Reader, destination, maxSourceCapsuleBytes, false)
+	return extractBoundedZip(&reader.Reader, destination, sourceExpandedLimit(), false)
 }
 
 func zipDirectoryTree(root, prefix, destination string) error {

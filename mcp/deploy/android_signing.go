@@ -57,7 +57,7 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 		return nil, err
 	}
 	if identity == nil {
-		identity, err = a.migrateLegacyAndroidSigningIdentity(d.ProjectID, packageName)
+		identity, err = a.migrateLegacyAndroidSigningIdentity(d.ProjectID, packageName, d.TargetConfigJSON)
 		if err != nil {
 			return nil, err
 		}
@@ -201,9 +201,13 @@ func (a *App) setupAndroidMobileSigning(ctx context.Context, d *Deployment, prov
 	return &mobileSigningSetupResult{Setup: setup, Identity: identity, Ready: true}, nil
 }
 
-func (a *App) migrateLegacyAndroidSigningIdentity(projectID, packageName string) (*MobileSigningIdentity, error) {
+func (a *App) migrateLegacyAndroidSigningIdentity(projectID, packageName string, configs ...string) (*MobileSigningIdentity, error) {
 	for _, role := range []string{"android_signing", "play_store"} {
-		credentials, err := boundConnectionCredentials(role)
+		raw := "{}"
+		if len(configs) > 0 {
+			raw = configs[0]
+		}
+		credentials, err := selectedCredentials(role, raw)
 		if err != nil || credentials == nil {
 			continue
 		}

@@ -316,7 +316,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 			mergeStoreProviderValidations(result.ProviderValidations, providerResult)
 			var privacyErr error
 			if googleBatch["privacy"] && strings.TrimSpace(doc.Privacy.DataSafetyCSV) != "" {
-				bound, boundErr := boundIntegration("play_store")
+				bound, boundErr := selectedIntegration("play_store", d.TargetConfigJSON)
 				target, targetErr := parseMobileTargetConfig(d.TargetConfigJSON)
 				switch {
 				case boundErr != nil:

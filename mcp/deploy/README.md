@@ -524,3 +524,12 @@ The `code` source kind reaches the Code app over `PlatformClient.CallApp`
   limits; add via `setrlimit` when it matters
 
 The corrective audit and test coverage are tracked in [AUDIT_FIXES.md](AUDIT_FIXES.md).
+
+## Generic command pipelines
+
+Source snapshots, preparation commands, artifact tests, target-specific accounts,
+integration publishers and release policies are described in
+[GENERIC_PIPELINES.md](GENERIC_PIPELINES.md). The
+[Steamworks configuration example](examples/steamworks-target.json) uses the
+existing integration catalog tools; Deploy contains no Steam HTTP client or game
+engine-specific build implementation.

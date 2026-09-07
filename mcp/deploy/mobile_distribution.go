@@ -44,6 +44,7 @@ type mobileDistributionState struct {
 }
 
 type distributionTarget struct {
+	TargetConfigJSON  string
 	Channel           string
 	AppID             string
 	PackageName       string
@@ -158,9 +159,10 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 		return distributionTarget{}, errors.New("distribution audiences apply only to Android and iOS deployments")
 	}
 	target := distributionTarget{
-		Channel:       strArg(args, "channel"),
-		BetaGroupID:   strArg(args, "beta_group_id"),
-		BetaGroupName: strArg(args, "group_name"),
+		TargetConfigJSON: d.TargetConfigJSON,
+		Channel:          strArg(args, "channel"),
+		BetaGroupID:      strArg(args, "beta_group_id"),
+		BetaGroupName:    strArg(args, "group_name"),
 	}
 	var releaseMeta mobileReleaseMeta
 	if releaseID := int64(intArg(args, "release_id")); releaseID > 0 {
@@ -173,6 +175,9 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 		}
 		if err := json.Unmarshal([]byte(defaultStr(rel.ReleaseMetaJSON, "{}")), &releaseMeta); err != nil {
 			return target, fmt.Errorf("release metadata: %w", err)
+		}
+		if releaseMeta.Connections != nil {
+			target.TargetConfigJSON = releaseBindingConfig(&releaseMeta)
 		}
 		if target.BetaGroupID == "" {
 			target.BetaGroupID = releaseMeta.BetaGroupID
@@ -210,7 +215,7 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 		if bundleID == "" {
 			return target, errors.New("iOS distribution requires app_store_app_id or bundle_id")
 		}
-		bound, err := boundIntegration("app_store")
+		bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 		if err != nil {
 			return target, err
 		}
@@ -568,7 +573,7 @@ func validateAudienceEmail(value string) error {
 }
 
 func (a *App) iosDistributionStatus(target distributionTarget) (*mobileDistributionState, error) {
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", target.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +606,7 @@ func (a *App) updateIOSDistribution(target distributionTarget, audience []distri
 			return nil, errors.New("App Store Connect audiences support individual tester emails; use kind=individual")
 		}
 	}
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", target.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -861,7 +866,7 @@ func firstAppleUserName(raw json.RawMessage) (string, string) {
 }
 
 func (a *App) androidDistributionStatus(target distributionTarget) (*mobileDistributionState, error) {
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", target.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -893,7 +898,7 @@ func (a *App) updateAndroidDistribution(target distributionTarget, audience []di
 	if err := validateDistributionAudienceForPlatform("android", audience); err != nil {
 		return nil, err
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", target.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -988,7 +993,7 @@ func androidDistributionState(target distributionTarget, groups []string) *mobil
 }
 
 func (a *App) applyConfiguredGoogleTestingToEdit(bound *sdk.BoundIntegration, d *Deployment, packageName, editID, channel string) (*mobileDistributionState, error) {
-	target := distributionTarget{Channel: channel, PackageName: packageName}
+	target := distributionTarget{Channel: channel, PackageName: packageName, TargetConfigJSON: d.TargetConfigJSON}
 	if isProductionMobileChannel("android", channel) {
 		return finalizeDistributionState(&mobileDistributionState{
 			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,
@@ -1033,11 +1038,11 @@ func (a *App) verifyConfiguredGoogleTesting(d *Deployment, packageName, channel 
 	if pending == nil || !pending.DesiredConfigured || isProductionMobileChannel("android", channel) {
 		return pending, nil
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
-	target := distributionTarget{Channel: channel, PackageName: packageName}
+	target := distributionTarget{Channel: channel, PackageName: packageName, TargetConfigJSON: d.TargetConfigJSON}
 	if err := a.loadDesiredDistribution(d, &target); err != nil {
 		return nil, err
 	}
@@ -1055,7 +1060,7 @@ func (a *App) verifyConfiguredGoogleTesting(d *Deployment, packageName, channel 
 }
 
 func (a *App) reconcileConfiguredGoogleTesting(d *Deployment, packageName, channel string) (*mobileDistributionState, error) {
-	target := distributionTarget{Channel: channel, PackageName: packageName}
+	target := distributionTarget{Channel: channel, PackageName: packageName, TargetConfigJSON: d.TargetConfigJSON}
 	if isProductionMobileChannel("android", channel) {
 		return finalizeDistributionState(&mobileDistributionState{
 			Platform: "android", Provider: "google_play", Channel: channel, PackageName: packageName,

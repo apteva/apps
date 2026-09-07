@@ -66,6 +66,8 @@ type mobileReviewOutcome struct {
 }
 
 type mobileReleaseMeta struct {
+	Availability        *availabilityObservation              `json:"availability,omitempty"`
+	Connections         map[string]int64                      `json:"connections,omitempty"`
 	Platform            string                                `json:"platform"`
 	PackageName         string                                `json:"package_name,omitempty"`
 	AppID               string                                `json:"app_id,omitempty"`
@@ -256,6 +258,9 @@ func isMobileDeployment(d *Deployment, b *Build) bool {
 }
 
 func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
+	if err := validateBuildDestination(d, b); err != nil {
+		return nil, err
+	}
 	if cfg, cfgErr := parseMobileTargetConfig(d.TargetConfigJSON); cfgErr == nil && cfg.SmokeOnly {
 		return nil, errors.New("smoke_only mobile builds cannot be published; disable smoke_only and create a signed build")
 	}
@@ -356,7 +361,19 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 			return nil, err
 		}
 	}
+	frozen, freezeErr := freezeTargetConnections(d.TargetConfigJSON)
+	if freezeErr != nil {
+		return nil, freezeErr
+	}
+	copyD := *d
+	copyD.TargetConfigJSON = frozen
+	d = &copyD
+	targetBindings, _ := genericTarget(frozen)
+	meta.Connections = targetBindings.Connections
 	metaJSON := mustJSON(meta)
+	if err := saveWorkflow(rel, d, workflowState{Phase: "publishing"}); err != nil {
+		return nil, err
+	}
 	_ = dbUpdateRelease(globalCtx.AppDB(), rel.ID, map[string]any{
 		"channel": channel, "provider": provider, "external_status": "publishing",
 		"release_meta_json": metaJSON, "started_at": nowUTC(), "log_path": logPath,
@@ -479,7 +496,7 @@ func (a *App) publishAndroidRelease(releaseID int64, b *Build, manifest artifact
 	if body, err := json.Marshal(manifest); err == nil {
 		_ = dbUpdateBuild(globalCtx.AppDB(), b.ID, map[string]any{"artifact_manifest_json": string(body)})
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", releaseBindingConfig(meta))
 	if err != nil {
 		return err
 	}
@@ -624,7 +641,7 @@ func (a *App) publishIOSRelease(releaseID int64, b *Build, manifest artifactMani
 	if meta.VersionName == "" || meta.BuildNumber == "" {
 		return errors.New("iOS release requires version_name and build_number in the artifact manifest or target_config_json")
 	}
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", releaseBindingConfig(meta))
 	if err != nil {
 		return err
 	}
@@ -719,7 +736,7 @@ func (a *App) syncIOSRelease(rel *Release) error {
 	if err := json.Unmarshal([]byte(defaultStr(rel.ReleaseMetaJSON, "{}")), &meta); err != nil {
 		return err
 	}
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", releaseBindingConfig(&meta))
 	if err != nil {
 		return err
 	}
@@ -845,6 +862,9 @@ func markTestFlightAvailable(rel *Release, buildID, groupID string, meta *mobile
 }
 
 func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Release, buildID string, meta *mobileReleaseMeta) error {
+	if err := a.checkExistingReleasePolicy(rel, releaseOptions{Channel: rel.Channel, SubmitForReview: meta.SubmitForReview, ReleaseNotes: meta.ReleaseNotes, BetaGroupID: meta.BetaGroupID, RolloutFraction: meta.RolloutFraction}); err != nil {
+		return err
+	}
 	if meta.VersionName == "" {
 		return errors.New("production App Store release requires version_name in the artifact manifest")
 	}
@@ -1202,6 +1222,19 @@ func (a *App) toolPromoteMobile(ctx *sdk.AppCtx, base *Deployment, args map[stri
 }
 
 func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release, opts releaseOptions) (*Release, error) {
+	frozen, freezeErr := freezeTargetConnections(d.TargetConfigJSON)
+	if freezeErr != nil {
+		return nil, freezeErr
+	}
+	copyD := *d
+	copyD.TargetConfigJSON = frozen
+	d = &copyD
+	if err := validateBuildDestination(d, build); err != nil {
+		return nil, err
+	}
+	if _, err := checkReleasePolicy(d, build, opts, false); err != nil {
+		return nil, err
+	}
 	channel, err := normalizeMobileChannel(d.TargetKind, opts.Channel)
 	if err != nil {
 		return nil, err
@@ -1233,6 +1266,9 @@ func (a *App) promoteMobileRelease(d *Deployment, build *Build, source *Release,
 	meta.ReviewSubmissionID = ""
 	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, build.ID)
 	if err != nil {
+		return nil, err
+	}
+	if err = saveWorkflow(rel, d, workflowState{Phase: "publishing"}); err != nil {
 		return nil, err
 	}
 	logPath, logFile, err := a.openMobileReleaseLog(rel.ID)
@@ -1329,7 +1365,7 @@ func (a *App) validateAndroidVersionToTrack(d *Deployment, channel string, meta 
 	if meta == nil || meta.PackageName == "" || meta.VersionCode == "" {
 		return errors.New("Android promotion validation requires package_name and version_code from a prior release")
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return err
 	}
@@ -1363,7 +1399,7 @@ func (a *App) publishAndroidVersionToTrack(releaseID int64, d *Deployment, chann
 	if meta.PackageName == "" || meta.VersionCode == "" {
 		return errors.New("Android promotion requires package_name and version_code from a prior release")
 	}
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return err
 	}
@@ -1441,6 +1477,9 @@ func (a *App) toolRollout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := json.Unmarshal([]byte(defaultStr(rel.ReleaseMetaJSON, "{}")), &meta); err != nil {
 		return nil, err
 	}
+	if err := a.checkExistingReleasePolicy(rel, releaseOptions{Channel: rel.Channel, RolloutFraction: fraction}); err != nil {
+		return nil, err
+	}
 	meta.RolloutFraction = fraction
 	logPath := rel.LogPath
 	if logPath == "" {
@@ -1479,7 +1518,7 @@ func (a *App) toolHalt(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if rel.Provider == "app_store_connect" {
 		boundRole = "app_store"
 	}
-	bound, err := boundIntegration(boundRole)
+	bound, err := selectedIntegration(boundRole, releaseBindingConfig(&meta))
 	if err != nil {
 		return nil, err
 	}

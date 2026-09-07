@@ -30,6 +30,7 @@ import (
 const artifactManifestFilename = ".apteva-artifact.json"
 
 type mobileTargetConfig struct {
+	genericTargetConfig
 	Module           string   `json:"module,omitempty"`
 	Variant          string   `json:"variant,omitempty"`
 	RequiredFeatures []string `json:"required_features,omitempty"`
@@ -53,22 +54,23 @@ type mobileTargetConfig struct {
 }
 
 type artifactManifest struct {
-	Platform          string         `json:"platform"`
-	Primary           string         `json:"primary,omitempty"`
-	PackageName       string         `json:"package_name,omitempty"`
-	BundleID          string         `json:"bundle_id,omitempty"`
-	VersionName       string         `json:"version_name,omitempty"`
-	BuildNumber       string         `json:"build_number,omitempty"`
-	VersionCode       string         `json:"version_code,omitempty"`
-	CertificateSHA256 string         `json:"certificate_sha256,omitempty"`
-	SigningVerified   bool           `json:"signing_verified,omitempty"`
-	SigningContract   string         `json:"signing_contract,omitempty"`
-	DeviceFamilies    []string       `json:"device_families,omitempty"`
-	Channel           string         `json:"channel,omitempty"`
-	ExternalProvider  string         `json:"external_provider,omitempty"`
-	ExternalID        string         `json:"external_id,omitempty"`
-	ExternalStatus    string         `json:"external_status,omitempty"`
-	Files             []artifactFile `json:"files,omitempty"`
+	Pipeline          *pipelineEvidence `json:"pipeline,omitempty"`
+	Platform          string            `json:"platform"`
+	Primary           string            `json:"primary,omitempty"`
+	PackageName       string            `json:"package_name,omitempty"`
+	BundleID          string            `json:"bundle_id,omitempty"`
+	VersionName       string            `json:"version_name,omitempty"`
+	BuildNumber       string            `json:"build_number,omitempty"`
+	VersionCode       string            `json:"version_code,omitempty"`
+	CertificateSHA256 string            `json:"certificate_sha256,omitempty"`
+	SigningVerified   bool              `json:"signing_verified,omitempty"`
+	SigningContract   string            `json:"signing_contract,omitempty"`
+	DeviceFamilies    []string          `json:"device_families,omitempty"`
+	Channel           string            `json:"channel,omitempty"`
+	ExternalProvider  string            `json:"external_provider,omitempty"`
+	ExternalID        string            `json:"external_id,omitempty"`
+	ExternalStatus    string            `json:"external_status,omitempty"`
+	Files             []artifactFile    `json:"files,omitempty"`
 }
 
 type artifactFile struct {

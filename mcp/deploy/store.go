@@ -930,7 +930,7 @@ func dbListPendingMobileReleases(db *sql.DB, limit int) ([]Release, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider NOT IN ('','pending_mobile') AND (status = 'starting' OR (status='live' AND external_status IN ('inProgress','in_progress','waiting_for_review','in_review'))) ORDER BY id LIMIT ?`, limit)
+	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider NOT IN ('','pending_mobile','pending_external') AND (status = 'starting' OR (status='live' AND (external_status IN ('inProgress','in_progress','waiting_for_review','in_review') OR id IN (SELECT release_id FROM release_workflows)))) ORDER BY id LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}

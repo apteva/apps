@@ -68,15 +68,17 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 
 	sourceCfg := a.cfg
 	sourceCfg.ProjectID = d.ProjectID
+	sourceCfg.Context = ctx
+	sourceCfg.CacheDir = buildDir
 	if err := fetchSource(globalCtx, d, srcDir, sourceCfg); err != nil {
 		return nil, fmt.Errorf("fetch source capsule: %w", err)
 	}
-	if d.TargetKind == "ios" {
+	if d.TargetKind == "ios" && !hasCommandPipeline(d.TargetConfigJSON) {
 		if err := a.snapshotIOSDeviceFamilies(srcDir, d, build); err != nil {
 			return nil, fmt.Errorf("detect iOS device families: %w", err)
 		}
 	}
-	if cfg.Preflight != "off" && isMobileDeployment(d, build) {
+	if cfg.Preflight != "off" && !hasCommandPipeline(d.TargetConfigJSON) && isMobileDeployment(d, build) {
 		if err := validateMobileSource(srcDir, d, cfg); err != nil {
 			return nil, fmt.Errorf("mobile source preflight: %w", err)
 		}
@@ -180,7 +182,7 @@ func writeSourceCapsule(root, dest string) (string, int64, error) {
 		return "", 0, fmt.Errorf("create source capsule: %w", err)
 	}
 	h := sha256.New()
-	counting := &countingWriter{w: io.MultiWriter(out, h), max: maxSourceCapsuleBytes}
+	counting := &countingWriter{w: io.MultiWriter(out, h), max: sourceTransferLimit()}
 	zw := zip.NewWriter(counting)
 	fixedTime := time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 	for _, rel := range paths {

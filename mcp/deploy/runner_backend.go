@@ -267,7 +267,10 @@ func (a *App) mobileSigningBuildCredentials(d *Deployment) (runnerCredentials, e
 		}
 	}
 	if d.TargetKind == "ios" || d.Framework == "ios" {
-		out.AppStore = selectedBoundCredentialFields("app_store", []string{"issuer_id", "key_id", "private_key"})
+		if _, credErr := selectedCredentials("app_store", d.TargetConfigJSON); credErr != nil {
+			return out, credErr
+		}
+		out.AppStore = selectedBoundCredentialFields("app_store", []string{"issuer_id", "key_id", "private_key"}, d.TargetConfigJSON)
 		out.IOSSigning, err = a.iosSigningCredentials(d)
 	}
 	if d.TargetKind == "android" || d.Framework == "android" {
@@ -276,11 +279,15 @@ func (a *App) mobileSigningBuildCredentials(d *Deployment) (runnerCredentials, e
 	return out, err
 }
 
-func selectedBoundCredentialFields(role string, keys []string) map[string]string {
+func selectedBoundCredentialFields(role string, keys []string, configs ...string) map[string]string {
 	if globalCtx == nil {
 		return nil
 	}
-	creds, err := boundConnectionCredentials(role)
+	raw := "{}"
+	if len(configs) > 0 {
+		raw = configs[0]
+	}
+	creds, err := selectedCredentials(role, raw)
 	if err != nil || creds == nil {
 		return nil
 	}

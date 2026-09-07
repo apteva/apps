@@ -917,7 +917,7 @@ func preserveStoreObservationState(observed map[string]any, previousJSON string)
 }
 
 func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[string]any, error) {
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -1090,7 +1090,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 }
 
 func (a *App) observeGoogleStoreConfig(d *Deployment, doc StoreDocument, cfg *MobileStoreConfig) (map[string]any, error) {
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -1748,7 +1748,7 @@ func (a *App) applyAppleStoreConfigScopes(d *Deployment, doc StoreDocument, scop
 }
 
 func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -2354,7 +2354,7 @@ func (a *App) applyGoogleStoreConfigScopes(d *Deployment, doc StoreDocument, sco
 }
 
 func (a *App) applyGoogleStoreConfigScopesWithMediaKinds(d *Deployment, doc StoreDocument, scopes storeScopeSet, mediaKinds mediaKindSet) (map[string]any, error) {
-	bound, err := boundIntegration("play_store")
+	bound, err := selectedIntegration("play_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}
@@ -2668,6 +2668,11 @@ func urlPathEscape(value string) string {
 }
 
 func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
+	if rel != nil {
+		if err := a.checkExistingReleasePolicy(rel, releaseOptions{Channel: rel.Channel}); err != nil {
+			return nil, err
+		}
+	}
 	if rel == nil || rel.Provider != "app_store_connect" {
 		return nil, errors.New("approved release must be an App Store release")
 	}
@@ -2681,7 +2686,7 @@ func (a *App) releaseApprovedMobileVersion(rel *Release) (*Release, error) {
 	if rel.ExternalStatus != "pending_apple_release" && rel.ExternalStatus != "approved_pending_release" {
 		return nil, fmt.Errorf("App Store version is not waiting for manual release (state=%s)", rel.ExternalStatus)
 	}
-	bound, err := boundIntegration("app_store")
+	bound, err := selectedIntegration("app_store", releaseBindingConfig(&meta))
 	if err != nil {
 		return nil, err
 	}

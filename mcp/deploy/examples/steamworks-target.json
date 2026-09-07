@@ -1,0 +1,38 @@
+{
+  "connections": {"publisher": 789},
+  "pipeline": {
+    "outputs": ["application", "ci/upload-steam.sh"],
+    "tests": [{"name":"smoke","command":["./application","--self-test"],"timeout_seconds":120}]
+  },
+  "publisher": {
+    "role":"publisher",
+    "provider":"steamworks",
+    "identity":{"appid":480,"steamid":"76561198012345678"},
+    "upload":[{
+      "name":"upload",
+      "command":["sh","-c","\"$DEPLOY_ARTIFACT_DIR/ci/upload-steam.sh\" > upload.json"],
+      "outputs":["upload.json"],
+      "timeout_seconds":7200
+    }],
+    "receipt_file":"upload.json",
+    "publish":{
+      "tool":"set_build_live",
+      "input":{"appid":"$identity.appid","buildid":"$upload.buildid","betakey":"$channel","steamid":"$identity.steamid"},
+      "pending_statuses":[201]
+    },
+    "observe":{
+      "action":{"tool":"list_branches","input":{"appid":"$identity.appid"}},
+      "published":[{"pointer":"/response/betas/$channel/buildid","equals":"$upload.buildid"}],
+      "audience":"selected branch"
+    }
+  },
+  "release_policy":{
+    "version":"1",
+    "auto_channel":"internal",
+    "approver_agent_ids":[123],
+    "channels":{
+      "internal":{"automatic":true,"required_tests":["smoke"]},
+      "public":{"from_channel":"internal","required_tests":["smoke"],"require_approval":true}
+    }
+  }
+}

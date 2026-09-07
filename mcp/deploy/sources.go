@@ -2,7 +2,7 @@ package main
 
 import (
 	"archive/zip"
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,7 +33,7 @@ func fetchSource(ctx *sdk.AppCtx, d *Deployment, destDir string, cfg sourceConfi
 	}
 	switch d.SourceKind {
 	case "code":
-		return (&codeFetcher{platform: ctx.PlatformAPI()}).Fetch(d, destDir)
+		return (&codeFetcher{platform: ctx.PlatformAPI(), config: cfg}).Fetch(d, destDir)
 	case "local":
 		return (&localFetcher{}).Fetch(d, destDir)
 	default:
@@ -44,46 +44,26 @@ func fetchSource(ctx *sdk.AppCtx, d *Deployment, destDir string, cfg sourceConfi
 type sourceConfig struct {
 	ProjectID string
 	InstallID string
+	Context   context.Context
+	CacheDir  string
 }
 
 // ─── code source ──────────────────────────────────────────────────
 
 type codeFetcher struct {
 	platform sdk.PlatformClient
+	config   sourceConfig
 }
 
 func (f *codeFetcher) Kind() string { return "code" }
 
 // Fetch reaches the Code app over the platform's cross-app RPC
 // (PlatformClient.CallApp → /api/apps/callback/apps/code/call), which
-// proxies an MCP tools/call to the bound code install with the right
-// token swapped in. The repo zip comes back base64-encoded inside the
-// tool result; we decode and unpack it into destDir. SourceRef is the
-// repo slug.
+// proxies authenticated calls to the bound Code installation. Snapshot receipts
+// and bounded chunks are persisted and verified before extraction. SourceRef
+// remains the repository slug.
 func (f *codeFetcher) Fetch(d *Deployment, destDir string) error {
-	if d.SourceRef == "" {
-		return errors.New("source_ref (repo slug) required for kind=code")
-	}
-	if f.platform == nil {
-		return errors.New("platform client unavailable; deploy app not fully mounted")
-	}
-	args := map[string]any{
-		"slug":        d.SourceRef,
-		"_project_id": d.ProjectID,
-	}
-	raw, err := f.platform.CallApp("code", "repos_export", args)
-	if err != nil {
-		return fmt.Errorf("call code.repos_export: %w", err)
-	}
-	zipBytes, err := decodeRepoExport(raw)
-	if err != nil {
-		return err
-	}
-	zr, err := zip.NewReader(bytes.NewReader(zipBytes), int64(len(zipBytes)))
-	if err != nil {
-		return fmt.Errorf("code export: not a valid zip: %w", err)
-	}
-	return unpackZip(zr, destDir)
+	return f.fetchSnapshot(d, destDir)
 }
 
 // decodeRepoExport unwraps the JSON-RPC envelope CallApp returned and

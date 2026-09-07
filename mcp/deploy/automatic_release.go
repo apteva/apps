@@ -41,10 +41,13 @@ func (a *App) createOperationRelease(d *Deployment, b *Build) (*Release, bool, e
 			return nil, false, errors.New("automatic release request was cancelled")
 		}
 	}
-	mobile := isMobileDeployment(d, b)
+	mobile := isMobileDeployment(d, b) || d.TargetKind == "artifact"
 	provider := ""
 	if mobile {
 		provider = "pending_mobile"
+		if d.TargetKind == "artifact" {
+			provider = "pending_external"
+		}
 	}
 	res, err := tx.Exec(`INSERT INTO releases(deployment_id,environment_id,build_id,status,provider,created_at) VALUES(?,?,?,'starting',?,?)`, d.ID, nullInt64(d.EnvironmentID), b.ID, provider, nowUTC())
 	if err != nil {
@@ -79,6 +82,13 @@ func (a *App) createOperationRelease(d *Deployment, b *Build) (*Release, bool, e
 }
 
 func (a *App) submitBuild(d *Deployment, opts *releaseOptions) (*Build, error) {
+	t, err := genericTarget(d.TargetConfigJSON)
+	if err != nil {
+		return nil, err
+	}
+	if opts == nil && t.ReleasePolicy != nil && t.ReleasePolicy.AutoChannel != "" {
+		opts = &releaseOptions{Channel: t.ReleasePolicy.AutoChannel}
+	}
 	if normalizeBuildBackend(d.BuildBackend) != buildBackendLocal {
 		return a.runBuildWithOptions(d, opts)
 	}

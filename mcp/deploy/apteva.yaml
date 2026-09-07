@@ -49,6 +49,7 @@ requires:
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment. Without it, the `domain` field on a deployment is free-text and no DNS is written.
     - role: play_store
+      mode: multiple
       kind: integration
       required: false
       compatible_slugs: [google-play-developer]
@@ -56,12 +57,19 @@ requires:
       label: Google Play Developer
       hint: Required to publish signed Android App Bundles to Google Play tracks.
     - role: app_store
+      mode: multiple
       kind: integration
       required: false
       compatible_slugs: [app-store-connect]
       capabilities: []
       label: App Store Connect
       hint: Required to sign, upload, publish, and monitor iOS releases.
+    - role: publisher
+      kind: integration
+      mode: multiple
+      required: false
+      label: Release publishers
+      hint: Select publisher accounts per target. Commands perform uploads; integration tools publish and observe releases.
     - role: cloud_build
       kind: integration
       mode: multiple
@@ -78,6 +86,8 @@ provides:
       no_auth: true
     - prefix: /
   mcp_tools:
+    - name: deploy_release_approve
+      description: Approve an exact artifact and destination using an authorized policy approver.
     - name: deploy_init
       description: Bind a source to a service, Android, or iOS deployment.
     - name: deploy_list

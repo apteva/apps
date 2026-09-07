@@ -79,6 +79,8 @@ func detectFramework(srcDir string) string {
 
 func builderFor(framework string) (Builder, error) {
 	switch framework {
+	case "command":
+		return &commandBuilder{}, nil
 	case "go":
 		return &goBuilder{}, nil
 	case "static":

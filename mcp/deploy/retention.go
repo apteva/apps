@@ -269,6 +269,8 @@ func (a *App) prunableArtifactPaths(b Build) []string {
 	add(filepath.Join(a.buildDir(b.ID), "source-capsule-src"))
 	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleFilename))
 	add(filepath.Join(a.buildDir(b.ID), sourceCapsuleMetadata))
+	add(filepath.Join(a.buildDir(b.ID), "source-snapshot.zip"))
+	add(filepath.Join(a.buildDir(b.ID), "source-snapshot.zip.partial"))
 	return out
 }
 

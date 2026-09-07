@@ -126,7 +126,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	if err != nil {
 		return nil, err
 	}
-	appleBound, err := boundIntegration("app_store")
+	appleBound, err := selectedIntegration("app_store", d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
 	}

@@ -19,6 +19,7 @@ import (
 // handlers.go and shares the underlying logic where possible.
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "deploy_release_approve", HandlerCtx: a.toolApproveRelease, Description: "Approve one exact tested artifact, target, channel and policy. First call returns a digest; repeat with approval_digest to approve. Restricted to policy approvers.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}, "build_id": map[string]any{"type": "integer"}, "environment": map[string]any{"type": "string"}, "channel": map[string]any{"type": "string"}, "rollout_fraction": map[string]any{"type": "number"}, "submit_for_review": map[string]any{"type": "boolean"}, "approval_digest": map[string]any{"type": "string"}}, "required": []string{"id", "build_id"}}},
 		{
 			Name: "deploy_init", Handler: a.toolInit,
 			Description: "Bind a source to a new service, Android, or iOS deployment. Builds default to local; set build_backend and build_backend_config_json for a capsule runner, Codemagic, or GitHub Actions.",
@@ -28,7 +29,8 @@ func (a *App) MCPTools() []sdk.Tool {
 					"name":                      map[string]any{"type": "string"},
 					"source_kind":               map[string]any{"type": "string", "enum": []string{"code", "local"}},
 					"source_ref":                map[string]any{"type": "string"},
-					"target_kind":               map[string]any{"type": "string", "enum": []string{"service", "android", "ios"}},
+					"source_extra_json":         map[string]any{"type": "string", "description": "Code snapshot_id/subdir and transfer budgets as a JSON object"},
+					"target_kind":               map[string]any{"type": "string", "enum": []string{"service", "android", "ios", "artifact"}},
 					"framework":                 map[string]any{"type": "string"},
 					"target_config_json":        map[string]any{"type": "string"},
 					"build_cmd":                 map[string]any{"type": "string"},
@@ -552,6 +554,7 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Description:      strArg(args, "description"),
 		SourceKind:       strArg(args, "source_kind"),
 		SourceRef:        strArg(args, "source_ref"),
+		SourceExtraJSON:  strArg(args, "source_extra_json"),
 		Framework:        strArg(args, "framework"),
 		BuildCmd:         strArg(args, "build_cmd"),
 		BuildBackend:     normalizeBuildBackend(strArg(args, "build_backend")),
@@ -564,8 +567,8 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := validateBuildBackendSelection(in.BuildBackend, defaultStr(in.BuildBackendJSON, "{}")); err != nil {
 		return nil, err
 	}
-	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
-		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios)", in.TargetKind)
+	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" && in.TargetKind != "artifact" {
+		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios|artifact)", in.TargetKind)
 	}
 	if in.TargetKind == "android" || in.TargetKind == "ios" {
 		if in.Framework == "" {
@@ -1101,6 +1104,9 @@ func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	base, err := a.lookupBaseDeployment(args)
 	if err != nil {
 		return nil, err
+	}
+	if base.TargetKind == "artifact" {
+		return a.toolPromoteArtifact(ctx, base, args)
 	}
 	if base.TargetKind == "android" || base.TargetKind == "ios" {
 		return a.toolPromoteMobile(ctx, base, args)
@@ -1801,6 +1807,9 @@ func normalizeTargetKind(value string) string {
 }
 
 func (a *App) deploymentURL(d *Deployment, current *Release) string {
+	if d.TargetKind != "service" && d.TargetKind != "" {
+		return ""
+	}
 	if d.Domain != "" {
 		return "https://" + d.Domain + "/"
 	}

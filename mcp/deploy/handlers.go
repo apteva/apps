@@ -626,6 +626,7 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		Description      string `json:"description"`
 		SourceKind       string `json:"source_kind"`
 		SourceRef        string `json:"source_ref"`
+		SourceExtraJSON  string `json:"source_extra_json"`
 		Framework        string `json:"framework"`
 		BuildCmd         string `json:"build_cmd"`
 		BuildBackend     string `json:"build_backend"`
@@ -648,7 +649,7 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 	domainsOn := domainArg != "" && a.domainsAvailable(globalCtx)
 	in := CreateDeploymentInput{
 		Name: body.Name, TargetKind: normalizeTargetKind(body.TargetKind), Description: body.Description,
-		SourceKind: body.SourceKind, SourceRef: body.SourceRef,
+		SourceKind: body.SourceKind, SourceRef: body.SourceRef, SourceExtraJSON: body.SourceExtraJSON,
 		Framework: body.Framework,
 		BuildCmd:  body.BuildCmd, BuildBackend: normalizeBuildBackend(body.BuildBackend),
 		BuildBackendJSON: body.BuildBackendJSON, StartCmd: body.StartCmd,
@@ -658,8 +659,8 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
-		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, or ios")
+	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" && in.TargetKind != "artifact" {
+		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, ios, or artifact")
 		return
 	}
 	if in.TargetKind == "android" || in.TargetKind == "ios" {
