@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,7 @@ type audienceJob struct {
 	RejectedRows       int
 	SourceChecksum     string
 	ProviderRequestID  string
+	LeaseToken         string
 	LastError          string
 	Attempts           int
 	CreatedAt          string
@@ -424,24 +426,29 @@ func (a *App) audienceUsage(ctx *sdk.AppCtx, acct *adAccount, resource *adResour
 	case "x":
 		return a.execOrErr(ctx, acct, "get_custom_audience_usage", map[string]any{"account_id": acct.NativeAccountID, "custom_audience_id": resource.NativeID, "with_active": true})
 	case "meta":
-		parsed, errOut := a.execIntegrationTool(ctx, acct, "adset_list", map[string]any{"objectId": acct.NativeAccountID, "fields": "id,name,status,campaign_id,targeting", "limit": 500})
+		rows, errOut := a.metaResourceRows(ctx, acct, "adset_list", map[string]any{"objectId": acct.NativeAccountID, "fields": "id,name,status,campaign_id,targeting", "limit": 500})
 		if errOut != nil {
 			return errOut, nil
 		}
-		return map[string]any{"data": rowsContainingID(resultRows(parsed), resource.NativeID)}, nil
+		return map[string]any{"data": rowsContainingID(rows, resource.NativeID)}, nil
 	case "google":
-		query := fmt.Sprintf("SELECT ad_group_criterion.resource_name, ad_group_criterion.ad_group, ad_group_criterion.status, ad_group_criterion.user_list.user_list FROM ad_group_criterion WHERE ad_group_criterion.user_list.user_list = 'customers/%s/userLists/%s'", acct.NativeAccountID, resource.NativeID)
-		parsed, errOut := a.execIntegrationTool(ctx, acct, "search", map[string]any{"customer_id": acct.NativeAccountID, "query": query})
-		if errOut != nil {
-			return errOut, nil
+		rows := []map[string]any{}
+		for _, level := range []string{"ad_group", "campaign"} {
+			criterion := level + "_criterion"
+			query := fmt.Sprintf("SELECT %s.resource_name, %s.%s, %s.status, %s.user_list.user_list FROM %s WHERE %s.user_list.user_list = 'customers/%s/userLists/%s' AND %s.status != REMOVED", criterion, criterion, level, criterion, criterion, criterion, criterion, acct.NativeAccountID, resource.NativeID, criterion)
+			found, errOut := a.googleResourceRows(ctx, acct, query)
+			if errOut != nil {
+				return errOut, nil
+			}
+			rows = append(rows, found...)
 		}
-		return map[string]any{"data": resultRows(parsed)}, nil
+		return map[string]any{"data": rows}, nil
 	case "reddit":
-		parsed, errOut := a.execIntegrationTool(ctx, acct, "list_ad_groups", map[string]any{"ad_account_id": acct.NativeAccountID, "page.size": 500})
+		rows, errOut := a.providerResourceRows(ctx, acct, "list_ad_groups", map[string]any{"ad_account_id": acct.NativeAccountID, "page.size": 500}, "reddit")
 		if errOut != nil {
 			return errOut, nil
 		}
-		return map[string]any{"data": rowsContainingID(resultRows(parsed), resource.NativeID)}, nil
+		return map[string]any{"data": rowsContainingID(rows, resource.NativeID)}, nil
 	}
 	return map[string]any{"data": []any{}}, nil
 }
@@ -626,7 +633,7 @@ func (a *App) toolAudienceMembersSync(ctx *sdk.AppCtx, args map[string]any) (any
 	mappingJSON, _ := json.Marshal(mapping)
 	consentJSON, _ := json.Marshal(consent)
 	pid, _ := requireProject(ctx, args)
-	result, err := ctx.AppDB().Exec(
+	_, err := ctx.AppDB().Exec(
 		`INSERT INTO ad_audience_jobs (project_id, ad_account_id, audience_resource_id, native_audience_id, operation, source_kind, source_ref, mapping_json, consent_json, idempotency_key)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project_id, idempotency_key) DO NOTHING`,
@@ -635,14 +642,18 @@ func (a *App) toolAudienceMembersSync(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	jobID, _ := result.LastInsertId()
-	if jobID == 0 {
-		_ = ctx.AppDB().QueryRow(`SELECT id FROM ad_audience_jobs WHERE project_id=? AND idempotency_key=?`, pid, idempotencyKey).Scan(&jobID)
+	var jobID int64
+	if err := ctx.AppDB().QueryRow(`SELECT id FROM ad_audience_jobs WHERE project_id=? AND idempotency_key=?`, pid, idempotencyKey).Scan(&jobID); err != nil {
+		return nil, err
 	}
 	job, err := a.getAudienceJob(ctx, pid, jobID)
 	if err != nil {
 		return nil, err
 	}
+	if job.AdAccountID != acct.ID || job.AudienceResourceID != resource.ID || job.Operation != operation || job.SourceKind != sourceKind || job.SourceRef != sourceRef || !reflect.DeepEqual(job.Mapping, mapping) || !reflect.DeepEqual(job.Consent, consent) {
+		return mcpError("idempotency_key already belongs to a different audience sync request"), nil
+	}
+
 	a.emitAudienceEvent(ctx, acct, "audience.sync.progress", resource, job.ID, job.Status)
 	return job.response(), nil
 }
@@ -662,11 +673,19 @@ func (a *App) toolAudienceSyncStatus(ctx *sdk.AppCtx, args map[string]any) (any,
 	return job.response(), nil
 }
 
-func (a *App) runAudienceSyncProcessor(_ context.Context, ctx *sdk.AppCtx) error {
+func (a *App) runAudienceSyncProcessor(runCtx context.Context, ctx *sdk.AppCtx) error {
+	a.audienceMu.Lock()
+	defer a.audienceMu.Unlock()
+	if projectScope(ctx) == "" {
+		return nil
+	}
 	if err := a.pollGoogleAudienceJob(ctx); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		ctx.Logger().Warn("poll Google audience sync failed", "error", err)
 	}
 	for i := 0; i < 2; i++ {
+		if err := runCtx.Err(); err != nil {
+			return err
+		}
 		job, err := a.claimAudienceJob(ctx)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -676,116 +695,6 @@ func (a *App) runAudienceSyncProcessor(_ context.Context, ctx *sdk.AppCtx) error
 		}
 		a.processAudienceJob(ctx, job)
 	}
-	return nil
-}
-
-func (a *App) claimAudienceJob(ctx *sdk.AppCtx) (*audienceJob, error) {
-	var id int64
-	err := ctx.AppDB().QueryRow(`SELECT id FROM ad_audience_jobs WHERE status='queued' AND available_at<=datetime('now') ORDER BY id LIMIT 1`).Scan(&id)
-	if err != nil {
-		return nil, err
-	}
-	result, err := ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='processing', attempts=attempts+1, started_at=COALESCE(started_at,CURRENT_TIMESTAMP), updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='queued'`, id)
-	if err != nil {
-		return nil, err
-	}
-	if changed, _ := result.RowsAffected(); changed != 1 {
-		return nil, sql.ErrNoRows
-	}
-	return a.getAudienceJobAnyProject(ctx, id)
-}
-
-func (a *App) processAudienceJob(ctx *sdk.AppCtx, job *audienceJob) {
-	args := map[string]any{"ad_account_id": job.AdAccountID, "_project_id": job.ProjectID}
-	acct, _, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		a.failAudienceJob(ctx, job, mcpErrorMessage(errOut), false)
-		return
-	}
-	members, checksum, rejected, err := a.loadAudienceMembers(ctx, job)
-	if err != nil {
-		a.failAudienceJob(ctx, job, err.Error(), false)
-		return
-	}
-	members, providerRejected := filterAudienceMembers(acct.Platform, members)
-	rejected += providerRejected
-	if len(members) == 0 {
-		a.failAudienceJob(ctx, job, "source contains no usable audience identifiers", false)
-		return
-	}
-	_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET total_rows=?, rejected_rows=?, source_checksum=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, len(members)+rejected, rejected, checksum, job.ID)
-	accepted := 0
-	requestID := ""
-	for start := 0; start < len(members); start += audienceBatchSize(acct.Platform) {
-		end := start + audienceBatchSize(acct.Platform)
-		if end > len(members) {
-			end = len(members)
-		}
-		parsed, providerErr := a.sendAudienceBatch(ctx, acct, job, members[start:end])
-		if providerErr != nil {
-			retry := audienceProviderRetryable(providerErr)
-			a.failAudienceJob(ctx, job, mcpErrorMessage(providerErr), retry)
-			return
-		}
-		accepted += end - start
-		if id := firstString(asMap(parsed), "requestId", "request_id"); id != "" {
-			requestID = id
-		}
-		_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET processed_rows=?, accepted_rows=?, provider_request_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, end, accepted, requestID, job.ID)
-		a.emitAudienceJobEvent(ctx, acct, job, "audience.sync.progress", "processing", accepted, len(members)+rejected, "")
-	}
-	status := "completed"
-	if acct.Platform == "google" && requestID != "" {
-		status = "provider_processing"
-	}
-	_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status=?, available_at=CASE WHEN ?='provider_processing' THEN datetime('now','+30 minutes') ELSE available_at END, completed_at=CASE WHEN ?='completed' THEN CURRENT_TIMESTAMP ELSE NULL END, updated_at=CURRENT_TIMESTAMP WHERE id=?`, status, status, status, job.ID)
-	event := "audience.ready"
-	if status == "provider_processing" {
-		event = "audience.sync.progress"
-	}
-	a.emitAudienceJobEvent(ctx, acct, job, event, status, accepted, len(members)+rejected, "")
-}
-
-func (a *App) pollGoogleAudienceJob(ctx *sdk.AppCtx) error {
-	var id int64
-	if err := ctx.AppDB().QueryRow(`SELECT id FROM ad_audience_jobs WHERE status='provider_processing' AND provider_request_id!='' AND available_at<=datetime('now') ORDER BY id LIMIT 1`).Scan(&id); err != nil {
-		return err
-	}
-	job, err := a.getAudienceJobAnyProject(ctx, id)
-	if err != nil {
-		return err
-	}
-	acct, _, errOut := a.resolveAdAccount(ctx, map[string]any{"ad_account_id": job.AdAccountID, "_project_id": job.ProjectID})
-	if errOut != nil {
-		a.failAudienceJob(ctx, job, mcpErrorMessage(errOut), false)
-		return nil
-	}
-	parsed, providerErr := a.execIntegrationTool(ctx, acct, "data_manager_request_status_get", map[string]any{"requestId": job.ProviderRequestID})
-	if providerErr != nil {
-		message := mcpErrorMessage(providerErr)
-		if audienceProviderRetryable(providerErr) {
-			_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET last_error=?, available_at=datetime('now','+60 minutes'), updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, job.ID)
-			a.emitAudienceJobEvent(ctx, acct, job, "audience.sync.progress", "provider_processing", job.AcceptedRows, job.TotalRows, message)
-		} else {
-			_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='failed', last_error=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, job.ID)
-			a.emitAudienceJobEvent(ctx, acct, job, "audience.sync.failed", "failed", job.AcceptedRows, job.TotalRows, message)
-		}
-		return nil
-	}
-	statuses := googleRequestStatuses(parsed)
-	if len(statuses) == 0 || containsString(statuses, "PROCESSING") || containsString(statuses, "REQUEST_STATUS_UNSPECIFIED") {
-		_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET available_at=datetime('now','+60 minutes'), updated_at=CURRENT_TIMESTAMP WHERE id=?`, job.ID)
-		a.emitAudienceJobEvent(ctx, acct, job, "audience.sync.progress", "provider_processing", job.AcceptedRows, job.TotalRows, "")
-		return nil
-	}
-	if containsString(statuses, "FAILURE") {
-		message := "Google Data Manager rejected the audience upload during asynchronous processing"
-		_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='failed', last_error=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, job.ID)
-		a.emitAudienceJobEvent(ctx, acct, job, "audience.sync.failed", "failed", job.AcceptedRows, job.TotalRows, message)
-		return nil
-	}
-	_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='completed', completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, job.ID)
-	a.emitAudienceJobEvent(ctx, acct, job, "audience.ready", "completed", job.AcceptedRows, job.TotalRows, "")
 	return nil
 }
 
@@ -995,10 +904,19 @@ func (a *App) failAudienceJob(ctx *sdk.AppCtx, job *audienceJob, message string,
 		status = "queued"
 		available = "datetime('now','+' || ? || ' seconds')"
 	}
+	var result sql.Result
+	var err error
 	if status == "queued" {
-		_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='queued', last_error=?, available_at=`+available+`, updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, 5*job.Attempts, job.ID)
+		result, err = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='queued', last_error=?, available_at=`+available+`, updated_at=CURRENT_TIMESTAMP WHERE id=? AND lease_token=?`, message, 5*job.Attempts, job.ID, job.LeaseToken)
 	} else {
-		_, _ = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='failed', last_error=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`, message, job.ID)
+		result, err = ctx.AppDB().Exec(`UPDATE ad_audience_jobs SET status='failed', last_error=?, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND lease_token=?`, message, job.ID, job.LeaseToken)
+	}
+	if err != nil {
+		ctx.Logger().Warn("save audience failure", "error", err)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return
 	}
 	acct, _, _ := a.resolveAdAccount(ctx, map[string]any{"ad_account_id": job.AdAccountID, "_project_id": job.ProjectID})
 	if acct != nil {
@@ -1007,17 +925,17 @@ func (a *App) failAudienceJob(ctx *sdk.AppCtx, job *audienceJob, message string,
 }
 
 func (a *App) getAudienceJob(ctx *sdk.AppCtx, projectID string, id int64) (*audienceJob, error) {
-	return scanAudienceJob(ctx.AppDB().QueryRow(`SELECT id, project_id, ad_account_id, COALESCE(audience_resource_id,0), native_audience_id, operation, source_kind, source_ref, mapping_json, consent_json, status, total_rows, processed_rows, accepted_rows, rejected_rows, source_checksum, provider_request_id, last_error, attempts, created_at, updated_at FROM ad_audience_jobs WHERE id=? AND project_id=?`, id, projectID))
+	return scanAudienceJob(ctx.AppDB().QueryRow(`SELECT id, project_id, ad_account_id, COALESCE(audience_resource_id,0), native_audience_id, operation, source_kind, source_ref, mapping_json, consent_json, status, total_rows, processed_rows, accepted_rows, rejected_rows, source_checksum, provider_request_id, last_error, attempts, created_at, updated_at, lease_token FROM ad_audience_jobs WHERE id=? AND project_id=?`, id, projectID))
 }
 
 func (a *App) getAudienceJobAnyProject(ctx *sdk.AppCtx, id int64) (*audienceJob, error) {
-	return scanAudienceJob(ctx.AppDB().QueryRow(`SELECT id, project_id, ad_account_id, COALESCE(audience_resource_id,0), native_audience_id, operation, source_kind, source_ref, mapping_json, consent_json, status, total_rows, processed_rows, accepted_rows, rejected_rows, source_checksum, provider_request_id, last_error, attempts, created_at, updated_at FROM ad_audience_jobs WHERE id=?`, id))
+	return scanAudienceJob(ctx.AppDB().QueryRow(`SELECT id, project_id, ad_account_id, COALESCE(audience_resource_id,0), native_audience_id, operation, source_kind, source_ref, mapping_json, consent_json, status, total_rows, processed_rows, accepted_rows, rejected_rows, source_checksum, provider_request_id, last_error, attempts, created_at, updated_at, lease_token FROM ad_audience_jobs WHERE id=?`, id))
 }
 
 func scanAudienceJob(row rowScanner) (*audienceJob, error) {
 	var job audienceJob
 	var mappingJSON, consentJSON string
-	err := row.Scan(&job.ID, &job.ProjectID, &job.AdAccountID, &job.AudienceResourceID, &job.NativeAudienceID, &job.Operation, &job.SourceKind, &job.SourceRef, &mappingJSON, &consentJSON, &job.Status, &job.TotalRows, &job.ProcessedRows, &job.AcceptedRows, &job.RejectedRows, &job.SourceChecksum, &job.ProviderRequestID, &job.LastError, &job.Attempts, &job.CreatedAt, &job.UpdatedAt)
+	err := row.Scan(&job.ID, &job.ProjectID, &job.AdAccountID, &job.AudienceResourceID, &job.NativeAudienceID, &job.Operation, &job.SourceKind, &job.SourceRef, &mappingJSON, &consentJSON, &job.Status, &job.TotalRows, &job.ProcessedRows, &job.AcceptedRows, &job.RejectedRows, &job.SourceChecksum, &job.ProviderRequestID, &job.LastError, &job.Attempts, &job.CreatedAt, &job.UpdatedAt, &job.LeaseToken)
 	if err != nil {
 		return nil, err
 	}
@@ -1324,6 +1242,9 @@ func rowsContainingID(rows []map[string]any, id string) []map[string]any {
 }
 
 func audienceProviderRetryable(errOut map[string]any) bool {
+	if errOut["retryable"] == true {
+		return true
+	}
 	message := strings.ToLower(mcpErrorMessage(errOut))
 	for _, marker := range []string{"rate limit", "too many", "temporar", "retry", "timeout", "unavailable", "resource_exhausted"} {
 		if strings.Contains(message, marker) {

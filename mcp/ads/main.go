@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.45
+version: 0.1.46
 scopes: [project, global]
 requires:
   permissions:
@@ -84,7 +84,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: ads/v0.1.46
     entry: mcp/ads
   port: 8080
   health_check: /health
@@ -313,6 +313,9 @@ type App struct {
 	sleep             func(ctx *sdk.AppCtx, delay time.Duration) bool
 	analyticsMu       sync.Mutex
 	analyticsInFlight map[string]*analyticsSyncCall
+	hierarchyMu       sync.Mutex
+	hierarchyInFlight map[string]*hierarchySyncCall
+	audienceMu        sync.Mutex
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -1893,6 +1896,8 @@ func mergeOptions(base map[string]any, args map[string]any) map[string]any {
 	opts, _ := args["platform_options"].(map[string]any)
 	protected := map[string]bool{
 		"adAccountId": true, "customer_id": true,
+		"account_id": true, "ad_account_id": true, "line_item_id": true,
+		"ad_group_id": true, "promoted_tweet_id": true, "post_id": true, "tweet_id": true,
 		"objectId":   true,
 		"campaignId": true, "campaign_id": true,
 		"adSetId": true, "adsetId": true, "adset_id": true,
@@ -3236,7 +3241,7 @@ func (googleAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		}
 		query += " WHERE campaign.status = " + googleCampaignStatus(status)
 	}
-	if limit := intArg(args, "limit", 0); limit > 0 {
+	if limit := intArg(args, "limit", 0); limit > 0 && !boolArg(args, "_all_pages") {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
@@ -3400,48 +3405,6 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		return mcpError("Google Ads generic campaigns support daily_budget_cents only"), nil
 	}
 	opts, _ := args["platform_options"].(map[string]any)
-	var budgetOut any
-	if cents := intArg(args, "daily_budget_cents", 0); cents > 0 {
-		budgetResource := firstString(opts, "campaignBudgetResource", "campaign_budget_resource")
-		if budgetResource == "" {
-			query := fmt.Sprintf(
-				"SELECT campaign.id, campaign_budget.resource_name FROM campaign WHERE campaign.id = %s LIMIT 1",
-				cid,
-			)
-			found, lookupErr := a.execIntegrationTool(ctx, acct, def.CampaignListTool, map[string]any{
-				"customer_id": acct.NativeAccountID,
-				"query":       query,
-			})
-			if lookupErr != nil {
-				return lookupErr, nil
-			}
-			rows := resultRows(found)
-			if len(rows) > 0 {
-				budgetMap := mapAt(rows[0], "campaignBudget")
-				if len(budgetMap) == 0 {
-					budgetMap = mapAt(rows[0], "campaign_budget")
-				}
-				budgetResource = firstString(budgetMap, "resourceName", "resource_name")
-			}
-		}
-		if budgetResource == "" {
-			return mcpError("could not resolve the campaign budget; pass platform_options.campaignBudgetResource"), nil
-		}
-		var budgetErr map[string]any
-		budgetOut, budgetErr = a.execIdempotentUpdate(ctx, acct, "budget_mutate", map[string]any{
-			"customer_id": acct.NativeAccountID,
-			"operations": []any{map[string]any{
-				"update": map[string]any{
-					"resourceName": budgetResource,
-					"amountMicros": strconv.Itoa(cents * 10000),
-				},
-				"updateMask": "amount_micros",
-			}},
-		})
-		if budgetErr != nil {
-			return budgetErr, nil
-		}
-	}
 	update := map[string]any{"resourceName": googleCampaignResource(acct.NativeAccountID, cid)}
 	fields := []string{}
 	if v, _ := args["name"].(string); v != "" {
@@ -3465,11 +3428,57 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	}
 	if custom, ok := opts["campaign"].(map[string]any); ok {
 		for k, v := range custom {
-			if k == "resourceName" {
+			if k == "resourceName" || k == "resource_name" {
 				continue
 			}
 			update[k] = v
 			fields = append(fields, googleMaskField(k))
+		}
+	}
+	var budgetOut any
+	if cents := intArg(args, "daily_budget_cents", 0); cents > 0 {
+		requestedBudget := firstString(opts, "campaignBudgetResource", "campaign_budget_resource")
+		budgetResource := ""
+		{
+			query := fmt.Sprintf(
+				"SELECT campaign.id, campaign_budget.resource_name FROM campaign WHERE campaign.id = %s LIMIT 1",
+				cid,
+			)
+			found, lookupErr := a.execIntegrationTool(ctx, acct, def.CampaignListTool, map[string]any{
+				"customer_id": acct.NativeAccountID,
+				"query":       query,
+			})
+			if lookupErr != nil {
+				return lookupErr, nil
+			}
+			rows := resultRows(found)
+			if len(rows) > 0 {
+				budgetMap := mapAt(rows[0], "campaignBudget")
+				if len(budgetMap) == 0 {
+					budgetMap = mapAt(rows[0], "campaign_budget")
+				}
+				budgetResource = firstString(budgetMap, "resourceName", "resource_name")
+			}
+		}
+		if budgetResource == "" {
+			return mcpError("could not resolve the selected campaign budget"), nil
+		}
+		if requestedBudget != "" && requestedBudget != budgetResource {
+			return mcpError("campaignBudgetResource must match the selected campaign budget"), nil
+		}
+		var budgetErr map[string]any
+		budgetOut, budgetErr = a.execIdempotentUpdate(ctx, acct, "budget_mutate", map[string]any{
+			"customer_id": acct.NativeAccountID,
+			"operations": []any{map[string]any{
+				"update": map[string]any{
+					"resourceName": budgetResource,
+					"amountMicros": strconv.Itoa(cents * 10000),
+				},
+				"updateMask": "amount_micros",
+			}},
+		})
+		if budgetErr != nil {
+			return budgetErr, nil
 		}
 	}
 	if len(fields) == 0 {
@@ -3486,7 +3495,19 @@ func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 		}},
 	})
 	if err != nil {
-		return nil, err
+		failure := mcpError(err.Error())
+		if budgetOut != nil {
+			failure["status"] = "partial"
+			failure["budget"] = budgetOut
+		}
+		return failure, nil
+	}
+	if failure := mcpResultError(campaignOut); failure != nil {
+		if budgetOut != nil {
+			failure["status"] = "partial"
+			failure["budget"] = budgetOut
+		}
+		return failure, nil
 	}
 	if budgetOut != nil {
 		return map[string]any{"budget": budgetOut, "campaign": campaignOut}, nil
@@ -3516,7 +3537,7 @@ func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pl
 		}
 		query += " WHERE campaign.id = " + cid
 	}
-	if limit := intArg(args, "limit", 0); limit > 0 {
+	if limit := intArg(args, "limit", 0); limit > 0 && !boolArg(args, "_all_pages") {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
@@ -3553,7 +3574,9 @@ func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *
 	if opts, _ := args["platform_options"].(map[string]any); opts != nil {
 		if custom, ok := opts["ad_group"].(map[string]any); ok {
 			for k, v := range custom {
-				adGroup[k] = v
+				if k != "campaign" && k != "resourceName" && k != "resource_name" {
+					adGroup[k] = v
+				}
 			}
 		}
 	}
@@ -3619,7 +3642,7 @@ func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 		}
 		query += " WHERE ad_group.id = " + asid
 	}
-	if limit := intArg(args, "limit", 0); limit > 0 {
+	if limit := intArg(args, "limit", 0); limit > 0 && !boolArg(args, "_all_pages") {
 		query += fmt.Sprintf(" LIMIT %d", limit)
 	}
 	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
@@ -3636,6 +3659,9 @@ func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platf
 func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		if failure := validateGoogleAdOperations(acct, args, ops, "create"); failure != nil {
+			return failure, nil
+		}
 		if !googlePayloadScoped(ops, acct.NativeAccountID) {
 			return mcpError("google operations contain a resource from another customer"), nil
 		}
@@ -3669,6 +3695,9 @@ func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *pla
 func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	opts, _ := args["platform_options"].(map[string]any)
 	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		if failure := validateGoogleAdOperations(acct, args, ops, "update"); failure != nil {
+			return failure, nil
+		}
 		if !googlePayloadScoped(ops, acct.NativeAccountID) {
 			return mcpError("google operations contain a resource from another customer"), nil
 		}
@@ -4043,6 +4072,9 @@ func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if scopeErr := a.requireManagedEntity(ctx, acct, def, "ad", stringArgAny(args, "ad_id")); scopeErr != nil {
 		return scopeErr, nil
+	}
+	if failure := a.requireManagedCreative(ctx, acct, stringArgAny(args, "creative_id")); failure != nil {
+		return failure, nil
 	}
 	out, err := platformAdapters[acct.Platform].AdUpdate(a, ctx, acct, def, args)
 	a.emitEntityChanged(ctx, acct, "ad", "updated", args, out, err)

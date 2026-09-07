@@ -193,6 +193,7 @@ func (a *App) listAllProviderCampaigns(ctx *sdk.AppCtx, acct *adAccount, def *pl
 	for page := 0; page < maxCampaignPickerPages; page++ {
 		pageArgs := cloneMap(args)
 		pageArgs["limit"] = 200
+		pageArgs["_all_pages"] = true
 		if after != "" {
 			pageArgs["after"] = after
 		} else {
@@ -639,34 +640,109 @@ func filterCampaignRows(rows []map[string]any, allowed map[string]bool) []map[st
 	return out
 }
 
+type hierarchySyncCall struct {
+	done    chan struct{}
+	failure map[string]any
+}
+
 func (a *App) refreshManagedHierarchy(ctx *sdk.AppCtx, acct *adAccount, def *platformDef) map[string]any {
 	if acct.ManagementMode != managementModeSelected {
 		return nil
 	}
-	campaignIDs, err := a.managedCampaignIDs(ctx, acct)
+	ids, err := a.managedCampaignIDs(ctx, acct)
 	if err != nil {
 		return mcpError("load managed campaigns: " + err.Error())
 	}
-	for _, campaignID := range campaignIDs {
-		adSetRows, errOut := a.listAllProviderChildren(ctx, acct, def, "ad_group", map[string]any{"campaign_id": campaignID})
-		if errOut != nil {
-			return errOut
+	if len(ids) == 0 {
+		return nil
+	}
+	key := fmt.Sprintf("%s:%d:%s", acct.ProjectID, acct.ID, strings.Join(ids, ","))
+	a.hierarchyMu.Lock()
+	if a.hierarchyInFlight == nil {
+		a.hierarchyInFlight = map[string]*hierarchySyncCall{}
+	}
+	if running := a.hierarchyInFlight[key]; running != nil {
+		a.hierarchyMu.Unlock()
+		select {
+		case <-running.done:
+			return running.failure
+		case <-ctx.Done():
+			return mcpError("hierarchy refresh cancelled")
 		}
-		if err := a.upsertDeliveryEntities(ctx, acct, "ad_group", adSetRows, campaignID); err != nil {
-			return mcpError("store managed ad sets: " + err.Error())
+	}
+	call := &hierarchySyncCall{done: make(chan struct{})}
+	a.hierarchyInFlight[key] = call
+	a.hierarchyMu.Unlock()
+	defer func() {
+		a.hierarchyMu.Lock()
+		delete(a.hierarchyInFlight, key)
+		close(call.done)
+		a.hierarchyMu.Unlock()
+	}()
+	call.failure = a.fetchManagedHierarchy(ctx, acct, def)
+	return call.failure
+}
+
+func (a *App) fetchManagedHierarchy(ctx *sdk.AppCtx, acct *adAccount, def *platformDef) map[string]any {
+	// Two account-level paginated scans replace a request per campaign and
+	// ad group. Ownership filtering in upsertDeliveryEntities remains mandatory.
+	groups, failure := a.listAllProviderChildren(ctx, acct, def, "ad_group", map[string]any{})
+	if failure != nil {
+		return failure
+	}
+	ads, failure := a.listAllProviderChildren(ctx, acct, def, "ad", map[string]any{})
+	if failure != nil {
+		return failure
+	}
+	allowed, err := a.managedCampaignSet(ctx, acct)
+	if err != nil {
+		return mcpError("load campaign scope: " + err.Error())
+	}
+	parents := map[string]string{}
+	managedGroups := make([]map[string]any, 0, len(groups))
+	for _, row := range groups {
+		campaignID := firstString(row, "campaign_id")
+		if allowed[campaignID] {
+			parents[firstString(row, "id", "native_id")] = campaignID
+			managedGroups = append(managedGroups, row)
 		}
-		for _, adSet := range adSetRows {
-			adSetID := firstString(adSet, "id", "native_id")
-			if adSetID == "" {
-				continue
+	}
+	managedAds := make([]map[string]any, 0, len(ads))
+	for _, row := range ads {
+		campaignID := firstString(row, "campaign_id")
+		if campaignID == "" {
+			campaignID = parents[firstString(row, "adset_id", "ad_group_id")]
+		}
+		if allowed[campaignID] {
+			row = cloneMap(row)
+			row["campaign_id"] = campaignID
+			managedAds = append(managedAds, row)
+		}
+	}
+	for _, snapshot := range []struct {
+		level string
+		rows  []map[string]any
+	}{{"ad_group", managedGroups}, {"ad", managedAds}} {
+		if err := a.upsertDeliveryEntities(ctx, acct, snapshot.level, snapshot.rows, ""); err != nil {
+			return mcpError("store hierarchy: " + err.Error())
+		}
+		// A complete snapshot must not leave deleted entities authorizable.
+		query := `DELETE FROM ad_entities WHERE project_id=? AND ad_account_id=? AND level=?`
+		args := []any{acct.ProjectID, acct.ID, snapshot.level}
+		ids := []string{}
+		for _, row := range snapshot.rows {
+			if id := firstString(row, "id", "native_id"); id != "" {
+				ids = append(ids, id)
 			}
-			adRows, errOut := a.listAllProviderChildren(ctx, acct, def, "ad", map[string]any{"adset_id": adSetID})
-			if errOut != nil {
-				return errOut
-			}
-			if err := a.upsertDeliveryEntities(ctx, acct, "ad", adRows, campaignID); err != nil {
-				return mcpError("store managed ads: " + err.Error())
-			}
+		}
+		if len(ids) > 0 {
+			// One JSON parameter avoids SQLite's variable limit on large accounts.
+			encoded, _ := json.Marshal(ids)
+			query += " AND native_entity_id NOT IN (SELECT value FROM json_each(?))"
+			args = append(args, string(encoded))
+		}
+		if _, err := ctx.AppDB().Exec(query, args...); err != nil {
+			return mcpError("reconcile hierarchy: " + err.Error())
 		}
 	}
 	return nil
@@ -684,6 +760,7 @@ func (a *App) listAllProviderChildren(
 	for page := 0; page < maxCampaignPickerPages; page++ {
 		pageArgs := cloneMap(args)
 		pageArgs["limit"] = 500
+		pageArgs["_all_pages"] = true
 		if after != "" {
 			pageArgs["after"] = after
 		}

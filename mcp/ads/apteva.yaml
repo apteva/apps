@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.45
+version: 0.1.46
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -61,6 +61,11 @@ description: |
   v0.1.45 preflights Meta ad-set goals against the parent campaign, prevents
   native overrides from bypassing billing validation, and records safe request
   context for rejected creates.
+  v0.1.46 hardens native mutation scope, recovers interrupted audience jobs,
+  tracks every Google upload batch, paginates complete hierarchy and usage
+  reads, and reconciles analytics without overwriting campaign snapshots.
+  Cached reports avoid provider scans; unsupported Reddit budget updates fail
+  explicitly. Legacy Google uploads with missing diagnostics require a new sync.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -190,7 +195,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: ads/v0.1.46
     entry: mcp/ads
   port: 8080
   health_check: /health

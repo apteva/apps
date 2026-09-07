@@ -171,8 +171,10 @@ func (a *App) scopePerformanceRequest(
 	if request.Level == "campaign" {
 		allowedIDs, err = a.managedCampaignIDs(ctx, acct)
 	} else {
-		if errOut := a.refreshManagedHierarchy(ctx, acct, def); errOut != nil {
-			return false, errOut, nil
+		if request.Refresh {
+			if errOut := a.refreshManagedHierarchy(ctx, acct, def); errOut != nil {
+				return false, errOut, nil
+			}
 		}
 		allowedIDs, err = a.managedEntityIDs(ctx, acct, request.Level)
 	}
@@ -205,7 +207,11 @@ func (a *App) syncAnalytics(ctx *sdk.AppCtx, pid string, acct *adAccount, reques
 	}
 	if active := a.analyticsInFlight[key]; active != nil {
 		a.analyticsMu.Unlock()
-		<-active.done
+		select {
+		case <-active.done:
+		case <-ctx.Done():
+			return nil, nil, fmt.Errorf("performance request cancelled"), false
+		}
 		if active.signature == signature {
 			return active.points, active.providerErr, active.err, false
 		}
@@ -550,25 +556,49 @@ func persistAnalyticsPoints(ctx *sdk.AppCtx, pid string, acct *adAccount, reques
 		return err
 	}
 	defer tx.Rollback()
-	for _, point := range points {
-		if point.EntityID == "" || point.Date == "" {
-			continue
+	if request == nil || request.DateFrom == "" || request.DateTo == "" {
+		return fmt.Errorf("performance range required")
+	}
+	// Replace only this complete response's scope. Failure rolls back the
+	// deletion as well as inserts, leaving the previous cache intact.
+	query := `DELETE FROM ad_metric_points WHERE project_id=? AND ad_account_id=? AND level=? AND point_date BETWEEN ? AND ?`
+	params := []any{pid, acct.ID, request.Level, request.DateFrom, request.DateTo}
+	allowed := map[string]bool{}
+	if len(request.EntityIDs) > 0 {
+		query += " AND native_entity_id IN (" + analyticsSQLPlaceholders(len(request.EntityIDs)) + ")"
+		for _, id := range request.EntityIDs {
+			params = append(params, id)
+			allowed[id] = true
+		}
+	}
+	if _, err := tx.Exec(query, params...); err != nil {
+		return err
+	}
+	for i := range points {
+		point := &points[i]
+		if point.EntityID == "" || point.Date < request.DateFrom || point.Date > request.DateTo || point.Level != request.Level || (len(allowed) > 0 && !allowed[point.EntityID]) {
+			return fmt.Errorf("provider returned a performance point outside the requested scope")
+		}
+		if point.CampaignID == "" || point.AdGroupID == "" {
+			var campaignID, adGroupID string
+			err := tx.QueryRow(`SELECT campaign_id,ad_group_id FROM ad_entities WHERE project_id=? AND ad_account_id=? AND level=? AND native_entity_id=?`, pid, acct.ID, point.Level, point.EntityID).Scan(&campaignID, &adGroupID)
+			if err != nil && err != sql.ErrNoRows {
+				return err
+			}
+			if point.CampaignID == "" {
+				point.CampaignID = campaignID
+			}
+			if point.AdGroupID == "" {
+				point.AdGroupID = adGroupID
+			}
 		}
 		providerJSON, _ := json.Marshal(point.ProviderMetrics)
-		if _, err := tx.Exec(
-			`INSERT INTO ad_entities (
-			    project_id, ad_account_id, platform, level, native_entity_id, name,
-			    campaign_id, ad_group_id, provider_data_json, last_seen_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(project_id, ad_account_id, level, native_entity_id) DO UPDATE SET
-			    name=excluded.name, campaign_id=excluded.campaign_id,
-			    ad_group_id=excluded.ad_group_id, provider_data_json=excluded.provider_data_json,
-			    last_seen_at=excluded.last_seen_at, updated_at=CURRENT_TIMESTAMP`,
-			pid, acct.ID, acct.Platform, point.Level, point.EntityID, point.EntityName,
-			point.CampaignID, point.AdGroupID, string(providerJSON), point.FetchedAt,
-		); err != nil {
+		entityJSON, _ := json.Marshal(map[string]any{"id": point.EntityID, "name": point.EntityName, "campaign_id": point.CampaignID, "adset_id": point.AdGroupID})
+		if _, err := tx.Exec(`INSERT INTO ad_entities(project_id,ad_account_id,platform,level,native_entity_id,name,campaign_id,ad_group_id,provider_data_json,last_seen_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(project_id,ad_account_id,level,native_entity_id) DO NOTHING`, pid, acct.ID, acct.Platform, point.Level, point.EntityID, point.EntityName, point.CampaignID, point.AdGroupID, string(entityJSON), point.FetchedAt); err != nil {
 			return err
 		}
+
 		if _, err := tx.Exec(
 			`INSERT INTO ad_metric_points (
 			    project_id, ad_account_id, platform, level, native_entity_id, entity_name,

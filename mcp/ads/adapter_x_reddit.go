@@ -170,16 +170,17 @@ func redditOptimizationGoal(value string) string {
 func centsToMicros(value int) int64 { return int64(value) * 10_000 }
 
 func redditData(args map[string]any, base map[string]any) map[string]any {
-	if opts := asMap(args["platform_options"]); len(opts) > 0 {
-		if nested := asMap(opts["data"]); len(nested) > 0 {
-			for key, value := range nested {
-				base[key] = value
-			}
-		} else {
-			for key, value := range opts {
-				base[key] = value
-			}
+	opts := asMap(args["platform_options"])
+	if nested := asMap(opts["data"]); len(nested) > 0 {
+		opts = nested
+	}
+	// Preserve canonical ownership and parent identifiers, including on updates.
+	for key, value := range opts {
+		switch key {
+		case "id", "account_id", "ad_account_id", "campaign_id", "ad_group_id", "ad_id", "post_id":
+			continue
 		}
+		base[key] = value
 	}
 	return base
 }
@@ -353,6 +354,12 @@ func (xRedditAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, d
 		mergeOptions(input, args)
 		return a.execUpdateOrErr(ctx, acct, def.CampaignUpdateTool, input)
 	}
+	for _, field := range []string{"daily_budget_cents", "lifetime_budget_cents", "bid_amount_cents"} {
+		if _, supplied := args[field]; supplied {
+			return mcpError("Reddit updates do not support " + field + "; use explicit native platform_options.data budget or bid fields"), nil
+		}
+	}
+
 	data := redditData(args, map[string]any{})
 	putString(data, "name", args, "name")
 	if status := stringArgAny(args, "status"); status != "" {
@@ -468,6 +475,12 @@ func (xRedditAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def 
 		mergeOptions(input, args)
 		return a.execUpdateOrErr(ctx, acct, def.AdSetUpdateTool, input)
 	}
+	for _, field := range []string{"daily_budget_cents", "lifetime_budget_cents", "bid_amount_cents"} {
+		if _, supplied := args[field]; supplied {
+			return mcpError("Reddit updates do not support " + field + "; use explicit native platform_options.data budget or bid fields"), nil
+		}
+	}
+
 	data := redditData(args, map[string]any{})
 	putString(data, "name", args, "name")
 	if status := stringArgAny(args, "status"); status != "" {
