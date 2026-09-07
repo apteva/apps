@@ -47,8 +47,16 @@ func TestWorkerEnvironmentProtectsReservedKeys(t *testing.T) {
 			t.Fatalf("worker environment accepted reserved value %q: %s", forbidden, joined)
 		}
 	}
-	if !strings.Contains(joined, "VISIBLE=yes") || !strings.Contains(joined, "NODE_OPTIONS=--max-old-space-size=64") {
+	if !strings.Contains(joined, "VISIBLE=yes") || !strings.Contains(joined, "NODE_OPTIONS=--max-old-space-size=32") {
 		t.Fatalf("worker environment missing expected values: %s", joined)
+	}
+}
+
+func TestNodeHeapLeavesNativeMemoryHeadroom(t *testing.T) {
+	for _, tc := range []struct{ memory, heap int }{{16, 8}, {32, 8}, {64, 32}, {128, 96}, {256, 192}, {512, 384}, {1024, 768}} {
+		if got := nodeOldSpaceMB(tc.memory); got != tc.heap || got >= tc.memory {
+			t.Fatalf("memory=%d: heap=%d, want %d with native headroom", tc.memory, got, tc.heap)
+		}
 	}
 }
 

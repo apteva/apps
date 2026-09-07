@@ -56,7 +56,7 @@ func TestPreparationRestartRelocationAndMissingArtifacts(t *testing.T) {
 			p := currentPool()
 			deadline, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			if err := p.awaitPreparation(deadline, fn); err != nil {
+			if _, err := app.toolPrepare(deadline, ctx, map[string]any{"id": fn.ID, "warm": true, "wait": true}); err != nil {
 				t.Fatal(err)
 			}
 			before := p.artifactBuilds.Load()

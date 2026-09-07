@@ -188,7 +188,7 @@ func (p *pool) requestPreparation(fn *Function, warm, retry, high bool) (*prepar
 				return entry, nil
 			}
 		case "failed":
-			if !retry {
+			if !retry && !strings.Contains(entry.result.Error, "budget") && !strings.Contains(entry.result.Error, "limit") {
 				return entry, nil
 			}
 		}
@@ -215,7 +215,7 @@ func (p *pool) runPreparation(job *preparation) {
 		result.Error = redactSecrets(result.Error, job.fn.Env)
 		p.prepareMu.Lock()
 		job.result = result
-		followWarm := job.warm && result.State == "prepared" && p.preparations[job.fn.InstanceKey] == job
+		followWarm := job.warm && result.State == "prepared" && result.Error == "" && p.preparations[job.fn.InstanceKey] == job
 		close(job.done)
 		p.prepareMu.Unlock()
 		if followWarm {
@@ -272,15 +272,28 @@ func (p *pool) runPreparation(job *preparation) {
 		result.Error = "Deployment changed during preparation; prepare the current version"
 		return
 	}
+	if err = dbUpdateVersionBuild(p.ctx.AppDB(), fn.ProjectID, v.ID, "ready", v.BuildLog, dir, fn.InstanceKey); err != nil {
+		result.Error = err.Error()
+		return
+	}
+	v.BuildDir = dir
+	p.cacheVersion(v)
+	p.cacheFunction(current)
 	var candidate *worker
 	p.prepareMu.Lock()
 	warm := job.warm
 	p.prepareMu.Unlock()
 	if warm {
 		started = time.Now()
-		candidate, err = p.start(ctx, fn, v, spec, dir)
+		candidate, err = p.start(context.WithValue(ctx, admissionClassKey{}, "preparation"), fn, v, spec, dir)
 		result.WorkerStartMS = time.Since(started).Milliseconds()
 		if err != nil {
+			if errorCode(err) != "" {
+				result.State = "prepared"
+				result.Error = err.Error()
+				p.cacheVersion(v)
+				return
+			}
 			result.Error = redactSecrets(err.Error(), fn.Env)
 			return
 		}
@@ -397,15 +410,26 @@ func (a *App) toolPrepare(parent context.Context, ctx *sdk.AppCtx, args map[stri
 		return nil, err
 	}
 	if args["wait"] == true {
-		select {
-		case <-parent.Done():
-			return nil, parent.Err()
-		case <-p.life.Done():
-			return nil, p.life.Err()
-		case <-job.done:
-		}
-		if warm && p.runtimeReadiness(fn).State == "prepared" {
-			return a.toolPrepare(parent, ctx, args)
+		for {
+			select {
+			case <-parent.Done():
+				return nil, parent.Err()
+			case <-p.life.Done():
+				return nil, p.life.Err()
+			case <-job.done:
+			}
+			p.prepareMu.Lock()
+			result := job.result
+			p.prepareMu.Unlock()
+			if !warm || result.State != "prepared" || result.Error != "" {
+				break
+			}
+			// A build-only job can be upgraded while finishing. Wait for the
+			// resulting warm job as well, even if the background scanner queued it.
+			job, err = p.requestPreparation(fn, true, false, true)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return map[string]any{"runtime_readiness": p.runtimeReadiness(fn)}, nil

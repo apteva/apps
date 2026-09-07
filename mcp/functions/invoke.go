@@ -24,6 +24,8 @@ const (
 // columns recorded on function_invocations plus the bits the MCP /
 // HTTP handlers surface to callers.
 type invokeResult struct {
+	ErrorCode                                  string         `json:"error_code,omitempty"`
+	Resources                                  *CallResources `json:"resources,omitempty"`
 	BuildMS, QueueMS, ColdStartMS, ExecutionMS int64
 	InvocationID                               int64
 	Status                                     string // ok | error | timeout
@@ -85,6 +87,8 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	if err != nil {
 		return nil, fmt.Errorf("record invocation: %w", err)
 	}
+	trace := p.newTrace(parent, fn, id)
+	invokeCtx = context.WithValue(invokeCtx, traceKey{}, trace)
 	if httpStream, ok := stream.(*httpInvocationStream); ok {
 		httpStream.invocationID = id
 		httpStream.ctx = invokeCtx
@@ -115,6 +119,23 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 				res.Error = "Function execution deadline exceeded"
 			}
 		}
+		if res.ErrorCode == "" {
+			res.ErrorCode = errorCode(retErr)
+		}
+		switch res.Status {
+		case "timeout":
+			res.ErrorCode = "invocation_timeout"
+		case "canceled":
+			res.ErrorCode = "caller_canceled"
+		case "upstream_timeout":
+			res.ErrorCode = "upstream_timeout"
+		}
+		if res.ErrorCode == "" {
+			res.ErrorCode = extractErrorCode(res.Error)
+		}
+		p.finishTrace(trace, retErr, res)
+		snapshot := trace.snapshot()
+		res.Resources = &snapshot
 		res.BuildMS = timings.build.Milliseconds()
 		res.QueueMS = timings.queue.Milliseconds()
 		res.ColdStartMS = timings.cold.Milliseconds()

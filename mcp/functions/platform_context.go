@@ -17,9 +17,18 @@ import (
 // The SDK's current CallAppResult has no context argument. This narrow adapter
 // uses the same public callback API with cancellation and bounded bodies. Custom
 // clients can implement the optional context methods without any HTTP adapter.
-var callbackHTTP = &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, MaxIdleConns: 128, MaxIdleConnsPerHost: 64, MaxConnsPerHost: 128, IdleConnTimeout: 90 * time.Second, ResponseHeaderTimeout: 30 * time.Second}}
+var callbackHTTP = callbackClient()
 
 func callbackRequest(ctx context.Context, method, path string, body any, out any) error {
+	if _, ok := ctx.Deadline(); !ok || strings.Contains(path, "/connections?") {
+		var cancel context.CancelFunc
+		ms := 30000
+		if strings.Contains(path, "/integrations/") {
+			ms = 300000
+		}
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(ms)*time.Millisecond)
+		defer cancel()
+	}
 	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
 	if base == "" {
 		base = "http://127.0.0.1:5280"
@@ -34,7 +43,11 @@ func callbackRequest(ctx context.Context, method, path string, body any, out any
 	}
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("APTEVA_APP_TOKEN"))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := callbackHTTP.Do(req)
+	client := callbackHTTP
+	if strings.Contains(path, "/integrations/") && strings.HasSuffix(path, "/execute") {
+		client = integrationHTTP
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
@@ -51,8 +64,14 @@ func callbackRequest(ctx context.Context, method, path string, body any, out any
 	}
 	return json.Unmarshal(data, out)
 }
-func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResponse) callResult {
-	ans := callResult{Type: "call_result", CallID: msg.CallID}
+func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResponse) (ans callResult) {
+
+	ans = callResult{Type: "call_result", CallID: msg.CallID}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			ans = callResult{Type: "call_result", CallID: msg.CallID, ErrorCode: "downstream_error", Error: fmt.Sprintf("downstream panic: %v", recovered)}
+		}
+	}()
 	if err := parent.Err(); err != nil {
 		ans.Error = err.Error()
 		return ans
@@ -69,6 +88,11 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 	}
 	input["_project_id"] = ctx.CurrentProject()
 	var err error
+	if msg.Type == "call" && msg.App == "functions" && msg.Tool == "functions_invoke" {
+		ans = dispatchNested(parent, ctx, input)
+		ans.CallID = msg.CallID
+		return ans
+	}
 	if msg.Type == "call" {
 		if msg.App == "" || msg.Tool == "" || strings.ContainsAny(msg.App, "/\\?#") {
 			ans.Error = "invalid app or tool"
@@ -120,6 +144,7 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 	}
 	if err != nil {
 		ans.Error = err.Error()
+		ans.ErrorCode = classifyDownstreamError(parent, parent, err, msg.Type)
 		return ans
 	}
 	if len(ans.Result) == 0 {

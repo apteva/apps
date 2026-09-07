@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 func maskFunction(fn *Function) *Function {
 	c := *withReadiness(fn)
@@ -44,6 +47,15 @@ func invocationPage(rows []*Invocation, limit int) map[string]any {
 	out := make([]*Invocation, 0, len(rows))
 	for _, r := range rows {
 		c := *r
+		if p := currentPool(); p != nil {
+			p.mu.Lock()
+			t := p.liveCalls[r.ID]
+			p.mu.Unlock()
+			if t != nil {
+				b, _ := json.Marshal(t.snapshot())
+				c.Resources = b
+			}
+		}
 		c.EventJSON = ""
 		c.ResponseBody = ""
 		c.Stderr = ""

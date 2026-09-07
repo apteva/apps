@@ -96,6 +96,8 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/capacity", Handler: a.handleHTTPCapacity},
+		{Pattern: "/capacity/settings", Handler: a.handleHTTPCapacitySettings},
 		// CRUD on functions.
 		{Pattern: "/functions", Handler: a.handleHTTPFunctionsCollection},
 		{Pattern: "/functions/", Handler: a.handleHTTPFunctionItem},
@@ -117,11 +119,23 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "functions_capacity", Description: "Live per-call and per-function memory, worker reservations, queues, limits, and rejection reasons. Project scoped details.", InputSchema: schemaObject(map[string]any{}, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			pid, err := resolveProjectFromArgs(args)
+			if err != nil {
+				return nil, err
+			}
+			p := currentPool()
+			if p == nil {
+				return nil, errors.New("runtime unavailable")
+			}
+			return p.capacitySnapshot(pid), nil
+		}},
 		{Name: "functions_prepare", Description: "Prepare the active runtime artifact without invoking the handler. Optional warm (default true) boots and validates a worker; module initialization and dependency build scripts may run. wait (default false) waits for preparation.", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "_project_id": map[string]any{"type": "string"}, "warm": map[string]any{"type": "boolean"}, "wait": map[string]any{"type": "boolean"}}}, HandlerCtx: a.toolPrepare},
 		{
 			Name:        "functions_create",
 			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?.",
 			InputSchema: schemaObject(map[string]any{
+				"limits":        map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
 				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
 				"name":          map[string]any{"type": "string"},
 				"runtime":       map[string]any{"type": "string", "enum": []any{"node", "go"}},
@@ -151,6 +165,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_memory_mb": map[string]any{"type": "integer"},
 				"status":        map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
 				"function_url":  map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
+				"limits":        map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
 				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
 			}, nil),
 			Handler: a.toolUpdate,

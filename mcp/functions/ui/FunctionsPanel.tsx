@@ -91,6 +91,7 @@ type BuildStatus = "pending" | "building" | "ready" | "failed";
 
 interface RuntimeReadiness {state:"preparing"|"prepared"|"ready"|"failed"|"inactive";error?:string;build_ms:number;worker_start_ms:number;boot_validated:boolean;warm_workers:number}
 interface FunctionRow {
+ limits?: Record<string,any>;
  runtime_readiness?:RuntimeReadiness;
   id: number;
   name: string;
@@ -130,6 +131,7 @@ interface Version {
 }
 
 interface Invocation {
+ resources?: CallResources;
  build_ms?:number;queue_ms?:number;cold_start_ms?:number;execution_ms?:number;
   id: number;
   function_id: number;
@@ -429,6 +431,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
       </header>
 
       <main className="flex-1 overflow-auto">
+ <CapacityView api={api}/>
         {error ? (
           <div className="p-6 text-red text-sm">{error}</div>
         ) : functions.length === 0 ? (
@@ -734,7 +737,7 @@ function DetailDialog({
                       <td className="px-3 py-2 text-text-muted">{inv.duration_ms} ms<div className="text-[10px] text-text-dim">Execution {inv.execution_ms ?? 0} ms</div></td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${invStatusTone(inv.status)}`}>
-                          {{canceled:"Caller canceled",upstream_timeout:"Upstream timeout",timeout:"Function timeout"}[inv.status] || inv.status}
+                          {({ canceled: "Caller canceled", upstream_timeout: "Upstream timeout", timeout: "Function timeout" } as Partial<Record<InvStatus, string>>)[inv.status] || inv.status}
                         </span>
                       </td>
                       <td className="px-3 py-2 text-text-muted">{inv.exit_code}</td>
@@ -779,6 +782,7 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
   return (
     <div className="flex flex-col gap-2">
  <InvocationTimings inv={inv}/>
+ <CallMemory resources={inv.resources}/>
       {inv.event_json && (
         <div>
           <div className="text-[10px] uppercase tracking-wide text-text-dim mb-1">Event</div>
@@ -1404,10 +1408,11 @@ function DeployDialog({
 function SettingsEditor({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChanged:()=>void|Promise<void>}) {
  const [env,setEnv]=useState(Object.entries(fn.env||{}).map(([k,v])=>`${k}=${v}`).join("\n"));
  const [timeout,setTimeoutValue]=useState(fn.timeout_ms),[memory,setMemory]=useState(fn.max_memory_mb);
+ const [limits,setLimits]=useState<Record<string,any>>(fn.limits||{});
  const [access,setAccess]=useState(JSON.stringify(fn.access??null,null,2));
  const [error,setError]=useState(""),[saving,setSaving]=useState(false);
- const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,access:JSON.parse(access)});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
- return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Memory (MiB)<input type="number" min={16} max={1024} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
+ const save=async()=>{setSaving(true);try { const parsed=envLinesToMap(env);if(typeof parsed==="string") throw Error(parsed);await api("PATCH",`/functions/${fn.id}`,{env:parsed,timeout_ms:timeout,max_memory_mb:memory,limits,access:JSON.parse(access)});await onChanged();setError("");}catch(e){setError((e as Error).message);}finally{setSaving(false);}};
+ return <details className="text-sm border border-border rounded p-3"><summary>Environment, limits and access</summary><div className="grid gap-2 mt-2"><label>Environment (KEY=value)<textarea value={env} onChange={e=>setEnv(e.target.value)} className={inputCls}/></label><label>Timeout (ms)<input type="number" min={1} max={300000} value={timeout} onChange={e=>setTimeoutValue(Number(e.target.value))} className={inputCls}/></label><label>Memory (MiB)<input type="number" min={16} max={65536} value={memory} onChange={e=>setMemory(Number(e.target.value))} className={inputCls}/></label><label>Capacity class<select value={limits.class||"interactive"} onChange={e=>setLimits({...limits,class:e.target.value})} className={inputCls}><option value="interactive">Interactive</option><option value="background">Background</option></select></label>{[["concurrency","Concurrent workers",1024],["max_idle_workers","Maximum idle workers",1024],["idle_timeout_ms","Idle lifetime (ms)",600000],["queue_timeout_ms","Capacity wait (ms)",600000],["app_timeout_ms","App call timeout (ms)",600000],["integration_timeout_ms","Integration timeout (ms)",600000]].map(([key,label,max])=><label key={String(key)}>{label}<input type="number" min={0} max={Number(max)} placeholder="Default" value={limits[String(key)]??""} onChange={e=>setLimits({...limits,[String(key)]:e.target.value===""?undefined:Number(e.target.value)})} className={inputCls}/></label>)}<label>Access policy (null inherits installation grants)<textarea value={access} onChange={e=>setAccess(e.target.value)} placeholder='{"apps":["tables.*"],"integrations":[]}' className={inputCls}/></label><button disabled={saving} onClick={save}>Save settings</button>{error&&<p role="alert" className="text-red">{error}</p>}</div></details>;
 }
 
 function LoadedInvocation({inv,api}:{inv:Invocation;api:ApiFn}) {
@@ -1425,4 +1430,214 @@ function RuntimePreparation({fn,api,onChanged}:{fn:FunctionRow;api:ApiFn;onChang
  useEffect(()=>{if(state?.state!=="preparing")return;const timer=setInterval(()=>onChanged(),2000);return()=>clearInterval(timer);},[state?.state,onChanged]);
  const prepare=async(warm:boolean)=>{setBusy(true);setError("");try{await api("POST",`/functions/${fn.id}/prepare`,undefined,{warm:String(warm)});await onChanged();}catch(e){setError((e as Error).message);}finally{setBusy(false);}};
  return <section className="border border-border rounded-lg p-3 text-sm" aria-label="Runtime preparation"><div className="flex flex-wrap items-center gap-3"><strong>Runtime: {state?.state || "preparing"}</strong><span className="text-text-muted">{state?.warm_workers ?? 0} warm workers</span><button disabled={busy||fn.status!=="active"} className="text-accent" onClick={()=>prepare(false)}>Prepare artifacts</button><button disabled={busy||fn.status!=="active"} className="text-accent" onClick={()=>prepare(true)}>Prepare and start worker</button></div><p className="text-xs text-text-muted mt-2">Preparation does not invoke the handler. Dependency scripts and module initialization may run when building or starting workers.</p>{(state?.state==="ready"||state?.state==="prepared")&&<p className="text-xs mt-2">Build {state.build_ms} ms · worker start {state.worker_start_ms} ms · {state.boot_validated?"Boot validated":"Artifacts prepared; worker not validated"}</p>}{(error||state?.error)&&<p role="alert" className="text-red mt-2">{error||state?.error}</p>}</section>;
+}
+
+interface CallResources {
+  invocation_id: number;
+  parent_invocation_id?: number;
+  function_id: number;
+  function_name: string;
+  class: string;
+  state: string;
+  worker_allowance_mb: number;
+  worker_memory_start_bytes: number | null;
+  worker_memory_current_bytes: number | null;
+  worker_memory_sampled_peak_bytes: number | null;
+  memory_source: string;
+  error_code?: string;
+  capacity_wait_ms: number;
+  downstream_buffer_reserved_bytes?: number;
+  downstream_buffer_peak_reserved_bytes?: number;
+  downstream_calls: { id: number; target: string; state: string; duration_ms: number; error_code?: string }[];
+}
+
+const memoryText = (bytes: number | null | undefined) =>
+  bytes == null ? "Unavailable" : `${(bytes / 1048576).toFixed(1)} MiB`;
+
+function CallMemory({ resources: r }: { resources?: CallResources }) {
+  if (!r) return <p className="text-xs text-text-muted">Memory measurements unavailable for this historical invocation.</p>;
+  return (
+    <section className="p-3 border border-border rounded text-xs" aria-label="Call resource usage">
+      <strong>Worker memory during this call</strong>
+      <div className="flex gap-4 flex-wrap mt-2">
+        <span>Allowance {r.worker_allowance_mb} MiB</span>
+        <span>Start {memoryText(r.worker_memory_start_bytes)}</span>
+        <span>Sampled peak {memoryText(r.worker_memory_sampled_peak_bytes)}</span>
+        <span>Latest {memoryText(r.worker_memory_current_bytes)}</span>
+      </div>
+      <p className="mt-2 text-text-muted">Includes the runtime and retained allocations. This is sampled worker usage, not memory allocated exclusively by this call. Source: {r.memory_source}.</p>
+      <p className="mt-2">Capacity wait {r.capacity_wait_ms} ms · {r.class}
+        {r.parent_invocation_id ? ` · Parent #${r.parent_invocation_id}` : ""}
+        {r.error_code ? ` · ${r.error_code}` : ""}
+      </p>
+      {r.downstream_buffer_peak_reserved_bytes != null && <p>
+        Downstream buffer reservation: {memoryText(r.downstream_buffer_reserved_bytes)} current · {memoryText(r.downstream_buffer_peak_reserved_bytes)} peak
+      </p>}
+      {r.downstream_calls?.map((d, i) => (
+        <div key={i} className="mt-1">{d.target} · {d.state} · {d.duration_ms} ms {d.error_code}</div>
+      ))}
+    </section>
+  );
+}
+
+const capacityLabels: Record<string, string> = {
+  interactive_reserved_queue: "Protected interactive queue slots",
+  nested_reserved_queue: "Reserved child queue slots",
+  app_timeout_ms: "Default app call timeout (ms)",
+  integration_timeout_ms: "Default integration timeout (ms)",
+  total_memory_mb: "Total worker memory (MiB)",
+  max_workers: "Maximum workers",
+  max_worker_memory_mb: "Maximum allowance per worker (MiB)",
+  interactive_reserved_memory_mb: "Protected interactive memory (MiB)",
+  interactive_reserved_workers: "Protected interactive workers",
+  nested_reserved_memory_mb: "Reserved child memory (MiB)",
+  nested_reserved_workers: "Reserved child workers",
+  max_downstream_calls: "Maximum downstream calls",
+  interactive_reserved_downstream: "Protected interactive downstream slots",
+  nested_reserved_downstream: "Reserved child downstream slots",
+  max_queue: "Global waiting queue",
+  max_queue_per_function: "Waiting queue per function",
+  max_prepared_idle_workers: "Background preparation warm workers",
+  host_headroom_mb: "Host headroom (MiB)",
+  max_nested_depth: "Maximum nested call depth",
+};
+
+interface CapacitySnapshot {
+  settings: Record<string, number>;
+  effective_host_memory_mb: number;
+  validation_warning?: string;
+  protocol_reserved_bytes: number;
+  global: {
+    reserved_memory_mb: number;
+    live_workers: number;
+    starting_workers: number;
+    actual_worker_memory_bytes: number;
+    measured_workers: number;
+    queue_depth: number;
+    reserved_by_class: Record<string, { reserved_memory_mb: number; workers_including_starting: number }>;
+    rejections: Record<string, number>;
+  };
+  queue_depth: number;
+  functions: {
+    function_id: number;
+    function_name: string;
+    active_workers: number;
+    idle_workers: number;
+    queued_calls: number;
+    reserved_memory_mb: number;
+    actual_memory_bytes: number | null;
+    measured_workers: number;
+    workers: number;
+  }[];
+  calls: CallResources[];
+}
+
+function CapacityView({ api }: { api: ApiFn }) {
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<CapacitySnapshot | null>(null);
+  const [settings, setSettings] = useState<Record<string, number> | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(async () => {
+    try {
+      setData(await api<CapacitySnapshot>("GET", "/capacity"));
+      setError("");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }, [api]);
+  useEffect(() => {
+    if (!open) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await refresh();
+      if (active) timer = setTimeout(poll, 2000);
+    };
+    void poll();
+    return () => { active = false; clearTimeout(timer); };
+  }, [open, refresh]);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api("PUT", "/capacity/settings", settings);
+      setSettings(null);
+      await refresh();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <details className="m-4 p-3 border border-border rounded-lg text-sm" open={open} onToggle={e => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer font-medium">Capacity and memory usage</summary>
+      {error && <p role="alert" className="text-red mt-2">{error}</p>}
+      {data && <div className="mt-3 space-y-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="border border-border rounded p-2">
+            <div className="text-xs text-text-muted">Reserved worker memory</div>
+            <strong>{data.global.reserved_memory_mb} / {data.settings.total_memory_mb} MiB</strong>
+          </div>
+          <div className="border border-border rounded p-2">
+            <div className="text-xs text-text-muted">Actual measured worker memory</div>
+            <strong>{memoryText(data.global.measured_workers ? data.global.actual_worker_memory_bytes : null)}</strong>
+            <div className="text-xs text-text-muted">{data.global.measured_workers} / {data.global.live_workers} workers measured</div>
+          </div>
+          <div className="border border-border rounded p-2">
+            <div className="text-xs text-text-muted">Workers and waiting calls</div>
+            <strong>{data.global.live_workers} live · {data.global.starting_workers} starting</strong>
+            <div className="text-xs text-text-muted">{data.queue_depth} queued in this project · {data.global.queue_depth} across installation</div>
+          </div>
+        </div>
+        <p className="text-xs text-text-muted">
+          Host/container limit: {data.effective_host_memory_mb ? `${data.effective_host_memory_mb} MiB` : "Unavailable"} · Downstream buffer reservations: {memoryText(data.protocol_reserved_bytes)}
+        </p>
+        {data.validation_warning && <p className="text-red">{data.validation_warning}</p>}
+        <div className="flex flex-wrap gap-3 text-xs">
+          {Object.entries(data.global.reserved_by_class || {}).map(([name, c]) => (
+            <span key={name}>{name}: {c.reserved_memory_mb} MiB · {c.workers_including_starting} workers</span>
+          ))}
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-text-muted"><tr>
+              <th className="p-2">Function</th><th className="p-2">Active / idle</th><th className="p-2">Queued</th><th className="p-2">Reserved</th><th className="p-2">Actual measured</th>
+            </tr></thead>
+            <tbody>{[...(data.functions || [])].sort((a, b) => b.reserved_memory_mb - a.reserved_memory_mb).map(g => (
+              <tr key={g.function_id} className="border-t border-border">
+                <td className="p-2">{g.function_name}</td>
+                <td className="p-2">{g.active_workers} / {g.idle_workers}</td>
+                <td className="p-2">{g.queued_calls}</td>
+                <td className="p-2">{g.reserved_memory_mb} MiB</td>
+                <td className="p-2">{memoryText(g.actual_memory_bytes)} <span className="text-text-muted">({g.measured_workers}/{g.workers})</span></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </div>
+        <div className="text-xs">{Object.entries(data.global.rejections || {}).map(([reason, count]) => (
+          <span key={reason} className="mr-4">{reason}: {count}</span>
+        ))}</div>
+        {data.calls?.map(c => (
+          <details key={c.invocation_id}>
+            <summary className="cursor-pointer">#{c.invocation_id} {c.function_name} · {c.state} · {c.class}</summary>
+            <CallMemory resources={c} />
+          </details>
+        ))}
+        <button className="text-accent" onClick={() => setSettings({ ...data.settings })}>Edit capacity settings</button>
+        {settings && <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          {Object.entries(settings).map(([key, value]) => (
+            <label key={key} className="text-xs">{capacityLabels[key] || key}
+              <input type="number" min={0} value={value} className={inputCls} onChange={e => setSettings({ ...settings, [key]: Number(e.target.value) })} />
+            </label>
+          ))}
+          <div className="flex items-center gap-3">
+            <button className="bg-accent text-white rounded px-3 py-1.5 disabled:opacity-50" disabled={busy} onClick={save}>Save validated settings</button>
+            <button className="text-text-muted" onClick={() => setSettings(null)}>Cancel</button>
+          </div>
+        </div>}
+        <p className="text-xs text-text-muted">API: GET /capacity and GET /invocations/:id. Calls include resource measurements and downstream timings.</p>
+      </div>}
+    </details>
+  );
 }

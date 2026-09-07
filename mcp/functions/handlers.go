@@ -513,6 +513,13 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 			stream.finish("error", err.Error())
 			return
 		}
+		var capacity *ResourceError
+		if errors.As(err, &capacity) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(503)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "error_code": capacity.Code, "details": capacity, "invocation_id": stream.invocationID})
+			return
+		}
 		if errors.Is(err, errFunctionBusy) {
 			httpErr(w, http.StatusServiceUnavailable, err.Error())
 			return
@@ -534,7 +541,8 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 			"status":        res.Status,
 			"exit_code":     res.ExitCode,
 			"invocation_id": res.InvocationID,
-			"stderr":        res.Stderr,
+			"resources":     res.Resources, "error_code": res.ErrorCode,
+			"stderr": res.Stderr,
 		})
 		return
 	}
@@ -554,6 +562,13 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 	if err != nil {
 		if stream.started {
 			stream.finish("error", err.Error())
+			return
+		}
+		var capacity *ResourceError
+		if errors.As(err, &capacity) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(503)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": err.Error(), "error_code": capacity.Code, "details": capacity, "invocation_id": stream.invocationID})
 			return
 		}
 		if errors.Is(err, errFunctionBusy) {
@@ -580,6 +595,7 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 			"status":        res.Status,
 			"exit_code":     res.ExitCode,
 			"invocation_id": res.InvocationID,
+			"error_code":    res.ErrorCode,
 			"stderr":        res.Stderr,
 		})
 		return
@@ -1065,9 +1081,10 @@ func (a *App) toolInvokeContext(parent context.Context, ctx *sdk.AppCtx, args ma
 	}
 	out := map[string]any{
 		"invocation_id": res.InvocationID,
-		"status":        res.Status,
-		"duration_ms":   res.DurationMS,
-		"build_ms":      res.BuildMS, "queue_ms": res.QueueMS, "cold_start_ms": res.ColdStartMS, "execution_ms": res.ExecutionMS,
+		"resources":     res.Resources, "error_code": res.ErrorCode,
+		"status":      res.Status,
+		"duration_ms": res.DurationMS,
+		"build_ms":    res.BuildMS, "queue_ms": res.QueueMS, "cold_start_ms": res.ColdStartMS, "execution_ms": res.ExecutionMS,
 		"exit_code": res.ExitCode,
 		"response":  res.Response,
 	}
@@ -1149,6 +1166,10 @@ func buildAndCreateFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid 
 		RepoPath:    strArg(args, "repo_path"),
 		TimeoutMS:   intArg(args, "timeout_ms", defaultTimeout),
 		MaxMemoryMB: intArg(args, "max_memory_mb", defaultMemoryMB),
+	}
+	if raw, ok := args["limits"]; ok {
+		b, _ := json.Marshal(raw)
+		_ = json.Unmarshal(b, &fn.Limits)
 	}
 	if rid := int64Arg(args, "repo_id"); rid != 0 {
 		fn.RepoID = &rid

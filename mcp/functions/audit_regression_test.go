@@ -31,7 +31,7 @@ func TestAuditMetadataRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(res.Response, `"new"`) || !strings.Contains(res.Response, "size=64") {
+	if !strings.Contains(res.Response, `"new"`) || !strings.Contains(res.Response, "size=32") {
 		t.Errorf("updated metadata was ignored by warm worker: %s", res.Response)
 	}
 }

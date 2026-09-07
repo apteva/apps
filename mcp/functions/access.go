@@ -55,6 +55,22 @@ func checkFunctionAccessInPool(p *pool, ctx *sdk.AppCtx, id int64, msg wireRespo
 }
 
 func validateFunctionArgs(args map[string]any, create bool) error {
+	if raw, ok := args["limits"]; ok {
+		var policy RuntimePolicy
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		d := json.NewDecoder(strings.NewReader(string(b)))
+		d.DisallowUnknownFields()
+		if err = d.Decode(&policy); err != nil {
+			return err
+		}
+		if err = policy.validate(); err != nil {
+			return err
+		}
+	}
+
 	for _, key := range []string{"source", "package_json", "source_kind", "runtime", "repo_path", "status", "name"} {
 		if value, ok := args[key]; ok {
 			str, valid := value.(string)
@@ -90,8 +106,8 @@ func validateFunctionArgs(args map[string]any, create bool) error {
 			if key == "timeout_ms" && n > maxTimeoutMS {
 				return errors.New("timeout_ms exceeds 300000")
 			}
-			if key == "max_memory_mb" && (n < 16 || n > maxMemoryMB) {
-				return errors.New("max_memory_mb must be between 16 and 1024")
+			if key == "max_memory_mb" && (n < 16 || n > int64(effectiveMaxMemoryMB())) {
+				return fmt.Errorf("max_memory_mb must be between 16 and %d", effectiveMaxMemoryMB())
 			}
 		}
 	}

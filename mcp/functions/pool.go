@@ -36,6 +36,15 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	protocolClasses   map[string]int64
+	queueClasses      map[string]int
+	capacity          CapacitySettings
+	capacityWarning   string
+	classReservations map[string][2]int
+	downstreamClasses map[string]int
+	liveCalls         map[int64]*callTrace
+	rejections        map[string]int64
+
 	initialPreparationScan                                   chan struct{}
 	artifactBuilds                                           atomic.Uint64
 	prepareMu                                                sync.Mutex
@@ -78,7 +87,8 @@ func configHash(fn *Function) string {
 		Env    map[string]string
 		Memory int
 		Access *FunctionAccess
-	}{fn.Env, fn.MaxMemoryMB, fn.Access})
+		Limits RuntimePolicy
+	}{fn.Env, fn.MaxMemoryMB, fn.Access, fn.Limits})
 	return hashSource(b)
 }
 func newPool(ctx *sdk.AppCtx) (*pool, error) {
@@ -95,7 +105,7 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		return nil, err
 	}
 	life, cancel := context.WithCancel(context.Background())
-	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)), globalQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000)), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
+	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
 	_, err = ctx.AppDB().ExecContext(ctx.StartupContext(), `UPDATE function_versions SET build_status='failed',build_log='Build interrupted by restart' WHERE build_status IN ('pending','building')`)
 	if err != nil {
 		cancel()
@@ -112,6 +122,10 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		removeTree(stage)
 		return nil, err
 	}
+	if err := p.initCapacity(); err != nil {
+		cancel()
+		return nil, err
+	}
 	p.startPreparation()
 	go p.reapLoop()
 	return p, nil
@@ -124,7 +138,7 @@ func (p *pool) poolFor(id int64) *fnPool {
 func (p *pool) poolForLocked(id int64) *fnPool {
 	fp := p.byFn[id]
 	if fp == nil {
-		fp = &fnPool{sem: make(chan struct{}, workersPerFunction), idle: make(chan *worker, workersPerFunction), queue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000))}
+		fp = &fnPool{sem: make(chan struct{}, 1024), idle: make(chan *worker, 1024), queue: make(chan struct{}, 10000)}
 		p.byFn[id] = fp
 	}
 	return fp
@@ -141,6 +155,8 @@ func (p *pool) discard(w *worker) {
 	if exists {
 		delete(p.all, w)
 		p.liveMB -= w.memoryMB
+		u := p.classReservations[w.capacityClass]
+		p.classReservations[w.capacityClass] = [2]int{u[0] - w.memoryMB, u[1] - 1}
 	}
 	p.mu.Unlock()
 	w.shutdown()
@@ -170,74 +186,45 @@ func (p *pool) evictIdle() bool {
 }
 func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, spec runtimeSpec, dir string) (*worker, error) {
 	memory := clampInt(fn.MaxMemoryMB, defaultMemoryMB, 16, maxMemoryMB)
-	for {
-		p.mu.Lock()
-		closed := p.closed || p.deleted[fn.InstanceKey]
-		p.mu.Unlock()
-		if closed {
-			return nil, errors.New("worker pool closed")
-		}
-		select {
-		case p.globalSem <- struct{}{}:
-			p.mu.Lock()
-			fits := p.liveMB+memory <= envInt("APTEVA_FUNCTIONS_TOTAL_MEMORY_MB", 4096, 16, 1048576)
-			if fits {
-				p.liveMB += memory
-			}
-			p.mu.Unlock()
-			if !fits {
-				<-p.globalSem
-				if p.evictIdle() {
-					continue
-				}
-				return nil, errFunctionBusy
-			}
-			w, err := startWorkerContext(parent, spec, dir, fn, v.ID)
-			if err != nil {
-				p.mu.Lock()
-				p.liveMB -= memory
-				p.mu.Unlock()
-				<-p.globalSem
-				p.signal()
-				return nil, err
-			}
-			w.owner = p
-			w.memoryMB = memory
-			w.signature = configHash(fn)
-			w.identity = fn.InstanceKey
-			p.mu.Lock()
-			fp := p.poolForLocked(fn.ID)
-			p.all[w] = fp
-			closed = p.closed || fp.closed || p.deleted[fn.InstanceKey]
-			p.mu.Unlock()
-			if closed {
-				p.discard(w)
-				return nil, errors.New("function deleted or pool closed")
-			}
-			return w, nil
-		default:
-		}
-		if p.evictIdle() {
-			continue
-		}
-		select {
-		case <-parent.Done():
-			return nil, parent.Err()
-		case <-p.stop:
-			return nil, errors.New("worker pool closed")
-		case <-p.wake:
-		}
+	class, err := p.reserveWorker(parent, fn)
+	if err != nil {
+		return nil, err
 	}
+	w, err := startWorkerContext(parent, spec, dir, fn, v.ID)
+	if err != nil {
+		p.releaseReservation(class, memory)
+		return nil, err
+	}
+	w.owner = p
+	w.memoryMB = memory
+	w.signature = configHash(fn)
+	w.identity = fn.InstanceKey
+	w.capacityClass = class
+	w.projectID = fn.ProjectID
+	w.capacityState.Store("starting")
+	p.mu.Lock()
+	fp := p.poolForLocked(fn.ID)
+	p.all[w] = fp
+	closed := p.closed || fp.closed || p.deleted[fn.InstanceKey]
+	p.mu.Unlock()
+	if closed {
+		p.discard(w)
+		return nil, errors.New("function deleted or pool closed")
+	}
+	return w, nil
 }
+
 func (p *pool) put(fn *Function, fp *fnPool, w *worker) {
 	p.mu.Lock()
-	keep := !p.closed && !fp.closed && fp.identity == fn.InstanceKey && fp.signature == w.signature
+	keep := (policy(fn).MaxIdle == nil || len(fp.idle) < *policy(fn).MaxIdle) && !p.closed && !fp.closed && fp.identity == fn.InstanceKey && fp.signature == w.signature
 	if current := p.cachedFunction(fn.ProjectID, fn.ID, ""); current != nil {
 		keep = keep && current.ActiveVersionID != nil && *current.ActiveVersionID == w.versionID && current.Status == "active"
 	}
 	if keep {
 		select {
 		case fp.idle <- w:
+			w.capacityState.Store("idle")
+			w.invocationID.Store(0)
 		default:
 			keep = false
 		}
@@ -251,27 +238,14 @@ func (p *pool) put(fn *Function, fp *fnPool, w *worker) {
 func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *FunctionVersion, spec runtimeSpec, dir string, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
 	t := timingsFrom(parent)
 	queueStart := time.Now()
+	parent = context.WithValue(parent, queueDeadlineKey{}, queueStart.Add(time.Duration(policy(fn).QueueMS)*time.Millisecond))
 	fp := p.poolFor(fn.ID)
-	select {
-	case p.globalQueue <- struct{}{}:
-		defer func() { <-p.globalQueue }()
-	default:
-		return nil, errFunctionBusy
+	releaseAdmission, releaseQueue, err := p.admitInvocation(parent, fn, fp)
+	if err != nil {
+		return nil, err
 	}
-	select {
-	case fp.queue <- struct{}{}:
-		defer func() { <-fp.queue }()
-	default:
-		return nil, errFunctionBusy
-	}
-	select {
-	case fp.sem <- struct{}{}:
-		defer func() { <-fp.sem }()
-	case <-parent.Done():
-		return nil, parent.Err()
-	case <-p.stop:
-		return nil, errors.New("worker pool closed")
-	}
+	defer releaseAdmission()
+
 	p.mu.Lock()
 	if fp.identity == "" {
 		fp.identity = fn.InstanceKey
@@ -287,7 +261,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	for w == nil {
 		select {
 		case candidate := <-fp.idle:
-			if candidate.alive() && !candidate.stale(v.ID) && candidate.signature == configHash(fn) {
+			if candidate.alive() && !candidate.stale(v.ID) && candidate.signature == configHash(fn) && p.reclassify(candidate, requestClass(parent, fn)) {
 				w = candidate
 			} else {
 				p.discard(candidate)
@@ -306,9 +280,44 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 			return nil, fmt.Errorf("cold start: %w", err)
 		}
 	}
+	releaseQueue()
+	w.capacityState.Store("running")
+	trace := traceFrom(parent)
+	if trace != nil {
+		trace.state("running")
+		w.invocationID.Store(trace.InvocationID)
+		trace.sample(w)
+	}
+	sampleDone := make(chan struct{})
+	sampleStopped := make(chan struct{})
+	go func() {
+		defer close(sampleStopped)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-sampleDone:
+				return
+			case <-ticker.C:
+				trace.sample(w)
+			}
+		}
+	}()
 	executionStart := time.Now()
 	res, err := w.call(ctx, parent, event, timeout, stream)
 	t.execution = time.Since(executionStart)
+	close(sampleDone)
+	<-sampleStopped
+	trace.sample(w)
+	_, _, oom := workerMemory(w)
+	if oom > 0 || w.oomKills.Load() > 0 {
+		if res == nil {
+			res = &invokeResult{Status: "error", ExitCode: -1}
+		}
+		res.ErrorCode = "worker_oom"
+		res.Error = "Worker exceeded its cgroup memory limit"
+	}
+
 	if err == nil && w.alive() {
 		p.put(fn, fp, w)
 		p.markBootValidated(fn, t.cold)
@@ -502,7 +511,7 @@ func (p *pool) reapIdle() {
 		for i := 0; i < n; i++ {
 			select {
 			case w := <-fp.idle:
-				if !w.alive() || time.Since(w.idleSince()) > idleWorkerTTL {
+				if !w.alive() || time.Since(w.idleSince()) > p.workerIdleTTL(w) {
 					victims = append(victims, w)
 				} else {
 					fp.idle <- w
@@ -573,4 +582,11 @@ func (p *pool) leaseVersion(dir string) (func(), error) {
 		}
 		p.mu.Unlock()
 	}, nil
+}
+
+func (p *pool) workerIdleTTL(w *worker) time.Duration {
+	if fn := p.cachedFunction(w.projectID, w.fnID, ""); fn != nil {
+		return time.Duration(policy(fn).IdleMS) * time.Millisecond
+	}
+	return idleWorkerTTL
 }

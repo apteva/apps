@@ -6,6 +6,10 @@ processes**: the runtime boots once, loads your handler, and then
 serves invocations over a socketpair — no per-request process spawn,
 cold starts only when no suitable worker is available.
 
+## Pending capacity and deadline changes
+
+See [Capacity and memory API](CAPACITY_API.md) for per-call measurements, live function usage, configurable admission limits and integration deadlines. These changes are not yet released.
+
 ## Runtime preparation in 1.9.0
 
 Active functions are prepared automatically after startup and checked again every 30 seconds. A bounded pool (two preparation workers by default) validates the current runtime artifact, rebuilds missing or incompatible artifacts from the immutable source snapshot, and boots a worker without invoking the business handler. Explicit priority functions run first, followed by public Function URLs and other active functions. One failed function does not prevent the app's management API from starting.

@@ -39,6 +39,12 @@ const maxFrame = 8 << 20 // 8 MiB; larger objects must use storage references.
 // at a time — the pool provides concurrency by running several
 // workers per function.
 type worker struct {
+	oomKills      atomic.Int64
+	projectID     string
+	capacityClass string
+	capacityState atomic.Value
+	invocationID  atomic.Int64
+
 	owner               *pool
 	identity, signature string
 	memoryMB            int
@@ -98,11 +104,12 @@ type wireResponse struct {
 
 // callResult answers a worker's cross-app call request.
 type callResult struct {
-	Type   string          `json:"type"` // always "call_result"
-	CallID int64           `json:"callId"`
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Error  string          `json:"error,omitempty"`
+	ErrorCode string          `json:"error_code,omitempty"`
+	Type      string          `json:"type"` // always "call_result"
+	CallID    int64           `json:"callId"`
+	OK        bool            `json:"ok"`
+	Result    json.RawMessage `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
 }
 
 // startWorker spawns a runtime process for fn against version
@@ -216,6 +223,8 @@ func startWorkerContext(parent context.Context, spec runtimeSpec, buildDir strin
 // over the same socket. A read timeout leaves the worker in an
 // unknown state — call kills it, and the pool discards it.
 func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeout time.Duration, stream invocationStream) (*invokeResult, error) {
+	parent, cancelCalls := context.WithCancel(parent)
+	defer cancelCalls()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.dead {
@@ -248,6 +257,19 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 	var callWG sync.WaitGroup
+	defer func() {
+		stopCancel()
+		cancelCalls()
+		done := make(chan struct{})
+		go func() { callWG.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(100 * time.Millisecond):
+			// A legacy client can ignore cancellation. Never reuse a worker
+			// while that call could still write an old response frame.
+			w.killLocked()
+		}
+	}()
 	callSlots := make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_CALLS", 16, 1, 256))
 	streamed := false
 	streamPreview := newCapBuffer(stdoutCap)
@@ -420,37 +442,54 @@ func (w *worker) writeFrame(payload []byte) error {
 func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadline time.Time, msg wireResponse) {
 	p := w.owner
 	ans := callResult{Type: "call_result", CallID: msg.CallID}
+	trace := traceFrom(parent)
+	record := -1
 	if err := checkFunctionAccessInPool(p, ctx, w.fnID, msg); err != nil {
 		ans.Error = err.Error()
 	} else {
-		select {
-		case p.downstream <- struct{}{}:
-			// Custom SDK clients without a context method are isolated and retain their
-			// global slot until they finish. The production adapter cancels HTTP I/O.
-			if err := waitProtocol(parent, maxFrame); err != nil {
-				<-p.downstream
-				ans.Error = err.Error()
-				break
-			}
-			answer := make(chan callResult, 1)
-			go func() {
-				defer func() { <-p.downstream; protocolBytes.Add(-maxFrame) }()
-				defer func() {
-					if r := recover(); r != nil {
-						answer <- callResult{Type: "call_result", CallID: msg.CallID, Error: fmt.Sprint("downstream panic: ", r)}
-					}
-				}()
-				answer <- dispatchPlatformFrame(parent, ctx, msg)
-			}()
-			select {
-			case ans = <-answer:
-			case <-parent.Done():
-				ans.Error = "invocation canceled"
-			}
-		case <-parent.Done():
-			ans.Error = "invocation canceled"
+		callCtx, cancel := downstreamContext(parent, ctx, w.fnID, msg)
+		defer cancel()
+		record = trace.beginDownstream(msg, callCtx)
+		class := "interactive"
+		if t := traceFrom(parent); t != nil {
+			class = t.Class
 		}
+		release, err := p.acquireDownstream(callCtx, class)
+		if err != nil {
+			ans.Error = err.Error()
+			ans.ErrorCode = classifyDownstreamError(parent, callCtx, err, msg.Type)
+		} else {
+			defer release()
+			releaseProtocol, err := p.acquireProtocol(callCtx, class, maxFrame)
+			if err != nil {
+				ans.Error = err.Error()
+				ans.ErrorCode = classifyDownstreamError(parent, callCtx, err, msg.Type)
+			} else {
+				defer releaseProtocol()
+				trace.protocolReservation(maxFrame)
+				defer trace.protocolReservation(-maxFrame)
+				w.capacityState.Store("waiting_downstream")
+				ans = dispatchPlatformFrame(callCtx, ctx, msg)
+				if callCtx.Err() != nil {
+					ans.ErrorCode = classifyDownstreamError(parent, callCtx, callCtx.Err(), msg.Type)
+					ans.Error = "[" + ans.ErrorCode + "] downstream deadline or cancellation"
+				}
+				if ans.Error != "" && ans.ErrorCode == "" {
+					ans.ErrorCode = classifyDownstreamError(parent, callCtx, errors.New(ans.Error), msg.Type)
+				}
+				w.capacityState.Store("running")
+			}
+		}
+
 	}
+	if ans.Error != "" {
+		ans.OK = false
+		if ans.ErrorCode == "" {
+			ans.ErrorCode = "downstream_error"
+		}
+		ans.Error = "[" + ans.ErrorCode + "] " + ans.Error
+	}
+	trace.endDownstream(record, ans)
 	ansBytes, err := json.Marshal(ans)
 	if err != nil {
 		return
@@ -704,6 +743,8 @@ func (w *worker) killLocked() {
 	if w.dead {
 		return
 	}
+	_, _, oom := workerMemory(w)
+	w.oomKills.Store(oom)
 	w.dead = true
 	w.abort()
 	_ = killGroup(w.cmd)
@@ -816,13 +857,28 @@ func workerEnv(fn *Function, entryPath, tempDir string) []string {
 		"TEMP="+tempDir,
 		"XDG_CACHE_HOME="+tempDir,
 		fmt.Sprintf("GOMEMLIMIT=%dMiB", memoryMB),
-		fmt.Sprintf("NODE_OPTIONS=--max-old-space-size=%d", memoryMB),
+		fmt.Sprintf("NODE_OPTIONS=--max-old-space-size=%d", nodeOldSpaceMB(memoryMB)),
 		"APTEVA_FN_ENTRY="+entryPath,
 		"APTEVA_FUNCTION_NAME="+fn.Name,
 		"APTEVA_FUNCTION_ID="+fmt.Sprintf("%d", fn.ID),
 		"APTEVA_FUNCTION_RUNTIME="+fn.Runtime,
 	)
 	return out
+}
+
+// V8 old space is only part of a Node worker's RSS. Leave room for young
+// generation, ICU formatters, code, stacks and native buffers under the same
+// cgroup ceiling. This is a heap hint, not a native allocation guarantee.
+func nodeOldSpaceMB(memoryMB int) int {
+	reserve := memoryMB / 4
+	if reserve < 32 {
+		reserve = 32
+	}
+	heap := memoryMB - reserve
+	if heap < 8 {
+		heap = 8
+	}
+	return heap
 }
 
 func safeFunctionEnvKey(key string) bool {
