@@ -149,14 +149,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Reply from the originating conversation thread to that exact conversation. Main routes " +
 				"requested outcomes back to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
-				"acknowledgement, progress, or final.",
+				"acknowledgement, progress, or final. Exception: main may acknowledge its own resolved approval " +
+				"with phase=acknowledgement and approval_message_id from approval.result.",
 			InputSchema: schemaObject(map[string]any{
-				"conversation_id": map[string]any{"type": "string"},
-				"text":            map[string]any{"type": "string"},
-				"idempotency_key": map[string]any{"type": "string"},
-				"phase":           map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}},
-				"components":      map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
-				"attachments":     map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"conversation_id":     map[string]any{"type": "string"},
+				"text":                map[string]any{"type": "string"},
+				"idempotency_key":     map[string]any{"type": "string"},
+				"phase":               map[string]any{"type": "string", "enum": []string{"acknowledgement", "progress", "final"}},
+				"approval_message_id": map[string]any{"type": "integer", "minimum": 1, "description": "Resolved approval being acknowledged by its originating main thread."},
+				"components":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"attachments":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			}, []string{"conversation_id"}),
 			HandlerCtx: a.toolSend,
 		},
@@ -384,12 +386,21 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	default:
 		return nil, fmt.Errorf("invalid phase %q", phase)
 	}
-	if from.ThreadID == "main" {
-		return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread, not the main thread")
-	}
 	conv, err := a.requireParticipant(from, conversationID)
 	if err != nil {
 		return nil, err
+	}
+	clientID := toolClientID(from, stringArg(args, "idempotency_key"))
+	if from.ThreadID == "main" {
+		approvalID := int64(intArg(args, "approval_message_id", 0))
+		approval, err := a.store.GetMessage(approvalID)
+		if phase != "acknowledgement" || err != nil || approval.ComponentKind != kindApproval ||
+			approval.ConversationID != conv.ID || approval.AgentID != from.AgentID || approval.ThreadID != "main" ||
+			(approval.ActionStatus == "" || approval.ActionStatus == "pending") {
+			return nil, errors.New("ordinary conversation replies belong to the mapped conversation thread; main may only acknowledge its own resolved approval with phase=acknowledgement and approval_message_id")
+		}
+		// An event retry or a second tool call must not duplicate the receipt.
+		clientID = fmt.Sprintf("approval:%d:acknowledgement", approvalID)
 	}
 	components, err := componentsArg(args, "components")
 	if err != nil {
@@ -405,7 +416,7 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	msg, inserted, err := a.appendAndDeliver(app, conv, &Message{
 		ConversationID: conv.ID, Role: "agent", Content: text,
 		AgentID: from.AgentID, ThreadID: from.ThreadID,
-		ClientID: toolClientID(from, stringArg(args, "idempotency_key")), Phase: phase,
+		ClientID: clientID, Phase: phase,
 		Components: components, Attachments: attachments,
 	})
 	if err != nil {

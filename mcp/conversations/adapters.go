@@ -112,6 +112,9 @@ func (*agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversation,
 		}
 		threadID = string(raw)
 	}
+	if conv != nil && threadID == "main" {
+		event.Message = fmt.Sprint(event.Message) + fmt.Sprintf("\nUse conversations_send with conversation_id=%s, phase=acknowledgement, approval_message_id=%d to acknowledge this decision from main. This exception only permits the receipt; ordinary replies remain in their conversation thread.", conv.ID, msg.ID)
+	}
 	client := app.AgentEventsAPI()
 	if client == nil {
 		return errors.New("platform does not support idempotent approval receipts")

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.21.1 — 2026-09-07
+
+- Allow main to acknowledge its own resolved approval with an explicit approval message ID; keep ordinary replies restricted to conversation threads.
+- Deliver precise receipt instructions with the approval verdict, including denials; deduplicate repeated acknowledgments.
+- Add regression coverage for pending decisions, wrong agents/conversations/threads and ordinary-reply restrictions.
+
 ## 0.21.0 — 2026-09-07
 
 - Ship the headless client, shared React UI and scoped styles with the app under `/ui/frontend.json`.

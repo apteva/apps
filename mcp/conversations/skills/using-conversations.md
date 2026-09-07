@@ -110,6 +110,12 @@ means do not do it — adjust or stop; never re-ask the same question
 hoping for a different answer. The operator's note on the verdict is
 them talking to you: honor it.
 
+Acknowledge the verdict in the originating conversation before continuing.
+When main requested the approval, use `conversations_send` with
+`phase=acknowledgement` and `approval_message_id` from the verdict event.
+This permits one receipt for main's own resolved approval, including a denial;
+it does not permit ordinary replies from main or imply the action succeeded.
+
 ## Public conversations
 
 A conversation marked audience "public" is a product's end user — a
