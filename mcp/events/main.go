@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: events
 display_name: Events
-version: 0.3.0-local.1
+version: 0.3.0
 description: Create shows, collect performer applications, curate lineups, issue simple tickets, and run check-in.
 author: Apteva
 icon: /ui/icon.svg
@@ -54,7 +54,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: events/v0.2.0
+    ref: events/v0.3.0
     entry: mcp/events
   port: 8080
   health_check: /health

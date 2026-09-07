@@ -85,9 +85,9 @@ DB_PATH=/tmp/events-preview.db APTEVA_APP_PORT=18197 \
   APTEVA_PROJECT_ID=preview ./events
 ```
 
-## Local artist workflow development
+## Version 0.3.0 — artist workflow APIs
 
-The `0.3.0-local.1` worktree adds migration `002_artist_workflow.sql` and a self-contained native binary with embedded UI/migrations. It is a local development build, not a published release. Existing source delivery references must be updated as part of a future release.
+Version 0.3.0 adds migration `002_artist_workflow.sql` and self-contained native binaries with embedded UI/migrations. Source delivery is pinned to `events/v0.3.0`; app-sdk is pinned to v0.76.0. These workflow APIs power custom owner websites such as On Tap Comedy.
 
 New HTTP operations (authenticated unless under `/public/`):
 
@@ -102,4 +102,21 @@ New HTTP operations (authenticated unless under `/public/`):
 
 Applications use transactional per-event contact identity deduplication and receive a generic acknowledgement. Performer capacity limits the lineup, not application intake. Applications may stay open for waitlist consideration. Scheduling checks capacity, event ownership, duplicate slots and overlap in the same transaction as insertion and acceptance. Changing a decision away from accepted cancels that artist's active slots. Slugs are permanent after creation.
 
-The local photo store is private SQLite storage (2 MB maximum per image); production Storage-backed photo delivery and platform-user website authentication remain rollout work. The branded owner website uses these Events HTTP routes rather than a second event database.
+Photos use private, persistent SQLite storage (2 MB maximum per image); include the Events database in backups. Photo delivery still checks consent, acceptance, active scheduling and lineup publication. External Storage integration and website authentication are separate concerns; the On Tap website uses Auth for owner access and these Events routes for event data.
+
+
+### Atomic editing and schedule changes
+
+`POST /shows` and `PATCH /shows/{id}` accept the normal event fields plus an optional `settings` object. Event details and settings commit together; failed validation leaves the existing event, settings and lineup unchanged and never creates a partial draft. `PATCH /shows/{id}/settings` remains supported.
+
+Changing a show's start moves all scheduled, timed artist slots by the same UTC duration, preserving their offsets and lengths. Completed/cancelled slots stay unchanged. Shortening an event cannot leave slots outside its bounds, and a dated lineup prevents clearing the event date. Existing application deadlines remain explicit dates and must be adjusted when needed. Performer capacity cannot be lowered below the scheduled lineup count.
+
+### Upgrade from 0.2.0
+
+Back up the Events database before upgrading. Migration 002 is additive: it creates event-settings, application-identity and photo tables, plus an index. Existing events, venues, applications, slots, tickets and orders remain in place. Existing records do **not** receive retroactive contact-identity deduplication entries; historical duplicates require review rather than automatic merging.
+
+Artist applications default to **closed** and public lineups default to **private**, including for existing events until their settings are saved explicitly. Set `applications_open: true` to accept performers, and `lineup_published: true` when the owner is ready to show the lineup. The generic dashboard retains its existing event/ticket tools; the new settings, private-photo and lineup-publication controls are provided by these HTTP APIs for owner frontends. This release does not install or deploy an owner website.
+
+Slugs are immutable after creation. Existing integrations that rename slugs must create a new event or duplicate it. Public `/apply` now accepts a name plus at least one of email, phone or Instagram; an event can additionally require email. Public responses omit private contact details and review notes. Meetup/Eventbrite syncing, paid checkout processing and email sending remain outside this release.
+
+The Events CI workflow runs the race suite, builds standalone Linux and Darwin binaries, and rehearses migration from a real v0.2.0 database using `scripts/check-upgrade.py`. The migration check starts the new binary from an empty working directory to verify embedded assets.

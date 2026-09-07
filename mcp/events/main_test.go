@@ -342,7 +342,7 @@ func TestManifestPublicRouteAndVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, m := range []sdk.Manifest{*manifest, (&App{}).Manifest()} {
-		if m.Version != "0.3.0-local.1" {
+		if m.Version != "0.3.0" {
 			t.Fatalf("version mismatch: %s", m.Version)
 		}
 		public := false

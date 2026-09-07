@@ -1,0 +1,37 @@
+name: Events checks
+on:
+  push:
+    branches: [main]
+    tags: ['events/v*']
+    paths: ['mcp/events/**', '.github/workflows/events.yml']
+  pull_request:
+    paths: ['mcp/events/**', '.github/workflows/events.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: 'off'
+    defaults:
+      run:
+        working-directory: mcp/events
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/events/go.mod
+          cache-dependency-path: mcp/events/go.sum
+      - run: go test -race ./...
+      - name: Build standalone binaries
+        run: |
+          go build -o /tmp/events-new .
+          GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/events-darwin-arm64 .
+      - name: Build prior release and rehearse migration
+        run: |
+          mkdir -p /tmp/events-prior
+          git -C ../.. archive events/v0.2.0 mcp/events | tar -x -C /tmp/events-prior
+          (cd /tmp/events-prior/mcp/events && go build -o /tmp/events-old .)
+          python3 scripts/check-upgrade.py --old-binary /tmp/events-old --new-binary /tmp/events-new --old-source /tmp/events-prior/mcp/events
