@@ -18,7 +18,7 @@ import (
 )
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		{Pattern: "/chats", Handler: a.handleChats},
 		{Pattern: "/participants", Handler: a.handleParticipants},
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
@@ -39,11 +39,20 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/telegram-invites", Handler: a.handleTelegramInvites},
 		{Pattern: "/telegram-webhook/", Handler: a.handleTelegramWebhook, NoAuth: true},
 	}
+	for i := range routes {
+		if !routes[i].NoAuth {
+			routes[i].Handler = a.delegatedHTTP(routes[i].Handler)
+		}
+	}
+	return routes
 }
 
 // requestUser resolves the delegated platform user, when present. The
 // platform proxy stamps subject headers; standalone runs may omit them.
 func requestUser(r *http.Request) int64 {
+	if p := delegatedFrom(r); p != nil {
+		return p.UserID
+	}
 	raw := r.Header.Get("X-User-ID")
 	if raw == "" {
 		raw = r.Header.Get("X-Apteva-User-ID")
@@ -64,7 +73,7 @@ func requestProject(r *http.Request) string {
 
 func requestIdentity(r *http.Request) (int64, string, error) {
 	userID, projectID := requestUser(r), requestProject(r)
-	if userID <= 0 {
+	if userID == 0 || (userID < 0 && delegatedFrom(r) == nil) {
 		return 0, "", fmt.Errorf("authenticated user required")
 	}
 	if projectID == "" {
@@ -128,7 +137,25 @@ func (a *App) authorizeConversation(r *http.Request, id string) (*Conversation, 
 	if !ok {
 		return nil, fmt.Errorf("conversation not found")
 	}
-	return a.store.getConversationAny(id)
+	conv, err := a.store.getConversationAny(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := delegatedConversationAllowed(r, conv); err != nil {
+		return nil, err
+	}
+	if p := delegatedFrom(r); p != nil {
+		ids, err := a.store.AgentParticipants(id)
+		if err != nil {
+			return nil, err
+		}
+		for _, agent := range ids {
+			if !p.Agents[agent] {
+				return nil, fmt.Errorf("conversation not found")
+			}
+		}
+	}
+	return conv, nil
 }
 
 func (a *App) authorizeMessage(r *http.Request, id int64) (*Message, *Conversation, error) {
@@ -199,7 +226,7 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "lead_agent_id only lists active conversations", http.StatusBadRequest)
 			return
 		}
-		page, err := a.store.ListConversationPage(projectID, userID, agentID, leadAgentID, archived, r.URL.Query().Get("query"), r.URL.Query().Get("cursor"), limit)
+		page, err := a.store.ListConversationPage(projectID, userID, agentID, leadAgentID, archived, r.URL.Query().Get("query"), r.URL.Query().Get("cursor"), limit, requestAllowedAgents(r)...)
 		conversations := page.Conversations
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -333,6 +360,23 @@ func (a *App) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "one or more agents are not available in this project", http.StatusNotFound)
 		return
 	}
+	if p := delegatedFrom(r); p != nil {
+		if body.Directive != "" || (body.Audience != "" && body.Audience != "public") {
+			http.Error(w, "application users cannot set operator audience or directives", 403)
+			return
+		}
+		for _, id := range agents {
+			if !p.Agents[id] {
+				http.Error(w, "agent not allowed", 403)
+				return
+			}
+		}
+		body.Audience = "public"
+		body.Directive = p.Directive
+		if body.ConversationKey != "" {
+			body.ConversationKey = fmt.Sprintf("visitor:%d:%s", p.UserID, body.ConversationKey)
+		}
+	}
 	audience := body.Audience
 	switch audience {
 	case "":
@@ -386,6 +430,10 @@ func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := a.authorizeConversation(r, id); err != nil {
 		http.Error(w, "conversation not found", http.StatusNotFound)
+		return
+	}
+	if delegatedFrom(r) != nil && body.Directive != nil {
+		http.Error(w, "application users cannot update directives", 403)
 		return
 	}
 	var conv *Conversation
@@ -528,6 +576,9 @@ func (a *App) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]agentInfo, 0, len(agents))
 	for _, agent := range agents {
+		if p := delegatedFrom(r); p != nil && !p.Agents[agent.ID] {
+			continue
+		}
 		out = append(out, agentInfo{ID: agent.ID, Name: agent.Name, Status: agent.Status,
 			Attached: agent.AttachedToCaller})
 	}
@@ -857,7 +908,8 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case f := <-frames:
-			allowed, err := a.store.UserCanAccessConversation(f.ConversationID, projectID, userID)
+			_, err := a.authorizeConversation(r, f.ConversationID)
+			allowed := err == nil
 			if err != nil || !allowed {
 				continue
 			}
@@ -872,7 +924,8 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			if !open {
 				return
 			}
-			allowed, err := a.store.UserCanAccessConversation(m.ConversationID, projectID, userID)
+			_, err := a.authorizeConversation(r, m.ConversationID)
+			allowed := err == nil
 			if err != nil || !allowed {
 				continue
 			}
@@ -902,7 +955,7 @@ func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if r.URL.Query().Get("page") == "1" {
-		page, err := a.store.InboxPage(projectID, userID, agentID, limit, r.URL.Query().Get("cursor"))
+		page, err := a.store.InboxPage(projectID, userID, agentID, limit, r.URL.Query().Get("cursor"), requestAllowedAgents(r)...)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
 			return
@@ -910,7 +963,7 @@ func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, page)
 		return
 	}
-	items, err := a.store.InboxForAgent(projectID, userID, agentID, limit)
+	items, err := a.store.InboxForAgent(projectID, userID, agentID, limit, requestAllowedAgents(r)...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1011,7 +1064,7 @@ func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, scopeErr.Error(), http.StatusBadRequest)
 		return
 	}
-	entries, err := a.store.UnreadSummaryForAgent(projectID, userID, agentID)
+	entries, err := a.store.UnreadSummaryForAgent(projectID, userID, agentID, requestAllowedAgents(r)...)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

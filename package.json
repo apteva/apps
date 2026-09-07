@@ -29,6 +29,9 @@
     "@playwright/test": "^1.63.0",
     "@types/bun": "^1.4.1",
     "@types/react-dom": "^19.2.7",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "@apteva/web-sdk": "0.6.0",
+    "@tailwindcss/cli": "^4.1.0",
+    "tailwindcss": "^4.1.0"
   }
 }

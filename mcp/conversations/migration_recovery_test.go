@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -27,7 +26,7 @@ func TestUpgradeFrom0182PreservesHistoryAndBackfillsRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), "009_") {
+		if entry.Name() >= "009_" {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join("migrations", entry.Name()))

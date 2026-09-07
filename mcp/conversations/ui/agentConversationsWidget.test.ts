@@ -51,7 +51,7 @@ describe("AgentConversationsWidget scope", () => {
     expect(selectedConversationSeenInput(entries, "read")).toBeNull();
     expect(selectedConversationSeenInput(entries, "missing")).toBeNull();
 
-    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).toContain('appendAgentScope("/unread-summary", instanceId)');
     expect(widget).not.toContain('apiPost("/seen", seen, projectId)');
   });
@@ -73,15 +73,15 @@ describe("AgentConversationsWidget scope", () => {
       gridTemplateColumns: "minmax(0,1fr)",
       gridTemplateRows: "minmax(150px,34%) minmax(0,1fr)",
     });
-    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).not.toContain("md:grid-cols-[");
     expect(widget).toContain("window.matchMedia");
   });
 
   test("both surfaces use the same transport/controller and shared chat view", () => {
-    const panel = readFileSync(new URL("./ConversationsPanel.tsx", import.meta.url), "utf8");
-    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
-    const view = readFileSync(new URL("./ConversationChatView.tsx", import.meta.url), "utf8");
+    const panel = readFileSync(new URL("../frontend/src/ConversationsPanel.tsx", import.meta.url), "utf8");
+    const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    const view = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
     expect(panel).toContain("<ConversationChatView");
     expect(panel).toContain("<ConversationChat");
     expect(widget).toContain("<ConversationChat");
@@ -91,7 +91,7 @@ describe("AgentConversationsWidget scope", () => {
   });
 
   test("single mode is focused, refreshes only while empty, lazy-loads history, and guards agent switches", () => {
-    const widget = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).toContain("function SingleConversation");
     expect(widget).toContain("singleConversationListPath(instanceId)");
     expect(widget).toContain("singleConversationListPath(instanceId, 50)");
@@ -120,8 +120,8 @@ describe("AgentConversationsWidget scope", () => {
   });
 
   test("shared chat UI describes a soft request rather than a hard stop", () => {
-    const panel = readFileSync(new URL("./ConversationsPanel.tsx", import.meta.url), "utf8");
-    const view = readFileSync(new URL("./ConversationChatView.tsx", import.meta.url), "utf8");
+    const panel = readFileSync(new URL("../frontend/src/ConversationsPanel.tsx", import.meta.url), "utf8");
+    const view = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
     expect(panel).toContain("softBreakMessageInput");
     expect(panel).toContain("Break requested");
     expect(view).toContain("Ask the agent to pause and reconsider");

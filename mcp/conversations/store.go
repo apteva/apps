@@ -164,7 +164,7 @@ func (s *store) CreateConversation(in CreateConversationInput) (*Conversation, e
 			if archived {
 				return nil, fmt.Errorf("conversation key belongs to an archived conversation; unarchive it first")
 			}
-			if in.OwnerUserID > 0 && existing.OwnerUserID != 0 && existing.OwnerUserID != in.OwnerUserID {
+			if in.OwnerUserID != 0 && (existing.OwnerUserID != 0 || in.OwnerUserID < 0) && existing.OwnerUserID != in.OwnerUserID {
 				var count int
 				if err := tx.QueryRow(`SELECT COUNT(*) FROM participants WHERE conversation_id=? AND user_id=?`, existing.ID, in.OwnerUserID).Scan(&count); err != nil {
 					return nil, err
@@ -218,7 +218,7 @@ func insertConversationTx(tx *sql.Tx, in CreateConversationInput) (string, error
 			return "", err
 		}
 	}
-	if in.OwnerUserID > 0 {
+	if in.OwnerUserID != 0 {
 		if _, err := tx.Exec(`INSERT INTO participants(conversation_id,user_id) VALUES(?,?)`, id, in.OwnerUserID); err != nil {
 			return "", err
 		}
@@ -315,9 +315,9 @@ func (s *store) ListConversationsForUserAndLeadAgent(projectID string, userID, l
 		      SELECT 1 FROM participants ap
 		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
 		  )
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR (c.owner_user_id = 0 AND ? > 0))
 		ORDER BY c.updated_at DESC, c.id DESC LIMIT ?`,
-		projectID, leadAgentID, leadAgentID, userID, userID, limit)
+		projectID, leadAgentID, leadAgentID, userID, userID, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -349,12 +349,12 @@ func (s *store) listConversationsForUser(projectID string, userID, agentID int64
 		FROM conversations c
 		LEFT JOIN participants p ON p.conversation_id = c.id
 		WHERE c.project_id = ? AND `+archivePredicate+`
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR (c.owner_user_id = 0 AND ? > 0))
 		  AND (? = 0 OR EXISTS (
 		      SELECT 1 FROM participants ap
 		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
 		  ))
-		ORDER BY c.updated_at DESC LIMIT ?`, projectID, userID, userID, agentID, agentID, limit)
+		ORDER BY c.updated_at DESC LIMIT ?`, projectID, userID, userID, userID, agentID, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func (s *store) ListArchivedForUserAndAgent(projectID string, userID, agentID in
 // the owning user, an explicit user participant, or a project-visible system
 // conversation (owner 0).
 func (s *store) UserCanAccessConversation(conversationID, projectID string, userID int64) (bool, error) {
-	if strings.TrimSpace(projectID) == "" || userID <= 0 {
+	if strings.TrimSpace(projectID) == "" || userID == 0 {
 		return false, nil
 	}
 	var one int
@@ -586,8 +586,8 @@ func (s *store) UserCanAccessConversation(conversationID, projectID string, user
 		FROM conversations c
 		LEFT JOIN participants p ON p.conversation_id = c.id AND p.user_id = ?
 		WHERE c.id = ? AND c.project_id = ?
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
-		LIMIT 1`, userID, conversationID, projectID, userID, userID).Scan(&one)
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR (c.owner_user_id = 0 AND ? > 0))
+		LIMIT 1`, userID, conversationID, projectID, userID, userID, userID).Scan(&one)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -900,7 +900,7 @@ func (s *store) UnreadSummary(projectID string, userID int64) ([]UnreadEntry, er
 	return s.UnreadSummaryForAgent(projectID, userID, 0)
 }
 
-func (s *store) UnreadSummaryForAgent(projectID string, userID, agentID int64) ([]UnreadEntry, error) {
+func (s *store) UnreadSummaryForAgent(projectID string, userID, agentID int64, allowedAgents ...int64) ([]UnreadEntry, error) {
 	rows, err := s.db.Query(`
 		SELECT c.id,
 		       COALESCE((SELECT MAX(m.id) FROM messages m
@@ -913,12 +913,12 @@ func (s *store) UnreadSummaryForAgent(projectID string, userID, agentID int64) (
 		LEFT JOIN read_marks r ON r.conversation_id = c.id AND r.user_id = ?
 		LEFT JOIN participants p ON p.conversation_id = c.id AND p.user_id = ?
 		WHERE c.project_id = ? AND c.archived_at IS NULL
-		  AND (c.owner_user_id = ? OR p.user_id = ? OR c.owner_user_id = 0)
+		  AND (c.owner_user_id = ? OR p.user_id = ? OR (c.owner_user_id = 0 AND ? > 0))
 		  AND (? = 0 OR EXISTS (
 		      SELECT 1 FROM participants ap
 		      WHERE ap.conversation_id = c.id AND ap.agent_id = ?
-		  ))`,
-		userID, userID, projectID, userID, userID, agentID, agentID)
+		  ))`+allowedConversationSQL(allowedAgents),
+		userID, userID, projectID, userID, userID, userID, agentID, agentID)
 	if err != nil {
 		return nil, err
 	}

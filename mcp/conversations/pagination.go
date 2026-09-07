@@ -16,7 +16,7 @@ type conversationCursor struct {
 	ID      string `json:"id"`
 }
 
-func (s *store) ListConversationPage(project string, user, agent, lead int64, archived bool, query, cursor string, limit int) (ConversationPage, error) {
+func (s *store) ListConversationPage(project string, user, agent, lead int64, archived bool, query, cursor string, limit int, allowedAgents ...int64) (ConversationPage, error) {
 	out := ConversationPage{Conversations: []Conversation{}}
 	if limit <= 0 || limit > 200 {
 		limit = 100
@@ -33,12 +33,12 @@ func (s *store) ListConversationPage(project string, user, agent, lead int64, ar
 		predicate = "c.archived_at IS NOT NULL"
 	}
 	rows, err := s.db.Query(`SELECT `+prefixCols("c.", conversationCols)+` FROM conversations c
- WHERE c.project_id=? AND `+predicate+` AND (c.owner_user_id=0 OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
+ WHERE c.project_id=? AND `+predicate+` AND ((c.owner_user_id=0 AND ?>0) OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
  AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
  AND (?=0 OR (c.lead_agent_id=? AND EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?)))
  AND instr(lower(c.title),lower(?))>0
  AND (?='' OR julianday(c.updated_at)<julianday(?) OR (julianday(c.updated_at)=julianday(?) AND c.id<?))
- ORDER BY c.updated_at DESC,c.id DESC LIMIT ?`, project, user, user, agent, agent, lead, lead, lead, strings.TrimSpace(query), cursor, cur.Updated, cur.Updated, cur.ID, limit+1)
+ `+allowedConversationSQL(allowedAgents)+` ORDER BY c.updated_at DESC,c.id DESC LIMIT ?`, project, user, user, user, agent, agent, lead, lead, lead, strings.TrimSpace(query), cursor, cur.Updated, cur.Updated, cur.ID, limit+1)
 	if err != nil {
 		return out, err
 	}

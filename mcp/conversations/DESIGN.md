@@ -3,7 +3,24 @@
 Conversations owns dashboard chat, approvals, reports, alerts, and an optional
 Telegram transport. The inbox is a projection of the same durable messages as
 the transcript. Agent status belongs to the Status app; historical status rows
-remain inert history. This repair is based on `conversations/v0.18.2`.
+remain inert history.
+
+## Shared frontend
+
+`frontend/src` owns the React implementation and the `conversationsExtension`
+headless client. Public entry points are `@apteva/conversations`, `/react` and
+`/styles.css`. Thin `ui` wrappers preserve dashboard manifests, cookie auth and
+layout. Web SDK 0.6.0 supplies scoped HTTP, bearer refresh and SSE transport; it
+is bundled into dashboard assets, so the dashboard has no new SDK dependency.
+REST change cursors and client message identities retain their original contracts.
+
+Application-user tokens carry issuer/subject/organization identity. Migration
+010 maps that tuple per project to a negative app-local user ID, distinct from
+positive platform owners. Each request checks explicit app actions and agents;
+external conversations must be public and every participant must be permitted.
+Aggregate queries apply these predicates before pagination and counts. Headers
+are trusted only behind app-sdk sidecar authentication and the platform proxy.
+SDK scope selection and component registration do not grant authorization.
 
 ## Authorization and lifecycle
 

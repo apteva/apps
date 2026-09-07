@@ -1,0 +1,43 @@
+{
+  "name": "@apteva/conversations",
+  "version": "0.20.0",
+  "type": "module",
+  "description": "App-owned Conversations client and shared React surfaces",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "import": "./dist/react.js"
+    },
+    "./styles.css": {
+      "types": "./dist/styles.d.ts",
+      "default": "./dist/styles.css"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@apteva/web-sdk": "^0.6.0",
+    "react": ">=19"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.13",
+    "marked": "^18.0.10"
+  },
+  "scripts": {
+    "build": "bun run build.ts"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apteva/apps.git",
+    "directory": "mcp/conversations/frontend"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.20.0 — 2026-09-07
+
+- Export `@apteva/conversations`: a headless Web SDK extension, the existing chat,
+  inbox, approval/report/alert cards, TypeScript declarations and scoped styles.
+- Share one UI implementation between dashboard wrappers and external hosts.
+  Keep manifest component names, dashboard theme, saved drafts, send retries,
+  delivery status and durable history replay. The SDK is bundled into dashboard assets.
+- Use published Web SDK 0.6.0 for scoped HTTP and authenticated SSE.
+- Isolate application-user subjects from their issuer’s installer account and
+  each other; enforce explicit actions, permitted agents and public audience.
+  Apply the same boundary to paginated lists, inbox totals and unread summaries.
+- Add migration 010 for external identities without changing existing owners.
+  Reset shared UI state when its client identity changes.
+
+
+Validation: 134 Go tests with race detection, 25 frontend tests, strict TypeScript,
+four browser fixture tests, production dashboard bundles and a separate packed-package
+consumer build passed. Go vet and Go/npm vulnerability checks passed. Real browser
+checks verified dashboard cookie auth, external bearer/CORS/SSE, real Codex replies,
+responsive layout and subject isolation. All 12 Tier 3 workflows passed with real Codex on the final candidate.
+See `VALIDATION-0.20.0.md` for live-suite evidence.
+
 ## 0.19.0 — 2026-09-05
 
 Requires Apteva **0.40.6 or later**. Source builds require Go **1.26.8 or later**;

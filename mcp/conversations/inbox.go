@@ -89,8 +89,8 @@ func (s *store) Inbox(projectID string, userID int64, limit int) ([]InboxItem, e
 	return s.InboxForAgent(projectID, userID, 0, limit)
 }
 
-func (s *store) InboxForAgent(projectID string, userID, agentID int64, limit int) ([]InboxItem, error) {
-	page, err := s.InboxPage(projectID, userID, agentID, limit, "")
+func (s *store) InboxForAgent(projectID string, userID, agentID int64, limit int, allowedAgents ...int64) ([]InboxItem, error) {
+	page, err := s.InboxPage(projectID, userID, agentID, limit, "", allowedAgents...)
 	return page.Items, err
 }
 
@@ -103,7 +103,7 @@ type InboxPage struct {
 
 const inboxPrioritySQL = `CASE m.component_kind WHEN 'approval' THEN 0 WHEN 'alert' THEN CASE m.severity WHEN 'error' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END WHEN 'report' THEN 4 ELSE 9 END`
 
-func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cursor string) (InboxPage, error) {
+func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cursor string, allowedAgents ...int64) (InboxPage, error) {
 	out := InboxPage{Items: []InboxItem{}}
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -116,10 +116,10 @@ func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cu
 	}
 	base := ` FROM messages m JOIN conversations c ON c.id=m.conversation_id
  WHERE c.project_id=? AND c.archived_at IS NULL
- AND (c.owner_user_id=0 OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
+ AND ((c.owner_user_id=0 AND ?>0) OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
  AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
- AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0`
-	args := []any{projectID, userID, userID, agentID, agentID}
+ AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0` + allowedConversationSQL(allowedAgents)
+	args := []any{projectID, userID, userID, userID, agentID, agentID}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return out, err
@@ -250,7 +250,7 @@ func applyInboxActionActor(m *Message, actionID, note string, userID int64, exte
 			props[k] = v
 		}
 		props["status"] = actionID
-		if userID > 0 {
+		if userID != 0 {
 			props["resolved_by"] = userID
 		}
 		if externalActor != "" {

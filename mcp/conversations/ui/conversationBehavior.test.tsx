@@ -3,9 +3,17 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
-import { ConversationChat, refreshConversationList, type Conversation } from "./ConversationsPanel";
+import { ConversationChat as ChatSource, refreshConversationList, type Conversation } from "../frontend/src/ConversationsPanel";
 import { reportSectionsText } from "./messageContent";
 
+import { AptevaClient } from "@apteva/web-sdk";
+import { conversationsExtension, type ConversationsClient } from "../frontend/src/client";
+import { ConversationsProvider } from "../frontend/src/context";
+import type { ComponentProps } from "react";
+let conversations: ConversationsClient;
+function ConversationChat(props: ComponentProps<typeof ChatSource>) {
+ return <ConversationsProvider conversations={conversations}><ChatSource {...props}/></ConversationsProvider>;
+}
 let win: Window, root: Root, element: HTMLElement;
 let fetcher: (url:string, init?:RequestInit) => Promise<Response>;
 class FakeEvents {
@@ -13,12 +21,17 @@ class FakeEvents {
  onopen: (()=>void)|null=null; onmessage: ((e:{data:string})=>void)|null=null; onerror: (()=>void)|null=null;
  listeners=new Map<string,(e:{data:string})=>void>();
  constructor(public url:string) {FakeEvents.instances.push(this);}
- addEventListener(name:string,fn:(e:{data:string})=>void){this.listeners.set(name,fn);}
+ addEventListener(name:string,fn:(e:{data:string})=>void){this.listeners.set(name,e=>fn({...e,type:name} as any));}
+ removeEventListener(name:string){this.listeners.delete(name);}
  close(){}
- emit(message:unknown){this.onmessage?.({data:JSON.stringify(message)});}
+ emit(message:unknown){this.listeners.get("message")?.({data:JSON.stringify(message)});}
 }
 const conv=(id:string):Conversation=>({id,project_id:"project",lead_agent_id:41,title:id,kind:"direct",origin:"web",created_at:"",updated_at:""});
 const message=(id:number,conversation_id="a",content=`message ${id}`)=>({id,conversation_id,content,role:"user",components:[],created_at:"2026-09-05T00:00:00Z"});
+const NativeResponse=globalThis.Response;
+class Response extends NativeResponse {
+ constructor(body?:BodyInit|null,init?:ResponseInit){super(body,{...init,headers:{"Content-Type":"application/json",...init?.headers}});}
+}
 const json=(value:unknown)=>Promise.resolve(new Response(JSON.stringify(value),{headers:{"Content-Type":"application/json"}}));
 const settle=async()=>{await act(async()=>{await new Promise(resolve=>setTimeout(resolve,15));});};
 const render=async(id="a")=>{await act(async()=>root.render(<ConversationChat key={id} conversation={conv(id)} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));await settle();};
@@ -31,6 +44,7 @@ beforeEach(()=>{
  element=win.document.createElement("div") as unknown as HTMLElement;win.document.body.appendChild(element as any);root=createRoot(element);FakeEvents.instances=[];
  fetcher=(url)=>url.includes("/deliveries")?json([]):json(url.includes("/changes")?{messages:[],cursor:0,has_more:false}:{messages:[],cursor:0,has_more:false,before:0});
  globalThis.fetch=((url:unknown,init?:RequestInit)=>fetcher(String(url),init)) as typeof fetch;
+ conversations=new AptevaClient({baseURL:""}).use(conversationsExtension(),{projectId:"project",installId:7});
 });
 afterEach(async()=>{await act(async()=>root.unmount());await win.happyDOM.abort();});
 
@@ -104,7 +118,7 @@ test("read marks require a visible loaded transcript at the bottom",async()=>{
 test("list refresh reads every loaded page and drops deleted rows",async()=>{
  const paths:string[]=[];
  fetcher=(url)=>{paths.push(url);return url.includes("cursor=older")?json({conversations:[conv("older-survivor")],next_cursor:""}):json({conversations:Array.from({length:100},(_,i)=>conv(`fresh-${i}`)),next_cursor:"older"});};
- const rows=await refreshConversationList("/chats?agent_id=41","project",101);
+ const rows=await refreshConversationList("/chats?agent_id=41",conversations,101);
  expect(paths.length).toBe(2);expect(paths.every(path=>path.includes("agent_id=41"))).toBe(true);expect(rows.length).toBe(101);expect(rows.at(-1)?.id).toBe("older-survivor");
 });
 
@@ -125,4 +139,29 @@ test("loading historical replies does not settle a current acknowledgement",asyn
  expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
  await act(async()=>events.emit({...message(301,"a","current reply"),role:"agent",agent_id:41}));
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});
+
+
+test("dashboard migrates drafts and pending identities into the scoped client", async () => {
+ const oldKey="conversations:draft:project:a";
+ sessionStorage.setItem(oldKey,"saved draft");
+ sessionStorage.setItem(oldKey+":pending",JSON.stringify({content:"saved draft",client_message_id:"original-id"}));
+ const bodies:any[]=[];
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return json(message(1,"a","saved draft"));}return url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
+ await act(async()=>root.render(<ConversationsProvider legacyDrafts conversations={conversations}><ChatSource conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/></ConversationsProvider>));await settle();
+ expect(element.querySelector("textarea")!.value).toBe("saved draft");
+ expect(sessionStorage.getItem(oldKey)).toBeNull();
+ await send();await settle();
+ expect(bodies[0].client_message_id).toBe("original-id");
+});
+
+test("changing the SDK client resets displayed history and drafts before the new response", async () => {
+ fetcher=(url)=>url.includes("/deliveries")?json([]):json({messages:[message(1,"a","first user history")],cursor:1,has_more:false,before:1});
+ await render();await type("first user draft");
+ expect(element.textContent).toContain("first user history");
+ conversations=new AptevaClient({baseURL:""}).use(conversationsExtension(),{projectId:"project",installId:7});
+ fetcher=(url)=>url.includes("/deliveries")?json([]):new Promise(()=>{});
+ await render();
+ expect(element.textContent).not.toContain("first user history");
+ expect(element.querySelector("textarea")!.value).toBe("");
 });
