@@ -295,6 +295,13 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	if run == nil || run.RuntimeID == "" {
 		return nil, errors.New("running environment required")
 	}
+	current, lookupErr := s.db.getRun(run.ID)
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if current == nil || current.Status != "running" {
+		return nil, errors.New("running environment required")
+	}
 	normalizeVoiceSpec(&spec)
 	if err := validateVoiceSpec(spec); err != nil {
 		return nil, err
@@ -334,6 +341,7 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		s.ctx.Emit(topic, voiceCallEvent(call))
 	}()
 
+	history := newTelemetryHistory(s.runtime())
 	callerDirective := voiceCallerDirective(spec)
 	if _, err = s.runtime().SpawnRuntimeAgent(run.RuntimeID, sdk.RuntimeAgentSpawnRequest{
 		Draft: &sdk.RuntimeAgentDraft{
@@ -394,8 +402,12 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	bridgeExits := make(chan voiceBridgeExit, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
 	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, true)
+	var deliveredCapture *cappedAudio
+	if audioPipeline != nil {
+		deliveredCapture = &deliveredCallerAudio
+	}
 	go pumpVoiceAudio(bridgeCtx, targetSocket, callerSocket, voiceBridgeLegTargetToCaller, voiceBridgeTarget, voiceBridgeCaller, "receptionist", mediaActivity, &receptionistAudio, nil, nil, bridgeExits)
-	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, voiceBridgeLegCallerToTarget, voiceBridgeCaller, voiceBridgeTarget, "caller", mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeExits)
+	go pumpVoiceAudio(bridgeCtx, callerSocket, targetSocket, voiceBridgeLegCallerToTarget, voiceBridgeCaller, voiceBridgeTarget, "caller", mediaActivity, &callerAudio, deliveredCapture, audioPipeline, bridgeExits)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
 	defer timeout.Stop()
@@ -414,13 +426,13 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 			appendVoiceBridgeExit(call, bridgeExit)
 			_ = s.db.saveVoiceCall(call)
 			s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
-			endedBy = s.classifyVoiceBridgeExit(ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
+			endedBy = s.classifyVoiceBridgeExit(history, ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
 		case <-ticker.C:
-			events, listErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
+			events, listErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
 			if listErr == nil && voiceCallerCompleted(events, call.CallerThreadID) {
 				callerDone = true
 			}
-			targetEvents, targetListErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
+			targetEvents, targetListErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 			if targetListErr == nil {
 				transcript := voiceTranscript(targetEvents, call.TargetThreadID, call.StartedAt)
 				raw, _ := json.Marshal(transcript)
@@ -458,11 +470,11 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 	callerSocket.close()
 	s.collectVoiceBridgeExits(call, bridgeExits, 2)
 
-	targetEvents, targetErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
+	targetEvents, targetErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 	if targetErr != nil {
 		return call, fmt.Errorf("read receptionist telemetry: %w", targetErr)
 	}
-	callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
+	callerEvents, callerErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
 	if callerErr != nil {
 		return call, fmt.Errorf("read caller telemetry: %w", callerErr)
 	}
@@ -473,21 +485,22 @@ func (s *service) runVoiceCall(ctx context.Context, run *Run, spec VoiceFixtureS
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1,
 		PostToolIdleSeconds: 1, RequireActivity: true,
 	})
-	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	receptionistPCM, callerPCM, deliveredPCM := receptionistAudio.bytes(), callerAudio.bytes(), deliveredCallerAudio.bytes()
+	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistPCM, callerPCM, endedBy)
 	finalizeVoiceBridgeExits(call)
 	if audioPipeline != nil {
-		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
+		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredPCM)) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
 	}
 	call.Validity = assessVoiceCall(call)
-	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistAudio.bytes()); err != nil {
+	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistPCM); err != nil {
 		return call, err
 	}
-	if err := s.writeVoiceRecording(call.ID, "caller", callerAudio.bytes()); err != nil {
+	if err := s.writeVoiceRecording(call.ID, "caller", callerPCM); err != nil {
 		return call, err
 	}
 	if audioPipeline != nil {
-		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredCallerAudio.bytes()); err != nil {
+		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredPCM); err != nil {
 			return call, err
 		}
 		call.DeliveredCallerRecording = "caller-delivered"
@@ -1134,6 +1147,7 @@ func voiceCallerCompleted(events []sdk.RuntimeTelemetryEvent, threadID string) b
 }
 
 func (s *service) classifyVoiceBridgeExit(
+	history *telemetryHistory,
 	ctx context.Context,
 	runtimeID string,
 	call *VoiceCall,
@@ -1145,7 +1159,7 @@ func (s *service) classifyVoiceBridgeExit(
 	if callerDone || voiceBridgeEndReason(exit, false) == "caller_done" {
 		completionReason = "caller_done"
 	} else {
-		completionReason = s.waitForVoiceBridgeCompletion(ctx, runtimeID, call, media, exit)
+		completionReason = s.waitForVoiceBridgeCompletion(history, ctx, runtimeID, call, media, exit)
 	}
 	log.Printf(
 		"[VOICE] bridge exit endpoint=%s operation=%s terminal=%s close_code=%d completion=%s err=%v",
@@ -1201,6 +1215,7 @@ func voiceBridgeExitIsTransportFailure(exit voiceBridgeExit) bool {
 }
 
 func (s *service) waitForVoiceBridgeCompletion(
+	history *telemetryHistory,
 	ctx context.Context,
 	runtimeID string,
 	call *VoiceCall,
@@ -1209,12 +1224,12 @@ func (s *service) waitForVoiceBridgeCompletion(
 ) string {
 	reason := ""
 	waitForVoiceCompletionEvidence(ctx, voiceCompletionGrace, voiceCompletionPoll, func() bool {
-		callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(runtimeID, call.CallerAgentAlias, call.StartedAt, 500)
+		callerEvents, callerErr := history.list(runtimeID, call.CallerAgentAlias, call.StartedAt, 500)
 		if callerErr == nil && voiceCallerCompleted(callerEvents, call.CallerThreadID) {
 			reason = "caller_done"
 			return true
 		}
-		targetEvents, targetErr := s.runtime().ListRuntimeAgentTelemetry(runtimeID, call.Spec.TargetAgent, call.StartedAt, 1000)
+		targetEvents, targetErr := history.list(runtimeID, call.Spec.TargetAgent, call.StartedAt, 1000)
 		if targetErr == nil && voiceCallerCompleted(targetEvents, call.TargetThreadID) {
 			reason = "target_done"
 			return true
@@ -1472,8 +1487,16 @@ func (s *service) writeVoiceRecording(callID, speaker string, pcm []byte) error 
 	_ = binary.Write(&out, binary.LittleEndian, uint16(16))
 	_ = binary.Write(&out, binary.LittleEndian, [4]byte{'d', 'a', 't', 'a'})
 	_ = binary.Write(&out, binary.LittleEndian, dataSize)
-	_, _ = out.Write(pcm)
-	return os.WriteFile(path, out.Bytes(), 0o640)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	_, headerErr := file.Write(out.Bytes())
+	var audioErr error
+	if headerErr == nil {
+		_, audioErr = file.Write(pcm)
+	}
+	return errors.Join(headerErr, audioErr, file.Close())
 }
 
 func firstNonEmpty(values ...string) string {

@@ -25,7 +25,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql", "005_protocol_fixtures.sql"} {
+	for _, name := range []string{"001_init.sql", "002_web_fixtures.sql", "003_single_active_run.sql", "004_voice_calls.sql", "005_protocol_fixtures.sql", "006_history_indexes.sql"} {
 		migration, err := os.ReadFile("migrations/" + name)
 		if err != nil {
 			t.Fatal(err)

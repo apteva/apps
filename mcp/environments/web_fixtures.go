@@ -97,27 +97,42 @@ func cloneJSONMap(value map[string]any) map[string]any {
 }
 
 func (s *service) decorateRun(run *Run) {
-	if run == nil {
-		return
+	if run != nil {
+		_ = s.decorateRuns([]*Run{run})
 	}
-	fixtures, err := s.db.listWebFixtures(run.ID)
-	if err != nil {
-		return
-	}
-	for i := range fixtures {
-		path := webFixturePath(fixtures[i])
-		fixtures[i].PreviewPath = path
-		if gateway := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/"); gateway != "" {
-			fixtures[i].TestURL = gateway + path
-		} else {
-			fixtures[i].TestURL = path
+}
+
+func (s *service) decorateRuns(runs []*Run) error {
+	// Bound SQL parameter counts while avoiding a query per run.
+	for offset := 0; offset < len(runs); offset += 200 {
+		batch := runs[offset:min(offset+200, len(runs))]
+		ids := make([]string, 0, len(batch))
+		byID := map[string]*Run{}
+		for _, run := range batch {
+			ids = append(ids, run.ID)
+			byID[run.ID] = run
+			run.WebFixtures = []WebFixtureInstance{}
+			run.ProtocolFixtures = []ProtocolFixtureInstance{}
+		}
+		fixtures, err := s.db.listWebFixturesForRuns(ids)
+		if err != nil {
+			return err
+		}
+		protocols, err := s.db.listProtocolFixturesForRuns(ids)
+		if err != nil {
+			return err
+		}
+		for _, fixture := range fixtures {
+			s.decorateFixture(&fixture)
+			run := byID[fixture.RunID]
+			run.WebFixtures = append(run.WebFixtures, fixture)
+		}
+		for _, fixture := range protocols {
+			run := byID[fixture.RunID]
+			run.ProtocolFixtures = append(run.ProtocolFixtures, fixture)
 		}
 	}
-	run.WebFixtures = fixtures
-	protocolFixtures, err := s.db.listProtocolFixtures(run.ID)
-	if err == nil {
-		run.ProtocolFixtures = protocolFixtures
-	}
+	return nil
 }
 
 func webFixturePath(x WebFixtureInstance) string {

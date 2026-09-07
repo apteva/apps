@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 
 interface NativePanelProps { appName: string; installId: number; projectId: string }
 interface CatalogApp { install_id: number; name: string; display_name?: string; description?: string; icon?: string; integration_roles?: IntegrationRole[] }
@@ -283,10 +283,25 @@ function Detail({ environment, catalog, onEdit, onRefresh }: { environment: Envi
   const tabs = ["Overview", "Websites", "Protocols", "Voice calls", "Apps", "MCP servers", "Agents", "Activity", "Network", "Snapshots"];
   const [tab, setTab] = useState("Overview");
   const [inspect, setInspect] = useState<any>(null);
+  const generation = useRef(0);
   const [error, setError] = useState("");
   const run = environment.active_run;
-  const load = useCallback(async () => { if (!run) return; try { const agent = environment.runtime?.agents?.[0]?.alias || ""; setInspect(await request(`/runs/${run.id}/inspect${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`)); setError("") } catch (caught: any) { setError(caught.message) } }, [run?.id, environment.runtime?.agents?.length]);
-  useEffect(() => { load(); if (!run) return; const timer = setInterval(load, 5000); return () => clearInterval(timer) }, [load, run?.id]);
+  const load = useCallback(async () => {
+    const current = ++generation.current;
+    if (!run) { setInspect(null); return; }
+    try {
+      const agent = environment.runtime?.agents?.[0]?.alias || "";
+      const result = await request(`/runs/${run.id}/inspect${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
+      if (current === generation.current) { setInspect(result); setError(""); }
+    } catch (caught: any) { if (current === generation.current) setError(caught.message); }
+  }, [run?.id, environment.runtime?.agents?.[0]?.alias]);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => { await load(); if (!stopped && run) timer = setTimeout(poll, 5000); };
+    poll();
+    return () => { stopped = true; clearTimeout(timer); generation.current++; };
+  }, [load, run?.id]);
   const runtime = inspect?.runtime || environment.runtime;
   const edge: any[] = inspect?.edge_calls || [];
   const telemetry: any[] = inspect?.telemetry || [];
@@ -321,14 +336,31 @@ export default function EnvironmentsPanel({ installId, projectId }: NativePanelP
   const [selectedID, setSelectedID] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const load = useCallback(async () => { try { const [environments, nextCatalog] = await Promise.all([request<Environment[]>("/environments"), request<Catalog>("/catalog")]); setRows(environments); setCatalog(nextCatalog); setError("") } catch (caught: any) { setError(caught.message) } }, []);
-  useEffect(() => { load(); const timer = setInterval(load, 5000); return () => clearInterval(timer) }, [load]);
+  const load = useCallback(async () => { try { setRows(await request<Environment[]>("/environments")); setError(""); } catch (caught: any) { setError(caught.message); } }, [installId, projectId]);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => { await load(); if (!stopped) timer = setTimeout(poll, 5000); };
+    poll();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [load]);
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try { const next = await request<Catalog>("/catalog"); if (!stopped) setCatalog(next); }
+      catch (caught: any) { if (!stopped) setError(caught.message); }
+      if (!stopped) timer = setTimeout(poll, 60000);
+    };
+    poll();
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [installId, projectId]);
   const act = async (id: string, action: string) => { setBusy(id + action); try { await request(`/environments/${id}/${action}`, { method: "POST" }); await load() } catch (caught: any) { setError(caught.message) } finally { setBusy("") } };
   const selected = rows.find(item => item.id === selectedID);
   return <div className="h-full overflow-auto bg-bg text-text"><div className="w-full p-5">
     <header className="mb-5 flex flex-col items-start gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h1 className="text-xl font-semibold">Environments</h1><p className="text-sm text-text-dim">Apps, MCP servers, agents, websites, and protocol fixtures in isolated runtimes.</p></div><button onClick={() => setBuilder(true)} className="rounded-md bg-accent px-3 py-2 text-sm font-semibold text-bg hover:bg-accent-hover">New environment</button></header>
     {error && <div className="mb-4 flex items-center justify-between rounded-md border border-red/40 bg-red/10 px-3 py-2 text-xs text-red"><span>{error}</span><button onClick={() => setError("")} title="Dismiss">x</button></div>}
     <div className="overflow-hidden rounded-md border border-border"><div className="hidden grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] gap-3 border-b border-border bg-surface px-4 py-2 text-[11px] font-semibold uppercase text-text-dim sm:grid"><span>Environment</span><span>Status</span><span>Resources</span><span className="text-right">Actions</span></div>{rows.length === 0 ? <div className="p-10 text-center"><p className="text-sm text-text-muted">No environments yet</p><p className="mt-1 text-xs text-text-dim">Create one from this project.</p></div> : rows.map(row => { const running = !!row.active_run && row.active_run.status === "running"; return <div key={row.id} className={`grid grid-cols-1 items-center gap-2 border-b border-border px-4 py-3 last:border-0 hover:bg-surface/50 sm:grid-cols-[minmax(0,1.6fr)_100px_1fr_150px] sm:gap-3 ${selectedID === row.id ? "bg-surface" : ""}`}><button onClick={() => setSelectedID(row.id)} className="min-w-0 text-left"><span className="block truncate text-sm font-medium">{row.name}</span><span className="block truncate text-xs text-text-dim">{row.description || row.id}</span></button><span className={`text-xs font-medium ${running ? "text-green" : row.active_run?.status === "failed" ? "text-red" : "text-text-dim"}`}>{row.active_run?.status || "stopped"}</span><div className="flex min-w-0 flex-wrap gap-2 text-xs text-text-dim"><span>{row.spec.app_install_ids?.length || 0} apps</span><span>{row.spec.mcp_server_ids?.length || 0} MCPs</span><span>{(row.spec.connection_ids?.length || 0) + (row.spec.integration_bindings?.filter(binding => binding.expose_to_agents)?.length || 0)} connections</span><span>{row.spec.web_fixtures?.length || 0} websites</span><span>{row.spec.protocol_fixtures?.length || 0} protocols</span></div><div className="flex justify-start gap-1 sm:justify-end">{running ? <><button onClick={() => act(row.id, "snapshot")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:bg-surface" title="Create snapshot">Snapshot</button><button onClick={() => act(row.id, "stop")} disabled={!!busy} className="rounded border border-border px-2 py-1 text-xs hover:border-red hover:text-red">Stop</button></> : <button onClick={() => act(row.id, "start")} disabled={!!busy} className="rounded bg-accent px-3 py-1 text-xs font-semibold text-bg">Start</button>}</div></div> })}</div>
-    {selected && <Detail environment={selected} catalog={catalog} onEdit={() => setBuilder(selected)} onRefresh={load} />}
+    {selected && <Detail key={`${projectId}:${installId}:${selected.id}:${selected.active_run?.id || "stopped"}`} environment={selected} catalog={catalog} onEdit={() => setBuilder(selected)} onRefresh={load} />}
   </div>{builder && <Builder initial={builder === true ? undefined : builder} catalog={catalog} onClose={() => setBuilder(null)} onSaved={load} />}</div>;
 }

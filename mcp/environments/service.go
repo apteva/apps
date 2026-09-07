@@ -16,9 +16,12 @@ import (
 )
 
 type service struct {
-	ctx       *sdk.AppCtx
-	db        store
-	fixtureMu sync.Mutex
+	ctx          *sdk.AppCtx
+	db           store
+	fixtureMu    sync.Mutex
+	catalogMu    sync.Mutex
+	catalogValue map[string]any
+	catalogUntil time.Time
 }
 
 const startingRunGracePeriod = 2 * time.Minute
@@ -28,10 +31,18 @@ func (s *service) listDefinitions() ([]Definition, error) {
 	if err != nil {
 		return nil, err
 	}
+	var active []*Run
+	for i := range defs {
+		if defs[i].ActiveRun != nil {
+			active = append(active, defs[i].ActiveRun)
+		}
+	}
+	if err := s.decorateRuns(active); err != nil {
+		return nil, err
+	}
 	live, _ := s.liveMap()
 	for i := range defs {
 		if defs[i].ActiveRun != nil {
-			s.decorateRun(defs[i].ActiveRun)
 			if rt := live[defs[i].ActiveRun.RuntimeID]; rt != nil {
 				defs[i].Runtime = rt
 			}
@@ -91,7 +102,6 @@ func (s *service) startDefinition(id string) (*Run, error) {
 }
 
 func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *Run, err error) {
-	aborted := false
 	if err = validateSpec(spec); err != nil {
 		return nil, err
 	}
@@ -111,31 +121,34 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.db.createRun(run); err != nil {
 		return nil, err
 	}
+	created := false
+	defer func() {
+		if err != nil {
+			status := "failed"
+			if created {
+				if cleanupErr := s.runtime().DestroyRuntime(runtimeID); cleanupErr != nil && !runtimeNotFound(cleanupErr) {
+					status = "stopping"
+					err = fmt.Errorf("%w; cleanup pending: %v", err, cleanupErr)
+				}
+			}
+			run.Status, run.Error = status, err.Error()
+			_ = s.db.updateRun(run.ID, status, err.Error())
+			_ = s.db.setWebFixturesStatus(run.ID, status)
+			_ = s.db.setProtocolFixturesStatus(run.ID, status)
+			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
+		}
+	}()
 	if err = s.createWebFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create web fixtures: %w", err)
 	}
 	if err = s.createProtocolFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create protocol fixtures: %w", err)
 	}
-	created := false
-	defer func() {
-		if err != nil && !aborted {
-			if created {
-				_ = s.runtime().DestroyRuntime(runtimeID)
-			}
-			run.Status = "failed"
-			run.Error = err.Error()
-			_ = s.db.updateRun(run.ID, "failed", err.Error())
-			_ = s.db.setWebFixturesStatus(run.ID, "failed")
-			_ = s.db.setProtocolFixturesStatus(run.ID, "failed")
-			s.ctx.Emit("environment.failed", map[string]any{"environment_id": environmentID, "run_id": run.ID, "error": err.Error()})
-		}
-	}()
 	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	created = true
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
 	}
-	created = true
 	for i, seed := range spec.Seeds {
 		if strings.TrimSpace(seed.App) == "" || strings.TrimSpace(seed.Tool) == "" {
 			return run, fmt.Errorf("seed %d: app and tool required", i)
@@ -157,12 +170,10 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 		return run, err
 	}
 	if !transitioned {
-		aborted = true
-		_ = s.runtime().DestroyRuntime(runtimeID)
-		created = false
 		err = errors.New("environment run was stopped while starting")
 		return run, err
 	}
+
 	run.Status = "running"
 	if err = s.db.setWebFixturesStatus(run.ID, "running"); err != nil {
 		return run, err
@@ -176,6 +187,9 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 }
 
 func (s *service) stopDefinition(id string) error {
+	if !validID(id) {
+		return errors.New("valid environment id required")
+	}
 	if err := s.db.setDesired(id, "stopped"); err != nil {
 		return err
 	}
@@ -202,10 +216,8 @@ func (s *service) stopRun(run *Run) error {
 		return err
 	}
 	err := s.runtime().DestroyRuntime(run.RuntimeID)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "not found") {
-		_ = s.db.updateRun(run.ID, "failed", err.Error())
-		_ = s.db.setWebFixturesStatus(run.ID, "failed")
-		_ = s.db.setProtocolFixturesStatus(run.ID, "failed")
+	if err != nil && !runtimeNotFound(err) {
+		_ = s.db.updateRun(run.ID, "stopping", err.Error())
 		return err
 	}
 	if err := s.db.updateRun(run.ID, "stopped", ""); err != nil {
@@ -226,13 +238,19 @@ func (s *service) reconcile(context.Context) error {
 	if err != nil {
 		return err
 	}
-	runs, err := s.db.listRuns()
+	runs, err := s.db.activeRuns("")
 	if err != nil {
 		return err
 	}
 	for i := range runs {
 		r := &runs[i]
 		if r.Status == "starting" && time.Since(r.StartedAt) < startingRunGracePeriod {
+			continue
+		}
+		if r.Status == "stopping" {
+			if err := s.stopRun(r); err != nil {
+				s.ctx.Logger().Error("runtime cleanup retry failed", "run_id", r.ID, "err", err)
+			}
 			continue
 		}
 		if (r.Status == "starting" || r.Status == "running" || r.Status == "stopping") && live[r.RuntimeID] == nil {
@@ -259,15 +277,14 @@ func (s *service) reconcile(context.Context) error {
 	for i := range defs {
 		d := defs[i]
 		if d.DesiredState == "running" {
-			active, _ := s.db.activeRun(d.ID)
-			if active == nil {
+			if d.ActiveRun == nil {
 				if _, err := s.start(d.ID, "reconcile", d.Spec); err != nil {
 					s.ctx.Logger().Error("environment reconcile start failed", "id", d.ID, "err", err)
 				}
 			}
 		}
 	}
-	return nil
+	return s.pruneHistory()
 }
 
 func (s *service) snapshot(environmentID, description string) (*Snapshot, error) {
@@ -294,6 +311,9 @@ func (s *service) snapshot(environmentID, description string) (*Snapshot, error)
 }
 
 func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error) {
+	if a.MinCalls < 0 {
+		return AssertionResult{}, errors.New("min_calls must not be negative")
+	}
 	switch a.Type {
 	case "app_state":
 		var actual any
@@ -310,11 +330,14 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 		got := jsonPath(actual, a.Path)
 		return AssertionResult{Passed: reflect.DeepEqual(got, a.Equals), Actual: got}, nil
 	case "mcp_tool_call":
+		if strings.TrimSpace(a.MCP) == "" {
+			return AssertionResult{}, errors.New("mcp required")
+		}
 		agent := a.AgentAlias
 		if agent == "" {
 			agent = "main"
 		}
-		events, err := s.runtime().ListRuntimeAgentTelemetry(runtimeID, agent, time.Time{}, 1000)
+		events, err := completeTelemetry(s.runtime(), runtimeID, agent, time.Time{})
 		if err != nil {
 			return AssertionResult{}, err
 		}
@@ -326,7 +349,7 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 			var data struct {
 				Name string `json:"name"`
 			}
-			if json.Unmarshal(event.Data, &data) == nil && (a.Tool == "" || data.Name == a.Tool || data.Name == a.MCP+"_"+a.Tool) {
+			if json.Unmarshal(event.Data, &data) == nil && matchesMCPTool(data.Name, a.MCP, a.Tool) {
 				count++
 			}
 		}
@@ -352,7 +375,7 @@ func (s *service) assert(runtimeID string, a Assertion) (AssertionResult, error)
 		}
 		return AssertionResult{Passed: n >= min, Actual: n}, nil
 	case "telemetry":
-		events, err := s.runtime().ListRuntimeAgentTelemetry(runtimeID, a.AgentAlias, time.Time{}, 1000)
+		events, err := completeTelemetry(s.runtime(), runtimeID, a.AgentAlias, time.Time{})
 		if err != nil {
 			return AssertionResult{}, err
 		}
@@ -519,4 +542,32 @@ func jsonPath(v any, path string) any {
 		cur = m[p]
 	}
 	return cur
+}
+
+func runtimeNotFound(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "not found")
+}
+func matchesMCPTool(name, mcp, tool string) bool {
+	if tool == "" {
+		return strings.HasPrefix(name, mcp+"_")
+	}
+	return name == mcp+"_"+tool
+}
+
+func (s *service) updateDefinition(id string, args map[string]any) (*Definition, error) {
+	d, err := s.db.getDefinition(id)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil {
+		return nil, errors.New("environment not found")
+	}
+	if value, exists := args["spec"]; exists && value == nil {
+		return nil, errors.New("spec must be an object")
+	}
+	if err := decodeArgs(args, d); err != nil {
+		return nil, err
+	}
+	d.ID = id
+	return s.saveDefinition(d)
 }

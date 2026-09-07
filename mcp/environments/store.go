@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -36,12 +37,18 @@ func (s store) listDefinitions() ([]Definition, error) {
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	for i := range out {
-		if run, err := s.activeRun(out[i].ID); err != nil {
-			return nil, err
-		} else if run != nil {
-			out[i].ActiveRun = run
+	runs, err := s.activeRuns("")
+	if err != nil {
+		return nil, err
+	}
+	byEnvironment := map[string]*Run{}
+	for i := range runs {
+		if byEnvironment[runs[i].EnvironmentID] == nil {
+			byEnvironment[runs[i].EnvironmentID] = &runs[i]
 		}
+	}
+	for i := range out {
+		out[i].ActiveRun = byEnvironment[out[i].ID]
 	}
 	return out, nil
 }
@@ -126,7 +133,7 @@ func (s store) activeRun(environmentID string) (*Run, error) {
 }
 
 func (s store) activeRuns(environmentID string) ([]Run, error) {
-	rows, err := s.db.Query(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE environment_id=? AND status IN ('starting','running','stopping') ORDER BY started_at DESC`, environmentID)
+	rows, err := s.db.Query(`SELECT id,environment_id,runtime_id,kind,status,error,started_at,stopped_at FROM environment_runs WHERE (? = '' OR environment_id=?) AND status IN ('starting','running','stopping') ORDER BY started_at DESC`, environmentID, environmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -288,8 +295,16 @@ func (s store) getProtocolFixture(runID, fixtureID string) (*ProtocolFixtureInst
 }
 
 func (s store) listProtocolFixtures(runID string) ([]ProtocolFixtureInstance, error) {
+	return s.listProtocolFixturesForRuns([]string{runID})
+}
+
+func (s store) listProtocolFixturesForRuns(ids []string) ([]ProtocolFixtureInstance, error) {
+	if len(ids) == 0 {
+		return []ProtocolFixtureInstance{}, nil
+	}
+	clause, args := runIDsClause(ids)
 	rows, err := s.db.Query(`SELECT run_id,fixture_id,pack,pack_version,protocol,target_app,status,config_json,created_at,updated_at
-		FROM environment_protocol_fixtures WHERE run_id=? ORDER BY fixture_id`, runID)
+		FROM environment_protocol_fixtures WHERE run_id IN (`+clause+`) ORDER BY fixture_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -409,7 +424,15 @@ func (s store) getWebFixtureByToken(runID, fixtureID, token string) (*WebFixture
 }
 
 func (s store) listWebFixtures(runID string) ([]WebFixtureInstance, error) {
-	rows, err := s.db.Query(`SELECT run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at FROM environment_web_fixtures WHERE run_id=? ORDER BY fixture_id`, runID)
+	return s.listWebFixturesForRuns([]string{runID})
+}
+
+func (s store) listWebFixturesForRuns(ids []string) ([]WebFixtureInstance, error) {
+	if len(ids) == 0 {
+		return []WebFixtureInstance{}, nil
+	}
+	clause, args := runIDsClause(ids)
+	rows, err := s.db.Query(`SELECT run_id,fixture_id,pack,pack_version,scenario,token,seed_json,initial_state_json,state_json,status,created_at,updated_at FROM environment_web_fixtures WHERE run_id IN (`+clause+`) ORDER BY fixture_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -561,4 +584,12 @@ func (s store) webFixtureSnapshot(snapshotID, fixtureID string) (map[string]any,
 func (s store) deleteWebFixtureSnapshots(snapshotID string) error {
 	_, err := s.db.Exec(`DELETE FROM environment_web_fixture_snapshots WHERE snapshot_id=?`, snapshotID)
 	return err
+}
+
+func runIDsClause(ids []string) (string, []any) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", len(ids)), ","), args
 }

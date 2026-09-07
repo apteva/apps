@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	sdk "github.com/apteva/app-sdk"
 )
 
 func decodeBody(w http.ResponseWriter, r *http.Request, out any) bool {
@@ -70,12 +68,11 @@ func (a *App) handleEnvironment(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, 200, d)
 		case http.MethodPut, http.MethodPatch:
-			var d Definition
-			if !decodeBody(w, r, &d) {
+			var args map[string]any
+			if !decodeBody(w, r, &args) {
 				return
 			}
-			d.ID = id
-			saved, err := a.svc.saveDefinition(&d)
+			saved, err := a.svc.updateDefinition(id, args)
 			if err != nil {
 				httpError(w, 400, err)
 				return
@@ -148,8 +145,13 @@ func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
 			httpError(w, 500, err)
 			return
 		}
+		runs := make([]*Run, len(rows))
 		for i := range rows {
-			a.svc.decorateRun(&rows[i])
+			runs[i] = &rows[i]
+		}
+		if err := a.svc.decorateRuns(runs); err != nil {
+			httpError(w, 500, err)
+			return
 		}
 		writeJSON(w, 200, rows)
 		return
@@ -358,38 +360,12 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		httpError(w, 405, errors.New("GET only"))
 		return
 	}
-	apps, err := a.svc.runtime().ListRuntimeCatalogApps(a.svc.ctx.CurrentProject())
+	value, err := a.svc.catalog()
 	if err != nil {
-		httpError(w, 502, err)
+		httpError(w, http.StatusBadGateway, err)
 		return
 	}
-	connections, err := a.svc.ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: a.svc.ctx.CurrentProject()})
-	if err != nil {
-		httpError(w, 502, err)
-		return
-	}
-	integrations, err := a.svc.runtime().ListRuntimeCatalogIntegrations()
-	if err != nil {
-		httpError(w, 502, err)
-		return
-	}
-	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
-	if err != nil {
-		httpError(w, 502, err)
-		return
-	}
-	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
-	if err != nil {
-		httpError(w, 502, err)
-		return
-	}
-	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
-	if err != nil {
-		httpError(w, 502, err)
-		return
-	}
-	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	writeJSON(w, 200, map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "web_fixtures": webFixtureCatalog(), "realtime_providers": realtimeProviders})
+	writeJSON(w, http.StatusOK, value)
 }
 func (a *App) handleCatalogItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {

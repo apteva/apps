@@ -1,0 +1,1 @@
+{"name":"environments-panel-tests","private":true,"scripts":{"test":"bun test"},"devDependencies":{"react":"19.1.1","react-dom":"19.1.1","happy-dom":"20.0.11"}}

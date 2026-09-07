@@ -35,6 +35,7 @@ type carrierRouteResult struct {
 type carrierActiveCalls struct {
 	Calls []struct {
 		CallID   string `json:"call_id"`
+		To       string `json:"to"`
 		ThreadID string `json:"thread_id"`
 		Status   string `json:"status"`
 	} `json:"calls"`
@@ -106,6 +107,7 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 		s.ctx.Emit(topic, voiceCallEvent(call))
 	}()
 
+	history := newTelemetryHistory(s.runtime())
 	callerDirective := voiceCallerDirective(spec)
 	if _, err = s.runtime().SpawnRuntimeAgent(run.RuntimeID, sdk.RuntimeAgentSpawnRequest{
 		Draft: &sdk.RuntimeAgentDraft{Name: firstNonEmpty(spec.CallerName, "Evaluation caller"), Directive: callerDirective, Mode: "autonomous"},
@@ -171,15 +173,11 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	if err := s.runtime().CallRuntimeAppAsAgentResult(run.RuntimeID, fixture.TargetApp, spec.TargetAgent, "telephony_active_calls", map[string]any{}, &active); err != nil {
 		return call, fmt.Errorf("inspect inbound call: %w", err)
 	}
-	for _, item := range active.Calls {
-		if item.ThreadID != "" {
-			call.TargetThreadID = item.ThreadID
-			break
-		}
+	call.TargetThreadID, err = carrierTargetThread(active, to)
+	if err != nil {
+		return call, err
 	}
-	if call.TargetThreadID == "" {
-		return call, errors.New("Telephony started no realtime thread for the inbound call")
-	}
+	defer s.runtime().StopRuntimeRealtimeThread(run.RuntimeID, spec.TargetAgent, call.TargetThreadID)
 
 	callerConn, _, err := websocket.DefaultDialer.DialContext(ctx, caller.AudioBridgeURL, nil)
 	if err != nil {
@@ -209,9 +207,9 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	}
 	s.addProtocolEvent(run.ID, fixture.ID, call.ID, "media.connected", "bidirectional", map[string]any{"stream_sid": streamSID, "codec": "PCMU", "sample_rate": 8000})
 	if response.Connect.Stream.StatusCallback != "" {
-		callbackGatewayURL, _ := carrierGatewayURL(response.Connect.Stream.StatusCallback, endpoint)
-		_, _, _ = carrierPOST(ctx, callbackGatewayURL, response.Connect.Stream.StatusCallback, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-started"}}, stringConfig(fixture.Config, "auth_token", ""))
-		s.addProtocolEvent(run.ID, fixture.ID, call.ID, "callback.stream_started", "fixture_to_app", map[string]any{"stream_sid": streamSID})
+		if err = s.deliverCarrierCallback(ctx, run.ID, fixture.ID, call.ID, "callback.stream_started", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-started"}}, stringConfig(fixture.Config, "auth_token", "")); err != nil {
+			return call, err
+		}
 	}
 
 	call.StartedAt = time.Now().UTC()
@@ -221,7 +219,11 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	bridgeExits := make(chan voiceBridgeExit, 2)
 	mediaActivity := newVoiceMediaActivity(call.StartedAt)
 	audioPipeline := newVoiceAudioPipeline(spec.AudioConditions, false)
-	go relayCallerToCarrier(bridgeCtx, callerSocket, media, streamSID, mediaActivity, &callerAudio, &deliveredCallerAudio, audioPipeline, bridgeExits)
+	var deliveredCapture *cappedAudio
+	if audioPipeline != nil {
+		deliveredCapture = &deliveredCallerAudio
+	}
+	go relayCallerToCarrier(bridgeCtx, callerSocket, media, streamSID, mediaActivity, &callerAudio, deliveredCapture, audioPipeline, bridgeExits)
 	go relayCarrierToCaller(bridgeCtx, media, callerSocket, mediaActivity, &receptionistAudio, bridgeExits)
 
 	timeout := time.NewTimer(time.Duration(spec.TimeoutSeconds) * time.Second)
@@ -241,13 +243,13 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 			appendVoiceBridgeExit(call, bridgeExit)
 			_ = s.db.saveVoiceCall(call)
 			s.ctx.Emit("environment.voice_call.progress", voiceCallEvent(call))
-			endedBy = s.classifyVoiceBridgeExit(ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
+			endedBy = s.classifyVoiceBridgeExit(history, ctx, run.RuntimeID, call, mediaActivity, bridgeExit, callerDone)
 		case <-ticker.C:
-			callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
+			callerEvents, callerErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 500)
 			if callerErr == nil && voiceCallerCompleted(callerEvents, call.CallerThreadID) {
 				callerDone = true
 			}
-			targetEvents, targetErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
+			targetEvents, targetErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 			if targetErr != nil {
 				continue
 			}
@@ -281,21 +283,20 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	callerSocket.close()
 	s.collectVoiceBridgeExits(call, bridgeExits, 2)
 
+	var callbackErr error
 	if response.Connect.Stream.StatusCallback != "" {
-		callbackGatewayURL, _ := carrierGatewayURL(response.Connect.Stream.StatusCallback, endpoint)
-		_, _, _ = carrierPOST(context.Background(), callbackGatewayURL, response.Connect.Stream.StatusCallback, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-stopped"}}, stringConfig(fixture.Config, "auth_token", ""))
-		s.addProtocolEvent(run.ID, fixture.ID, call.ID, "callback.stream_stopped", "fixture_to_app", map[string]any{"stream_sid": streamSID})
+		callbackErr = s.deliverCarrierCallback(context.Background(), run.ID, fixture.ID, call.ID, "callback.stream_stopped", response.Connect.Stream.StatusCallback, endpoint, url.Values{"CallSid": {callSID}, "StreamSid": {streamSID}, "StreamEvent": {"stream-stopped"}}, stringConfig(fixture.Config, "auth_token", ""))
 	}
 	statusURL := carrierInboundStatusURL(route.InboundURL)
-	statusGatewayURL, _ := carrierGatewayURL(statusURL, endpoint)
-	_, _, _ = carrierPOST(context.Background(), statusGatewayURL, statusURL, url.Values{"CallSid": {callSID}, "From": {from}, "To": {to}, "CallStatus": {"completed"}}, stringConfig(fixture.Config, "auth_token", ""))
-	s.addProtocolEvent(run.ID, fixture.ID, call.ID, "callback.call_completed", "fixture_to_app", map[string]any{"call_sid": callSID})
+	if e := s.deliverCarrierCallback(context.Background(), run.ID, fixture.ID, call.ID, "callback.call_completed", statusURL, endpoint, url.Values{"CallSid": {callSID}, "From": {from}, "To": {to}, "CallStatus": {"completed"}}, stringConfig(fixture.Config, "auth_token", "")); e != nil {
+		callbackErr = errors.Join(callbackErr, e)
+	}
 
-	targetEvents, targetErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
+	targetEvents, targetErr := history.list(run.RuntimeID, spec.TargetAgent, call.StartedAt, 1000)
 	if targetErr != nil {
 		return call, fmt.Errorf("read receptionist telemetry: %w", targetErr)
 	}
-	callerEvents, callerErr := s.runtime().ListRuntimeAgentTelemetry(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
+	callerEvents, callerErr := history.list(run.RuntimeID, call.CallerAgentAlias, call.StartedAt, 1000)
 	if callerErr != nil {
 		return call, fmt.Errorf("read caller telemetry: %w", callerErr)
 	}
@@ -305,28 +306,29 @@ func (s *service) runCarrierVoiceCall(ctx context.Context, run *Run, spec VoiceF
 	call.Execution, _ = s.runtime().WaitRuntimeAgent(run.RuntimeID, spec.TargetAgent, sdk.RuntimeAgentWaitRequest{
 		ThreadID: call.TargetThreadID, TimeoutSeconds: 5, IdleSeconds: 1, PostToolIdleSeconds: 1, RequireActivity: true,
 	})
-	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistAudio.bytes(), callerAudio.bytes(), endedBy)
+	receptionistPCM, callerPCM, deliveredPCM := receptionistAudio.bytes(), callerAudio.bytes(), deliveredCallerAudio.bytes()
+	call.Metrics = voiceMetrics(targetEvents, callerEvents, call.TargetThreadID, call.CallerThreadID, call.StartedAt, receptionistPCM, callerPCM, endedBy)
 	finalizeVoiceBridgeExits(call)
 	if audioPipeline != nil {
-		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredCallerAudio.bytes())) / voiceBytesPerSecond
+		call.Metrics.DeliveredCallerAudioS = float64(len(deliveredPCM)) / voiceBytesPerSecond
 		call.Metrics.AudioConditions = audioPipeline.metrics()
 	}
 	call.Validity = assessVoiceCall(call)
-	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistAudio.bytes()); err != nil {
+	if err := s.writeVoiceRecording(call.ID, "receptionist", receptionistPCM); err != nil {
 		return call, err
 	}
-	if err := s.writeVoiceRecording(call.ID, "caller", callerAudio.bytes()); err != nil {
+	if err := s.writeVoiceRecording(call.ID, "caller", callerPCM); err != nil {
 		return call, err
 	}
 	if audioPipeline != nil {
-		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredCallerAudio.bytes()); err != nil {
+		if err := s.writeVoiceRecording(call.ID, "caller-delivered", deliveredPCM); err != nil {
 			return call, err
 		}
 		call.DeliveredCallerRecording = "caller-delivered"
 	}
 	call.TargetRecording = "receptionist"
 	call.CallerRecording = "caller"
-	return call, nil
+	return call, callbackErr
 }
 
 func voiceCarrierRouteInput(spec VoiceFixtureSpec, virtualNumber string) map[string]any {
@@ -806,4 +808,38 @@ func carrierRMS(pcm []int16) float64 {
 		sum += value * value
 	}
 	return math.Sqrt(sum / float64(len(pcm)))
+}
+
+func carrierTargetThread(active carrierActiveCalls, destination string) (string, error) {
+	thread := ""
+	for _, item := range active.Calls {
+		if item.To != destination || item.ThreadID == "" {
+			continue
+		}
+		if thread != "" {
+			return "", errors.New("multiple active calls match simulated destination")
+		}
+		thread = item.ThreadID
+	}
+	if thread == "" {
+		return "", errors.New("no realtime thread matches simulated inbound call")
+	}
+	return thread, nil
+}
+func (s *service) deliverCarrierCallback(ctx context.Context, runID, fixtureID, callID, eventType, external string, endpoint *sdk.RuntimeAppEndpoint, form url.Values, token string) error {
+	gateway, err := carrierGatewayURL(external, endpoint)
+	status := 0
+	if err == nil {
+		_, status, err = carrierPOST(ctx, gateway, external, form, token)
+	}
+	if err == nil && (status < 200 || status >= 300) {
+		err = fmt.Errorf("callback returned HTTP %d", status)
+	}
+	data := map[string]any{"status": status, "call_sid": form.Get("CallSid"), "stream_sid": form.Get("StreamSid"), "delivered": err == nil}
+	if err != nil {
+		data["error"] = err.Error()
+		eventType += ".failed"
+	}
+	saveErr := s.db.addProtocolEvent(&ProtocolFixtureEvent{RunID: runID, FixtureID: fixtureID, CallID: callID, Type: eventType, Direction: "fixture_to_app", Data: data})
+	return errors.Join(err, saveErr)
 }

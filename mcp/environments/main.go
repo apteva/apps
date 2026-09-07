@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.3
-description: Isolated test environments with project apps, managed MCP servers, fake or explicitly bound real connections, deterministic seeds, agents, interactive web, voice, and protocol fixtures, edge policies, and snapshots. v0.7.3 publishes its authoritative assertion type catalog.
+version: 0.7.4
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.4 fixes lifecycle recovery, partial updates, evaluation evidence, carrier call correlation, and stale UI state, with cached catalogs, batched reads, and optional history retention.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -71,7 +71,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.3, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.4, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
@@ -102,7 +102,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "reconcile", Schedule: "@every 15s", Run: func(ctx context.Context, app *sdk.AppCtx) error { a.svc.ctx = app; return a.svc.reconcile(ctx) }}}
+	return []sdk.Worker{{Name: "reconcile", Schedule: "@every 15s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.svc.reconcile(ctx) }}}
 }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{{Pattern: "/fixtures/", Handler: a.handleFixture, NoAuth: true}, {Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environments/", Handler: a.handleEnvironment}, {Pattern: "/api/runs", Handler: a.handleRuns}, {Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/voice-recordings/", Handler: a.handleVoiceRecording}, {Pattern: "/api/catalog", Handler: a.handleCatalog}, {Pattern: "/api/catalog/", Handler: a.handleCatalogItem}, {Pattern: "/api/snapshots", Handler: a.handleSnapshots}, {Pattern: "/api/snapshots/", Handler: a.handleSnapshot}, {Pattern: "/api/import/legacy", Handler: a.handleLegacyImport}}

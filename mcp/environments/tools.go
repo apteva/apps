@@ -114,7 +114,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_list", Description: "List environment definitions and active runs.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.listDefinitions() }},
 		{Name: "environment_get", Description: "Get one environment definition and runtime.", InputSchema: requiredSchema("id"), Handler: a.toolGet},
 		{Name: "environment_create", Description: "Create a durable environment definition.", InputSchema: requiredSchema("name"), Handler: a.toolSave(false)},
-		{Name: "environment_update", Description: "Update a durable environment definition.", InputSchema: requiredSchema("id", "name"), Handler: a.toolSave(true)},
+		{Name: "environment_update", Description: "Update a durable environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolSave(true)},
 		{Name: "environment_delete", Description: "Delete a stopped environment definition.", InputSchema: requiredSchema("id"), Handler: a.toolDelete},
 		{Name: "environment_start", Description: "Start a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStart},
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
@@ -161,6 +161,9 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 }
 func (a *App) toolSave(update bool) sdk.ToolHandler {
 	return func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+		if update {
+			return a.svc.updateDefinition(str(args, "id"), args)
+		}
 		var d Definition
 		if err := decodeArgs(args, &d); err != nil {
 			return nil, err
@@ -223,29 +226,7 @@ func (a *App) toolRunStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]bool{"ok": true}, a.svc.stopRun(r)
 }
 func (a *App) toolCatalog(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	apps, err := a.svc.runtime().ListRuntimeCatalogApps(a.svc.ctx.CurrentProject())
-	if err != nil {
-		return nil, err
-	}
-	connections, err := a.svc.ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: a.svc.ctx.CurrentProject()})
-	if err != nil {
-		return nil, err
-	}
-	integrations, err := a.svc.runtime().ListRuntimeCatalogIntegrations()
-	if err != nil {
-		return nil, err
-	}
-	managedMCPs, err := a.svc.runtime().ListRuntimeCatalogManagedMCPServers(a.svc.ctx.CurrentProject())
-	if err != nil {
-		return nil, err
-	}
-	agents, err := a.svc.runtime().ListRuntimeCatalogAgents(a.svc.ctx.CurrentProject())
-	if err != nil {
-		return nil, err
-	}
-	snapshots, err := a.svc.runtime().ListRuntimeSnapshots()
-	realtimeProviders, _ := a.svc.runtime().ListRuntimeRealtimeProviders(a.svc.ctx.CurrentProject())
-	return map[string]any{"apps": apps, "connections": connections, "integrations": integrations, "managed_mcps": managedMCPs, "agents": agents, "snapshots": snapshots, "assertion_types": assertionTypeCatalog(), "web_fixtures": webFixtureCatalog(), "protocol_fixtures": protocolFixtureCatalog(), "realtime_providers": realtimeProviders}, err
+	return a.svc.catalog()
 }
 func (a *App) toolCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
