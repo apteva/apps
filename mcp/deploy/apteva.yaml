@@ -2,28 +2,26 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.25.0
+version: 0.26.0
 description: |
-  Build and release services, Android apps, and iOS apps across local
-  and external build backends using a provider-neutral build contract.
-  Takes a code repo (from the Code app or a local path),
-  builds it with the framework's toolchain, and runs the result as
-  a supervised child process bound to a local port. The Apteva
-  server proxies traffic to live deployments under /_deploy/<slug>/.
+  Build and release services, mobile apps, and arbitrary artifacts from Code
+  or local sources using local and external build backends. Generic command
+  stages prepare, export, build, and test projects with your chosen toolchain.
+  Service deployments run as supervised processes with server-proxied ingress.
 
   Supports source kinds {code, local} and frameworks
-  {go, node, bun, static, blank, android, ios}.
-  v0.25.0 adds durable release and cancellation intent, scoped record access,
-  process ownership checks, safe replacement/recovery, signing revisions,
-  bounded archives/logging, ingress retries and environment-aware panel actions.
-  Local builds now return asynchronously. GitHub workflows must declare
-  apteva_deploy_run_id and use it as their run-name.
+  {go, node, bun, static, blank, android, ios, command}.
+  v0.26.0 adds verified, resumable Code snapshots, per-target publisher accounts,
+  integration-driven artifact publishing, separate availability observations,
+  and release policies tied to the exact tested artifact. Includes a Steamworks
+  integration configuration example; engine exports and uploads use commands.
+  GitHub workflows must declare apteva_deploy_run_id and use it as their run-name.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [deploy, build, runtime, android, ios, app-store, google-play, agent]
+tags: [deploy, build, runtime, artifacts, android, ios, app-store, google-play, steam, agent]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -181,7 +179,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.25.0
+    ref: deploy/v0.26.0
     entry: mcp/deploy
   port: 8080
   health_check: /health

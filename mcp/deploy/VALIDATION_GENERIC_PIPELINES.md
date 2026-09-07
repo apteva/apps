@@ -30,4 +30,5 @@ connections must be configured for a real target. The Steam configuration exampl
 contains placeholder IDs and an illustrative observation pointer; confirm the
 provider response shape before enabling production policy rules.
 
-No new release tag or production deployment was created as part of this change.
+This validation covers Deploy 0.26.0. No production deployment or real store
+publication was performed during validation.
