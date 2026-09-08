@@ -46,10 +46,14 @@ func startReadObservation(ctx *sdk.AppCtx, args map[string]any, operation string
 	if parent == nil {
 		parent = context.Background()
 	}
+	requestID := diagnosticRequestID(strArg(args, "request_id"))
+	if id, ok := parent.Value(readRequestIDKey{}).(string); ok && requestIDPattern.MatchString(id) {
+		requestID = id
+	}
 	now := time.Now()
 	pid, _ := resolveProjectFromArgs(args)
 	d := &readObservation{app: ctx, started: now, phaseStarted: now,
-		phase: "prepare", operation: operation, callID: rand.Text(), requestID: diagnosticRequestID(strArg(args, "request_id")),
+		phase: "prepare", operation: operation, callID: rand.Text(), requestID: requestID,
 		projectID: pid, queryID: readFingerprint(operation, args), phases: map[string]time.Duration{}, poolStart: ctx.AppReadDB().Stats()}
 	cp := make(map[string]any, len(args)+1)
 	for k, v := range args {

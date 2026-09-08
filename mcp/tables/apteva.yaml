@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.19
+version: 0.1.20
 description: |
-  v0.1.19 Logs Gateway request correlation IDs on Functions-to-Tables calls without changing query behavior or access controls.
+  v0.1.20 Adds correlated read diagnostics, query fingerprints, pool and phase timings, and deadline-overrun reporting without changing SQL timeouts or read concurrency.
 
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -135,7 +135,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.19
+    ref: tables/v0.1.20
     entry: mcp/tables
   port: 8080
   health_check: /health

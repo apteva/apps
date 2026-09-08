@@ -1,3 +1,20 @@
+# 0.1.20 — Read diagnostics
+
+Adds one detailed completion record for every failed or slow read, plus optional
+`log_all_reads` for temporary full sampling. Records query fingerprints,
+Function/Gateway request correlation, per-call IDs, phase timings, row counts,
+effective read-pool state, deadline sources and overruns. Query literals,
+parameters, result values and raw database error messages are omitted.
+
+Preserves 0.1.19 Function correlation, 0.1.18 JSON query compatibility, 0.1.17
+startup migration behavior, and SDK v0.76.0. No new database migration, read-pool
+limit change, SQL timeout change, or driver update.
+
+Includes regression tests and a standalone synthetic reproducer showing delayed
+cancellation while the pinned driver computes a later result row. This release
+reports that condition; a driver-level interruption fix remains separate. See
+READ_DIAGNOSTICS.md for measurement instructions and the precise limitation.
+
 # 0.1.18 — JSON query compatibility
 
 Allow SQLite's built-in `json_each()` and `json_tree()` in `tables_query`,

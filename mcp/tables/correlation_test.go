@@ -22,3 +22,18 @@ func TestTableCorrelationDoesNotChangeToolArguments(t *testing.T) {
 		t.Fatalf("%v %v", result, err)
 	}
 }
+
+func TestFunctionCorrelationReachesReadDiagnostics(t *testing.T) {
+	ctx, _, logger := diagnosticTestCtx(t)
+	args := map[string]any{"sql": "SELECT 1 AS n", "_request_id": "gateway-function-123", "request_id": "caller-supplied"}
+	if _, err := invokeObservedRead(&App{}, ctx, context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	records := logger.snapshot()
+	if len(records) != 1 || records[0]["request_id"] != "gateway-function-123" {
+		t.Fatalf("missing originating Function request ID: %+v", records)
+	}
+	if args["_request_id"] != "gateway-function-123" {
+		t.Fatal("caller arguments were mutated")
+	}
+}

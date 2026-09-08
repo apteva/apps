@@ -1,7 +1,8 @@
 # Read diagnostics
 
-This change is based on Tables `tables/v0.1.16` with app-sdk `v0.74.1` and
-modernc.org/sqlite `v1.50.0`. It does not change read concurrency, queue limits,
+Tables 0.1.20 carries the diagnostics developed against `tables/v0.1.16`
+forward onto 0.1.19, retaining app-sdk `v0.76.0` and modernc.org/sqlite `v1.50.0`.
+It does not change read concurrency, queue limits,
 SQL deadlines, WAL configuration, or dependencies.
 
 ## Collect a useful comparison
@@ -11,8 +12,10 @@ After deploying this change, temporarily set the installation config
 read exceeding `slow_query_ms` (250 ms by default) still produces a completion
 record. Turn full logging off after the measurement window.
 
-Pass the originating Function request ID as the optional `request_id` argument
-on each Tables read. For example:
+Functions 1.11.4 already passes the Gateway request ID in `_request_id`. Tables
+0.1.20 carries that ID into the detailed read record automatically, while
+retaining the existing `tables call completed` summary. For other callers, pass
+an optional `request_id` argument on each Tables read. For example:
 
 ```json
 {
@@ -25,8 +28,8 @@ on each Tables read. For example:
 The HTTP routes also accept `X-Request-ID`. IDs must be 1–128 ASCII characters
 from letters, digits, `-_.:/`; invalid diagnostic IDs are ignored. Each call
 gets a separate random `call_id`, so retries and parallel calls can be separated.
-The caller must supply `request_id`: this change does not add automatic tracing
-through Functions, the gateway, or the SDK.
+The existing Functions `_request_id` takes precedence over an explicitly supplied
+`request_id`. Callers outside that flow must supply their own diagnostic ID.
 
 Reproduce `dashboard_calls`, `dashboard_outbound_calls`, and the inbound
 `appels` aggregation with identical parameters and arrival load, first alone,
