@@ -94,7 +94,7 @@ func (p *recordingStoragePlatform) CallAppResult(appName, tool string, input map
 	case "files_upload":
 		resp = map[string]any{"id": 88}
 	case "files_get":
-		resp = map[string]any{"id": input["id"]}
+		resp = map[string]any{"found": true, "file": map[string]any{"id": input["id"]}}
 	case "files_get_content":
 		resp = map[string]any{
 			"id":             input["id"],

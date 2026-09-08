@@ -747,6 +747,12 @@ func syncFinancialObligation(ctx *sdk.AppCtx, pid, id string) error {
 	if v.Kind != "credit" && out.Bill.SourceKey != source {
 		return fail("conflict", errors.New("Bills source identity does not match this obligation"))
 	}
+	// The payable already exists. Keep its durable link even if a later receipt
+	// attachment fails, so retries and the UI can still locate the obligation.
+	if _, e = ctx.AppDB().Exec(`UPDATE gig_obligations SET bill_id=?,bill_json=?,synced_at=CURRENT_TIMESTAMP WHERE id=?`, out.Bill.ID, stringifyJSON(out.Bill), id); e != nil {
+		return e
+	}
+
 	if documentsSynced == 0 && out.Bill.Status != "void" {
 		for _, x := range v.Expenses {
 			if x.FileID > 0 {

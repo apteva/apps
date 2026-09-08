@@ -1,6 +1,7 @@
 package main
 
 import (
+	tk "github.com/apteva/app-sdk/testkit"
 	"strings"
 	"sync"
 	"testing"
@@ -157,5 +158,27 @@ func TestBackdatedPaymentReturnsExactRecord(t *testing.T) {
 		if _, e = app.toolBillPaymentsRecord(ctx, args); e != nil {
 			t.Fatal(e)
 		}
+	}
+}
+
+func TestStorageMetadataEnvelopeAndAppendOnlyDocument(t *testing.T) {
+	p := &recordingStoragePlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(p))
+	v := mustVendor(t, ctx, "document@example.test", "Document")
+	b := mustBill(t, ctx, v.ID, "Doc-1", []any{line("Work", 1, 100, 0)})
+	for _, id := range []int64{88, 89, 88} {
+		if _, e := (&App{}).toolBillsAttachFile(ctx, map[string]any{"bill_id": b.ID, "file_id": id, "append_only": true}); e != nil {
+			t.Fatal(e)
+		}
+	}
+	b, e := dbBillGetByID(ctx.AppDB(), "test-proj", b.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = loadBillChildren(ctx.AppDB(), "test-proj", b); e != nil {
+		t.Fatal(e)
+	}
+	if len(b.Documents) != 2 || b.AttachedFileID != nil {
+		t.Fatal("append-only documents replaced primary or duplicated", b)
 	}
 }

@@ -31,6 +31,8 @@ func (p *financialPlatform) CallAppResult(app, tool string, args map[string]any,
 	}
 	var value any
 	switch tool {
+	case "files_get":
+		value = map[string]any{"found": true, "file": map[string]any{"id": args["id"]}}
 	case "vendors_upsert_by_email":
 		value = map[string]any{"vendor": map[string]any{"id": 901}}
 	case "bills_create_obligation":
@@ -283,5 +285,24 @@ func TestFinancialKnownZeroAndNullExpense(t *testing.T) {
 	f, _ := loadFinancials(ctx, "project-a", gid)
 	if f.Obligations[0].TotalMinor != 0 || f.Obligations[0].SyncStatus != "not_applicable" || p.creates != 0 {
 		t.Fatal(f)
+	}
+}
+
+func TestFinancialReceiptFailureRetainsCreatedBill(t *testing.T) {
+	ctx, p, gid := financeTest(t, 226)
+	a := saveFinanceAgreement(t, ctx, gid)
+	args := approvalArgs(gid, a)
+	args["expenses"] = []any{map[string]any{"description": "Receipt", "amount_minor": 100, "file_id": 91}}
+	if _, e := (&App{}).toolGigsApproveCompensation(ctx, args); e != nil {
+		t.Fatal(e)
+	}
+	f, _ := loadFinancials(ctx, "project-a", gid)
+	o := f.Obligations[0]
+	if o.Bill == nil || o.BillID == 0 || o.SyncStatus != "documents_pending" || p.creates != 1 {
+		t.Fatal(o)
+	}
+	_ = syncFinancialObligation(ctx, "project-a", o.ID)
+	if p.creates != 1 {
+		t.Fatal("receipt retry duplicated bill")
 	}
 }

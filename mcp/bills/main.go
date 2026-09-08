@@ -1298,7 +1298,10 @@ func storageFileExists(ctx *sdk.AppCtx, pid string, fileID int64) error {
 		return errors.New("attach: storage app not installed for this project — install it to attach files to bills")
 	}
 	var got struct {
-		ID int64 `json:"id"`
+		Found bool `json:"found"`
+		File  *struct {
+			ID int64 `json:"id"`
+		} `json:"file"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
 		"id":          fileID,
@@ -1311,7 +1314,7 @@ func storageFileExists(ctx *sdk.AppCtx, pid string, fileID int64) error {
 		}
 		return fmt.Errorf("attach: storage file %d not found (%w)", fileID, err)
 	}
-	if got.ID == 0 {
+	if !got.Found || got.File == nil || got.File.ID != fileID {
 		return fmt.Errorf("attach: storage file %d not found", fileID)
 	}
 	return nil
