@@ -132,6 +132,26 @@ SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
 fulfillment, account-management, usage-write, and manual-payment tools require
 `saas.admin`; customer checkout requires `saas.checkout`.
 
+## Recovery and account browsing
+
+The checkout recovery worker resumes failed billing preparation and paid-invoice
+activation, including expired processing leases. Billing inputs are saved before
+external calls so retries retain the original cycle dates, collection policy,
+and checkout redirect URLs. Existing operations without saved inputs recover
+their dates from prepared lines or the original Subscription cycle. Recovery
+does not start another collection attempt for an invoice simply awaiting payment;
+Billing owns collection retries. Active leases are left alone, and polling is
+paced so unavailable operations do not prevent other accounts from recovering.
+
+Delayed collection-failure events are checked against the current Billing
+invoice before changing access. An invoice that is now paid retains paid access;
+actual refunds and voids still follow the configured policy.
+
+Plan-change recovery polls all pending changes fairly, including when more than
+100 changes are scheduled or awaiting payment. The panel pages accounts in groups
+of 50 and shows account/status totals for the entire filtered result. Changing a
+filter returns to the first page.
+
 ## Fulfillment Actions
 
 Plans can define generic lifecycle actions. SaaS calls the configured
@@ -197,6 +217,11 @@ mappings because there would be no durable response available to resume the
 mapping after an interrupted call. Sensitive output values cannot be mapped
 into account metadata.
 
+Historical cleanup runs in transactions of at most 128 records, checkpointing
+each batch. Sanitized records are indexed by persistence version and skipped on
+subsequent mounts. Changing an action's persistence mode or sensitive paths
+invalidates that action's history so the next mount applies the new policy.
+
 ### Integration-backed fulfillment
 
 `saas_connection_ensure` is the one-time credential-ingestion boundary. It
@@ -211,6 +236,15 @@ calls the configured integration tool. An optional `managed` block describes
 restricted provider grants and a remote app bundle. Grant delivery tokens are
 assembled only in memory and are excluded from persisted fulfillment input and
 output.
+
+Generic integration actions receive the fulfillment `idempotency_key` in their
+outgoing input, including actions using an explicit `input` object. Configure a
+target tool that honors this key for operations that must not be repeated.
+Managed provisioning continues to use its stable `request_id` instead.
+Revoked managed grants are disabled on the controller before the remote
+provisioning request is sent, so the delegated token is revoked even if the
+customer's instance is unreachable. A controller revocation failure leaves the
+fulfillment action retryable and prevents remote delivery.
 
 ```json
 {

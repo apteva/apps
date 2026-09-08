@@ -116,10 +116,15 @@ func (a *App) executeIntegrationFulfillment(ctx *sdk.AppCtx, pid string, acct *A
 	input := mapFromAny(args["input"])
 	if input == nil {
 		input = copyMap(args)
-		for _, key := range []string{"connection_id", "managed", "idempotency_key", "_project_id"} {
+		for _, key := range []string{"connection_id", "managed", "_project_id"} {
 			delete(input, key)
 		}
+	} else {
+		input = copyMap(input)
 	}
+	// Keep the operation identity across lost responses, including when an
+	// action supplies an explicit input object. Do not mutate stored arguments.
+	input["idempotency_key"] = strArg(args, "idempotency_key")
 	if managed := mapFromAny(args["managed"]); len(managed) != 0 {
 		var err error
 		input, err = prepareManagedProvisioning(ctx, pid, acct, run, args, managed)
@@ -183,6 +188,11 @@ func prepareManagedProvisioning(ctx *sdk.AppCtx, pid string, acct *Account, run 
 	revoked := make([]string, 0)
 	for _, value := range sliceFromAny(managed["revoked_grant_ids"]) {
 		if grantID := strings.TrimSpace(strFromAny(value)); grantID != "" {
+			// The controller is authoritative for the delegated token. Disabling
+			// only the customer's local connection leaves that token usable.
+			if err := manager.RevokeManagedConnectionGrant(tenantID, grantID); err != nil {
+				return nil, fmt.Errorf("revoke managed grant %s: %w", grantID, err)
+			}
 			revoked = append(revoked, grantID)
 		}
 	}

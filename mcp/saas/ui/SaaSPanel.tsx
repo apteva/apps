@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 interface NativePanelProps {
@@ -178,6 +178,14 @@ function featureOptions(plan: Plan | null, usage: UsageTotal[]): string[] {
 }
 
 const UNLINKED_PRODUCT = "unlinked";
+const ACCOUNT_PAGE_SIZE = 50;
+
+interface AccountPage {
+  accounts: Account[];
+  total: number;
+  has_more: boolean;
+  status_counts: Record<string, number>;
+}
 
 function productKey(plan: Plan | null | undefined): string {
   return plan?.catalog_product_id ? String(plan.catalog_product_id) : UNLINKED_PRODUCT;
@@ -192,6 +200,12 @@ function productName(plan: Plan | null | undefined): string {
 export default function SaaSPanel({ projectId }: NativePanelProps) {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accountOffset, setAccountOffset] = useState(0);
+  const [accountTotal, setAccountTotal] = useState(0);
+  const [accountHasMore, setAccountHasMore] = useState(false);
+  const [accountLoading, setAccountLoading] = useState(true);
+  const [accountCounts, setAccountCounts] = useState<Record<string, number>>({});
+  const loadSequence = useRef(0);
   const [usage, setUsage] = useState<UsageTotal[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("");
@@ -303,35 +317,48 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   const features = useMemo(() => featureOptions(selectedPlan, usage), [selectedPlan, usage]);
 
   const summary = useMemo(() => {
-    const active = visibleAccounts.filter((a) => a.status === "active").length;
-    const pastDue = visibleAccounts.filter((a) => a.status === "past_due").length;
+    const active = accountCounts.active || 0;
+    const pastDue = accountCounts.past_due || 0;
     const over = usage.filter((u) => u.over_limit).length;
     return { active, pastDue, over };
-  }, [usage, visibleAccounts]);
+  }, [usage, accountCounts]);
 
   const load = useCallback(async () => {
+    const sequence = ++loadSequence.current;
+    setAccountLoading(true);
     try {
-      const accountParams: Record<string, string> = {};
+      const accountParams: Record<string, string> = { limit: String(ACCOUNT_PAGE_SIZE), offset: String(accountOffset) };
       if (statusFilter) accountParams.status = statusFilter;
       if (productFilter) accountParams.catalog_product_id = productFilter === UNLINKED_PRODUCT ? "0" : productFilter;
       const [p, a] = await Promise.all([
         getJSON<{ plans: Plan[] }>("/plans"),
-        getJSON<{ accounts: Account[] }>("/accounts", accountParams),
+        getJSON<AccountPage>("/accounts", accountParams),
       ]);
+      if (sequence !== loadSequence.current) return;
+      if (accountOffset > 0 && accountOffset >= a.total) {
+        setAccountOffset(Math.max(0, Math.floor((a.total - 1) / ACCOUNT_PAGE_SIZE) * ACCOUNT_PAGE_SIZE));
+        return;
+      }
       const planRows = p.plans || [];
       const accountRows = a.accounts || [];
       setPlans(planRows);
       setAccounts(accountRows);
+      setAccountTotal(a.total);
+      setAccountHasMore(a.has_more);
+      setAccountCounts(a.status_counts || {});
       if (!form.plan_key && planRows[0]) setForm((f) => ({ ...f, plan_key: planRows[0].key }));
       if (!selectedId && accountRows[0]) setSelectedId(accountRows[0].id);
       const productCount = new Set(planRows.filter((plan) => plan.catalog_product_id).map(productKey)).size;
-      setStatus(`${productCount} product${productCount === 1 ? "" : "s"} · ${accountRows.length} account${accountRows.length === 1 ? "" : "s"}`);
+      setStatus(`${productCount} product${productCount === 1 ? "" : "s"} · ${a.total} account${a.total === 1 ? "" : "s"}`);
       setError("");
     } catch (e) {
+      if (sequence !== loadSequence.current) return;
       setError((e as Error).message);
       setStatus("Load failed");
+    } finally {
+      if (sequence === loadSequence.current) setAccountLoading(false);
     }
-  }, [form.plan_key, getJSON, productFilter, selectedId, statusFilter]);
+  }, [accountOffset, form.plan_key, getJSON, productFilter, selectedId, statusFilter]);
 
   const loadUsage = useCallback(async (account: Account | null) => {
     if (!account) {
@@ -349,7 +376,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     load();
     const timer = window.setInterval(load, 8000);
-    return () => window.clearInterval(timer);
+    return () => { window.clearInterval(timer); ++loadSequence.current; };
   }, [load]);
 
   useEffect(() => {
@@ -616,7 +643,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           <select
             aria-label="Filter accounts by product"
             value={productFilter}
-            onChange={(e) => setProductFilter(e.target.value)}
+            onChange={(e) => { setAccountOffset(0); setProductFilter(e.target.value); }}
             className={`${CONTROL} text-xs`}
           >
             <option value="">all products</option>
@@ -627,7 +654,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           <select
             aria-label="Filter accounts by status"
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setAccountOffset(0); setStatusFilter(e.target.value); }}
             className={`${CONTROL} text-xs`}
           >
             <option value="">all statuses</option>
@@ -639,7 +666,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
           </select>
         </section>
 
-        <div className="flex-1 min-h-0 overflow-auto">
+        <div className="flex-1 min-h-0 overflow-auto" aria-busy={accountLoading}>
           {visibleAccounts.length === 0 ? (
             <div className="p-4 text-sm text-text-dim">No accounts match this view.</div>
           ) : visibleAccounts.map((account) => {
@@ -663,6 +690,15 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             );
           })}
         </div>
+        <nav aria-label="Account pages" className="p-3 border-t border-border flex items-center justify-between gap-2 text-xs">
+          <button type="button" disabled={accountLoading || accountOffset === 0}
+            onClick={() => setAccountOffset((offset) => Math.max(0, offset - ACCOUNT_PAGE_SIZE))}
+            className="px-2 py-1 rounded bg-bg-input disabled:opacity-50">Previous</button>
+          <span>{accountTotal ? `${accountOffset + 1}–${Math.min(accountOffset + accounts.length, accountTotal)} of ${accountTotal}` : "0 accounts"}</span>
+          <button type="button" disabled={accountLoading || !accountHasMore}
+            onClick={() => setAccountOffset((offset) => offset + ACCOUNT_PAGE_SIZE)}
+            className="px-2 py-1 rounded bg-bg-input disabled:opacity-50">Next</button>
+        </nav>
       </aside>
 
       <main className="min-w-0 min-h-0 flex flex-col">

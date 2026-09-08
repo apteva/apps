@@ -2782,7 +2782,9 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 	if collectionMethod != "charge_automatically" {
 		collectionMethod = "send_invoice"
 	}
-	op, claimed, err := dbCommerceCycleClaim(ctx.AppDB(), pid, acct.ID, subID, cycleID)
+	request := commerceBillingRequest(event.Data)
+	request["metadata"] = map[string]any{"collection_method": collectionMethod}
+	op, claimed, err := dbCommerceCycleClaim(ctx.AppDB(), pid, acct.ID, subID, cycleID, request)
 	if err != nil || !claimed {
 		return err
 	}
@@ -3297,10 +3299,19 @@ func (a *App) handleInvoiceCollectionFailed(ctx *sdk.AppCtx, event sdk.Event) er
 	if err != nil || op == nil {
 		return err
 	}
-	if _, err := a.syncBillingInvoiceProjection(ctx, pid, op); err != nil {
+	projection, err := a.syncBillingInvoiceProjection(ctx, pid, op)
+	if err != nil {
 		return err
 	}
 	eventName := event.Name()
+	// Events may arrive after a later successful collection. Use the current
+	// invoice state, not an obsolete failure payload, to decide access.
+	if projection.Status == "paid" {
+		return a.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: pid, Data: map[string]any{"id": invoiceID}})
+	}
+	if (eventName == "invoice.voided" || eventName == "invoice.void") && projection.Status != "void" && projection.Status != "voided" {
+		return nil
+	}
 	behavior := "past_due"
 	if eventName == "invoice.refunded" {
 		behavior = strings.ToLower(firstNonEmpty(ctx.Config().Get("refund_behavior"), "past_due"))
@@ -3379,39 +3390,6 @@ func (a *App) recoverExpiredCheckouts(ctx *sdk.AppCtx) error {
 		ctx.Logger().Warn("backfill SaaS Billing projections", "failed", result["failed"], "errors", result["errors"])
 	}
 	return err
-}
-
-func (a *App) reconcilePendingInvoices(ctx *sdk.AppCtx, pid string) error {
-	operations, err := dbCommerceOperationsForReconciliation(ctx.AppDB(), pid, time.Now().UTC().Add(-5*time.Minute), 20)
-	if err != nil {
-		return err
-	}
-	for _, operation := range operations {
-		invoiceID := int64PtrValue(operation.InvoiceID)
-		if invoiceID == 0 {
-			continue
-		}
-		var out map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"_project_id": pid, "id": invoiceID}, &out); err != nil {
-			ctx.Logger().Warn("reconcile SaaS invoice", "invoice_id", invoiceID, "err", err)
-			continue
-		}
-		invoice := unwrapMap(out, "invoice")
-		status := strArg(invoice, "status")
-		switch status {
-		case "paid":
-			if err := a.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": status}}); err != nil {
-				return err
-			}
-		case "void", "uncollectible":
-			if err := a.handleInvoiceCollectionFailed(ctx, sdk.Event{Event: "invoice." + status, ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": status}}); err != nil {
-				return err
-			}
-		default:
-			_ = dbCommerceOperationTouch(ctx.AppDB(), pid, operation.ID)
-		}
-	}
-	return nil
 }
 
 func createAuthOrg(ctx *sdk.AppCtx, pid, slug, name string) (*int64, error) {
@@ -4398,7 +4376,7 @@ func dbAccountList(db *sql.DB, pid string, args map[string]any) ([]*Account, err
 	return out, rows.Err()
 }
 
-func dbAccountSearch(db *sql.DB, pid string, args map[string]any) ([]*Account, int, int, int, error) {
+func accountSearchFrom(pid string, args map[string]any) (string, []any) {
 	where := []string{"a.project_id=?"}
 	vals := []any{pid}
 	if id := int64Arg(args, "customer_id"); id != 0 {
@@ -4474,6 +4452,30 @@ func dbAccountSearch(db *sql.DB, pid string, args map[string]any) ([]*Account, i
 	}
 
 	from := ` FROM saas_accounts a JOIN saas_customers c ON c.project_id=a.project_id AND c.id=a.customer_id WHERE ` + strings.Join(where, " AND ")
+	return from, vals
+}
+
+func dbAccountStatusCounts(db *sql.DB, pid string, args map[string]any) (map[string]int, error) {
+	from, vals := accountSearchFrom(pid, args)
+	rows, err := db.Query(`SELECT a.status, COUNT(*)`+from+` GROUP BY a.status`, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, err
+		}
+		counts[status] = count
+	}
+	return counts, rows.Err()
+}
+
+func dbAccountSearch(db *sql.DB, pid string, args map[string]any) ([]*Account, int, int, int, error) {
+	from, vals := accountSearchFrom(pid, args)
 	var total int
 	if err := db.QueryRow(`SELECT COUNT(*)`+from, vals...).Scan(&total); err != nil {
 		return nil, 0, 0, 0, err
@@ -4793,7 +4795,7 @@ func dbUsageStaleSources(db *sql.DB, pid string, acct *Account, now time.Time, d
 			return nil, err
 		}
 		freshness := defaultFreshness
-		meta := mapFromAny(metadata)
+		meta := mapFromAny(json.RawMessage(metadata))
 		if seconds := int64Arg(meta, "freshness_seconds"); seconds > 0 {
 			freshness = time.Duration(seconds) * time.Second
 		}
@@ -4930,8 +4932,8 @@ func dbFulfillmentRunReserve(db *sql.DB, pid, accountID string, action *PlanActi
 	persistedInput := persistedFulfillmentValue(action.PersistInput, input, action.SensitiveInputPaths)
 	res, err := db.Exec(`
 		INSERT INTO saas_fulfillment_runs
-			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error, attempt_count, started_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, '{}', '', 1, CURRENT_TIMESTAMP)
+			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error, attempt_count, started_at, persistence_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, '{}', '', 1, CURRENT_TIMESTAMP, 1)
 		ON CONFLICT(project_id, account_id, plan_action_id, transition_id) DO NOTHING`,
 		pid, accountID, action.ID, transitionID, action.Event, action.AppName, action.ToolName, jsonOrEmpty(persistedInput, "{}"))
 	if err != nil {
@@ -4975,7 +4977,7 @@ func dbFulfillmentRunFinish(db *sql.DB, pid string, id int64, action *PlanAction
 	}
 	persistedOutput := persistedFulfillmentValue(action.PersistOutput, output, action.SensitiveOutputPaths)
 	_, err := db.Exec(`UPDATE saas_fulfillment_runs
-		SET status=?, output_json=?, error=?, completed_at=`+completed+`, updated_at=CURRENT_TIMESTAMP
+		SET persistence_version=1, status=?, output_json=?, error=?, completed_at=`+completed+`, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND id=?`, status, jsonOrEmpty(persistedOutput, "{}"), errText, pid, id)
 	if err != nil {
 		return nil, err
@@ -5287,12 +5289,17 @@ func scanCheckout(row rowScanner) (*Checkout, error) {
 	return &checkout, nil
 }
 
-func dbCommerceCycleClaim(db *sql.DB, pid, accountID string, subscriptionID, cycleID int64) (*CommerceOperation, bool, error) {
+func dbCommerceCycleClaim(db *sql.DB, pid, accountID string, subscriptionID, cycleID int64, requests ...map[string]any) (*CommerceOperation, bool, error) {
 	key := fmt.Sprintf("subscription:%d:cycle:%d", subscriptionID, cycleID)
+	var request map[string]any
+	if len(requests) > 0 {
+		request = requests[0]
+	}
 	if _, err := db.Exec(`INSERT INTO saas_commerce_operations
-		(project_id, operation_key, account_id, subscription_id, cycle_id)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(project_id, operation_key) DO NOTHING`, pid, key, accountID, subscriptionID, cycleID); err != nil {
+		(project_id, operation_key, account_id, subscription_id, cycle_id, billing_request_json)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, operation_key) DO UPDATE SET billing_request_json=
+            CASE WHEN saas_commerce_operations.billing_request_json='{}' THEN excluded.billing_request_json ELSE saas_commerce_operations.billing_request_json END`, pid, key, accountID, subscriptionID, cycleID, jsonOrEmpty(request, "{}")); err != nil {
 		return nil, false, err
 	}
 	now := time.Now().UTC()
@@ -5326,7 +5333,7 @@ func dbCommercePaymentClaim(db *sql.DB, pid string, invoiceID int64) (*CommerceO
 		status='processing_payment', attempt_count=attempt_count+1, last_error='', lease_until=?, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND id=? AND (
 			status IN ('awaiting_payment','failed_billing','failed_payment') OR
-			(status='processing_payment' AND (lease_until IS NULL OR lease_until < ?))
+			(status IN ('processing_payment','processing_billing') AND (lease_until IS NULL OR lease_until < ?))
 		)`, leaseUntil, pid, op.ID, now.Format(time.RFC3339))
 	if err != nil {
 		return nil, false, err
@@ -5411,7 +5418,11 @@ func dbCommerceOperationGet(db *sql.DB, pid string, id int64) (*CommerceOperatio
 }
 
 func dbCommerceOperationsForReconciliation(db *sql.DB, pid string, before time.Time, limit int) ([]*CommerceOperation, error) {
-	rows, err := db.Query(commerceOperationSelect()+` WHERE project_id=? AND status='awaiting_payment' AND updated_at < ? ORDER BY updated_at LIMIT ?`, pid, before.Format("2006-01-02 15:04:05"), limit)
+	rows, err := db.Query(commerceOperationSelect()+` WHERE project_id=? AND cycle_id>0
+        AND status IN ('pending','awaiting_payment','failed_billing','failed_payment','processing_billing','processing_payment')
+        AND updated_at < ? AND (next_recovery_at IS NULL OR next_recovery_at<=CURRENT_TIMESTAMP)
+        AND (lease_until IS NULL OR datetime(lease_until)<=CURRENT_TIMESTAMP)
+        ORDER BY COALESCE(next_recovery_at,updated_at),id LIMIT ?`, pid, before.Format("2006-01-02 15:04:05"), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -5663,11 +5674,16 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			handleJSONOrErr(w, nil, err)
 			return
 		}
+		counts, err := dbAccountStatusCounts(ctx.AppDB(), pid, args)
+		if err != nil {
+			handleJSONOrErr(w, nil, err)
+			return
+		}
 		pending, err := dbBillingProjectionPendingCount(ctx.AppDB(), pid, "")
 		handleJSONOrErr(w, map[string]any{
 			"accounts": accounts, "count": len(accounts), "total": total,
 			"limit": limit, "offset": offset, "has_more": offset+len(accounts) < total,
-			"billing_sync_pending": pending,
+			"billing_sync_pending": pending, "status_counts": counts,
 		}, err)
 	case http.MethodPost:
 		var body map[string]any

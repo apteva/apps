@@ -252,35 +252,55 @@ func redactedStrings(original, sanitized any) []string {
 	return out
 }
 
+// A versioned partial index keeps ordinary mounts independent of history size.
+// Each transaction is a durable checkpoint and bounds memory during upgrades.
 func scrubFulfillmentHistory(db *sql.DB) error {
-	rows, err := db.Query(`
-		SELECT r.id, r.input_json, r.output_json, r.error,
-		       a.persist_input, a.persist_output, a.sensitive_input_paths_json, a.sensitive_output_paths_json
-		FROM saas_fulfillment_runs r
-		JOIN saas_plan_actions a ON a.id=r.plan_action_id AND a.project_id=r.project_id`)
+	for {
+		count, err := scrubFulfillmentBatch(db)
+		if err != nil {
+			return err
+		}
+		if count < 128 {
+			return nil
+		}
+	}
+}
+
+func scrubFulfillmentBatch(db *sql.DB) (int, error) {
+	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`
+  SELECT r.id, r.input_json, r.output_json, r.error,
+         a.persist_input, a.persist_output, a.sensitive_input_paths_json, a.sensitive_output_paths_json
+  FROM saas_fulfillment_runs r
+  JOIN saas_plan_actions a ON a.id=r.plan_action_id AND a.project_id=r.project_id
+  WHERE r.persistence_version < 1 ORDER BY r.id LIMIT 128`)
+	if err != nil {
+		return 0, err
 	}
 	type record struct {
 		id                                                  int64
 		input, output, errText, persistInput, persistOutput string
 		inputPaths, outputPaths                             string
 	}
-	var records []record
+	records := make([]record, 0, 128)
 	for rows.Next() {
 		var item record
 		if err := rows.Scan(&item.id, &item.input, &item.output, &item.errText, &item.persistInput, &item.persistOutput, &item.inputPaths, &item.outputPaths); err != nil {
 			rows.Close()
-			return err
+			return 0, err
 		}
 		records = append(records, item)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		return err
+		return 0, err
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, item := range records {
 		var input, output any
@@ -293,13 +313,9 @@ func scrubFulfillmentHistory(db *sql.DB) error {
 		safeInput := persistedFulfillmentValue(item.persistInput, input, json.RawMessage(item.inputPaths))
 		safeOutput := persistedFulfillmentValue(item.persistOutput, output, json.RawMessage(item.outputPaths))
 		safeError := redactFulfillmentError(item.errText, input, output, json.RawMessage(item.inputPaths), json.RawMessage(item.outputPaths))
-		inputJSON, outputJSON := jsonOrEmpty(safeInput, "{}"), jsonOrEmpty(safeOutput, "{}")
-		if inputJSON == item.input && outputJSON == item.output && safeError == item.errText {
-			continue
-		}
-		if _, err := db.Exec(`UPDATE saas_fulfillment_runs SET input_json=?, output_json=?, error=? WHERE id=?`, inputJSON, outputJSON, safeError, item.id); err != nil {
-			return err
+		if _, err := tx.Exec(`UPDATE saas_fulfillment_runs SET input_json=?, output_json=?, error=?, persistence_version=1 WHERE id=?`, jsonOrEmpty(safeInput, "{}"), jsonOrEmpty(safeOutput, "{}"), safeError, item.id); err != nil {
+			return 0, err
 		}
 	}
-	return nil
+	return len(records), tx.Commit()
 }

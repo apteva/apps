@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.10.0
+version: 0.10.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -27,6 +27,9 @@ description: |
   v0.10.0 adds integration-backed fulfillment and secure, app-owned managed
   connections so SaaS can push idempotent desired state to customer Apteva
   instances without storing provider or instance credentials in SaaS data.
+  v0.10.1 fixes managed grant revocation, fulfillment idempotency, delayed
+  payment events, billing recovery, plan-change scheduling, usage freshness,
+  account pagination, and fulfillment history cleanup performance.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas

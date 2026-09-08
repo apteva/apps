@@ -437,8 +437,9 @@ func (a *App) recoverPlanChanges(ctx *sdk.AppCtx) error {
 	}
 	rows, err := ctx.AppDB().Query(`SELECT id FROM saas_plan_changes
 		WHERE project_id=? AND status IN ('pending','scheduled','awaiting_payment','applying','failed')
-		AND (status<>'failed' OR next_attempt_at IS NULL OR next_attempt_at<=CURRENT_TIMESTAMP)
-		ORDER BY updated_at,id LIMIT 100`, pid)
+		AND (next_attempt_at IS NULL OR next_attempt_at<=CURRENT_TIMESTAMP)
+		AND (lease_until IS NULL OR datetime(lease_until)<=CURRENT_TIMESTAMP)
+		ORDER BY COALESCE(next_attempt_at,updated_at),id LIMIT 100`, pid)
 	if err != nil {
 		return err
 	}
@@ -456,6 +457,21 @@ func (a *App) recoverPlanChanges(ctx *sdk.AppCtx) error {
 	}
 	var first error
 	for _, id := range ids {
+		// Advance the polling schedule even when an unpaid or future change
+		// has nothing to do. Concurrent recovery workers share this claim.
+		res, err := ctx.AppDB().Exec(`UPDATE saas_plan_changes SET next_attempt_at=datetime('now','+1 minute')
+            WHERE project_id=? AND id=? AND (next_attempt_at IS NULL OR next_attempt_at<=CURRENT_TIMESTAMP)
+            AND (lease_until IS NULL OR datetime(lease_until)<=CURRENT_TIMESTAMP)`, pid, id)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			continue
+		}
 		if err := a.recoverPlanChange(ctx, pid, id); err != nil {
 			_ = dbPlanChangeFail(ctx.AppDB(), pid, id, err.Error())
 			if first == nil {
