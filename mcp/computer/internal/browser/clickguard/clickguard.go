@@ -18,6 +18,7 @@ import (
 )
 
 type Options struct {
+	WorkflowConstraints        []computer.WorkflowConstraint
 	TargetID                   string
 	ExpectedText               string
 	ExpectedEffect             string
@@ -30,6 +31,9 @@ type Options struct {
 // and explicit acknowledgement do not match the live target's consequence.
 // Callers can use errors.As to return a structured, retry-safe rejection.
 type ConsequenceError struct {
+	WorkflowID         string
+	AllowedEffect      string
+	ScheduledAt        string
 	Code               string
 	Target             Target
 	DetectedEffect     string
@@ -46,31 +50,34 @@ func (e *ConsequenceError) Error() string {
 		actual = strings.TrimSpace(e.Target.Text)
 	}
 	switch e.Code {
+	case "workflow_effect_mismatch", "workflow_resource_mismatch", "workflow_schedule_mismatch", "workflow_schedule_unverifiable", "workflow_target_unverifiable":
+		return fmt.Sprintf("click rejected: %s: operator workflow %q permits only %s for its registered resource at %s; no action was executed. Do not change confirmation arguments to bypass this constraint; use the authorized schedule or ask the operator to revise it", e.Code, e.WorkflowID, e.AllowedEffect, e.ScheduledAt)
 	case "semantic_intent_mismatch":
 		return fmt.Sprintf("click rejected: semantic_intent_mismatch: requested effect %q but live target %s is classified as %q; no action was executed", e.ExpectedEffect, describe(e.Target, actual), e.DetectedEffect)
 	default:
-		return fmt.Sprintf("click rejected: consequence_confirmation_required: live target %s is classified as %q; pass expected_effect=%q and confirm_consequence=%q only when that consequence is intended; no action was executed", describe(e.Target, actual), e.DetectedEffect, e.DetectedEffect, e.DetectedEffect)
+		return fmt.Sprintf("click rejected: consequence_confirmation_required: live target %s is classified as %q; no action was executed. Check the authorized task before choosing a target; acknowledging a detected effect does not authorize it", describe(e.Target, actual), e.DetectedEffect)
 	}
 }
 
 type Target struct {
-	ID                string `json:"id,omitempty"`
-	X                 int    `json:"x,omitempty"`
-	Y                 int    `json:"y,omitempty"`
-	Tag               string `json:"tag"`
-	Role              string `json:"role,omitempty"`
-	Text              string `json:"text,omitempty"`
-	AccessibleName    string `json:"accessible_name,omitempty"`
-	Disabled          bool   `json:"disabled"`
-	Loading           bool   `json:"loading"`
-	TargetLoading     bool   `json:"target_loading"`
-	ContainerLoading  bool   `json:"container_loading"`
-	PageLoadingCount  int    `json:"page_loading_indicators"`
-	Stale             bool   `json:"stale,omitempty"`
-	Dangerous         bool   `json:"dangerous"`
-	Effect            string `json:"effect,omitempty"`
-	DestructiveEffect string `json:"destructive_effect,omitempty"`
-	OpaqueFrame       bool   `json:"opaque_frame,omitempty"`
+	WorkflowObservations []WorkflowObservation `json:"workflow_observations,omitempty"`
+	ID                   string                `json:"id,omitempty"`
+	X                    int                   `json:"x,omitempty"`
+	Y                    int                   `json:"y,omitempty"`
+	Tag                  string                `json:"tag"`
+	Role                 string                `json:"role,omitempty"`
+	Text                 string                `json:"text,omitempty"`
+	AccessibleName       string                `json:"accessible_name,omitempty"`
+	Disabled             bool                  `json:"disabled"`
+	Loading              bool                  `json:"loading"`
+	TargetLoading        bool                  `json:"target_loading"`
+	ContainerLoading     bool                  `json:"container_loading"`
+	PageLoadingCount     int                   `json:"page_loading_indicators"`
+	Stale                bool                  `json:"stale,omitempty"`
+	Dangerous            bool                  `json:"dangerous"`
+	Effect               string                `json:"effect,omitempty"`
+	DestructiveEffect    string                `json:"destructive_effect,omitempty"`
+	OpaqueFrame          bool                  `json:"opaque_frame,omitempty"`
 }
 
 // Click performs validation and mouse dispatch inside one chromedp action.
@@ -81,7 +88,7 @@ func Click(ctx context.Context, x, y, clickCount int, options Options) (Target, 
 	}
 	var target Target
 	err := cdputil.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		result, exception, err := cdpruntime.Evaluate(inspectScript(x, y, options.TargetID)).WithReturnByValue(true).Do(ctx)
+		result, exception, err := cdpruntime.Evaluate(inspectWorkflowScript(inspectScript(x, y, options.TargetID), options.WorkflowConstraints)).WithReturnByValue(true).Do(ctx)
 		if err != nil {
 			return fmt.Errorf("inspect click target: %w", err)
 		}
@@ -125,6 +132,9 @@ func Validate(target Target, options Options) error {
 	}
 	if target.Disabled {
 		return fmt.Errorf("click rejected: target %s is disabled", describe(target, actual))
+	}
+	if err := validateWorkflow(target, options); err != nil {
+		return err
 	}
 	expected := normalize(options.ExpectedText)
 	if target.OpaqueFrame {

@@ -56,6 +56,8 @@ type Action struct {
 	// while ensuring agent-driven label, selector, target-id, and coordinate
 	// clicks all receive the same atomic live-DOM guard.
 	EnforceConsequence bool `json:"-"`
+	// Loaded from operator-owned persistent policy, never from tool arguments.
+	WorkflowConstraints []WorkflowConstraint `json:"-"`
 	// ClickResult is an internal result sink shared through Action's value copy.
 	// Backends populate it from the same live hit-test used immediately before
 	// mouse dispatch, avoiding a second, potentially stale target inspection.
@@ -67,6 +69,16 @@ type Action struct {
 	// most recent screenshot. Takes precedence over X/Y when set.
 	// Implementations that don't support SoM fall back to X/Y.
 	Label int `json:"label,omitempty"`
+}
+
+type WorkflowConstraint struct {
+	ID            string `json:"id"`
+	ResourceURL   string `json:"resource_url"`
+	AllowedEffect string `json:"allowed_effect"`
+	ScheduledAt   string `json:"scheduled_at"`
+	Timezone      string `json:"timezone"`
+	DateSelector  string `json:"date_selector"`
+	TimeSelector  string `json:"time_selector"`
 }
 
 // ClickResult is the compact live consequence observation for one click.
