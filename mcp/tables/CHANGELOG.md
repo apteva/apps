@@ -1,3 +1,10 @@
+## 0.1.21 — Legacy text default compatibility
+
+- Prevent startup migration failure when old text-column defaults contain raw strings instead of JSON-quoted strings.
+- Apply the same compatibility rule to cached schemas, table lists and uncached column loading.
+- Preserve valid JSON types, legacy metadata, existing rows, indexes and resumable per-table upgrade behavior. Keep non-text parsing errors actionable.
+- Add raw-default, typed-default, partial-upgrade, restart and opt-in database-copy preservation regression tests.
+
 # 0.1.20 — Read diagnostics
 
 Adds one detailed completion record for every failed or slow read, plus optional

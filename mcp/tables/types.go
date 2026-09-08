@@ -475,3 +475,18 @@ func jsonParse(s string) (any, error) {
 	}
 	return v, nil
 }
+
+// decodeColumnDefault accepts historical raw text metadata without rewriting it.
+// Modern JSON defaults retain their types and number precision. Only text has
+// an unambiguous raw-string fallback; invalid defaults of other types remain
+// errors instead of being silently dropped or coerced during migration.
+func decodeColumnDefault(column Column, raw string) (any, error) {
+	value, err := jsonParse(raw)
+	if err == nil {
+		return value, nil
+	}
+	if column.Type == "text" {
+		return raw, nil
+	}
+	return nil, fmt.Errorf("column %q (%s) default: %w", column.Name, column.Type, err)
+}

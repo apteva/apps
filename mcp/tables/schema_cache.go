@@ -122,7 +122,7 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 		if columnName.Valid {
 			column := Column{Name: columnName.String, Type: columnType.String, Nullable: nullable.Int64 != 0}
 			if defaultRaw.Valid && defaultRaw.String != "" {
-				column.Default, err = jsonParse(defaultRaw.String)
+				column.Default, err = decodeColumnDefault(column, defaultRaw.String)
 				if err != nil {
 					return nil, err
 				}

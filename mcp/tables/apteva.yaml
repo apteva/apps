@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.20
+version: 0.1.21
 description: |
+  v0.1.21 Accepts legacy unquoted text defaults during schema loading and resumable upgrades, preserving row data and existing metadata. Non-text invalid defaults retain actionable errors.
+
   v0.1.20 Adds correlated read diagnostics, query fingerprints, pool and phase timings, and deadline-overrun reporting without changing SQL timeouts or read concurrency.
 
   Typed-row database for Apteva agents and human teams. The row-shaped
@@ -135,7 +137,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.20
+    ref: tables/v0.1.21
     entry: mcp/tables
   port: 8080
   health_check: /health

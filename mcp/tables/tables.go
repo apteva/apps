@@ -733,7 +733,7 @@ func loadTablesPage(ctx context.Context, db *sql.DB, projectID string, limit, of
 		if colName.Valid {
 			col := Column{Name: colName.String, Type: colType.String, Nullable: nullable.Int64 != 0}
 			if def.Valid && def.String != "" {
-				col.Default, err = jsonParse(def.String)
+				col.Default, err = decodeColumnDefault(col, def.String)
 				if err != nil {
 					return nil, err
 				}
@@ -777,7 +777,7 @@ func loadColumns(db *sql.DB, tableID int64) ([]Column, error) {
 		}
 		c.Nullable = nullable != 0
 		if defaultRaw.Valid && defaultRaw.String != "" {
-			v, err := jsonParse(defaultRaw.String)
+			v, err := decodeColumnDefault(c, defaultRaw.String)
 			if err != nil {
 				return nil, err
 			}

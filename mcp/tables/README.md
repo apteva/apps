@@ -166,3 +166,7 @@ still produces SQLite's normal query error.
 See [READ_DIAGNOSTICS.md](READ_DIAGNOSTICS.md) for Function request correlation,
 query fingerprints, phase and pool measurements, and the standalone reproduction
 of delayed cancellation during result iteration in the pinned SQLite driver.
+
+## Legacy default compatibility in 0.1.21
+
+Schema loaders accept historical unquoted defaults for text columns, such as `standard` and `EUR`, without rewriting metadata or existing rows. Valid JSON defaults retain their types; invalid non-text defaults report the column and type. Partially completed upgrades resume normally. See [validation and compatibility details](LEGACY_DEFAULTS.md).
