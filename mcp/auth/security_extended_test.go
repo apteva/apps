@@ -366,11 +366,13 @@ func TestRequestAndHashResourceBounds(t *testing.T) {
 		t.Fatal("long password accepted")
 	}
 	for i := 0; i < 4; i++ {
-		if !acquirePasswordHash() {
+		if err := acquirePasswordHash(context.Background()); err != nil {
 			t.Fatal("unexpected saturated hash budget")
 		}
 	}
-	if _, err := hashPassword("GoodPassword123"); err == nil {
+	waiting, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if _, err := hashPassword("GoodPassword123", waiting); err == nil {
 		t.Fatal("hash concurrency unbounded")
 	}
 	for i := 0; i < 4; i++ {

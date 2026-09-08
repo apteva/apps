@@ -244,10 +244,8 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 413, "request body too large")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
-	controller := http.NewResponseController(w)
-	_ = controller.SetReadDeadline(time.Now().Add(bodyTimeout))
-	defer controller.SetReadDeadline(time.Time{})
+	w, finishBody := boundGatewayBody(w, r, bodyTimeout)
+	defer finishBody()
 	pid, err := a.projectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -264,6 +262,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logRow := RequestLog{ProjectID: pid, APIID: api.ID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500, RequestID: newRequestID()}
+	w.Header().Set("X-Request-ID", logRow.RequestID)
 	defer func() {
 		logRow.DurationMS = time.Since(start).Milliseconds()
 		logRow.Error = redactErrorText(logRow.Error)
@@ -310,9 +309,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	logRow.AuthKind = authCtx.Kind
 	logRow.Subject = authCtx.Subject
 	if err != nil {
-		logRow.StatusCode = http.StatusUnauthorized
-		logRow.Error = safeUpstreamError(err)
-		httpErr(w, http.StatusUnauthorized, err.Error())
+		a.writeAuthorizationError(w, r, err, &logRow, start)
 		return
 	}
 	w.Header().Set("X-Request-ID", logRow.RequestID)
@@ -331,8 +328,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		verified, authErr := a.authorizeRequest(r, freshAPI, freshRoute)
 		if authErr != nil {
 			a.mutationMu.Unlock()
-			httpErr(w, 401, "stream authorization rejected")
-			logRow.StatusCode = 401
+			a.writeAuthorizationError(w, r, authErr, &logRow, start)
 			return
 		}
 		streamCtx, done, registerErr := a.streams.register(r.Context(), pid, api.ID, route.ID, verified.KeyID, verified.ExpiresAt)
@@ -392,10 +388,10 @@ type authContext struct {
 func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (authContext, error) {
 	kind, err := effectiveAuthKind(api.AuthJSON, route.AuthJSON)
 	if err != nil {
-		return authContext{}, err
+		return authContext{}, authFailure(500, "invalid authentication configuration", err)
 	}
 	if route.TargetKind == "app_events" && (kind == "" || kind == "public") {
-		return authContext{Kind: "public"}, errors.New("app_events routes require api_key or auth_jwt authentication")
+		return authContext{Kind: "public"}, authFailure(401, "app_events routes require api_key or auth_jwt authentication", nil)
 	}
 	switch kind {
 	case "", "public":
@@ -414,10 +410,10 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 		}
 		keyID, ok, err := validateAPIKey(a.ctx.AppDB(), api.ProjectID, api.ID, key)
 		if err != nil {
-			return authContext{Kind: "api_key"}, err
+			return authContext{Kind: "api_key"}, authFailure(503, "authentication service unavailable", err)
 		}
 		if !ok {
-			return authContext{Kind: "api_key"}, errors.New("invalid api key")
+			return authContext{Kind: "api_key"}, authFailure(401, "invalid api key", nil)
 		}
 		return authContext{Kind: "api_key", Subject: "api_key", KeyID: keyID}, nil
 	case "auth_jwt":
@@ -433,35 +429,45 @@ func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
 	defer cancel()
 	token := bearerToken(r.Header.Get("Authorization"))
 	if token == "" {
-		return "", errors.New("missing bearer token")
+		return "", authFailure(401, "missing bearer token", nil)
 	}
 	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
 	if base == "" {
-		return "", errors.New("APTEVA_GATEWAY_URL not set for auth_jwt verification")
+		return "", authFailure(503, "authentication service unavailable", nil)
 	}
 	u := base + "/api/apps/auth/me?project_id=" + url.QueryEscape(projectID)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
 	if err != nil {
-		return "", err
+		return "", authBackendFailure(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := a.performRequest(req)
 	if err != nil {
-		return "", err
+		return "", authBackendFailure(err)
 	}
 	defer resp.Body.Close()
-	body, readErr := readBounded(resp.Body, 1<<20)
-	if readErr != nil {
-		return "", errors.New("invalid Auth response")
+	switch resp.StatusCode {
+	case http.StatusUnauthorized:
+		return "", authFailure(401, "invalid or expired bearer token", nil)
+	case http.StatusForbidden:
+		return "", authFailure(403, "access forbidden", nil)
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return "", authFailure(503, "authentication service unavailable", nil)
+	case http.StatusGatewayTimeout, http.StatusRequestTimeout:
+		return "", authFailure(504, "authentication service timed out", nil)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", errors.New("auth jwt rejected")
+		return "", authFailure(502, "authentication service failed", nil)
+	}
+	body, readErr := readBounded(resp.Body, 1<<20)
+	if readErr != nil {
+		return "", authBackendFailure(readErr)
 	}
 	var out map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
 	if decoder.Decode(&out) != nil {
-		return "", errors.New("invalid Auth response")
+		return "", authFailure(502, "invalid authentication service response", nil)
 	}
 	if user, _ := out["user"].(map[string]any); user != nil {
 		if s, _ := user["id"].(string); s != "" {
@@ -474,7 +480,7 @@ func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
 		}
 
 	}
-	return "", errors.New("Auth response is missing user identity")
+	return "", authFailure(502, "invalid authentication service response", nil)
 }
 
 func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute, publicPath string, params map[string]string, auth authContext) (int, error) {

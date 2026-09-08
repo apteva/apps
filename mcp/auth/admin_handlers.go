@@ -10,6 +10,7 @@ package main
 // project-wide when omitted. Mutations require an org identifier.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -290,6 +291,7 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user, resetSent, code, err := a.createUser(ctx, pid, org, createUserInput{
+		requestContext:    r.Context(),
 		email:             body.Email,
 		password:          body.Password,
 		displayName:       body.DisplayName,
@@ -317,6 +319,7 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 // createUserInput is the shared argument set for the admin-side user
 // provisioning path (HTTP handler + auth_users_create MCP tool).
 type createUserInput struct {
+	requestContext    context.Context
 	email             string
 	password          string // empty = no password set (invite or import)
 	displayName       string
@@ -350,9 +353,9 @@ func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in crea
 		if err := checkPasswordPolicy(ctx, org, in.password); err != nil {
 			return nil, false, 400, err
 		}
-		h, err := hashPassword(in.password)
+		h, err := hashPassword(in.password, in.requestContext)
 		if err != nil {
-			return nil, false, http.StatusInternalServerError, err
+			return nil, false, passwordFailureStatus(err), err
 		}
 		pwHash = h
 	}
@@ -495,7 +498,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	if body.RevokeSessions != nil {
 		revokeSessions = *body.RevokeSessions
 	}
-	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, "password_set_admin", "", r.RemoteAddr, r.UserAgent())
+	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, "password_set_admin", "", r.RemoteAddr, r.UserAgent(), r.Context())
 	if err != nil {
 		httpErr(w, code, err.Error())
 		return
@@ -503,7 +506,7 @@ func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request
 	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
 }
 
-func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, password string, revokeSessions bool, event, cid, ip, ua string) (int64, int, error) {
+func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, password string, revokeSessions bool, event, cid, ip, ua string, contexts ...context.Context) (int64, int, error) {
 	org, err := dbGetOrgByID(ctx.AppDB(), pid, oid)
 	if err != nil {
 		return 0, 404, errors.New("organization not found")
@@ -511,9 +514,9 @@ func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, oid, uid int64, passw
 	if err = checkPasswordPolicy(ctx, org, password); err != nil {
 		return 0, 400, err
 	}
-	hash, err := hashPassword(password)
+	hash, err := hashPassword(password, contexts...)
 	if err != nil {
-		return 0, 503, err
+		return 0, passwordFailureStatus(err), err
 	}
 	tx, err := beginAuthTx(ctx.AppDB(), pid, oid)
 	if err != nil {

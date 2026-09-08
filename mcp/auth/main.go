@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.11.1
+version: 0.11.2
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -879,6 +879,9 @@ func httpStatus(w http.ResponseWriter, code int, v any) {
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {
+	if code == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", "1")
+	}
 	if code >= 500 {
 		if globalCtx != nil {
 			globalCtx.Logger().Error("Auth request failed", "status", code)

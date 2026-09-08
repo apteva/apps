@@ -60,9 +60,9 @@ func (a *App) confirmRecovery(w http.ResponseWriter, r *http.Request, kind strin
 			return
 		}
 		var err error
-		hash, err = hashPassword(body.Password)
+		hash, err = hashPassword(body.Password, r.Context())
 		if err != nil {
-			httpErr(w, 503, "password_service_busy")
+			writePasswordFailure(w, r, err)
 			return
 		}
 	}

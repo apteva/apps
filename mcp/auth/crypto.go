@@ -9,6 +9,7 @@ package main
 // for one alg is overkill.
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -40,12 +41,13 @@ const (
 	argonSaltLen        = 16
 )
 
-func hashPassword(password string) (string, error) {
+func hashPassword(password string, contexts ...context.Context) (string, error) {
+	ctx := passwordContext(contexts)
 	if len(password) > 4096 {
 		return "", errors.New("password too long")
 	}
-	if !acquirePasswordHash() {
-		return "", errors.New("password service busy; retry")
+	if err := acquirePasswordHash(ctx); err != nil {
+		return "", err
 	}
 	defer releasePasswordHash()
 	salt := make([]byte, argonSaltLen)
@@ -53,6 +55,9 @@ func hashPassword(password string) (string, error) {
 		return "", err
 	}
 	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf(
 		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version,
@@ -62,12 +67,13 @@ func hashPassword(password string) (string, error) {
 	), nil
 }
 
-func verifyPassword(encoded, password string) (bool, error) {
+func verifyPassword(encoded, password string, contexts ...context.Context) (bool, error) {
+	ctx := passwordContext(contexts)
 	if len(password) > 4096 || len(encoded) > 1024 {
 		return false, errors.New("password too long")
 	}
-	if !acquirePasswordHash() {
-		return false, errors.New("password service busy; retry")
+	if err := acquirePasswordHash(ctx); err != nil {
+		return false, err
 	}
 	defer releasePasswordHash()
 	parts := strings.Split(encoded, "$")
@@ -100,6 +106,9 @@ func verifyPassword(encoded, password string) (bool, error) {
 		return false, errors.New("invalid password hash parameters")
 	}
 	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
@@ -349,17 +358,6 @@ func parseTTL(s string, dflt time.Duration) time.Duration {
 	return time.Duration(n) * time.Second
 }
 
-var passwordHashSlots = make(chan struct{}, 4)
-
-func acquirePasswordHash() bool {
-	select {
-	case passwordHashSlots <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
-func releasePasswordHash() { <-passwordHashSlots }
 func dummyPasswordHash() string {
 	return "$argon2id$v=19$m=65536,t=2,p=1$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 }

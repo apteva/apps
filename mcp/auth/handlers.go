@@ -17,6 +17,7 @@ package main
 // stack — so tests can hit them with httptest.NewRequest directly.
 
 import (
+	"context"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
@@ -142,6 +143,7 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		body.ClientSecret = secret
 	}
 
+	body.RequestContext = r.Context()
 	res, status, err := performSignup(ctx, pid, body, mintSessionFor(r))
 	if err != nil {
 		httpErr(w, status, err.Error())
@@ -175,16 +177,17 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 // path; MCP callers either pass them through from the originating
 // request or accept the "mcp" defaults.
 type signupRequest struct {
-	Email            string `json:"email"`
-	Password         string `json:"password"`
-	DisplayName      string `json:"display_name"`
-	ClientID         string `json:"client_id"`
-	ClientSecret     string `json:"client_secret"`
-	OrganizationSlug string `json:"organization_slug"`
-	ContinueURL      string `json:"continue_url"`
-	IP               string `json:"-"`
-	UserAgent        string `json:"-"`
-	Origin           string `json:"-"`
+	RequestContext   context.Context `json:"-"`
+	Email            string          `json:"email"`
+	Password         string          `json:"password"`
+	DisplayName      string          `json:"display_name"`
+	ClientID         string          `json:"client_id"`
+	ClientSecret     string          `json:"client_secret"`
+	OrganizationSlug string          `json:"organization_slug"`
+	ContinueURL      string          `json:"continue_url"`
+	IP               string          `json:"-"`
+	UserAgent        string          `json:"-"`
+	Origin           string          `json:"-"`
 }
 
 // signupResult mirrors what /signup writes to the response body, but
@@ -267,9 +270,9 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 		return nil, http.StatusInternalServerError, err
 	}
 
-	pwHash, err := hashPassword(body.Password)
+	pwHash, err := hashPassword(body.Password, body.RequestContext)
 	if err != nil {
-		return nil, http.StatusInternalServerError, err
+		return nil, passwordFailureStatus(err), err
 	}
 	tx, err := beginAuthTx(ctx.AppDB(), pid, org.ID)
 	if err != nil {
@@ -401,7 +404,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user == nil {
-		_, _ = verifyPassword(dummyPasswordHash(), body.Password)
+		if _, err := verifyPassword(dummyPasswordHash(), body.Password, r.Context()); err != nil {
+			writePasswordFailure(w, r, err)
+			return
+		}
 		dbAudit(ctx.AppDB(), pid, org.ID, nil, client.ClientID, "login_failed",
 			r.RemoteAddr, r.UserAgent(), map[string]any{"reason": "no_user", "email": body.Email})
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
@@ -430,9 +436,9 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return
 	}
-	ok, err := verifyPassword(pwHash, body.Password)
+	ok, err := verifyPassword(pwHash, body.Password, r.Context())
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		writePasswordFailure(w, r, err)
 		return
 	}
 	if !ok {
