@@ -1,6 +1,6 @@
-# Functions 1.11.1
+# Functions 1.11.2
 
-**Unreleased:** indexed active-work recovery, process ownership, runtime drain API, and a companion platform handover fix. See [startup recovery and validation](STARTUP_RECOVERY.md).
+**New in 1.11.2:** indexed active-work recovery, process ownership, and runtime startup/drain APIs. The companion platform handover change is not released with this app. See [startup recovery and validation](STARTUP_RECOVERY.md).
 
 **Fixed in 1.11.1:** nested calls can borrow unused shared protocol-buffer capacity beyond their protected allowance, while the hard total limit remains enforced. See [regression evidence](NESTED_PROTOCOL_VALIDATION.md).
 

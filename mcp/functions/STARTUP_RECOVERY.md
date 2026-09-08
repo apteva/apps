@@ -1,4 +1,4 @@
-# Startup recovery and upgrade handover (unreleased)
+# Startup recovery in Functions 1.11.2
 
 Startup no longer updates every historical invocation or version whose status
 looks unfinished. Migration 007 creates a small `function_active_work` table,
@@ -51,7 +51,7 @@ Initialization reports owner registration, abandoned-work recovery, legacy
 checkpoint initialization, and capacity loading separately, with timings and
 recovered-row counts in logs. Background snapshot recovery logs its duration.
 
-## Companion platform change
+## Companion platform change (not included in this release)
 
 For healthy HTTP sidecars without exclusive fixed ports, the platform keeps
 the committed installation running while staging `pending_manifest_json`.
@@ -67,8 +67,11 @@ limits remain. Older Functions releases without the endpoint receive that
 bounded grace rather than immediate termination. Fixed-port apps still require
 exclusive activation and are not advertised as continuously serving.
 
-Deploy the platform change before upgrading Functions to preserve availability
-on the first upgrade. Updating Functions alone cannot fix platform routing.
+This release publishes only the Functions app. The platform change remains
+unreleased. Functions 1.11.2 independently fixes startup recovery; on the
+existing platform, the installation can still be unavailable while upgrading.
+A future platform release is needed to preserve old-instance routing and
+coordinate draining.
 No production installation was modified during local validation.
 
 ## Local validation

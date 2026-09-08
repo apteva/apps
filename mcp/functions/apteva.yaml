@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.11.1
+version: 1.11.2
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -11,6 +11,11 @@ description: |
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
+
+  v1.11.2 removes history scans from startup recovery, tracks active work by
+  process ownership, and adds startup diagnostics and a protected drain endpoint.
+  Legacy recovery and retention run in bounded background batches. Platform
+  upgrade handover requires a separate server update, not included in this release.
 
   v1.11.1 lets nested calls borrow unused shared protocol-buffer capacity
   instead of failing at the protected 16 MiB allowance. Preserves the hard
