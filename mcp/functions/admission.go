@@ -314,7 +314,9 @@ func capacityWaitContext(ctx context.Context, fn *Function) (context.Context, co
 }
 
 // Downstream buffers share the hard protocol ceiling but background calls
-// cannot reserve the portions needed by interactive and nested calls.
+// cannot reserve the portions needed by interactive and nested calls. The
+// nested portion is protected capacity, not a ceiling: children may borrow any
+// unused shared bytes, always subject to the same global atomic byte limit.
 func (p *pool) acquireProtocol(ctx context.Context, class string, n int64) (func(), error) {
 	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
 	allowed := limit - limit/8
@@ -322,7 +324,7 @@ func (p *pool) acquireProtocol(ctx context.Context, class string, n int64) (func
 		allowed -= limit / 4
 	}
 	if class == "nested" {
-		allowed = limit / 8
+		allowed = limit
 	}
 	if n > allowed {
 		return nil, p.reject(resourceError("protocol_memory_limit", "downstream response allowance cannot fit in this class protocol budget"))
@@ -350,7 +352,7 @@ func (p *pool) acquireProtocol(ctx context.Context, class string, n int64) (func
 		}
 		p.mu.Unlock()
 		if class == "nested" {
-			return nil, p.reject(resourceError("protocol_memory_limit", "nested protocol reserve exhausted"))
+			return nil, p.reject(resourceError("protocol_memory_limit", "global protocol memory budget exhausted during nested call"))
 		}
 		select {
 		case <-ctx.Done():

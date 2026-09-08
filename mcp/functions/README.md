@@ -1,4 +1,6 @@
-# Functions 1.11.0
+# Functions 1.11.1
+
+**Fixed in 1.11.1:** nested calls can borrow unused shared protocol-buffer capacity beyond their protected allowance, while the hard total limit remains enforced. See [regression evidence](NESTED_PROTOCOL_VALIDATION.md).
 
 **New in 1.11.0:** memory admission defaults to **soft**: measured Linux worker usage plus a safety margin determines capacity, while per-worker cgroup limits remain hard. Full allowances are retained for starting or unmeasured workers. Strict reservation remains an explicit option. See [capacity settings and API](CAPACITY_API.md#soft-memory-admission-default) for migration behavior, pressure errors and safety bounds.
 

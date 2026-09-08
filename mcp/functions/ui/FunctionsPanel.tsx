@@ -1516,6 +1516,13 @@ interface CapacitySnapshot {
   effective_host_memory_mb: number;
   validation_warning?: string;
   protocol_reserved_bytes: number;
+  protocol_capacity?: {
+    hard_limit_bytes: number;
+    nested_protected_bytes: number;
+    nested_reserved_bytes: number;
+    nested_borrowed_bytes: number;
+    available_bytes: number;
+  };
   global: {
     reserved_memory_mb: number;
     live_workers: number;
@@ -1604,6 +1611,11 @@ function CapacityView({ api }: { api: ApiFn }) {
         <p className="text-xs text-text-muted">
           Host/container limit: {data.effective_host_memory_mb ? `${data.effective_host_memory_mb} MiB` : "Unavailable"} · Downstream buffer reservations: {memoryText(data.protocol_reserved_bytes)}
         </p>
+        {data.protocol_capacity && <p className="text-xs text-text-muted">
+          Protocol buffer limit: {memoryText(data.protocol_capacity.hard_limit_bytes)} · Available: {memoryText(data.protocol_capacity.available_bytes)}.
+          {" "}Nested reservations: {memoryText(data.protocol_capacity.nested_reserved_bytes)} · Protected: {memoryText(data.protocol_capacity.nested_protected_bytes)} · Borrowed shared capacity: {memoryText(data.protocol_capacity.nested_borrowed_bytes)}.
+          {" "}Nested calls can borrow unused shared capacity within the hard total limit.
+        </p>}
         <p className="text-xs text-text-muted">{data.memory_admission.mode === "soft"
           ? "Soft mode uses measured memory plus a safety margin. Combined worker limits may exceed the target; each worker still has a hard limit. Starting and unmeasured workers count at their full allowance."
           : "Strict mode counts every worker’s full allowance against the target."}

@@ -431,7 +431,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 	for _, g := range groups {
 		functionGroups = append(functionGroups, g)
 	}
-	return map[string]any{"memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024), "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
+	return map[string]any{"protocol_capacity": protocolCapacitySnapshot(protocolByClass), "memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024), "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
 }
 func (a *App) handleHTTPCapacity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -565,4 +565,19 @@ func (t *callTrace) addCapacityWait(elapsed time.Duration) {
 	t.mu.Lock()
 	t.QueueMS += elapsed.Milliseconds()
 	t.mu.Unlock()
+}
+
+// Protected nested capacity is a floor against root/background reservations,
+// not a separate cap. Byte totals include both callback allowances and frames.
+func protocolCapacitySnapshot(classes map[string]int64) map[string]any {
+	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
+	used := protocolBytes.Load()
+	nested := classes["nested"]
+	return map[string]any{
+		"hard_limit_bytes": limit, "reserved_bytes": used, "available_bytes": max(0, limit-used),
+		"nested_protected_bytes": limit / 8, "nested_reserved_bytes": nested,
+		"nested_borrowed_bytes": max(0, nested-limit/8), "nested_can_borrow_shared": true,
+		"root_reservation_limit_bytes":       limit - limit/8,
+		"background_reservation_limit_bytes": limit - limit/8 - limit/4,
+	}
 }

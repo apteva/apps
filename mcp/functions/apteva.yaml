@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.11.0
+version: 1.11.1
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -11,6 +11,10 @@ description: |
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
   with the Jobs app for cron-fired schedules. Optional public Function
   URLs are available at /url/<name>/<token>.
+
+  v1.11.1 lets nested calls borrow unused shared protocol-buffer capacity
+  instead of failing at the protected 16 MiB allowance. Preserves the hard
+  total buffer limit and exposes nested borrowing in the API and themed panel.
 
   v1.11.0 defaults to soft memory admission using measured worker usage plus
   headroom, with full allowances for starting or unmeasured workers. Keeps hard
