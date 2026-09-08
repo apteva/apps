@@ -16,6 +16,9 @@ import (
 //go:embed apteva.yaml
 var manifestYAML []byte
 
+//go:embed worker_upload.js
+var workerUploadJS string
+
 // globalCtx stashes the AppCtx for HTTP handlers — the SDK's http
 // signature is (w, r) only, so handlers reach the platform client +
 // DB via this package var. Same pattern as CRM/storage/etc.
@@ -38,6 +41,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("gigs requires a db block")
 	}
 	globalCtx = ctx
+	// A restarted finalizer can replay Storage's durable completion receipt.
+	if _, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='uploading',last_stage='finalize',last_error='Server restarted; resume finalization.' WHERE status='finalizing'`); err != nil {
+		return err
+	}
 	go reconcileGigPublicDomains(ctx)
 	ctx.Logger().Info("gigs mounted",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))

@@ -49,7 +49,13 @@ func (a *App) handleWorkerRoot(w http.ResponseWriter, r *http.Request) {
 	case "upload/init":
 		a.handleWorkerUploadInit(w, r, token)
 	case "upload/part":
-		a.handleWorkerUploadPart(w, r, token)
+		if r.Method == http.MethodPut {
+			a.handleWorkerBinaryPart(w, r, token)
+		} else {
+			a.handleWorkerUploadPart(w, r, token)
+		}
+	case "upload/status":
+		a.handleWorkerUploadStatus(w, r, token)
 	case "upload/complete":
 		a.handleWorkerUploadComplete(w, r, token)
 	case "upload/abort":
@@ -632,7 +638,7 @@ func workerPageHTML(token string) string {
 	      async function processSelectedFiles(files) {
 	        if (!file || files.length === 0) return;
 	        const existingCount = (instructionResponses[key] && instructionResponses[key].files || []).length;
-	        if (spec.files.max_items > 0 && existingCount + files.length > spec.files.max_items) {
+	        if (spec.files.max_items > 0 && existingCount + filesInFlight + files.length > spec.files.max_items) {
 	          setStatus("Step " + (index + 1) + " accepts at most " + spec.files.max_items + " file(s).");
 	          file.value = "";
 	          return;
@@ -649,34 +655,17 @@ func workerPageHTML(token string) string {
 	          const preview = renderFilePreview(f, "Uploading...");
 	          previews.appendChild(preview.card);
 	          setStatus("Uploading " + f.name + "...");
-	          let id = null;
-	          pendingUploads++;
-	          updateSubmitDisabled();
-	          try {
-	            id = await uploadFile(f, key, percent => preview.setProgress(percent));
-	          } catch (e) {
-	            preview.setStatus("Upload failed", true);
-	            setStatus("Upload failed: " + e.message);
-	          } finally {
-	            pendingUploads--;
-	            filesInFlight--;
-	            updateSubmitDisabled();
-	            updateFilePickerState();
-	          }
-	          if (!id) continue;
-	          const entry = ensureInstructionResponse(key, it, index);
-	          entry.files.push({ storage_file_id: id, filename: f.name, mime: f.type });
-	          allAttachmentIDs.add(id);
-	          preview.setStatus("Ready to submit");
-	          preview.addRemove(() => {
-	            entry.files = entry.files.filter(item => item.storage_file_id !== id);
-	            allAttachmentIDs.delete(id);
-	            preview.card.remove();
-	            pruneInstructionResponse(key);
-	            updateStatus();
-	            discardUploadedFile(key, id);
-	            updateFilePickerState();
+	          await uploadWithPreview(f,key,preview,async id => {
+	            const entry = ensureInstructionResponse(key,it,index);
+	            if (!entry.files.some(item => item.storage_file_id === id)) entry.files.push({storage_file_id:id,filename:f.name,mime:f.type});
+	            allAttachmentIDs.add(id);
+	            preview.addRemove(() => {
+	              entry.files = entry.files.filter(item => item.storage_file_id !== id);
+	              allAttachmentIDs.delete(id); preview.card.remove(); pruneInstructionResponse(key);
+	              updateStatus(); discardUploadedFile(key,id); updateFilePickerState();
+	            });
 	          });
+	          filesInFlight--; updateFilePickerState();
 	          updateFilePickerState();
 	        }
 	        file.value = "";
@@ -846,36 +835,21 @@ func workerPageHTML(token string) string {
             const preview = renderFilePreview(file, "Uploading...");
             previews.appendChild(preview.card);
             setStatus("Uploading " + file.name + "...");
-            let id = null;
-	          pendingUploads++;
-	          updateSubmitDisabled();
-            try {
-	            id = await uploadFile(file, key, percent => preview.setProgress(percent));
-            } catch (e) {
-              preview.setStatus("Upload failed", true);
-              setStatus("Upload failed: " + e.message);
-	          } finally {
-	            pendingUploads--;
-	            updateSubmitDisabled();
-            }
-            if (id) {
-	            Array.from(previews.children).forEach(child => { if (child !== preview.card) child.remove(); });
-              result[key] = { storage_file_id: id, filename: file.name, mime: file.type };
+            fileInput.disabled = true;
+            await uploadWithPreview(file,key,preview,async id => {
+              result[key] = {storage_file_id:id,filename:file.name,mime:file.type};
               allAttachmentIDs.add(id);
-	            preview.setStatus("Ready — not submitted");
               preview.addRemove(() => {
-                if (result[key] && result[key].storage_file_id === id) delete result[key];
-                allAttachmentIDs.delete(id);
-                preview.card.remove();
-                updateStatus();
-	              discardUploadedFile(key, id);
+                delete result[key]; allAttachmentIDs.delete(id); preview.card.remove();
+                updateStatus(); discardUploadedFile(key,id);
               });
-	            if (previousValue && previousValue.storage_file_id && previousValue.storage_file_id !== id) {
-	              allAttachmentIDs.delete(previousValue.storage_file_id);
-	              discardUploadedFile(key, previousValue.storage_file_id);
-	            }
-	            updateStatus();
-            }
+              if (previousValue && previousValue.storage_file_id && previousValue.storage_file_id !== id) {
+                allAttachmentIDs.delete(previousValue.storage_file_id);
+                discardUploadedFile(key,previousValue.storage_file_id);
+              }
+            });
+            fileInput.disabled = false;
+
           });
           el.appendChild(fileInput);
           el.appendChild(previews);
@@ -902,48 +876,7 @@ func workerPageHTML(token string) string {
 	      updateStatus();
 	    }
 
-	    async function uploadFile(file, instructionKey, onProgress) {
-	      const initRes = await fetch(publicWorkerURL("/upload/init"), {
-	        method: "POST",
-	        headers: { "Content-Type": "application/json" },
-	        body: JSON.stringify({ instruction_key: instructionKey, name: file.name, content_type: file.type, size_bytes: file.size }),
-	      });
-	      const init = await responseJSON(initRes);
-	      if (init.storage_file_id) {
-	        if (onProgress) onProgress(100);
-	        return init.storage_file_id;
-	      }
-	      const uploadID = init.upload_id;
-	      const partSize = Number(init.part_size) || (1024 * 1024);
-	      if (!uploadID) throw new Error("Storage did not start the upload");
-	      try {
-	        let part = 1;
-	        for (let offset = 0; offset < file.size; offset += partSize, part++) {
-	          const end = Math.min(offset + partSize, file.size);
-	          const bytes = await file.slice(offset, end).arrayBuffer();
-	          const partRes = await fetch(publicWorkerURL("/upload/part"), {
-	            method: "POST",
-	            headers: { "Content-Type": "application/json" },
-	            body: JSON.stringify({ upload_id: uploadID, part_number: part, content_base64: arrayBufferToBase64(bytes) }),
-	          });
-	          await responseJSON(partRes);
-	          if (onProgress) onProgress(Math.round((end / file.size) * 100));
-	        }
-	        const completeRes = await fetch(publicWorkerURL("/upload/complete"), {
-	          method: "POST",
-	          headers: { "Content-Type": "application/json" },
-	          body: JSON.stringify({ upload_id: uploadID }),
-	        });
-	        const complete = await responseJSON(completeRes);
-	        return complete.storage_file_id;
-	      } catch (error) {
-	        fetch(publicWorkerURL("/upload/abort"), {
-	          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ upload_id: uploadID }),
-	        }).catch(() => {});
-	        throw error;
-	      }
-	    }
-
+` + workerUploadJS + `
 	    function buildPayload() {
 	      const payload = Object.assign({}, result);
 	      const instructionPayload = Object.values(instructionResponses)
@@ -973,12 +906,13 @@ func workerPageHTML(token string) string {
 	        draftTimer = null;
 	      }
 	      const payload = buildPayload();
+          const pendingKeys = Array.from(pendingInstructionUploads).filter(([, count]) => count > 0).map(([key]) => key);
 	      draftSavePromise = draftSavePromise.then(async () => {
 	        if (showStatus) setStatus("Saving draft...");
 	        const res = await fetch(publicWorkerURL("/draft"), {
 	          method: "POST",
 	          headers: { "Content-Type": "application/json" },
-	          body: JSON.stringify({ payload: payload, attachment_file_ids: currentAttachmentIDs(payload) }),
+	          body: JSON.stringify({ payload: payload, attachment_file_ids: currentAttachmentIDs(payload), pending_upload_keys: pendingKeys }),
 	        });
 	        await responseJSON(res);
 	        gig.draft = { payload: payload, attachment_file_ids: currentAttachmentIDs(payload) };
@@ -1002,18 +936,19 @@ func workerPageHTML(token string) string {
 	        });
 	        await responseJSON(res);
 	      } catch (e) {
-	        setStatus("File removed from this draft, but storage cleanup failed: " + e.message);
+	        setStatus("Could not detach the file: " + e.message);
+        throw e;
 	      }
 	    }
 
 	    function updateSubmitDisabled() {
 	      const button = document.getElementById("submit");
-	      if (button) button.disabled = pendingUploads > 0;
+	      if (button) button.disabled = pendingUploads > 0 || failedUploadCards.size > 0;
 	    }
 
 	    async function submit() {
-	      if (pendingUploads > 0) {
-	        setStatus("Wait for every file to finish uploading before submitting.");
+	      if (pendingUploads > 0 || failedUploadCards.size > 0) {
+	        setStatus("Finish, resume, or cancel each unfinished upload before submitting.");
 	        return;
 	      }
 	      const missing = firstMissingRequiredResponse();
@@ -1379,17 +1314,14 @@ func workerPageHTML(token string) string {
 	        }
 	      }
 	      if (!res.ok) {
-	        throw new Error(json.error || ("HTTP " + res.status));
+	        const error = new Error(json.error || ("HTTP " + res.status));
+	        error.status = res.status;
+	        throw error;
 	      }
 	      return json;
 	    }
 	    function escapeHTML(s) { return String(s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
     function escapeAttr(s) { return String(s||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-    function arrayBufferToBase64(buf) {
-      const bytes = new Uint8Array(buf);
-      let s = ""; for (let i = 0; i < bytes.byteLength; i++) s += String.fromCharCode(bytes[i]);
-      return btoa(s);
-    }
   </script>
 </body>
 </html>`
@@ -1403,22 +1335,22 @@ func jsString(s string) string {
 // ─── API: gig JSON, submit, upload ──────────────────────────────────
 
 type workerGigPayload struct {
-	GigID              int64            `json:"gig_id"`
-	Title              string           `json:"title"`
-	ScheduledFor       string           `json:"scheduled_for,omitempty"`
-	DueAt              string           `json:"due_at,omitempty"`
-	DeadlineAt         string           `json:"deadline_at,omitempty"`
-	Overdue            bool             `json:"overdue"`
-	AccessExpiresAt    string           `json:"access_expires_at,omitempty"`
-	GigStatus          string           `json:"gig_status"`
-	AssignmentStatus   string           `json:"assignment_status"`
-	AssignmentMode     string           `json:"assignment_mode"`
-	ProjectID          string           `json:"project_id"`
-	Composition        []map[string]any `json:"composition"`
-	RequiredResultKeys []string         `json:"required_result_keys,omitempty"`
-	Submission         *submission      `json:"submission,omitempty"`
-	Draft              *workerDraft     `json:"draft,omitempty"`
-	Compensation       *gigCompensation `json:"compensation,omitempty"`
+	GigID              int64               `json:"gig_id"`
+	Title              string              `json:"title"`
+	ScheduledFor       string              `json:"scheduled_for,omitempty"`
+	DueAt              string              `json:"due_at,omitempty"`
+	DeadlineAt         string              `json:"deadline_at,omitempty"`
+	Overdue            bool                `json:"overdue"`
+	AccessExpiresAt    string              `json:"access_expires_at,omitempty"`
+	GigStatus          string              `json:"gig_status"`
+	AssignmentStatus   string              `json:"assignment_status"`
+	AssignmentMode     string              `json:"assignment_mode"`
+	ProjectID          string              `json:"project_id"`
+	Composition        []map[string]any    `json:"composition"`
+	RequiredResultKeys []string            `json:"required_result_keys,omitempty"`
+	Submission         *submission         `json:"submission,omitempty"`
+	Draft              *workerDraft        `json:"draft,omitempty"`
+	Compensation       *workerCompensation `json:"compensation,omitempty"`
 }
 
 func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token string) {
@@ -1461,12 +1393,33 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 	if status == "offered" {
 		composition = nil
 	}
+	submission, err := loadLatestSubmissionForAssignment(ctx.AppDB(), assignID)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	draft, err := loadWorkerDraft(ctx.AppDB(), assignID)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	payloads := []map[string]any{}
+	if submission != nil {
+		payloads = append(payloads, submission.Payload)
+	}
+	if draft != nil {
+		payloads = append(payloads, draft.Payload)
+	}
+	urls := workerSignedURLs(ctx, pid, ttl, composition, assignID, payloads...)
+	for _, payload := range payloads {
+		applyWorkerSignedURLs(payload, urls)
+	}
 	for _, it := range composition {
 		body := it.RenderedBody
 		if it.InstructionKind == kindText {
 			body = enrichMarkdownBody(body)
 		} else if it.InstructionKind == kindContent {
-			body = enrichContentBlockURLs(ctx, pid, body, ttl)
+			body = enrichContentBlockURLs(ctx, pid, body, ttl, urls)
 		}
 		m := map[string]any{
 			"sort_order":       it.SortOrder,
@@ -1477,28 +1430,12 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 		}
 		if isMediaKind(it.InstructionKind) {
 			if fid := int64Cast(it.RenderedBody["storage_file_id"]); fid > 0 {
-				if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
+				if url := urls[fid]; url != "" {
 					m["signed_url"] = url
 				}
 			}
 		}
 		rendered = append(rendered, m)
-	}
-	submission, err := loadLatestSubmissionForAssignment(ctx.AppDB(), assignID)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if submission != nil {
-		enrichSubmissionFileURLs(ctx, pid, submission.Payload, ttl)
-	}
-	draft, err := loadWorkerDraft(ctx.AppDB(), assignID)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if draft != nil {
-		enrichSubmissionFileURLs(ctx, pid, draft.Payload, ttl)
 	}
 
 	httpJSON(w, map[string]any{
@@ -1523,12 +1460,12 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, r *http.Request, token 
 			}(),
 			Submission:   submission,
 			Draft:        draft,
-			Compensation: g.Compensation,
+			Compensation: publicWorkerCompensation(g.Compensation),
 		},
 	})
 }
 
-func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, ttl int) map[string]any {
+func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, ttl int, batches ...map[int64]string) map[string]any {
 	out := make(map[string]any, len(body))
 	for key, value := range body {
 		out[key] = value
@@ -1555,8 +1492,14 @@ func enrichContentBlockURLs(ctx *sdk.AppCtx, pid string, body map[string]any, tt
 			}
 		case "image":
 			if fid := int64Cast(copy["storage_file_id"]); fid > 0 {
-				if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
-					copy["signed_url"] = url
+				u := ""
+				if len(batches) > 0 {
+					u = batches[0][fid]
+				} else {
+					u, _ = storageSignedURL(ctx, pid, fid, ttl)
+				}
+				if u != "" {
+					copy["signed_url"] = u
 				}
 			}
 		}
@@ -1612,24 +1555,6 @@ func loadLatestSubmissionForAssignment(db *sql.DB, assignmentID int64) (*submiss
 		sub.Payload = map[string]any{}
 	}
 	return sub, nil
-}
-
-func enrichSubmissionFileURLs(ctx *sdk.AppCtx, pid string, value any, ttl int) {
-	switch v := value.(type) {
-	case map[string]any:
-		if fid := int64Cast(v["storage_file_id"]); fid > 0 {
-			if url, err := storageSignedURL(ctx, pid, fid, ttl); err == nil {
-				v["signed_url"] = url
-			}
-		}
-		for _, child := range v {
-			enrichSubmissionFileURLs(ctx, pid, child, ttl)
-		}
-	case []any:
-		for _, child := range v {
-			enrichSubmissionFileURLs(ctx, pid, child, ttl)
-		}
-	}
 }
 
 func (a *App) handleWorkerAccept(w http.ResponseWriter, r *http.Request, token string) {
@@ -1768,6 +1693,7 @@ func (a *App) handleWorkerDraft(w http.ResponseWriter, r *http.Request, token st
 		return
 	}
 	var body struct {
+		PendingKeys []string       `json:"pending_upload_keys"`
 		Payload     map[string]any `json:"payload"`
 		Attachments []int64        `json:"attachment_file_ids,omitempty"`
 	}
@@ -1775,15 +1701,13 @@ func (a *App) handleWorkerDraft(w http.ResponseWriter, r *http.Request, token st
 		httpErr(w, http.StatusBadRequest, "payload required")
 		return
 	}
-	if err := validateSubmissionAttachments(ctx.AppDB(), assignID, body.Attachments); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+	attachments, err := validateWorkerPayload(ctx.AppDB(), gigID, assignID, body.Payload, body.Attachments, false)
+	if err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
-	if err := validateInstructionResponses(ctx.AppDB(), gigID, assignID, body.Payload, false); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	draft, err := saveWorkerDraft(ctx.AppDB(), assignID, body.Payload, body.Attachments)
+	body.Attachments = attachments
+	draft, err := saveWorkerDraft(ctx.AppDB(), assignID, body.Payload, body.Attachments, body.PendingKeys...)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1814,14 +1738,12 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusBadRequest, "payload required")
 		return
 	}
-	if err := validateSubmission(ctx.AppDB(), gigID, assignID, body.Payload); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
+	attachments, err := validateWorkerPayload(ctx.AppDB(), gigID, assignID, body.Payload, body.Attachments, true)
+	if err != nil {
+		httpErr(w, 400, err.Error())
 		return
 	}
-	if err := validateSubmissionAttachments(ctx.AppDB(), assignID, body.Attachments); err != nil {
-		httpErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	body.Attachments = attachments
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1948,6 +1870,8 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 	}
 	var body struct {
 		InstructionKey string `json:"instruction_key"`
+		Transport      string `json:"transport"`
+		ClientKey      string `json:"client_key"`
 		Name           string `json:"name"`
 		ContentType    string `json:"content_type"`
 		SizeBytes      int64  `json:"size_bytes"`
@@ -1980,6 +1904,10 @@ func (a *App) handleWorkerUploadInit(w http.ResponseWriter, r *http.Request, tok
 	}
 	if body.SizeBytes > maxBytes {
 		httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("file exceeds the %d MB limit", maxBytes/(1024*1024)))
+		return
+	}
+	if body.Transport == "binary" {
+		beginBinaryWorkerUpload(w, r, ctx, assignmentID, gigID, pid, body.InstructionKey, body.Name, body.ContentType, body.SizeBytes, body.ClientKey)
 		return
 	}
 	folder := fmt.Sprintf("submissions/%d", gigID)
@@ -2085,11 +2013,42 @@ func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request,
 		httpErr(w, http.StatusBadRequest, "upload_id required")
 		return
 	}
+	u, err := loadWorkerUpload(ctx.AppDB(), body.UploadID, assignmentID, pid)
+	if err != nil {
+		httpErr(w, 404, "upload session not found")
+		return
+	}
+	if u.Status == "completed" {
+		httpJSON(w, map[string]any{"ok": true, "status": "completed", "storage_file_id": u.FileID})
+		return
+	}
+	if u.Transport == "binary" {
+		if u.Status != "uploading" && u.Status != "finalizing" {
+			httpErr(w, 409, "upload is no longer active")
+			return
+		}
+		if u.Status == "uploading" && !startBinaryFinalization(ctx, u) {
+			httpErr(w, 409, "upload changed; check its status")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		httpJSON(w, map[string]any{"status": "finalizing", "upload_id": u.ID})
+		return
+	}
+	mu := workerUploadLock(u.ID)
+	mu.Lock()
+	defer mu.Unlock()
+	u, _ = loadWorkerUpload(ctx.AppDB(), body.UploadID, assignmentID, pid)
+	if u != nil && u.Status == "completed" {
+		httpJSON(w, map[string]any{"ok": true, "status": "completed", "storage_file_id": u.FileID})
+		return
+	}
 	if err := requireWorkerUploadSession(ctx.AppDB(), body.UploadID, assignmentID, pid, "uploading"); err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	fileID, err := storageUploadComplete(ctx, pid, body.UploadID)
+	fileID, wasExisting, err := storageUploadComplete(ctx, pid, body.UploadID)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -2104,27 +2063,24 @@ func (a *App) handleWorkerUploadComplete(w http.ResponseWriter, r *http.Request,
 	}
 	metadata, metadataErr := storageGetFile(ctx, pid, fileID)
 	if metadataErr != nil {
-		_ = storageDeleteFile(ctx, pid, fileID)
-		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
-		httpErr(w, http.StatusBadGateway, metadataErr.Error())
+		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET storage_file_id=?,was_existing=? WHERE upload_id=?`, fileID, wasExisting, body.UploadID)
+		httpErr(w, http.StatusBadGateway, recordUploadError(ctx, u, "finalize", metadataErr))
 		return
 	}
 	filename, contentType, sizeBytes = metadata.Name, metadata.ContentType, metadata.SizeBytes
 	requirement, err := loadGigFileRequirement(ctx.AppDB(), gigID, instructionKey)
 	if err != nil || requirement == nil {
-		_ = storageDeleteFile(ctx, pid, fileID)
 		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
 		httpErr(w, http.StatusBadRequest, "this instruction no longer accepts files")
 		return
 	}
 	if err := responseAcceptsFile(requirement.Spec.Files, filename, contentType, sizeBytes); err != nil {
-		_ = storageDeleteFile(ctx, pid, fileID)
 		_, _ = ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='discarded',storage_file_id=?,discarded_at=CURRENT_TIMESTAMP WHERE upload_id=?`, fileID, body.UploadID)
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='completed', storage_file_id=?,filename=?,content_type=?,size_bytes=?,completed_at=CURRENT_TIMESTAMP
-		WHERE upload_id=? AND assignment_id=? AND status='uploading'`, fileID, filename, contentType, sizeBytes, body.UploadID, assignmentID)
+	res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='completed', storage_file_id=?,filename=?,content_type=?,size_bytes=?,was_existing=?,completed_at=CURRENT_TIMESTAMP
+		WHERE upload_id=? AND assignment_id=? AND status='uploading'`, fileID, filename, contentType, sizeBytes, wasExisting, body.UploadID, assignmentID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -2159,6 +2115,35 @@ func (a *App) handleWorkerUploadAbort(w http.ResponseWriter, r *http.Request, to
 		httpErr(w, http.StatusBadRequest, "upload_id required")
 		return
 	}
+	u, err := loadWorkerUpload(ctx.AppDB(), body.UploadID, assignmentID, pid)
+	if err != nil {
+		httpErr(w, 404, "upload session not found")
+		return
+	}
+	if u.Transport == "binary" {
+		if u.Status == "completed" || u.Status == "finalizing" {
+			httpErr(w, 409, "upload is already finalizing or saved; remove it after completion")
+			return
+		}
+		if u.Status == "aborted" || u.Status == "expired" {
+			httpJSON(w, map[string]any{"ok": true})
+			return
+		}
+		res, err := ctx.AppDB().Exec(`UPDATE gig_upload_sessions SET status='aborted',updated_at=CURRENT_TIMESTAMP WHERE upload_id=? AND status='uploading'`, u.ID)
+		if err != nil {
+			httpErr(w, 500, "Could not cancel upload")
+			return
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			httpErr(w, 409, "upload changed; reload its status")
+			return
+		}
+		if err := storageHTTPJSON(r.Context(), pid, http.MethodDelete, "/uploads/"+u.ID, nil, nil); err != nil {
+			recordUploadError(ctx, u, "Cancel", err)
+		}
+		httpJSON(w, map[string]any{"ok": true})
+		return
+	}
 	if err := requireWorkerUploadSession(ctx.AppDB(), body.UploadID, assignmentID, pid, "uploading"); err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
@@ -2178,7 +2163,7 @@ func (a *App) handleWorkerUploadRemove(w http.ResponseWriter, r *http.Request, t
 		return
 	}
 	ctx := globalCtx
-	assignmentID, _, pid, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
+	assignmentID, _, _, assignmentStatus, gigStatus, _, revoked, accessExpired, err := loadAssignmentState(ctx.AppDB(), token)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "invalid or expired link")
 		return
@@ -2234,12 +2219,7 @@ func (a *App) handleWorkerUploadRemove(w http.ResponseWriter, r *http.Request, t
 		httpErr(w, http.StatusConflict, "file changed; reload the page")
 		return
 	}
-	if err := storageDeleteFile(ctx, pid, body.StorageFileID); err != nil {
-		ctx.Logger().Warn("delete discarded worker upload failed", "file_id", body.StorageFileID, "err", err.Error())
-		httpJSON(w, map[string]any{"ok": true, "deleted": false, "discarded": true})
-		return
-	}
-	httpJSON(w, map[string]any{"ok": true, "deleted": true})
+	httpJSON(w, map[string]any{"ok": true, "deleted": false, "discarded": true, "retained_in_storage": true})
 }
 
 func requireWorkerUploadSession(db *sql.DB, uploadID string, assignmentID int64, pid, status string) error {
@@ -2254,36 +2234,33 @@ func requireWorkerUploadSession(db *sql.DB, uploadID string, assignmentID int64,
 	return nil
 }
 
-func validateSubmissionAttachments(db *sql.DB, assignmentID int64, ids []int64) error {
-	if len(ids) == 0 {
-		return nil
-	}
+func allowedSubmissionFiles(db *sql.DB, assignmentID int64) (map[int64]bool, error) {
 	allowed := map[int64]bool{}
 	rows, err := db.Query(`SELECT storage_file_id FROM gig_upload_sessions
 		WHERE assignment_id=? AND status='completed' AND storage_file_id IS NOT NULL`, assignmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for rows.Next() {
 		var id int64
 		if err := rows.Scan(&id); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		allowed[id] = true
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	oldRows, err := db.Query(`SELECT COALESCE(attachment_file_ids_json,'[]') FROM gig_submissions WHERE assignment_id=?`, assignmentID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for oldRows.Next() {
 		var raw string
 		if err := oldRows.Scan(&raw); err != nil {
 			oldRows.Close()
-			return err
+			return nil, err
 		}
 		var existing []int64
 		_ = parseJSON(raw, &existing)
@@ -2292,6 +2269,17 @@ func validateSubmissionAttachments(db *sql.DB, assignmentID int64, ids []int64) 
 		}
 	}
 	if err := oldRows.Close(); err != nil {
+		return nil, err
+	}
+	return allowed, nil
+}
+
+func validateSubmissionAttachments(db *sql.DB, assignmentID int64, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	allowed, err := allowedSubmissionFiles(db, assignmentID)
+	if err != nil {
 		return err
 	}
 	for _, id := range ids {

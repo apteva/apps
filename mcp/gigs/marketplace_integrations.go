@@ -153,17 +153,10 @@ func createGigPayable(ctx *sdk.AppCtx, pid string, gigID int64) (*gigCompensatio
 	if g.Status != "reviewed" {
 		return comp, nil, errors.New("payable can only be created after gig review")
 	}
-	wid := comp.WorkerID
-	if wid == 0 && len(g.Assignments) > 0 {
-		for _, ass := range g.Assignments {
-			if ass.Status == "reviewed" {
-				wid = ass.WorkerID
-				break
-			}
-		}
-	}
-	if wid == 0 {
-		return comp, nil, errors.New("compensation snapshot has no reviewed worker")
+	// Only the reviewed assignment determines the payable recipient.
+	var wid int64
+	if err := ctx.AppDB().QueryRow(`SELECT worker_id FROM gig_assignments WHERE gig_id=? AND status='reviewed' ORDER BY reviewed_at DESC,id DESC LIMIT 1`, gigID).Scan(&wid); err != nil {
+		return comp, nil, errors.New("gig has no reviewed worker")
 	}
 	w, err := getWorker(ctx.AppDB(), pid, wid)
 	if err != nil {

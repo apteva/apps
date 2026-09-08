@@ -52,11 +52,28 @@ func loadWorkerDraft(db *sql.DB, assignmentID int64) (*workerDraft, error) {
 	return draft, nil
 }
 
-func saveWorkerDraft(db *sql.DB, assignmentID int64, payload map[string]any, attachmentIDs []int64) (*workerDraft, error) {
+func saveWorkerDraft(db *sql.DB, assignmentID int64, payload map[string]any, attachmentIDs []int64, pendingKeys ...string) (*workerDraft, error) {
 	if payload == nil {
 		payload = map[string]any{}
 	}
-	_, err := db.Exec(`INSERT INTO gig_assignment_drafts
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if len(pendingKeys) > 0 {
+		var raw string
+		err := tx.QueryRow(`SELECT payload_json FROM gig_assignment_drafts WHERE assignment_id=?`, assignmentID).Scan(&raw)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		existing := map[string]any{}
+		_ = parseJSON(raw, &existing)
+		mergePendingUploadFiles(payload, existing, pendingKeys)
+		stripWorkerSignedURLs(payload)
+		attachmentIDs = draftAttachmentIDs(payload)
+	}
+	_, err = tx.Exec(`INSERT INTO gig_assignment_drafts
 		(assignment_id,payload_json,attachment_file_ids_json,revision,updated_at)
 		VALUES (?,?,?,1,CURRENT_TIMESTAMP)
 		ON CONFLICT(assignment_id) DO UPDATE SET
@@ -65,6 +82,9 @@ func saveWorkerDraft(db *sql.DB, assignmentID int64, payload map[string]any, att
 		revision=gig_assignment_drafts.revision+1,
 		updated_at=CURRENT_TIMESTAMP`, assignmentID, mustJSON(payload), mustJSON(attachmentIDs))
 	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return loadWorkerDraft(db, assignmentID)
@@ -205,6 +225,65 @@ func validateInstructionResponses(db *sql.DB, gigID, assignmentID int64, payload
 	if err != nil {
 		return err
 	}
+	known := map[string]bool{}
+	for _, req := range requirements {
+		known[req.Key] = true
+	}
+	if raw, exists := payload["instruction_responses"]; exists {
+		items, ok := raw.([]any)
+		if !ok {
+			return errors.New("instruction_responses must be an array")
+		}
+		seen := map[string]bool{}
+		for _, raw := range items {
+			entry, ok := raw.(map[string]any)
+			if !ok {
+				return errors.New("invalid instruction response")
+			}
+			key := strings.TrimSpace(strOf(entry["key"]))
+			if !known[key] || seen[key] {
+				return fmt.Errorf("unknown or duplicate instruction response %q", key)
+			}
+			seen[key] = true
+			for name := range entry {
+				switch name {
+				case "key", "step", "sort_order", "instruction_kind", "note", "files":
+				default:
+					return fmt.Errorf("unknown instruction response property %q", name)
+				}
+			}
+			if v, ok := entry["note"]; ok {
+				if _, ok := v.(string); !ok {
+					return errors.New("response note must be text")
+				}
+			}
+			if raw, ok := entry["files"]; ok {
+				files, ok := raw.([]any)
+				if !ok {
+					return errors.New("response files must be an array")
+				}
+				unique := map[int64]bool{}
+				for _, raw := range files {
+					f, ok := raw.(map[string]any)
+					if !ok {
+						return errors.New("invalid response file")
+					}
+					id := int64Cast(f["storage_file_id"])
+					if id <= 0 || unique[id] {
+						return errors.New("invalid or duplicate response file")
+					}
+					unique[id] = true
+					for name := range f {
+						switch name {
+						case "storage_file_id", "filename", "mime", "signed_url":
+						default:
+							return fmt.Errorf("unknown response file property %q", name)
+						}
+					}
+				}
+			}
+		}
+	}
 	responses := parseSubmittedInstructionResponses(payload)
 	for _, requirement := range requirements {
 		response := responses[requirement.Key]
@@ -225,7 +304,7 @@ func validateInstructionResponses(db *sql.DB, gigID, assignmentID int64, payload
 		if requireComplete && spec.Files.Required && len(response.Files) < spec.Files.MinItems {
 			return fmt.Errorf("step %d requires at least %d file(s)", step, spec.Files.MinItems)
 		}
-		if len(response.Files) > 0 && len(response.Files) < spec.Files.MinItems {
+		if requireComplete && len(response.Files) > 0 && len(response.Files) < spec.Files.MinItems {
 			return fmt.Errorf("step %d requires at least %d file(s) when files are provided", step, spec.Files.MinItems)
 		}
 		if spec.Files.MaxItems > 0 && len(response.Files) > spec.Files.MaxItems {
@@ -326,4 +405,60 @@ func submissionReferencesFile(db *sql.DB, assignmentID, fileID int64) (bool, err
 		}
 	}
 	return false, rows.Err()
+}
+
+// A draft request sent while an upload is in flight must retain files that
+// finalization attached after the browser captured that request's payload.
+func mergePendingUploadFiles(payload, existing map[string]any, keys []string) {
+	pending := map[string]bool{}
+	for _, key := range keys {
+		pending[key] = true
+		if len(draftAttachmentIDs(map[string]any{"value": payload[key]})) == 0 {
+			if value, ok := existing[key]; ok && len(draftAttachmentIDs(map[string]any{"value": value})) > 0 {
+				payload[key] = value
+			}
+		}
+	}
+	current, _ := payload["instruction_responses"].([]any)
+	old, _ := existing["instruction_responses"].([]any)
+	for _, raw := range old {
+		previous, _ := raw.(map[string]any)
+		key := strOf(previous["key"])
+		if !pending[key] {
+			continue
+		}
+		files, _ := previous["files"].([]any)
+		if len(files) == 0 {
+			continue
+		}
+		var entry map[string]any
+		for _, candidate := range current {
+			m, _ := candidate.(map[string]any)
+			if strOf(m["key"]) == key {
+				entry = m
+				break
+			}
+		}
+		if entry == nil {
+			entry = map[string]any{"key": key, "step": previous["step"], "instruction_kind": previous["instruction_kind"]}
+			current = append(current, entry)
+		}
+		incoming, _ := entry["files"].([]any)
+		seen := map[int64]bool{}
+		for _, id := range draftAttachmentIDs(map[string]any{"files": incoming}) {
+			seen[id] = true
+		}
+		for _, file := range files {
+			m, _ := file.(map[string]any)
+			id := int64Cast(m["storage_file_id"])
+			if id > 0 && !seen[id] {
+				incoming = append(incoming, file)
+				seen[id] = true
+			}
+		}
+		entry["files"] = incoming
+	}
+	if len(current) > 0 {
+		payload["instruction_responses"] = current
+	}
 }

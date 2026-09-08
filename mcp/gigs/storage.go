@@ -74,18 +74,19 @@ func storageUploadPart(ctx *sdk.AppCtx, pid, uploadID string, partNumber int, co
 	return nil
 }
 
-func storageUploadComplete(ctx *sdk.AppCtx, pid, uploadID string) (int64, error) {
+func storageUploadComplete(ctx *sdk.AppCtx, pid, uploadID string) (int64, bool, error) {
 	var got struct {
-		File map[string]any `json:"file"`
+		File        map[string]any `json:"file"`
+		WasExisting bool           `json:"was_existing"`
 	}
 	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "storage_upload_complete", map[string]any{"upload_id": uploadID}, &got); err != nil {
-		return 0, fmt.Errorf("storage.storage_upload_complete: %w", err)
+		return 0, false, fmt.Errorf("storage.storage_upload_complete: %w", err)
 	}
 	id := int64Cast(got.File["id"])
 	if id == 0 {
-		return 0, errors.New("storage upload completed without a file id")
+		return 0, false, errors.New("storage upload completed without a file id")
 	}
-	return id, nil
+	return id, got.WasExisting, nil
 }
 
 func storageUploadAbort(ctx *sdk.AppCtx, pid, uploadID, reason string) error {
