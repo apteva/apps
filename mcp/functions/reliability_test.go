@@ -233,6 +233,7 @@ func TestLegacySnapshotRecovery(t *testing.T) {
 	if err := app.OnMount(ctx); err != nil {
 		t.Fatal(err)
 	}
+	<-currentPool().initialPreparationScan
 	v, err := dbGetVersion(ctx.AppDB(), testProj, *fn.ActiveVersionID)
 	if err != nil {
 		t.Fatal(err)

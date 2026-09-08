@@ -36,6 +36,14 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	startupSteps         []startupStep
+	recoveredWork        int64
+	legacySnapshotsReady chan struct{}
+	owner                *runtimeOwner
+	draining             bool
+	activeWork           int
+	workWG               sync.WaitGroup
+	maintenanceWG        sync.WaitGroup
 	// Admission measurements are cached for at most 100 ms under mu.
 	memorySamples     map[*worker]admissionSample
 	hostSample        admissionHostSample
@@ -111,26 +119,35 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 	}
 	life, cancel := context.WithCancel(context.Background())
 	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
-	_, err = ctx.AppDB().ExecContext(ctx.StartupContext(), `UPDATE function_versions SET build_status='failed',build_log='Build interrupted by restart' WHERE build_status IN ('pending','building')`)
-	if err != nil {
-		cancel()
-		removeTree(stage)
-		return nil, err
+	steps := []struct {
+		name string
+		run  func() error
+	}{
+		{"runtime-owner", func() error { p.owner, err = openRuntimeOwner(ctx.StartupContext(), ctx.AppDB(), base); return err }},
+		{"recover-active-work", func() error {
+			n, e := p.owner.recover(ctx.StartupContext(), ctx.AppDB())
+			p.recoveredWork = n
+			ctx.Logger().Info("recovered abandoned work", "rows", n)
+			return e
+		}},
+		{"legacy-recovery-checkpoint", func() error { return p.initLegacyRecovery(ctx.StartupContext()) }},
+		{"capacity", p.initCapacity},
 	}
-	if _, err = ctx.AppDB().ExecContext(ctx.StartupContext(), `UPDATE function_invocations SET status='error',error='Invocation interrupted by restart' WHERE status='running'`); err != nil {
-		cancel()
-		removeTree(stage)
-		return nil, fmt.Errorf("recover interrupted invocations: %w", err)
+	for i, step := range steps {
+		started := time.Now()
+		ctx.ReportStartupProgress(step.name, int64(i), int64(len(steps)))
+		err = step.run()
+		p.startupSteps = append(p.startupSteps, startupStep{Name: step.name, DurationMS: time.Since(started).Milliseconds()})
+		ctx.Logger().Info("startup step", "step", step.name, "duration_ms", time.Since(started).Milliseconds(), "err", err)
+		if err != nil {
+			cancel()
+			p.owner.close()
+			removeTree(stage)
+			return nil, err
+		}
 	}
-	if err := p.recoverLegacySnapshots(); err != nil {
-		cancel()
-		removeTree(stage)
-		return nil, err
-	}
-	if err := p.initCapacity(); err != nil {
-		cancel()
-		return nil, err
-	}
+	p.maintenanceWG.Add(2)
+	go p.legacyRecoveryLoop()
 	p.startPreparation()
 	go p.reapLoop()
 	return p, nil
@@ -498,6 +515,7 @@ func (p *pool) removeFunction(fn *Function) {
 	p.signal()
 }
 func (p *pool) reapLoop() {
+	defer p.maintenanceWG.Done()
 	ticker := time.NewTicker(reaperEvery)
 	defer ticker.Stop()
 	for {
@@ -505,6 +523,7 @@ func (p *pool) reapLoop() {
 		case <-p.stop:
 			return
 		case <-ticker.C:
+			p.recoverAbandonedWork()
 			p.reapIdle()
 			p.retainInvocations()
 			p.retainArtifacts()
@@ -557,6 +576,9 @@ func (p *pool) shutdown() {
 		p.discard(w)
 	}
 	p.prepareWG.Wait()
+	p.workWG.Wait()
+	p.maintenanceWG.Wait()
+	p.owner.close()
 	_ = removeTree(p.stageDir)
 }
 func (p *pool) retainInvocations() {
@@ -569,9 +591,19 @@ func (p *pool) retainInvocations() {
 	p.lastRetention = time.Now()
 	p.mu.Unlock()
 	cutoff := time.Now().UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
-	if _, err := p.ctx.AppDB().Exec(`DELETE FROM function_invocations WHERE started_at < ?`, cutoff); err != nil {
+	// One bounded batch per reaper tick; allow the next tick to continue a backlog.
+	result, err := p.ctx.AppDB().ExecContext(p.life, `DELETE FROM function_invocations WHERE id IN (SELECT id FROM function_invocations WHERE started_at < ? ORDER BY started_at LIMIT 128)`, cutoff)
+	if err != nil {
 		p.ctx.Logger().Warn("prune function invocations", "err", err)
+		return
 	}
+	n, _ := result.RowsAffected()
+	if n == 128 {
+		p.mu.Lock()
+		p.lastRetention = time.Time{}
+		p.mu.Unlock()
+	}
+
 }
 
 func (p *pool) leaseVersion(dir string) (func(), error) {

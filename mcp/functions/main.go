@@ -96,6 +96,8 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/runtime/drain", Handler: a.handleRuntimeDrain},
+		{Pattern: "/runtime/status", Handler: a.handleRuntimeStatus},
 		{Pattern: "/capacity", Handler: a.handleHTTPCapacity},
 		{Pattern: "/capacity/settings", Handler: a.handleHTTPCapacitySettings},
 		// CRUD on functions.

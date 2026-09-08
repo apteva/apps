@@ -482,7 +482,7 @@ func scanVersion(row scanRow) (*FunctionVersion, error) {
 // dbCreateVersion inserts a version row, stamping the next monotonic
 // version number for the function. Caller resolves the source bytes
 // and computes source_hash; build_status starts at "building".
-func dbCreateVersion(db *sql.DB, pid string, v *FunctionVersion) (*FunctionVersion, error) {
+func dbCreateVersion(db *sql.DB, pid string, v *FunctionVersion, owner ...string) (*FunctionVersion, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -502,6 +502,11 @@ func dbCreateVersion(db *sql.DB, pid string, v *FunctionVersion) (*FunctionVersi
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if firstString(owner) != "" {
+		if _, err = tx.Exec("INSERT INTO function_active_work(kind,id,owner) VALUES('build',?,?)", id, firstString(owner)); err != nil {
+			return nil, err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -587,8 +592,13 @@ func dbSetActiveVersion(db *sql.DB, pid string, fnID int64, v *FunctionVersion) 
 
 // ─── Invocations ───────────────────────────────────────────────────
 
-func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation) (int64, error) {
-	res, err := db.Exec(
+func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation, owner ...string) (int64, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO function_invocations (
 			project_id, function_id, started_at, finished_at, duration_ms,
 			status, exit_code, trigger_kind, event_json, response_body, stderr, error, version_id, config_hash, truncated
@@ -602,7 +612,12 @@ func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation) (int64, error) 
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
-	return id, nil
+	if firstString(owner) != "" {
+		if _, err = tx.Exec("INSERT INTO function_active_work(kind,id,owner) VALUES('invocation',?,?)", id, firstString(owner)); err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
 }
 
 func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...int64) ([]*Invocation, error) {

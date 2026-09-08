@@ -221,7 +221,7 @@ func watchDiskCause(ctx context.Context, root string, limit int64, exceeded func
 }
 
 func (p *pool) recoverLegacySnapshots() error {
-	rows, err := p.ctx.AppDB().Query(`SELECT ` + fnVerColumns + ` FROM function_versions WHERE source_kind='repo' AND COALESCE(source,'')='' AND build_status='ready'`)
+	rows, err := p.ctx.AppDB().QueryContext(p.life, `SELECT `+fnVerColumns+` FROM function_versions WHERE id IN (SELECT active_version_id FROM functions WHERE active_version_id IS NOT NULL) AND source_kind='repo' AND COALESCE(source,'')='' AND build_status='ready'`)
 	if err != nil {
 		return err
 	}
@@ -239,11 +239,20 @@ func (p *pool) recoverLegacySnapshots() error {
 	if err != nil {
 		return err
 	}
+	return p.recoverSnapshots(p.life, versions)
+}
+func (p *pool) recoverSnapshots(ctx context.Context, versions []*FunctionVersion) error {
 	root, err := filepath.EvalSymlinks(p.buildBase)
 	if err != nil {
 		return err
 	}
 	for _, v := range versions {
+		if v.SourceKind != "repo" || v.Source != "" || v.BuildStatus != "ready" {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		candidates := []string{v.BuildDir}
 		moved, _ := filepath.Glob(filepath.Join(root, v.ArtifactKey, fmt.Sprintf("v%d-*", v.Version)))
 		candidates = append(candidates, moved...)
@@ -265,9 +274,11 @@ func (p *pool) recoverLegacySnapshots() error {
 				if err != nil || hashSource(src) != v.SourceHash {
 					continue
 				}
-				if _, err = p.ctx.AppDB().ExecContext(p.ctx.StartupContext(), `UPDATE function_versions SET source=?,build_dir=? WHERE id=? AND artifact_key=?`, string(src), dir, v.ID, v.ArtifactKey); err != nil {
+				if _, err = p.ctx.AppDB().ExecContext(ctx, `UPDATE function_versions SET source=?,build_dir=? WHERE id=? AND artifact_key=?`, string(src), dir, v.ID, v.ArtifactKey); err != nil {
 					return err
 				}
+				v.Source = string(src)
+				v.BuildDir = dir
 				recovered = true
 				break
 			}

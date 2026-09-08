@@ -21,6 +21,11 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 	if p == nil {
 		return nil, errors.New("pool unavailable")
 	}
+	done, err := p.beginWork()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	parent = context.WithValue(parent, poolContextKey{}, p)
 	parent, cancel := context.WithTimeoutCause(parent, buildTimeout, errBuildDeadline)
 	defer cancel()
@@ -49,11 +54,18 @@ func deployVersionContext(parent context.Context, ctx *sdk.AppCtx, fn *Function,
 		ArtifactKey: fn.InstanceKey, FunctionID: fn.ID, SourceKind: sourceKind, Source: string(src),
 		RepoID: repoID, RepoPath: repoPath, SourceHash: hashSource(src),
 		PackageJSON: packageJSON, BuildStatus: "building",
-	})
+	}, p.owner.id)
 	if err != nil {
 		return nil, err
 	}
 
+	// Every deployment exit must retire its active-work entry, including
+	// failures between compilation and activation. Existing diagnostics survive.
+	defer func() {
+		if _, e := db.Exec(`UPDATE function_versions SET build_status='failed',build_log='Deployment did not complete' WHERE id=? AND build_status IN ('pending','building') AND EXISTS (SELECT 1 FROM function_active_work WHERE kind='build' AND id=? AND owner=?)`, ver.ID, ver.ID, p.owner.id); e != nil {
+			ctx.Logger().Warn("finalize build ownership", "id", ver.ID, "err", e)
+		}
+	}()
 	base, err := poolBuildBase()
 	if err != nil {
 		return nil, err
@@ -127,6 +139,11 @@ func rollbackFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string
 	if p == nil {
 		return nil, errors.New("pool unavailable")
 	}
+	done, err := p.beginWork()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	parent = context.WithValue(parent, poolContextKey{}, p)
 	parent, cancel := context.WithTimeoutCause(parent, buildTimeout, errBuildDeadline)
 	defer cancel()
@@ -157,6 +174,9 @@ func rollbackFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid string
 	}
 	spec, err := resolveRuntime(fn.Runtime)
 	if err != nil {
+		return nil, err
+	}
+	if err := p.recoverSnapshots(parent, []*FunctionVersion{ver}); err != nil {
 		return nil, err
 	}
 	src, err := resolveVersionSourceContext(parent, ctx, ver)

@@ -44,6 +44,7 @@ func versionID(fn *Function) int64 {
 func (p *pool) startPreparation() {
 	p.preparations = make(map[string]*preparation)
 	p.initialPreparationScan = make(chan struct{})
+	p.legacySnapshotsReady = make(chan struct{})
 	p.prepareHigh = make(chan *preparation, 32)
 	p.prepareNormal = make(chan *preparation, 64)
 	for i := 0; i < envInt("APTEVA_FUNCTIONS_PREPARE_WORKERS", 2, 1, 8); i++ {
@@ -71,6 +72,12 @@ func (p *pool) startPreparation() {
 	p.prepareWG.Add(1)
 	go func() {
 		defer p.prepareWG.Done()
+		started := time.Now()
+		if err := p.recoverLegacySnapshots(); err != nil {
+			p.ctx.Logger().Warn("recover legacy snapshots", "err", err)
+		}
+		close(p.legacySnapshotsReady)
+		p.ctx.Logger().Info("startup background step", "step", "legacy-snapshots", "duration_ms", time.Since(started).Milliseconds())
 		p.scanPreparation()
 		close(p.initialPreparationScan)
 		ticker := time.NewTicker(30 * time.Second)
@@ -208,6 +215,11 @@ func (p *pool) requestPreparation(fn *Function, warm, retry, high bool) (*prepar
 	}
 }
 func (p *pool) runPreparation(job *preparation) {
+	select {
+	case <-p.legacySnapshotsReady:
+	case <-p.life.Done():
+		return
+	}
 	ctx, cancel := context.WithTimeoutCause(context.WithValue(p.life, poolContextKey{}, p), buildTimeout, errBuildDeadline)
 	defer cancel()
 	result := RuntimeReadiness{State: "failed", VersionID: versionID(job.fn)}

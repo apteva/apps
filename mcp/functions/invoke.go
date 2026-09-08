@@ -58,6 +58,11 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	if p == nil {
 		return nil, errors.New("function worker pool not initialised")
 	}
+	done, err := p.beginWork()
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	parent = context.WithValue(parent, poolContextKey{}, p)
 	started := time.Now().UTC()
 	timeout := time.Duration(fn.TimeoutMS) * time.Millisecond
@@ -83,7 +88,7 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	}
 	eventLog = redactSecrets(eventLog, fn.Env)
 	inv := &Invocation{FunctionID: fn.ID, VersionID: fn.ActiveVersionID, ConfigHash: configHash(fn), StartedAt: started.Format(time.RFC3339Nano), Status: "running", TriggerKind: triggerKind, EventJSON: truncate(eventLog, eventJSONCap), Truncated: len(eventLog) > eventJSONCap}
-	id, err := dbInsertInvocation(ctx.AppDB(), fn.ProjectID, inv)
+	id, err := dbInsertInvocation(ctx.AppDB(), fn.ProjectID, inv, p.owner.id)
 	if err != nil {
 		return nil, fmt.Errorf("record invocation: %w", err)
 	}
