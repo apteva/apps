@@ -1,6 +1,6 @@
-# Functions 1.10.1
+# Functions 1.11.0
 
-**Unreleased change:** memory admission defaults to **soft**: measured Linux worker usage plus a safety margin determines capacity, while per-worker cgroup limits remain hard. Full allowances are retained for starting or unmeasured workers. Strict reservation remains an explicit option. See [capacity settings and API](CAPACITY_API.md#soft-memory-admission-default) for migration behavior, pressure errors and safety bounds.
+**New in 1.11.0:** memory admission defaults to **soft**: measured Linux worker usage plus a safety margin determines capacity, while per-worker cgroup limits remain hard. Full allowances are retained for starting or unmeasured workers. Strict reservation remains an explicit option. See [capacity settings and API](CAPACITY_API.md#soft-memory-admission-default) for migration behavior, pressure errors and safety bounds.
 
 Lambda-style serverless functions for Apteva. Each function is an
 immutable, built **version** served by a pool of **warm worker

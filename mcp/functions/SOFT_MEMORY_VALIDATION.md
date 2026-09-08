@@ -1,6 +1,6 @@
 # Soft memory admission validation
 
-Implemented on 2026-09-08 on top of apps main `f6c5c9f1`, retaining the Functions 1.10.1 and Fleet 0.10.9 history. Not released or deployed.
+Implemented on 2026-09-08 on top of apps main `f6c5c9f1`, retaining the Functions 1.10.1 and Fleet 0.10.9 history. Released as Functions 1.11.0. Publishing does not upgrade existing installations.
 
 ## Behavior
 
@@ -24,3 +24,7 @@ The Linux check used a disposable network-disabled container with 4 GiB outer me
 ## API
 
 `GET /capacity` and MCP `functions_capacity` expose `memory_admission`, plus per-worker/per-function `admission_memory_mb`. Existing `reserved_memory_mb` fields keep their prior meaning (sum of hard allowances). Settings use `memory_mode: soft|strict`, configurable via `PUT /capacity/settings` or the panel; startup default override is `APTEVA_FUNCTIONS_MEMORY_MODE`. See `mcp/functions/CAPACITY_API.md` for complete semantics.
+
+## Release 1.11.0 verification
+
+Rebased onto current apps main without changes to the Functions implementation. The full race suite passed in **117.668 seconds** with the 1.11.0 manifest. Native Linux checks again completed 4/4 soft-mode calls with zero rejections versus 2/4 in strict mode; soft admission was 77 MiB with 11,632,640 bytes measured and 1,024 MiB combined hard limits. The OOM, physical/cgroup pressure and pending-start tests passed. Vet, strict TypeScript, panel build/import checks, Darwin arm64 and Linux amd64/arm64 builds passed. SDK v0.76.0 was verified in the built binary. Original Fleet/Functions checkout preservation was verified for 119 files.
