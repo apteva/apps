@@ -158,3 +158,51 @@ has no compare-and-swap/create-only operation, so use manual mode when other
 systems simultaneously manage the same record. Failed cleanup remains visible
 and retryable. A hostname cannot be claimed by a second API while its prior
 owner or cleanup record exists.
+
+## Upstream deadlines and correlation
+
+For `function`, `http`, and `app` routes, `timeout_ms` is the configurable total
+upstream budget (default 30,000 ms, range 1–300,000 ms). It starts at dispatch
+and includes request forwarding, upstream queueing/preparation, execution, and
+response transfer. Response headers may arrive at any point within that budget;
+there is no separate 10-second header cutoff. Authentication and upload read
+limits remain independently bounded. `app_events` retains its streaming policy.
+
+Set a route budget to cover the intended upstream work **and** queue/preparation
+and transfer time. For example, a 45,000 ms route can allow a 30,000 ms Function
+invocation plus forwarding/transfer headroom. Functions currently starts its own
+`timeout_ms` before preparation and admission, so its queue consumes its own
+invocation budget too; increasing the Gateway budget does not extend that
+Functions deadline. `limits.queue_timeout_ms` independently limits Functions
+admission waiting. A shorter outer deadline always wins; no stage resets it.
+
+Gateway deadline errors are JSON with `error`, `error_code`, and `request_id`:
+
+| Code | Meaning | HTTP |
+|---|---|---|
+| `gateway_timeout` | Route's total budget expired | 504 |
+| `queue_timeout` | Functions reported that its admission wait expired | 504 |
+| `upstream_timeout` | Upstream execution/service or an incoming deadline expired | 504 |
+| `client_cancelled` | Incoming request was cancelled | 499 in logs; no response can be delivered to a disconnected browser |
+
+Capacity rejection without waiting remains a capacity error, not a timeout.
+Functions retains the specific resource constraint in its error details and
+adds `queue_timed_out` when waiting, rather than admission itself, failed.
+When streaming headers have already been sent, the Gateway logs the classified
+failure and aborts the response; it cannot replace the committed status/body
+with JSON. Client cancellation continues through the upstream HTTP context.
+
+The Gateway creates `X-Request-ID` and replaces any client-provided value.
+Functions receives it both as an HTTP header and `event.request_id`, persists it
+in invocation resources, and includes it in completion logs. Calls to Tables
+carry `_request_id` as diagnostic metadata through the MCP bridge; Tables strips
+it before operation validation and emits it with tool name, project, duration,
+and success/error. Correlation metadata does not grant access or carry query
+arguments, user data, credentials, or tokens. This complete correlation path
+requires the corresponding Functions and Tables changes as well as the Gateway.
+
+Run the real-duration regression with:
+
+```sh
+API_LONG_UPSTREAM=1 GOWORK=off GOTOOLCHAIN=go1.26.6 go test -race -run TestUpstreamHeaderBudgetRealDurations -v .
+```

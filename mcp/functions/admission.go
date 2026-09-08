@@ -98,6 +98,7 @@ func (p *pool) reserveWorker(ctx context.Context, fn *Function) (string, error) 
 			if err := ctx.Err(); err != nil {
 				return class, err
 			}
+			reason.QueueTimedOut = true
 			reason.Reason += "; capacity wait deadline expired"
 			return class, p.reject(reason)
 		case <-p.stop:
@@ -224,7 +225,9 @@ func (p *pool) admitInvocation(ctx context.Context, fn *Function, fp *fnPool) (f
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err
 			}
-			return nil, nil, p.reject(resourceError("function_worker_limit", fmt.Sprintf("function concurrency %d remained occupied until queue deadline", policy(fn).Concurrency)))
+			reason := resourceError("function_worker_limit", fmt.Sprintf("function concurrency %d remained occupied until queue deadline", policy(fn).Concurrency))
+			reason.QueueTimedOut = true
+			return nil, nil, p.reject(reason)
 		case <-p.stop:
 			return nil, nil, resourceError("runtime_stopped", "pool stopped")
 		case <-p.wake:

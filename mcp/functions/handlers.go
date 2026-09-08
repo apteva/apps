@@ -506,9 +506,13 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 // returns 500 with the error message — callers reading from jobs
 // see the non-2xx and retry on schedule.
 func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, trigger string) {
+	r = withCorrelation(r, w)
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, trigger, stream)
 	if err != nil {
+		if !stream.started && writeInvocationDeadline(w, r, res, err) {
+			return
+		}
 		if stream.started {
 			stream.finish("error", err.Error())
 			return
@@ -534,6 +538,9 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 	w.Header().Set("X-Apteva-Function-Invocation", strconv.FormatInt(res.InvocationID, 10))
 	w.Header().Set("X-Apteva-Function-Status", res.Status)
 	if res.Status != "ok" {
+		if writeInvocationDeadline(w, r, res, nil) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -557,9 +564,13 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 }
 
 func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
+	r = withCorrelation(r, w)
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, "function_url", stream)
 	if err != nil {
+		if !stream.started && writeInvocationDeadline(w, r, res, err) {
+			return
+		}
 		if stream.started {
 			stream.finish("error", err.Error())
 			return
@@ -588,6 +599,9 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 	w.Header().Set("X-Apteva-Function-Invocation", strconv.FormatInt(res.InvocationID, 10))
 	w.Header().Set("X-Apteva-Function-Status", res.Status)
 	if res.Status != "ok" {
+		if writeInvocationDeadline(w, r, res, nil) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(w).Encode(map[string]any{

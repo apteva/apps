@@ -51,7 +51,9 @@ func boundedIntArg(args map[string]any, key string, def, min, max int) (int, err
 
 func gatewayHTTPClient() *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.ResponseHeaderTimeout = 10 * time.Second
+	// The route context owns the entire budget, including queueing and body transfer.
+	// A transport-wide header timer would silently override longer routes.
+	tr.ResponseHeaderTimeout = 0
 	tr.MaxIdleConns = 100
 	tr.MaxIdleConnsPerHost = 32
 	tr.IdleConnTimeout = 90 * time.Second

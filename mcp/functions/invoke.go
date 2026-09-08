@@ -125,7 +125,7 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 			}
 		}
 		if res.ErrorCode == "" {
-			res.ErrorCode = errorCode(retErr)
+			res.ErrorCode = deadlineErrorCode(retErr)
 		}
 		switch res.Status {
 		case "timeout":
@@ -147,6 +147,9 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		res.ExecutionMS = timings.execution.Milliseconds()
 
 		res.InvocationID = id
+		if trace.RequestID != "" {
+			ctx.Logger().Info("function invocation completed", "request_id", trace.RequestID, "invocation_id", id, "status", res.Status, "error_code", res.ErrorCode, "queue_ms", res.QueueMS, "execution_ms", res.ExecutionMS)
+		}
 		res.DurationMS = time.Since(started).Milliseconds()
 		res.Stderr = redactSecrets(res.Stderr, fn.Env)
 		res.Error = redactSecrets(res.Error, fn.Env)

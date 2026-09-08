@@ -324,13 +324,14 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	for i := range tools {
 		handler := tools[i].Handler
+		toolName := tools[i].Name
 		tools[i].HandlerCtx = func(callCtx context.Context, appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 			cp := make(map[string]any, len(args)+1)
 			for k, v := range args {
 				cp[k] = v
 			}
 			cp["_request_context"] = callCtx
-			return handler(appCtx, cp)
+			return traceTableCall(callCtx, appCtx, toolName, cp, handler)
 		}
 	}
 	return tools

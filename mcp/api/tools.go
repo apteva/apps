@@ -66,7 +66,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"events":       map[string]any{"type": "object"},
 				"auth":         map[string]any{"type": "object"},
 				"cors":         corsPolicySchema(),
-				"timeout_ms":   map[string]any{"type": "integer"},
+				"timeout_ms":   map[string]any{"type": "integer", "description": "Total upstream budget in milliseconds, including queueing, preparation, execution and response transfer (default 30000, maximum 300000)."},
 				"priority":     map[string]any{"type": "integer"},
 				"enabled":      map[string]any{"type": "boolean"},
 			}, []string{"method", "path_pattern", "target_kind", "target_ref"}),

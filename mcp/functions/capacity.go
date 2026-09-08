@@ -178,11 +178,12 @@ func (p *pool) initCapacity() error {
 }
 
 type ResourceError struct {
-	Code        string `json:"code"`
-	Reason      string `json:"reason"`
-	RequestedMB int    `json:"requested_memory_mb,omitempty"`
-	AvailableMB int    `json:"available_memory_mb,omitempty"`
-	Retryable   bool   `json:"retryable"`
+	QueueTimedOut bool   `json:"queue_timed_out,omitempty"`
+	Code          string `json:"code"`
+	Reason        string `json:"reason"`
+	RequestedMB   int    `json:"requested_memory_mb,omitempty"`
+	AvailableMB   int    `json:"available_memory_mb,omitempty"`
+	Retryable     bool   `json:"retryable"`
 }
 
 func (e *ResourceError) Is(target error) bool { return target == errFunctionBusy }
@@ -225,6 +226,7 @@ func requestClass(ctx context.Context, fn *Function) string {
 }
 
 type CallResources struct {
+	RequestID             string             `json:"request_id,omitempty"`
 	ProtocolReservedBytes int64              `json:"downstream_buffer_reserved_bytes"`
 	ProtocolPeakBytes     int64              `json:"downstream_buffer_peak_reserved_bytes"`
 	InvocationID          int64              `json:"invocation_id"`
@@ -310,7 +312,7 @@ func (t *callTrace) sample(w *worker) {
 	}
 }
 func (p *pool) newTrace(ctx context.Context, fn *Function, id int64) *callTrace {
-	t := &callTrace{CallResources: CallResources{InvocationID: id, FunctionID: fn.ID, FunctionName: fn.Name, ProjectID: fn.ProjectID, Class: policy(fn).Class, State: "preparing", ReservedMB: fn.MaxMemoryMB, MemorySource: "unavailable", StartedAt: time.Now().UTC(), Downstream: []DownstreamRecord{}}, chain: []int64{fn.ID}}
+	t := &callTrace{CallResources: CallResources{RequestID: correlationID(ctx), InvocationID: id, FunctionID: fn.ID, FunctionName: fn.Name, ProjectID: fn.ProjectID, Class: policy(fn).Class, State: "preparing", ReservedMB: fn.MaxMemoryMB, MemorySource: "unavailable", StartedAt: time.Now().UTC(), Downstream: []DownstreamRecord{}}, chain: []int64{fn.ID}}
 	if parent := traceFrom(ctx); parent != nil {
 		t.ParentID = parent.InvocationID
 		t.Depth = parent.Depth + 1

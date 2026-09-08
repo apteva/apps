@@ -43,6 +43,9 @@ func callbackRequest(ctx context.Context, method, path string, body any, out any
 	}
 	req.Header.Set("Authorization", "Bearer "+os.Getenv("APTEVA_APP_TOKEN"))
 	req.Header.Set("Content-Type", "application/json")
+	if id := correlationID(ctx); id != "" {
+		req.Header.Set("X-Request-ID", id)
+	}
 	client := callbackHTTP
 	if strings.Contains(path, "/integrations/") && strings.HasSuffix(path, "/execute") {
 		client = integrationHTTP
@@ -87,6 +90,12 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 		input = map[string]any{}
 	}
 	input["_project_id"] = ctx.CurrentProject()
+	if msg.Type == "call" && msg.App == "tables" {
+		delete(input, "_request_id")
+		if id := correlationID(parent); id != "" {
+			input["_request_id"] = id
+		}
+	}
 	var err error
 	if msg.Type == "call" && msg.App == "functions" && msg.Tool == "functions_invoke" {
 		ans = dispatchNested(parent, ctx, input)

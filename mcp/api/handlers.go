@@ -263,6 +263,8 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	logRow := RequestLog{ProjectID: pid, APIID: api.ID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500, RequestID: newRequestID()}
 	w.Header().Set("X-Request-ID", logRow.RequestID)
+	r = r.Clone(context.WithValue(r.Context(), gatewayRequestIDKey{}, logRow.RequestID))
+	r.Header.Set("X-Request-ID", logRow.RequestID)
 	defer func() {
 		logRow.DurationMS = time.Since(start).Milliseconds()
 		logRow.Error = redactErrorText(logRow.Error)
@@ -348,8 +350,13 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	logRow.StatusCode = status
 	if err != nil {
 		logRow.Error = safeUpstreamError(err)
+		var failure *gatewayFailure
+		if errors.As(err, &failure) {
+			logRow.Error = "[" + failure.code + "] " + failure.message
+			a.ctx.Logger().Warn("gateway upstream failed", "request_id", logRow.RequestID, "error_code", failure.code, "status", status, "elapsed_ms", time.Since(start).Milliseconds())
+		}
 		var transfer *responseTransferError
-		if errors.As(err, &transfer) {
+		if errors.As(err, &transfer) || status == 499 {
 			panic(http.ErrAbortHandler)
 		}
 	}
@@ -487,7 +494,7 @@ func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, ro
 	if route.TargetKind == "app_events" {
 		return a.dispatchAppEvents(w, r, api, route)
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond)
+	ctx, cancel := context.WithTimeoutCause(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond, errGatewayDeadline)
 	defer cancel()
 	switch route.TargetKind {
 	case "function":
@@ -522,6 +529,7 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 		"raw_body":    string(raw),
 		"auth":        auth,
 		"received_at": time.Now().UTC().Format(time.RFC3339),
+		"request_id":  gatewayRequestID(r.Context()),
 	}
 	if len(raw) > 0 {
 		var body any
@@ -550,18 +558,14 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", gatewayRequestID(r.Context()))
 	if accept := r.Header.Get("Accept"); accept != "" {
 		req.Header.Set("Accept", accept)
 	}
 
 	resp, err := a.performRequest(req)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			httpErr(w, http.StatusGatewayTimeout, err.Error())
-			return http.StatusGatewayTimeout, err
-		}
-		httpErr(w, http.StatusBadGateway, err.Error())
-		return http.StatusBadGateway, err
+		return writeGatewayFailure(w, r.Context(), err)
 	}
 	defer resp.Body.Close()
 
@@ -572,15 +576,17 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 			return resp.StatusCode, err
 		}
 		if err := copyResponseStream(w, resp.Body); err != nil {
-			return resp.StatusCode, &responseTransferError{err}
+			return resp.StatusCode, &responseTransferError{classifyGatewayFailure(r.Context(), err)}
 		}
 		return resp.StatusCode, nil
 	}
 
 	responseBody, readErr := readBounded(resp.Body, maxFunctionResponseBytes)
 	if readErr != nil {
-		httpErr(w, http.StatusBadGateway, readErr.Error())
-		return http.StatusBadGateway, readErr
+		return writeGatewayFailure(w, r.Context(), readErr)
+	}
+	if failure := functionDeadlineFailure(resp.StatusCode, responseBody); failure != nil {
+		return writeGatewayFailure(w, r.Context(), failure)
 	}
 	if len(responseBody) == 0 {
 		copyUpstreamResponseHeaders(w.Header(), resp.Header)
@@ -651,7 +657,7 @@ func proxyResponseHeaderAllowed(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "", "connection", "proxy-connection", "keep-alive", "proxy-authenticate",
 		"proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade",
-		"content-length":
+		"content-length", "x-request-id":
 		return false
 	default:
 		return true
@@ -750,17 +756,20 @@ func (a *App) performRequest(req *http.Request) (*http.Response, error) {
 func (a *App) doProxy(w http.ResponseWriter, req *http.Request) (int, error) {
 	resp, err := a.performRequest(req)
 	if err != nil {
-		code := 502
-		var size *http.MaxBytesError
-		if errors.As(err, &size) {
-			code = 413
-		} else if errors.Is(err, context.DeadlineExceeded) {
-			code = 504
-		}
-		httpErr(w, code, "upstream request failed")
-		return code, err
+		return writeGatewayFailure(w, req.Context(), err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusGatewayTimeout || resp.StatusCode == http.StatusRequestTimeout {
+		body, readErr := readBounded(resp.Body, maxFunctionResponseBytes)
+		if readErr != nil {
+			return writeGatewayFailure(w, req.Context(), readErr)
+		}
+		failure := functionDeadlineFailure(resp.StatusCode, body)
+		if failure == nil {
+			failure = &gatewayFailure{"upstream_timeout", "Upstream timed out", 504, nil}
+		}
+		return writeGatewayFailure(w, req.Context(), failure)
+	}
 	if resp.StatusCode == 101 {
 		httpErr(w, 502, "protocol upgrades are not supported")
 		return 502, errors.New("unsupported upstream upgrade")
@@ -771,12 +780,12 @@ func (a *App) doProxy(w http.ResponseWriter, req *http.Request) (int, error) {
 	// Streams still expose headers immediately, before an event arrives.
 	if resp.ContentLength < 0 || functionResponseIsStreaming(resp) {
 		if err := flushResponse(w); err != nil {
-			return resp.StatusCode, &responseTransferError{err}
+			return resp.StatusCode, &responseTransferError{classifyGatewayFailure(req.Context(), err)}
 		}
 	}
 	err = copyResponseStream(w, resp.Body)
 	if err != nil {
-		return resp.StatusCode, &responseTransferError{err}
+		return resp.StatusCode, &responseTransferError{classifyGatewayFailure(req.Context(), err)}
 	}
 	return resp.StatusCode, nil
 }

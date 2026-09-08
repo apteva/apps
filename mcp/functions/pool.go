@@ -268,6 +268,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	parent = context.WithValue(parent, queueDeadlineKey{}, queueStart.Add(time.Duration(policy(fn).QueueMS)*time.Millisecond))
 	fp := p.poolFor(fn.ID)
 	releaseAdmission, releaseQueue, err := p.admitInvocation(parent, fn, fp)
+	t.queue = time.Since(queueStart)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +284,6 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	if !valid {
 		return nil, errors.New("function deleted or configuration changed; retry")
 	}
-	t.queue = time.Since(queueStart)
 	var w *worker
 	for w == nil {
 		select {
