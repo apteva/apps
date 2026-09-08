@@ -432,7 +432,7 @@ func TestImmediateAnswerSpawnsRealtimeThreadAndAnswersCarrier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status != "answered" || stored.ThreadID != "tel-"+call.ID || stored.AudioBridgeURL == "pending" {
+	if stored.Status != "answered" || stored.ThreadID != platform.spawned[0].ThreadID || stored.AudioBridgeURL == "pending" {
 		t.Fatalf("call was not attached and answered: %+v", stored)
 	}
 }
@@ -480,6 +480,9 @@ func TestAnswerCallIsIdempotentAfterAnswer(t *testing.T) {
 	call := testCall("already-answered", "answered")
 	call.Direction = "inbound"
 	call.ThreadID = "tel-" + call.ID
+	if err := a.db().insertCall(call); err != nil {
+		t.Fatal(err)
+	}
 	threadID, err := a.answerCall(ctx, &call, "Help.", "marin", "Hello.", false)
 	if err != nil || threadID != call.ThreadID {
 		t.Fatalf("thread=%q err=%v", threadID, err)
@@ -529,7 +532,7 @@ func TestTwilioImmediateInboundReturnsStreamInInitialResponse(t *testing.T) {
 		t.Fatalf("spawned=%d carrier API calls=%d", len(platform.spawned), len(platform.integrationCalls))
 	}
 	stored, err := a.db().findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "CAdirect")
-	if err != nil || stored == nil || stored.Status != "answered" || stored.ThreadID != "tel-"+stored.ID {
+	if err != nil || stored == nil || stored.Status != "answered" || stored.ThreadID != platform.spawned[0].ThreadID {
 		t.Fatalf("stored call=%+v err=%v", stored, err)
 	}
 	if stored.ForwardedFrom != "+34930494946" || stored.IngressPath != "forwarded" {
@@ -732,7 +735,7 @@ func TestImmediateAnswerCleansUpThreadWhenCarrierAnswerFails(t *testing.T) {
 	if err := a.answerImmediateCall(ctx, &route, call.ID); err == nil {
 		t.Fatal("carrier answer failure was ignored")
 	}
-	if len(platform.killed) != 1 || platform.killed[0] != "tel-"+call.ID {
+	if len(platform.killed) != 1 || platform.killed[0] != platform.spawned[0].ThreadID {
 		t.Fatalf("spawned thread was not cleaned up: %v", platform.killed)
 	}
 	stored, err := a.db().findCall(call.ID)

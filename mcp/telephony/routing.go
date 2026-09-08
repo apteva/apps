@@ -1625,7 +1625,7 @@ func (a *App) twilioIVRActionURL(row *callRow, nodeID string) string {
 	return a.publicAppURL() + "/ivr/twilio/" + url.PathEscape(row.ID) + "?" + query
 }
 
-func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
+func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route *routeRow, plan *inboundRoutingPlan, waitContexts ...context.Context) error {
 	if plan == nil {
 		return errors.New("routing plan is unavailable")
 	}
@@ -1639,7 +1639,15 @@ func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route 
 		switch plan.AnswerMode {
 		case answerModeRealtimeImmediate:
 			ctx := globalCtx.WithProject(row.ProjectID)
-			if _, err := a.prepareInboundRealtime(ctx, row, plan.Directive, plan.Voice, plan.Greeting); err != nil {
+			if _, err := a.prepareInboundRealtime(ctx, row, plan.Directive, plan.Voice, plan.Greeting, waitContexts...); err != nil {
+				if retryAnswerPreparation(err) {
+					writeTwilioPreparationWait(w, a.twilioWaitURL(*route, row.ID))
+					return nil
+				}
+				if errors.Is(err, errAnswerCallEnded) {
+					writeTwilioHangup(w)
+					return nil
+				}
 				return err
 			}
 			if err := a.db().updateStatus(row.ID, "answered", ""); err != nil {
@@ -1648,6 +1656,10 @@ func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route 
 			stored, err := a.db().findCall(row.ID)
 			if err != nil || stored == nil {
 				return firstError(err, errors.New("answered call disappeared"))
+			}
+			if isTerminalStatus(stored.Status) {
+				writeTwilioHangup(w)
+				return nil
 			}
 			w.Header().Set("Content-Type", "application/xml")
 			_, _ = w.Write([]byte(a.twilioStreamTwiML(stored)))
@@ -1726,7 +1738,7 @@ func (a *App) handleIVRCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	row, _ = a.db().findCall(row.ID)
-	if err := a.writeTwilioRoutingPlan(w, row, route, plan); err != nil {
+	if err := a.writeTwilioRoutingPlan(w, row, route, plan, r.Context()); err != nil {
 		_ = a.db().updateStatus(row.ID, "failed", "execute IVR: "+err.Error())
 		writeTwilioSayHangup(w, "We could not route your call. Please try again later.")
 	}
@@ -1805,14 +1817,25 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 	case "destination", "ring_group":
 		switch plan.AnswerMode {
 		case answerModeRealtimeImmediate:
-			if _, err := a.prepareInboundRealtime(ctx, row, plan.Directive, plan.Voice, plan.Greeting); err != nil {
-				return err
-			}
-			row, _ = a.db().findCall(row.ID)
-			if err := a.db().updateStatus(row.ID, "answered", ""); err != nil {
-				return err
-			}
-			return a.startTelnyxStream(ctx, row)
+			_, err := a.sharedRealtimeWork(row, "ivr-stream", true, func(owned *callRow) error {
+				if _, err := a.sharedRealtimeWork(owned, "prepare", false, func(preparing *callRow) error {
+					return a.runInboundPreparation(ctx, preparing, plan.Directive, plan.Voice, plan.Greeting)
+				}); err != nil {
+					return err
+				}
+				if err := a.db().updateStatus(owned.ID, "answered", ""); err != nil {
+					return err
+				}
+				current, err := a.db().findCall(owned.ID)
+				if err != nil {
+					return err
+				}
+				if current == nil || isTerminalStatus(current.Status) {
+					return errAnswerCallEnded
+				}
+				return a.startTelnyxStream(ctx, current)
+			})
+			return err
 		case answerModeHumanBrowser:
 			// The carrier leg is already answered by the IVR. Return it to the
 			// project's browser-offer state; softphoneAnswer starts streaming

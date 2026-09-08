@@ -21,6 +21,7 @@ import (
 const lifecycleSchemaVersion = 1
 
 type lifecycleFacts struct {
+	ExpectedThreadID     string // Optional ownership guard for asynchronous answer cleanup.
 	OccurredAt           string
 	Source               string
 	PreviousStatus       string
@@ -68,6 +69,10 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if err != nil {
 		return false, err
 	}
+	if facts.ExpectedThreadID != "" && current.ThreadID != facts.ExpectedThreadID {
+		return false, nil
+	}
+
 	now := time.Now().UTC()
 	occurredAt := normalizedEventTime(facts.OccurredAt, now)
 	lateNonTerminal := isTerminalStatus(current.Status) && !isTerminalStatus(status)

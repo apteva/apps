@@ -193,13 +193,25 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := globalCtx.WithProject(route.ProjectID)
-		if _, err := a.prepareInboundRealtime(ctx, stored, route.AutoDirective, route.AutoVoice, route.AutoGreeting); err != nil {
+		if _, err := a.prepareInboundRealtime(ctx, stored, route.AutoDirective, route.AutoVoice, route.AutoGreeting, r.Context()); err != nil {
+			if retryAnswerPreparation(err) {
+				writePlivoWait(w, a.plivoWaitURL(*route, stored.ID))
+				return
+			}
+			if errors.Is(err, errAnswerCallEnded) {
+				writePlivoHangup(w)
+				return
+			}
 			_ = a.db().updateStatus(stored.ID, "failed", "prepare immediate answer: "+err.Error())
 			writePlivoHangup(w)
 			return
 		}
 		_ = a.db().updateStatus(stored.ID, "answered", "")
 		stored, _ = a.db().findCall(stored.ID)
+		if stored == nil || isTerminalStatus(stored.Status) {
+			writePlivoHangup(w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		_, _ = w.Write([]byte(a.plivoStreamXML(stored, xmlEscape(a.publicWSStreamURL("plivo", stored.ID, stored.CallbackSecret)))))
 		return
@@ -228,6 +240,19 @@ func (a *App) handlePlivoInboundWait(w http.ResponseWriter, r *http.Request, rou
 	}
 	if callUUID := strings.TrimSpace(r.FormValue("CallUUID")); callUUID != "" && callUUID != row.CarrierSID {
 		http.Error(w, "call does not match route", http.StatusForbidden)
+		return
+	}
+	if (row.Status == "pending" || row.Status == "answering") && route.AnswerMode == answerModeRealtimeImmediate && !callTimedOut(*route, *row) {
+		if _, err := a.prepareInboundRealtime(globalCtx.WithProject(row.ProjectID), row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, r.Context()); err == nil {
+			_ = a.db().updateStatus(row.ID, "answered", "")
+			row, _ = a.db().findCall(row.ID)
+		} else if !retryAnswerPreparation(err) {
+			writePlivoHangup(w)
+			return
+		}
+	}
+	if row == nil {
+		http.Error(w, "reload call", 500)
 		return
 	}
 	w.Header().Set("Content-Type", "application/xml")

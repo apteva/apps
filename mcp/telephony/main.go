@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.10
+version: 0.3.11
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -253,9 +253,10 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	installID  int64
-	sip        sipRuntimeHolder
-	softphones softphoneRegistry
+	installID    int64
+	sip          sipRuntimeHolder
+	softphones   softphoneRegistry
+	preparations realtimePreparations
 }
 
 const (
@@ -1571,6 +1572,23 @@ func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args ma
 }
 
 func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string, terminalOnCarrierError bool) (string, error) {
+	return a.sharedRealtimeWork(row, "answer", true, func(owned *callRow) error {
+		current, err := a.db().findCall(owned.ID)
+		if err != nil {
+			return err
+		}
+		if current == nil || isTerminalStatus(current.Status) {
+			return errAnswerCallEnded
+		}
+		if current.Status != "pending" {
+			*owned = *current
+		}
+		_, err = a.answerCallOwned(ctx, owned, directive, voice, greeting, terminalOnCarrierError)
+		return err
+	})
+}
+
+func (a *App) answerCallOwned(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string, terminalOnCarrierError bool) (string, error) {
 	if row.RoutingFlowVersionID != "" {
 		_, plan, err := a.routingPlanForCall(row, nil)
 		if err != nil {
@@ -1583,17 +1601,29 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 	if row.Status == "answered" || row.Status == "in-progress" {
 		return row.ThreadID, nil
 	}
-	threadID, err := a.prepareInboundRealtime(ctx, row, directive, voice, greeting)
+	threadID, err := a.sharedRealtimeWork(row, "prepare", false, func(owned *callRow) error {
+		return a.runInboundPreparation(ctx, owned, directive, voice, greeting)
+	})
 	if err != nil {
 		return "", err
 	}
 
+	current, err := a.db().findCall(row.ID)
+	if err != nil {
+		return "", err
+	}
+	if current == nil || isTerminalStatus(current.Status) {
+		return "", errAnswerCallEnded
+	}
+	if current.ThreadID != threadID {
+		return "", errAnswerPreparationInProgress
+	}
 	if err := a.answerInboundCarrierCall(ctx, row); err != nil {
 		_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
 		if terminalOnCarrierError {
-			_ = a.db().updateStatus(row.ID, "failed", "carrier answer failed: "+err.Error())
+			_, _ = a.db().updateStatusWithFacts(row.ID, "failed", "carrier answer failed: "+err.Error(), lifecycleFacts{Source: "telephony", ExpectedThreadID: threadID})
 		} else {
-			_ = a.db().resetAnswerClaim(row.ID)
+			_ = a.db().releaseRealtimePreparation(row.ID, threadID)
 		}
 		return "", fmt.Errorf("answer carrier call failed: %w", err)
 	}
@@ -1605,6 +1635,13 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 		}
 		return "", fmt.Errorf("persist answered status: %w", err)
 	}
+	current, err = a.db().findCall(row.ID)
+	if err != nil {
+		return "", err
+	}
+	if current == nil || isTerminalStatus(current.Status) {
+		return "", errAnswerCallEnded
+	}
 	if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {
@@ -1615,77 +1652,6 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 			_ = a.db().updateStatus(row.ID, "failed", "direct SIP media startup failed: "+err.Error())
 			return "", fmt.Errorf("start direct SIP media: %w", err)
 		}
-	}
-	return threadID, nil
-}
-
-func (a *App) prepareInboundRealtime(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string) (string, error) {
-	// A softphone-routed call bridges to an operator's browser, not to Core.
-	// Spawning a thread for it would strand the thread and leave the caller on
-	// a bridge nobody is listening to, so refuse rather than half-answer.
-	if row.PeerKind == peerKindHuman {
-		return "", errors.New("call is routed to the browser softphone; answer it from the Telephony panel")
-	}
-	if row.Status == "answered" || row.Status == "in-progress" {
-		return row.ThreadID, nil
-	}
-	if row.Status != "pending" && row.Status != "answering" {
-		return "", fmt.Errorf("call is not available to answer (status=%s)", row.Status)
-	}
-
-	threadID := row.ThreadID
-	audioBridgeURL := row.AudioBridgeURL
-	if row.Status == "pending" {
-		claimed, err := a.db().claimPendingCall(row.ID, row.AgentID, row.ProjectID)
-		if err != nil {
-			return "", fmt.Errorf("claim pending call: %w", err)
-		}
-		if !claimed {
-			return "", errors.New("call was already claimed")
-		}
-		current, loadErr := a.db().findCall(row.ID)
-		if loadErr != nil || current == nil {
-			_ = a.db().releaseAnswerClaim(row.ID)
-			return "", firstError(loadErr, errors.New("claimed call unavailable"))
-		}
-		*row = *current
-		threadID = "tel-" + row.ID
-		effectiveDirective := strings.TrimSpace(directive)
-		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
-			AgentID:                    row.AgentID,
-			ThreadID:                   threadID,
-			Directive:                  effectiveDirective,
-			Voice:                      voice,
-			CapabilityMode:             sdk.RealtimeCapabilitiesInheritAgent,
-			CallContext:                realtimeCallContext(*row),
-			TurnDetection:              telephonyTurnDetection(),
-			Ephemeral:                  true,
-			InitialMessage:             greeting,
-			BridgeDisconnectTTLSeconds: 30,
-		})
-		if err != nil {
-			_ = a.db().releaseAnswerClaim(row.ID)
-			return "", fmt.Errorf("spawn realtime thread: %w", err)
-		}
-		if rt == nil || strings.TrimSpace(rt.AudioBridgeURL) == "" {
-			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
-			_ = a.db().releaseAnswerClaim(row.ID)
-			return "", errors.New("realtime spawn returned no audio bridge URL")
-		}
-		audioBridgeURL = rt.AudioBridgeURL
-		if err := a.db().attachCall(row.ID, threadID, audioBridgeURL, effectiveDirective, voice); err != nil {
-			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
-			_ = a.db().releaseAnswerClaim(row.ID)
-			return "", fmt.Errorf("persist call answer: %w", err)
-		}
-		row.ThreadID = threadID
-		row.AudioBridgeURL = audioBridgeURL
-		row.Directive = effectiveDirective
-		row.Voice = voice
-		row.Status = "answering"
-	}
-	if threadID == "" || strings.HasPrefix(threadID, "pending-") || audioBridgeURL == "" || audioBridgeURL == "pending" {
-		return "", errors.New("answer claim is incomplete; wait for lifecycle recovery and retry")
 	}
 	return threadID, nil
 }
@@ -2319,7 +2285,7 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		stored, _ = a.db().findCall(stored.ID)
-		if err := a.writeTwilioRoutingPlan(w, stored, routed, plan); err != nil {
+		if err := a.writeTwilioRoutingPlan(w, stored, routed, plan, r.Context()); err != nil {
 			_ = a.db().updateStatus(stored.ID, "failed", "execute inbound flow: "+err.Error())
 			writeTwilioSayHangup(w, "We could not route your call. Please try again later.")
 		}
@@ -2332,8 +2298,16 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ctx := globalCtx.WithProject(route.ProjectID)
-		if _, err := a.prepareInboundRealtime(ctx, stored, route.AutoDirective, route.AutoVoice, route.AutoGreeting); err != nil {
+		if _, err := a.prepareInboundRealtime(ctx, stored, route.AutoDirective, route.AutoVoice, route.AutoGreeting, r.Context()); err != nil {
 			ctx.Logger().Warn("prepare immediate Twilio inbound call", "call", stored.ID, "route", route.ID, "err", err)
+			if retryAnswerPreparation(err) {
+				writeTwilioPreparationWait(w, a.twilioWaitURL(*route, stored.ID))
+				return
+			}
+			if errors.Is(err, errAnswerCallEnded) {
+				writeTwilioHangup(w)
+				return
+			}
 			_ = a.db().updateStatus(stored.ID, "failed", "prepare immediate answer: "+err.Error())
 			writeTwilioHangup(w)
 			return
@@ -2346,6 +2320,10 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		stored, _ = a.db().findCall(stored.ID)
 		if stored == nil {
 			http.Error(w, "reload answered call", http.StatusInternalServerError)
+			return
+		}
+		if isTerminalStatus(stored.Status) {
+			writeTwilioHangup(w)
 			return
 		}
 		w.Header().Set("Content-Type", "application/xml")
@@ -2672,6 +2650,14 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 					_ = a.db().updateStatus(row.ID, "failed", "resume IVR: "+planErr.Error())
 				} else if err := a.executeTelnyxRoutingPlan(ctx, row, routed, plan); err != nil {
 					ctx.Logger().Warn("execute Telnyx IVR selection", "call", row.ID, "node", nodeID, "digits", digit, "err", err)
+					if retryAnswerPreparation(err) {
+						http.Error(w, "answer preparation pending; retry", http.StatusServiceUnavailable)
+						return
+					}
+					if errors.Is(err, errAnswerCallEnded) {
+						w.WriteHeader(http.StatusNoContent)
+						return
+					}
 					_ = a.db().updateStatus(row.ID, "failed", "execute IVR selection: "+err.Error())
 				}
 			}
@@ -2787,7 +2773,16 @@ func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, ro
 		http.Error(w, "call does not belong to route", http.StatusForbidden)
 		return
 	}
-	if row.Status == "pending" && row.RoutingFlowVersionID != "" {
+	if !isTerminalStatus(row.Status) && row.PeerKind != peerKindHuman && route.AnswerMode == answerModeRealtimeImmediate && row.RoutingFlowVersionID == "" {
+		plan := &inboundRoutingPlan{TerminalType: "destination", AnswerMode: answerModeRealtimeImmediate, Directive: route.AutoDirective, Voice: route.AutoVoice, Greeting: route.AutoGreeting}
+		if !callTimedOut(*route, *row) || realtimePreparationReady(row) {
+			if err := a.writeTwilioRoutingPlan(w, row, route, plan, r.Context()); err != nil {
+				http.Error(w, "resume answer preparation", 500)
+			}
+			return
+		}
+	}
+	if (row.Status == "pending" || row.Status == "answering" || row.Status == "answered" || row.Status == "in-progress") && row.RoutingFlowVersionID != "" {
 		current, plan, err := a.routingPlanForCall(row, nil)
 		if err != nil {
 			http.Error(w, "load routing state", 500)
@@ -2797,7 +2792,7 @@ func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, ro
 			route = current
 		}
 		if plan != nil && !callTimedOut(*route, *row) {
-			if err := a.writeTwilioRoutingPlan(w, row, route, plan); err != nil {
+			if err := a.writeTwilioRoutingPlan(w, row, route, plan, r.Context()); err != nil {
 				http.Error(w, "execute routing state", 500)
 			}
 			return
