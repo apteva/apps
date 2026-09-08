@@ -27,6 +27,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -43,52 +44,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: bills
-display_name: Bills
-version: 0.1.33
-description: |
-  Vendors, bills, and outbound payments. The AP mirror of billing.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.connections.execute
-    - platform.apps.call
-  apps:
-    - name: storage
-      version: ">=0.1.0"
-      reason: holds vendor PDF attachments, rendered vouchers, and source bytes for OCR
-  integrations:
-    - role: vision_llm
-      kind: integration
-      compatible_slugs: [anthropic-api, opencode-go, openai-codex]
-      capabilities: [chat.complete, vision.describe]
-      tools:
-        chat.complete: chat_completion
-        vision.describe: chat_completion
-      required: false
-      label: "Vision LLM provider"
-      hint: "Anthropic API (Haiku 4.5, ~3s/page), OpenCode Go (Qwen3.6 Plus), or OpenAI Codex (gpt-5.5, device login)."
-provides:
-  http_routes:
-    - prefix: /
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/bills
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/bills.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct{}
 
@@ -225,6 +182,11 @@ func (a *App) handleHTTPBillItem(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
+		case "adjustments":
+			if r.Method == http.MethodPost {
+				a.handleHTTPBillAdjustment(w, r)
+				return
+			}
 		case "approve":
 			if r.Method == http.MethodPost {
 				a.handleHTTPBillApprove(w, r)
@@ -286,7 +248,7 @@ func (a *App) handleHTTPPaymentsCollection(w http.ResponseWriter, r *http.Reques
 // ─── MCP tools (17) ─────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append(a.obligationTools(), []sdk.Tool{
 		// ── Vendors ────────────────────────────────────────────────
 		{
 			Name:        "vendors_search",
@@ -463,6 +425,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "bills_attach_file",
 			Description: "Link an existing storage app file to a bill. Use after the file is already in storage. Validates the file exists in storage before linking. Allowed on any status except void. Replaces an existing attachment if there is one — the previous file is NOT auto-deleted from storage. Args: bill_id, file_id.",
 			InputSchema: schemaObject(map[string]any{
+				"append_only": map[string]any{"type": "boolean"}, "expected_storage_install_id": map[string]any{"type": "integer"},
 				"bill_id": map[string]any{"type": "integer"},
 				"file_id": map[string]any{"type": "integer"},
 			}, []string{"bill_id", "file_id"}),
@@ -512,6 +475,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "bill_payments_record",
 			Description: "Log an outbound payment to a vendor (wire / check / cash / ach / card / other). Updates bill.amount_paid_cents and transitions to 'paid' when fully covered. Bills must be in 'scheduled' or 'approved' state. method='external_rail' is reserved for v0.2 bank integrations. Args: bill_id, amount_cents (positive), method, sent_at (RFC3339, default now), notes.",
 			InputSchema: schemaObject(map[string]any{
+				"request_key":  map[string]any{"type": "string"},
 				"bill_id":      map[string]any{"type": "integer"},
 				"amount_cents": map[string]any{"type": "integer"},
 				"method":       map[string]any{"type": "string"},
@@ -533,7 +497,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolBillPaymentsList,
 		},
-	}
+	}...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -595,7 +559,18 @@ type Vendor struct {
 	DeletedAt               string          `json:"deleted_at,omitempty"`
 }
 
+type BillDocument struct {
+	FileID int64  `json:"file_id"`
+	Label  string `json:"label"`
+}
 type Bill struct {
+	Documents []BillDocument `json:"documents"`
+
+	SourceKey        string `json:"source_key,omitempty"`
+	SourceHash       string `json:"-"`
+	CreditMinor      int64  `json:"credit_minor"`
+	OutstandingMinor int64  `json:"outstanding_minor"`
+
 	ID                  int64           `json:"id"`
 	ProjectID           string          `json:"project_id,omitempty"`
 	VendorID            int64           `json:"vendor_id"`
@@ -852,6 +827,7 @@ func (a *App) toolBillsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	bill := &Bill{
+		SourceKey: strArg(args, "_source_key"), SourceHash: strArg(args, "_source_hash"),
 		ProjectID:           pid,
 		VendorID:            vid,
 		Provider:            provider,
@@ -1103,11 +1079,14 @@ func (a *App) toolBillPaymentsRecord(ctx *sdk.AppCtx, args map[string]any) (any,
 	}
 	requireW9 := strings.EqualFold(strings.TrimSpace(configString(ctx, "require_w9_before_payment", "false")), "true")
 	pay, bill, err := dbBillPaymentRecord(ctx.AppDB(), pid, id, amount, method, sentAt,
-		strArg(args, "notes"), callerActor(args), requireW9)
+		strArg(args, "notes"), callerActor(args), requireW9, strArg(args, "request_key"), strArg(args, "sent_at"))
 	if err != nil {
 		return nil, err
 	}
-	emitBill(ctx, "bill.paid", bill) // listeners filter on status == 'paid'
+	emitBill(ctx, "bill.payment_recorded", bill)
+	if bill.Status == "paid" {
+		emitBill(ctx, "bill.paid", bill)
+	}
 	return map[string]any{"payment": pay, "bill": bill}, nil
 }
 
@@ -1146,9 +1125,24 @@ func (a *App) toolBillsAttachFile(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if billID == 0 || fileID == 0 {
 		return nil, errors.New("bill_id and file_id required")
 	}
+	if expected := int64Arg(args, "expected_storage_install_id"); expected > 0 {
+		identity, e := ctx.PlatformAPI().WhoAmI()
+		if e != nil || identity == nil {
+			return nil, errors.New("cannot verify document Storage binding")
+		}
+		actual := int64Arg(identity.Bindings, "storage")
+		if actual != expected {
+			return nil, errors.New("supporting document belongs to a different Storage installation")
+		}
+	}
+
 	if err := storageFileExists(ctx, pid, fileID); err != nil {
 		return nil, err
 	}
+	if appendOnly, _ := args["append_only"].(bool); appendOnly {
+		return appendBillDocument(ctx, pid, billID, fileID, callerActor(args))
+	}
+
 	bill, prevID, err := dbBillAttachFile(ctx.AppDB(), pid, billID, fileID, callerActor(args))
 	if err != nil {
 		return nil, err
@@ -1444,7 +1438,7 @@ func emitVendor(ctx *sdk.AppCtx, topic string, v *Vendor) {
 	if ctx == nil || v == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, v.ProjectID, map[string]any{
 		"id":    v.ID,
 		"name":  v.Name,
 		"email": v.Email,
@@ -1455,7 +1449,8 @@ func emitBill(ctx *sdk.AppCtx, topic string, b *Bill) {
 	if ctx == nil || b == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, b.ProjectID, map[string]any{
+		"amount_paid_cents": b.AmountPaidCents, "credit_minor": b.CreditMinor, "source_key": b.SourceKey,
 		"id":                    b.ID,
 		"vendor_id":             b.VendorID,
 		"vendor_invoice_number": b.VendorInvoiceNumber,
@@ -2477,12 +2472,15 @@ func (a *App) handleHTTPPaymentRecord(w http.ResponseWriter, r *http.Request) {
 	}
 	requireW9 := strings.EqualFold(strings.TrimSpace(configString(ctx, "require_w9_before_payment", "false")), "true")
 	pay, bill, err := dbBillPaymentRecord(ctx.AppDB(), pid, id, amount, method, sentAt,
-		strArg(body, "notes"), actorFromRequest(r), requireW9)
+		strArg(body, "notes"), actorFromRequest(r), requireW9, strArg(body, "request_key"), strArg(body, "sent_at"))
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitBill(ctx, "bill.paid", bill)
+	emitBill(ctx, "bill.payment_recorded", bill)
+	if bill.Status == "paid" {
+		emitBill(ctx, "bill.paid", bill)
+	}
 	httpJSON(w, map[string]any{"payment": pay, "bill": bill})
 }
 
@@ -2743,7 +2741,7 @@ func dbVendorTotals(db *sql.DB, pid string, vid int64) (map[string]any, error) {
 	}
 	row := db.QueryRow(
 		`SELECT COUNT(*),
-		        COALESCE(SUM(total_cents), 0),
+		        COALESCE(SUM(total_cents-COALESCE((SELECT SUM(amount_minor) FROM bill_adjustments a WHERE a.bill_id=bills.id AND a.kind='credit'),0)), 0),
 		        COALESCE(SUM(amount_paid_cents), 0)
 		 FROM bills
 		 WHERE project_id = ? AND vendor_id = ?
@@ -2941,8 +2939,8 @@ func dbBillMonthlySummary(db *sql.DB, pid, sinceYM string) ([]billMonthSummary, 
 	const ymExpr = `substr(COALESCE(NULLIF(vendor_invoice_date, ''), created_at), 1, 7)`
 	rows, err := db.Query(
 		`SELECT `+ymExpr+` AS ym, currency,
-		        SUM(CASE WHEN status = 'paid' THEN total_cents ELSE 0 END) AS paid_cents,
-		        SUM(CASE WHEN status != 'paid' THEN total_cents ELSE 0 END) AS unpaid_cents
+		        SUM(amount_paid_cents) AS paid_cents,
+ SUM(total_cents-amount_paid_cents-COALESCE((SELECT SUM(amount_minor) FROM bill_adjustments a WHERE a.bill_id=bills.id AND a.kind='credit'),0)) AS unpaid_cents
 		 FROM bills
 		 WHERE project_id = ? AND deleted_at IS NULL AND status != 'void'
 		   AND `+ymExpr+` >= ?
@@ -3129,6 +3127,12 @@ func dbBillCreate(db *sql.DB, bill *Bill, actor string) (*Bill, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if bill.SourceKey != "" {
+		if _, err := tx.Exec(`INSERT INTO bill_sources(project_id,source_key,payload_hash,bill_id) VALUES(?,?,?,?)`, bill.ProjectID, bill.SourceKey, bill.SourceHash, id); err != nil {
+			return nil, err
+		}
+	}
+
 	for i, li := range bill.LineItems {
 		if _, err := tx.Exec(
 			`INSERT INTO bill_line_items
@@ -3326,6 +3330,19 @@ func dbBillMarkPaidOnCreate(db *sql.DB, pid string, billID int64, paid PaidOnCre
 }
 
 func dbBillUpdate(db *sql.DB, pid string, id int64, patch map[string]any, actor string, defaultBps int) (*Bill, error) {
+	var sourceCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM bill_sources WHERE project_id=? AND bill_id=?`, pid, id).Scan(&sourceCount); err != nil {
+		return nil, err
+	}
+	if sourceCount > 0 {
+		for k := range patch {
+			switch k {
+			case "due_date", "notes", "category", "gl_account", "vendor_invoice_number", "vendor_invoice_date":
+			default:
+				return nil, errors.New("source obligation amounts and payee are immutable; use an explicit adjustment or void and replacement")
+			}
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -3599,6 +3616,14 @@ func dbBillVoid(db *sql.DB, pid string, id int64, reason, actor string) (*Bill, 
 		}
 		return nil, err
 	}
+	var paid int64
+	if err := tx.QueryRow(`SELECT amount_paid_cents FROM bills WHERE id=? AND project_id=?`, id, pid).Scan(&paid); err != nil {
+		return nil, err
+	}
+	if paid != 0 {
+		return nil, errors.New("cannot void a paid or partially paid bill; record a refund or reversal first")
+	}
+
 	switch status {
 	case "void":
 		// Idempotent.
@@ -3668,6 +3693,10 @@ func dbBillAttachFile(db *sql.DB, pid string, billID, fileID int64, actor string
 	if err := writeAuditTx(tx, billID, actor, action, details); err != nil {
 		return nil, 0, err
 	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO bill_documents(bill_id,file_id,label) VALUES(?,?,'Supporting document')`, billID, fileID); err != nil {
+		return nil, 0, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, 0, err
 	}
@@ -3746,6 +3775,31 @@ func dbBillDetachFile(db *sql.DB, pid string, billID int64, actor string) (*Bill
 }
 
 func loadBillChildren(db *sql.DB, pid string, b *Bill) error {
+	if err := db.QueryRow(`SELECT COALESCE(SUM(amount_minor),0) FROM bill_adjustments WHERE bill_id=? AND kind='credit'`, b.ID).Scan(&b.CreditMinor); err != nil {
+		return err
+	}
+	b.OutstandingMinor = b.TotalCents - b.CreditMinor - b.AmountPaidCents
+	_ = db.QueryRow(`SELECT source_key FROM bill_sources WHERE bill_id=?`, b.ID).Scan(&b.SourceKey)
+
+	docs, e := db.Query(`SELECT file_id,label FROM bill_documents WHERE bill_id=? ORDER BY created_at,file_id`, b.ID)
+	if e != nil {
+		return e
+	}
+	b.Documents = []BillDocument{}
+	for docs.Next() {
+		var d BillDocument
+		if e = docs.Scan(&d.FileID, &d.Label); e != nil {
+			docs.Close()
+			return e
+		}
+		b.Documents = append(b.Documents, d)
+	}
+	e = docs.Err()
+	docs.Close()
+	if e != nil {
+		return e
+	}
+
 	rows, err := db.Query(
 		`SELECT id, bill_id, position, description, quantity, unit_price_cents,
 		        amount_cents, tax_rate_bps, external_id, metadata
@@ -3831,15 +3885,19 @@ func recomputeBillTotalsTx(tx *sql.Tx, id int64) error {
 // ── Payments ──
 
 type paymentFilters struct {
-	vendorID, billID int64
-	method           string
-	since, until     string
-	limit            int
+	vendorID, billID, id int64
+	method               string
+	since, until         string
+	limit                int
 }
 
 func dbBillPaymentList(db *sql.DB, pid string, f paymentFilters) ([]*BillPayment, error) {
 	where := []string{"project_id = ?"}
 	args := []any{pid}
+	if f.id > 0 {
+		where = append(where, "id = ?")
+		args = append(args, f.id)
+	}
 	if f.vendorID != 0 {
 		where = append(where, "vendor_id = ?")
 		args = append(args, f.vendorID)
@@ -3897,12 +3955,53 @@ func dbBillPaymentList(db *sql.DB, pid string, f paymentFilters) ([]*BillPayment
 }
 
 func dbBillPaymentRecord(db *sql.DB, pid string, billID int64, amount int64,
-	method, sentAt, notes, actor string, requireW9 bool) (*BillPayment, *Bill, error) {
+	method, sentAt, notes, actor string, requireW9 bool, requestKeys ...string) (*BillPayment, *Bill, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, nil, err
 	}
 	defer tx.Rollback()
+
+	key := ""
+	if len(requestKeys) > 0 {
+		key = requestKeys[0]
+	}
+	originalDate := ""
+	if len(requestKeys) > 1 {
+		originalDate = requestKeys[1]
+	}
+	hash := payloadHash(map[string]any{"bill_id": billID, "amount": amount, "method": method, "notes": notes, "sent_at": originalDate})
+	if key != "" {
+		var stored string
+		var payID int64
+		err := tx.QueryRow(`SELECT payload_hash,payment_id FROM bill_payment_requests WHERE project_id=? AND request_key=?`, pid, key).Scan(&stored, &payID)
+		if err == nil {
+			if stored != hash {
+				return nil, nil, errors.New("payment request conflicts with existing payment")
+			}
+			tx.Rollback()
+			b, e := dbBillGetByID(db, pid, billID)
+			if e != nil {
+				return nil, nil, e
+			}
+			if e = loadBillChildren(db, pid, b); e != nil {
+				return nil, nil, e
+			}
+			payments, e := dbBillPaymentList(db, pid, paymentFilters{id: payID, limit: 1})
+			if e != nil {
+				return nil, nil, e
+			}
+			for _, p := range payments {
+				if p.ID == payID {
+					return p, b, nil
+				}
+			}
+			return nil, nil, errors.New("payment record unavailable")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, nil, err
+		}
+	}
 
 	var (
 		status, currency string
@@ -3928,6 +4027,14 @@ func dbBillPaymentRecord(db *sql.DB, pid string, billID int64, amount int64,
 		return nil, nil, errors.New("vendor has no W-9 on file (require_w9_before_payment=true) — set vendors.update with w9_received_at first or flip the install config off")
 	}
 
+	var credit int64
+	if err := tx.QueryRow(`SELECT COALESCE(SUM(amount_minor),0) FROM bill_adjustments WHERE bill_id=? AND kind='credit'`, billID).Scan(&credit); err != nil {
+		return nil, nil, err
+	}
+	if amount > total-credit-paid {
+		return nil, nil, errors.New("payment exceeds outstanding payable")
+	}
+
 	res, err := tx.Exec(
 		`INSERT INTO bill_payments (project_id, bill_id, vendor_id, amount_cents,
 		                            currency, method, sent_at, notes)
@@ -3937,10 +4044,16 @@ func dbBillPaymentRecord(db *sql.DB, pid string, billID int64, amount int64,
 		return nil, nil, err
 	}
 	payID, _ := res.LastInsertId()
+	if key != "" {
+		if _, err := tx.Exec(`INSERT INTO bill_payment_requests(project_id,request_key,payload_hash,payment_id) VALUES(?,?,?,?)`, pid, key, hash, payID); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	newPaid := paid + amount
 	newStatus := status
 	action := "partial_payment"
-	if newPaid >= total && total > 0 {
+	if newPaid >= total-credit && total > 0 {
 		newStatus = "paid"
 		action = "paid"
 	}
@@ -3965,7 +4078,7 @@ func dbBillPaymentRecord(db *sql.DB, pid string, billID int64, amount int64,
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	pays, err := dbBillPaymentList(db, pid, paymentFilters{billID: billID, limit: 1})
+	pays, err := dbBillPaymentList(db, pid, paymentFilters{billID: billID, id: payID, limit: 1})
 	if err != nil {
 		return nil, nil, err
 	}

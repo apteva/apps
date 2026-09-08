@@ -59,7 +59,7 @@ function fmtMoney(cents: number, currency: string): string {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: (currency || "USD").toUpperCase(),
-    }).format(cents / 100);
+    }).format(cents / (10 ** (new Intl.NumberFormat(undefined,{style:"currency",currency:(currency||"USD").toUpperCase()}).resolvedOptions().maximumFractionDigits ?? 2)));
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
   }

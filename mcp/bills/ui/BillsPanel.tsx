@@ -156,6 +156,9 @@ interface Bill {
   tax_cents: number;
   total_cents: number;
   amount_paid_cents: number;
+ credit_minor?: number;
+ source_key?: string;
+ documents?: {file_id:number;label:string}[];
   due_date?: string;
   notes?: string;
   category?: string;
@@ -181,7 +184,7 @@ function fmtMoney(cents: number, currency: string): string {
       style: "currency",
       currency: (currency || "USD").toUpperCase(),
       currencyDisplay: "narrowSymbol",
-    }).format(cents / 100);
+    }).format(cents / (10 ** (new Intl.NumberFormat(undefined,{style:"currency",currency:(currency||"USD").toUpperCase()}).resolvedOptions().maximumFractionDigits ?? 2)));
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
   }
@@ -1565,6 +1568,7 @@ function BillsTab({
       await apiCall("POST", `/bills/${detail.id}/schedule`, {
         scheduled_for: result.scheduled_for,
         method: result.method,
+ request_key: crypto.randomUUID(),
       });
       await loadList();
       await loadDetail(detail.id);
@@ -1573,18 +1577,24 @@ function BillsTab({
     }
   };
 
+  const pendingRequest = (body:unknown) => {
+    const storageKey=`bills:pending:${installId}:${projectId}:${JSON.stringify(body)}`;
+    const key=sessionStorage.getItem(storageKey)||crypto.randomUUID();sessionStorage.setItem(storageKey,key);
+    return {key,clear:()=>sessionStorage.removeItem(storageKey)};
+  };
   const recordPayment = async () => {
     if (!detail) return;
-    const remaining = detail.total_cents - detail.amount_paid_cents;
+    const remaining = detail.total_cents - (detail.credit_minor||0) - detail.amount_paid_cents;
+    const precision=new Intl.NumberFormat(undefined,{style:"currency",currency:detail.currency}).resolvedOptions().maximumFractionDigits??2;
     const result = await dialogs.form({
       title: "Record outbound payment",
       body: `Outstanding: ${fmtMoney(remaining, detail.currency)}.`,
       fields: [
         {
-          name: "amount_cents",
-          label: "Amount (cents)",
-          type: "number",
-          initialValue: String(remaining),
+          name: "amount",
+          label: `Amount (${detail.currency})`,
+          type: "text",
+          initialValue: String(remaining/10**precision),
           required: true,
         },
         {
@@ -1605,28 +1615,47 @@ function BillsTab({
       submitLabel: "Record payment",
     });
     if (!result) return;
-    const amount = parseInt(result.amount_cents, 10);
-    if (Number.isNaN(amount) || amount <= 0) {
+    const rawAmount=Number(result.amount)*10**precision;
+ const amount=Math.round(rawAmount);
+    if (!Number.isFinite(rawAmount) || Math.abs(rawAmount-amount)>0.000001 || amount <= 0) {
       dialogs.toast({
-        message: "Amount must be a positive integer (cents).",
+        message: "Enter a positive amount using the currency’s precision.",
         level: "error",
       });
       return;
     }
+    const request=pendingRequest({bill_id:detail.id,amount,method:result.method});
     try {
       await apiCall("POST", "/payments", {
         bill_id: detail.id,
         amount_cents: amount,
         method: result.method,
+ request_key:request.key,
       });
       await loadList();
       await loadDetail(detail.id);
+ request.clear();
     } catch (err) {
       dialogs.toast({
         message: `Record payment failed: ${(err as Error).message}`,
         level: "error",
       });
     }
+  };
+
+  const recordAdjustment = async () => {
+    if (!detail) return;
+    const result = await dialogs.form({title:"Record bill adjustment",fields:[
+      {name:"kind",label:"Adjustment",type:"select",initialValue:"credit",options:[{value:"credit",label:"Supplier credit (reduce amount owed)"},{value:"refund",label:"Refund received"},{value:"reversal",label:"Reverse incorrect payment record"}]},
+      {name:"amount",label:`Amount (${detail.currency})`,type:"text"},
+      {name:"reason",label:"Reason / supporting reference",type:"text"}
+    ],submitLabel:"Record adjustment"});
+    if(!result)return;
+    const digits=new Intl.NumberFormat(undefined,{style:"currency",currency:detail.currency}).resolvedOptions().maximumFractionDigits??2;
+    const n=Number(result.amount)*10**digits;
+    if(!result.reason?.trim()||!Number.isFinite(n)||n<=0||Math.abs(n-Math.round(n))>0.000001){dialogs.toast({message:"Enter a positive amount and a reason.",level:"error"});return}
+    const request=pendingRequest({bill_id:detail.id,kind:result.kind,amount:n,reason:result.reason});
+    try{await apiCall("POST",`/bills/${detail.id}/adjustments`,{kind:result.kind,amount_minor:Math.round(n),reason:result.reason,request_key:request.key});await loadList();await loadDetail(detail.id);request.clear()}catch(err){dialogs.toast({message:(err as Error).message,level:"error"})}
   };
 
   // The persistent "+ New" button reuses the hidden file input from
@@ -2160,6 +2189,7 @@ function BillsTab({
             onReject={reject}
             onSchedule={schedule}
             onRecordPayment={recordPayment}
+ onAdjustment={recordAdjustment}
             onVoid={voidIt}
             onAttachmentChanged={() => {
               loadList();
@@ -2180,6 +2210,7 @@ function BillDetail({
   onReject,
   onSchedule,
   onRecordPayment,
+ onAdjustment,
   onVoid,
   onAttachmentChanged,
 }: {
@@ -2190,10 +2221,11 @@ function BillDetail({
   onReject: () => void;
   onSchedule: () => void;
   onRecordPayment: () => void;
+ onAdjustment: () => void;
   onVoid: () => void;
   onAttachmentChanged: () => void;
 }) {
-  const remaining = bill.total_cents - bill.amount_paid_cents;
+  const remaining = bill.total_cents - (bill.credit_minor||0) - bill.amount_paid_cents;
   const pdfHref = `/api/apps/bills/bills/${bill.id}/pdf?project_id=${encodeURIComponent(projectId)}`;
   const printHref = `/api/apps/bills/bills/${bill.id}/print?project_id=${encodeURIComponent(projectId)}`;
 
@@ -2232,6 +2264,11 @@ function BillDetail({
           )}
         </div>
       </header>
+
+      {(bill.credit_minor||0)>0&&<p className="text-sm">Supplier credits: {fmtMoney(bill.credit_minor||0,bill.currency)} · Remaining: {fmtMoney(remaining,bill.currency)}</p>}
+      {bill.source_key&&<p className="text-xs text-text-muted">Linked source obligation: {bill.source_key}. Changes require an explicit adjustment.</p>}
+      {bill.status!=="void"&&<button className="rounded border border-border px-3 py-2 text-sm" onClick={onAdjustment}>Record credit, refund or reversal</button>}
+      {(bill.documents||[]).length>0&&<div className="text-sm space-y-1"><p>Supporting documents</p>{bill.documents!.map(d=><a key={d.file_id} className="block text-accent underline" href={`/api/apps/storage/files/${d.file_id}/content?project_id=${encodeURIComponent(projectId)}`} target="_blank" rel="noreferrer">{d.label} #{d.file_id}</a>)}</div>}
 
       {bill.line_items && bill.line_items.length > 0 && (
         <section>

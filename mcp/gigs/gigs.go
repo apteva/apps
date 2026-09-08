@@ -1623,6 +1623,14 @@ func (a *App) toolGigsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g == nil {
 		return nil, errors.New("gig not found")
 	}
+	var financialHistory int
+	if err = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM gig_agreements WHERE project_id=? AND gig_id=?`, pid, id).Scan(&financialHistory); err != nil {
+		return nil, err
+	}
+	if financialHistory > 0 {
+		return nil, errors.New("gig has financial history and cannot be permanently deleted")
+	}
+
 	// Deleting live work strands whichever worker is holding its magic link,
 	// so that needs saying out loud rather than happening by typo.
 	if !slices.Contains(gigTerminalStatuses, g.Status) && !boolArg(args, "force", false) {
@@ -1773,11 +1781,7 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"submission_id": subID,
 		"worker_id":     workerID,
 	})
-	if boolArg(map[string]any{"enabled": ctx.Config().Get("auto_create_worker_payables")}, "enabled", false) {
-		if _, _, payableErr := createGigPayable(ctx, pid, id); payableErr != nil {
-			ctx.Logger().Warn("automatic gig payable failed", "gig_id", id, "err", payableErr.Error())
-		}
-	}
+
 	g, _ = loadGig(ctx, pid, id)
 	return map[string]any{"gig": g}, nil
 }

@@ -162,9 +162,12 @@ func renderBillPDF(bill *Bill, vendor *Vendor) ([]byte, error) {
 	drawTotalRow("Subtotal", formatMoney(bill.SubtotalCents, bill.Currency), false, false)
 	drawTotalRow("Input tax", formatMoney(bill.TaxCents, bill.Currency), false, true)
 	drawTotalRow("Total", formatMoney(bill.TotalCents, bill.Currency), true, false)
-	if bill.AmountPaidCents > 0 {
+	if bill.AmountPaidCents > 0 || bill.CreditMinor > 0 {
+		if bill.CreditMinor > 0 {
+			drawTotalRow("Credits", formatMoney(bill.CreditMinor, bill.Currency), false, false)
+		}
 		drawTotalRow("Paid", formatMoney(bill.AmountPaidCents, bill.Currency), false, false)
-		balance := bill.TotalCents - bill.AmountPaidCents
+		balance := bill.TotalCents - bill.CreditMinor - bill.AmountPaidCents
 		if balance < 0 {
 			balance = 0
 		}
@@ -495,7 +498,7 @@ func renderBillHTML(bill *Bill, vendor *Vendor) string {
 	b.WriteString(html.EscapeString(formatMoney(bill.TotalCents, bill.Currency)))
 	b.WriteString(`</td>
       </tr>`)
-	if bill.AmountPaidCents > 0 {
+	if bill.AmountPaidCents > 0 || bill.CreditMinor > 0 {
 		fmt.Fprintf(&b, `
       <tr>
         <td colspan="4" class="num" style="color:var(--muted);">Paid</td>
@@ -506,7 +509,7 @@ func renderBillHTML(bill *Bill, vendor *Vendor) string {
         <td class="num">%s</td>
       </tr>`,
 			html.EscapeString(formatMoney(bill.AmountPaidCents, bill.Currency)),
-			html.EscapeString(formatMoney(maxInt(0, bill.TotalCents-bill.AmountPaidCents), bill.Currency)))
+			html.EscapeString(formatMoney(maxInt(0, bill.TotalCents-bill.CreditMinor-bill.AmountPaidCents), bill.Currency)))
 	}
 	b.WriteString(`
     </tfoot>
@@ -561,6 +564,17 @@ func renderBillHTML(bill *Bill, vendor *Vendor) string {
 
 func formatMoney(cents int64, currency string) string {
 	currency = strings.ToUpper(strings.TrimSpace(currency))
+	switch currency {
+	case "JPY":
+		return fmt.Sprintf("¥%d", cents)
+	case "BIF", "CLP", "DJF", "GNF", "ISK", "KMF", "KRW", "PYG", "RWF", "UGX", "UYI", "VND", "VUV", "XAF", "XOF", "XPF":
+		return fmt.Sprintf("%s %d", currency, cents)
+	case "BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND":
+		return fmt.Sprintf("%s %.3f", currency, float64(cents)/1000)
+	case "CLF", "UYW":
+		return fmt.Sprintf("%s %.4f", currency, float64(cents)/10000)
+	}
+
 	sign := ""
 	abs := cents
 	if abs < 0 {

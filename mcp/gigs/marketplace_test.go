@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -187,20 +188,14 @@ func TestReviewedGigCreatesIdempotentBillsPayable(t *testing.T) {
 	if _, err := ctx.AppDB().Exec(`INSERT INTO gig_compensation(project_id,gig_id,worker_id,pricing_model,rate_amount_minor,quantity,worker_amount_minor,currency,rate_source) VALUES('project-a',?,?, 'fixed',12500,1,12500,'EUR','manual_test')`, gigID, workerID); err != nil {
 		t.Fatal(err)
 	}
-	comp, bill, err := createGigPayable(ctx, "project-a", gigID)
-	if err != nil {
-		t.Fatal(err)
+	_, _, err := createGigPayable(ctx, "project-a", gigID)
+	if err == nil || !strings.Contains(err.Error(), "approve compensation") {
+		t.Fatalf("review must not create a payable: %v", err)
 	}
-	if bill == nil || bill.ID != 902 || comp.PayableStatus != "created" {
-		t.Fatalf("comp=%+v bill=%+v", comp, bill)
-	}
-	before := len(platform.calls)
-	_, bill, err = createGigPayable(ctx, "project-a", gigID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bill.ID != 902 || len(platform.calls) != before {
-		t.Fatalf("retry was not local/idempotent calls=%v", platform.calls)
+	for _, call := range platform.calls {
+		if strings.HasPrefix(call, "bills/") {
+			t.Fatalf("unexpected bill call %s", call)
+		}
 	}
 }
 

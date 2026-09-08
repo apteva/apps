@@ -318,3 +318,56 @@ GOWORK=off GIGS_TEST_STORAGE_BIN=/path/to/storage GIGS_TEST_UPLOAD_BYTES=2000000
 
 The integration fixture uses temporary databases and disk storage. Its local
 throughput is not an estimate of mobile-network or production S3 throughput.
+
+## Financials (0.6.0)
+
+Every gig has a generic financial section. Fixed fees and decimal rate × unit
+agreements preserve their original currency; omitted amounts remain unknown.
+Saving an amendment appends a revision, including the reason, confirmation
+reference, timestamp and actor. Financial records prevent permanent gig deletion.
+
+Accepting work does **not** approve compensation or record payment. Explicit
+compensation approval records the accepted quantity, work amount, expenses,
+canonical site/cost-center allocations and delivered Storage file references.
+Shared allocations must sum to the approved total. Additional obligations and
+credits explicitly reference an earlier obligation; they do not overwrite it.
+Supplier, payroll and other settlement arrangements are supported.
+
+Bills is optional. Connect it under the app's integrations to automatically
+create an unapproved supplier payable after compensation approval. No Bills
+installation is required for agreements, approvals, attribution or history.
+Disabling `auto_create_approved_payables` prevents new automatic payables;
+existing links still refresh. Bills creation never approves or pays the bill.
+`gigs_financials_sync` retries failures and refreshes payment status; a durable
+worker reconciles up to 25 due obligations each minute (five-minute per-record
+interval). Bills events invalidate cached balances. Changed bindings cannot
+redirect historical bill IDs to another installation.
+
+Source identity includes Gigs installation, project, gig and obligation UUID.
+The prepared request is persisted before calling Bills. Bills atomically claims
+that identity and rejects conflicting replays. Historical bill links require
+explicit adoption and matching vendor, amount and currency. Their payment
+history remains marked as potentially incomplete. No historical approvals,
+zero costs, confirmation dates or payments are invented by migration.
+
+MCP: `gigs_financials_get`, `gigs_agreement_save`,
+`gigs_compensation_approve`, `gigs_financials_sync`, `gigs_financial_facts`.
+HTTP: GET `/financials/{gig_id}`; POST `/financials/{gig_id}/agreement`,
+`/approve`, `/sync`; GET `/financials/{gig_id}/options`.
+Use `expected_revision` for agreement changes and a stable `request_key` for
+approval retries. Money is integer original-currency minor units; quantities
+are decimal strings, multiplied with exact rational arithmetic and rounded
+half up. Unknown approval amounts are rejected; known zero is explicit.
+
+`gigs_financial_facts` exports paginated facts for Analytics. Each obligation
+is one cost; its linked Bills entry is the same expense. Credits are negative
+obligation facts. Recorded payments are a separate measure, included only on
+the original obligation, not repeated on credit records. Sum by currency and
+use explicit conversion policies if needed. Bill adjustments recorded directly
+in Bills are exposed separately from approved Gigs amounts for reconciliation.
+Do not sum both approval events and bill events as expenses, or both credit
+facts and the bill's cumulative credit balance as additional reductions.
+
+Sites and delivered files are optional: Content supplies canonical site IDs;
+Storage supplies file identity, also used by Media. A Media installation is
+not required and file bytes are never copied into financial records.
