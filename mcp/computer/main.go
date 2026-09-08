@@ -60,11 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.89
+version: 0.7.90
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.89 fixes native
-  file-chooser uploads, rejects ambiguous upload targets, and improves upload
-  recovery guidance, with live LLM image-upload and recovery coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.90 adds persistent
+  operator-owned scheduling constraints that reject immediate publication and
+  incorrect schedule times, with live Patreon LLM recovery coverage.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
