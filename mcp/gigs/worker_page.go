@@ -274,7 +274,7 @@ func workerPageHTML(token string) string {
 	    let draftTimer = null;
 	    let draftSavePromise = Promise.resolve();
 
-    fetch(API + "/api/gig")
+    fetch(publicWorkerURL("/api/gig"))
       .then(r => r.json())
 	      .then(data => {
 	        if (data.error) {
@@ -369,7 +369,7 @@ func workerPageHTML(token string) string {
         });
         await responseJSON(res);
         if (action === "accept") {
-          const refreshed = await fetch(API + "/api/gig");
+          const refreshed = await fetch(publicWorkerURL("/api/gig"));
           const data = await responseJSON(refreshed);
           gig = data.gig;
           hydrateExistingSubmission(gig.draft || gig.submission);

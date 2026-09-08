@@ -1,4 +1,4 @@
-# Gigs (v0.5.0)
+# Gigs (v0.5.1)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -284,7 +284,7 @@ surface: `workers.go`, `instructions.go`, `templates.go`, `gigs.go`,
 `storage.go` (inter-app helpers), and `marketplace_*.go` (commercial model,
 contracts, HTTP/MCP APIs, and Catalog/Bills integrations).
 
-## Resumable worker uploads (0.5.0)
+## Resumable worker uploads (0.5.1)
 
 Upgrade the bound Storage app to **0.11.3 or newer before Gigs**. Worker links
 send four binary 5 MiB parts concurrently through the platform's authenticated

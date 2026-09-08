@@ -327,3 +327,10 @@ func TestRegressionEmbeddedWorkerScriptParses(t *testing.T) {
 		}
 	}
 }
+
+func TestRegressionInitialWorkerFetchPreservesInstallSelector(t *testing.T) {
+	page := workerPageHTML("test-token")
+	if !strings.Contains(page, `fetch(publicWorkerURL("/api/gig"))`) || strings.Contains(page, `fetch(API + "/api/gig")`) {
+		t.Fatal("initial gig fetch bypasses the installation-scoped URL helper")
+	}
+}
