@@ -209,6 +209,17 @@ func (p *pool) admitInvocation(ctx context.Context, fn *Function, fp *fnPool) (f
 	defer cancel()
 	for {
 		p.mu.Lock()
+		if wait.Err() != nil {
+			p.mu.Unlock()
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return nil, nil, p.reject(resourceError("queue_timeout", "invocation admission deadline expired"))
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return nil, nil, resourceError("runtime_stopped", "pool stopped")
+		}
 		if len(fp.sem) < policy(fn).Concurrency && len(fp.sem) < cap(fp.sem) {
 			fp.sem <- struct{}{}
 			p.mu.Unlock()

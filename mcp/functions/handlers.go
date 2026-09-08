@@ -510,6 +510,9 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, trigger, stream)
 	if err != nil {
+		if !stream.started && writeAutomaticOverload(w, err) {
+			return
+		}
 		if !stream.started && writeInvocationDeadline(w, r, res, err) {
 			return
 		}
@@ -568,6 +571,9 @@ func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWri
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, "function_url", stream)
 	if err != nil {
+		if !stream.started && writeAutomaticOverload(w, err) {
+			return
+		}
 		if !stream.started && writeInvocationDeadline(w, r, res, err) {
 			return
 		}

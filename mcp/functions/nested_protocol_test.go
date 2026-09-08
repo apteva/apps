@@ -88,6 +88,9 @@ func TestNestedProtocolFanoutAndCancellation(t *testing.T) {
 			defer close(platform.gate)
 			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(platform))
 			app := mountApp(t, ctx)
+			// Exercise the underlying deadline/protocol mechanism independently of adaptive admission.
+			currentPool().auto = nil
+			currentPool().autoDownstream = nil
 			createFn(t, app, ctx, map[string]any{"name": "protocol-child", "max_memory_mb": 128, "source": `export default async(e,c)=>c.call("tables","list",{})`})
 			fn := createFn(t, app, ctx, map[string]any{"name": "protocol-fanout", "max_memory_mb": 128, "source": `export default async(e,c)=>Promise.all([1,2,3].map(()=>c.call("functions","functions_invoke",{name:"protocol-child",event:{}})))`})
 			parent, cancel := context.WithCancel(context.Background())

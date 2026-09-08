@@ -64,6 +64,9 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 	}
 	defer done()
 	parent = context.WithValue(parent, poolContextKey{}, p)
+	if caller := sdk.CallerFrom(parent); caller != nil && (caller.AppName == "jobs" || caller.ThreadRole == "worker") {
+		parent = context.WithValue(parent, admissionClassKey{}, "background")
+	}
 	started := time.Now().UTC()
 	timeout := time.Duration(fn.TimeoutMS) * time.Millisecond
 	if timeout <= 0 {

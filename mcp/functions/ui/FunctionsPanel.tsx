@@ -1446,9 +1446,11 @@ interface CallResources {
   memory_source: string;
   error_code?: string;
   capacity_wait_ms: number;
+  automatic_wait_ms?: number;
+  worker_cpu_seconds?: number | null;
   downstream_buffer_reserved_bytes?: number;
   downstream_buffer_peak_reserved_bytes?: number;
-  downstream_calls: { id: number; target: string; state: string; duration_ms: number; error_code?: string }[];
+  downstream_calls: { id: number; target: string; state: string; duration_ms: number; admission_wait_ms?: number; service_ms?: number; error_code?: string }[];
 }
 
 const memoryText = (bytes: number | null | undefined) =>
@@ -1466,7 +1468,7 @@ function CallMemory({ resources: r }: { resources?: CallResources }) {
         <span>Latest {memoryText(r.worker_memory_current_bytes)}</span>
       </div>
       <p className="mt-2 text-text-muted">Includes the runtime and retained allocations. This is sampled worker usage, not memory allocated exclusively by this call. Source: {r.memory_source}.</p>
-      <p className="mt-2">Capacity wait {r.capacity_wait_ms} ms · {r.class}
+      <p className="mt-2">Automatic wait {r.automatic_wait_ms ?? 0} ms · Capacity wait {r.capacity_wait_ms} ms · Worker CPU {r.worker_cpu_seconds == null ? "unavailable" : `${r.worker_cpu_seconds.toFixed(3)} s`} · {r.class}
         {r.parent_invocation_id ? ` · Parent #${r.parent_invocation_id}` : ""}
         {r.error_code ? ` · ${r.error_code}` : ""}
       </p>
@@ -1474,7 +1476,7 @@ function CallMemory({ resources: r }: { resources?: CallResources }) {
         Downstream buffer reservation: {memoryText(r.downstream_buffer_reserved_bytes)} current · {memoryText(r.downstream_buffer_peak_reserved_bytes)} peak
       </p>}
       {r.downstream_calls?.map((d, i) => (
-        <div key={i} className="mt-1">{d.target} · {d.state} · {d.duration_ms} ms {d.error_code}</div>
+        <div key={i} className="mt-1">{d.target} · {d.state} · {d.duration_ms} ms total · Admission {d.admission_wait_ms ?? 0} ms · Service {d.service_ms ?? 0} ms {d.error_code}</div>
       ))}
     </section>
   );
@@ -1508,6 +1510,11 @@ const capacityLabels: Record<string, string> = {
 
 type CapacitySettings = Record<string, number | string>;
 interface CapacitySnapshot {
+  automatic_admission?: {
+    mode: string; active: number; queued: number; last_decision: string;
+    pressure: { effective_cpus: number; cpu_busy_fraction: number; cpu_throttled: boolean; memory_pressure: boolean };
+    operations: { key: string; limit: number; active: number; queued: number; estimated_cpu_cores: number }[];
+  };
   settings: CapacitySettings;
   memory_admission: {
     mode: string;
@@ -1633,6 +1640,12 @@ function CapacityView({ api }: { api: ApiFn }) {
           {" "}{data.memory_admission.fallback_workers} workers use conservative fallback accounting.
           {" "}Available host/container memory: {data.memory_admission.host_available_memory_mb == null ? "Unavailable" : `${data.memory_admission.host_available_memory_mb} MiB`}.
         </p>
+        {data.automatic_admission?.mode === "automatic" && <div className="space-y-2 text-xs">
+          <p className="font-medium">Automatic admission · {data.automatic_admission.active} active · {data.automatic_admission.queued} waiting</p>
+          <p className="text-text-muted">New functions start with one active call. Concurrency grows cautiously when measured capacity permits. CPU-heavy work, downstream waits and memory pressure are accounted for separately.</p>
+          <p className="text-text-muted">Effective CPUs: {data.automatic_admission.pressure.effective_cpus.toFixed(1)} · CPU busy: {data.automatic_admission.pressure.cpu_busy_fraction < 0 ? "Unavailable (conservative mode)" : `${Math.round(data.automatic_admission.pressure.cpu_busy_fraction * 100)}%`}{data.automatic_admission.pressure.cpu_throttled ? " · CPU throttling detected" : ""}{data.automatic_admission.pressure.memory_pressure ? " · Memory pressure" : ""}</p>
+          {data.automatic_admission.last_decision && <p className="text-text-muted">{data.automatic_admission.last_decision}</p>}
+        </div>}
         {data.validation_warning && <p className="text-red">{data.validation_warning}</p>}
         <div className="flex flex-wrap gap-3 text-xs">
           {Object.entries(data.global.reserved_by_class || {}).map(([name, c]) => (
@@ -1642,11 +1655,12 @@ function CapacityView({ api }: { api: ApiFn }) {
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="text-text-muted"><tr>
-              <th className="p-2">Function</th><th className="p-2">Active / idle</th><th className="p-2">Queued</th><th className="p-2">Admission / hard limits</th><th className="p-2">Actual measured</th>
+              <th className="p-2">Function</th><th className="p-2">Automatic limit / waiting</th><th className="p-2">Active / idle</th><th className="p-2">Queued</th><th className="p-2">Admission / hard limits</th><th className="p-2">Actual measured</th>
             </tr></thead>
             <tbody>{[...(data.functions || [])].sort((a, b) => b.reserved_memory_mb - a.reserved_memory_mb).map(g => (
               <tr key={g.function_id} className="border-t border-border">
                 <td className="p-2">{g.function_name}</td>
+                <td className="p-2">{(() => { const rows = data.automatic_admission?.operations.filter(o => o.key.endsWith(`:${g.function_id}`)) || []; return rows.length ? `${Math.max(...rows.map(o => o.limit))} / ${rows.reduce((n, o) => n + o.queued, 0)}` : "1 / 0"; })()}</td>
                 <td className="p-2">{g.active_workers} / {g.idle_workers}</td>
                 <td className="p-2">{g.queued_calls}</td>
                 <td className="p-2">{g.admission_memory_mb} / {g.reserved_memory_mb} MiB</td>

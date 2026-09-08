@@ -190,6 +190,9 @@ func TestContextCallsFanOutConcurrently(t *testing.T) {
 	stub := &slowParallelPlatform{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(stub))
 	app := mountApp(t, ctx)
+	// Exercise the underlying deadline/protocol mechanism independently of adaptive admission.
+	currentPool().auto = nil
+	currentPool().autoDownstream = nil
 	fn := createFn(t, app, ctx, map[string]any{
 		"name": "fanout", "source": `export default async (_event, context) => {
 			await Promise.all([

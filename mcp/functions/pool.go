@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"github.com/apteva/apps/mcp/functions/internal/admission"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +37,8 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	auto                 *admission.Controller
+	autoDownstream       *admission.Controller
 	protocolBudget       atomic.Pointer[protocolBudget]
 	protocolWaiters      atomic.Int64
 	startupSteps         []startupStep
@@ -120,7 +123,9 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		return nil, err
 	}
 	life, cancel := context.WithCancel(context.Background())
-	p := &pool{ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
+	p := &pool{auto: admission.New(nil), autoDownstream: admission.New(nil), ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
+	p.auto.SetLeaseDirectory(filepath.Join(base, ".automatic-executions"))
+	p.autoDownstream.SetLeaseDirectory(filepath.Join(base, ".automatic-downstream"))
 	steps := []struct {
 		name string
 		run  func() error
@@ -212,11 +217,19 @@ func (p *pool) evictIdle() bool {
 }
 func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, spec runtimeSpec, dir string) (*worker, error) {
 	memory := clampInt(fn.MaxMemoryMB, defaultMemoryMB, 16, maxMemoryMB)
+	waitStart := time.Now()
 	class, err := p.reserveWorker(parent, fn)
+	if traceFrom(parent) != nil {
+		timingsFrom(parent).queue += time.Since(waitStart)
+	}
 	if err != nil {
 		return nil, err
 	}
+	processStart := time.Now()
 	w, err := startWorkerContext(parent, spec, dir, fn, v.ID)
+	if traceFrom(parent) != nil {
+		timingsFrom(parent).cold += time.Since(processStart)
+	}
 	if err != nil {
 		p.releaseReservation(class, memory)
 		return nil, err
@@ -267,6 +280,17 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	queueStart := time.Now()
 	parent = context.WithValue(parent, queueDeadlineKey{}, queueStart.Add(time.Duration(policy(fn).QueueMS)*time.Millisecond))
 	fp := p.poolFor(fn.ID)
+	autoPermit, autoErr := p.acquireAutomatic(parent, fn)
+	t.queue = time.Since(queueStart)
+	if autoErr != nil {
+		return nil, autoErr
+	}
+	autoResult := admission.Result{CPUSeconds: -1, Failed: true}
+	defer func() {
+		if autoPermit != nil {
+			autoPermit.Finish(autoResult)
+		}
+	}()
 	releaseAdmission, releaseQueue, err := p.admitInvocation(parent, fn, fp)
 	t.queue = time.Since(queueStart)
 	if err != nil {
@@ -300,9 +324,7 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 	}
 	if w == nil {
 		var err error
-		coldStart := time.Now()
 		w, err = p.start(parent, fn, v, spec, dir)
-		t.cold = time.Since(coldStart)
 		if err != nil {
 			return nil, fmt.Errorf("cold start: %w", err)
 		}
@@ -330,9 +352,29 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 			}
 		}
 	}()
+	cpuStart := workerCPUSeconds(w)
+	stopCPU := autoPermit.TrackCPU(parent, func() float64 { return workerCPUSeconds(w) })
+	defer stopCPU()
 	executionStart := time.Now()
 	res, err := w.call(ctx, parent, event, timeout, stream)
 	t.execution = time.Since(executionStart)
+	autoResult.Duration = t.execution
+	stopCPU()
+	cpuEnd := workerCPUSeconds(w)
+	if cpuStart >= 0 && cpuEnd >= cpuStart {
+		autoResult.CPUSeconds = cpuEnd - cpuStart
+	}
+	autoResult.Canceled = parent.Err() != nil
+	autoResult.Failed = err != nil || res == nil || res.Status != "ok"
+	if trace != nil {
+		trace.mu.Lock()
+		trace.WorkerCPUSeconds = nil
+		if autoResult.CPUSeconds >= 0 {
+			n := autoResult.CPUSeconds
+			trace.WorkerCPUSeconds = &n
+		}
+		trace.mu.Unlock()
+	}
 	close(sampleDone)
 	<-sampleStopped
 	trace.sample(w)
@@ -555,6 +597,12 @@ func (p *pool) reapIdle() {
 	}
 }
 func (p *pool) shutdown() {
+	if p.auto != nil {
+		p.auto.Close()
+	}
+	if p.autoDownstream != nil {
+		p.autoDownstream.Close()
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()

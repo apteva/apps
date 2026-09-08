@@ -36,6 +36,9 @@ func TestIntegrationDelayedBeyondThirtySeconds(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", server.URL)
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
+	// Exercise the underlying deadline/protocol mechanism independently of adaptive admission.
+	currentPool().auto = nil
+	currentPool().autoDownstream = nil
 	fn := createFn(t, app, ctx, map[string]any{"name": "slow-ai", "timeout_ms": 90000, "source": `export default async(e,c)=>c.integration(1,"evaluate",e)`})
 	var wg sync.WaitGroup
 	for _, delay := range []int{35, 60} {
@@ -254,6 +257,9 @@ func TestInteractiveRequestsDuringBackgroundEvaluations(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", server.URL)
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
+	// Exercise the underlying deadline/protocol mechanism independently of adaptive admission.
+	currentPool().auto = nil
+	currentPool().autoDownstream = nil
 	bg := createFn(t, app, ctx, map[string]any{"name": "background-ai", "max_memory_mb": 256, "timeout_ms": 5000, "limits": map[string]any{"class": "background", "concurrency": 2}, "source": `export default async(e,c)=>c.integration(1,"evaluate",{})`})
 	interactive := createFn(t, app, ctx, map[string]any{"name": "session", "max_memory_mb": 128, "source": echoHandler})
 	p := currentPool()

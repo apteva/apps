@@ -62,6 +62,15 @@ func callbackRequest(ctx context.Context, method, path string, body any, out any
 	if len(data) > maxFrame {
 		return fmt.Errorf("downstream response exceeds 8 MiB; use storage references")
 	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		var body struct {
+			Code  string `json:"error_code"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(data, &body) == nil && strings.HasPrefix(body.Code, "adaptive_") {
+			return resourceError(body.Code, body.Error)
+		}
+	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("platform callback status %d: %s", resp.StatusCode, truncate(string(data), 2048))
 	}

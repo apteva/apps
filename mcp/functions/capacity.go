@@ -53,7 +53,12 @@ func policy(fn *Function) RuntimePolicy {
 		r.IdleMS = 300000
 	}
 	if r.QueueMS == 0 {
-		r.QueueMS = 10000
+		// Inherited queue patience follows the invocation budget. An explicit
+		// queue_timeout_ms can still request a shorter wait.
+		r.QueueMS = fn.TimeoutMS
+		if r.QueueMS <= 0 {
+			r.QueueMS = defaultTimeout
+		}
 	}
 	if r.AppMS == 0 {
 		r.AppMS = envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000)
@@ -216,16 +221,18 @@ type admissionClassKey struct{}
 
 func traceFrom(ctx context.Context) *callTrace { t, _ := ctx.Value(traceKey{}).(*callTrace); return t }
 func requestClass(ctx context.Context, fn *Function) string {
-	if c, ok := ctx.Value(admissionClassKey{}).(string); ok {
-		return c
-	}
 	if t := traceFrom(ctx); t != nil && t.ParentID != 0 {
 		return "nested"
+	}
+	if c, ok := ctx.Value(admissionClassKey{}).(string); ok {
+		return c
 	}
 	return policy(fn).Class
 }
 
 type CallResources struct {
+	AutomaticWaitMS       int64              `json:"automatic_wait_ms"`
+	WorkerCPUSeconds      *float64           `json:"worker_cpu_seconds"`
 	RequestID             string             `json:"request_id,omitempty"`
 	ProtocolReservedBytes int64              `json:"downstream_buffer_reserved_bytes"`
 	ProtocolPeakBytes     int64              `json:"downstream_buffer_peak_reserved_bytes"`
@@ -250,14 +257,16 @@ type CallResources struct {
 	Depth                 int                `json:"depth"`
 }
 type DownstreamRecord struct {
-	ID         int64     `json:"id"`
-	Kind       string    `json:"kind"`
-	Target     string    `json:"target"`
-	State      string    `json:"state"`
-	StartedAt  time.Time `json:"started_at"`
-	DurationMS int64     `json:"duration_ms"`
-	TimeoutMS  int64     `json:"timeout_ms"`
-	ErrorCode  string    `json:"error_code,omitempty"`
+	AdmissionMS int64     `json:"admission_wait_ms"`
+	ServiceMS   int64     `json:"service_ms"`
+	ID          int64     `json:"id"`
+	Kind        string    `json:"kind"`
+	Target      string    `json:"target"`
+	State       string    `json:"state"`
+	StartedAt   time.Time `json:"started_at"`
+	DurationMS  int64     `json:"duration_ms"`
+	TimeoutMS   int64     `json:"timeout_ms"`
+	ErrorCode   string    `json:"error_code,omitempty"`
 }
 type callTrace struct {
 	mu sync.Mutex
@@ -312,7 +321,7 @@ func (t *callTrace) sample(w *worker) {
 	}
 }
 func (p *pool) newTrace(ctx context.Context, fn *Function, id int64) *callTrace {
-	t := &callTrace{CallResources: CallResources{RequestID: correlationID(ctx), InvocationID: id, FunctionID: fn.ID, FunctionName: fn.Name, ProjectID: fn.ProjectID, Class: policy(fn).Class, State: "preparing", ReservedMB: fn.MaxMemoryMB, MemorySource: "unavailable", StartedAt: time.Now().UTC(), Downstream: []DownstreamRecord{}}, chain: []int64{fn.ID}}
+	t := &callTrace{CallResources: CallResources{RequestID: correlationID(ctx), InvocationID: id, FunctionID: fn.ID, FunctionName: fn.Name, ProjectID: fn.ProjectID, Class: requestClass(ctx, fn), State: "preparing", ReservedMB: fn.MaxMemoryMB, MemorySource: "unavailable", StartedAt: time.Now().UTC(), Downstream: []DownstreamRecord{}}, chain: []int64{fn.ID}}
 	if parent := traceFrom(ctx); parent != nil {
 		t.ParentID = parent.InvocationID
 		t.Depth = parent.Depth + 1
@@ -446,7 +455,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 	for _, g := range groups {
 		functionGroups = append(functionGroups, g)
 	}
-	return map[string]any{"protocol_capacity": p.protocolCapacitySnapshot(protocolByClass), "memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": p.protocolConfig().hard >> 20, "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
+	return map[string]any{"automatic_admission": p.automaticSnapshot(pid), "protocol_capacity": p.protocolCapacitySnapshot(protocolByClass), "memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": p.protocolConfig().hard >> 20, "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
 }
 func (a *App) handleHTTPCapacity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {

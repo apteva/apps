@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/apteva/apps/mcp/functions/internal/admission"
 )
 
 // coldStartTimeout bounds how long we wait for a freshly-spawned
@@ -454,32 +456,85 @@ func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadl
 		if t := traceFrom(parent); t != nil {
 			class = t.Class
 		}
-		release, err := p.acquireDownstream(callCtx, class)
-		if err != nil {
-			ans.Error = err.Error()
-			ans.ErrorCode = classifyDownstreamError(parent, callCtx, err, msg.Type)
-		} else {
+		ans = func() callResult {
+			failure := func(err error) callResult {
+				return callResult{Type: "call_result", CallID: msg.CallID, Error: err.Error(), ErrorCode: classifyDownstreamError(parent, callCtx, err, msg.Type)}
+			}
+			started := time.Now()
+			defer func() {
+				if trace != nil && record >= 0 {
+					trace.mu.Lock()
+					d := &trace.Downstream[record]
+					d.AdmissionMS = max(0, time.Since(started).Milliseconds()-d.ServiceMS)
+					trace.mu.Unlock()
+				}
+			}()
+			var permit *admission.Permit
+			if p.autoDownstream != nil && !(msg.App == "functions" && msg.Tool == "functions_invoke") {
+				target := ctx.CurrentProject() + ":" + msg.Type + ":" + msg.App
+				if msg.Type == "integration" {
+					target = ctx.CurrentProject() + ":integration:" + string(msg.Conn)
+				}
+				var err error
+				permit, err = p.autoDownstream.Acquire(callCtx, admission.Request{Key: target, Operation: msg.Tool, Caller: strconv.FormatInt(w.fnID, 10), Background: class == "background"})
+				if err != nil {
+					return failure(automaticError(err))
+				}
+			}
+			outcome := admission.Result{CPUSeconds: -1, Failed: true}
+			if permit != nil && msg.Type == "integration" {
+				stopCPU := permit.TrackCPU(callCtx, func() float64 { return 0 })
+				defer stopCPU()
+			}
+			defer func() {
+				if permit != nil {
+					permit.Finish(outcome)
+				}
+			}()
+			release, err := p.acquireDownstream(callCtx, class)
+			if err != nil {
+				return failure(err)
+			}
 			defer release()
 			releaseProtocol, err := p.acquireProtocol(callCtx, class, maxFrame)
 			if err != nil {
-				ans.Error = err.Error()
-				ans.ErrorCode = classifyDownstreamError(parent, callCtx, err, msg.Type)
-			} else {
-				defer releaseProtocol()
-				trace.protocolReservation(maxFrame)
-				defer trace.protocolReservation(-maxFrame)
-				w.capacityState.Store("waiting_downstream")
-				ans = dispatchPlatformFrame(callCtx, ctx, msg)
-				if callCtx.Err() != nil {
-					ans.ErrorCode = classifyDownstreamError(parent, callCtx, callCtx.Err(), msg.Type)
-					ans.Error = "[" + ans.ErrorCode + "] downstream deadline or cancellation"
-				}
-				if ans.Error != "" && ans.ErrorCode == "" {
-					ans.ErrorCode = classifyDownstreamError(parent, callCtx, errors.New(ans.Error), msg.Type)
-				}
-				w.capacityState.Store("running")
+				return failure(err)
 			}
-		}
+			defer releaseProtocol()
+			trace.protocolReservation(maxFrame)
+			defer trace.protocolReservation(-maxFrame)
+			if trace != nil && record >= 0 {
+				trace.mu.Lock()
+				trace.Downstream[record].AdmissionMS = time.Since(started).Milliseconds()
+				trace.mu.Unlock()
+			}
+			serviceStart := time.Now()
+			w.capacityState.Store("waiting_downstream")
+			ans := dispatchPlatformFrame(callCtx, ctx, msg)
+			outcome.Duration = time.Since(serviceStart)
+			outcome.Canceled = callCtx.Err() != nil
+			outcome.Failed = !ans.OK
+			outcome.Overloaded = strings.HasPrefix(ans.ErrorCode, "adaptive_")
+			// Remote integration I/O consumes no worker CPU while awaiting its
+			// response. App-side CPU is measured/regulated by the gateway.
+			if msg.Type == "integration" {
+				outcome.CPUSeconds = 0
+			}
+			if trace != nil && record >= 0 {
+				trace.mu.Lock()
+				trace.Downstream[record].ServiceMS = outcome.Duration.Milliseconds()
+				trace.mu.Unlock()
+			}
+			if callCtx.Err() != nil {
+				ans.ErrorCode = classifyDownstreamError(parent, callCtx, callCtx.Err(), msg.Type)
+				ans.Error = "[" + ans.ErrorCode + "] downstream deadline or cancellation"
+			}
+			if ans.Error != "" && ans.ErrorCode == "" {
+				ans.ErrorCode = classifyDownstreamError(parent, callCtx, errors.New(ans.Error), msg.Type)
+			}
+			w.capacityState.Store("running")
+			return ans
+		}()
 
 	}
 	if ans.Error != "" {
