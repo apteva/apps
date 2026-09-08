@@ -220,7 +220,7 @@ func (p *pool) admitInvocation(ctx context.Context, fn *Function, fp *fnPool) (f
 			p.mu.Unlock()
 			return nil, nil, resourceError("runtime_stopped", "pool stopped")
 		}
-		if len(fp.sem) < policy(fn).Concurrency && len(fp.sem) < cap(fp.sem) {
+		if (policy(fn).Concurrency == 0 || len(fp.sem) < policy(fn).Concurrency) && len(fp.sem) < cap(fp.sem) {
 			fp.sem <- struct{}{}
 			p.mu.Unlock()
 			return func() { ready(); <-fp.sem; p.signal() }, ready, nil

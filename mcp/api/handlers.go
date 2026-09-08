@@ -281,7 +281,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	if preflight {
 		requestMethod = strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
 	}
-	route, params, err := dbMatchRoute(a.ctx.AppDB(), pid, api.ID, requestMethod, publicPath)
+	route, params, err := dbMatchRoute(a.ctx.AppReadDB(), pid, api.ID, requestMethod, publicPath)
 	if err != nil {
 		logRow.Error = safeUpstreamError(err)
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -319,8 +319,8 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		// Share the mutation lock with revocation so a stream cannot register
 		// after the mutation canceled its older credentials/configuration.
 		a.mutationMu.Lock()
-		freshAPI, loadErr := dbGetPublicAPI(a.ctx.AppDB(), pid, "id", api.ID)
-		freshRoute, routeErr := dbGetRouteByID(a.ctx.AppDB(), pid, route.ID)
+		freshAPI, loadErr := dbGetPublicAPI(a.ctx.AppReadDB(), pid, "id", api.ID)
+		freshRoute, routeErr := dbGetRouteByID(a.ctx.AppReadDB(), pid, route.ID)
 		if loadErr != nil || routeErr != nil || freshAPI == nil || freshRoute == nil || freshAPI.Status != "active" || !freshRoute.Enabled || *freshAPI != *api || *freshRoute != *route {
 			a.mutationMu.Unlock()
 			httpErr(w, 503, "stream route unavailable")
@@ -364,7 +364,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, string, error) {
 	if host != "" {
-		if api, err := dbGetPublicAPI(a.ctx.AppDB(), pid, "hostname", host); err != nil {
+		if api, err := dbGetPublicAPI(a.ctx.AppReadDB(), pid, "hostname", host); err != nil {
 			return nil, "", err
 		} else if api != nil {
 			return api, path, nil
@@ -374,7 +374,7 @@ func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, s
 	if len(parts) == 0 {
 		return nil, "", errors.New("api slug required")
 	}
-	api, err := dbGetPublicAPI(a.ctx.AppDB(), pid, "slug", parts[0])
+	api, err := dbGetPublicAPI(a.ctx.AppReadDB(), pid, "slug", parts[0])
 	if err != nil || api == nil {
 		return nil, "", errors.New("api not found")
 	}

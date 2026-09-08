@@ -37,8 +37,8 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
-	auto                 *admission.Controller
-	autoDownstream       *admission.Controller
+	auto                 *admission.Observer
+	autoDownstream       *admission.Observer
 	protocolBudget       atomic.Pointer[protocolBudget]
 	protocolWaiters      atomic.Int64
 	startupSteps         []startupStep
@@ -123,9 +123,7 @@ func newPool(ctx *sdk.AppCtx) (*pool, error) {
 		return nil, err
 	}
 	life, cancel := context.WithCancel(context.Background())
-	p := &pool{auto: admission.New(nil), autoDownstream: admission.New(nil), ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
-	p.auto.SetLeaseDirectory(filepath.Join(base, ".automatic-executions"))
-	p.autoDownstream.SetLeaseDirectory(filepath.Join(base, ".automatic-downstream"))
+	p := &pool{auto: admission.NewObserver(), autoDownstream: admission.NewObserver(), ctx: ctx, stageDir: stage, buildBase: base, versionRefs: map[string]int{}, collecting: map[string]bool{}, deleted: map[string]bool{}, byFn: map[int64]*fnPool{}, all: map[*worker]*fnPool{}, globalSem: make(chan struct{}, 1024), globalQueue: make(chan struct{}, 10000), buildSem: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)), buildQueue: make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_BUILD_QUEUE", 16, 1, 256)), downstream: make(chan struct{}, 1024), stop: make(chan struct{}), wake: make(chan struct{}, 1), life: life, cancel: cancel}
 	steps := []struct {
 		name string
 		run  func() error
@@ -353,13 +351,10 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 		}
 	}()
 	cpuStart := workerCPUSeconds(w)
-	stopCPU := autoPermit.TrackCPU(parent, func() float64 { return workerCPUSeconds(w) })
-	defer stopCPU()
 	executionStart := time.Now()
 	res, err := w.call(ctx, parent, event, timeout, stream)
 	t.execution = time.Since(executionStart)
 	autoResult.Duration = t.execution
-	stopCPU()
 	cpuEnd := workerCPUSeconds(w)
 	if cpuStart >= 0 && cpuEnd >= cpuStart {
 		autoResult.CPUSeconds = cpuEnd - cpuStart

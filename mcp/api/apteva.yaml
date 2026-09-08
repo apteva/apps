@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.6.2
+version: 0.6.3
 description: |
+  v0.6.3 Concurrent gateway read pools with immediate shared route-cache invalidation; preserves streaming, browser cancellation, and correlated upstream budgets.
+
   v0.6.2 Uses the configured route timeout for upstream response headers, including queueing and execution, preserves browser cancellation, classifies deadline failures, and propagates request correlation IDs.
 
   Lightweight API gateway for Apteva SaaS projects. Owns public API

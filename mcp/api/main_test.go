@@ -93,8 +93,8 @@ func TestManifest(t *testing.T) {
 	if m.Name != "api" {
 		t.Fatalf("name = %q, want api", m.Name)
 	}
-	if m.Version != "0.6.2" {
-		t.Fatalf("version = %q, want 0.6.2", m.Version)
+	if m.Version != "0.6.3" {
+		t.Fatalf("version = %q, want 0.6.3", m.Version)
 	}
 	if len(m.Provides.HTTPRoutes) == 0 {
 		t.Fatal("manifest should expose HTTP routes")

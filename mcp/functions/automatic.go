@@ -22,15 +22,11 @@ func automaticError(err error) error {
 	}
 	return err
 }
-func (p *pool) acquireAutomatic(ctx context.Context, fn *Function) (*admission.Permit, error) {
+func (p *pool) acquireAutomatic(ctx context.Context, fn *Function) (*admission.Observation, error) {
 	if p.auto == nil {
 		return nil, nil
 	} // small unit-test pools have no running scheduler
 	class := requestClass(ctx, fn)
-	if trace := traceFrom(ctx); trace != nil {
-		trace.state("queued")
-	}
-	started := time.Now()
 	permit, err := p.auto.Acquire(ctx, admission.Request{
 		Key: fn.ProjectID + ":" + strconv.FormatInt(fn.ID, 10), Operation: fn.InstanceKey + ":" + strconv.FormatInt(automaticVersion(fn), 10),
 		Caller: fn.ProjectID, Background: class == "background", Nested: class == "nested",
@@ -39,7 +35,7 @@ func (p *pool) acquireAutomatic(ctx context.Context, fn *Function) (*admission.P
 	})
 	if trace := traceFrom(ctx); trace != nil {
 		trace.mu.Lock()
-		trace.AutomaticWaitMS += time.Since(started).Milliseconds()
+		trace.AutomaticWaitMS += permitWaitMS(permit)
 		trace.mu.Unlock()
 	}
 	if err != nil {
@@ -97,4 +93,11 @@ func automaticVersion(fn *Function) int64 {
 		return *fn.ActiveVersionID
 	}
 	return 0
+}
+
+func permitWaitMS(p *admission.Observation) int64 {
+	if p == nil {
+		return 0
+	}
+	return p.Wait.Milliseconds()
 }

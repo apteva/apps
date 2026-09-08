@@ -1640,11 +1640,9 @@ function CapacityView({ api }: { api: ApiFn }) {
           {" "}{data.memory_admission.fallback_workers} workers use conservative fallback accounting.
           {" "}Available host/container memory: {data.memory_admission.host_available_memory_mb == null ? "Unavailable" : `${data.memory_admission.host_available_memory_mb} MiB`}.
         </p>
-        {data.automatic_admission?.mode === "automatic" && <div className="space-y-2 text-xs">
-          <p className="font-medium">Automatic admission · {data.automatic_admission.active} active · {data.automatic_admission.queued} waiting</p>
-          <p className="text-text-muted">New functions start with one active call. Concurrency grows cautiously when measured capacity permits. CPU-heavy work, downstream waits and memory pressure are accounted for separately.</p>
-          <p className="text-text-muted">Effective CPUs: {data.automatic_admission.pressure.effective_cpus.toFixed(1)} · CPU busy: {data.automatic_admission.pressure.cpu_busy_fraction < 0 ? "Unavailable (conservative mode)" : `${Math.round(data.automatic_admission.pressure.cpu_busy_fraction * 100)}%`}{data.automatic_admission.pressure.cpu_throttled ? " · CPU throttling detected" : ""}{data.automatic_admission.pressure.memory_pressure ? " · Memory pressure" : ""}</p>
-          {data.automatic_admission.last_decision && <p className="text-text-muted">{data.automatic_admission.last_decision}</p>}
+        {data.automatic_admission?.mode === "parallel" && <div className="space-y-2 text-xs">
+          <p className="font-medium">Parallel execution · {data.automatic_admission.active} active</p>
+          <p className="text-text-muted">Independent calls start concurrently. Worker memory, protocol buffers and explicitly configured capacity policies govern resource usage.</p>
         </div>}
         {data.validation_warning && <p className="text-red">{data.validation_warning}</p>}
         <div className="flex flex-wrap gap-3 text-xs">
@@ -1655,12 +1653,12 @@ function CapacityView({ api }: { api: ApiFn }) {
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs">
             <thead className="text-text-muted"><tr>
-              <th className="p-2">Function</th><th className="p-2">Automatic limit / waiting</th><th className="p-2">Active / idle</th><th className="p-2">Queued</th><th className="p-2">Admission / hard limits</th><th className="p-2">Actual measured</th>
+              <th className="p-2">Function</th><th className="p-2">Execution mode</th><th className="p-2">Active / idle</th><th className="p-2">Queued</th><th className="p-2">Admission / hard limits</th><th className="p-2">Actual measured</th>
             </tr></thead>
             <tbody>{[...(data.functions || [])].sort((a, b) => b.reserved_memory_mb - a.reserved_memory_mb).map(g => (
               <tr key={g.function_id} className="border-t border-border">
                 <td className="p-2">{g.function_name}</td>
-                <td className="p-2">{(() => { const rows = data.automatic_admission?.operations.filter(o => o.key.endsWith(`:${g.function_id}`)) || []; return rows.length ? `${Math.max(...rows.map(o => o.limit))} / ${rows.reduce((n, o) => n + o.queued, 0)}` : "1 / 0"; })()}</td>
+                <td className="p-2">{data.automatic_admission?.mode === "parallel" ? "Parallel" : "—"}</td>
                 <td className="p-2">{g.active_workers} / {g.idle_workers}</td>
                 <td className="p-2">{g.queued_calls}</td>
                 <td className="p-2">{g.admission_memory_mb} / {g.reserved_memory_mb} MiB</td>

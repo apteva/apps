@@ -1,3 +1,36 @@
+# Parallel execution — Functions 1.13.0
+
+The automatic CPU-learning execution and destination gates are replaced by
+nonblocking accounting. Independent calls begin concurrently on Linux and macOS;
+CPU telemetry is diagnostic and no longer a prerequisite for concurrency.
+The server companion removes its own installation-wide transport gates.
+
+Unset per-function concurrency no longer means eight. An explicit concurrency
+policy remains authoritative. The default global worker maximum derives from
+the configured memory budget (minimum worker size 16 MiB, with a 1024 process
+safety ceiling), instead of always being 32. Explicit saved capacity settings
+and environment overrides are preserved. Existing memory/protocol budgets,
+class reserves, preparation, queues at exhausted resource boundaries, nested
+call protections and cancellation retain their existing behavior.
+
+The capacity API reports automatic_admission.mode=parallel, active/completed
+calls and zero automatic wait. Existing capacity wait and execution timing stay
+separate; worker CPU diagnostics remain available when supported. The panel
+shows parallel execution without a fictitious learned limit.
+
+This release retains all 1.12.0 migrations, recovery, immutable execution
+identity, warm preparation, memory modes, soft protocol admission, streaming,
+request correlation and capacity-management APIs. It does not migrate or reset
+app data or overwrite operator settings. The older Controller implementation
+remains as an unused internal component; active calls use Observer.
+
+Regression coverage verifies overlapping CPU work, more than eight concurrent
+invocations with distinct results, cancellation and explicit-policy retention.
+
+---
+
+Historical 1.12.0 design (superseded automatic scheduling policy):
+
 # Automatic admission — Functions 1.12.0
 
 Functions now regulates execution and managed downstream calls automatically. No

@@ -469,7 +469,7 @@ func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadl
 					trace.mu.Unlock()
 				}
 			}()
-			var permit *admission.Permit
+			var permit *admission.Observation
 			if p.autoDownstream != nil && !(msg.App == "functions" && msg.Tool == "functions_invoke") {
 				target := ctx.CurrentProject() + ":" + msg.Type + ":" + msg.App
 				if msg.Type == "integration" {
@@ -482,10 +482,6 @@ func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadl
 				}
 			}
 			outcome := admission.Result{CPUSeconds: -1, Failed: true}
-			if permit != nil && msg.Type == "integration" {
-				stopCPU := permit.TrackCPU(callCtx, func() float64 { return 0 })
-				defer stopCPU()
-			}
 			defer func() {
 				if permit != nil {
 					permit.Finish(outcome)

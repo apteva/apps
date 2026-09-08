@@ -46,9 +46,6 @@ func policy(fn *Function) RuntimePolicy {
 	if r.Class == "" {
 		r.Class = "interactive"
 	}
-	if r.Concurrency == 0 {
-		r.Concurrency = 8
-	}
 	if r.IdleMS == 0 {
 		r.IdleMS = 300000
 	}
@@ -98,7 +95,7 @@ type CapacitySettings struct {
 
 func defaultCapacity() CapacitySettings {
 	total := envInt("APTEVA_FUNCTIONS_TOTAL_MEMORY_MB", 4096, 16, 1048576)
-	workers := envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)
+	workers := envInt("APTEVA_FUNCTIONS_MAX_WORKERS", min(1024, max(1, total/16)), 1, 1024)
 	downstream := envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)
 	s := CapacitySettings{MemoryMode: defaultMemoryMode(), InteractiveQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 4, NestedQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 8, AppTimeoutMS: envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000), IntegrationTimeoutMS: envInt("APTEVA_FUNCTIONS_INTEGRATION_TIMEOUT_MS", 300000, 1, 600000), TotalMemoryMB: total, MaxWorkers: workers, MaxWorkerMemoryMB: envInt("APTEVA_FUNCTIONS_MAX_WORKER_MEMORY_MB", 1024, 16, 65536), InteractiveMemoryMB: total / 4, InteractiveWorkers: workers / 4, NestedMemoryMB: total / 8, NestedWorkers: workers / 8, MaxDownstream: downstream, InteractiveDownstream: downstream / 4, NestedDownstream: downstream / 8, MaxQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000), MaxQueuePerFunction: envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000), PreparationWorkers: 2, HostHeadroomMB: 512, MaxNestedDepth: 4}
 	s.normalizeProtocol()

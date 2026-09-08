@@ -20,7 +20,7 @@ func TestAutomaticRealConcurrentCPUInvocations(t *testing.T) {
 	app := mountApp(t, ctx)
 	fn := createFn(t, app, ctx, map[string]any{"name": "cpu-concurrency", "source": `export default e=>{const start=Date.now();let n=0;while(Date.now()-start<1200){n=(n+1)%1000003}return {id:e.id,start,end:Date.now(),valid:n>=0}}`})
 	p := currentPool()
-	p.auto = admission.New(func() admission.Pressure { return admission.Pressure{CPUs: 1, Busy: 0.2} })
+	p.auto = admission.NewObserver()
 	if err := p.awaitPreparation(context.Background(), fn); err != nil {
 		t.Fatal(err)
 	}
@@ -70,23 +70,23 @@ func TestAutomaticRealConcurrentCPUInvocations(t *testing.T) {
 	if a.Start > b.Start {
 		a, b = b, a
 	}
-	if b.Start < a.End {
-		t.Fatalf("CPU handlers overlapped: %+v %+v", a, b)
+	if b.Start >= a.End {
+		t.Fatalf("independent handlers were serialized: %+v %+v", a, b)
 	}
-	if maxWait < 1000 {
+	if maxWait != 0 {
 		t.Fatalf("missing queue measurement: %d", maxWait)
 	}
 	if a.ID == b.ID {
 		t.Fatal("distinct requests were coalesced")
 	}
-	t.Logf("Two distinct CPU requests: intervals %d ms and %d ms; second queued %d ms; no overlap", a.End-a.Start, b.End-b.Start, maxWait)
+	t.Logf("Two distinct CPU requests: intervals %d ms and %d ms; automatic wait %d ms; concurrent execution", a.End-a.Start, b.End-b.Start, maxWait)
 }
 
 func TestAutomaticMixedCPUAndLightweightTraffic(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
 	p := currentPool()
-	p.auto = admission.New(func() admission.Pressure { return admission.Pressure{CPUs: 1, Busy: 0.2} })
+	p.auto = admission.NewObserver()
 	heavy := createFn(t, app, ctx, map[string]any{"name": "mixed-heavy", "source": `export default e=>{const start=Date.now();while(Date.now()-start<120){}return {centre:e.centre,start,end:Date.now()}}`})
 	light := createFn(t, app, ctx, map[string]any{"name": "mixed-light", "source": `export default e=>({value:e.value})`})
 	if err := p.awaitPreparation(context.Background(), heavy); err != nil {
@@ -150,25 +150,19 @@ func TestAutomaticMixedCPUAndLightweightTraffic(t *testing.T) {
 		t.Fatal("distinct centre inputs were lost", seen)
 	}
 	sort.Slice(intervals, func(i, j int) bool { return intervals[i][0] < intervals[j][0] })
-	for i := 1; i < len(intervals); i++ {
-		if intervals[i][0] < intervals[i-1][1] {
-			t.Fatal("CPU calculations overlapped", intervals)
-		}
-	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	p95 := latencies[len(latencies)-1]
 	if p95 > 200*time.Millisecond {
 		t.Fatalf("lightweight responsiveness regressed: %v", latencies)
 	}
-	t.Logf("6 distinct CPU calculations including all-centres completed serially; 12 lightweight calls remained correct; worst lightweight latency %s", p95)
+	t.Logf("6 distinct CPU calculations including all-centres completed independently; 12 lightweight calls remained correct; worst lightweight latency %s", p95)
 }
 
-func TestAutomaticHTTPOverloadAndQueuedCancellation(t *testing.T) {
+func TestAutomaticHTTPDoesNotQueueBehindExistingInvocation(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
 	app := mountApp(t, ctx)
-	fn := createFn(t, app, ctx, map[string]any{"name": "queue-contract", "source": `export default e=>e`, "limits": map[string]any{"queue_timeout_ms": 30}})
+	fn := createFn(t, app, ctx, map[string]any{"name": "parallel-http", "source": `export default e=>e`})
 	p := currentPool()
-	p.auto = admission.New(func() admission.Pressure { return admission.Pressure{CPUs: 1, Busy: 0.2} })
 	if err := p.awaitPreparation(context.Background(), fn); err != nil {
 		t.Fatal(err)
 	}
@@ -176,26 +170,20 @@ func TestAutomaticHTTPOverloadAndQueuedCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer permit.Finish(admission.Result{CPUSeconds: -1})
-	r := httptest.NewRequest("POST", "/fn/"+fn.Name+"?project_id="+testProj, strings.NewReader(`{"centre":"different"}`))
+	defer permit.Finish(admission.Result{})
+	r := httptest.NewRequest("POST", "/fn/"+fn.Name+"?project_id="+testProj, strings.NewReader(`{"value":"independent"}`))
 	w := httptest.NewRecorder()
 	app.handleHTTPInvokeByName(w, r)
-	if w.Code != 429 || w.Header().Get("Retry-After") != "1" || !strings.Contains(w.Body.String(), "adaptive_queue_timeout") {
-		t.Fatalf("overload contract: %d %s", w.Code, w.Body)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "independent") {
+		t.Fatal(w.Code, w.Body.String())
 	}
-	parent, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { _, e := invokeFunction(ctx, parent, fn, map[string]any{"centre": "all"}, "test"); done <- e }()
-	deadline := time.Now().Add(time.Second)
-	for p.auto.Snapshot()["queued"].(int) == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if e := <-done; e == nil {
-		t.Fatal("canceled invocation started")
+	if _, err := p.acquireAutomatic(canceled, fn); err != context.Canceled {
+		t.Fatal(err)
 	}
-	if p.auto.Snapshot()["queued"].(int) != 0 {
-		t.Fatal("canceled waiter leaked")
+	if p.auto.Snapshot()["queued"] != 0 {
+		t.Fatal("automatic execution queue remained")
 	}
 }
 
@@ -210,7 +198,7 @@ func TestAutomaticAdmissionAPIAndGenericDestinations(t *testing.T) {
 	}
 	s := p.capacitySnapshot(testProj)
 	a := s["automatic_admission"].(map[string]any)
-	if a["mode"] != "automatic" || a["active"].(int) != 1 {
+	if a["mode"] != "parallel" || a["active"].(int) != 1 {
 		t.Fatal(a)
 	}
 	other := p.capacitySnapshot("unrelated-project")["automatic_admission"].(map[string]any)

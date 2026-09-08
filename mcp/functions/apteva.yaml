@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.12.0
+version: 1.13.0
 description: |
+  v1.13.0 Parallel execution and downstream calls without CPU-learning gates; default function concurrency follows resource capacity while explicit policies remain intact.
+
   v1.12.0 adds automatic CPU-aware execution and managed-call admission.
   Queued requests retain their existing deadlines and cancellation; learned
   lightweight operations retain protected headroom. API and themed panel expose

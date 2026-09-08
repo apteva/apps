@@ -42,6 +42,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("api requires a db block")
 	}
 	a.ctx = ctx
+	bindRouteReadPool(ctx.AppDB(), ctx.AppReadDB())
 	a.requestSlots = make(chan struct{}, 256)
 	if a.httpClient == nil {
 		a.httpClient = gatewayHTTPClient()
@@ -66,6 +67,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	a.streams.closeAll()
 	if a.ctx != nil {
 		stopLogSink(a.ctx.AppDB())
+		releaseRouteCache(a.ctx.AppReadDB())
 		releaseRouteCache(a.ctx.AppDB())
 	}
 	if a.eventHubs != nil {

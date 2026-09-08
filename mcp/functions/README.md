@@ -1,6 +1,6 @@
 # Functions 1.12.0
 
-**New in 1.12.0:** automatic execution/downstream admission, deadline-aware queueing, and API/panel diagnostics. See [behavior and tests](AUTOMATIC_ADMISSION.md).
+**New in 1.13.0:** parallel execution/downstream accounting without CPU-learning gates; unset function concurrency follows resource capacity while explicit policies and all recovery, streaming, and capacity APIs are preserved. See [behavior and tests](AUTOMATIC_ADMISSION.md).
 
 **New in 1.11.3:** configurable soft protocol-buffer admission, bounded bursts and queueing, with API and themed panel controls. See [protocol settings and local evidence](SOFT_PROTOCOL.md).
 
@@ -275,7 +275,7 @@ Useful operator settings:
 - `APTEVA_FUNCTIONS_REQUIRE_CGROUP=true` (Linux default) — fail closed without hard cgroups. Set false only for trusted development inside an independently limited container.
 - `APTEVA_FUNCTIONS_REQUIRE_SANDBOX=false` — emergency Linux compatibility
   escape hatch; Linux otherwise fails closed if Landlock/seccomp cannot load.
-- `APTEVA_FUNCTIONS_MAX_WORKERS=32`, `APTEVA_FUNCTIONS_MAX_QUEUE=256`,
+- `APTEVA_FUNCTIONS_MAX_WORKERS` (defaults to memory budget / 16 MiB, capped at 1024), `APTEVA_FUNCTIONS_MAX_QUEUE=256`,
   `APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION=64`, and
   `APTEVA_FUNCTIONS_MAX_BUILDS=2` — process-wide backpressure.
 - `APTEVA_FUNCTIONS_MAX_DOWNSTREAM_CALLS=16` — concurrent

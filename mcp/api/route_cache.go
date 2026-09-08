@@ -142,3 +142,11 @@ func captureParams(pattern, path []string) map[string]string {
 	}
 	return out
 }
+
+// Read and write pools share one cache identity. Mutations invalidate snapshots
+// immediately even though gateway lookups use concurrent read-only connections.
+func bindRouteReadPool(writer, reader *sql.DB) {
+	if writer != reader {
+		routeCaches.Store(reader, cacheFor(writer))
+	}
+}
