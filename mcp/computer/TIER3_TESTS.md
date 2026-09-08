@@ -16,6 +16,7 @@ outcome waits, and these Patreon cases:
 | `TestLLMPatreonReliabilityFixtureLive` | Long audience label and schedule switches enabled; final scheduling remains uncommitted |
 | `TestLLMPatreonRealContenteditableLive` | Exact body edit/readback/restoration and paywall preservation in the saved draft |
 | `TestLLMPatreonMediaPublishLive` | Model navigates the composer and publishes a video test post; final URL, title, and media checked independently |
+| `TestLLMPatreonWorkflowIntentLive` | Operator independently registers the schedule; fully confirmed immediate Publish is rejected before and after reopening the session, a wrong time is rejected, then the model restores the authorized time and commits Schedule; exact post, title and schedule survive reload |
 | `TestLLMPatreonSchedulingLive` | Model configures audience/date/time, commits final Schedule, verifies scheduled status after reload, and checks session survival beyond five minutes |
 | `TestLLMPatreonScheduledVideoPublicationLive` | Model embeds Bunny video and schedules it; exact post ID, title, schedule and media survive reload; the post automatically publishes at its deadline and the published video survives another reload |
 
@@ -115,3 +116,19 @@ model so it can inspect and recover; transport failures fail the test.
 Tests do not accept a model's `done` claim as proof. Browser state is checked
 afterward, and each workflow has a bounded action budget. Preserve failed-run
 artifacts separately when comparing a fix with a rerun.
+
+## Operator-authorized scheduling regression
+
+`TestLLMPatreonWorkflowIntentLive` requires the isolated checkout sidecar and
+saved Browserbase provider context. It deliberately injects the mistaken,
+fully acknowledged Publish call from the incident; it does not wait for the
+model to happen to make that mistake. The model creates the disposable draft,
+configures scheduling, and recovers from a separately injected wrong time to
+perform the final Schedule. The harness registers the authorization over the
+operator HTTP API, independently of model decisions. Agent-origin registration
+must fail. Wrong-time probes retry only explicit stale-target rejections, which
+prove no click was dispatched, after waiting for autosave and refreshing.
+
+See [WORKFLOW_CONSTRAINTS.md](WORKFLOW_CONSTRAINTS.md) for the production
+registration contract and server dependency. Running this test does not install
+that server change or register authorization for existing production tasks.

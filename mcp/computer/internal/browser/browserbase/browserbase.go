@@ -714,8 +714,9 @@ func (c *Computer) executeClick(ctx context.Context, action computer.Action, cli
 		fmt.Fprintf(os.Stderr, "[BROWSERBASE] presentation cursor unavailable, continuing click: %v\n", err)
 	}
 	guardOptions := clickguard.Options{
-		TargetID:     action.TargetID,
-		ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+		WorkflowConstraints: action.WorkflowConstraints,
+		TargetID:            action.TargetID,
+		ExpectedText:        expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 		EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 	}
 	target, err := clickguard.Click(ctx, x, y, clickCount, guardOptions)

@@ -214,7 +214,9 @@ func buildCreateTableSQL(physical string, cols []Column) (string, error) {
 
 // ─── tables_list ───────────────────────────────────────────────────
 
-func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "tables_list")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "tables_list", false)
 	if err != nil {
 		return nil, err
@@ -227,6 +229,7 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	if boolArg(args, "summary") {
+		readPhase(ctx, "metadata")
 		return listTableSummaries(ctx, pid, args)
 	}
 	limit := intArg(args, "limit", 100)
@@ -234,6 +237,7 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errf("limit must be 1..1000")
 	}
 	offset := intArg(args, "offset", 0)
+	readPhase(ctx, "metadata")
 	tables, err := loadTablesPage(qctx, ctx.AppReadDB(), pid, limit+1, offset, maxQueryBytes(ctx))
 	if err != nil {
 		return nil, queryStageErr("metadata", "<tables>", err)
@@ -269,7 +273,9 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 // ─── tables_describe ───────────────────────────────────────────────
 
-func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTablesDescribe(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "tables_describe")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "tables_describe", false)
 	if err != nil {
 		return nil, err

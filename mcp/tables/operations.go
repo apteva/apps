@@ -104,7 +104,7 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	if schemaWrite || operation == "rows_insert" || operation == "rows_upsert" || operation == "rows_update" || operation == "rows_delete" {
 		duration = int(cfgInt64Range(ctx, "max_write_ms", 30000, 1, 300000))
 	}
-	callCtx, cancel := context.WithTimeout(parent, time.Duration(duration)*time.Millisecond)
+	callCtx, cancel := context.WithTimeoutCause(parent, time.Duration(duration)*time.Millisecond, errReadOperationDeadline)
 	if err := validateArguments(args); err != nil {
 		cancel()
 		return nil, nil, err
@@ -116,7 +116,8 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 	}
 	scoped := ctx.WithProject(pid)
 	activeContexts.Store(scoped, callCtx)
-	cleanup := func() { activeContexts.Delete(scoped); cancel() }
+	cleanup := func() { observeReadCancellation(scoped, callCtx); activeContexts.Delete(scoped); cancel() }
+	readPhase(scoped, "schema_queue")
 	if err := a.schemaMu.acquire(callCtx, false); err != nil {
 		cleanup()
 		return nil, nil, queryStageErr("schema_queue", operation, err)
@@ -167,12 +168,13 @@ func (a *App) beginOperation(ctx *sdk.AppCtx, args map[string]any, operation str
 		}
 		releases = append(releases, func() { ref.lock.release(schemaWrite); dropRef() })
 	}
+	readPhase(scoped, "prepare")
 	return scoped, func() {
 		for i := len(releases) - 1; i >= 0; i-- {
 			releases[i]()
 		}
 		elapsed := time.Since(started)
-		if elapsed >= time.Duration(slowQueryMs(ctx))*time.Millisecond {
+		if readObservationFor(scoped) == nil && elapsed >= time.Duration(slowQueryMs(ctx))*time.Millisecond {
 			ctx.Logger().Info("tables operation", "operation", operation, "project_id", pid, "elapsed_ms", elapsed.Milliseconds())
 		}
 		cleanup()

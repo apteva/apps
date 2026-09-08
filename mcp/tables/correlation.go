@@ -8,6 +8,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+type readRequestIDKey struct{}
+
 var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 // _request_id is diagnostic metadata, never an authorization input. Functions
@@ -16,6 +18,10 @@ var requestIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 func traceTableCall(callCtx context.Context, appCtx *sdk.AppCtx, tool string, args map[string]any, handler sdk.ToolHandler) (any, error) {
 	id, _ := args["_request_id"].(string)
 	delete(args, "_request_id")
+	if requestIDPattern.MatchString(id) {
+		callCtx = context.WithValue(callCtx, readRequestIDKey{}, id)
+		args["_request_context"] = callCtx
+	}
 	started := time.Now()
 	result, err := handler(appCtx, args)
 	if requestIDPattern.MatchString(id) {

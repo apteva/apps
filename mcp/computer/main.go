@@ -60,11 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.89
+version: 0.7.90
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.89 fixes native
-  file-chooser uploads, rejects ambiguous upload targets, and improves upload
-  recovery guidance, with live LLM image-upload and recovery coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.90 adds persistent
+  operator-owned scheduling constraints that reject immediate publication and
+  incorrect schedule times, with live Patreon LLM recovery coverage.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -560,6 +560,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodPatch, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
 		{Method: http.MethodDelete, Pattern: "/contexts/{id}", Handler: a.handleContextItem},
+		{Method: http.MethodPost, Pattern: "/workflow-constraints", Handler: a.handleWorkflowConstraints},
+		{Method: http.MethodDelete, Pattern: "/workflow-constraints/{id}", Handler: a.handleWorkflowConstraints},
 		{Method: http.MethodGet, Pattern: "/settings", Handler: a.handleSettings},
 		{Method: http.MethodPatch, Pattern: "/settings", Handler: a.handleSettings},
 		{Method: http.MethodGet, Pattern: "/proxy-profiles", Handler: a.handleProxyProfilesCollection},
@@ -648,7 +650,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Structured SoM reports accessible_name, disabled, loading, dangerous, and destructive_effect. Computer re-checks the live target immediately before dispatch. Pass expected_text for target identity. Operator-owned workflow constraints independently restrict the resource, commit effect and scheduled time; acknowledgements cannot override them. For a scheduling task, do not click an immediate Publish control to look for scheduling afterward. When dangerous=true, also pass expected_effect and repeat that exact generic effect in confirm_consequence; Computer rejects missing or contradictory consequence intent before mouse dispatch. Omit both consequence fields for ordinary clicks. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Raw coordinates receive the same consequence guard. Do not pass both; when both are present, coordinate wins. selector is accepted for deterministic compatibility flows, but agents should continue using fresh screenshot labels when available. " +
 				"For an operation outcome, prefer action=wait_for with declarative URL, text, selector, semantic-target, or media conditions; target_state=ready|loading|enabled|disabled|checked|unchecked ignores unrelated page activity. For an embed, use media_present and media_error together with match=any to wait for a terminal rendered-player-or-error outcome. Computer reports the visible provider/source and player state but does not decide whether the media is the intended asset. Use action=wait_for_stable only when the whole page must become quiet. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with a fresh label or target_id and its som_revision, plus source_url/base64/file_path. Optional expected_name and expected_role must copy accessible_name and role from the current semantic target; omit an expectation when that field is absent, and never infer role from tag/type; omit expected_text, expected_effect, and confirm_consequence, which are click/double_click-only. A compatibility selector must match exactly one element. After a stale-target rejection, take action=screenshot with include_som=true and retry upload_file with the new target and original file source; do not click Browse or operate the native OS file picker. For native image uploads, verify the visible image preview and draft-save state afterward; media_present checks an audio/video player, not a still-image preview. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. Custom button comboboxes are opened and inspected automatically. An unavailable option returns error_code, control_kind, menu_open, current_value, visible_options, recoverable=false, and a refreshed som_revision instead of a generic backend error. " +
@@ -2571,6 +2573,9 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		// remains unchanged when selector is absent.
 		act.Label = 0
 	}
+	if err := attachWorkflowConstraint(ctx, sess, &act); err != nil {
+		return nil, computerUseFailure("workflow_constraint_rejected", id, sess, action, err.Error(), "Use the operator-authorized workflow; ordinary tool calls cannot broaden its constraint.", err)
+	}
 	if err := resolveStableActionTarget(sess, &act); err != nil {
 		var mismatch *stableTargetMismatchError
 		if errors.As(err, &mismatch) {
@@ -2950,6 +2955,7 @@ func (a *App) toolComputerUseCaller(callCtx context.Context, ctx *sdk.AppCtx, ar
 		out["height"] = disp.Height
 	}
 	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
+	mergeWorkflowSummary(out, act)
 	if waitResult != nil {
 		mergeWaitResultPayload(out, *waitResult)
 		highlightMediaDespiteUnmatchedText(out, act, waitResult)
@@ -3166,6 +3172,9 @@ func (a *App) toolComputerUseBatchLocked(ctx *sdk.AppCtx, id string, sess *sessi
 			act.Label, act.Selector, act.GuardDangerousCoordinate = 0, "", true
 		} else if action == "click" && strings.TrimSpace(act.Selector) != "" {
 			act.Label = 0
+		}
+		if err := attachWorkflowConstraint(ctx, sess, &act); err != nil {
+			return nil, computerUseFailure("workflow_constraint_rejected", id, sess, action, err.Error(), "Use the operator-authorized workflow; ordinary tool calls cannot broaden its constraint.", err)
 		}
 		if err := resolveStableActionTarget(sess, &act); err != nil {
 			return nil, computerUseFailure("invalid_batch_step", id, sess, "batch",
@@ -3852,14 +3861,13 @@ func consequenceRejectionPayload(ctx *sdk.AppCtx, id string, sess *session, act 
 	if rejection.Target.Role != "" {
 		out["target_role"] = rejection.Target.Role
 	}
-	if rejection.Code == "semantic_intent_mismatch" {
+	if rejection.WorkflowID != "" {
+		out["workflow_id"], out["allowed_effect"], out["scheduled_at"] = rejection.WorkflowID, rejection.AllowedEffect, rejection.ScheduledAt
+		out["next_step"] = "Keep the authorized resource, scheduled date, time and timezone. Configure scheduling and use its Schedule control. Ordinary click arguments cannot broaden this operator-owned workflow."
+	} else if rejection.Code == "semantic_intent_mismatch" {
 		out["next_step"] = "Do not retry this target. Take a fresh semantic screenshot and choose a control whose detected consequence matches the intended operation, or stop."
 	} else {
-		out["required_confirmation"] = map[string]any{
-			"expected_effect":     rejection.DetectedEffect,
-			"confirm_consequence": rejection.DetectedEffect,
-		}
-		out["next_step"] = "Retry only if the detected consequence is truly intended; otherwise choose a different semantic target or stop."
+		out["next_step"] = "Compare the detected consequence with the authorized task. If they differ, choose the matching operation or stop; never copy a confirmation merely to clear the rejection."
 	}
 	return out
 }
@@ -4505,6 +4513,7 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 
 func (a *App) sessionActionPayload(id string, s *session, act backends.Action, args map[string]any) map[string]any {
 	payload := a.sessionEventPayload(id, s)
+	mergeWorkflowSummary(payload, act)
 	payload["action"] = act.Type
 	switch act.Type {
 	case "click", "double_click":

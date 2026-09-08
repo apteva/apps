@@ -127,7 +127,7 @@ The build emits all four tracked browser bundles and source maps. React and
 
 ### Exact MCP numbers
 
-Tables pins App SDK v0.74.1 and opts into its `PreserveJSONNumbers()` capability.
+Tables pins App SDK v0.76.0 and opts into its `PreserveJSONNumbers()` capability.
 Large numeric input literals reach tool handlers without being rounded by the
 MCP decoder. Normal release builds and HTTP/MCP smoke tests use this published
 SDK dependency directly, with no local module replacement.
@@ -160,3 +160,9 @@ This support does not create persisted virtual tables or grant access to other
 SQLite modules. Tables referenced inside JSON arguments must still pass the
 project placeholder authorization checks. An invalid JSON value without a guard
 still produces SQLite's normal query error.
+
+## Read diagnostics
+
+See [READ_DIAGNOSTICS.md](READ_DIAGNOSTICS.md) for Function request correlation,
+query fingerprints, phase and pool measurements, and the standalone reproduction
+of delayed cancellation during result iteration in the pinned SQLite driver.

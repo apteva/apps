@@ -278,6 +278,9 @@ func injectProject(r *http.Request, args map[string]any) map[string]any {
 		args = map[string]any{}
 	}
 	args["_request_context"] = r.Context()
+	if id := diagnosticRequestID(r.Header.Get("X-Request-ID")); id != "" {
+		args["request_id"] = id
+	}
 	if v := r.URL.Query().Get("project_id"); v != "" {
 		args["_project_id"] = v
 	}

@@ -815,8 +815,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
-			TargetID:     action.TargetID,
-			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+			WorkflowConstraints: action.WorkflowConstraints,
+			TargetID:            action.TargetID,
+			ExpectedText:        expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
 		target, clickErr := clickguard.Click(c.ctx, x, y, 1, guardOptions)
@@ -879,8 +880,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 			fmt.Fprintf(os.Stderr, "[BROWSER] presentation cursor unavailable, continuing double click: %v\n", err)
 		}
 		guardOptions := clickguard.Options{
-			TargetID:     action.TargetID,
-			ExpectedText: expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
+			WorkflowConstraints: action.WorkflowConstraints,
+			TargetID:            action.TargetID,
+			ExpectedText:        expectedText, ExpectedEffect: action.ExpectedEffect, ConfirmConsequence: action.ConfirmConsequence,
 			EnforceConsequence: action.EnforceConsequence, RequireExpectedIfDangerous: action.GuardDangerousCoordinate,
 		}
 		target, clickErr := clickguard.Click(c.ctx, x, y, 2, guardOptions)
