@@ -1,5 +1,37 @@
 # Subscriptions
 
+## v0.9.1 reliability fixes
+
+This release preserves the v0.9.0 UI, metered usage, discounts, item-change
+history, metadata reconciliation, cancellation resume, and money-bearing events.
+
+- Scheduled cancellation preserves the current status and emits
+  `subscription.cancellation_scheduled`. The worker ends the subscription at
+  the deadline, including paused subscriptions. Immediate cancellation stops
+  renewal and verifies project ownership.
+- Cycle creation serializes SQLite writes and uses a normalized UTC period-start
+  key for retries. Conflicting/overlapping periods are rejected. Historical
+  duplicate rows remain intact and retries return the first matching cycle.
+- Concurrent payment and fulfillment patches no longer overwrite one another.
+  Paid/fulfilled cycles receive a completion timestamp on creation.
+- Invalid dates, quantities, item metadata, mixed currencies, and malformed HTTP
+  bodies fail explicitly. Cents use checked decimal arithmetic and preserve
+  explicit zero totals, including prepared invoices.
+- HTTP and MCP lifecycle changes share event behavior. Lifecycle event intent is
+  committed with the audit record, then delivered through an acknowledged
+  outbox. Failed deliveries remain queued for the lifecycle worker to retry.
+  Delivery is at least once; consumers should deduplicate stable `event_id` or
+  `cycle_id` values. The existing sidecar gateway/token environment is used.
+- Global installations process each subscription project. Local renewal
+  scheduling excludes subscriptions managed by external billing providers and
+  preserves month-end billing anchors.
+- Search accepts `limit` and `offset`, uses a matching ordering index, and honors
+  HTTP `customer_id` filters. Cycle/event tool lists also accept `offset`.
+
+Migration `008_lifecycle_integrity.sql` follows all previously published
+migrations; no existing migration or UI file is removed. Run `go test -race
+-short ./...` and `go vet ./...` from this directory to verify the release.
+
 Generic recurring-commerce lifecycle for SaaS, physical subscriptions, and services.
 
 Subscriptions owns recurrence and renewal cycles. It does not own access rights or fulfillment operations:

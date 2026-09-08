@@ -53,6 +53,7 @@ func (a *App) Workers() []sdk.Worker {
 			if appCtx == nil {
 				appCtx = globalCtx
 			}
+			defer publishEvents(appCtx)
 			return runSubscriptionLifecycle(appCtx, time.Now().UTC())
 		},
 	}, {
@@ -90,7 +91,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"items"}), Handler: a.toolSubscriptionsCreate},
 		{Name: "subscriptions_get", Description: "Fetch one subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolSubscriptionsGet},
 		{Name: "subscriptions_search", Description: "Search subscriptions.", InputSchema: schemaObject(map[string]any{
-			"q": map[string]any{"type": "string"}, "customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+			"q": map[string]any{"type": "string"}, "customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}, "offset": map[string]any{"type": "integer", "minimum": 0},
 		}, nil), Handler: a.toolSubscriptionsSearch},
 		{Name: "subscriptions_metrics_get", Description: "Return recurring subscription metrics such as MRR by currency. Args: source, statuses, include_trialing.", InputSchema: schemaObject(map[string]any{
 			"source": map[string]any{"type": "string"}, "statuses": map[string]any{"type": "array"}, "include_trialing": map[string]any{"type": "boolean"},
@@ -124,14 +125,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			"subscription_id": map[string]any{"type": "integer"}, "cycle_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "due_date": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}, "finalize": map[string]any{"type": "boolean"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolSubscriptionsInvoiceCreate},
 		{Name: "subscription_cycles_create", Description: "Create a renewal cycle.", InputSchema: schemaObject(map[string]any{
-			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "due_at": map[string]any{"type": "string"}, "invoice_id": map[string]any{"type": "integer"}, "order_id": map[string]any{"type": "integer"}, "entitlement_grant_id": map[string]any{"type": "integer"}, "payment_status": map[string]any{"type": "string"}, "fulfillment_status": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"},
+			"tax_cents": map[string]any{"type": "integer", "minimum": 0}, "shipping_cents": map[string]any{"type": "integer", "minimum": 0}, "total_cents": map[string]any{"type": "integer", "minimum": 0}, "subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "due_at": map[string]any{"type": "string"}, "invoice_id": map[string]any{"type": "integer"}, "order_id": map[string]any{"type": "integer"}, "entitlement_grant_id": map[string]any{"type": "integer"}, "payment_status": map[string]any{"type": "string"}, "fulfillment_status": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolCyclesCreate},
 		{Name: "subscription_cycles_update", Description: "Update a renewal cycle.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "payment_status": map[string]any{"type": "string"}, "fulfillment_status": map[string]any{"type": "string"}, "invoice_id": map[string]any{"type": "integer"}, "order_id": map[string]any{"type": "integer"}, "entitlement_grant_id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolCyclesUpdate},
-		{Name: "subscription_cycles_list", Description: "List cycles.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolCyclesList},
-		{Name: "subscription_events_list", Description: "List subscription events.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolEventsList},
+		{Name: "subscription_cycles_list", Description: "List cycles.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}, "offset": map[string]any{"type": "integer", "minimum": 0}}, []string{"subscription_id"}), Handler: a.toolCyclesList},
+		{Name: "subscription_events_list", Description: "List subscription events.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}, "offset": map[string]any{"type": "integer", "minimum": 0}}, []string{"subscription_id"}), Handler: a.toolEventsList},
 	}
 	tools = append(tools, subscriptionDiscountTools(a)...)
-	return append(tools, subscriptionChangeTools(a)...)
+	tools = append(tools, subscriptionChangeTools(a)...)
+	for i := range tools {
+		handler, schema := tools[i].Handler, tools[i].InputSchema
+		tools[i].Handler = func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			if err := validateToolInput(args, schema); err != nil {
+				return nil, err
+			}
+			return handler(ctx, args)
+		}
+	}
+	return tools
+
 }
 
 func main() { sdk.Run(&App{}) }
@@ -296,7 +308,7 @@ func (a *App) toolSubscriptionsCreate(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("subscription.created", subscriptionEventPayload(ctx.AppDB(), sub))
+	emitDomainEvent(ctx, "subscription.created", subscriptionEventPayload(ctx.AppDB(), sub))
 	for _, discount := range sub.Discounts {
 		ctx.Emit("subscription.discount.created", map[string]any{"subscription_id": sub.ID, "subscription_item_id": discount.SubscriptionItemID, "discount_id": discount.ID})
 	}
@@ -380,7 +392,7 @@ func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("subscription.cancelled", subscriptionEventPayload(ctx.AppDB(), sub))
+	emitDomainEvent(ctx, cancellationTopic(sub), subscriptionEventPayload(ctx.AppDB(), sub))
 	return map[string]any{"subscription": sub}, nil
 }
 
@@ -394,7 +406,7 @@ func (a *App) toolSubscriptionsResume(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	if changed {
-		ctx.Emit("subscription.resumed", subscriptionEventPayload(ctx.AppDB(), sub))
+		emitDomainEvent(ctx, "subscription.resumed", subscriptionEventPayload(ctx.AppDB(), sub))
 	}
 	return map[string]any{"subscription": sub, "changed": changed}, nil
 }
@@ -526,7 +538,7 @@ func (a *App) toolSubscriptionsInvoiceCreate(ctx *sdk.AppCtx, args map[string]an
 
 // subscriptionRecurringAmounts mirrors the metrics computation: active flat
 // items only, raw per-interval sum plus the monthly-normalized equivalent.
-func subscriptionRecurringAmounts(db *sql.DB, sub *Subscription) (recurringCents, mrrCents int64) {
+func subscriptionRecurringAmounts(db queryDB, sub *Subscription) (recurringCents, mrrCents int64) {
 	if db == nil || sub == nil {
 		return 0, 0
 	}
@@ -538,7 +550,7 @@ func subscriptionRecurringAmounts(db *sql.DB, sub *Subscription) (recurringCents
 	return int64(math.Round(amount)), monthlyNormalizedCents(amount, sub.Interval, sub.IntervalCount)
 }
 
-func subscriptionEventPayload(db *sql.DB, sub *Subscription) map[string]any {
+func subscriptionEventPayload(db queryDB, sub *Subscription) map[string]any {
 	recurring, mrr := subscriptionRecurringAmounts(db, sub)
 	return map[string]any{
 		"id":                     sub.ID,
@@ -564,14 +576,14 @@ func emitSubscriptionLifecycle(ctx *sdk.AppCtx, sub *Subscription) {
 	if ctx == nil || sub == nil || !validSubStatus[sub.Status] {
 		return
 	}
-	ctx.Emit("subscription."+sub.Status, subscriptionEventPayload(ctx.AppDB(), sub))
+	emitDomainEvent(ctx, "subscription."+sub.Status, subscriptionEventPayload(ctx.AppDB(), sub))
 }
 
 func emitSubscriptionUpdated(ctx *sdk.AppCtx, sub *Subscription) {
 	if ctx == nil || sub == nil {
 		return
 	}
-	ctx.Emit("subscription.updated", subscriptionEventPayload(ctx.AppDB(), sub))
+	emitDomainEvent(ctx, "subscription.updated", subscriptionEventPayload(ctx.AppDB(), sub))
 }
 
 // emitSubscriptionUpdatedByID reloads the subscription so item-level writes
@@ -595,7 +607,36 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 	}
 	pid := strings.TrimSpace(ctx.CurrentProject())
 	if pid == "" {
-		return nil
+		rows, err := ctx.AppDB().Query(`SELECT DISTINCT project_id FROM subscriptions ORDER BY project_id`)
+		if err != nil {
+			return err
+		}
+		var projects []string
+		for rows.Next() {
+			var p string
+			if err = rows.Scan(&p); err != nil {
+				rows.Close()
+				return err
+			}
+			if p != "" {
+				projects = append(projects, p)
+			}
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		var failures []error
+		for _, p := range projects {
+			if err = runSubscriptionLifecycle(ctx.WithProject(p), now); err != nil {
+				failures = append(failures, err)
+			}
+		}
+		return errors.Join(failures...)
+	}
+	if err := processScheduledCancellations(ctx, pid, now); err != nil {
+		return err
 	}
 	if err := dbSeedTrialAttempts(ctx.AppDB(), pid, now, 100); err != nil {
 		return err
@@ -654,7 +695,7 @@ func dbSeedRenewalAttempts(db *sql.DB, pid string, now time.Time, limit int) err
 		(project_id,subscription_id,action,effective_at,status,next_attempt_at)
 		SELECT project_id,id,'renewal',next_renewal_at,'pending',?
 		FROM subscriptions
-		WHERE project_id=? AND status='active'
+		WHERE project_id=? AND status='active' AND billing_provider='local'
 		  AND next_renewal_at IS NOT NULL AND next_renewal_at<=?
 		ORDER BY next_renewal_at,id LIMIT ?`, nowStr, pid, nowStr, limit)
 	return err
@@ -696,7 +737,10 @@ func processRenewal(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) e
 	if err != nil || sub == nil {
 		return firstErr(err, errors.New("subscription not found after applying changes"))
 	}
-	end := subscriptionPeriodEnd(start, sub.Interval, sub.IntervalCount)
+	end, err := anchoredPeriodEnd(ctx.AppDB(), sub, start)
+	if err != nil {
+		return err
+	}
 	cycle, err := dbEnsureLifecycleCycle(ctx.AppDB(), attempt, sub, start, end)
 	if err != nil {
 		return err
@@ -733,7 +777,10 @@ func processTrialEnd(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) 
 	if !ok {
 		return errors.New("trial lifecycle effective_at is invalid")
 	}
-	end := subscriptionPeriodEnd(start, sub.Interval, sub.IntervalCount)
+	end, err := anchoredPeriodEnd(ctx.AppDB(), sub, start)
+	if err != nil {
+		return err
+	}
 	cycle, err := dbEnsureLifecycleCycle(ctx.AppDB(), attempt, sub, start, end)
 	if err != nil {
 		return err
@@ -770,7 +817,7 @@ func (a *App) toolCyclesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbCyclesList(ctx.AppDB(), pid, int64Arg(args, "subscription_id"), clampLimit(int(int64Arg(args, "limit")), 200))
+	out, err := dbCyclesList(ctx.AppDB(), pid, int64Arg(args, "subscription_id"), clampLimit(int(int64Arg(args, "limit")), 200), int64Arg(args, "offset"))
 	if err != nil {
 		return nil, err
 	}
@@ -782,14 +829,18 @@ func (a *App) toolEventsList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbEventsList(ctx.AppDB(), pid, int64Arg(args, "subscription_id"), clampLimit(int(int64Arg(args, "limit")), 200))
+	out, err := dbEventsList(ctx.AppDB(), pid, int64Arg(args, "subscription_id"), clampLimit(int(int64Arg(args, "limit")), 200), int64Arg(args, "offset"))
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"events": out, "count": len(out)}, nil
 }
 
-func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Subscription, error) {
+func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, input map[string]any) (*Subscription, error) {
+	args := copyArgs(input)
+	if err := validateCreation(args); err != nil {
+		return nil, err
+	}
 	itemsRaw, _ := args["items"].([]any)
 	if len(itemsRaw) == 0 {
 		return nil, errors.New("items required")
@@ -807,7 +858,10 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 		return nil, fmt.Errorf("invalid trial_end_behavior %q", trialEndBehavior)
 	}
 	currency := strings.ToUpper(firstNonEmpty(strArg(args, "currency"), configString(ctx, "default_currency", "USD")))
-	items := normalizeItems(itemsRaw, currency)
+	items, err := strictItems(itemsRaw, currency)
+	if err != nil {
+		return nil, err
+	}
 	if len(items) == 0 {
 		return nil, errors.New("at least one valid item required")
 	}
@@ -837,6 +891,15 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	).Scan(&id)
 	if err != nil {
 		return nil, err
+	}
+	anchor := strArg(args, "current_period_start")
+	if status == "trialing" {
+		anchor = firstNonEmpty(strArg(args, "trial_end"), anchor)
+	}
+	if t, ok := parseTime(anchor); ok {
+		if _, err = tx.Exec(`UPDATE subscriptions SET billing_anchor_day=? WHERE id=?`, t.Day(), id); err != nil {
+			return nil, err
+		}
 	}
 	createdItems := make([]*SubItem, 0, len(items))
 	for i, it := range items {
@@ -876,10 +939,17 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	return dbSubscriptionGet(ctx.AppDB(), pid, id, true)
 }
 
-func dbSubscriptionsSearch(db *sql.DB, pid string, args map[string]any) ([]*Subscription, error) {
+func dbSubscriptionsSearch(db queryDB, pid string, args map[string]any) ([]*Subscription, error) {
 	where := []string{"project_id = ?"}
 	qargs := []any{pid}
-	if v := int64Arg(args, "customer_id"); v != 0 {
+	if value, ok := args["customer_id"]; ok && value != "" {
+		v, err := integer(args, "customer_id", 0)
+		if err != nil {
+			return nil, err
+		}
+		if v <= 0 {
+			return nil, errors.New("customer_id must be positive")
+		}
 		where = append(where, "customer_id = ?")
 		qargs = append(qargs, v)
 	}
@@ -894,13 +964,30 @@ func dbSubscriptionsSearch(db *sql.DB, pid string, args map[string]any) ([]*Subs
 		like := "%" + q + "%"
 		qargs = append(qargs, like, like, like)
 	}
-	qargs = append(qargs, clampLimit(int(int64Arg(args, "limit")), 200))
-	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions WHERE `+strings.Join(where, " AND ")+` ORDER BY updated_at DESC LIMIT ?`, qargs...)
+	page := copyArgs(args)
+	for _, key := range []string{"limit", "offset"} {
+		if page[key] == "" {
+			delete(page, key)
+		}
+	}
+	offset, err := integer(page, "offset", 0)
+	if err != nil {
+		return nil, err
+	}
+	if offset < 0 {
+		return nil, errors.New("offset must be nonnegative")
+	}
+	limit, err := integer(page, "limit", 50)
+	if err != nil {
+		return nil, err
+	}
+	qargs = append(qargs, clampLimit(int(limit), 200), offset)
+	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions WHERE `+strings.Join(where, " AND ")+` ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`, qargs...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Subscription
+	out := []*Subscription{}
 	for rows.Next() {
 		s, err := scanSub(rows)
 		if err != nil {
@@ -911,7 +998,7 @@ func dbSubscriptionsSearch(db *sql.DB, pid string, args map[string]any) ([]*Subs
 	return out, rows.Err()
 }
 
-func dbSubscriptionGet(db *sql.DB, pid string, id int64, nested bool) (*Subscription, error) {
+func dbSubscriptionGet(db queryDB, pid string, id int64, nested bool) (*Subscription, error) {
 	if id == 0 {
 		return nil, nil
 	}
@@ -923,10 +1010,22 @@ func dbSubscriptionGet(db *sql.DB, pid string, id int64, nested bool) (*Subscrip
 		return nil, err
 	}
 	if nested {
-		s.Items, _ = dbItemsList(db, id)
-		s.Discounts, _ = dbSubscriptionDiscountsList(db, pid, id, "")
-		s.Cycles, _ = dbCyclesList(db, pid, id, 50)
-		s.Events, _ = dbEventsList(db, pid, id, 50)
+		s.Items, err = dbItemsList(db, id)
+		if err != nil {
+			return nil, err
+		}
+		s.Discounts, err = dbSubscriptionDiscountsList(db, pid, id, "")
+		if err != nil {
+			return nil, err
+		}
+		s.Cycles, err = dbCyclesList(db, pid, id, 50)
+		if err != nil {
+			return nil, err
+		}
+		s.Events, err = dbEventsList(db, pid, id, 50)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -1015,42 +1114,99 @@ func dbSubscriptionMetrics(db *sql.DB, pid string, args map[string]any) (*Subscr
 	}, nil
 }
 
-func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*Subscription, error) {
-	id := int64Arg(args, "id")
-	if id == 0 {
-		return nil, errors.New("id required")
+func dbSubscriptionUpdateStatus(db *sql.DB, pid string, input map[string]any) (*Subscription, error) {
+	args := copyArgs(input)
+	if e := validateScalarFields(args); e != nil {
+		return nil, e
 	}
-	sub, err := dbSubscriptionGet(db, pid, id, false)
-	if err != nil || sub == nil {
-		return nil, firstErr(err, errors.New("subscription not found"))
+	if e := validateIDs(args, "id"); e != nil {
+		return nil, e
 	}
-	status := firstNonEmpty(strArg(args, "status"), sub.Status)
-	if !validSubStatus[status] {
-		return nil, fmt.Errorf("invalid status %q", status)
+	if e := dates(args, "current_period_start", "current_period_end", "next_renewal_at"); e != nil {
+		return nil, e
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
+	tx, e := beginWrite(db)
+	if e != nil {
+		return nil, e
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(
-		`UPDATE subscriptions SET status = ?,
-		        current_period_start = COALESCE(?, current_period_start),
-		        current_period_end = COALESCE(?, current_period_end),
-		        next_renewal_at = COALESCE(?, next_renewal_at),
-		        updated_at = CURRENT_TIMESTAMP
-		  WHERE id = ? AND project_id = ?`,
-		status, nullStr(strArg(args, "current_period_start")), nullStr(strArg(args, "current_period_end")), nullStr(strArg(args, "next_renewal_at")), id, pid)
-	if err != nil {
-		return nil, err
+	s, e := requiredSub(tx, pid, int64Arg(args, "id"), false)
+	if e != nil {
+		return nil, e
 	}
-	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.status_updated", map[string]any{"status": status, "note": strArg(args, "note")}); err != nil {
-		return nil, err
+	status := firstNonEmpty(strArg(args, "status"), s.Status)
+	if !validSubStatus[status] {
+		return nil, errors.New("invalid status")
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if (s.Status == "cancelled" || s.Status == "ended") && status != s.Status {
+		return nil, errors.New("terminal subscription cannot be reactivated")
 	}
-	return dbSubscriptionGet(db, pid, id, true)
+	start, end, next := s.CurrentPeriodStart, s.CurrentPeriodEnd, s.NextRenewalAt
+	if _, ok := args["current_period_start"]; ok {
+		start = strArg(args, "current_period_start")
+	}
+	if _, ok := args["current_period_end"]; ok {
+		end = strArg(args, "current_period_end")
+	}
+	if _, ok := args["next_renewal_at"]; ok {
+		next = strArg(args, "next_renewal_at")
+	}
+	if s.Status == "paused" && status == "active" {
+		_, hasStart := args["current_period_start"]
+		_, hasEnd := args["current_period_end"]
+		if !hasStart && !hasEnd {
+			now := time.Now().UTC().Truncate(time.Second)
+			newEnd, err := nextPeriod(now, s.Interval, s.IntervalCount, now.Day())
+			if err != nil {
+				return nil, err
+			}
+			start, end = now.Format(time.RFC3339), newEnd.Format(time.RFC3339)
+		}
+		if _, explicit := args["next_renewal_at"]; !explicit {
+			next = end
+		}
+		anchor, err := parseDate(start)
+		if err != nil {
+			return nil, err
+		}
+		if _, err = tx.Exec(`UPDATE subscriptions SET billing_anchor_day=? WHERE id=? AND project_id=?`, anchor.Day(), s.ID, pid); err != nil {
+			return nil, err
+		}
+	}
+	if start != "" && end != "" {
+		if e = period(start, end); e != nil {
+			return nil, e
+		}
+	}
+	cancelled, ended, cancelAt := s.CancelledAt, s.EndedAt, s.CancelAt
+	if status == "cancelled" || status == "ended" {
+		next = ""
+		cancelAt = ""
+		if ended == "" {
+			ended = time.Now().UTC().Format(time.RFC3339)
+		}
+		if status == "cancelled" && cancelled == "" {
+			cancelled = ended
+		}
+	}
+	if status == "paused" {
+		next = ""
+	}
+	if _, e = tx.Exec(`UPDATE subscriptions SET status=?,current_period_start=?,current_period_end=?,next_renewal_at=?,cancel_at=?,cancelled_at=?,ended_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, status, nullStr(start), nullStr(end), nullStr(next), nullStr(cancelAt), nullStr(cancelled), nullStr(ended), s.ID, pid); e != nil {
+		return nil, e
+	}
+	if e = writeEventTx(tx, pid, s.ID, actorOrSystem(strArg(args, "actor")), "subscription.status_updated", map[string]any{"status": status, "note": strArg(args, "note")}); e != nil {
+		return nil, e
+	}
+	updated, e := requiredSub(tx, pid, s.ID, true)
+	if e != nil {
+		return nil, e
+	}
+
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return updated, nil
 }
 
 func dbSubscriptionUpdateMetadata(db *sql.DB, pid string, args map[string]any) (*Subscription, bool, error) {
@@ -1351,7 +1507,7 @@ func emitCycleDue(ctx *sdk.AppCtx, sub *Subscription, cycle *Cycle) {
 	if ctx == nil || sub == nil || cycle == nil {
 		return
 	}
-	ctx.Emit("subscription.cycle_due", cycleDueDetails(sub, cycle))
+	emitDomainEvent(ctx, "subscription.cycle_due", cycleDueDetails(sub, cycle))
 }
 
 func dbCloseLifecycleAttempt(db *sql.DB, attempt *LifecycleAttempt, now time.Time) error {
@@ -1384,11 +1540,13 @@ func dbSubscriptionSetStatusMetadata(db *sql.DB, pid string, id int64, status st
 	_, err = tx.Exec(
 		`UPDATE subscriptions
 		    SET status=?,
-		        metadata=?,
+                metadata=?,
+                next_renewal_at=CASE WHEN ? IN ('ended','cancelled','paused') THEN NULL ELSE next_renewal_at END,
+                cancel_at=CASE WHEN ? IN ('ended','cancelled') THEN NULL ELSE cancel_at END,
 		        ended_at = CASE WHEN ?='ended' THEN COALESCE(ended_at, ?) ELSE ended_at END,
 		        updated_at=CURRENT_TIMESTAMP
 		  WHERE id=? AND project_id=?`,
-		status, jsonOrEmpty(metadata, "{}"), status, nowStr, id, pid)
+		status, jsonOrEmpty(metadata, "{}"), status, status, status, nowStr, id, pid)
 	if err != nil {
 		return nil, err
 	}
@@ -1401,32 +1559,68 @@ func dbSubscriptionSetStatusMetadata(db *sql.DB, pid string, id int64, status st
 	return dbSubscriptionGet(db, pid, id, true)
 }
 
-func dbSubscriptionCancel(db *sql.DB, pid string, args map[string]any) (*Subscription, error) {
-	id := int64Arg(args, "id")
-	if id == 0 {
-		return nil, errors.New("id required")
+func dbSubscriptionCancel(db *sql.DB, pid string, input map[string]any) (*Subscription, error) {
+	args := copyArgs(input)
+	if e := validateScalarFields(args); e != nil {
+		return nil, e
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return nil, err
+	if e := validateIDs(args, "id"); e != nil {
+		return nil, e
+	}
+	if v, ok := args["at_period_end"]; ok {
+		if _, ok := v.(bool); !ok {
+			return nil, errors.New("at_period_end must be boolean")
+		}
+	}
+	tx, e := beginWrite(db)
+	if e != nil {
+		return nil, e
 	}
 	defer tx.Rollback()
-	if boolArg(args, "at_period_end") {
-		_, err = tx.Exec(`UPDATE subscriptions SET status='active', cancel_at=current_period_end, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, pid)
+	s, e := requiredSub(tx, pid, int64Arg(args, "id"), true)
+	if e != nil {
+		return nil, e
+	}
+	if s.Status == "cancelled" || s.Status == "ended" {
+		return s, tx.Commit()
+	}
+	scheduled := boolArg(args, "at_period_end")
+	if scheduled {
+		deadline, e := parseDate(s.CurrentPeriodEnd)
+		if e != nil {
+			return nil, errors.New("valid current_period_end required for scheduled cancellation")
+		}
+		_ = deadline
+	}
+	topic := "subscription.cancelled"
+	if scheduled {
+		if s.CancelAt == s.CurrentPeriodEnd {
+			return s, tx.Commit()
+		}
+		_, e = tx.Exec(`UPDATE subscriptions SET cancel_at=current_period_end,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, s.ID, pid)
+		topic = "subscription.cancellation_scheduled"
 	} else {
-		_, err = tx.Exec(`UPDATE subscriptions SET status='cancelled', cancelled_at=CURRENT_TIMESTAMP, ended_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, pid)
+		_, e = tx.Exec(`UPDATE subscriptions SET status='cancelled',cancel_at=NULL,next_renewal_at=NULL,cancelled_at=CURRENT_TIMESTAMP,ended_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, s.ID, pid)
 	}
-	if err != nil {
-		return nil, err
+	if e != nil {
+		return nil, e
 	}
-	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.cancelled", map[string]any{"at_period_end": boolArg(args, "at_period_end"), "reason": strArg(args, "reason")}); err != nil {
-		return nil, err
+	details := map[string]any{"at_period_end": scheduled, "reason": strArg(args, "reason")}
+	if e = writeEventTx(tx, pid, s.ID, actorOrSystem(strArg(args, "actor")), topic, details); e != nil {
+		return nil, e
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	s, e = requiredSub(tx, pid, s.ID, true)
+	if e != nil {
+		return nil, e
 	}
-	return dbSubscriptionGet(db, pid, id, true)
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return s, nil
 }
+
+var validPayment = map[string]bool{"pending": true, "open": true, "unpaid": true, "past_due": true, "paid": true, "failed": true, "refunded": true, "voided": true, "cancelled": true}
+var validFulfillment = map[string]bool{"none": true, "pending": true, "processing": true, "shipped": true, "fulfilled": true, "delivered": true, "failed": true, "cancelled": true}
 
 func dbSubscriptionResume(db *sql.DB, pid string, args map[string]any) (*Subscription, bool, error) {
 	id := int64Arg(args, "id")
@@ -1470,7 +1664,13 @@ func dbSubscriptionItemCreate(db *sql.DB, pid string, args map[string]any) (*Sub
 	if err != nil || sub == nil {
 		return nil, firstErr(err, errors.New("subscription not found"))
 	}
+	if err := validateItemInput(args); err != nil {
+		return nil, err
+	}
 	it := normalizeItemMap(args, sub.Currency)
+	if it.Currency != sub.Currency {
+		return nil, errors.New("item currency must match subscription currency")
+	}
 	if it.Title == "" {
 		return nil, errors.New("title required")
 	}
@@ -1520,6 +1720,12 @@ func dbSubscriptionItemCreate(db *sql.DB, pid string, args map[string]any) (*Sub
 }
 
 func validateItem(it itemIn) error {
+	if it.Title == "" || it.Quantity <= 0 || math.IsNaN(it.Quantity) || math.IsInf(it.Quantity, 0) {
+		return errors.New("item requires a title and finite positive quantity")
+	}
+	if _, err := lineAmount(it.UnitAmountCents, it.Quantity); err != nil {
+		return err
+	}
 	switch it.BillingScheme {
 	case "flat":
 		if it.MeterKey != "" {
@@ -1541,7 +1747,15 @@ func validateItem(it itemIn) error {
 	return nil
 }
 
-func dbSubscriptionItemUpdate(db *sql.DB, pid string, args map[string]any) (*SubItem, error) {
+func dbSubscriptionItemUpdate(database *sql.DB, pid string, args map[string]any) (*SubItem, error) {
+	db, err := beginWrite(database)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Rollback()
+	if err = validateItemInput(args); err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "id")
 	item, err := dbSubscriptionItemGet(db, pid, id)
 	if err != nil || item == nil {
@@ -1610,10 +1824,20 @@ func dbSubscriptionItemUpdate(db *sql.DB, pid string, args map[string]any) (*Sub
 	if err != nil {
 		return nil, err
 	}
-	return dbSubscriptionItemGet(db, pid, id)
+	updated, err := dbSubscriptionItemGet(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if err = writeEventTx(db, pid, item.SubscriptionID, "system", "subscription.item_updated", map[string]any{"subscription_item_id": id}); err != nil {
+		return nil, err
+	}
+	if err = db.Commit(); err != nil {
+		return nil, err
+	}
+	return updated, nil
 }
 
-func dbSubscriptionItemGet(db *sql.DB, pid string, id int64) (*SubItem, error) {
+func dbSubscriptionItemGet(db queryDB, pid string, id int64) (*SubItem, error) {
 	if id == 0 {
 		return nil, nil
 	}
@@ -1778,6 +2002,9 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 	discountTotal := int64(0)
 	discounts := discountsByItem(sub.Discounts)
 	for _, item := range sub.Items {
+		if item.Currency != sub.Currency {
+			return nil, errors.New("item currency mismatch")
+		}
 		if !itemAppliesToCycle(item, cycleNumber) {
 			continue
 		}
@@ -1798,8 +2025,14 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 					"period_end":           end.Format(time.RFC3339),
 				},
 			}
-			baseAmount := int64(math.Round(float64(item.UnitAmountCents) * quantity))
-			baseSubtotal += baseAmount
+			baseAmount, err := lineAmount(item.UnitAmountCents, quantity)
+			if err != nil {
+				return nil, err
+			}
+			baseSubtotal, err = addAmounts(baseSubtotal, baseAmount)
+			if err != nil {
+				return nil, err
+			}
 			if discount := discountForItemCycle(discounts, item.ID, cycleNumber); discount != nil {
 				amount, applicationNumber, applies := calculateDiscount(discount, quantity, item.UnitAmountCents, item.Currency, cycleNumber)
 				if applies {
@@ -1851,8 +2084,17 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 				"unit_size":            item.UnitSize,
 			},
 		}
-		baseAmount := int64(math.Round(float64(item.UnitAmountCents) * summary.QuantityUnits))
-		baseSubtotal += baseAmount
+		baseAmount := int64(0)
+		if summary.QuantityUnits > 0 {
+			baseAmount, err = lineAmount(item.UnitAmountCents, summary.QuantityUnits)
+			if err != nil {
+				return nil, err
+			}
+		}
+		baseSubtotal, err = addAmounts(baseSubtotal, baseAmount)
+		if err != nil {
+			return nil, err
+		}
 		if discount := discountForItemCycle(discounts, item.ID, cycleNumber); discount != nil {
 			amount, applicationNumber, applies := calculateDiscount(discount, summary.QuantityUnits, item.UnitAmountCents, item.Currency, cycleNumber)
 			if applies {
@@ -1871,6 +2113,16 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 			}
 		}
 		lines = append(lines, line)
+	}
+	var overrideTotal int64
+	overrideErr := db.QueryRow(`SELECT c.total_cents FROM subscription_cycle_keys k JOIN subscription_cycles c ON c.id=k.cycle_id WHERE k.subscription_id=? AND k.period_start=? AND c.project_id=? AND c.total_override=1`, sub.ID, start.Format(time.RFC3339), pid).Scan(&overrideTotal)
+	if overrideErr != nil && overrideErr != sql.ErrNoRows {
+		return nil, overrideErr
+	}
+	if overrideErr == nil && includeFlat && includeMetered {
+		lines = []any{map[string]any{"description": "Subscription renewal (adjusted total)", "quantity": 1, "unit_price_cents": overrideTotal, "tax_rate_bps": 0, "metadata": map[string]any{"source_app": "subscriptions", "subscription_id": sub.ID}}}
+		baseSubtotal = overrideTotal
+		discountTotal = 0
 	}
 	return map[string]any{
 		"subscription": sub, "line_items": lines, "usage_summaries": summaries,
@@ -1907,43 +2159,87 @@ func callBillingInvoiceCreate(ctx *sdk.AppCtx, args map[string]any, finalize boo
 }
 
 func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscription, error) {
-	subID := int64Arg(args, "subscription_id")
-	sub, err := dbSubscriptionGet(db, pid, subID, true)
-	if err != nil || sub == nil {
-		return nil, nil, firstErr(err, errors.New("subscription not found"))
+	args, err := cycleArgs(args)
+	if err != nil {
+		return nil, nil, err
 	}
-	next := int64(1)
-	_ = db.QueryRow(`SELECT COALESCE(MAX(cycle_number),0)+1 FROM subscription_cycles WHERE subscription_id=?`, subID).Scan(&next)
+	tx, err := beginWrite(db)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	subID := int64Arg(args, "subscription_id")
+	sub, err := requiredSub(tx, pid, subID, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if existing, err := existingCycle(tx, sub, args); err != nil {
+		return nil, nil, err
+	} else if existing != nil {
+		return existing, sub, tx.Commit()
+	}
+	if sub.Status != "active" && sub.Status != "trialing" {
+		var valid int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM subscription_lifecycle_attempts WHERE id=? AND subscription_id=? AND project_id=? AND action='trial_end'`, int64Arg(args, "lifecycle_attempt_id"), subID, pid).Scan(&valid); err != nil {
+			return nil, nil, err
+		}
+		if sub.Status != "past_due" || valid != 1 {
+			return nil, nil, errors.New("subscription cannot create renewals in its current state")
+		}
+	}
+	if cancelled, ok := parseTime(sub.CancelAt); ok {
+		start, _ := parseTime(strArg(args, "period_start"))
+		if !start.Before(cancelled) {
+			return nil, nil, errors.New("renewal is at or after cancellation")
+		}
+	}
+	var next int64
+	if err = tx.QueryRow(`SELECT COALESCE(MAX(cycle_number),0)+1 FROM subscription_cycles WHERE subscription_id=?`, subID).Scan(&next); err != nil {
+		return nil, nil, err
+	}
 	subtotal := int64(0)
 	discountTotal := int64(0)
 	discounts := discountsByItem(sub.Discounts)
 	for _, it := range sub.Items {
 		if it.Status == "active" && it.BillingScheme == "flat" {
-			baseAmount := int64(math.Round(float64(it.UnitAmountCents) * it.Quantity))
-			subtotal += baseAmount
+			if it.Currency != sub.Currency {
+				return nil, nil, errors.New("item currency mismatch")
+			}
+			baseAmount, err := lineAmount(it.UnitAmountCents, it.Quantity)
+			if err != nil {
+				return nil, nil, err
+			}
+			subtotal, err = addAmounts(subtotal, baseAmount)
+			if err != nil {
+				return nil, nil, err
+			}
 			if discount := discountForItemCycle(discounts, it.ID, next); discount != nil {
 				amount, _, applies := calculateDiscount(discount, it.Quantity, it.UnitAmountCents, it.Currency, next)
 				if applies {
-					discountTotal += amount
+					discountTotal, err = addAmounts(discountTotal, amount)
+					if err != nil {
+						return nil, nil, err
+					}
 				}
 			}
 		}
 	}
 	tax := int64Arg(args, "tax_cents")
 	ship := int64Arg(args, "shipping_cents")
-	total := firstNonZero(int64Arg(args, "total_cents"), subtotal-discountTotal+tax+ship)
-	var id int64
-	tx, err := db.Begin()
+	total, err := addAmounts(subtotal-discountTotal, tax, ship)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer tx.Rollback()
+	if _, ok := args["total_cents"]; ok {
+		total = int64Arg(args, "total_cents")
+	}
+	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO subscription_cycles
 		   (project_id, subscription_id, cycle_number, period_start, period_end, due_at,
 		    invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status,
-		    subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id,completed_at,total_override)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, subID, next, strArg(args, "period_start"), strArg(args, "period_end"), nullStr(strArg(args, "due_at")),
 		nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")),
@@ -1951,49 +2247,77 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 		subtotal, discountTotal, tax, ship, total, sub.Currency, jsonOrEmpty(args["metadata"], "{}"),
 		nullableTime(strArg(args, "payment_status") == "paid", time.Now().UTC().Format(time.RFC3339)),
 		nullableInt64(int64Arg(args, "lifecycle_attempt_id")),
+		nullableTime(isComplete(strArg(args, "payment_status"), strArg(args, "fulfillment_status")), time.Now().UTC().Format(time.RFC3339)),
+		hasField(args, "total_cents"),
 	).Scan(&id)
 	if err != nil {
+		return nil, nil, err
+	}
+	if _, err = tx.Exec(`INSERT INTO subscription_cycle_keys(subscription_id,period_start,cycle_id) VALUES(?,?,?)`, subID, strArg(args, "period_start"), id); err != nil {
 		return nil, nil, err
 	}
 	if err := writeEventTx(tx, pid, subID, "system", "subscription.cycle_created", map[string]any{"cycle_id": id, "cycle_number": next}); err != nil {
 		return nil, nil, err
 	}
-	if err := tx.Commit(); err != nil {
+	c, err := dbCycleGet(tx, pid, id)
+	if err != nil {
 		return nil, nil, err
 	}
-	c, err := dbCycleGet(db, pid, id)
-	sub, _ = dbSubscriptionGet(db, pid, subID, true)
-	return c, sub, err
-}
-
-func dbCycleUpdate(db *sql.DB, pid string, args map[string]any) (*Cycle, error) {
-	id := int64Arg(args, "id")
-	if id == 0 {
-		return nil, errors.New("id required")
-	}
-	c, err := dbCycleGet(db, pid, id)
-	if err != nil || c == nil {
-		return nil, firstErr(err, errors.New("cycle not found"))
-	}
-	payment := firstNonEmpty(strArg(args, "payment_status"), c.PaymentStatus)
-	fulfillment := firstNonEmpty(strArg(args, "fulfillment_status"), c.FulfillmentStatus)
-	_, err = db.Exec(
-		`UPDATE subscription_cycles
-		    SET payment_status=?, fulfillment_status=?,
-		        invoice_id=COALESCE(?, invoice_id), order_id=COALESCE(?, order_id), entitlement_grant_id=COALESCE(?, entitlement_grant_id),
-		        paid_at = CASE WHEN ?='paid' AND paid_at IS NULL THEN CURRENT_TIMESTAMP ELSE paid_at END,
-		        completed_at = CASE WHEN (?='paid' AND ? IN ('none','fulfilled','delivered')) AND completed_at IS NULL THEN CURRENT_TIMESTAMP ELSE completed_at END,
-		        updated_at=CURRENT_TIMESTAMP
-		  WHERE id=? AND project_id=?`,
-		payment, fulfillment, nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")),
-		payment, payment, fulfillment, id, pid)
+	sub, err = requiredSub(tx, pid, subID, true)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return dbCycleGet(db, pid, id)
+	if err = tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	return c, sub, nil
 }
 
-func dbCycleGet(db *sql.DB, pid string, id int64) (*Cycle, error) {
+func dbCycleUpdate(db *sql.DB, pid string, input map[string]any) (*Cycle, error) {
+	args := copyArgs(input)
+	if e := validateScalarFields(args); e != nil {
+		return nil, e
+	}
+	if e := validateIDs(args, "id", "invoice_id", "order_id", "entitlement_grant_id"); e != nil {
+		return nil, e
+	}
+	tx, e := beginWrite(db)
+	if e != nil {
+		return nil, e
+	}
+	defer tx.Rollback()
+	c, e := dbCycleGet(tx, pid, int64Arg(args, "id"))
+	if e != nil {
+		return nil, e
+	}
+	if c == nil {
+		return nil, errors.New("cycle not found")
+	}
+	payment, fulfillment := firstNonEmpty(strArg(args, "payment_status"), c.PaymentStatus), firstNonEmpty(strArg(args, "fulfillment_status"), c.FulfillmentStatus)
+	if !validPayment[payment] || !validFulfillment[fulfillment] {
+		return nil, errors.New("invalid payment or fulfillment status")
+	}
+	if c.PaymentStatus == "paid" && payment != "paid" && payment != "refunded" && payment != "voided" {
+		return nil, errors.New("paid cycle cannot return to an unpaid state")
+	}
+	_, e = tx.Exec(`UPDATE subscription_cycles SET payment_status=?,fulfillment_status=?,invoice_id=COALESCE(?,invoice_id),order_id=COALESCE(?,order_id),entitlement_grant_id=COALESCE(?,entitlement_grant_id),paid_at=CASE WHEN ?='paid' AND paid_at IS NULL THEN CURRENT_TIMESTAMP ELSE paid_at END,completed_at=CASE WHEN ? THEN COALESCE(completed_at,CURRENT_TIMESTAMP) ELSE NULL END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, payment, fulfillment, nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")), payment, isComplete(payment, fulfillment), c.ID, pid)
+	if e != nil {
+		return nil, e
+	}
+	if e = writeEventTx(tx, pid, c.SubscriptionID, "system", "subscription.cycle_updated", map[string]any{"cycle_id": c.ID, "payment_status": payment, "fulfillment_status": fulfillment}); e != nil {
+		return nil, e
+	}
+	c, e = dbCycleGet(tx, pid, c.ID)
+	if e != nil {
+		return nil, e
+	}
+	if e = tx.Commit(); e != nil {
+		return nil, e
+	}
+	return c, nil
+}
+
+func dbCycleGet(db queryDB, pid string, id int64) (*Cycle, error) {
 	c, err := scanCycle(db.QueryRow(cycleSelect()+` WHERE id=? AND project_id=?`, id, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -2001,13 +2325,20 @@ func dbCycleGet(db *sql.DB, pid string, id int64) (*Cycle, error) {
 	return c, err
 }
 
-func dbCyclesList(db *sql.DB, pid string, subID int64, limit int) ([]*Cycle, error) {
-	rows, err := db.Query(cycleSelect()+` WHERE subscription_id=? AND project_id=? ORDER BY cycle_number DESC LIMIT ?`, subID, pid, limit)
+func dbCyclesList(db queryDB, pid string, subID int64, limit int, offsets ...int64) ([]*Cycle, error) {
+	offset := int64(0)
+	if len(offsets) > 0 {
+		offset = offsets[0]
+	}
+	if offset < 0 {
+		return nil, errors.New("offset must be nonnegative")
+	}
+	rows, err := db.Query(cycleSelect()+` WHERE subscription_id=? AND project_id=? ORDER BY cycle_number DESC LIMIT ? OFFSET ?`, subID, pid, clampLimit(limit, 200), offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Cycle
+	out := []*Cycle{}
 	for rows.Next() {
 		c, err := scanCycle(rows)
 		if err != nil {
@@ -2112,7 +2443,7 @@ func scanSub(row rowScanner) (*Subscription, error) {
 	return &s, nil
 }
 
-func dbItemsList(db *sql.DB, subID int64) ([]*SubItem, error) {
+func dbItemsList(db queryDB, subID int64) ([]*SubItem, error) {
 	rows, err := db.Query(`SELECT id, subscription_id, position, catalog_product_id, catalog_price_id, COALESCE(sku,''), title, quantity, unit_amount_cents, currency, billing_scheme, meter_key, included_units, unit_size, status, starts_cycle_number, ends_cycle_number, metadata FROM subscription_items WHERE subscription_id=? ORDER BY starts_cycle_number,position,id`, subID)
 	if err != nil {
 		return nil, err
@@ -2207,13 +2538,20 @@ func scanCycle(row rowScanner) (*Cycle, error) {
 	return &c, nil
 }
 
-func dbEventsList(db *sql.DB, pid string, subID int64, limit int) ([]*Event, error) {
-	rows, err := db.Query(`SELECT id, project_id, subscription_id, actor, action, details, created_at FROM subscription_events WHERE subscription_id=? AND project_id=? ORDER BY created_at DESC,id DESC LIMIT ?`, subID, pid, limit)
+func dbEventsList(db queryDB, pid string, subID int64, limit int, offsets ...int64) ([]*Event, error) {
+	offset := int64(0)
+	if len(offsets) > 0 {
+		offset = offsets[0]
+	}
+	if offset < 0 {
+		return nil, errors.New("offset must be nonnegative")
+	}
+	rows, err := db.Query(`SELECT id, project_id, subscription_id, actor, action, details, created_at FROM subscription_events WHERE subscription_id=? AND project_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, subID, pid, clampLimit(limit, 200), offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Event
+	out := []*Event{}
 	for rows.Next() {
 		var e Event
 		var details string
@@ -2228,7 +2566,10 @@ func dbEventsList(db *sql.DB, pid string, subID int64, limit int) ([]*Event, err
 
 func writeEventTx(tx *sql.Tx, pid string, subID int64, actor, action string, details map[string]any) error {
 	_, err := tx.Exec(`INSERT INTO subscription_events (project_id, subscription_id, actor, action, details) VALUES (?, ?, ?, ?, ?)`, pid, subID, actorOrSystem(actor), action, jsonOrEmpty(details, "{}"))
-	return err
+	if err != nil {
+		return err
+	}
+	return queueAuditEvent(tx, pid, subID, action, details)
 }
 
 func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -2239,7 +2580,7 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		args := map[string]any{"q": r.URL.Query().Get("q"), "customer_email": r.URL.Query().Get("customer_email"), "kind": r.URL.Query().Get("kind"), "status": r.URL.Query().Get("status"), "limit": r.URL.Query().Get("limit")}
+		args := map[string]any{"q": r.URL.Query().Get("q"), "customer_email": r.URL.Query().Get("customer_email"), "kind": r.URL.Query().Get("kind"), "status": r.URL.Query().Get("status"), "limit": r.URL.Query().Get("limit"), "offset": r.URL.Query().Get("offset"), "customer_id": r.URL.Query().Get("customer_id")}
 		out, err := dbSubscriptionsSearch(ctx.AppDB(), pid, args)
 		if err != nil {
 			httpErr(w, 500, err.Error())
@@ -2249,8 +2590,8 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		body, err := decodeBody(w, r)
+		if err != nil {
 			httpErr(w, 400, "invalid JSON body")
 			return
 		}
@@ -2259,6 +2600,7 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 400, err.Error())
 			return
 		}
+		emitDomainEvent(ctx, "subscription.created", subscriptionEventPayload(ctx.AppDB(), sub))
 		httpJSON(w, map[string]any{"subscription": sub})
 		return
 	}
@@ -2310,25 +2652,35 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 	}
 	id := pathInt(r.URL.Path, "/subscriptions/")
 	if strings.HasSuffix(r.URL.Path, "/cancel") && r.Method == http.MethodPost {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, err := decodeBody(w, r)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		body["id"] = id
 		sub, err := dbSubscriptionCancel(ctx.AppDB(), pid, body)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
 		}
+		emitDomainEvent(ctx, cancellationTopic(sub), subscriptionEventPayload(ctx.AppDB(), sub))
 		httpJSON(w, map[string]any{"subscription": sub})
 		return
 	}
 	if strings.HasSuffix(r.URL.Path, "/resume") && r.Method == http.MethodPost {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, err := decodeBody(w, r)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		body["id"] = id
 		sub, changed, err := dbSubscriptionResume(ctx.AppDB(), pid, body)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
+		}
+		if changed {
+			emitDomainEvent(ctx, "subscription.resumed", subscriptionEventPayload(ctx.AppDB(), sub))
 		}
 		httpJSON(w, map[string]any{"subscription": sub, "changed": changed})
 		return
@@ -2347,14 +2699,19 @@ func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPatch {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		body, err := decodeBody(w, r)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		body["id"] = id
 		sub, err := dbSubscriptionUpdateStatus(ctx.AppDB(), pid, body)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
 		}
+		emitSubscriptionUpdated(ctx, sub)
+		emitSubscriptionLifecycle(ctx, sub)
 		httpJSON(w, map[string]any{"subscription": sub})
 		return
 	}
@@ -2379,8 +2736,8 @@ func (a *App) handleCycles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost {
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		body, err := decodeBody(w, r)
+		if err != nil {
 			httpErr(w, 400, "invalid JSON body")
 			return
 		}
@@ -2406,8 +2763,11 @@ func (a *App) handleCycleItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 405, "method not allowed")
 		return
 	}
-	var body map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	body, err := decodeBody(w, r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	body["id"] = pathInt(r.URL.Path, "/cycles/")
 	c, err := dbCycleUpdate(ctx.AppDB(), pid, body)
 	if err != nil {
@@ -2456,9 +2816,7 @@ func normalizeItems(raw []any, currency string) []itemIn {
 
 func normalizeItemMap(m map[string]any, currency string) itemIn {
 	scheme := strings.ToLower(firstNonEmpty(strArg(m, "billing_scheme"), "flat"))
-	if scheme != "metered" {
-		scheme = "flat"
-	}
+
 	unitSize := int64Arg(m, "unit_size")
 	if unitSize <= 0 {
 		unitSize = 1
@@ -2468,7 +2826,7 @@ func normalizeItemMap(m map[string]any, currency string) itemIn {
 		SKU:             strArg(m, "sku"),
 		Title:           firstNonEmpty(strArg(m, "title"), strArg(m, "description"), strArg(m, "name")),
 		Quantity:        float64Arg(m, "quantity", 1),
-		UnitAmountCents: firstNonZero(int64Arg(m, "unit_amount_cents"), int64Arg(m, "unit_price_cents")),
+		UnitAmountCents: itemUnitAmount(m),
 		Currency:        strings.ToUpper(firstNonEmpty(strArg(m, "currency"), currency)),
 		BillingScheme:   scheme,
 		MeterKey:        strArg(m, "meter_key"),
@@ -2524,6 +2882,9 @@ func int64Arg(m map[string]any, key string) int64 {
 		return 0
 	}
 	switch v := m[key].(type) {
+	case json.Number:
+		n, _ := v.Int64()
+		return n
 	case float64:
 		return int64(v)
 	case int:
@@ -2541,6 +2902,12 @@ func float64Arg(m map[string]any, key string, def float64) float64 {
 		return def
 	}
 	switch v := m[key].(type) {
+	case json.Number:
+		n, err := v.Float64()
+		if err == nil {
+			return n
+		}
+		return def
 	case float64:
 		return v
 	case int:
@@ -2797,9 +3164,14 @@ func configString(ctx *sdk.AppCtx, key, def string) string {
 	return def
 }
 func httpJSON(w http.ResponseWriter, v any) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		httpErr(w, 500, "response encoding failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(v)
+	_, _ = w.Write(append(data, '\n'))
 }
 func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")

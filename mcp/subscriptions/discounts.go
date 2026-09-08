@@ -341,7 +341,7 @@ func insertSubscriptionDiscountTx(tx *sql.Tx, pid string, subID int64, item *Sub
 	return result.LastInsertId()
 }
 
-func dbSubscriptionDiscountsList(db *sql.DB, pid string, subID int64, status string) ([]*SubscriptionDiscount, error) {
+func dbSubscriptionDiscountsList(db queryDB, pid string, subID int64, status string) ([]*SubscriptionDiscount, error) {
 	if subID == 0 {
 		return nil, errors.New("subscription_id required")
 	}
