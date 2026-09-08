@@ -1,10 +1,12 @@
-# Automatic admission (unreleased)
+# Automatic admission — Functions 1.12.0
 
 Functions now regulates execution and managed downstream calls automatically. No
 function-name lists, Tables-specific rules, or user-defined concurrency groups
 are required. This is admission control on the available host, not AWS Lambda's
 distributed capacity provisioning. Both this Functions change and the companion
 server change are needed for destination control across different caller apps.
+The server change remains unpublished; Functions 1.12.0 includes execution
+admission and managed downstream admission within this Functions installation.
 
 ## What happens to concurrent calls
 

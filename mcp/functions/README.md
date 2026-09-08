@@ -1,6 +1,6 @@
-# Functions 1.11.3
+# Functions 1.12.0
 
-**Unreleased:** automatic execution/downstream admission, deadline-aware queueing, and API/panel diagnostics. See [behavior and tests](AUTOMATIC_ADMISSION.md).
+**New in 1.12.0:** automatic execution/downstream admission, deadline-aware queueing, and API/panel diagnostics. See [behavior and tests](AUTOMATIC_ADMISSION.md).
 
 **New in 1.11.3:** configurable soft protocol-buffer admission, bounded bursts and queueing, with API and themed panel controls. See [protocol settings and local evidence](SOFT_PROTOCOL.md).
 

@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.11.4
+version: 1.12.0
 description: |
+  v1.12.0 adds automatic CPU-aware execution and managed-call admission.
+  Queued requests retain their existing deadlines and cancellation; learned
+  lightweight operations retain protected headroom. API and themed panel expose
+  automatic limits, queue time and worker CPU. Cross-app gateway coordination
+  requires a separate platform update, not included in this release.
+
   v1.11.4 Distinguishes queue expiry from capacity rejection, returns HTTP 504 for deadline failures, and carries Gateway correlation IDs into invocation records and Tables calls.
 
   Lambda-style serverless functions in node or Go. Each function is
@@ -118,7 +124,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.11.4
+    ref: functions/v1.12.0
     entry: mcp/functions
   port: 8080
   health_check: /health
