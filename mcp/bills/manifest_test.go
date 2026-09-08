@@ -34,7 +34,8 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 	want := []string{
 		"vendors_search", "vendors_get", "vendors_get_context",
 		"vendors_upsert_by_email", "vendors_update", "vendors_merge",
-		"bills_create", "bills_update", "bills_approve", "bills_reject",
+		"bills_create_obligation", "bills_get_obligation", "bills_record_adjustment",
+ "bills_create", "bills_update", "bills_approve", "bills_reject",
 		"bills_schedule_payment", "bills_void", "bills_get", "bills_search",
 		"bills_render_pdf",
 		"bills_attach_file", "bills_detach_file", "bills_create_from_file",

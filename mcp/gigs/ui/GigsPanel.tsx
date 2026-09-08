@@ -5,6 +5,7 @@
 // promote an existing CRM contact or create/match one by channel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Financials from "./Financials";
 
 interface NativePanelProps {
   appName: string;
@@ -690,22 +691,7 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
         </Panel>
       )}
 
-      {g.compensation && (
-        <Panel className="p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-xs uppercase tracking-wide text-text-muted">Agreed worker compensation</div>
-              <div className="mt-1 text-lg font-semibold">{formatMoneyMinor(g.compensation.worker_amount_minor, g.compensation.currency)}</div>
-              <div className="text-xs text-text-muted">
-                {g.compensation.pricing_model}{g.compensation.unit ? ` · ${g.compensation.quantity} ${g.compensation.unit}` : ""} · {g.compensation.rate_source}
-              </div>
-            </div>
-            <Pill tone={g.compensation.payable_status === "created" ? "success" : g.compensation.payable_status === "failed" ? "danger" : "default"}>
-              payable: {g.compensation.payable_status}
-            </Pill>
-          </div>
-        </Panel>
-      )}
+      <Financials key={g.id} gigId={g.id} status={g.status} projectId={projectId} api={api} files={Array.from(new Set([...(g.submissions||[]),...(g.submission?[g.submission]:[]),...(g.assignments||[]).flatMap(a=>a.submission?[a.submission]:[])].flatMap(s=>s.attachment_file_ids||[]))).map(id=>({id,name:`Delivered file ${id}`}))} />
 
       <div>
         <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">Composition</h3>

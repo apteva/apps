@@ -13,6 +13,9 @@ interface BillMeta {
   currency: string;
   total_cents: number;
   amount_paid_cents: number;
+ credit_minor?: number;
+ source_key?: string;
+ documents?: {file_id:number;label:string}[];
   due_date?: string;
   category?: string;
 }
@@ -50,7 +53,7 @@ function fmtMoney(cents: number, currency: string): string {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: (currency || "USD").toUpperCase(),
-    }).format(cents / 100);
+    }).format(cents / (10 ** (new Intl.NumberFormat(undefined,{style:"currency",currency:(currency||"USD").toUpperCase()}).resolvedOptions().maximumFractionDigits ?? 2)));
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
   }
@@ -158,7 +161,7 @@ export default function BillCard({ bill_id, projectId, preview }: Props) {
     );
   }
 
-  const remaining = meta.total_cents - meta.amount_paid_cents;
+  const remaining = meta.total_cents - (meta.credit_minor||0) - meta.amount_paid_cents;
   const title = meta.vendor_invoice_number || `Bill #${meta.id}`;
   const subtitle = (
     <span className="flex items-center gap-2">

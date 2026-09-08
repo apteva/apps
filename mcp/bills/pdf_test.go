@@ -122,7 +122,7 @@ func TestFormatMoney(t *testing.T) {
 		"USD":      {150000, "USD", "$1500.00"},
 		"EUR":      {99, "EUR", "€0.99"},
 		"GBP":      {1234, "GBP", "£12.34"},
-		"JPY":      {15000, "JPY", "¥150"},
+		"JPY":      {15000, "JPY", "¥15000"},
 		"unknown":  {2500, "XYZ", "XYZ 25.00"},
 		"negative": {-100, "USD", "-$1.00"},
 	}

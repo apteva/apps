@@ -97,11 +97,11 @@ func TestRegressionReassignedGigPaysReviewedWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _, err = createGigPayable(ctx, "project-a", gid)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("reviewed assignment bypassed explicit financial approval")
 	}
-	if p.vendorEmail != "new-worker@example.test" {
-		t.Fatalf("unexpected vendor: %q", p.vendorEmail)
+	if p.vendorEmail != "" {
+		t.Fatalf("unexpected payee creation before approval: %s", p.vendorEmail)
 	}
 }
 func auditWorker(t *testing.T, p sdk.PlatformClient) (*sdk.AppCtx, int64, int64) {

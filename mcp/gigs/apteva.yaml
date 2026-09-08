@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.5.2
+version: 0.6.0
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -34,7 +34,8 @@ requires:
       optional: false
       reason: Customer-facing standard offers publish service products and immutable prices into Catalog.
     - name: bills
-      version: ">=0.1.33"
+      events: [bill.payment_recorded, bill.approved, bill.adjusted, bill.voided, bill.disputed, bill.paid]
+      version: ">=0.2.0"
       optional: true
       reason: Approved external-worker compensation can become an accounts-payable bill.
     - name: orders
@@ -42,6 +43,18 @@ requires:
       optional: true
       reason: Paid service orders can reference Gigs contracts and fulfillment work without coupling Gigs to Checkout.
   integrations:
+    - role: bills
+      kind: app
+      compatible_app_names: [bills]
+      required: false
+      label: "Bills (optional supplier payables)"
+      hint: "Connect to create unapproved supplier bills after compensation approval and display recorded payments. Financial tracking works without Bills."
+    - role: sites
+      kind: app
+      compatible_app_names: [content]
+      required: false
+      label: "Sites (optional attribution)"
+      hint: "Canonical site references for work allocated to websites."
     - role: contacts
       kind: app
       compatible_app_names: [crm]
@@ -70,6 +83,16 @@ provides:
       no_auth: true
     - prefix: /
   mcp_tools:
+    - name: gigs_financials_get
+      description: Read generic financial agreements, approvals and optional Bills payment status.
+    - name: gigs_agreement_save
+      description: Append a versioned compensation agreement; preserve unknown amounts.
+    - name: gigs_compensation_approve
+      description: Approve compensation explicitly; optionally create an unapproved supplier bill.
+    - name: gigs_financials_sync
+      description: Retry or refresh optional Bills synchronization.
+    - name: gigs_financial_facts
+      description: Read paginated financial facts without counting linked bills twice.
     # ─── Workers ─────────────────────────────────────────────────────
     - name: workers_create
       description: Create a worker by name + email/phone — upserts the CRM contact in one shot, then promotes it to a worker. Returns {worker, contact, was_created}.
@@ -221,7 +244,7 @@ provides:
     - name: contracts_dispatch_milestone
       description: Dispatch a pending contract milestone into a compensated worker gig and track it through review.
     - name: gigs_create_payable
-      description: Create or retry the Bills payable for reviewed work, idempotently.
+      description: Retry optional Bills synchronization after explicit compensation approval.
   ui_panels:
     - slot: project.page
       label: Gigs
@@ -268,6 +291,8 @@ provides:
             minimum: 1
             maximum: 12
   workers:
+    - name: financial-sync
+      schedule: "@every 1m"
     - name: lifecycle
       schedule: "@every 5m"
 
@@ -275,7 +300,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: gigs/v0.5.2
+    ref: gigs/v0.6.0
     entry: mcp/gigs
   port: 8080
   health_check: /health
@@ -326,10 +351,10 @@ config_schema:
     default: 2048
     label: Maximum submission file size (MB)
     description: Per-file limit applied before a worker upload session is created.
-  - name: auto_create_worker_payables
+  - name: auto_create_approved_payables
     type: bool
-    default: false
-    label: Automatically create worker payables
-    description: After a compensated gig is reviewed, create a received vendor bill in the optional Bills app. Disabled by default so employee/payroll work is never treated as contractor AP accidentally.
+    default: true
+    label: Automatically create approved supplier payables
+    description: After explicit compensation approval, create an unapproved bill only when Bills is connected and settlement is supplier. Never installs Bills or records payment.
 
 upgrade_policy: auto-patch

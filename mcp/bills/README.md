@@ -326,3 +326,32 @@ provider frozen at create, audit log per row, integer cents + basis
 points for tax) but stay fully separate — different DBs, different
 panels, different tool surfaces. See the bills v0.1 design doc for
 the rationale on splitting AR + AP into two apps.
+
+## Generic source obligations (0.2.0)
+
+`bills_create_obligation` creates an unapproved (`received`) supplier bill using
+an immutable `source_key`. It atomically records the key and bill. Identical
+retries return the existing bill; different payloads conflict. It cannot accept
+paid-on-create arguments or move money. Optional `existing_bill_id` explicitly
+adopts a matching historical bill without changing its amounts or payments.
+`bills_get_obligation` returns the bill, recorded payments, supporting documents,
+credits and outstanding balance. Source-linked bills are immutable even before
+approval; use explicit adjustments or void/replacement.
+
+`bills_record_adjustment` (also POST `/bills/{id}/adjustments`) records an explicit
+credit, received refund or reversal of an incorrect payment record. It requires
+a stable `request_key`, positive `amount_minor` and reason. Original bill and
+payment records remain intact. Credits cannot exceed the original bill total;
+refunds/reversals cannot exceed net recorded payments. A credit alone is not a
+payment. Partially paid bills cannot be voided. No adjustment executes a transfer.
+
+`bill_payments_record` accepts `request_key` for retry safety, as does POST
+`/payments`; the panel retains pending keys across interrupted requests. Partial
+payments emit `bill.payment_recorded`; `bill.paid` is emitted only when covered.
+Balances deduct explicit credits. Monetary fields retain their historical `_cents`
+names for compatibility and represent integer currency minor units; formatting
+uses currency precision, including zero-decimal JPY and three-decimal KWD.
+
+`bills_attach_file` supports `append_only=true` to retain multiple supporting
+files without replacing the primary invoice. Inter-app callers can supply
+`expected_storage_install_id` to prevent linking a different installation's file.

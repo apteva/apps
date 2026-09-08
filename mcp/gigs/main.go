@@ -54,7 +54,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{
+	return []sdk.Worker{{Name: "financial-sync", Schedule: "@every 1m", Run: runFinancialSync}, {
 		Name:     "lifecycle",
 		Schedule: "@every 5m",
 		Run: func(ctx context.Context, app *sdk.AppCtx) error {
@@ -65,6 +65,12 @@ func (a *App) Workers() []sdk.Worker {
 
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
+		{Topic: "bill.payment_recorded", Handler: a.handleFinancialBillEvent},
+		{Topic: "bill.approved", Handler: a.handleFinancialBillEvent},
+		{Topic: "bill.adjusted", Handler: a.handleFinancialBillEvent},
+		{Topic: "bill.voided", Handler: a.handleFinancialBillEvent},
+		{Topic: "bill.disputed", Handler: a.handleFinancialBillEvent},
+		{Topic: "bill.paid", Handler: a.handleFinancialBillEvent},
 		// Reply-based submissions: when a worker replies on the CRM
 		// thread we opened for their gig, we try to parse the message
 		// as a submission. Falls back to a "please open the link"
@@ -113,6 +119,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/templates/", Handler: a.handleHTTPTemplateItem},
 
 		// Gigs.
+		{Pattern: "/financials/", Handler: a.handleHTTPFinancials},
 		{Pattern: "/gigs", Handler: a.handleHTTPGigsCollection},
 		{Pattern: "/gigs/", Handler: a.handleHTTPGigItem},
 	}
@@ -126,6 +133,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	out = append(out, a.templateTools()...)
 	out = append(out, a.gigTools()...)
 	out = append(out, a.marketplaceTools()...)
+	out = append(out, a.financialTools()...)
 	return out
 }
 

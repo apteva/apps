@@ -130,96 +130,28 @@ type billsBillRef struct {
 // into a Bills AP record. The deterministic vendor invoice number lets a
 // retry recover a remotely-created bill if the local link update was lost.
 func createGigPayable(ctx *sdk.AppCtx, pid string, gigID int64) (*gigCompensation, *billsBillRef, error) {
-	comp, err := loadGigCompensation(ctx.AppDB(), pid, gigID)
-	if err != nil {
-		return nil, nil, err
+	f, e := loadFinancials(ctx, pid, gigID)
+	if e != nil {
+		return nil, nil, e
 	}
-	if comp == nil {
-		return nil, nil, errors.New("gig has no compensation snapshot")
+	if len(f.Obligations) == 0 {
+		return nil, nil, errors.New("approve compensation in Financials before creating a payable")
 	}
-	if comp.WorkerAmountMinor <= 0 {
-		return comp, nil, errors.New("gig has no payable worker compensation")
-	}
-	if comp.PayableBillID > 0 {
-		return comp, &billsBillRef{ID: comp.PayableBillID, Status: "linked", TotalCents: comp.WorkerAmountMinor}, nil
-	}
-	g, err := loadGig(ctx, pid, gigID)
-	if err != nil {
-		return comp, nil, err
-	}
-	if g == nil {
-		return comp, nil, errors.New("gig not found")
-	}
-	if g.Status != "reviewed" {
-		return comp, nil, errors.New("payable can only be created after gig review")
-	}
-	// Only the reviewed assignment determines the payable recipient.
-	var wid int64
-	if err := ctx.AppDB().QueryRow(`SELECT worker_id FROM gig_assignments WHERE gig_id=? AND status='reviewed' ORDER BY reviewed_at DESC,id DESC LIMIT 1`, gigID).Scan(&wid); err != nil {
-		return comp, nil, errors.New("gig has no reviewed worker")
-	}
-	w, err := getWorker(ctx.AppDB(), pid, wid)
-	if err != nil {
-		return comp, nil, err
-	}
-	if w == nil {
-		return comp, nil, errors.New("worker not found")
-	}
-	contact, err := crmGetContact(ctx, pid, w.ContactID)
-	if err != nil {
-		return comp, nil, err
-	}
-	if contact == nil || contact.PrimaryEmail == "" {
-		return comp, nil, errors.New("worker needs a primary email before creating a Bills vendor")
-	}
-	api := ctx.WithProject(pid).PlatformAPI()
-	var vendorOut struct {
-		Vendor *billsVendorRef `json:"vendor"`
-	}
-	name := contact.DisplayName
-	if name == "" {
-		name = strings.TrimSpace(contact.FirstName + " " + contact.LastName)
-	}
-	if err := api.CallAppResult("bills", "vendors_upsert_by_email", map[string]any{"email": contact.PrimaryEmail, "defaults": map[string]any{"name": name, "phone": contact.PrimaryPhone, "currency": comp.Currency}}, &vendorOut); err != nil {
-		return markPayableFailure(ctx, pid, comp, fmt.Errorf("bills vendor upsert: %w", err))
-	}
-	if vendorOut.Vendor == nil || vendorOut.Vendor.ID == 0 {
-		return markPayableFailure(ctx, pid, comp, errors.New("bills vendor upsert returned no vendor"))
-	}
-	invoiceNumber := fmt.Sprintf("GIG-%d", gigID)
-	var billOut struct {
-		Bill *billsBillRef `json:"bill"`
-	}
-	createArgs := map[string]any{"vendor_id": vendorOut.Vendor.ID, "vendor_invoice_number": invoiceNumber, "currency": comp.Currency,
-		"line_items":  []any{map[string]any{"description": "Gig: " + g.Title, "quantity": 1, "unit_price_cents": comp.WorkerAmountMinor}},
-		"total_cents": comp.WorkerAmountMinor, "category": "contractor-compensation", "notes": fmt.Sprintf("Generated from Gigs gig %d", gigID),
-		"metadata": map[string]any{"source_app": "gigs", "gig_id": gigID, "contract_id": comp.ContractID, "worker_id": wid, "rate_source": comp.RateSource},
-	}
-	if _, err = ctx.AppDB().Exec(`UPDATE gig_compensation SET payable_status='pending',payable_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`, comp.ID); err != nil {
-		return comp, nil, err
-	}
-	if err = api.CallAppResult("bills", "bills_create", createArgs, &billOut); err != nil {
-		var recovered struct {
-			Bill *billsBillRef `json:"bill"`
-		}
-		if getErr := api.CallAppResult("bills", "bills_get", map[string]any{"vendor_id": vendorOut.Vendor.ID, "vendor_invoice_number": invoiceNumber}, &recovered); getErr == nil && recovered.Bill != nil {
-			billOut = recovered
-		} else {
-			return markPayableFailure(ctx, pid, comp, fmt.Errorf("bills create: %w", err))
+	for _, o := range f.Obligations {
+		if e = syncFinancialObligation(ctx, pid, o.ID); e != nil {
+			return f.Legacy, nil, e
 		}
 	}
-	if billOut.Bill == nil || billOut.Bill.ID == 0 {
-		return markPayableFailure(ctx, pid, comp, errors.New("bills create returned no bill"))
+	f, e = loadFinancials(ctx, pid, gigID)
+	if e != nil {
+		return nil, nil, e
 	}
-	_, err = ctx.AppDB().Exec(`UPDATE gig_compensation SET payable_status='created',payable_bill_id=?,payable_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?`, billOut.Bill.ID, comp.ID)
-	if err != nil {
-		return comp, billOut.Bill, err
+	for _, o := range f.Obligations {
+		if o.Bill != nil {
+			return f.Legacy, &billsBillRef{ID: o.Bill.ID, Status: o.Bill.Status, TotalCents: o.Bill.Total}, nil
+		}
 	}
-	comp, err = loadGigCompensation(ctx.AppDB(), pid, gigID)
-	if err == nil {
-		ctx.EmitWithProject("gig.payable_created", pid, map[string]any{"gig_id": gigID, "bill_id": billOut.Bill.ID, "amount_minor": comp.WorkerAmountMinor, "currency": comp.Currency})
-	}
-	return comp, billOut.Bill, err
+	return f.Legacy, nil, errors.New("Bills is optional and is not connected or payable is not applicable")
 }
 
 func markPayableFailure(ctx *sdk.AppCtx, pid string, comp *gigCompensation, cause error) (*gigCompensation, *billsBillRef, error) {

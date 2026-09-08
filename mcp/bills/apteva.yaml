@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.33
+version: 0.2.0
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -60,6 +60,12 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: bills_create_obligation
+      description: Create or retrieve an unapproved bill by stable source identity; never pays.
+    - name: bills_get_obligation
+      description: Read a source obligation bill with payment and adjustment balances.
+    - name: bills_record_adjustment
+      description: Record an explicit credit, refund or payment reversal with retry protection.
     - name: vendors_search
       description: Filtered vendor search by name / email / external_id / metadata.
     - name: vendors_get
@@ -137,6 +143,19 @@ provides:
         integrations and rejected here.
     - name: bill_payments_list
       description: List payments OUT, optionally filtered by vendor / bill / method / date range.
+  publishes:
+    - name: bill.payment_recorded
+      description: A payment was recorded; inspect its amounts and current bill status.
+    - name: bill.adjusted
+      description: An explicit credit, refund or payment reversal was recorded.
+    - name: bill.paid
+      description: A bill is covered by recorded payment and adjustments.
+    - name: bill.approved
+      description: A supplier bill was approved.
+    - name: bill.voided
+      description: An unpaid bill was voided.
+    - name: bill.disputed
+      description: A supplier bill was disputed.
   ui_panels:
     - slot: project.page
       label: Bills
@@ -186,7 +205,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: bills/v0.2.0
     entry: mcp/bills
   port: 8080
   health_check: /health
