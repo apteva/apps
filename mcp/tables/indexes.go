@@ -100,7 +100,9 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return map[string]any{"index": index}, nil
 }
 
-func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "indexes_list")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "indexes_list", false)
 	if err != nil {
 		return nil, err
@@ -119,8 +121,9 @@ func (a *App) toolIndexesList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
-	defer cancel()
+	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
+	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
+	readPhase(ctx, "metadata")
 	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT
 		i.id, i.name, i.unique_index, i.managed, i.created_at,
 		c.column_name, c.direction

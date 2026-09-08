@@ -175,6 +175,11 @@ config_schema:
     default: "4"
     label: Concurrent read connections
     description: Read-only SQLite connections available independently of the serialized writer. Valid range is 1 to 16.
+  - name: log_all_reads
+    type: boolean
+    default: "false"
+    label: Log every read
+    description: Temporarily log successful fast reads as well as errors and slow reads for contention diagnosis. SQL and parameter values are omitted.
   - name: slow_query_ms
     type: text
     default: "250"

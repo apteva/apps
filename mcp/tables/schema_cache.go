@@ -76,14 +76,19 @@ func (c *schemaCache) invalidate(projectID, tableName string) {
 }
 
 func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, error) {
+	if d := readObservationFor(ctx); d != nil {
+		previous := d.phase
+		d.setPhase("metadata")
+		defer d.setPhase(previous)
+	}
 	key := schemaCacheKey{projectID: projectID, tableName: name}
 	generation := ctx.AppDBGeneration()
 	if table, ok := a.cache.get(generation, key); ok {
 		return table, nil
 	}
 
-	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
-	defer cancel()
+	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
+	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
 	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT
 		t.id, t.name, t.scope, t.physical_name, t.created_at, t.row_count,
 		c.name, c.type, c.nullable, c.default_value
@@ -153,8 +158,13 @@ func (a *App) loadTableWithCount(ctx *sdk.AppCtx, projectID, name string) (*Tabl
 }
 
 func currentRowCount(ctx *sdk.AppCtx, table *Table) (int64, error) {
-	qctx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
-	defer cancel()
+	if d := readObservationFor(ctx); d != nil {
+		previous := d.phase
+		d.setPhase("metadata")
+		defer d.setPhase(previous)
+	}
+	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
+	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
 	var cached sql.NullInt64
 	if err := ctx.AppReadDB().QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, table.ID).Scan(&cached); err != nil {
 		return 0, queryStageErr("metadata", table.Name, err)
@@ -197,39 +207,28 @@ func queryStageErr(stage, table string, err error) error {
 }
 
 type readQueryConn struct {
-	conn      *sql.Conn
-	queueWait time.Duration
+	ctx  *sdk.AppCtx
+	conn *sql.Conn
 }
 
 func acquireReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
-	started := time.Now()
-	queueCtx, cancel := context.WithTimeout(requestContext(ctx), time.Duration(maxReadQueueMs(ctx))*time.Millisecond)
+	readPhase(ctx, "read_queue")
+	queueCtx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxReadQueueMs(ctx))*time.Millisecond, errReadQueueDeadline)
 	defer cancel()
 	conn, err := ctx.AppReadDB().Conn(queueCtx)
-	wait := time.Since(started)
 	if err != nil {
-		ctx.Logger().Warn("tables read query failed", "table", table, "timeout_stage", "read_queue", "queue_wait_ms", wait.Milliseconds(), "error", err)
+		observeReadCancellation(ctx, queueCtx)
 		return nil, queryStageErr("read_queue", table, err)
 	}
-	return &readQueryConn{conn: conn, queueWait: wait}, nil
+	if d := readObservationFor(ctx); d != nil {
+		d.acquired = true
+		d.poolAcquired = ctx.AppReadDB().Stats()
+	}
+	readPhase(ctx, "connection_setup")
+	return &readQueryConn{ctx: ctx, conn: conn}, nil
 }
 
-func logReadQuery(ctx *sdk.AppCtx, table, operation string, queueWait, countTime, sqlTime time.Duration, err error, stage string) {
-	total := queueWait + countTime + sqlTime
-	fields := []any{
-		"operation", operation,
-		"table", table,
-		"queue_wait_ms", queueWait.Milliseconds(),
-		"count_ms", countTime.Milliseconds(),
-		"sql_ms", sqlTime.Milliseconds(),
-		"total_ms", total.Milliseconds(),
-	}
-	if err != nil {
-		fields = append(fields, "timeout_stage", stage, "error", err)
-		ctx.Logger().Warn("tables read query failed", fields...)
-		return
-	}
-	if total >= time.Duration(slowQueryMs(ctx))*time.Millisecond {
-		ctx.Logger().Info("tables slow read query", fields...)
-	}
+func (r *readQueryConn) close() error {
+	readPhase(r.ctx, "cleanup")
+	return r.conn.Close()
 }

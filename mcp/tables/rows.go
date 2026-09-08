@@ -445,7 +445,9 @@ func ensureUniqueUpsertIndex(tx *writeTx, t *Table, keyCols []string) error {
 
 // ─── rows_get ──────────────────────────────────────────────────────
 
-func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "rows_get")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "rows_get", false)
 	if err != nil {
 		return nil, err
@@ -467,6 +469,7 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	readPhase(ctx, "prepare")
 	selectClause, err := parseSelect(args, t)
 	if err != nil {
 		return nil, err
@@ -476,24 +479,22 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	qctx, cancel := queryTimeoutContext(ctx)
-	started := time.Now()
+	readPhase(ctx, "select")
 	row, found, err := fetchRowByIDBudget(qctx, read.conn, t, id, selectClause, maxQueryBytes(ctx))
 	cancel()
-	closeErr := read.conn.Close()
-	sqlTime := time.Since(started)
+	closeErr := read.close()
 	if err != nil {
-		logReadQuery(ctx, tableName, "rows_get", read.queueWait, 0, sqlTime, err, "select")
 		return nil, queryStageErr("select", tableName, err)
 	}
 	if closeErr != nil {
 		return nil, queryStageErr("select", tableName, closeErr)
 	}
-	logReadQuery(ctx, tableName, "rows_get", read.queueWait, 0, sqlTime, nil, "")
 	if !found {
 		return map[string]any{"row": nil, "found": false}, nil
 	}
 	result := map[string]any{"row": row, "found": true}
 	if boolArg(args, "hydrate_files") {
+		readPhase(ctx, "hydrate")
 		result["file_hydration"] = hydrateFileColumns(ctx, t, row)
 		size, err := jsonSize(result, maxQueryBytes(ctx))
 		if err != nil {
@@ -716,7 +717,9 @@ func deleteRows(ctx *sdk.AppCtx, t *Table, tableName string, id int64, stmt stri
 
 // ─── rows_search ───────────────────────────────────────────────────
 
-func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "rows_search")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "rows_search", false)
 	if err != nil {
 		return nil, err
@@ -766,7 +769,7 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	defer read.conn.Close()
+	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	var query searchQueryer = read.conn
@@ -780,9 +783,8 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		query = snapshot
 	}
 	var total int64
-	var countTime time.Duration
 	if includeTotal {
-		countStarted := time.Now()
+		readPhase(ctx, "count")
 		if clause == "" {
 			var cached sql.NullInt64
 			err = query.QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, t.ID).Scan(&cached)
@@ -796,13 +798,12 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
 			err = query.QueryRowContext(qctx, totalSQL, vals...).Scan(&total)
 		}
-		countTime = time.Since(countStarted)
 		if err != nil {
-			logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, 0, err, "count")
 			return nil, queryStageErr("count", tableName, err)
 		}
 	}
 
+	readPhase(ctx, "prepare")
 	selectClause, err := parseSelect(args, t)
 	if err != nil {
 		return nil, err
@@ -839,18 +840,17 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	stmt += " " + orderBy
 	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit+1, offset)
-	sqlStarted := time.Now()
+	readPhase(ctx, "select")
 	rows, err := query.QueryContext(qctx, stmt, vals...)
 	if err != nil {
-		sqlTime := time.Since(sqlStarted)
-		logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, err, "select")
 		return nil, queryStageErr("select", tableName, err)
 	}
+	readPhase(ctx, "scan")
 	out, truncated, err := scanRowsBudget(rows, t, maxQueryBytes(ctx), limit)
+	observation.partialRows = len(out)
+	readPhase(ctx, "cleanup")
 	closeErr := rows.Close()
-	sqlTime := time.Since(sqlStarted)
 	if err != nil {
-		logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, err, "scan")
 		return nil, queryStageErr("scan", tableName, err)
 	}
 	if closeErr != nil {
@@ -861,7 +861,7 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return nil, queryStageErr("scan", tableName, err)
 		}
 	}
-	logReadQuery(ctx, tableName, "rows_search", read.queueWait, countTime, sqlTime, nil, "")
+	readPhase(ctx, "prepare")
 	result := map[string]any{"rows": out, "truncated": truncated, "has_more": truncated, "next_offset": offset + len(out)}
 	if truncated && len(out) > 0 {
 		result["next_cursor"] = makeCursor(pid, t, args, out[len(out)-1])
@@ -883,7 +883,9 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 // ─── rows_count ────────────────────────────────────────────────────
 
-func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "rows_count")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "rows_count", false)
 	if err != nil {
 		return nil, err
@@ -921,22 +923,21 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer read.conn.Close()
+	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	started := time.Now()
+	readPhase(ctx, "count")
 	if err := read.conn.QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
-		elapsed := time.Since(started)
-		logReadQuery(ctx, tableName, "rows_count", read.queueWait, elapsed, 0, err, "count")
 		return nil, queryStageErr("count", tableName, err)
 	}
-	logReadQuery(ctx, tableName, "rows_count", read.queueWait, time.Since(started), 0, nil, "")
 	return map[string]any{"count": n}, nil
 }
 
 // ─── rows_aggregate ────────────────────────────────────────────────
 
-func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "rows_aggregate")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "rows_aggregate", false)
 	if err != nil {
 		return nil, err
@@ -1012,32 +1013,31 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	defer read.conn.Close()
+	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	started := time.Now()
+	readPhase(ctx, "select")
 	rows, err := read.conn.QueryContext(qctx, stmt, vals...)
 	if err != nil {
-		elapsed := time.Since(started)
-		logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, err, "select")
 		return nil, queryStageErr("select", tableName, err)
 	}
+	readPhase(ctx, "scan")
 	out, truncatedByBytes, err := scanAggregateRows(rows, maxQueryBytes(ctx))
+	observation.partialRows = len(out)
+	readPhase(ctx, "cleanup")
 	closeErr := rows.Close()
-	elapsed := time.Since(started)
 	if err != nil {
-		logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, err, "scan")
 		return nil, queryStageErr("scan", tableName, err)
 	}
 	if closeErr != nil {
 		return nil, queryStageErr("scan", tableName, closeErr)
 	}
+	readPhase(ctx, "prepare")
 	truncated := truncatedByBytes
 	if len(out) > limit {
 		truncated = true
 		out = out[:limit]
 	}
-	logReadQuery(ctx, tableName, "rows_aggregate", read.queueWait, 0, elapsed, nil, "")
 	return map[string]any{"rows": out, "truncated": truncated}, nil
 }
 

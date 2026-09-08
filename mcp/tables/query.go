@@ -21,7 +21,9 @@ import (
 //
 // Cross-table joins use {table_name} placeholders, which are resolved
 // strictly against the current project.
-func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue any, resultErr error) {
+	args, observation := startReadObservation(ctx, args, "tables_query")
+	defer func() { observation.finish(resultValue, resultErr) }()
 	ctx, finish, err := a.beginOperation(ctx, args, "tables_query", false)
 	if err != nil {
 		return nil, err
@@ -58,7 +60,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	conn := read.conn
-	defer conn.Close()
+	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	sharedWriterConnection := ctx.AppReadDB() == ctx.AppDB()
@@ -69,6 +71,7 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	previousLengthLimit := -1
 	defer func() {
+		readPhase(ctx, "cleanup")
 		resetCtx, resetCancel := context.WithTimeout(context.Background(), time.Second)
 		defer resetCancel()
 		if previousLengthLimit >= 0 {
@@ -83,17 +86,23 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, errf("set sqlite result length limit: %v", err)
 	}
 
-	started := time.Now()
+	readPhase(ctx, "authorization")
 	if err := authorizeQuery(qctx, conn, ctx, a, pid, rawSQL, resolved, bound); err != nil {
 		return nil, err
 	}
+	readPhase(ctx, "select")
 	rows, err := conn.QueryContext(qctx, resolved, bound...)
 	if err != nil {
-		elapsed := time.Since(started)
-		logReadQuery(ctx, "<sql>", "tables_query", read.queueWait, 0, elapsed, err, "select")
 		return nil, queryStageErr("select", "<sql>", err)
 	}
-	defer rows.Close()
+	defer func() {
+		readPhase(ctx, "cleanup")
+		if closeErr := rows.Close(); resultErr == nil && closeErr != nil {
+			resultValue = nil
+			resultErr = queryStageErr("cleanup", "<sql>", closeErr)
+		}
+	}()
+	readPhase(ctx, "scan")
 
 	cols, err := rows.Columns()
 	if err != nil {
@@ -148,12 +157,11 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			break
 		}
 		out = append(out, row)
+		observation.partialRows = len(out)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, queryStageErr("scan", "<sql>", err)
 	}
-	elapsed := time.Since(started)
-	logReadQuery(ctx, "<sql>", "tables_query", read.queueWait, 0, elapsed, nil, "")
 	return map[string]any{
 		"columns":   cols,
 		"rows":      out,

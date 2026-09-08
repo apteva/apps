@@ -367,7 +367,12 @@ func cfgInt64Range(ctx *sdk.AppCtx, key string, def, min, max int64) int64 {
 }
 
 func queryTimeoutContext(ctx *sdk.AppCtx) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadExecutionDeadline)
+	if d := readObservationFor(ctx); d != nil {
+		deadline, _ := qctx.Deadline()
+		d.executionBudget = max(time.Duration(0), time.Until(deadline))
+	}
+	return qctx, func() { observeReadCancellation(ctx, qctx); cancel() }
 }
 
 func validateStoredValueSize(ctx *sdk.AppCtx, col Column, v any) error {

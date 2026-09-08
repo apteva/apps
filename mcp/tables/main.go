@@ -18,6 +18,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
@@ -60,6 +61,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"max_query_ms", maxQueryMs(ctx),
 		"max_read_queue_ms", maxReadQueueMs(ctx),
 		"max_read_conns", maxReadConns(ctx),
+		"effective_read_max_open", ctx.AppReadDB().Stats().MaxOpenConnections,
+		"shared_writer_pool", ctx.AppReadDB() == ctx.AppDB(),
+		"gomaxprocs", runtime.GOMAXPROCS(0),
+		"logical_cpus", runtime.NumCPU(),
 		"max_query_bytes", maxQueryBytes(ctx),
 		"max_value_bytes", maxValueBytes(ctx),
 		"max_batch_rows", maxBatchRows(ctx))
@@ -323,6 +328,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	for i := range tools {
+		switch tools[i].Name {
+		case "tables_query", "rows_get", "rows_search", "rows_count", "rows_aggregate", "tables_list", "tables_describe", "indexes_list":
+			tools[i].InputSchema["properties"].(map[string]any)["request_id"] = map[string]any{"type": "string", "maxLength": 128, "description": "Optional originating request ID for diagnostics; pass the Function request ID to correlate read logs."}
+		}
 		handler := tools[i].Handler
 		toolName := tools[i].Name
 		tools[i].HandlerCtx = func(callCtx context.Context, appCtx *sdk.AppCtx, args map[string]any) (any, error) {

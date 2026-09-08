@@ -160,3 +160,8 @@ This support does not create persisted virtual tables or grant access to other
 SQLite modules. Tables referenced inside JSON arguments must still pass the
 project placeholder authorization checks. An invalid JSON value without a guard
 still produces SQLite's normal query error.
+## Read diagnostics
+
+See [READ_DIAGNOSTICS.md](READ_DIAGNOSTICS.md) for Function request correlation,
+query fingerprints, phase and pool measurements, and the standalone reproduction
+of delayed cancellation during result iteration in the pinned SQLite driver.
