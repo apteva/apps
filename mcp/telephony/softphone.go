@@ -192,8 +192,40 @@ func (h *softphoneHub) toPeer(op ws.OpCode, data []byte) {
 }
 
 type softphoneRegistry struct {
+	mu     sync.Mutex
+	hubs   map[string]*softphoneHub
+	claims map[string]*softphoneClaimLock
+}
+
+// Serialize claim creation, media activation and release for one call. Locks
+// live only while requests use them; an idle/finished call retains no entry.
+type softphoneClaimLock struct {
 	mu   sync.Mutex
-	hubs map[string]*softphoneHub
+	refs int
+}
+
+func (r *softphoneRegistry) lockClaim(callID string) func() {
+	r.mu.Lock()
+	if r.claims == nil {
+		r.claims = make(map[string]*softphoneClaimLock)
+	}
+	lock := r.claims[callID]
+	if lock == nil {
+		lock = &softphoneClaimLock{}
+		r.claims[callID] = lock
+	}
+	lock.refs++
+	r.mu.Unlock()
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		r.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(r.claims, callID)
+		}
+		r.mu.Unlock()
+	}
 }
 
 // hubFor is get-or-create: either the browser or the carrier bridge may arrive
@@ -366,6 +398,12 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
 	}
+	unlock := a.softphones.lockClaim(callID)
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
 	row, err := a.db().findCall(callID)
 	if err != nil || row == nil {
 		http.Error(w, "unknown call_id", http.StatusNotFound)
@@ -451,6 +489,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		hub.setCallState(row.Direction, row.Status)
 	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
+	unlock()
+	unlock = nil
 
 	for {
 		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
@@ -680,6 +720,8 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
 	}
+	unlock := a.softphones.lockClaim(callID)
+	defer unlock()
 	row, err := a.db().findCall(callID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -698,16 +740,11 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "call is routed to an agent, not the softphone", http.StatusConflict)
 		return
 	}
-	// Already answered by this or another operator — hand back the live session
-	// so a reloading tab can rejoin instead of erroring.
+	// Only an explicit rejoin may replace an existing operator session. A stale
+	// Answer click must never silently take over a live call.
 	if row.Status == "answering" || row.Status == "answered" || row.Status == "in-progress" || (row.Direction == "outbound" && (row.Status == "initiated" || row.Status == "ringing")) {
-		var grouped int
-		if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=?`, row.ID).Scan(&grouped); err != nil {
-			http.Error(w, "load answer state", 500)
-			return
-		}
-		if grouped > 0 && !request.Rejoin {
-			http.Error(w, "another operator already claimed this call; use Join audio to reconnect explicitly", 409)
+		if !request.Rejoin {
+			http.Error(w, "another operator already claimed this call; use Join audio to reconnect explicitly", http.StatusConflict)
 			return
 		}
 		if row.PeerToken == "" {
@@ -776,6 +813,8 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 		http.Error(w, "invalid release request", http.StatusBadRequest)
 		return
 	}
+	unlock := a.softphones.lockClaim(callID)
+	defer unlock()
 	row, err := a.db().findCall(callID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -790,7 +829,7 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 		http.Error(w, "answer session is not releasable", http.StatusConflict)
 		return
 	}
-	if err := a.db().resetAnswerClaim(callID); err != nil {
+	if err := a.db().resetAnswerClaim(callID, body.SessionToken); err != nil {
 		http.Error(w, "release answer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

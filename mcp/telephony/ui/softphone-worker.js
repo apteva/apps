@@ -14,7 +14,7 @@ let playbackPort = null;
 let closed = false;
 let microphoneReady = false;
 let muted = false;
-let stableTimer = null;
+let healthTimer = null;
 let reconnectStartedAt = 0;
 let reconnectAttempt = 0;
 let playbackSequence = 0;
@@ -99,34 +99,58 @@ function connect() {
   const ws = new WebSocket(mediaURL);
   ws.binaryType = "arraybuffer";
   socket = ws;
+  let openedAt = 0;
+  let lastReceivedAt = Date.now();
+  let lastPingAt = 0;
+  // CONNECTING sockets and half-open TCP connections do not always emit close.
+  // Run the heartbeat in the worker so a busy UI thread cannot fake an outage.
+  healthTimer = setInterval(() => {
+    if (closed || socket !== ws) return;
+    const now = Date.now();
+    if (now - lastReceivedAt >= (openedAt ? 15000 : 10000)) {
+      detach();
+      ws.close();
+      return;
+    }
+    if (ws.readyState === WebSocket.OPEN && now - lastPingAt >= 5000) {
+      lastPingAt = now;
+      ws.send(JSON.stringify({ type: "ping", nonce: -1 }));
+    }
+  }, 1000);
   ws.onopen = () => {
     if (socket !== ws || closed) { ws.close(); return; }
-    // A handshake alone is not recovery. Require a stable socket before
-    // resetting the retry budget, otherwise open/close loops run forever.
-    stableTimer = setTimeout(() => { if (socket === ws) { if (microphoneReady) {reconnectStartedAt=0; reconnectAttempt=0;} else {ws.close();} } }, 10000);
+    openedAt = Date.now();
+    lastReceivedAt = openedAt;
     postMessage({ type: "socket.open" });
   };
   ws.onmessage = (event) => {
-    if (socket !== ws) return;
+    if (closed || socket !== ws) return;
+    lastReceivedAt = Date.now();
+    // A responsive transport is healthy even while the callee is ringing.
+    // Handshakes alone must not reset the retry budget.
+    if (openedAt && lastReceivedAt - openedAt >= 10000) { reconnectStartedAt = 0; reconnectAttempt = 0; }
     if (typeof event.data === "string") {
       postMessage({ type: "socket.message", data: event.data });
       return;
     }
+    if (!(event.data instanceof ArrayBuffer) || event.data.byteLength % 2 !== 0) return;
     const frame = resample(decodePlayback(event.data), SAMPLE_RATE, contextRate);
     const sequence = playbackSequence++;
     playbackPort?.postMessage({ type: "playback", frame, sequence, timestamp_ms: performance.now() }, [frame.buffer]);
   };
   ws.onerror = () => postMessage({ type: "socket.error" });
-  ws.onclose = () => {
+  function detach() {
     if (socket !== ws) return;
-    if (stableTimer !== null) clearTimeout(stableTimer);
-    stableTimer = null;
+    if (healthTimer !== null) clearInterval(healthTimer);
+    healthTimer = null;
     socket = null;
     microphoneReady = false;
+    resamplers.clear();
     playbackPort?.postMessage({ type: "flush" });
     postMessage({ type: "socket.close" });
     scheduleReconnect();
-  };
+  }
+  ws.onclose = detach;
 }
 
 function scheduleReconnect() {
@@ -146,6 +170,7 @@ self.onmessage = (event) => {
   const message = event.data;
   switch (message?.type) {
     case "init":
+      muted = Boolean(message.muted);
       mediaURL = message.mediaURL;
       contextRate = message.contextRate || SAMPLE_RATE;
       capturePort = message.capturePort;
@@ -160,6 +185,7 @@ self.onmessage = (event) => {
       resamplers.clear();
       break;
     case "microphone.ready":
+      if (!message.value) resamplers.clear();
       microphoneReady = Boolean(message.value);
       break;
     case "send.text":
@@ -173,7 +199,8 @@ self.onmessage = (event) => {
       break;
     case "close":
       closed = true;
-      if(stableTimer!==null) clearTimeout(stableTimer);
+      if (healthTimer !== null) clearInterval(healthTimer);
+      healthTimer = null;
       if (reconnectTimer !== null) clearTimeout(reconnectTimer);
       reconnectTimer = null;
       socket?.close();

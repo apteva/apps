@@ -328,6 +328,7 @@ export class SoftphoneSession {
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private opened = false;
+  private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
   private diagnostics: SoftphoneDiagnostics = {
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
@@ -355,6 +356,10 @@ export class SoftphoneSession {
       this.ensureOpen();
       const track = this.stream.getAudioTracks()[0];
       if (!track) throw new Error("No microphone audio track was returned.");
+      if (track.readyState === "ended") throw new Error("Microphone disconnected before audio setup.");
+      track.onmute = () => this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser.");
+      track.onunmute = () => this.callbacks.onNotice?.("Microphone input restored.");
+      track.onended = () => { if (!this.closed) this.fail("Microphone disconnected. Select a microphone and reconnect audio."); };
       const applied = appliedMicrophoneSettings(track);
       this.diagnostics = {
         ...this.diagnostics, microphoneSampleRate: applied.sampleRate ?? 0,
@@ -378,6 +383,9 @@ export class SoftphoneSession {
         numberOfInputs: 0, outputChannelCount: [1],
         processorOptions: { initialTargetMs: JITTER_TARGET_MS, minTargetMs: 60, maxTargetMs: 160, hardMaxMs: 320 },
       });
+      // A headless host can reconnect an already-muted call. Apply the gate
+      // before capture starts, rather than after the socket has connected.
+      this.capture.port.postMessage({ type: "muted", value: this.muted });
       this.installWorkletDiagnostics();
       this.sink = this.ctx.createGain();
       this.sink.gain.value = 0;
@@ -387,11 +395,12 @@ export class SoftphoneSession {
       this.playback.connect(this.output).connect(this.ctx.destination);
       await this.openWorker(mediaURL, workerURL);
       this.ensureOpen();
-      track.onmute = () => this.callbacks.onNotice?.("Microphone input was interrupted by the device or browser.");
-      track.onunmute = () => this.callbacks.onNotice?.("Microphone input restored.");
-      track.onended = () => { if (!this.closed) this.fail("Microphone disconnected. Select a microphone and reconnect audio."); };
       this.capture.onprocessorerror = this.playback.onprocessorerror = () => this.fail("Audio processing stopped. Reconnect audio.");
-      this.ctx.onstatechange = () => { if (!this.closed && this.ctx?.state === "suspended") this.callbacks.onState?.("reconnecting", "Browser paused audio. Resume audio to continue."); };
+      this.ctx.onstatechange = () => {
+        if (this.closed) return;
+        if (this.ctx?.state === "suspended" || (this.ctx?.state as string) === "interrupted") this.callbacks.onState?.("reconnecting", "Browser paused audio. Reconnect audio to continue.");
+        else if (this.ctx?.state === "running" && this.microphoneTransportReady) this.callbacks.onState?.("live");
+      };
       this.levelTimer = setInterval(() => {
         this.callbacks.onLevels?.(this.micLevel, this.speakerLevel);
         this.micLevel *= 0.65;
@@ -457,6 +466,7 @@ export class SoftphoneSession {
         clearTimeout(timeout);
         if (error) reject(error); else resolve();
       };
+      this.cancelWorkerStart = () => finish(new Error("audio session closed"));
       worker.onmessage = (event: MessageEvent) => {
         if (this.closed) { finish(new Error("audio session closed")); return; }
         const message = event.data;
@@ -472,6 +482,7 @@ export class SoftphoneSession {
           if (this.opened && !this.closed) this.callbacks.onState?.("reconnecting", "Connection interrupted; retrying…");
           else finish(new Error("audio connection closed before it was ready"));
         } else if (message?.type === "socket.failed") {
+          finish(new Error(message.detail || "audio connection lost"));
           this.fail(message.detail || "audio connection lost");
         } else if (message?.type === "transport.drop" && message.event) {
           this.diagnostics.dropEvents = [...this.diagnostics.dropEvents, message.event].slice(-100);
@@ -481,7 +492,7 @@ export class SoftphoneSession {
       };
       worker.onerror = () => { finish(new Error("audio worker failed")); if (!this.closed) this.fail("Audio worker failed. Reconnect audio."); };
       worker.postMessage({
-        type: "init", mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE,
+        type: "init", mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE, muted: this.muted,
         capturePort: captureChannel.port2, playbackPort: playbackChannel.port2,
       }, [captureChannel.port2, playbackChannel.port2]);
     });
@@ -492,12 +503,14 @@ export class SoftphoneSession {
     try {
       const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number };
       if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
-      } else if (parsed.type === "pong" && typeof parsed.nonce === "number") {
+      } else if (parsed.type === "pong" && typeof parsed.nonce === "number" && parsed.nonce >= 0) {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
         this.diagnostics.rttMs = Math.max(0, Math.round(performance.now() - parsed.nonce));
         this.callbacks.onDiagnostics?.({ ...this.diagnostics });
       } else if (parsed.type === "call.ended" || parsed.type === "session.replaced") {
-        this.closed = true; this.callbacks.onState?.("ended", parsed.type); this.teardown();
+        this.closed = true;
+        try { this.callbacks.onState?.("ended", parsed.type); }
+        finally { this.teardown(); }
       } else if (parsed.type === "call.error") {
         this.fail(parsed.detail || "The call could not be connected.");
       } else if (parsed.type === "peer.disconnected") {
@@ -555,17 +568,23 @@ export class SoftphoneSession {
   }
 
   stop(): void {
-    if (!this.closed) this.callbacks.onState?.("ended");
-    this.closed = true; this.teardown();
+    const notify = !this.closed;
+    this.closed = true;
+    try { if (notify) this.callbacks.onState?.("ended"); }
+    finally { this.teardown(); }
   }
 
   private fail(detail: string): void {
-    this.closed = true; this.callbacks.onState?.("error", detail); this.teardown();
+    this.closed = true;
+    try { this.callbacks.onState?.("error", detail); }
+    finally { this.teardown(); }
   }
 
   private teardown(): void {
     this.microphoneTransportReady = false;
-    this.sendDiagnostics();
+    this.cancelWorkerStart?.();
+    this.cancelWorkerStart = undefined;
+    try { this.sendDiagnostics(); } catch { /* diagnostics cannot prevent device cleanup */ }
     this.stopRTTProbe();
     if (this.levelTimer !== null) clearInterval(this.levelTimer);
     this.levelTimer = null;

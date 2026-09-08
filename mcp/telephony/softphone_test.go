@@ -987,24 +987,9 @@ func TestRepeatedOutboundSoftphoneCallsUseUniqueHumanThreadIDs(t *testing.T) {
 	}
 }
 
-func TestCallsPanelPinsSoftphoneSocketToCurrentOrigin(t *testing.T) {
-	source, err := os.ReadFile("ui/CallsPanel.tsx")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{
-		"new URL(session.media_url, location.href)",
-		"media.host = location.host",
-		"media.protocol = location.protocol",
-		"phone.start(media.toString(), workletURL, workerURL, audioOptions)",
-		"/softphone/release/",
-		"session_token: session.session_token",
-	} {
-		if !strings.Contains(string(source), required) {
-			t.Fatalf("panel does not keep browser media on the current origin: missing %q", required)
-		}
-	}
-}
+// Browser media URL validation and release behavior are exercised through the
+// shared client in frontend/tests/client.test.ts and TestTier2HeadlessBrowser.
+// The panel no longer owns URL rewriting or call cleanup.
 
 // A human-routed call must not be answerable into a realtime thread, or the
 // caller ends up bridged to a thread nobody is listening to.
@@ -1046,5 +1031,110 @@ func TestNormalizeRouteAnswerConfigAcceptsHumanBrowserWithoutDirective(t *testin
 	}
 	if _, _, _, _, err := normalizeRouteAnswerConfig("nonsense", "", "", ""); err == nil {
 		t.Fatal("invalid answer mode accepted")
+	}
+}
+
+func TestSoftphoneExistingCallRequiresExplicitRejoin(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	row := insertSoftphoneCall(t, app, "answered")
+	for _, tc := range []struct {
+		body string
+		want int
+	}{{`{}`, 409}, {`{"rejoin":true}`, 200}} {
+		rec := httptest.NewRecorder()
+		app.softphoneAnswer(rec, httptest.NewRequest("POST", "/softphone/answer/"+row.ID, strings.NewReader(tc.body)), row.ProjectID, row.ID)
+		if rec.Code != tc.want {
+			t.Fatalf("body=%s status=%d: %s", tc.body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestSoftphoneReleaseCannotReportSuccessForActiveMediaOrStaleToken(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	row := insertSoftphoneCall(t, app, "answering")
+	if err := app.db().resetAnswerClaim(row.ID, "older-token"); err == nil {
+		t.Fatal("released a newer claim with stale token")
+	}
+	if _, err := app.db().db.Exec(`UPDATE calls SET media_active=1 WHERE id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	app.softphoneReleaseAnswer(rec, httptest.NewRequest("POST", "/softphone/release/"+row.ID, strings.NewReader(`{"session_token":"peer-secret"}`)), row.ProjectID, row.ID)
+	if rec.Code < 400 {
+		t.Fatalf("active media release reported success: %d", rec.Code)
+	}
+	stored, err := app.db().findCall(row.ID)
+	if err != nil || stored.Status != "answering" || stored.PeerToken != "peer-secret" {
+		t.Fatalf("claim changed: %+v %v", stored, err)
+	}
+}
+
+type delayedSoftphoneAnswerPlatform struct {
+	*answerPlatform
+	entered chan struct{}
+	proceed chan struct{}
+}
+
+func (p *delayedSoftphoneAnswerPlatform) ExecuteIntegrationTool(id int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if tool == "answer_call" {
+		close(p.entered)
+		<-p.proceed
+	}
+	return p.answerPlatform.ExecuteIntegrationTool(id, tool, input)
+}
+
+func TestSoftphoneReleaseWaitsForCarrierAnswerOutcome(t *testing.T) {
+	platform := &delayedSoftphoneAnswerPlatform{answerPlatform: &answerPlatform{}, entered: make(chan struct{}), proceed: make(chan struct{})}
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(platform.proceed) }) }
+	defer unblock()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(platform))
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	app := &App{installID: 42}
+	row := insertSoftphoneCall(t, app, "answering")
+	if _, err := app.db().db.Exec(`UPDATE calls SET direction='inbound',carrier_slug='telnyx',carrier_sid='fixture' WHERE id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	server := softphoneTestServer(t, app)
+	browser := dialWS(t, server.URL+"/softphone/media/"+row.ID+"/peer-secret")
+	select {
+	case <-platform.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("carrier answer never started")
+	}
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		app.softphoneReleaseAnswer(rec, httptest.NewRequest("POST", "/softphone/release/"+row.ID, strings.NewReader(`{"session_token":"peer-secret"}`)), row.ProjectID, row.ID)
+		done <- rec.Code
+	}()
+	select {
+	case code := <-done:
+		t.Fatalf("release raced ahead of carrier answer: %d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unblock()
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	select {
+	case code := <-done:
+		if code != 409 {
+			t.Fatalf("release=%d, want conflict", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("release did not finish")
+	}
+	stored, err := app.db().findCall(row.ID)
+	if err != nil || stored.Status != "answered" || stored.PeerToken != "peer-secret" {
+		t.Fatalf("live carrier answer was reset: %+v %v", stored, err)
+	}
+	app.softphones.mu.Lock()
+	remaining := len(app.softphones.claims)
+	app.softphones.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("retained %d idle claim locks", remaining)
 	}
 }

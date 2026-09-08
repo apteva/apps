@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "DOM",
+      "DOM.Iterable",
+      "ES2022"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "types": [
+      "bun"
+    ],
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "src/**/*.ts",
+    "client-entry.ts",
+    "tests/*.test.ts",
+    "../../../../node_modules/@types/bun",
+    "../ui/CallsPanel.tsx",
+    "../ui/use-panel-softphone.ts",
+    "example/main.ts"
+  ]
+}

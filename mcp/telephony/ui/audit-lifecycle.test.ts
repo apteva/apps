@@ -27,3 +27,20 @@ test("audit: cancel during microphone permission must release a late stream", as
     else Reflect.deleteProperty(globalThis, "AudioContext");
   }
 });
+
+test("a microphone that ends before startup must fail without opening a carrier socket", async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  let stopped = 0;
+  const track = { readyState: "ended", stop() { stopped++; } };
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { mediaDevices: {
+    getUserMedia: async () => ({ getAudioTracks: () => [track], getTracks: () => [track] }),
+  } } });
+  try {
+    const session = new SoftphoneSession();
+    await expect(session.start("ws://unused", "worklet.js", "worker.js")).rejects.toThrow("Microphone disconnected");
+    expect(stopped).toBe(1);
+  } finally {
+    if (original) Object.defineProperty(globalThis, "navigator", original);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  }
+});

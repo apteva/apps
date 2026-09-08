@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MicrophoneTestSession,
-  microphoneConstraints,
-  SoftphoneSession,
   type MicrophoneAppliedSettings,
   type MicrophoneTestResult,
   type SoftphoneAudioOptions,
   type SoftphoneDiagnostics,
-  type SoftphoneState,
 } from "./softphone-audio";
 import {
   loadAudioOptions,
   persistAudioOptions,
 } from "./audio-settings";
+
+import { usePanelSoftphone } from "./use-panel-softphone";
+import { isIncomingBrowserCall } from "../frontend/src/client";
 
 const API = "/api/apps/telephony";
 
@@ -977,45 +977,34 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   const [fromError, setFromError] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [dialerOpen, setDialerOpen] = useState(false);
-  const [softphoneCallId, setSoftphoneCallId] = useState("");
-  const [softphoneState, setSoftphoneState] = useState<SoftphoneState | "">("");
-  const [softphoneDetail, setSoftphoneDetail] = useState("");
-  const [muted, setMuted] = useState(false);
-  const levelsSink=useRef<((mic:number,speaker:number)=>void)|null>(null);
-  const setLevels=({mic,speaker}:{mic:number;speaker:number})=>levelsSink.current?.(mic,speaker);
+  const levelsSink = useRef<((mic:number,speaker:number)=>void)|null>(null);
   const [audioOptions, setAudioOptions] = useState<SoftphoneAudioOptions>(loadAudioOptions);
   const [diagnostics, setDiagnostics] = useState<SoftphoneDiagnostics | null>(null);
-  const [softphoneBusy, setSoftphoneBusy] = useState(false);
-  const sessionRef = useRef<SoftphoneSession | null>(null);
+  const { client: telephony, phone, state: phoneState } = usePanelSoftphone(projectId, installId, {
+    audio: audioOptions,
+    onLevels: (mic, speaker) => levelsSink.current?.(mic, speaker),
+    onDiagnostics: setDiagnostics,
+    onNotice: setStatus,
+  });
+  const softphoneCallId = phoneState.callId ?? "";
+  const softphoneState = phoneState.audioState;
+  const softphoneDetail = phoneState.detail ?? "";
+  const softphoneBusy = phoneState.busy;
+  const muted = phoneState.muted;
+  const hasAudio = ["connecting", "reconnecting", "live"].includes(softphoneState);
   const callsRequest = useRef<AbortController | null>(null);
   const recordingsRequest = useRef<AbortController | null>(null);
   const recordingsCall = useRef("");
-  const placementKey = useRef<{intent:string;key:string}|null>(null);
-  const lastSession = useRef<{call_id:string;media_url:string;session_token?:string}|null>(null);
   const [keypadOpen, setKeypadOpen] = useState(false);
   const [answerDestinations,setAnswerDestinations] = useState<Record<string,string>>({});
-
-  const endSoftphone = useCallback(() => {
-    sessionRef.current?.stop();
-    sessionRef.current = null;
-    setSoftphoneCallId("");
-    setSoftphoneState("");
-    setMuted(false);
-    setLevels({ mic: 0, speaker: 0 });
-    setDiagnostics(null);
-  }, []);
-
+  useEffect(() => { if (!softphoneCallId) setDiagnostics(null); }, [softphoneCallId]);
+  useEffect(() => { persistAudioOptions(audioOptions); }, [audioOptions]);
   useEffect(() => {
-    persistAudioOptions(audioOptions);
-  }, [audioOptions]);
-  useEffect(()=>{if(!softphoneCallId)return;const warn=(event:BeforeUnloadEvent)=>{event.preventDefault();event.returnValue="";};window.addEventListener("beforeunload",warn);return()=>window.removeEventListener("beforeunload",warn);},[softphoneCallId]);
-
-  // The audio session owns a microphone and an AudioContext; unmounting the
-  // panel without releasing them would leave the mic indicator lit.
-  useEffect(() => () => {
-    sessionRef.current?.stop();
-    sessionRef.current = null;
-  }, []);
+    if (!softphoneCallId) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [softphoneCallId]);
 
   const withProject = useCallback((path: string) => {
     if (!projectId) return `${API}${path}`;
@@ -1084,10 +1073,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     const request = new AbortController(); callsRequest.current = request;
     setLoading(true);
     try {
-      const res = await fetch(withProject("/calls"), { credentials: "same-origin", signal:request.signal });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      const list = ((data.calls ?? []) as RawCall[]).map(normalizeCall);
+      const list = (await telephony.listCalls(request.signal)).map(call => normalizeCall(call as RawCall));
       if (request.signal.aborted) return;
       setCalls(list);
       setSelectedId((current) => current && list.some((c) => c.id === current)
@@ -1099,7 +1085,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
       if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
     }
-  }, [withProject]);
+  }, [telephony]);
 
   const loadRecordingSettings = useCallback(async () => {
     try {
@@ -1183,8 +1169,10 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   // Inbound softphone calls waiting for a person to pick up.
   const ringing = useMemo(
-    () => calls.filter((call) =>
-      call.direction === "inbound" && call.peerKind === "human" && !call.routingWaiting && call.status === "pending"),
+    () => calls.filter(call => isIncomingBrowserCall({
+      direction: call.direction, status: call.status, peer_kind: call.peerKind,
+      routing_waiting: call.routingWaiting, ring_offers: call.ringOffers,
+    })),
     [calls],
   );
   const { ringtoneEnabled, enableRingtone, disableRingtone } = useInboundRingtone(ringing.length > 0);
@@ -1204,153 +1192,59 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   const terminalCount = calls.length - activeCount;
 
-  // Carrier callbacks are the durable authority for call completion. A media
-  // socket may disconnect transiently and reconnect, so keep the live panel
-  // mounted until the call itself reaches a terminal state.
-  useEffect(() => {
-    if (!softphoneCallId) return;
-    const call = calls.find((candidate) => candidate.id === softphoneCallId);
-    if (call && ["completed", "failed", "no-answer", "busy", "canceled"].includes(call.status)) {
-      endSoftphone();
-    }
-  }, [calls, softphoneCallId, endSoftphone]);
+  // The same controller consumes authoritative call state in both hosts.
+  useEffect(() => { for (const call of calls) phone?.observeCall(call); }, [calls, phone]);
 
   const hangup = async (call: Pick<Call, "id" | "status">) => {
-    // "pending" is included so an operator can decline a ringing inbound call.
     if (!call || (!LIVE_STATUSES.has(call.status) && call.status !== "pending")) return;
     setEnding(call.id);
     try {
-      const res = await fetch(withProject(`/calls/${encodeURIComponent(call.id)}/hangup`), {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!res.ok) throw new Error(await res.text());
-      if (softphoneCallId === call.id) endSoftphone();
+      if (phone?.getSnapshot().callId === call.id) await phone.hangup();
+      else await telephony.hangup(call.id);
       setStatus("call ended");
       await loadCalls();
-    } catch (e) {
-      setStatus((e as Error).message || "Hangup failed");
-    } finally {
-      setEnding("");
-    }
+    } catch (e) { setStatus((e as Error).message || "Hangup failed"); }
+    finally { setEnding(""); }
   };
 
-  // Opens the operator's audio path for a call the server has already created.
-  // Both dialling out and answering an inbound call funnel through here, so the
-  // microphone is acquired in exactly one place.
-  type BrowserCallSession = { call_id: string; media_url: string; session_token?: string };
-
-  const workletURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worklet.js`;
-  const workerURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worker.js`;
-
-  const startAudio = async (session: BrowserCallSession) => {
-    lastSession.current=session;
-    sessionRef.current?.stop();
-    const phone = new SoftphoneSession({
-      onState: (state, detail) => {
-        setSoftphoneState(state);
-        setSoftphoneDetail(detail ?? "");
-        if (state === "ended" || state === "error") {
-          sessionRef.current = null;
-          // Media errors do not end the carrier call. Keep its identity and
-          // controls so the operator can reconnect or hang up safely.
-          setLevels({ mic: 0, speaker: 0 });
-          void loadCalls();
-        }
-      },
-      onLevels: (mic, speaker) => setLevels({ mic, speaker }),
-      onDiagnostics: setDiagnostics,
-      onNotice:setStatus,
-    });
-    sessionRef.current = phone;
-    setSoftphoneCallId(session.call_id);
-    setMuted(false);
-    setDiagnostics(null);
-    // Browser media belongs to the gateway serving this panel. PublicURL is
-    // intentionally reserved for carrier webhooks and can name another host
-    // (for example production while the operator uses a local dashboard).
-    // Preserve the install-scoped path but always pin the socket to this origin.
-    const media = new URL(session.media_url, location.href);
-    media.protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    media.host = location.host;
-    await phone.start(media.toString(), workletURL, workerURL, audioOptions);
-    setSelectedId(session.call_id);
-    await loadCalls();
-  };
-
+  // These handlers contain presentation updates only; recovery and audio are
+  // owned by HeadlessSoftphone, also loaded by external apps through the SDK.
   const placeSoftphoneCall = async () => {
-    const to = dialNumber.trim();
-    if (!to || softphoneCallId || softphoneBusy) return;
-    setSoftphoneBusy(true);
+    if (!phone) return;
     setStatus("");
-    let placed: BrowserCallSession | null = null;
     try {
-      // Permission/device failure must be discovered before a billable leg.
-      const preflight = await navigator.mediaDevices.getUserMedia({audio:microphoneConstraints(audioOptions)});
-      preflight.getTracks().forEach(track => track.stop());
-      const intent=JSON.stringify([to,fromNumber,dialTimeoutSec]);
-      if(placementKey.current?.intent!==intent) placementKey.current={intent,key:crypto.randomUUID()};
-      const session = await postJSON<{ call_id: string; media_url: string }>(
-        withProject("/softphone/place"), { to, from: fromNumber, timeout_sec: dialTimeoutSec, idempotency_key:placementKey.current.key },
-      );
-      placed = session;
-      placementKey.current = null;
-      await startAudio(session);
+      const id = await phone.dial({ to: dialNumber, from: fromNumber, timeout_sec: dialTimeoutSec });
+      setSelectedId(id);
       setDialNumber("");
       setDialerOpen(false);
-      setStatus(`calling ${to}`);
-    } catch (e) {
-      let detail = (e as Error).message || "Call failed";
-      if (placed) {
-        setSoftphoneCallId(placed.call_id);
-        try { await postJSON(withProject(`/calls/${encodeURIComponent(placed.call_id)}/hangup`),{}); endSoftphone(); }
-        catch { detail += " The carrier call may still be active. Retry Hang up."; }
-      }
-      setStatus(detail);
-    } finally {
-      setSoftphoneBusy(false);
-    }
+      setStatus(`calling ${dialNumber.trim()}`);
+    } catch (e) { setStatus((e as Error).message || "Call failed"); }
+    finally { void loadCalls(); }
   };
-
   const answerSoftphoneCall = async (call: Call) => {
-    if (softphoneCallId || softphoneBusy) { setStatus("End the current call before answering another."); return; }
-    setSoftphoneBusy(true);
+    if (!phone) return;
     setStatus("");
-    let session: BrowserCallSession | null = null;
     try {
-      session = await postJSON<BrowserCallSession>(
-        withProject(`/softphone/answer/${encodeURIComponent(call.id)}`), {destination_id:answerDestinations[call.id] || call.ringOffers.find(o=>o.kind==="browser")?.destination_id,rejoin:call.status!=="pending"},
-      );
-      await startAudio(session);
+      await phone.answer(call.id, {
+        destination_id: answerDestinations[call.id] || call.ringOffers.find(o => o.kind === "browser")?.destination_id,
+        rejoin: call.status !== "pending",
+      });
+      setSelectedId(call.id);
       setStatus(`connected to ${call.fromNumber || call.id}`);
-    } catch (e) {
-      console.error("Telephony softphone answer failed", e);
-      let released = !session;
-      if (session?.session_token) {
-        try {
-          await postJSON(
-            withProject(`/softphone/release/${encodeURIComponent(session.call_id)}`),
-            { session_token: session.session_token },
-          );
-          released=true;
-        } catch {
-          // A carrier event may have ended the call while browser setup failed.
-        }
-      }
-      setStatus((e as Error).message || "Answer failed");
-      if(released)endSoftphone();
-      else if(session) setSoftphoneCallId(session.call_id);
-      void loadCalls();
-    } finally {
-      setSoftphoneBusy(false);
-    }
+    } catch (e) { setStatus((e as Error).message || "Answer failed"); }
+    finally { void loadCalls(); }
   };
-
-  const toggleMute = () => {
-    const next = !muted;
-    sessionRef.current?.setMuted(next);
-    setMuted(next);
+  const reconnectAudio = async () => {
+    try { await phone?.reconnect(audioOptions); }
+    catch (e) { setStatus((e as Error).message || "Reconnect failed"); }
   };
+  const toggleMute = () => { phone?.setMuted(!muted); };
+  const sendDTMF = (digit: string) => {
+    try { phone?.sendDTMF(digit); }
+    catch (e) { setStatus((e as Error).message); }
+  };
+  // The standalone microphone preview has no call-control state.
+  const workletURL = `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worklet.js`;
 
   const toggleFutureRecording = async () => {
     if (!recordingSettings || !recordingSettings.recording_supported) return;
@@ -1402,12 +1296,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
             <strong>{(() => {const call = calls.find(c=>c.id===softphoneCallId); return call ? (call.direction === "inbound" ? call.fromNumber : call.toNumber) : "Active call";})()}</strong>
             <span className="block text-xs" role="status">{softphoneState === "live" ? "Audio connected" : softphoneDetail || "Connecting audio"}{muted ? " · Microphone muted" : ""}</span>
           </button>
-          <button aria-pressed={muted} disabled={!sessionRef.current} className="min-h-11 px-3 border border-border rounded" onClick={() => {const value=!muted; sessionRef.current?.setMuted(value); setMuted(value);}}>{muted ? "Unmute" : "Mute"}</button>
-          {softphoneState !== "live" ? <button className="min-h-11 px-3 border border-border rounded" onClick={()=>{ if(sessionRef.current) void sessionRef.current.resumeAudio().catch(e=>setStatus(e.message)); else if(lastSession.current) void startAudio(lastSession.current).catch(e=>setStatus(e.message)); }}>Reconnect audio</button> : null}
+          <button aria-pressed={muted} disabled={!hasAudio} className="min-h-11 px-3 border border-border rounded" onClick={toggleMute}>{muted ? "Unmute" : "Mute"}</button>
+          {softphoneState !== "live" ? <button className="min-h-11 px-3 border border-border rounded" onClick={() => void reconnectAudio()}>Reconnect audio</button> : null}
           <button className="min-h-11 px-3 border border-border rounded" aria-expanded={keypadOpen} onClick={()=>setKeypadOpen(v=>!v)}>Keypad</button>
           <button disabled={ending===softphoneCallId} className="min-h-11 px-3 bg-error text-bg rounded" onClick={()=>void hangup({id:softphoneCallId,status:"answered"})}>Hang up</button>
         </div>
-        {keypadOpen ? <div className="grid grid-cols-3 gap-1 mt-2" aria-label="In-call keypad">{"123456789*0#".split("").map(digit=><button key={digit} className="min-h-11 border border-border rounded" disabled={softphoneState!=="live"} onClick={()=>sessionRef.current?.sendDTMF(digit)}>{digit}</button>)}</div> : null}
+        {keypadOpen ? <div className="grid grid-cols-3 gap-1 mt-2" aria-label="In-call keypad">{"123456789*0#".split("").map(digit=><button key={digit} className="min-h-11 border border-border rounded" disabled={softphoneState!=="live"} onClick={() => sendDTMF(digit)}>{digit}</button>)}</div> : null}
         {status ? <p role="status" className="text-xs mt-2">{status}</p> : null}
       </div> : null}
       <div className={`${visible ? "flex" : "hidden"} min-h-0 flex-1 flex-col`}>
@@ -1584,7 +1478,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
               <div className="border-t border-border p-4 space-y-4">
                 <AudioProcessingSettings
                   value={audioOptions}
-                  disabled={softphoneBusy || Boolean(softphoneCallId && sessionRef.current)}
+                  disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
                   onChange={setAudioOptions}
                 />
                 <MicrophoneTest
@@ -1661,7 +1555,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                     <button
                       type="button"
                       onClick={toggleMute}
-                      disabled={!sessionRef.current}
+                      disabled={!hasAudio}
                       className={`h-8 px-3 rounded border text-xs disabled:opacity-40 ${muted ? "border-warn/40 bg-warn/10 text-warn" : "border-border hover:bg-bg-muted"}`}
                     >
                       {muted ? "Unmute" : "Mute"}
@@ -1690,7 +1584,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
               <AudioProcessingSettings
                 value={audioOptions}
-                disabled={softphoneBusy || Boolean(softphoneCallId && sessionRef.current)}
+                disabled={softphoneBusy || Boolean(softphoneCallId && hasAudio)}
                 onChange={setAudioOptions}
               />
 
@@ -3439,7 +3333,7 @@ export default function CallsPanel(props: NativePanelProps) {
         </button>
       </nav>
       <div className="min-h-0 min-w-0 flex-1 flex flex-col">
-        <CallsView key={props.projectId} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
+        <CallsView key={`${props.projectId}:${props.installId}`} {...props} visible={view === "calls"} showCalls={()=>setView("calls")} />
         {view === "routing" ? <RoutingView {...props} onOpenNumbers={() => setView("numbers")} /> : null}
         {view === "numbers" ? <NumbersView key={props.projectId} {...props} /> : null}
         {view === "addresses" ? <AddressesView {...props} /> : null}

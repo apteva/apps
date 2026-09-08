@@ -1,0 +1,11 @@
+{
+  "name": "@apteva/telephony-source",
+  "private": true,
+  "scripts": {
+    "build:frontend": "bun run frontend/build-app.ts",
+    "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
+    "test:frontend": "bun test frontend/tests/*.test.ts && bun test ui/*.test.ts",
+    "example": "bun frontend/example/server.ts",
+    "test:example": "bunx --no-install playwright test -c frontend/example/playwright.config.ts"
+  }
+}

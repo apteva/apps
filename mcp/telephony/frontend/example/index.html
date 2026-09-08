@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Northstar — Telephony example</title><link rel="stylesheet" href="/example.css"></head>
+<body>
+  <aside class="rail"><a class="brand" href="/" aria-label="Northstar home">✳</a><span class="rail-line"></span><span class="rail-icon">⌂</span><span class="rail-icon selected" title="Calls">☎</span><span class="rail-icon">▤</span><span class="rail-avatar">Y</span></aside>
+  <div class="workspace">
+    <header><div class="breadcrumb"><strong>Northstar</strong><span>/</span> Customer workspace</div><span class="operator"><i></i> You’re available <b>YO</b></span></header>
+    <main>
+      <div class="page-heading"><div><div class="eyebrow">COMMUNICATIONS</div><h1>A little closer to your customers.</h1><p>Your own interface. Telephony handles the call.</p></div><button id="simulate" class="secondary">＋ Simulate incoming call</button></div>
+      <div class="demo-notice"><span class="notice-dot"></span><strong>Local demo</strong><span>Calls stay on this computer. No real numbers are dialed.</span><span id="load-time" class="load-time">Loading client…</span></div>
+      <div class="columns">
+        <section class="phone-card" aria-label="Softphone">
+          <div class="card-top"><span class="card-label">YOUR SOFTPHONE</span><span class="connection"><i id="connection-dot"></i><span id="connection">Connecting…</span></span></div>
+          <div class="contact"><div id="avatar" class="contact-avatar">☎</div><h2 id="contact-name">Ready when you are</h2><p id="contact-subtitle">Make a test call or simulate an incoming one.</p></div>
+          <div id="incoming" class="incoming" hidden><span>Incoming call</span><button id="answer" class="primary">Answer call</button><button id="decline" class="small-button">Decline</button></div>
+          <label class="field-label" for="number">PHONE NUMBER</label><div class="number-field"><span>＋</span><input id="number" value="15550100100" inputmode="tel" autocomplete="off" aria-label="Phone number"><button id="erase" aria-label="Delete last digit">⌫</button></div>
+          <div id="keypad" class="keypad" aria-label="Phone keypad"></div>
+          <button id="dial" class="primary dial" disabled><span>☎</span> Call test line</button>
+          <div id="active-controls" class="active-controls" hidden><button id="mute" class="secondary" aria-pressed="false">Mute</button><button id="reconnect" class="secondary">Reconnect</button><button id="hangup" class="danger">End call</button></div>
+          <div class="audio-meters"><div><span>Microphone</span><div class="meter"><i id="mic"></i></div></div><div><span>Speaker</span><div class="meter"><i id="speaker"></i></div></div></div>
+          <p id="status" role="status" class="status">No microphone access until you start or answer a call.</p>
+        </section>
+        <div class="right-column">
+          <section class="context-card"><div class="card-label">MADE FOR YOUR APP</div><h2>Bring the conversation<br> into your workflow.</h2><p>This page is plain HTML and TypeScript. It loads the same call controller used by the Telephony Calls panel.</p><div class="feature"><span>↗</span><div><strong>Your interface, shared logic</strong><p>Dialing, answering, recovery, and audio come from the installed app.</p></div></div><div class="feature"><span>◉</span><div><strong>Ready for live audio</strong><p>Try mute, the keypad, and reconnect during a local call.</p></div></div><a href="#integration" class="text-link">See the integration <span>↘</span></a></section>
+          <section class="activity-card"><div class="activity-heading"><h3>Call activity</h3><span id="activity-count">0 calls</span></div><div id="activity" class="activity"><p class="empty">Your test calls will appear here.</p></div></section>
+          <div class="powered"><span>✳</span> Powered by Apteva Telephony <span class="dot-separator">·</span> No React required</div>
+        </div>
+      </div>
+      <section id="integration" class="integration"><div><div class="eyebrow">UNDER THE HOOD</div><h2>A few lines. A complete softphone.</h2><p>The page supplies the layout. The installed Telephony app supplies the call behavior.</p></div><pre><code>const loaded = await sdk.apps.load("telephony", {
+  projectId, installId
+});
+const phone = loaded.client.createSoftphone();
+
+phone.subscribe(renderCallState);
+await phone.dial({ to: "+15550100100" });
+phone.setMuted(true);
+await phone.hangup();</code></pre></section>
+      <footer>Northstar is an example application. The local simulator uses generated audio.</footer>
+    </main>
+  </div>
+  <script type="module" src="/example.js"></script>
+</body></html>

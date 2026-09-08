@@ -1,0 +1,28 @@
+import { test, expect } from "@playwright/test";
+test("installed headless client talks through real Telephony with host-owned UI", async ({ page }) => {
+  const gateway = process.env.TELEPHONY_TEST_GATEWAY;
+  if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/");
+  await page.waitForFunction(() => typeof (window as any).loadPhone === "function");
+  await page.evaluate(url => (window as any).loadPhone(url), gateway);
+  expect(await page.evaluate(() => Object.keys((window as any).loaded.components))).toEqual([]);
+  expect(await page.evaluate(() => (window as any).calls[0].status)).toBe("pending");
+  await page.click("#answer");
+  await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
+  await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
+  await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);
+  await expect.poll(async () => (await page.request.get(gateway + "/fixture/audio-ready")).json()).toEqual({ ready: true });
+  await page.evaluate(() => { const w = window as any; w.phone.setMuted(true); w.phone.sendDTMF("12#"); });
+  await expect.poll(() => page.evaluate(() => (window as any).notices)).toContain("Keypad tone sent");
+  await page.evaluate(() => (window as any).phone.reconnect());
+  await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
+  expect(await page.evaluate(() => (window as any).phone.getSnapshot().muted)).toBe(true);
+  await page.evaluate(() => (window as any).phone.setMuted(false));
+  await page.evaluate(() => (window as any).phone.hangup());
+  expect(await page.evaluate(() => (window as any).phone.getSnapshot().callId)).toBeUndefined();
+  await page.evaluate(() => { const w = window as any; w.phone.dispose(); w.loaded.dispose(); });
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => (window as any).answerError)).toBeUndefined();
+});

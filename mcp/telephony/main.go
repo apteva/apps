@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.9
+version: 0.3.10
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -3764,12 +3764,27 @@ func (c *callsDB) releaseAnswerClaim(id string) error {
 	return c.releaseRingClaim(id)
 }
 
-func (c *callsDB) resetAnswerClaim(id string) error {
-	_, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
-	        audio_bridge_url = 'pending', peer_token = '', directive = 'inbound pending', voice = ''
-	        WHERE id = ? AND status = 'answering' AND media_active = 0`, id)
+func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
+	predicate := ""
+	args := []any{id}
+	if len(sessionTokens) > 0 {
+		predicate = " AND peer_token = ?"
+		args = append(args, sessionTokens[0])
+	}
+	res, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
+            audio_bridge_url = 'pending', peer_token = '', directive = 'inbound pending', voice = ''
+            WHERE id = ? AND status = 'answering' AND media_active = 0`+predicate, args...)
 	if err != nil {
 		return err
+	}
+	if len(sessionTokens) > 0 {
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n != 1 {
+			return errors.New("answer session is no longer releasable")
+		}
 	}
 	return c.releaseRingClaim(id)
 }
