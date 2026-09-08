@@ -33,8 +33,9 @@ underlying calculation speedup or evidence for a server/SQL-driver upgrade.
 - Functions persists the same ID in invocation resources, and Tables removes
   diagnostic metadata before operation validation.
 
-No production configuration was changed, and no release has been published for
-this patch. It introduces no database migrations or SQL-driver changes.
+Release versions: API 0.6.2, Functions 1.11.4, Tables 0.1.19.
+No production configuration was changed. This patch introduces no database
+migrations or SQL-driver changes.
 
 All three complete package suites passed with the race detector: API (including
 real-duration cases) 49.434 s; Functions 125.352 s; Tables 11.221 s. The final API

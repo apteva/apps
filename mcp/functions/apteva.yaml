@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.11.3
+version: 1.11.4
 description: |
+  v1.11.4 Distinguishes queue expiry from capacity rejection, returns HTTP 504 for deadline failures, and carries Gateway correlation IDs into invocation records and Tables calls.
+
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
   processes; handlers reach sibling Apteva apps via context.call and
@@ -116,7 +118,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: functions/v1.11.4
     entry: mcp/functions
   port: 8080
   health_check: /health
