@@ -50,6 +50,17 @@ func TestOnDiskManifest_Parses(t *testing.T) {
 	}
 }
 
+func TestManifestSourceRefMatchesVersion(t *testing.T) {
+	m := (&App{}).Manifest()
+	if m.Runtime.Kind != "source" || m.Runtime.Source == nil {
+		t.Fatal("Fleet must declare its source runtime")
+	}
+	want := m.Name + "/v" + m.Version
+	if got := m.Runtime.Source.Ref; got != want {
+		t.Fatalf("source ref=%q, want %q: installers would build a different release", got, want)
+	}
+}
+
 func TestManifestsAgree_VersionAndScopes(t *testing.T) {
 	// apteva.yaml is what the registry/marketplace hands to a fresh
 	// installer; main.go's embedded manifest is what apteva-server
