@@ -889,6 +889,15 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 			return nil, nil, err
 		}
 	}
+	if o.MilestoneID > 0 {
+		res, err := tx.Exec(`UPDATE contract_milestones SET status='active',gig_id=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND contract_id=? AND id=? AND status='pending' AND gig_id IS NULL`, gigID, pid, o.ContractID, o.MilestoneID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, nil, errors.New("milestone already dispatched or changed")
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
@@ -1683,9 +1692,14 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g.Status != "submitted" {
 		return nil, fmt.Errorf("gig is %s, expected submitted", g.Status)
 	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	requestedSubmissionID := int64Arg(args, "submission_id")
 	var subID, workerID int64
-	if err := ctx.AppDB().QueryRow(
+	if err := tx.QueryRow(
 		`SELECT s.id, a.worker_id
 		 FROM gig_submissions s
 		 JOIN gig_assignments a ON a.id = s.assignment_id
@@ -1698,18 +1712,20 @@ func (a *App) toolGigsAccept(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	} else if err != nil {
 		return nil, err
 	}
-	tx, err := ctx.AppDB().Begin()
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE gigs SET status='reviewed', completed_at=CURRENT_TIMESTAMP,
 		    updated_at=CURRENT_TIMESTAMP,
 		    result_json=(SELECT payload_json FROM gig_submissions WHERE id=?)
-		 WHERE id=?`,
+		 WHERE id=? AND status='submitted'`,
 		subID, id,
-	); err != nil {
+	)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, errors.New("gig changed while being reviewed")
+	}
+	if _, err := tx.Exec(`UPDATE gig_compensation SET worker_id=?,updated_at=CURRENT_TIMESTAMP WHERE gig_id=? AND project_id=? AND payable_bill_id IS NULL`, workerID, id, pid); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(
@@ -1787,10 +1803,15 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if g.Status != "submitted" {
 		return nil, fmt.Errorf("gig is %s, expected submitted", g.Status)
 	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 	requestedSubmissionID := int64Arg(args, "submission_id")
 	var submissionID, assignmentID, workerID int64
 	var assignmentMode string
-	if err := ctx.AppDB().QueryRow(
+	if err := tx.QueryRow(
 		`SELECT s.id, a.id, a.worker_id, COALESCE(a.mode,'direct') FROM gig_submissions s
 		 JOIN gig_assignments a ON a.id = s.assignment_id
 		 JOIN gigs g ON g.id=a.gig_id
@@ -1803,11 +1824,13 @@ func (a *App) toolGigsReject(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 
-	tx, err := ctx.AppDB().Begin()
-	if err != nil {
+	var current string
+	if err := tx.QueryRow(`SELECT status FROM gigs WHERE id=? AND project_id=?`, id, pid).Scan(&current); err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
+	if current != "submitted" {
+		return nil, errors.New("gig changed while being reviewed")
+	}
 	if workerID > 0 {
 		_, _ = tx.Exec(
 			`UPDATE workers SET rejected_count = rejected_count + 1,

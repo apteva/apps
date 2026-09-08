@@ -1,4 +1,4 @@
-# Gigs (v0.3.5)
+# Gigs (v0.5.0)
 
 Gigs is a generic work marketplace and execution engine. Agents can define
 standard services and packages, know the usual customer offer and worker pay,
@@ -283,3 +283,38 @@ surface: `workers.go`, `instructions.go`, `templates.go`, `gigs.go`,
 `worker_page.go`, `composition.go` (derivation), `crm.go` /
 `storage.go` (inter-app helpers), and `marketplace_*.go` (commercial model,
 contracts, HTTP/MCP APIs, and Catalog/Bills integrations).
+
+## Resumable worker uploads (0.5.0)
+
+Upgrade the bound Storage app to **0.11.3 or newer before Gigs**. Worker links
+send four binary 5 MiB parts concurrently through the platform's authenticated
+Storage binding. Credentials stay on the server. Transient requests retry with
+backoff; Pause preserves acknowledged parts. After a reload, select the same
+original file to resume. Cancel explicitly abandons a partial upload. Storage
+may expire idle partial uploads; those restart automatically on reselection.
+
+Progress remains below 100% until Storage commits the file and Gigs saves its
+receipt and draft association. Finalization continues when the browser closes,
+and durable receipts recover interrupted completion responses. Per-file errors
+include a stage and upload reference for diagnosis. Removed attachments remain
+in Storage to protect shared/deduplicated objects and immutable submissions.
+
+Drafts allow partial minimum-file counts; final submission enforces the full
+contract. Every worker file reference is checked against assignment ownership
+before accepting it or issuing a signed URL. Worker compensation JSON contains
+only the worker's terms. Reviews, job awards and milestone dispatch claim their
+state transactionally; payables use the worker whose assignment was reviewed.
+
+Validation:
+
+```sh
+GOWORK=off go test -race ./...
+bun test worker_upload.test.ts
+# Build Storage in ../storage, then exercise real uploads (including SHA-256
+# verification and a deliberately lost completion response):
+GOWORK=off GIGS_TEST_STORAGE_BIN=/path/to/storage go test -run TestBinaryUploadWithRealStorage -v .
+GOWORK=off GIGS_TEST_STORAGE_BIN=/path/to/storage GIGS_TEST_UPLOAD_BYTES=2000000000 go test -run TestBinaryUploadWithRealStorage -v .
+```
+
+The integration fixture uses temporary databases and disk storage. Its local
+throughput is not an estimate of mobile-network or production S3 throughput.

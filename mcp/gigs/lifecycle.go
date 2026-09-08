@@ -17,6 +17,9 @@ func runLifecycleSweep(ctx context.Context, app *sdk.AppCtx) error {
 	if err := expireAssignmentAccess(ctx, app); err != nil {
 		return err
 	}
+	if err := reconcileWorkerUploads(ctx, app); err != nil {
+		return err
+	}
 	return remindOfferedWorkers(ctx, app)
 }
 

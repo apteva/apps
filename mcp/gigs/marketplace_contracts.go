@@ -258,6 +258,13 @@ func (a *App) toolProposalsAccept(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	defer tx.Rollback()
+	claim, err := tx.Exec(`UPDATE job_posts SET status='awarded',updated_at=CURRENT_TIMESTAMP,closed_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=? AND status='open'`, p.JobPostID, pid)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := claim.RowsAffected(); n != 1 {
+		return nil, errors.New("job post already awarded or changed")
+	}
 	res, err := tx.Exec(`INSERT INTO contracts(project_id,source_type,source_id,customer_contact_id,worker_id,template_id,title,scope_json,pricing_model,worker_amount_minor,currency,status,accepted_at)
       VALUES(?,'proposal',?,?,?,?,?,?,?,?,?,'active',CURRENT_TIMESTAMP)`, pid, p.ID, nullInt64(j.CustomerContactID), p.WorkerID, nullInt64(j.TemplateID), j.Title, nullStr(mustJSON(j.Scope)), p.PricingModel, p.AmountMinor, p.Currency)
 	if err != nil {
@@ -607,13 +614,6 @@ func (a *App) toolContractsDispatchMilestone(ctx *sdk.AppCtx, args map[string]an
 	g, ok := out["gig"].(*gig)
 	if !ok || g == nil {
 		return nil, errors.New("gig creation did not return a gig")
-	}
-	res, err := ctx.AppDB().Exec(`UPDATE contract_milestones SET status='active',gig_id=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND contract_id=? AND id=? AND status='pending' AND gig_id IS NULL`, g.ID, pid, cid, mid)
-	if err != nil {
-		return nil, err
-	}
-	if n, _ := res.RowsAffected(); n != 1 {
-		return nil, errors.New("milestone changed while it was being dispatched")
 	}
 	m, err = scanMilestone(ctx.AppDB().QueryRow(milestoneSelect+` WHERE project_id=? AND id=?`, pid, mid))
 	if err != nil {
