@@ -60,19 +60,10 @@ func (p *pool) reserveWorker(ctx context.Context, fn *Function) (string, error) 
 		if p.classReservations == nil {
 			p.classReservations = map[string][2]int{}
 		}
-		limit, max := p.admissionLimitLocked(class)
-		used, count := p.classUsageLocked(class)
+		_, max := p.admissionLimitLocked(class)
+		_, count := p.classUsageLocked(class)
 		s := p.settingsLocked()
-		reason = nil
-		if memory > s.MaxWorkerMemoryMB {
-			reason = &ResourceError{Code: "worker_memory_limit", Reason: "worker allowance exceeds operator maximum", RequestedMB: memory, AvailableMB: s.MaxWorkerMemoryMB}
-		}
-		if memory > limit {
-			reason = &ResourceError{Code: "memory_budget_exhausted", Reason: "worker cannot fit in this class budget", RequestedMB: memory, AvailableMB: limit}
-		}
-		if reason == nil && (p.liveMB+memory > s.TotalMemoryMB || used+memory > limit) {
-			reason = &ResourceError{Code: "memory_budget_exhausted", Reason: "configured worker reservations fill the memory budget", RequestedMB: memory, AvailableMB: limit - used, Retryable: true}
-		}
+		reason = p.memoryAdmissionErrorLocked(class, memory, p.admissionMemoryLocked())
 		if reason == nil && (len(p.globalSem) >= s.MaxWorkers || len(p.globalSem) >= cap(p.globalSem) || count >= max) {
 			reason = resourceError("worker_limit", "worker slots occupied")
 		}
@@ -295,11 +286,14 @@ func (p *pool) reclassify(w *worker, class string) bool {
 		return true
 	}
 	old := w.capacityClass
+	m := p.admissionMemoryLocked()
+	charge := m.workerCharges[w]
+	m.ByClass[old] -= charge
 	u := p.classReservations[old]
 	p.classReservations[old] = [2]int{u[0] - w.memoryMB, u[1] - 1}
 	limit, max := p.admissionLimitLocked(class)
-	used, count := p.classUsageLocked(class)
-	if used+w.memoryMB > limit || count+1 > max {
+	_, count := p.classUsageLocked(class)
+	if m.classUsage(class)+charge > limit || count+1 > max {
 		p.classReservations[old] = u
 		return false
 	}

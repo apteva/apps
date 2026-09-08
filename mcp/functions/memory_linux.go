@@ -9,6 +9,52 @@ import (
 	"strings"
 )
 
+// Available physical RAM and each enclosing cgroup's remaining allowance are
+// separate constraints. Include both: a container can be full on a free host.
+func hostMemoryAvailableMB() int64 {
+	b, _ := os.ReadFile("/proc/meminfo")
+	dirs := []string{"/sys/fs/cgroup"}
+	if c, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(c), "\n") {
+			if strings.HasPrefix(line, "0::") {
+				dir := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(line, "0::"))
+				for dir != "/sys/fs/cgroup" && dir != "/" {
+					dirs = append(dirs, dir)
+					dir = filepath.Dir(dir)
+				}
+			}
+		}
+	}
+	return availableMemoryMB(string(b), dirs)
+}
+
+func availableMemoryMB(meminfo string, cgroups []string) int64 {
+	available := int64(-1)
+	for _, line := range strings.Split(meminfo, "\n") {
+		f := strings.Fields(line)
+		if len(f) > 1 && f[0] == "MemAvailable:" {
+			if n, err := strconv.ParseInt(f[1], 10, 64); err == nil && n >= 0 {
+				available = n / 1024
+			}
+		}
+	}
+	for _, dir := range cgroups {
+		limit := readIntFile(filepath.Join(dir, "memory.max"))
+		if limit < 0 {
+			continue
+		} // Unlimited or unavailable.
+		current := readIntFile(filepath.Join(dir, "memory.current"))
+		remaining := int64(0)
+		if current >= 0 {
+			remaining = max(0, limit-current) >> 20
+		}
+		if available < 0 || remaining < available {
+			available = remaining
+		}
+	}
+	return available
+}
+
 func hostMemoryLimitMB() int64 {
 	var limit int64
 	if b, e := os.ReadFile("/proc/meminfo"); e == nil {

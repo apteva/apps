@@ -65,34 +65,46 @@ func policy(fn *Function) RuntimePolicy {
 }
 
 type CapacitySettings struct {
-	InteractiveQueue      int `json:"interactive_reserved_queue"`
-	NestedQueue           int `json:"nested_reserved_queue"`
-	AppTimeoutMS          int `json:"app_timeout_ms"`
-	IntegrationTimeoutMS  int `json:"integration_timeout_ms"`
-	TotalMemoryMB         int `json:"total_memory_mb"`
-	MaxWorkers            int `json:"max_workers"`
-	MaxWorkerMemoryMB     int `json:"max_worker_memory_mb"`
-	InteractiveMemoryMB   int `json:"interactive_reserved_memory_mb"`
-	InteractiveWorkers    int `json:"interactive_reserved_workers"`
-	NestedMemoryMB        int `json:"nested_reserved_memory_mb"`
-	NestedWorkers         int `json:"nested_reserved_workers"`
-	MaxDownstream         int `json:"max_downstream_calls"`
-	InteractiveDownstream int `json:"interactive_reserved_downstream"`
-	NestedDownstream      int `json:"nested_reserved_downstream"`
-	MaxQueue              int `json:"max_queue"`
-	MaxQueuePerFunction   int `json:"max_queue_per_function"`
-	PreparationWorkers    int `json:"max_prepared_idle_workers"`
-	HostHeadroomMB        int `json:"host_headroom_mb"`
-	MaxNestedDepth        int `json:"max_nested_depth"`
+	MemoryMode            string `json:"memory_mode"`
+	InteractiveQueue      int    `json:"interactive_reserved_queue"`
+	NestedQueue           int    `json:"nested_reserved_queue"`
+	AppTimeoutMS          int    `json:"app_timeout_ms"`
+	IntegrationTimeoutMS  int    `json:"integration_timeout_ms"`
+	TotalMemoryMB         int    `json:"total_memory_mb"`
+	MaxWorkers            int    `json:"max_workers"`
+	MaxWorkerMemoryMB     int    `json:"max_worker_memory_mb"`
+	InteractiveMemoryMB   int    `json:"interactive_reserved_memory_mb"`
+	InteractiveWorkers    int    `json:"interactive_reserved_workers"`
+	NestedMemoryMB        int    `json:"nested_reserved_memory_mb"`
+	NestedWorkers         int    `json:"nested_reserved_workers"`
+	MaxDownstream         int    `json:"max_downstream_calls"`
+	InteractiveDownstream int    `json:"interactive_reserved_downstream"`
+	NestedDownstream      int    `json:"nested_reserved_downstream"`
+	MaxQueue              int    `json:"max_queue"`
+	MaxQueuePerFunction   int    `json:"max_queue_per_function"`
+	PreparationWorkers    int    `json:"max_prepared_idle_workers"`
+	HostHeadroomMB        int    `json:"host_headroom_mb"`
+	MaxNestedDepth        int    `json:"max_nested_depth"`
 }
 
 func defaultCapacity() CapacitySettings {
 	total := envInt("APTEVA_FUNCTIONS_TOTAL_MEMORY_MB", 4096, 16, 1048576)
 	workers := envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)
 	downstream := envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)
-	return CapacitySettings{InteractiveQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 4, NestedQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 8, AppTimeoutMS: envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000), IntegrationTimeoutMS: envInt("APTEVA_FUNCTIONS_INTEGRATION_TIMEOUT_MS", 300000, 1, 600000), TotalMemoryMB: total, MaxWorkers: workers, MaxWorkerMemoryMB: envInt("APTEVA_FUNCTIONS_MAX_WORKER_MEMORY_MB", 1024, 16, 65536), InteractiveMemoryMB: total / 4, InteractiveWorkers: workers / 4, NestedMemoryMB: total / 8, NestedWorkers: workers / 8, MaxDownstream: downstream, InteractiveDownstream: downstream / 4, NestedDownstream: downstream / 8, MaxQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000), MaxQueuePerFunction: envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000), PreparationWorkers: 2, HostHeadroomMB: 512, MaxNestedDepth: 4}
+	return CapacitySettings{MemoryMode: defaultMemoryMode(), InteractiveQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 4, NestedQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 8, AppTimeoutMS: envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000), IntegrationTimeoutMS: envInt("APTEVA_FUNCTIONS_INTEGRATION_TIMEOUT_MS", 300000, 1, 600000), TotalMemoryMB: total, MaxWorkers: workers, MaxWorkerMemoryMB: envInt("APTEVA_FUNCTIONS_MAX_WORKER_MEMORY_MB", 1024, 16, 65536), InteractiveMemoryMB: total / 4, InteractiveWorkers: workers / 4, NestedMemoryMB: total / 8, NestedWorkers: workers / 8, MaxDownstream: downstream, InteractiveDownstream: downstream / 4, NestedDownstream: downstream / 8, MaxQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000), MaxQueuePerFunction: envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000), PreparationWorkers: 2, HostHeadroomMB: 512, MaxNestedDepth: 4}
+}
+
+// Missing mode in older persisted settings and API requests adopts the new default.
+func (s CapacitySettings) memoryMode() string {
+	if s.MemoryMode == "" {
+		return "soft"
+	}
+	return s.MemoryMode
 }
 func (s CapacitySettings) validate() error {
+	if s.memoryMode() != "soft" && s.memoryMode() != "strict" {
+		return errors.New("memory_mode must be soft or strict")
+	}
 	if s.AppTimeoutMS < 1 || s.AppTimeoutMS > 600000 || s.IntegrationTimeoutMS < 1 || s.IntegrationTimeoutMS > 600000 {
 		return errors.New("callback deadlines must be 1..600000 ms")
 	}
@@ -125,7 +137,9 @@ func (p *pool) settingsLocked() CapacitySettings {
 	if p.capacity.MaxWorkers == 0 {
 		return defaultCapacity()
 	}
-	return p.capacity
+	s := p.capacity
+	s.MemoryMode = s.memoryMode()
+	return s
 }
 func (p *pool) initCapacity() error {
 	p.capacity = defaultCapacity()
@@ -322,6 +336,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 	p.mu.Lock()
 	settings := p.settingsLocked()
 	reserved := p.liveMB
+	memoryAdmission := p.admissionMemoryLocked()
 	workers := make([]*worker, 0, len(p.all))
 	for w := range p.all {
 		workers = append(workers, w)
@@ -371,7 +386,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 		if w.projectID != pid {
 			continue
 		}
-		ws = append(ws, map[string]any{"function_id": w.fnID, "function_name": w.fnName, "version_id": w.versionID, "pid": w.cmd.Process.Pid, "class": workerClass, "state": w.capacityState.Load(), "invocation_id": w.invocationID.Load(), "reserved_memory_mb": w.memoryMB, "memory_current_bytes": m, "memory_source": source, "oom_kills": oom})
+		ws = append(ws, map[string]any{"function_id": w.fnID, "function_name": w.fnName, "version_id": w.versionID, "pid": w.cmd.Process.Pid, "class": workerClass, "state": w.capacityState.Load(), "invocation_id": w.invocationID.Load(), "reserved_memory_mb": w.memoryMB, "admission_memory_mb": memoryAdmission.workerCharges[w], "memory_current_bytes": m, "memory_source": source, "oom_kills": oom})
 	}
 	groups := map[int64]*FunctionCapacity{}
 	for _, w := range ws {
@@ -383,6 +398,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 		}
 		g.Workers++
 		g.ReservedMB += w["reserved_memory_mb"].(int)
+		g.AdmissionMB += w["admission_memory_mb"].(int)
 		if w["state"] == "idle" {
 			g.Idle++
 		} else {
@@ -415,7 +431,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 	for _, g := range groups {
 		functionGroups = append(functionGroups, g)
 	}
-	return map[string]any{"functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024), "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
+	return map[string]any{"memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024), "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
 }
 func (a *App) handleHTTPCapacity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -455,13 +471,14 @@ func (a *App) handleHTTPCapacitySettings(w http.ResponseWriter, r *http.Request)
 		httpErr(w, 400, err.Error())
 		return
 	}
+	s.MemoryMode = s.memoryMode()
 	if err := s.validate(); err != nil {
 		httpErr(w, 400, err.Error())
 		return
 	}
 	// Settings changes serialize with admission; lowering a budget never kills work.
 	p.mu.Lock()
-	if s.TotalMemoryMB < p.liveMB || s.MaxWorkers < len(p.globalSem) {
+	if s.memoryMode() == "strict" && s.TotalMemoryMB < p.liveMB || s.MaxWorkers < len(p.globalSem) {
 		p.mu.Unlock()
 		httpErr(w, 409, "new limits are below current reservations; drain workers first")
 		return
@@ -516,6 +533,7 @@ func readIntFile(path string) int64 {
 }
 
 type FunctionCapacity struct {
+	AdmissionMB int    `json:"admission_memory_mb"`
 	FunctionID  int64  `json:"function_id"`
 	Name        string `json:"function_name"`
 	Workers     int    `json:"workers"`

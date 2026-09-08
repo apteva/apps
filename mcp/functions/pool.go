@@ -36,6 +36,11 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	// Admission measurements are cached for at most 100 ms under mu.
+	memorySamples     map[*worker]admissionSample
+	hostSample        admissionHostSample
+	memoryReader      func(*worker) (*int64, string, int64)
+	hostMemoryReader  func() int64
 	protocolClasses   map[string]int64
 	queueClasses      map[string]int
 	capacity          CapacitySettings
@@ -154,6 +159,8 @@ func (p *pool) discard(w *worker) {
 	_, exists := p.all[w]
 	if exists {
 		delete(p.all, w)
+		delete(p.memorySamples, w)
+		p.hostSample.at = time.Time{}
 		p.liveMB -= w.memoryMB
 		u := p.classReservations[w.capacityClass]
 		p.classReservations[w.capacityClass] = [2]int{u[0] - w.memoryMB, u[1] - 1}
@@ -205,6 +212,7 @@ func (p *pool) start(parent context.Context, fn *Function, v *FunctionVersion, s
 	p.mu.Lock()
 	fp := p.poolForLocked(fn.ID)
 	p.all[w] = fp
+	p.hostSample.at = time.Time{}
 	closed := p.closed || fp.closed || p.deleted[fn.InstanceKey]
 	p.mu.Unlock()
 	if closed {

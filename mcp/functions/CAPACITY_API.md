@@ -78,7 +78,7 @@ PATCH the existing `/functions/:id` endpoint (or use `functions_update`):
 
 `limits` replaces the policy object. Omitted values inherit defaults: class interactive, concurrency 8, idle lifetime 300000 ms, capacity wait 10000 ms, and operator callback deadlines. Omitted `max_idle_workers` allows up to the worker-pool ceiling; explicit zero disables idle retention. Durations are bounded at 600000 ms. Invocation timeout remains capped at 300000 ms and always wins if shorter. Mark AI job functions as background explicitly; classification is controlled by function configuration, not event payloads.
 
-The current default memory allowance remains 256 MiB, with a default operator maximum of 1024 MiB. The operator can raise that ceiling up to the validated safety ceiling of 65536 MiB; every actual worker must also fit its class and total budgets. Node old-space receives a smaller heap hint to leave native memory headroom; cgroups remain the hard Linux memory boundary.
+The current default memory allowance remains 256 MiB, with a default operator maximum of 1024 MiB. The operator can raise that ceiling up to the validated safety ceiling of 65536 MiB; each cold start must also fit its class and total admission budgets; soft mode uses measured usage for existing workers. Node old-space receives a smaller heap hint to leave native memory headroom; cgroups remain the hard Linux memory boundary.
 
 ## Configure the installation
 
@@ -88,7 +88,8 @@ Defaults with the existing 4096 MiB / 32-worker configuration:
 
 | Setting | Default |
 |---|---:|
-| Total reserved worker memory | 4096 MiB |
+| Worker memory admission mode | soft |
+| Total worker memory target | 4096 MiB |
 | Maximum workers | 32 |
 | Interactive protected memory / workers | 1024 MiB / 8 |
 | Nested-only memory / workers | 512 MiB / 4 |
@@ -107,18 +108,38 @@ Downstream response-buffer reservations also protect interactive and nested work
 
 Queue waits share one capacity deadline across per-function admission and memory admission, also bounded by the invocation deadline. Queue size checks and memory/worker reservations are atomic. Cancellation removes waiting requests. When limits remain occupied, the request receives a typed reason rather than waiting indefinitely. This is bounded priority admission, not a guarantee that every request succeeds under overload.
 
-Host validation checks physical memory and enclosing Linux cgroup limits, with room for configured build processes, protocol buffers and host headroom. It cannot infer a safe allowance for unrelated services; set adequate host headroom for the deployment. Unsupported host measurements are reported as unavailable. For compatibility, an existing environment configuration starts with a visible warning when it fails the new validation; API changes must pass validation. Lowering total limits below current reservations returns 409 and requires draining first. Lowering class limits affects new admission and does not kill existing work.
+Host validation checks physical memory and enclosing Linux cgroup limits, with room for configured build processes, protocol buffers and host headroom. It cannot infer a safe allowance for unrelated services; set adequate host headroom for the deployment. Unsupported host measurements are reported as unavailable. For compatibility, an existing environment configuration starts with a visible warning when it fails the new validation; API changes must pass validation. In strict mode, lowering total limits below current allowances returns 409 and requires draining first. Lowering class limits affects new admission and does not kill existing work.
+
+## Soft memory admission (default)
+
+`settings.memory_mode` is `soft` by default, including existing persisted settings that predate this field. Set `APTEVA_FUNCTIONS_MEMORY_MODE=strict` for the startup default, or save `memory_mode: "strict"` through `PUT /capacity/settings`. Persisted explicit settings take precedence over the environment. The PUT endpoint accepts the complete settings object from GET with the desired fields changed; an older client omitting `memory_mode` selects soft.
+
+Soft mode separates a worker's hard `max_memory_mb` from its scheduling charge. For a measured Linux cgroup, charge current usage rounded up to MiB plus 25% (at least 16 MiB), capped at its hard allowance, but never below measured usage. A 256 MiB worker using 40 MiB counts as 56 MiB. Measurements are cached for at most 100 ms. Starting workers retain their **full allowance** until registered and measured. Missing cgroup measurements, including RSS-only readings and unsupported platforms, also retain the full allowance. This avoids treating unknown usage as zero.
+
+The total and class memory budgets apply to these scheduling charges in soft mode. Combined hard worker limits may exceed the target. This is controlled overcommit, not an aggregate kernel memory cap or a guarantee against simultaneous spikes. Per-worker cgroup memory limits, worker counts, queue bounds and protected interactive/nested partitions remain enforced. New cold starts also check physical `MemAvailable` and remaining enclosing cgroup memory against host headroom and pending starts. Builds remain separately bounded. Existing active calls are not killed to make room.
+
+Under real pressure, eligible idle workers are evicted before bounded waiting. Memory is rechecked during waits, so admission can recover when a live process frees memory without exiting. `memory_pressure` identifies scheduling-target pressure; `host_memory_pressure` identifies insufficient host/container headroom. Cancellation releases waiting slots. Nested calls still fail promptly if their protected capacity is occupied, avoiding a parent/child deadlock. Ordinary warm-worker reuse remains available; this admission check controls new workers, not every allocation by a running handler.
+
+The capacity API includes:
+
+- `memory_admission.mode`, `accounted_memory_mb`, `accounted_by_class_mb`, `starting_allowance_mb`, `fallback_workers`, `host_available_memory_mb` (null when unavailable), and `sample_max_age_ms`.
+- `workers[].admission_memory_mb` and `functions[].admission_memory_mb` beside their measured memory and hard allowances.
+- Existing `reserved_memory_mb` fields retain their original meaning: the sum of configured worker limits. They are **not** actual memory or the admission charge in soft mode.
+
+The themed panel offers the soft/strict selector and displays admission usage, combined hard limits and actual memory separately. Per-call measurements retain their existing semantics.
+
+Switching to strict with live allowances above the total returns 409 until drained. Soft targets may be lowered while work is running; new starts wait for enough room without killing existing calls. Host validation still applies to settings changes. No database migration is required.
 
 ## Deadlines, nested calls and errors
 
 Integrations use a separate pooled HTTP transport from ordinary app calls. Effective downstream time is the shorter of the configured operation timeout and remaining invocation time, including admission waits, headers and body reading. Dial and TLS handshake timeouts remain 10 seconds. Connection metadata lookups retain a 30-second bound. Changing Functions does not override a provider/catalog tool's own stricter timeout.
 
-Direct `context.call("functions", "functions_invoke", ...)` calls execute with trusted in-process ancestry, the parent's cancellation/deadline and the child's policy. Parents keep their real memory reservation. Children use the finite nested reserve; insufficient child capacity, excessive depth or recursion returns an explicit error immediately. This avoids waiting behind parents that hold all root capacity. Calls routed indirectly through unrelated apps do not acquire synthetic trusted ancestry; use direct Functions calls for bounded nested workflows.
+Direct `context.call("functions", "functions_invoke", ...)` calls execute with trusted in-process ancestry, the parent's cancellation/deadline and the child's policy. Parents retain their memory accounting while waiting; soft mode measures the live worker and strict mode counts its hard allowance. Children use the finite nested reserve; insufficient child capacity, excessive depth or recursion returns an explicit error immediately. This avoids waiting behind parents that hold all root capacity. Calls routed indirectly through unrelated apps do not acquire synthetic trusted ancestry; use direct Functions calls for bounded nested workflows.
 
 Relevant `resources.error_code` / HTTP error codes include:
 
 - `integration_timeout`, `app_call_timeout`, `invocation_timeout`, `upstream_timeout`, `caller_canceled`.
-- `memory_budget_exhausted`, `worker_memory_limit`, `worker_limit`, `function_worker_limit`.
+- `memory_pressure`, `host_memory_pressure`, `memory_budget_exhausted`, `worker_memory_limit`, `worker_limit`, `function_worker_limit`.
 - `queue_limit`, `function_queue_limit`, `protocol_memory_limit`, `nested_capacity_exhausted`, `nested_downstream_limit`, `nested_cycle`, `nested_depth_limit`.
 - `worker_oom`, based on cgroup OOM evidence, not merely an arbitrary killed process.
 
