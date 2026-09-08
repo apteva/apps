@@ -1143,7 +1143,12 @@ func workerPageHTML(token string) string {
 	    }
 	    function publicWorkerURL(path) {
 	      const exp = Math.floor(Date.now() / 1000) + 86400;
-	      return API + path + "?sig=" + encodeURIComponent(TOKEN) + "&exp=" + exp;
+	      const url = new URL(API + path, window.location.origin);
+          const selector = new URLSearchParams(window.location.search).get("install_id");
+          if (selector) url.searchParams.set("install_id", selector);
+          url.searchParams.set("sig", TOKEN);
+          url.searchParams.set("exp", String(exp));
+          return url.pathname + url.search;
 	    }
 	    function renderFilePreview(file, status) {
 	      const card = document.createElement("article");

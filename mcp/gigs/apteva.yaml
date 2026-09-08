@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.5.1
+version: 0.5.2
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -275,7 +275,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: gigs/v0.5.1
+    ref: gigs/v0.5.2
     entry: mcp/gigs
   port: 8080
   health_check: /health

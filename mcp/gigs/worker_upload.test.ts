@@ -67,3 +67,23 @@ test('expired partial session is replaced and completed init is reused', async (
   expect(await c.uploadFile(file,'clip',()=>{})).toBe(93);
   expect(await c.uploadFile(file,'clip',()=>{})).toBe(93);
 });
+
+
+test('worker URLs preserve install routing and binary-part query parameters', () => {
+  const pageSource = readFileSync(new URL('./worker_page.go', import.meta.url), 'utf8');
+  const helper = pageSource.slice(pageSource.indexOf('function publicWorkerURL(path)'), pageSource.indexOf('function renderFilePreview('));
+  for (const initial of ['http://localhost:5280/api/apps/gigs/worker/token?install_id=45', 'http://localhost:5280/api/apps/gigs/_install/45/worker/token']) {
+    const location = new URL(initial);
+    const makeURL = new Function('window', 'TOKEN', 'API', helper + ';return publicWorkerURL;')({location}, 'token', location.pathname);
+    const part = new URL(makeURL('/upload/part?upload_id=ABC12345&part_number=2'), location.origin);
+    expect(part.searchParams.get('part_number')).toBe('2');
+    expect(part.searchParams.get('upload_id')).toBe('ABC12345');
+    expect(part.searchParams.get('sig')).toBe('token');
+    expect(Number(part.searchParams.get('exp'))).toBeGreaterThan(Date.now()/1000);
+    expect(part.pathname).toBe(location.pathname + '/upload/part');
+    expect(part.searchParams.get('install_id')).toBe(location.searchParams.get('install_id'));
+    const data = new URL(makeURL('/api/gig'), location.origin);
+    expect(data.pathname).toBe(location.pathname+'/api/gig');
+    expect(data.searchParams.get('install_id')).toBe(location.searchParams.get('install_id'));
+  }
+});
