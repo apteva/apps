@@ -255,6 +255,19 @@ func collectLocalMetrics() (*Metrics, error) {
 
 // ─── Remote — SSH-execute a /proc parser ─────────────────────────
 
+// Split the interface name at the colon, independently of optional leading
+// whitespace. Network device names of six or more characters are not padded.
+const remoteLinuxNetworkAWK = `
+  NR>2 {
+    iface=$1; gsub(/^[[:space:]]+|[[:space:]]+$/, "", iface)
+    if (iface == "lo") next
+    counters=$2; sub(/^[[:space:]]+/, "", counters)
+    split(counters, values, /[[:space:]]+/)
+    gsub(/\\/, "\\\\", iface); gsub(/"/, "\\\"", iface)
+    printf "{\"iface\":\"%s\",\"rx_bytes\":%s,\"tx_bytes\":%s},", iface, values[1], values[9]
+  }
+`
+
 const remoteVitalsScript = `
 set -e
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -288,7 +301,7 @@ LOAD=$(cat /proc/loadavg | awk '{print $1, $2, $3}')
 UPTIME=$(awk '{print int($1)}' /proc/uptime)
 PROCS=$(ls -1 /proc | grep -cE '^[0-9]+$')
 DISK=$(df -P -B1 -x tmpfs -x devtmpfs -x squashfs 2>/dev/null | tail -n +2 | awk '{printf "{\"mount\":\"%s\",\"used_bytes\":%s,\"total_bytes\":%s,\"used_pct\":%s},", $6, $3, $2, $5}' | sed 's/%//g; s/,$//')
-NET=$(awk -F'[: ]+' 'NR>2 && $2 != "lo" {printf "{\"iface\":\"%s\",\"rx_bytes\":%s,\"tx_bytes\":%s},", $2, $3, $11}' /proc/net/dev | sed 's/,$//')
+NET=$(awk -F: '` + remoteLinuxNetworkAWK + `' /proc/net/dev | sed 's/,$//')
 read used total avail swap <<EOF
 $MEM
 EOF
