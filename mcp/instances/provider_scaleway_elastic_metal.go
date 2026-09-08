@@ -266,7 +266,8 @@ func scalewayElasticMetalProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*In
 		}
 		install["partitioning_schema"] = schema
 	}
-	args := map[string]any{"zone": in.Region, "offer_id": scalewayElasticMetalID(in.Size), "project_id": access.ProjectID, "name": in.Name, "description": "Managed by Apteva Instances", "tags": []string{"managed-by-apteva", "apteva-instance-" + fmt.Sprint(inst.ID)}, "install": install, "user_data": map[string]any{"value": base64.StdEncoding.EncodeToString([]byte(buildCloudInit(pub)))}}
+	// The API's bytes value is a base64 JSON string, not a {"value": ...} object.
+	args := map[string]any{"zone": in.Region, "offer_id": scalewayElasticMetalID(in.Size), "project_id": access.ProjectID, "name": in.Name, "description": "Managed by Apteva Instances", "tags": []string{"managed-by-apteva", "apteva-instance-" + fmt.Sprint(inst.ID)}, "install": install, "user_data": base64.StdEncoding.EncodeToString([]byte(buildCloudInit(pub)))}
 	data, err := executeProviderToolOnConnection(ctx, in.ProviderConnectionID, "scaleway", "elastic_metal_server_create", args)
 	if err != nil {
 		_ = deleteScalewaySSHKeyOnConnection(ctx, in.ProviderConnectionID, access.SSHKeyID)
