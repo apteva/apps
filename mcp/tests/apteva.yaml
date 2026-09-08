@@ -1,0 +1,51 @@
+schema: apteva-app/v1
+name: tests
+display_name: Tests
+version: 0.1.0
+description: Project test suites, function and HTTP assertions, durable queued runs, and saved failure evidence.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/tests
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [tests, checks, quality, functions]
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+requires:
+  permissions: [db.write.app, platform.apps.call, net.egress]
+  apps:
+    - { name: functions, optional: true, reason: "Select Functions to enable function checks; omit for HTTP-only suites." }
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: tests_suites_list, description: List project test suites. }
+    - { name: tests_suite_save, description: Create or update a suite. }
+    - { name: tests_suite_archive, description: Archive a suite while retaining its history. }
+    - { name: tests_checks_list, description: List a suite's checks. }
+    - { name: tests_check_save, description: Create or replace a function or HTTP check with assertions. }
+    - { name: tests_check_delete, description: Delete a check while retaining historical run snapshots. }
+    - { name: tests_run, description: Queue a suite run and return its id immediately. }
+    - { name: tests_runs_list, description: List recent suite runs. }
+    - { name: tests_run_get, description: Get a run and its per-check results and assertions. }
+  ui_panels:
+    - { slot: project.page, label: Tests, icon: circle-check, entry: /ui/TestsPanel.mjs }
+  workers:
+    - { name: runner, schedule: "@every 1s" }
+    - { name: events, schedule: "@every 2s" }
+  publishes:
+    - { name: tests.suite.saved, description: A suite was created or updated. }
+    - { name: tests.suite.archived, description: A suite was archived. }
+    - { name: tests.check.saved, description: A check was created or updated. }
+    - { name: tests.check.deleted, description: A check was deleted. }
+    - { name: tests.run.queued, description: A suite run was queued. }
+    - { name: tests.run.completed, description: A run finished with passed or failed status and result counts. }
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: tests/v0.1.0, entry: mcp/tests }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/tests.db
+  migrations: migrations/
+upgrade_policy: auto-patch
