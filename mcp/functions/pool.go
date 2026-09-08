@@ -36,6 +36,8 @@ func poolFrom(ctx context.Context) *pool {
 var errFunctionBusy = errors.New("function capacity exhausted; retry later")
 
 type pool struct {
+	protocolBudget       atomic.Pointer[protocolBudget]
+	protocolWaiters      atomic.Int64
 	startupSteps         []startupStep
 	recoveredWork        int64
 	legacySnapshotsReady chan struct{}

@@ -1,5 +1,7 @@
 # Functions 1.11.2
 
+**Unreleased:** configurable soft protocol-buffer admission, bounded bursts and queueing, with API and themed panel controls. See [protocol settings and local evidence](SOFT_PROTOCOL.md).
+
 **New in 1.11.2:** indexed active-work recovery, process ownership, and runtime startup/drain APIs. The companion platform handover change is not released with this app. See [startup recovery and validation](STARTUP_RECOVERY.md).
 
 **Fixed in 1.11.1:** nested calls can borrow unused shared protocol-buffer capacity beyond their protected allowance, while the hard total limit remains enforced. See [regression evidence](NESTED_PROTOCOL_VALIDATION.md).

@@ -1481,6 +1481,10 @@ function CallMemory({ resources: r }: { resources?: CallResources }) {
 }
 
 const capacityLabels: Record<string, string> = {
+  protocol_memory_mode: "Protocol buffer admission",
+  protocol_target_mb: "Protocol soft target (MiB)",
+  protocol_hard_limit_mb: "Protocol hard ceiling (MiB)",
+  protocol_wait_timeout_ms: "Protocol wait timeout (ms)",
   interactive_reserved_queue: "Protected interactive queue slots",
   nested_reserved_queue: "Reserved child queue slots",
   app_timeout_ms: "Default app call timeout (ms)",
@@ -1517,6 +1521,11 @@ interface CapacitySnapshot {
   validation_warning?: string;
   protocol_reserved_bytes: number;
   protocol_capacity?: {
+    mode: string;
+    target_bytes: number;
+    over_target_bytes: number;
+    waiting_calls: number;
+    burst_admissions: number;
     hard_limit_bytes: number;
     nested_protected_bytes: number;
     nested_reserved_bytes: number;
@@ -1612,7 +1621,9 @@ function CapacityView({ api }: { api: ApiFn }) {
           Host/container limit: {data.effective_host_memory_mb ? `${data.effective_host_memory_mb} MiB` : "Unavailable"} · Downstream buffer reservations: {memoryText(data.protocol_reserved_bytes)}
         </p>
         {data.protocol_capacity && <p className="text-xs text-text-muted">
-          Protocol buffer limit: {memoryText(data.protocol_capacity.hard_limit_bytes)} · Available: {memoryText(data.protocol_capacity.available_bytes)}.
+          Protocol buffers: {data.protocol_capacity.mode} · Target: {memoryText(data.protocol_capacity.target_bytes)} · Hard ceiling: {memoryText(data.protocol_capacity.hard_limit_bytes)} · Available: {memoryText(data.protocol_capacity.available_bytes)}.
+          {" "}Over target: {memoryText(data.protocol_capacity.over_target_bytes)} · Waiting calls: {data.protocol_capacity.waiting_calls}.
+          {" "}Soft bursts require measured host headroom. The hard ceiling and frame limits remain enforced.
           {" "}Nested reservations: {memoryText(data.protocol_capacity.nested_reserved_bytes)} · Protected: {memoryText(data.protocol_capacity.nested_protected_bytes)} · Borrowed shared capacity: {memoryText(data.protocol_capacity.nested_borrowed_bytes)}.
           {" "}Nested calls can borrow unused shared capacity within the hard total limit.
         </p>}
@@ -1660,6 +1671,9 @@ function CapacityView({ api }: { api: ApiFn }) {
               {key === "memory_mode" ? <select value={value} className={inputCls} onChange={e => setSettings({ ...settings, memory_mode: e.target.value })}>
                 <option value="soft">Soft (default): measured usage with headroom</option>
                 <option value="strict">Strict: full worker allowances</option>
+              </select> : key === "protocol_memory_mode" ? <select value={value} className={inputCls} onChange={e => setSettings({ ...settings, protocol_memory_mode: e.target.value })}>
+                <option value="soft">Soft: burst with host headroom</option>
+                <option value="strict">Strict: enforce the target</option>
               </select> : <input type="number" min={0} value={value} className={inputCls} onChange={e => setSettings({ ...settings, [key]: Number(e.target.value) })} />}
             </label>
           ))}

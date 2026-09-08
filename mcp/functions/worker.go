@@ -803,8 +803,8 @@ func readFrameOwned(r io.Reader) ([]byte, func(), error) {
 	if n > maxFrame {
 		return nil, noop, fmt.Errorf("frame too large: %d bytes", n)
 	}
-	if !reserveProtocol(int64(n)) {
-		return nil, noop, errors.New("protocol memory capacity exhausted")
+	if reason := reserveCurrentProtocol(int64(n)); reason != "" {
+		return nil, noop, resourceError(reason, "protocol frame cannot fit within current buffer capacity and host headroom")
 	}
 	release := func() { protocolBytes.Add(-int64(n)) }
 	buf := make([]byte, n)
@@ -937,16 +937,7 @@ func (c *capBuffer) Reset() { c.mu.Lock(); c.buf.Reset(); c.written = 0; c.mu.Un
 var protocolBytes atomic.Int64
 
 func reserveProtocol(n int64) bool {
-	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
-	for {
-		old := protocolBytes.Load()
-		if old+n > limit {
-			return false
-		}
-		if protocolBytes.CompareAndSwap(old, old+n) {
-			return true
-		}
-	}
+	return reserveCurrentProtocol(n) == ""
 }
 
 func streamOperation(ctx context.Context, s invocationStream, f func() error) error {

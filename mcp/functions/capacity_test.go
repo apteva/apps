@@ -418,6 +418,7 @@ func TestConcurrentMixedMemoryReservations(t *testing.T) {
 }
 
 func TestInteractiveAndNestedProtocolReserves(t *testing.T) {
+	t.Setenv("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MODE", "strict")
 	protocolBytes.Store(0)
 	t.Cleanup(func() { protocolBytes.Store(0) })
 	p := &pool{stop: make(chan struct{}), wake: make(chan struct{}, 1)}

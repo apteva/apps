@@ -65,6 +65,10 @@ func policy(fn *Function) RuntimePolicy {
 }
 
 type CapacitySettings struct {
+	ProtocolMode          string `json:"protocol_memory_mode"`
+	ProtocolTargetMB      int    `json:"protocol_target_mb"`
+	ProtocolHardMB        int    `json:"protocol_hard_limit_mb"`
+	ProtocolWaitMS        int    `json:"protocol_wait_timeout_ms"`
 	MemoryMode            string `json:"memory_mode"`
 	InteractiveQueue      int    `json:"interactive_reserved_queue"`
 	NestedQueue           int    `json:"nested_reserved_queue"`
@@ -91,7 +95,9 @@ func defaultCapacity() CapacitySettings {
 	total := envInt("APTEVA_FUNCTIONS_TOTAL_MEMORY_MB", 4096, 16, 1048576)
 	workers := envInt("APTEVA_FUNCTIONS_MAX_WORKERS", 32, 1, 1024)
 	downstream := envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_TOTAL", 64, 1, 1024)
-	return CapacitySettings{MemoryMode: defaultMemoryMode(), InteractiveQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 4, NestedQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 8, AppTimeoutMS: envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000), IntegrationTimeoutMS: envInt("APTEVA_FUNCTIONS_INTEGRATION_TIMEOUT_MS", 300000, 1, 600000), TotalMemoryMB: total, MaxWorkers: workers, MaxWorkerMemoryMB: envInt("APTEVA_FUNCTIONS_MAX_WORKER_MEMORY_MB", 1024, 16, 65536), InteractiveMemoryMB: total / 4, InteractiveWorkers: workers / 4, NestedMemoryMB: total / 8, NestedWorkers: workers / 8, MaxDownstream: downstream, InteractiveDownstream: downstream / 4, NestedDownstream: downstream / 8, MaxQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000), MaxQueuePerFunction: envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000), PreparationWorkers: 2, HostHeadroomMB: 512, MaxNestedDepth: 4}
+	s := CapacitySettings{MemoryMode: defaultMemoryMode(), InteractiveQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 4, NestedQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000) / 8, AppTimeoutMS: envInt("APTEVA_FUNCTIONS_APP_TIMEOUT_MS", 30000, 1, 600000), IntegrationTimeoutMS: envInt("APTEVA_FUNCTIONS_INTEGRATION_TIMEOUT_MS", 300000, 1, 600000), TotalMemoryMB: total, MaxWorkers: workers, MaxWorkerMemoryMB: envInt("APTEVA_FUNCTIONS_MAX_WORKER_MEMORY_MB", 1024, 16, 65536), InteractiveMemoryMB: total / 4, InteractiveWorkers: workers / 4, NestedMemoryMB: total / 8, NestedWorkers: workers / 8, MaxDownstream: downstream, InteractiveDownstream: downstream / 4, NestedDownstream: downstream / 8, MaxQueue: envInt("APTEVA_FUNCTIONS_MAX_QUEUE", 256, 1, 10000), MaxQueuePerFunction: envInt("APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION", 64, 1, 10000), PreparationWorkers: 2, HostHeadroomMB: 512, MaxNestedDepth: 4}
+	s.normalizeProtocol()
+	return s
 }
 
 // Missing mode in older persisted settings and API requests adopts the new default.
@@ -102,6 +108,10 @@ func (s CapacitySettings) memoryMode() string {
 	return s.MemoryMode
 }
 func (s CapacitySettings) validate() error {
+	s.normalizeProtocol()
+	if err := s.validateProtocol(); err != nil {
+		return err
+	}
 	if s.memoryMode() != "soft" && s.memoryMode() != "strict" {
 		return errors.New("memory_mode must be soft or strict")
 	}
@@ -117,7 +127,7 @@ func (s CapacitySettings) validate() error {
 	if s.InteractiveMemoryMB < 0 || s.NestedMemoryMB < 0 || s.InteractiveMemoryMB+s.NestedMemoryMB >= s.TotalMemoryMB || s.InteractiveWorkers < 0 || s.NestedWorkers < 0 || s.InteractiveWorkers+s.NestedWorkers >= s.MaxWorkers || s.InteractiveDownstream < 0 || s.NestedDownstream < 0 || s.InteractiveDownstream+s.NestedDownstream >= s.MaxDownstream || s.PreparationWorkers < 0 || s.PreparationWorkers > s.MaxWorkers {
 		return errors.New("reserved capacity must leave shared capacity; preparation workers must fit the global limit")
 	}
-	if limit := hostMemoryLimitMB(); limit > 0 && int64(s.TotalMemoryMB+s.HostHeadroomMB+envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)*envInt("APTEVA_FUNCTIONS_BUILD_MEMORY_MB", 1024, 64, 8192)+envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) > limit {
+	if limit := hostMemoryLimitMB(); limit > 0 && int64(s.TotalMemoryMB+s.HostHeadroomMB+envInt("APTEVA_FUNCTIONS_MAX_BUILDS", 2, 1, 32)*envInt("APTEVA_FUNCTIONS_BUILD_MEMORY_MB", 1024, 64, 8192)+s.ProtocolHardMB) > limit {
 		return fmt.Errorf("worker budget plus host/build/protocol headroom exceeds effective host limit %d MiB", limit)
 	}
 	return nil
@@ -139,6 +149,7 @@ func (p *pool) settingsLocked() CapacitySettings {
 	}
 	s := p.capacity
 	s.MemoryMode = s.memoryMode()
+	s.normalizeProtocol()
 	return s
 }
 func (p *pool) initCapacity() error {
@@ -156,6 +167,8 @@ func (p *pool) initCapacity() error {
 			return err
 		}
 	}
+	p.capacity.normalizeProtocol()
+	p.protocolBudget.Store(newProtocolBudget(p.capacity))
 	// Existing installations continue with explicit warnings if their configured
 	// budget exceeds the new host validation. API updates must pass validation.
 	if err := p.capacity.validate(); err != nil {
@@ -431,7 +444,7 @@ func (p *pool) capacitySnapshot(pid string) map[string]any {
 	for _, g := range groups {
 		functionGroups = append(functionGroups, g)
 	}
-	return map[string]any{"protocol_capacity": protocolCapacitySnapshot(protocolByClass), "memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024), "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
+	return map[string]any{"protocol_capacity": p.protocolCapacitySnapshot(protocolByClass), "memory_admission": memoryAdmission, "functions": functionGroups, "settings": settings, "protocol_memory_limit_mb": p.protocolConfig().hard >> 20, "protocol_reserved_bytes": protocolBytes.Load(), "effective_host_memory_mb": hostMemoryLimitMB(), "validation_warning": warning, "global": map[string]any{"reserved_by_class": classReservations, "starting_workers": starting, "reserved_memory_mb": reserved, "live_workers": len(workers), "actual_worker_memory_bytes": actual, "measured_workers": measured, "memory_measurement_complete": measured == len(workers), "downstream_by_class": down, "queue_depth": globalQueued, "queued_by_class": queueByClass, "protocol_reserved_by_class": protocolByClass, "rejections": reasons}, "project_id": pid, "workers": ws, "calls": live, "queue_depth": queued, "memory_note": "Current/peak values measure the worker, including its loaded runtime and retained allocations. Peaks are sampled during the call, not exclusive allocations by that call."}
 }
 func (a *App) handleHTTPCapacity(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -464,7 +477,8 @@ func (a *App) handleHTTPCapacitySettings(w http.ResponseWriter, r *http.Request)
 		httpErr(w, 405, "GET or PUT required")
 		return
 	}
-	var s CapacitySettings
+	current := p.settings()
+	s := CapacitySettings{ProtocolMode: current.ProtocolMode, ProtocolTargetMB: current.ProtocolTargetMB, ProtocolHardMB: current.ProtocolHardMB, ProtocolWaitMS: current.ProtocolWaitMS}
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&s); err != nil {
@@ -472,6 +486,7 @@ func (a *App) handleHTTPCapacitySettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.MemoryMode = s.memoryMode()
+	s.normalizeProtocol()
 	if err := s.validate(); err != nil {
 		httpErr(w, 400, err.Error())
 		return
@@ -483,12 +498,21 @@ func (a *App) handleHTTPCapacitySettings(w http.ResponseWriter, r *http.Request)
 		httpErr(w, 409, "new limits are below current reservations; drain workers first")
 		return
 	}
+	protocolAdmissionMu.Lock()
+	if newProtocolBudget(s).hard < protocolBytes.Load() {
+		protocolAdmissionMu.Unlock()
+		p.mu.Unlock()
+		httpErr(w, 409, "protocol ceiling is below current reservations; wait for buffers to drain")
+		return
+	}
 	b, _ := json.Marshal(s)
 	_, err := p.ctx.AppDB().Exec("INSERT INTO function_capacity_settings(id,settings_json) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET settings_json=excluded.settings_json", string(b))
 	if err == nil {
 		p.capacity = s
+		p.protocolBudget.Store(newProtocolBudget(s))
 		p.capacityWarning = ""
 	}
+	protocolAdmissionMu.Unlock()
 	p.mu.Unlock()
 	if err != nil {
 		httpErr(w, 500, err.Error())
@@ -569,11 +593,18 @@ func (t *callTrace) addCapacityWait(elapsed time.Duration) {
 
 // Protected nested capacity is a floor against root/background reservations,
 // not a separate cap. Byte totals include both callback allowances and frames.
-func protocolCapacitySnapshot(classes map[string]int64) map[string]any {
-	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
+func (p *pool) protocolCapacitySnapshot(classes map[string]int64) map[string]any {
+	b := p.protocolConfig()
+	limit := b.hard
 	used := protocolBytes.Load()
 	nested := classes["nested"]
+	free := b.hostAvailable()
+	var hostAvailable *int64
+	if free >= 0 {
+		hostAvailable = &free
+	}
 	return map[string]any{
+		"callback_allowance_bytes": maxFrame, "frame_limit_bytes": maxFrame, "mode": b.mode, "target_bytes": b.target, "over_target_bytes": max(0, used-b.target), "waiting_calls": p.protocolWaiters.Load(), "burst_admissions": b.bursts.Load(), "host_available_memory_mb": hostAvailable, "host_headroom_mb": b.headroom, "wait_timeout_ms": b.wait.Milliseconds(),
 		"hard_limit_bytes": limit, "reserved_bytes": used, "available_bytes": max(0, limit-used),
 		"nested_protected_bytes": limit / 8, "nested_reserved_bytes": nested,
 		"nested_borrowed_bytes": max(0, nested-limit/8), "nested_can_borrow_shared": true,

@@ -1,3 +1,5 @@
+> Unreleased: protocol buffering now has its own soft/strict mode, target, hard ceiling and bounded wait settings, independent of worker memory mode. See [protocol settings and validation](SOFT_PROTOCOL.md). The 1.11.1 protocol behavior documented below describes the prior released defaults.
+
 # Capacity, memory and deadlines
 
 These Functions changes ship in 1.10.0. The companion server cancellation patch requires a separate platform release; Functions alone cannot cancel provider work inside an older gateway. See [CAPACITY_VALIDATION.md](CAPACITY_VALIDATION.md) for test evidence and rollout notes.

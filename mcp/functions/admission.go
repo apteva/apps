@@ -318,26 +318,42 @@ func capacityWaitContext(ctx context.Context, fn *Function) (context.Context, co
 // nested portion is protected capacity, not a ceiling: children may borrow any
 // unused shared bytes, always subject to the same global atomic byte limit.
 func (p *pool) acquireProtocol(ctx context.Context, class string, n int64) (func(), error) {
-	limit := int64(envInt("APTEVA_FUNCTIONS_PROTOCOL_MEMORY_MB", 128, 16, 1024)) << 20
-	allowed := limit - limit/8
-	if class == "background" {
-		allowed -= limit / 4
-	}
-	if class == "nested" {
-		allowed = limit
-	}
-	if n > allowed {
-		return nil, p.reject(resourceError("protocol_memory_limit", "downstream response allowance cannot fit in this class protocol budget"))
-	}
+	wait, cancel := context.WithTimeout(ctx, p.protocolConfig().wait)
+	defer cancel()
+	queued := false
+	lastReason, lastMessage := "protocol_memory_limit", "protocol buffer ceiling exhausted"
+	defer func() {
+		if queued {
+			p.protocolWaiters.Add(-1)
+		}
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		p.mu.Lock()
+		if err := ctx.Err(); err != nil {
+			p.mu.Unlock()
+			return nil, err
+		}
+		if class != "nested" && wait.Err() != nil {
+			p.mu.Unlock()
+			return nil, p.reject(resourceError(lastReason, lastMessage+"; protocol wait deadline expired"))
+		}
+		b := p.protocolConfig()
+		allowed := protocolClassLimit(b.hard, class)
+		if n > allowed {
+			p.mu.Unlock()
+			return nil, p.reject(resourceError("protocol_memory_limit", "response allowance exceeds the class protocol ceiling"))
+		}
+		if p.closed {
+			p.mu.Unlock()
+			return nil, resourceError("runtime_stopped", "pool closed")
+		}
 		if p.protocolClasses == nil {
 			p.protocolClasses = map[string]int64{}
 		}
-		used := int64(0)
+		var used int64
 		for c, v := range p.protocolClasses {
 			if class == "nested" && c == "nested" || class != "nested" && c != "nested" {
 				if class != "background" || c == "background" {
@@ -345,21 +361,42 @@ func (p *pool) acquireProtocol(ctx context.Context, class string, n int64) (func
 				}
 			}
 		}
-		if used+n <= allowed && reserveProtocol(n) {
+		reason := "protocol_memory_limit"
+		if used+n <= allowed {
+			reason = reserveProtocolBudget(b, n, used+n > protocolClassLimit(b.target, class))
+		}
+		if reason == "" {
 			p.protocolClasses[class] += n
 			p.mu.Unlock()
 			return func() { p.mu.Lock(); p.protocolClasses[class] -= n; p.mu.Unlock(); protocolBytes.Add(-n); p.signal() }, nil
 		}
 		p.mu.Unlock()
+		message := "protocol buffer ceiling exhausted"
+		if reason == "protocol_host_memory_pressure" {
+			message = "protocol burst denied: insufficient or unavailable host memory headroom"
+		}
+		// A waiting parent may hold exactly the bytes its child needs. Children
+		// borrow immediately when safe; they never queue behind that parent.
 		if class == "nested" {
-			return nil, p.reject(resourceError("protocol_memory_limit", "global protocol memory budget exhausted during nested call"))
+			return nil, p.reject(resourceError(reason, message+" during nested call"))
+		}
+		lastReason, lastMessage = reason, message
+		if !queued {
+			p.protocolWaiters.Add(1)
+			queued = true
 		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(5 * time.Millisecond):
+		case <-wait.Done():
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, p.reject(resourceError(reason, message+"; protocol wait deadline expired"))
 		case <-p.stop:
 			return nil, resourceError("runtime_stopped", "pool stopped")
+		case <-p.wake:
+		case <-time.After(5 * time.Millisecond):
 		}
 	}
 }
