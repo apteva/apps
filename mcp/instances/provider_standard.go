@@ -102,6 +102,19 @@ func apiProviderListServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType,
 	if err != nil {
 		return nil, err
 	}
+	if provider == "vultr" {
+		// Keep the existing Cloud Compute family and include VX1. Both use
+		// the same create API; pagination and account-scoped caching apply.
+		data, err := executeProviderTool(ctx, provider, "list_plans", map[string]any{"type": "vx1", "per_page": 500})
+		if err != nil {
+			return nil, err
+		}
+		vx1, err := parseProviderServerTypes(provider, data)
+		if err != nil {
+			return nil, err
+		}
+		types = append(types, vx1...)
+	}
 	for i := range types {
 		if types[i].Platform == "" {
 			types[i].Platform = "linux"
@@ -406,7 +419,7 @@ func apiProviderProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, e
 func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstanceInput) error {
 	var selectedType *ServerType
 	types, typesErr := apiProviderListServerTypes(ctx, provider)
-	if typesErr != nil && in.Size == "" {
+	if typesErr != nil && (in.Size == "" || provider == "vultr") {
 		return typesErr
 	}
 	if in.Size == "" {
@@ -424,6 +437,17 @@ func applyAPIProviderDefaults(ctx *sdk.AppCtx, provider string, in *CreateInstan
 			selectedType = &types[i]
 			break
 		}
+	}
+	if provider == "vultr" {
+		if selectedType == nil {
+			return fmt.Errorf("Vultr plan %s is not available in the supported local-disk catalog; diskless VX1 boot volumes are not supported", in.Size)
+		}
+		if selectedType.MonthlyPriceUSD <= 0 {
+			return fmt.Errorf("Vultr plan %s has no valid price; refresh the catalog before provisioning", in.Size)
+		}
+		// Always use the selected account's provider quote, including when a
+		// caller supplies a cost. Missing catalog data must not imply free.
+		in.MonthlyCostCents = int(selectedType.MonthlyPriceUSD*100 + 0.5)
 	}
 	if in.Region == "" {
 		locations, err := apiProviderListLocations(ctx, provider)
@@ -923,6 +947,16 @@ func kickAPIProviderReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		fresh, err := dbGetInstance(ctx.AppDB(), id)
 		if err != nil || fresh.Status != "provisioning" {
 			return
+		}
+		// Older versions persisted provider placeholders. Normalize those
+		// rows as well as new create responses before selecting an SSH host.
+		ipv4, ipv6 := usableProviderIP(fresh.PublicIPv4, 4), usableProviderIP(fresh.PublicIPv6, 6)
+		if ipv4 != fresh.PublicIPv4 || ipv6 != fresh.PublicIPv6 {
+			if err := dbUpdateInstance(ctx.AppDB(), id, map[string]any{"public_ipv4": ipv4, "public_ipv6": ipv6}); err != nil {
+				failInstanceStage(ctx, id, "Network", err)
+				return
+			}
+			fresh.PublicIPv4, fresh.PublicIPv6 = ipv4, ipv6
 		}
 		if fresh.PublicIPv4 == "" && fresh.PublicIPv6 == "" {
 			_ = dbUpdateInstance(ctx.AppDB(), id, map[string]any{"lifecycle_stage": "Network"})

@@ -13,15 +13,17 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 	case "vultr":
 		var v struct {
 			Plans []struct {
-				ID          string   `json:"id"`
-				VCPU        int      `json:"vcpu_count"`
-				VCPULegacy  int      `json:"vcpu"`
-				RAM         int      `json:"ram"`
-				Disk        int      `json:"disk"`
-				Type        string   `json:"type"`
-				MonthlyCost float64  `json:"monthly_cost"`
-				HourlyCost  float64  `json:"hourly_cost"`
-				Locations   []string `json:"locations"`
+				ID             string   `json:"id"`
+				VCPU           int      `json:"vcpu_count"`
+				VCPULegacy     int      `json:"vcpu"`
+				RAM            int      `json:"ram"`
+				Disk           int      `json:"disk"`
+				Type           string   `json:"type"`
+				MonthlyCost    float64  `json:"monthly_cost"`
+				HourlyCost     float64  `json:"hourly_cost"`
+				Locations      []string `json:"locations"`
+				DeployOnDemand *bool    `json:"deploy_ondemand"`
+				StorageType    string   `json:"storage_type"`
 			} `json:"plans"`
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
@@ -36,7 +38,21 @@ func parseProviderServerTypes(provider string, data json.RawMessage) ([]ServerTy
 			if p.ID == "" {
 				continue
 			}
-			out = append(out, ServerType{Name: p.ID, Description: p.ID, Cores: cores, MemoryGB: float64(p.RAM) / 1024, DiskGB: p.Disk, CPUType: vultrCPUType(p.Type), Architecture: "x86", MonthlyPriceUSD: p.MonthlyCost, HourlyPriceUSD: p.HourlyCost, AvailableIn: p.Locations})
+			if p.DeployOnDemand != nil && !*p.DeployOnDemand {
+				continue
+			}
+			vx1 := p.Type == "vx1" || strings.HasPrefix(p.ID, "vx1-")
+			if vx1 && (p.Disk <= 0 || p.StorageType == "block_storage" || len(p.Locations) == 0) {
+				// Diskless VX1 needs a bootable block device, which the current
+				// adapter cannot provision or attach during server creation.
+				continue
+			}
+			plan := ServerType{Name: p.ID, Description: p.ID, Cores: cores, MemoryGB: float64(p.RAM) / 1024, DiskGB: p.Disk, CPUType: vultrCPUType(p.Type), Architecture: "x86", MonthlyPriceUSD: p.MonthlyCost, HourlyPriceUSD: p.HourlyCost, AvailableIn: p.Locations}
+			if vx1 {
+				plan.CPUType = "dedicated"
+				plan.BootStorage = []StorageConstraint{{StorageClass: "local", ProviderType: "local", MinSizeGB: p.Disk, MaxSizeGB: p.Disk, Technology: "nvme", Billing: "included"}}
+			}
+			out = append(out, plan)
 		}
 		return out, nil
 	case "linode":
@@ -539,7 +555,7 @@ func parseProviderResource(provider string, data json.RawMessage) (id, ipv4, ipv
 					continue
 				}
 			}
-			return candidateID, ipv4, ipv6
+			return candidateID, usableProviderIP(ipv4, 4), usableProviderIP(ipv6, 6)
 		}
 	}
 	return "", "", ""
@@ -812,12 +828,23 @@ func firstAddress(m map[string]any, key string, version int) string {
 func firstPublicIP(values []string, version int) string {
 	for _, value := range values {
 		ip := net.ParseIP(strings.Split(value, "/")[0])
-		if ip == nil || !isIPVersion(value, version) || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		if ip == nil || ip.IsUnspecified() || !isIPVersion(value, version) || ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
 			continue
 		}
 		return strings.Split(value, "/")[0]
 	}
 	return ""
+}
+
+// A provider may return 0.0.0.0 or :: while networking is being allocated.
+// Those addresses are not SSH destinations, even though they are valid IPs.
+func usableProviderIP(value string, version int) string {
+	value = strings.TrimSpace(strings.Split(value, "/")[0])
+	ip := net.ParseIP(value)
+	if ip == nil || ip.IsUnspecified() || !isIPVersion(value, version) {
+		return ""
+	}
+	return value
 }
 
 func firstIPFromCIDR(value string, version int) string {
@@ -955,7 +982,7 @@ func imageVersion(value string) string {
 }
 
 func vultrCPUType(value string) string {
-	if strings.Contains(strings.ToLower(value), "dedicated") || strings.Contains(strings.ToLower(value), "vhf") {
+	if strings.EqualFold(value, "vx1") || strings.Contains(strings.ToLower(value), "dedicated") || strings.Contains(strings.ToLower(value), "vhf") {
 		return "dedicated"
 	}
 	return "shared"
