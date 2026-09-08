@@ -1,4 +1,4 @@
-# Configurable protocol-buffer admission (unreleased)
+# Configurable protocol-buffer admission in Functions 1.11.3
 
 Worker `memory_mode` and protocol `protocol_memory_mode` are independent.
 Availability can inherit soft worker memory and still encounter a hard
@@ -107,6 +107,6 @@ settings validation/persistence, and legacy environment compatibility. The
 full Functions race suite, Linux container tests, vet, panel build and
 TypeScript checks are included in local validation.
 
-This change is local and unreleased. It changes no production settings and
-requires no Apteva server change. The separate sale-owner issue is outside
-this change.
+Publishing this release does not upgrade installations or change production
+settings. This feature requires no Apteva server change. The separate sale-owner
+issue is outside this change.

@@ -1,6 +1,6 @@
-# Functions 1.11.2
+# Functions 1.11.3
 
-**Unreleased:** configurable soft protocol-buffer admission, bounded bursts and queueing, with API and themed panel controls. See [protocol settings and local evidence](SOFT_PROTOCOL.md).
+**New in 1.11.3:** configurable soft protocol-buffer admission, bounded bursts and queueing, with API and themed panel controls. See [protocol settings and local evidence](SOFT_PROTOCOL.md).
 
 **New in 1.11.2:** indexed active-work recovery, process ownership, and runtime startup/drain APIs. The companion platform handover change is not released with this app. See [startup recovery and validation](STARTUP_RECOVERY.md).
 
