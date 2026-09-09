@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -40,16 +41,36 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})
-	var identityServer *httptest.Server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostPort := listener.Addr().(*net.TCPAddr).Port
+	listener.Close()
+	hostOrigin := fmt.Sprintf("http://127.0.0.1:%d", hostPort)
+	var authSidecar *tk.Sidecar
+	var refreshToken string
+	browserToken := "headless-browser-fixture"
 	if surface == "application-user" {
-		identityServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Authorization") != "Bearer headless-browser-fixture" {
-				http.Error(w, "invalid login", 401)
-				return
-			}
-			writeTier2JSON(w, map[string]any{"user": map[string]any{"id": "browser-user", "organization_id": "test-org", "project_id": tier2Project}})
-		}))
-		defer identityServer.Close()
+		authSidecar = tk.SpawnSidecar(t, "../auth", tk.WithProjectID(tier2Project), tk.WithConfig(map[string]string{"email_verification_required": "false", "app_url": "http://localhost:8080"}))
+		client := authSidecar.MCP("auth_clients_create", map[string]any{"organization_slug": "default", "name": "telephony-browser-regression", "type": "spa", "allowed_origins": []any{hostOrigin}})
+		credentials := map[string]any{"client_id": client["client_id"], "email": "telephony-regression@example.invalid", "password": "Temporary-Test-Only!234"}
+		var signup, login map[string]any
+		if result := authSidecar.POST("/signup", credentials, &signup); result.Status != 201 {
+			t.Fatalf("Auth signup status=%d", result.Status)
+		}
+		if result := authSidecar.POST("/login", credentials, &login); result.Status != 200 {
+			t.Fatalf("Auth login status=%d", result.Status)
+		}
+		browserToken, _ = login["access_token"].(string)
+		refreshToken, _ = login["refresh_token"].(string)
+		if browserToken == "" || refreshToken == "" {
+			t.Fatal("Auth did not issue a real session")
+		}
+		user := login["user"].(map[string]any)
+		if deployed := os.Getenv("TELEPHONY_DEPLOYED_FRONTEND"); deployed != "" {
+			checkDeployedPhoneFrontend(t, deployed, browserToken)
+		}
 		// Route this number to a browser destination assigned to the user.
 		request := func(method, path string, body any) map[string]any {
 			data, _ := json.Marshal(body)
@@ -76,8 +97,8 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		request("POST", "/routing/flows/publish", map[string]any{"id": flow["id"]})
 		request("POST", "/routing/routes/assign", map[string]any{"flow_id": flow["id"], "route_id": route["id"]})
 		request("PUT", "/access/policy", phonePolicy{
-			Users:     []phoneUser{{Identity: phoneIdentity{"auth", "11", "user", "browser-user", "test-org"}, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{destination}}}},
-			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: identityServer.URL, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
+			Users:     []phoneUser{{Identity: phoneIdentity{"auth", "11", "user", fmt.Sprint(user["id"]), fmt.Sprint(user["organization_id"])}, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{destination}}}},
+			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: authSidecar.URL() + "/me?project_id=" + tier2Project, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
 		})
 	}
 
@@ -92,19 +113,17 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		t.Fatalf("incoming status: %d", resp.StatusCode)
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostPort := listener.Addr().(*net.TCPAddr).Port
-	listener.Close()
-	hostOrigin := fmt.Sprintf("http://127.0.0.1:%d", hostPort)
 	target, _ := url.Parse(sc.URL())
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
 		r.Host = target.Host
-		if !strings.HasPrefix(r.URL.Path, "/user/") {
+		// Match the production proxy: manifest-public frontend downloads keep
+		// the user's bearer. The installation token travels separately.
+		publicRoute := strings.HasPrefix(r.URL.Path, "/user/") || r.URL.Path == "/ui/frontend.json" || strings.HasPrefix(r.URL.Path, "/ui/frontend/")
+		if publicRoute && r.Header.Get("Authorization") != "" {
+			r.Header.Set("X-Apteva-App-Token", sc.Token())
+		} else {
 			r.Header.Set("Authorization", "Bearer "+sc.Token())
 		}
 		r.Header.Set("X-User-ID", "1")
@@ -115,6 +134,11 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		w.Header().Set("Access-Control-Allow-Origin", hostOrigin)
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		if r.URL.Path == "/fixture/logout" && authSidecar != nil && r.Method == http.MethodPost {
+			result := authSidecar.POST("/logout", map[string]any{"refresh_token": refreshToken}, nil)
+			w.WriteHeader(result.Status)
+			return
+		}
 		if r.URL.Path == "/fixture/audio-ready" {
 			writeTier2JSON(w, map[string]bool{"ready": audioVerified.Load()})
 			return
@@ -129,7 +153,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			return
 		}
 		media := strings.HasPrefix(path, "/_install/42/softphone/media/")
-		if !media && (r.Header.Get("Authorization") != "Bearer headless-browser-fixture" || r.URL.Query().Get("project_id") != tier2Project || r.URL.Query().Get("install_id") != "42") {
+		if !media && (r.Header.Get("Authorization") != "Bearer "+browserToken || r.URL.Query().Get("project_id") != tier2Project || r.URL.Query().Get("install_id") != "42") {
 			http.Error(w, "invalid fixture auth/scope", 403)
 			return
 		}
@@ -170,7 +194,7 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		t.Fatal(err)
 	}
 	cmd := exec.CommandContext(t.Context(), "bunx", "--no-install", "playwright", "test", "-c", "frontend/playwright.config.ts")
-	cmd.Env = append(os.Environ(), "TELEPHONY_TEST_GATEWAY="+public.URL, fmt.Sprintf("TELEPHONY_HOST_PORT=%d", hostPort), "TELEPHONY_MIC_WAV="+micFile, "TELEPHONY_TEST_SURFACE="+surface)
+	cmd.Env = append(os.Environ(), "TELEPHONY_TEST_GATEWAY="+public.URL, fmt.Sprintf("TELEPHONY_HOST_PORT=%d", hostPort), "TELEPHONY_MIC_WAV="+micFile, "TELEPHONY_TEST_SURFACE="+surface, "TELEPHONY_TEST_USER_TOKEN="+browserToken)
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if err := cmd.Start(); err != nil {
@@ -240,4 +264,45 @@ waitAnswer:
 	case <-time.After(45 * time.Second):
 		t.Fatal("headless browser did not finish")
 	}
+}
+
+// Optional deployment smoke uses the same genuine Auth token as the browser
+// regression. Public code downloads must accept it without an operator key.
+func checkDeployedPhoneFrontend(t *testing.T, base, bearer string) {
+	t.Helper()
+	get := func(path string) []byte {
+		req, _ := http.NewRequest(http.MethodGet, strings.TrimRight(base, "/")+path, nil)
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("deployed frontend %s status=%d", path, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	var manifest struct {
+		Version string `json:"version"`
+		Client  struct {
+			Path   string `json:"path"`
+			SHA256 string `json:"sha256"`
+		} `json:"client"`
+	}
+	if err := json.Unmarshal(get("/ui/frontend.json"), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != "0.4.1" || !strings.HasPrefix(manifest.Client.Path, "/ui/frontend/") {
+		t.Fatal("unexpected deployed frontend version or path")
+	}
+	asset := get(manifest.Client.Path)
+	if fmt.Sprintf("%x", sha256.Sum256(asset)) != manifest.Client.SHA256 {
+		t.Fatal("deployed frontend integrity mismatch")
+	}
+	t.Log("Deployed 0.4.1 manifest and hashed client accepted a genuine Auth bearer")
 }

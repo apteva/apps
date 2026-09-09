@@ -1,7 +1,7 @@
 import { AptevaClient } from "@apteva/web-sdk";
 const w = window as any;
-w.loadPhone = async (gateway: string) => {
-  const sdk = new AptevaClient({ baseURL: gateway, accessToken: "headless-browser-fixture" });
+w.loadPhone = async (gateway: string, accessToken = "headless-browser-fixture") => {
+  const sdk = new AptevaClient({ baseURL: gateway, accessToken });
   w.loaded = await sdk.apps.load<any>("telephony", { projectId: "telephony-tier2", installId: 42, clientOptions: new URLSearchParams(location.search).has("application-user") ? { authProvider: "browser-login" } : undefined });
   w.client = w.loaded.client;
   w.maxMic = 0; w.maxSpeaker = 0; w.notices = [];

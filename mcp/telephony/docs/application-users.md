@@ -2,7 +2,9 @@
 
 Telephony owns communication permissions and call ownership. Consuming apps own
 business rules. No customer-specific roles, IDs, or databases are required.
-The browser needs `@apteva/web-sdk@0.7.0` and an installed Telephony 0.4.0.
+The browser needs `@apteva/web-sdk@0.7.0` and an installed Telephony 0.4.1 or later.
+Telephony 0.4.1 fixes authenticated frontend downloads; 0.4.0 can return 401 when
+the loader sends an application-user bearer.
 
 ## Current Auth sessions
 
