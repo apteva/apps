@@ -356,12 +356,12 @@ func (a *App) toolCompositionListSummary(ctx *sdk.AppCtx, pid string, limit int)
 		     c.updated_at,
 		     COALESCE((
 		       SELECT r.id FROM renders r
-		       WHERE r.composition_id = c.id
+		       WHERE r.composition_id = c.id AND r.output_id IS NULL
 		       ORDER BY r.id DESC LIMIT 1
 		     ), 0) AS latest_render_id,
 		     COALESCE((
 		       SELECT r.status FROM renders r
-		       WHERE r.composition_id = c.id
+		       WHERE r.composition_id = c.id AND r.output_id IS NULL
 		       ORDER BY r.id DESC LIMIT 1
 		     ), '') AS latest_render_status
 		   FROM compositions c
@@ -500,7 +500,7 @@ func loadLatestRender(ctx *sdk.AppCtx, compID int64) map[string]any {
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, executor, status, COALESCE(phase,''), COALESCE(progress_pct,0), COALESCE(progress_json,'{}'),
 		        storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at, qa_json
-		 FROM renders WHERE composition_id=? ORDER BY id DESC LIMIT 1`, compID,
+		 FROM renders WHERE composition_id=? AND output_id IS NULL ORDER BY id DESC LIMIT 1`, compID,
 	).Scan(&id, &executor, &status, &phase, &progressPct, &progressJSON, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt, &qaJSON)
 	if err != nil {
 		return nil
@@ -1216,6 +1216,11 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/composition/"), "/"), "/")
+	if len(parts) >= 2 && parts[1] == "outputs" {
+		a.handleOutputs(w, r, id, parts[2:])
 		return
 	}
 	switch r.Method {

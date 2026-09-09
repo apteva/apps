@@ -1,3 +1,4 @@
+import OutputPresets from "./output-presets";
 // ComposerPanel - AI-native multi-track editor for the stable Composer timeline.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -328,7 +329,7 @@ interface MediaHistoryGeneration {
   actual_duration_seconds?: number;
 }
 
-type Tab = "timeline" | "json";
+type Tab = "timeline" | "json" | "outputs";
 type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "audio"; clipId: string } | { kind: "soundtrack" };
 type ClipEditorTarget = { kind: "visual"; id: string } | { kind: "audio"; id: string } | { kind: "text"; id: string };
 
@@ -2196,14 +2197,14 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
           <option value="local">local</option>
           <option value="remote">remote</option>
         </select>
-        <button onClick={save} className="h-8 px-3 text-sm border border-border rounded flex items-center gap-2 hover:bg-bg-input"><Save size={15} />{dirty ? "Save changes" : "Save"}</button>
-        <button
+        {tab!=="outputs" && <button onClick={save} className="h-8 px-3 text-sm border border-border rounded flex items-center gap-2 hover:bg-bg-input"><Save size={15} />{dirty ? "Save changes" : "Save"}</button>}
+        {tab!=="outputs" && <button
           onClick={render}
           disabled={rendering}
           className="h-8 px-3 text-sm bg-accent text-bg rounded font-semibold flex items-center gap-2 disabled:opacity-50"
         >
           <Sparkles size={15} />{rendering ? "Rendering..." : "Save & render"}
-        </button>
+        </button>}
         <IconButton label={inspectorOpen ? "Hide inspector" : "Show inspector"} onClick={() => { setInspectorOpen((value) => !value); if (window.innerWidth < 1120) setLibraryOpen(false); }}>
           {inspectorOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </IconButton>
@@ -2240,6 +2241,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         <main className="flex-1 min-w-0 flex flex-col">
           <nav className="border-b border-border px-3 pt-2 flex gap-1 text-xs">
             <TabButton active={tab === "timeline"} onClick={() => { if (isV2CompositionJSON(jsonEdit)) { setStatus("V2 scene compositions are edited in JSON. The timeline editor supports V1 clips."); return; } setTab("timeline"); }}>Timeline</TabButton>
+            <TabButton active={tab === "outputs"} onClick={() => setTab("outputs")}>Outputs</TabButton>
             <TabButton active={tab === "json"} onClick={() => setTab("json")}>JSON</TabButton>
           </nav>
           {detailLoading && selectedId != null && (
@@ -2248,7 +2250,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
             </div>
           )}
 
-          {tab === "timeline" ? (
+          {tab === "outputs" ? (selectedId ? <OutputPresets key={selectedId} compositionId={selectedId} projectId={projectId} sourceRevision={selectedFull?.edit_json || ""} /> : <p className="p-4 text-sm">Save the composition to configure its outputs.</p>) : tab === "timeline" ? (
             <div className="flex-1 min-h-0 flex">
               <section className="flex-1 min-w-0 flex flex-col p-4 gap-4 overflow-auto">
                 <PreviewStage

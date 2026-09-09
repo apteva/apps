@@ -149,7 +149,7 @@ func recoverInterruptedComposerRenders(db *sql.DB) (int64, error) {
 		 SET status='queued', phase='queued', next_attempt_at=NULL,
 		     progress_json='{"message":"Resuming interrupted render"}',
 		     updated_at=CURRENT_TIMESTAMP
-		 WHERE status='rendering'`,
+		 WHERE status='rendering' AND output_id IS NULL`,
 	)
 	if err != nil {
 		return 0, err
@@ -187,7 +187,7 @@ func processNextQueuedRenderContext(parent context.Context, ctx *sdk.AppCtx) {
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, composition_id, project_id, executor
 		 FROM renders
-		 WHERE status='queued'
+		 WHERE status='queued' AND output_id IS NULL
 		   AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP)
 		 ORDER BY id LIMIT 1`,
 	).Scan(&job.ID, &job.CompositionID, &job.ProjectID, &job.Executor)
@@ -253,7 +253,7 @@ func cancelQueuedRender(ctx *sdk.AppCtx, renderID int64, expectedProjectID strin
 	res, err := ctx.AppDB().Exec(
 		`UPDATE renders SET status='cancelled', phase='cancelled', progress_pct=100,
 		 finished_at=CURRENT_TIMESTAMP, next_attempt_at=NULL, updated_at=CURRENT_TIMESTAMP
-		 WHERE id=? AND status IN ('queued','rendering')`, renderID,
+		 WHERE id=? AND status IN ('queued','preparing','waiting_ai','rendering')`, renderID,
 	)
 	if err != nil {
 		return nil, err

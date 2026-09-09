@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.7.5
+version: 0.8.0
 description: |
+  v0.8.0 adds saved audio, image-video and full-video output presets sharing
+  one composition and master, selective generation, durable asset reuse,
+  independent previews/history, excerpts and safe artifact adoption.
   v0.7.5 hardens project isolation and remote output validation, protects saved
   drafts with revision checks, and polls existing AI jobs without duplicate
   refresh requests. Save & render persists the current draft first. Split clips,
@@ -310,7 +313,7 @@ requires:
       optional: true
       reason: when render_host_id config > 0, renders SSH-execute on that instance (auto-installs ffmpeg on first use)
     - name: media-studio
-      version: ">=0.10.14"
+      version: ">=0.10.62"
       optional: true
       reason: panel can browse generations and materialize AI clip/soundtrack sources
   integrations:
@@ -328,6 +331,13 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: composition_outputs }
+    - { name: composition_output_update }
+    - { name: composition_output_master }
+    - { name: composition_output_render }
+    - { name: composition_output_history }
+    - { name: composition_output_adopt }
+    - { name: composition_output_estimate }
     - { name: composition_create, description: "Create a v1 timeline composition or a composer/v2 composition via spec." }
     - { name: composition_update, description: "Patch a composition. V2 compositions accept patch.spec or a full composer/v2 payload." }
     - { name: composition_validate, description: "Validate composer/v1 or composer/v2 JSON and report renderer compatibility." }

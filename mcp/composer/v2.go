@@ -102,13 +102,16 @@ type V2Element struct {
 }
 
 type V2Audio struct {
-	ID       string  `json:"id,omitempty"`
-	Asset    string  `json:"asset,omitempty"`
-	Src      string  `json:"src,omitempty"`
-	Start    float64 `json:"start,omitempty"`
-	Duration float64 `json:"duration,omitempty"`
-	Length   float64 `json:"length,omitempty"`
-	Volume   float64 `json:"volume"`
+	SourceEnd    float64 `json:"source_end,omitempty"`
+	PlaybackRate float64 `json:"playback_rate,omitempty"`
+	SourceStart  float64 `json:"source_start,omitempty"`
+	ID           string  `json:"id,omitempty"`
+	Asset        string  `json:"asset,omitempty"`
+	Src          string  `json:"src,omitempty"`
+	Start        float64 `json:"start,omitempty"`
+	Duration     float64 `json:"duration,omitempty"`
+	Length       float64 `json:"length,omitempty"`
+	Volume       float64 `json:"volume"`
 }
 
 type CompositionValidation struct {
@@ -728,11 +731,14 @@ func v2AudioTrack(spec *V2Composition, assets map[string]V2Asset) (Track, bool, 
 		}
 		volume := audio.Volume
 		track.Clips = append(track.Clips, Clip{
-			UID:    audio.ID,
-			Asset:  Asset{Type: "audio", Src: src},
-			Start:  audio.Start,
-			Length: length,
-			Volume: volume, volumeSet: true,
+			UID:          audio.ID,
+			SourceStart:  audio.SourceStart,
+			SourceEnd:    audio.SourceEnd,
+			PlaybackRate: audio.PlaybackRate,
+			Asset:        Asset{Type: "audio", Src: src},
+			Start:        audio.Start,
+			Length:       length,
+			Volume:       volume, volumeSet: true,
 		})
 	}
 	for ti, srcTrack := range spec.Tracks {

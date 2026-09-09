@@ -36,8 +36,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.61
+version: 0.10.62
 description: |
+  v0.10.62 adds project-scoped media_job_get so consumers can poll existing
+  generation jobs without submitting duplicate paid requests.
   v0.10.61 adds media_asset_source: a project-scoped export of retained generation
   bytes, checksum and provenance through Media Studio's own Storage binding.
   Generate images, video, audio, music, and avatars via compatible
@@ -192,6 +194,7 @@ provides:
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
+    - { name: media_job_get }
     - { name: media_history,  description: "List generations newest-first. Args: kind?, limit?, cursor?, since?. Returns next_cursor and has_more." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
@@ -602,6 +605,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolMediaAvatarList,
 		},
+		{Name: "media_job_get", Description: "Read one asynchronous generation job in the current project without submitting generation.", InputSchema: schemaObject(map[string]any{"job_id": map[string]any{"type": "integer"}}, []string{"job_id"}), Handler: a.toolMediaJobGet},
 		{
 			Name:        "media_history",
 			Description: "List generations for this project newest-first. Args: kind? (filter), limit? (default 50, max 200), cursor? (next_cursor from the previous page), since? (RFC3339). Returns generations, next_cursor, and has_more.",

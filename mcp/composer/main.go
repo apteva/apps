@@ -29,8 +29,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.7.5
+version: 0.8.0
 description: |
+  v0.8.0 adds saved audio, image-video and full-video output presets sharing
+  one composition and master, selective generation, durable asset reuse,
+  independent previews/history, excerpts and safe artifact adoption.
   v0.7.5 hardens project isolation and remote output validation, protects saved
   drafts with revision checks, and polls existing AI jobs without duplicate
   refresh requests. Save & render persists the current draft first. Split clips,
@@ -122,7 +125,7 @@ requires:
   apps:
     - { name: storage, version: ">=0.10.13" }
     - { name: instances, version: ">=0.2.0", optional: true }
-    - { name: media-studio, version: ">=0.10.14", optional: true }
+    - { name: media-studio, version: ">=0.10.62", optional: true }
   integrations:
     - role: render_executor
       kind: integration
@@ -135,6 +138,13 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: composition_outputs }
+    - { name: composition_output_update }
+    - { name: composition_output_master }
+    - { name: composition_output_render }
+    - { name: composition_output_history }
+    - { name: composition_output_adopt }
+    - { name: composition_output_estimate }
     - { name: composition_create }
     - { name: composition_update }
     - { name: composition_validate }
@@ -225,6 +235,7 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
+	outputRenderer   func(context.Context, *sdk.AppCtx, outputSnapshot, string) (Result, error)
 	renderPoolCancel context.CancelFunc
 }
 
@@ -239,6 +250,9 @@ func (a *App) Manifest() sdk.Manifest {
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("composer requires a db block")
+	}
+	if err := recoverOutputAttempts(ctx); err != nil {
+		return err
 	}
 	globalCtx = ctx
 	if n, err := recoverInterruptedComposerRenders(ctx.AppDB()); err != nil {

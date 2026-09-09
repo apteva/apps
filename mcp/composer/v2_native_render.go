@@ -47,6 +47,10 @@ type v2NativeRender struct {
 }
 
 func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string) (Result, []string, error) {
+	return renderV2NativeWindow(ctx, app, spec, projectID, 0, 0)
+}
+
+func renderV2NativeWindow(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string, excerptStart, excerptEnd float64) (Result, []string, error) {
 	start := time.Now()
 	if err := ctx.Err(); err != nil {
 		return Result{}, nil, err
@@ -91,6 +95,10 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 		fps = 30
 	}
 	duration := v2DurationSeconds(spec)
+	if excerptEnd > 0 {
+		duration = excerptEnd
+	}
+	duration -= excerptStart
 	if duration <= 0 {
 		return Result{}, nil, fmt.Errorf("composer/v2 duration must be > 0")
 	}
@@ -145,7 +153,7 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 			return Result{}, nil, err
 		}
 		t := float64(i) / float64(fps)
-		img := r.renderFrame(t)
+		img := r.renderFrame(t + excerptStart)
 		framePath := filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpg", i+1))
 		f, err := os.Create(framePath)
 		if err != nil {

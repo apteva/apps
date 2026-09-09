@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.22
+version: 0.2.0
 description: |
+  v0.2.0 adds Song, Image video, and Full clip exports on each canonical
+  Composer composition, sharing audio and keeping independent previews.
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
@@ -76,7 +78,7 @@ requires:
         - media.generated
         - media.failed
     - name: composer
-      version: ">=0.3.0"
+      version: ">=0.8.0"
       optional: true
       reason: Assemble generated or uploaded assets into timeline compositions and renders.
 

@@ -1,3 +1,22 @@
+# Composer v0.8.0
+
+One composition now manages Song, Image video, and Full clip exports. Each output keeps independent settings, excerpts, attempts, history, and its last successful preview. Shared audio and completed shots are reused across exports; only dependencies needed by the selected output are generated.
+
+- Add revision-checked HTTP and MCP output APIs, idempotent attempts, durable asset claims, asynchronous generation polling, and explicit artifact adoption.
+- Preserve the selected master while exporting shorter excerpts. Track stale outputs when shared inputs change, and distinguish recorded shared/visual costs from unknown estimates.
+- Add the Outputs panel and expose the same controls in Persona Studio without duplicating composition records.
+- Preserve legacy rendering, project isolation, cancellation, and native/browser scene rendering behavior.
+
+## Compatibility
+
+Migration 005 adds output records and shared asset jobs without deleting compositions, renders, or Storage files. Existing previews remain available; adopting historical artifacts is explicit. Requires Media Studio v0.10.62 and app-sdk v0.77.1. Persona Studio v0.2.0 integrates these outputs.
+
+## Validation
+
+Go suites and Composer race tests cover dependency filtering, shared-generation concurrency, retries, failure isolation, project access, revisions, migration, excerpts, and cancellation. Panel builds, import checks, and Bun editor regressions validate the UI integration. Tests use fake providers and local media; no paid generation or production data migration is performed.
+
+---
+
 # Composer v0.7.5
 
 This release fixes correctness, isolation, reliability, and editor defects found in the published v0.7.4 release.

@@ -385,6 +385,9 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		ai.Error = ""
 		return true, fmt.Sprintf("%s queued as media-studio job #%d", label, ai.JobID), nil
 	}
+	if cost := floatNumber(meta["cost_usd"]); cost > 0 {
+		ai.RecordedCostUSD = &cost
+	}
 	if id := number(meta["generation_id"]); id > 0 {
 		ai.GenerationID = id
 	}

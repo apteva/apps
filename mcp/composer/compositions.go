@@ -120,6 +120,7 @@ type Asset struct {
 }
 
 type AIAsset struct {
+	RecordedCostUSD          *float64       `json:"recorded_cost_usd,omitempty"`
 	MediaKind                string         `json:"media_kind"` // image | video | audio_tts | audio_sfx | music | avatar
 	Prompt                   string         `json:"prompt"`
 	Model                    string         `json:"model,omitempty"`

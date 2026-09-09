@@ -22,7 +22,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append(a.outputTools(), []sdk.Tool{
 		{
 			Name:        "composition_create",
 			Description: "Create a V1 timeline composition, or pass spec with version composer/v2 for native shape/text scene graphs. V2 shapes support rectangles, ellipses, gradients, borders, radii, and shadows. V1 args: name?, tracks, markers?, soundtrack?, background?, output?. Video and audio clips can reuse source assets with source_start/source_end and playback_rate; retained audio stays synchronized. Visual clips can crop normalized source regions and animate source-space focus/zoom through transform.keyframes. Returns {id, version, duration_seconds}.",
@@ -135,7 +135,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolAssetSearch,
 		},
-	}
+	}...)
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {
@@ -147,4 +147,17 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		s["required"] = required
 	}
 	return s
+}
+
+func (a *App) outputTools() []sdk.Tool {
+	props := map[string]any{"storage_id": map[string]any{"type": "integer"}, "render_id": map[string]any{"type": "integer"}, "duration_ms": map[string]any{"type": "integer"}, "id": map[string]any{"type": "integer"}, "kind": map[string]any{"type": "string", "enum": []string{"song", "image_video", "full_clip"}}, "project_id": map[string]any{"type": "string"}, "expected_revision": map[string]any{"type": "integer"}, "idempotency_key": map[string]any{"type": "string"}, "settings": map[string]any{"type": "object"}, "plan": map[string]any{"type": "object"}, "master": map[string]any{"type": "object"}, "executor": map[string]any{"type": "string"}}
+	return []sdk.Tool{
+		{Name: "composition_output_estimate", Description: "Read the selected output dependency requirements without generating anything. Unknown costs are null.", InputSchema: schemaObject(props, []string{"id", "kind"}), Handler: a.toolOutputEstimate},
+		{Name: "composition_output_adopt", Description: "Adopt an existing Storage artifact or legacy render into an output, preserving all original media/history. Requires expected_revision and idempotency_key. Imported input revisions are unknown until re-exported.", InputSchema: schemaObject(props, []string{"id", "kind", "expected_revision", "idempotency_key"}), Handler: a.toolOutputAdopt},
+		{Name: "composition_outputs", Description: "List saved audio, image-video and full-video outputs with independent latest attempts and successful artifacts.", InputSchema: schemaObject(props, []string{"id"}), Handler: a.toolOutputList},
+		{Name: "composition_output_update", Description: "Save output settings or a visual-only Edit plan. Requires expected_revision. Excerpts use excerpt_start/excerpt_end in seconds; audio comes from shared inputs.", InputSchema: schemaObject(props, []string{"id", "kind", "expected_revision"}), Handler: a.toolOutputUpdate},
+		{Name: "composition_output_master", Description: "Select the shared audio master as a Clip {asset:{type:audio,src:storage:N},length:seconds,ai?}. Requires shared expected_revision. Use a new AI cache_key only to explicitly regenerate; existing outputs retain artifacts and become stale.", InputSchema: schemaObject(props, []string{"id", "master", "expected_revision"}), Handler: a.toolOutputMaster},
+		{Name: "composition_output_render", Description: "Render one saved output using only its dependencies. Requires idempotency_key and expected_revision. Repeat the same request to resume waiting_ai; terminal attempts are immutable. New attempts reuse generated assets.", InputSchema: schemaObject(props, []string{"id", "kind", "expected_revision", "idempotency_key"}), Handler: a.toolOutputRender},
+		{Name: "composition_output_history", Description: "List up to 100 attempts for one saved output.", InputSchema: schemaObject(props, []string{"id", "kind"}), Handler: a.toolOutputHistory},
+	}
 }
