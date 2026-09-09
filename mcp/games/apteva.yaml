@@ -2,8 +2,9 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.4.0
+version: 0.5.0
 description: |
+  Per-game logos reference retained sprite asset versions and ship in content builds.
   Versioned game assets and content for thirteen asset kinds, with Media Studio
   generation, deterministic sprite baking and Unity/Godot importers.
   Multi-game backend for Apteva: independent games, players, cloud saves,
@@ -89,6 +90,8 @@ provides:
       no_auth: true
     - prefix: /admin/
   mcp_tools:
+    - name: games_logo_set
+      description: Set the game logo to an exact saved PNG sprite version, or clear it without deleting the asset. Requires game_id, logo_version_id and expected_logo_version_id.
     - name: games_asset_versions
       description: List recent immutable versions of one asset.
     - name: games_renditions_list
@@ -325,7 +328,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: games/v0.4.0
+    ref: games/v0.5.0
     entry: mcp/games
   port: 8080
   health_check: /health

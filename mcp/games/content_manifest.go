@@ -23,6 +23,7 @@ type LockedDependency struct {
 type ContentManifest struct {
 	Schema       string             `json:"schema"`
 	Game         string             `json:"game"`
+	Logo         *AssetDependency   `json:"logo,omitempty"`
 	Assets       []AssetRendition   `json:"assets"`
 	Dependencies []LockedDependency `json:"dependencies"`
 }
@@ -123,6 +124,9 @@ func contentFreeze(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, erro
 	for _, k := range keys {
 		v := deps[k]
 		m.Dependencies = append(m.Dependencies, LockedDependency{Asset: v.AssetID, Version: v.ID, Source: v.Source, Kind: v.Kind})
+	}
+	if e := freezeGameLogo(ctx, s, &m); e != nil {
+		return nil, e
 	}
 	document := contentJSON(m)
 	if len(document) > 2<<20 {

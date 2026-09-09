@@ -1,4 +1,4 @@
-# Games v0.4
+# Games v0.5
 
 See [Assets and content](ASSETS.md) for all thirteen asset kinds, Media Studio generation, immutable manifests and Unity/Godot importers.
 
@@ -13,6 +13,28 @@ Source links, Deploy release controls, portfolio status, gameplay telemetry and
 AdMob/GA4/Apple sales reporting are described in [STUDIO.md](STUDIO.md).
 Code 0.10.0 and Deploy 0.26.0 provide the build/publishing foundation. No engine
 or store publisher implementation is duplicated in Games.
+
+## Game logos
+
+A game logo is a reference to an exact PNG `sprite` asset version. Upload or generate
+an image in **Assets**, save it, then choose **Use as game logo**. The catalog card
+and workspace header show that image. **Clear game logo** removes the reference
+without deleting any assets or versions. Saving a newer version does not change
+the selected logo until you explicitly select that version.
+
+MCP: `games_logo_set {game_id, logo_version_id, expected_logo_version_id}`.
+Use an empty `logo_version_id` to clear; the expected value is the current logo
+version returned by `games_get` / `games_list`, or empty if unset. HTTP uses
+`POST /admin/games/{game_id}/logo` with the same version fields, and the protected
+`GET /admin/games/{game_id}/logo` serves the selected image. Logos cannot reference
+another game/project, a recipe-only draft, or non-sprite assets.
+
+Before freezing a content build, bake and select the exact logo version for each
+engine/platform in that build. The immutable manifest includes `logo: {asset,
+version}` plus the ordinary asset renditions and PNG files. Clearing or changing
+the game logo never changes an existing frozen release. Existing v0.4 databases
+receive an additive logo-reference column at startup; all game and asset data is
+preserved. No logo is assigned automatically.
 
 ## Games and isolation
 

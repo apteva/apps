@@ -7,7 +7,11 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { AssetPanel, SpritePreview } from "./AssetViews";
-import { contentHash, fetchLockedContent } from "../client/content";
+import {
+  contentHash,
+  fetchLockedContent,
+  validateManifest,
+} from "../client/content";
 import { exportContent } from "../client/export-content";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -222,4 +226,76 @@ test("exporter verifies files and refuses to overwrite", async () => {
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("content manifests require the exact logo for each build target", () => {
+  const version = "a".repeat(64);
+  const asset = {
+    asset: "logo",
+    version,
+    target: "generic",
+    engine_version: "1",
+    platform: "desktop",
+    files: [],
+  };
+  const manifest = {
+    schema: "apteva.games.content/v1",
+    game: "g",
+    logo: { asset: "logo", version },
+    assets: [asset],
+  };
+  expect(() => validateManifest(manifest, "g")).not.toThrow();
+  expect(() =>
+    validateManifest(
+      { ...manifest, assets: [{ ...asset, version: "b".repeat(64) }] },
+      "g",
+    ),
+  ).toThrow("logo");
+  expect(() =>
+    validateManifest(
+      {
+        ...manifest,
+        assets: [asset, { ...asset, asset: "hero", target: "godot" }],
+      },
+      "g",
+    ),
+  ).toThrow("logo");
+  expect(() =>
+    validateManifest({ ...manifest, logo: undefined, assets: [] }, "g"),
+  ).not.toThrow();
+});
+
+test("a stale logo change reports conflict without changing the displayed logo", async () => {
+  let changed = false;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const action = String(input).split("/").pop()!.split("?")[0];
+    if (action === "logo")
+      return new Response(
+        JSON.stringify({ error: "Game logo changed; reload before saving" }),
+        { status: 400 },
+      );
+    return reply(
+      action === "assets"
+        ? { assets: [], has_more: false }
+        : action === "content"
+          ? { manifests: [], heads: {} }
+          : [],
+    );
+  }) as typeof fetch;
+  render(
+    <AssetPanel
+      projectId="p"
+      gameId="g"
+      logoVersionId="current"
+      onLogoChanged={() => {
+        changed = true;
+      }}
+    />,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Clear game logo" }));
+  await waitFor(() =>
+    expect(screen.getByRole("alert").textContent).toContain("reload"),
+  );
+  expect(changed).toBe(false);
+  expect(screen.getByRole("button", { name: "Clear game logo" })).toBeTruthy();
 });

@@ -1,7 +1,7 @@
-# Games assets and content — v0.4.0
+# Games assets and content — v0.5.0
 
 Games now owns a versioned game-content catalog alongside the existing player,
-source, delivery and reporting features. Upgrade Games to v0.4.0 and bind the
+source, delivery and reporting features. Upgrade Games to v0.5.0 and bind the
 optional companion apps below to enable imports and generation.
 
 ## Supported kinds
@@ -207,3 +207,17 @@ GOWORK=off GAMES_GODOT_BIN=/path/to/godot go test -run TestAssetsGodotImport -v
 
 These are local fixture tests. No real provider spend or store publication is
 performed during validation.
+
+## Logos in game builds
+
+A game can select an ordinary PNG `sprite` asset version as its logo, using
+**Use as game logo** or `games_logo_set`. The reference is pinned: future edits
+create asset versions without changing the displayed logo. The catalog and
+workspace header display the retained source image through a protected route.
+
+Content freezes for a game with a logo require the logo's exact version among
+the selected renditions for every included engine/platform. The manifest's
+optional `logo` field identifies `{asset, version}`; build exporters include
+its normal PNG rendition alongside the other assets. Existing manifests without
+this field remain valid, and existing releases keep their original logo and
+files even when the game later selects a different logo or clears it.

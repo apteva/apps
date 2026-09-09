@@ -4,7 +4,7 @@ description: Use Games tools for versioned assets, engine content, generation, d
 compatibility: Requires the Games MCP tools supplied by an Apteva app installation, with the Auth app installed alongside.
 metadata:
   author: apteva
-  version: "4.0"
+  version: "5.0"
 ---
 
 # Games
@@ -112,3 +112,9 @@ Bake exact versions, freeze complete target-specific dependency sets, review the
 exact manifest, then move an environment using expected_head. A Games content
 review does not bypass Deploy's approval policy. Put the content lockfile in Code
 before a tested Deploy release. Never put an admin/platform credential in a game.
+
+
+For game logos, save a PNG sprite asset first. Call `games_logo_set` with its exact
+`logo_version_id` and the game's current `expected_logo_version_id` (empty when
+unset). Clear with an empty logo version; this does not delete the asset. Bake
+and include the selected logo version for every target when freezing builds.
