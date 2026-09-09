@@ -36,8 +36,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.60
+version: 0.10.61
 description: |
+  v0.10.61 adds media_asset_source: a project-scoped export of retained generation
+  bytes, checksum and provenance through Media Studio's own Storage binding.
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
@@ -178,6 +180,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: media_asset_source, description: "Export a ready generation output with bytes, checksum and provenance." }
     - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image and audio ids may include a provider prefix when multiple providers are bound." }
     - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?. In chat, attach the returned _meta.chat_component through respond(components=[...])." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
@@ -213,7 +216,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: media-studio/v0.10.61
     entry: mcp/media-studio
   port: 8080
   health_check: /health
@@ -610,6 +613,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			Handler: a.toolMediaHistory,
 		},
+		{Name: "media_asset_source", Description: "Export one ready generation output through its own Storage binding with bytes, checksum and provenance (up to 25 MiB). Args: id, index?.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "index": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolMediaAssetSource},
 		{
 			Name:        "media_get",
 			Description: "Fetch one generation for this project. Args: id.",

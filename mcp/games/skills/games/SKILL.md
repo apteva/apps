@@ -1,10 +1,10 @@
 ---
 name: games
-description: Use Games tools for players, bans, player data, statistics, leaderboards, and achievements. Activate when the user asks about players, scores, rankings, saves, cheating, or a game's backend.
+description: Use Games tools for versioned assets, engine content, generation, delivery, players, saves, progression and reporting.
 compatibility: Requires the Games MCP tools supplied by an Apteva app installation, with the Auth app installed alongside.
 metadata:
   author: apteva
-  version: "3.0"
+  version: "4.0"
 ---
 
 # Games
@@ -96,3 +96,19 @@ adding an advertising SDK or changing a paid game's monetization.
 
 `games_portfolio` reads cached release summaries with timestamps and does not
 contact providers. Use `games_release_status` for a current Deploy view.
+
+
+## Assets and content
+
+Use the explicit game-scoped `games_asset_*`, `games_renditions_list` and
+`games_content_*` tools for all thirteen kinds: sprite, spriteset, rig, tileset,
+style, material, font, sfx, music, stream, locale, table and blob. Read [ASSETS.md](../../ASSETS.md) for
+typed specifications, limits and engine coverage. Scenes/prefabs belong in Code.
+
+Save a version with expected_parent; pin every dependency version. Generation is
+an explicit potentially paid action through Media Studio. Reuse request_key on
+retry and reconcile an uncertain generation rather than blindly starting another.
+Bake exact versions, freeze complete target-specific dependency sets, review the
+exact manifest, then move an environment using expected_head. A Games content
+review does not bypass Deploy's approval policy. Put the content lockfile in Code
+before a tested Deploy release. Never put an admin/platform credential in a game.
