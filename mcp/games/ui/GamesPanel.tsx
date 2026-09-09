@@ -282,6 +282,7 @@ type Tab =
   | "metrics";
 
 interface Game {
+  logo_version_id?: string;
   description: string;
   id: string;
   name: string;
@@ -289,6 +290,21 @@ interface Game {
   status: "active" | "archived";
   legacy: boolean;
   auth_organization_slug: string;
+}
+
+function GameLogo({ game, projectId }: { game: Game; projectId: string }) {
+  if (!game.logo_version_id) return null;
+  return (
+    <img
+      key={game.logo_version_id}
+      alt={`${game.name} logo`}
+      src={
+        apiUrl(`/admin/games/${encodeURIComponent(game.id)}/logo`, projectId) +
+        `&version=${encodeURIComponent(game.logo_version_id)}`
+      }
+      className="w-10 h-10 shrink-0 rounded object-contain bg-bg-card"
+    />
+  );
 }
 
 export default function GamesPanel(props: NativePanelProps) {
@@ -341,6 +357,7 @@ function GameCatalog({ projectId }: { projectId: string }) {
           <button className={quietBtn} onClick={() => setSelected(null)}>
             All games
           </button>
+          <GameLogo game={game} projectId={projectId} />
           <strong>{game.name}</strong>
           <span className="text-xs text-text-dim">{game.slug}</span>
         </div>
@@ -350,6 +367,14 @@ function GameCatalog({ projectId }: { projectId: string }) {
             projectId={projectId}
             gameId={game.id}
             gameName={game.name}
+            logoVersionId={game.logo_version_id || ""}
+            onLogoChanged={(version) =>
+              setGames((all) =>
+                all.map((g) =>
+                  g.id === game.id ? { ...g, logo_version_id: version } : g,
+                ),
+              )
+            }
           />
         </div>
       </div>
@@ -444,6 +469,7 @@ function GameCatalog({ projectId }: { projectId: string }) {
             className="border border-border rounded p-3 space-y-2"
           >
             <div className="flex items-center gap-2">
+              <GameLogo game={g} projectId={projectId} />
               <strong>{g.name}</strong>
               <span className="text-xs text-text-dim">
                 {g.status}
@@ -507,10 +533,14 @@ function GamesWorkspace({
   projectId,
   gameId,
   gameName,
+  logoVersionId,
+  onLogoChanged,
 }: {
   projectId: string;
   gameId: string;
   gameName: string;
+  logoVersionId: string;
+  onLogoChanged: (version: string) => void;
 }) {
   const url = useCallback(
     (path: string) =>
@@ -619,7 +649,13 @@ function GamesWorkspace({
           />
         )}
         {tab === "assets" && (
-          <AssetPanel key={gameId} projectId={projectId} gameId={gameId} />
+          <AssetPanel
+            key={gameId}
+            projectId={projectId}
+            gameId={gameId}
+            logoVersionId={logoVersionId}
+            onLogoChanged={onLogoChanged}
+          />
         )}
         {tab === "players" && (
           <PlayersTab

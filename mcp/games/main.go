@@ -1,4 +1,4 @@
-// Games v0.4 — game content studio, players and progression.
+// Games v0.5 — game content studio, players and progression.
 //
 // The Games app is the game-domain layer of Apteva: the pieces a studio
 // would otherwise get from PlayFab, Nakama, or Unity Gaming Services,
@@ -170,6 +170,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	for _, spec := range []struct{ method, path string }{{"GET", "/admin/games"}, {"POST", "/admin/games"}, {"GET", "/admin/games/{game_id}"}, {"PATCH", "/admin/games/{game_id}"}, {"POST", "/admin/games/{game_id}/archive"}, {"POST", "/admin/games/{game_id}/restore"}} {
 		routes = append(routes, sdk.Route{Method: spec.method, Pattern: spec.path, Handler: a.handleGames})
 	}
+	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/admin/games/{game_id}/logo", Handler: a.handleGames}, sdk.Route{Method: "GET", Pattern: "/admin/games/{game_id}/logo", Handler: a.handleGameLogo})
 	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/admin/games/{game_id}/login-ticket", Handler: a.handleLoginTicket})
 	for _, method := range []string{"GET", "POST"} {
 		routes = append(routes, sdk.Route{Method: method, Pattern: "/admin/games/{game_id}/assets/{action}", Handler: a.handleContent})

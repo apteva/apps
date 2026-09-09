@@ -9,6 +9,7 @@ export type ContentFile = {
 export type ContentManifest = {
   schema: string;
   game: string;
+  logo?: { asset: string; version: string };
   assets: Array<{
     asset: string;
     version: string;
@@ -53,6 +54,28 @@ export function validateManifest(
     manifest.assets.length > 256
   )
     throw new Error("Invalid game content manifest");
+  if (manifest.logo) {
+    const logo = manifest.logo;
+    if (
+      !/^[a-z][a-z0-9_-]{0,63}$/.test(logo.asset) ||
+      !/^[a-f0-9]{64}$/.test(logo.version) ||
+      !manifest.assets.some(
+        (a) => a.asset === logo.asset && a.version === logo.version,
+      ) ||
+      manifest.assets.some(
+        (a) =>
+          !manifest.assets.some(
+            (l) =>
+              l.asset === logo.asset &&
+              l.version === logo.version &&
+              l.target === a.target &&
+              l.engine_version === a.engine_version &&
+              l.platform === a.platform,
+          ),
+      )
+    )
+      throw new Error("Missing or invalid game logo rendition");
+  }
   for (const a of manifest.assets) {
     if (!Array.isArray(a.files)) throw new Error("Missing files");
     for (const f of a.files) {

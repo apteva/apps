@@ -243,3 +243,90 @@ test("edits game title and description together", async () => {
     expect(screen.getByRole("button", { name: "Create game" })).toBeTruthy(),
   );
 });
+
+test("game logos use saved assets, update the header and remain on catalog cards", async () => {
+  const old = "a".repeat(64),
+    next = "b".repeat(64);
+  const baseFetch = globalThis.fetch;
+  const changes: any[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/apps/games/admin/games")
+      return response({
+        games: [{ ...games[0], logo_version_id: old }, games[1]],
+      });
+    if (url.pathname.endsWith("/logo") && init?.method === "POST") {
+      const body = JSON.parse(String(init.body));
+      changes.push(body);
+      return response({
+        game: { ...games[0], logo_version_id: body.logo_version_id },
+      });
+    }
+    if (url.pathname.includes("/assets/")) {
+      const action = url.pathname.split("/").pop();
+      return response({
+        data:
+          action === "assets"
+            ? {
+                assets: [
+                  {
+                    id: "logo",
+                    name: "Brand image",
+                    kind: "sprite",
+                    head: next,
+                  },
+                ],
+                has_more: false,
+              }
+            : action === "version"
+              ? {
+                  id: next,
+                  asset_id: "logo",
+                  kind: "sprite",
+                  name: "Brand image",
+                  source: "c".repeat(64),
+                  spec: { license: "Owned" },
+                }
+              : action === "content"
+                ? { manifests: [], heads: {} }
+                : [],
+      });
+    }
+    return baseFetch(input, init);
+  }) as typeof fetch;
+  await openGame();
+  expect(screen.getByAltText("Racer logo").getAttribute("src")).toContain(
+    `version=${old}`,
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Assets" }));
+  await waitFor(() => expect(screen.getByText("Brand image")).toBeTruthy());
+  fireEvent.click(screen.getByText("Brand image"));
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", { name: "Use as game logo" }),
+    ).toBeTruthy(),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Use as game logo" }));
+  await waitFor(() =>
+    expect(screen.getByAltText("Racer logo").getAttribute("src")).toContain(
+      `version=${next}`,
+    ),
+  );
+  expect(changes[0]).toEqual({
+    logo_version_id: next,
+    expected_logo_version_id: old,
+  });
+  fireEvent.click(screen.getByRole("button", { name: "All games" }));
+  expect(screen.getByAltText("Racer logo").getAttribute("src")).toContain(
+    `version=${next}`,
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: "Open game" })[0]);
+  fireEvent.click(screen.getByRole("button", { name: "Assets" }));
+  fireEvent.click(screen.getByRole("button", { name: "Clear game logo" }));
+  await waitFor(() => expect(screen.queryByAltText("Racer logo")).toBeNull());
+  expect(changes[1]).toEqual({
+    logo_version_id: "",
+    expected_logo_version_id: next,
+  });
+  expect(screen.getByText("Brand image")).toBeTruthy();
+});

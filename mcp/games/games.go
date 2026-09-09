@@ -31,6 +31,7 @@ type Game struct {
 	Slug             string `json:"slug"`
 	Name             string `json:"name"`
 	Description      string `json:"description"`
+	LogoVersionID    string `json:"logo_version_id,omitempty"`
 	Status           string `json:"status"`
 	AuthOrganization string `json:"auth_organization_slug"`
 	Legacy           bool   `json:"legacy"`
@@ -82,6 +83,7 @@ func initializeGames(ctx *sdk.AppCtx) error {
 		return e
 	}
 	hasDescription := false
+	hasLogo := false
 	for columns.Next() {
 		var cid, notnull, pk int
 		var name, typ string
@@ -89,6 +91,9 @@ func initializeGames(ctx *sdk.AppCtx) error {
 		if e = columns.Scan(&cid, &name, &typ, &notnull, &def, &pk); e != nil {
 			columns.Close()
 			return e
+		}
+		if name == "logo_version_id" {
+			hasLogo = true
 		}
 		if name == "description" {
 			hasDescription = true
@@ -101,6 +106,11 @@ func initializeGames(ctx *sdk.AppCtx) error {
 	}
 	if !hasDescription {
 		if _, err = tx.Exec(`ALTER TABLE games ADD COLUMN description TEXT NOT NULL DEFAULT ''`); err != nil {
+			return err
+		}
+	}
+	if !hasLogo {
+		if _, err = tx.Exec(`ALTER TABLE games ADD COLUMN logo_version_id TEXT NOT NULL DEFAULT ''`); err != nil {
 			return err
 		}
 	}
@@ -228,11 +238,11 @@ func ensureLegacyGame(ctx *sdk.AppCtx, project string) (*Game, error) {
 	return getGame(ctx.AppDB(), project, "legacy-"+project)
 }
 
-const gameCols = `id,project_id,slug,name,description,status,auth_organization_slug,legacy,created_at`
+const gameCols = `id,project_id,slug,name,description,status,auth_organization_slug,legacy,created_at,logo_version_id`
 
 func scanGame(row rowScanner) (*Game, error) {
 	var g Game
-	err := row.Scan(&g.ID, &g.ProjectID, &g.Slug, &g.Name, &g.Description, &g.Status, &g.AuthOrganization, &g.Legacy, &g.CreatedAt)
+	err := row.Scan(&g.ID, &g.ProjectID, &g.Slug, &g.Name, &g.Description, &g.Status, &g.AuthOrganization, &g.Legacy, &g.CreatedAt, &g.LogoVersionID)
 	return &g, err
 }
 func getGame(db DBTX, project, id string) (*Game, error) {
@@ -349,6 +359,8 @@ func gameAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, error
 	}
 	switch action {
 	case "get":
+	case "logo_set":
+		err = setGameLogo(ctx, g, args)
 	case "update":
 		name := g.Name
 		description := g.Description
@@ -386,7 +398,7 @@ func gameAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, error
 }
 func gameTools() []sdk.Tool {
 	out := []sdk.Tool{}
-	for _, action := range []string{"create", "list", "get", "update", "archive", "restore"} {
+	for _, action := range []string{"create", "list", "get", "update", "archive", "restore", "logo_set"} {
 		action := action
 		req := []string{}
 		if action != "list" && action != "create" {
@@ -395,7 +407,12 @@ func gameTools() []sdk.Tool {
 		if action == "create" {
 			req = append(req, "name", "slug")
 		}
-		out = append(out, sdk.Tool{Name: "games_" + action, Description: action + " a game within this project", InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"}, "description": map[string]any{"type": "string", "maxLength": 4000, "description": "Optional description of the game."}}, req), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) { return gameAction(ctx, action, args) }})
+		description := action + " a game within this project"
+		if action == "logo_set" {
+			description = "Select an exact saved PNG sprite asset version as the game logo, or clear it without deleting the asset. Requires the current logo version to prevent overwriting another edit."
+			req = append(req, "logo_version_id", "expected_logo_version_id")
+		}
+		out = append(out, sdk.Tool{Name: "games_" + action, Description: description, InputSchema: schemaObject(map[string]any{"game_id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"}, "logo_version_id": map[string]any{"type": "string", "description": "Exact saved PNG sprite asset version; empty clears the logo without deleting the asset."}, "expected_logo_version_id": map[string]any{"type": "string", "description": "Current game logo_version_id, or empty if unset; prevents overwriting another edit."}, "description": map[string]any{"type": "string", "maxLength": 4000, "description": "Optional description of the game."}}, req), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) { return gameAction(ctx, action, args) }})
 	}
 	return out
 }
@@ -417,6 +434,9 @@ func (a *App) handleGames(w http.ResponseWriter, r *http.Request) {
 		}
 	case "POST":
 		action = "create"
+		if strings.HasSuffix(r.URL.Path, "/logo") {
+			action = "logo_set"
+		}
 		if strings.HasSuffix(r.URL.Path, "/archive") {
 			action = "archive"
 		}

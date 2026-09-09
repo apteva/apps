@@ -204,9 +204,13 @@ const initialSpec = {
 export function AssetPanel({
   projectId,
   gameId,
+  logoVersionId = "",
+  onLogoChanged,
 }: {
   projectId: string;
   gameId: string;
+  logoVersionId?: string;
+  onLogoChanged?: (version: string) => void;
 }) {
   const [history, setHistory] = useState<Item[]>([]);
   const [assets, setAssets] = useState<Item[]>([]),
@@ -237,6 +241,29 @@ export function AssetPanel({
     selection = useRef(0);
   const api = (action: string, args: Item = {}) =>
     assetRequest(projectId, gameId, action, args);
+  async function setLogo(versionId: string) {
+    const response = await fetch(
+      `/api/apps/games/admin/games/${encodeURIComponent(gameId)}/logo?project_id=${encodeURIComponent(projectId)}`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          logo_version_id: versionId,
+          expected_logo_version_id: logoVersionId,
+        }),
+      },
+    );
+    const result = await response.json();
+    if (!response.ok)
+      throw new Error(result.error || `HTTP ${response.status}`);
+    onLogoChanged?.(result.game.logo_version_id || "");
+    setMessage(
+      versionId
+        ? "Game logo updated. This version remains an asset for your builds."
+        : "Game logo cleared. The asset and its versions are preserved.",
+    );
+  }
   async function refresh(page = offset) {
     const n = ++generation.current;
     const [a, r, c, j] = await Promise.all([
@@ -332,6 +359,18 @@ export function AssetPanel({
           of content.
         </p>
       </div>
+      {logoVersionId && (
+        <div className="flex items-center gap-3 text-sm">
+          <span>Game logo is selected from a saved asset version.</span>
+          <button
+            className={button}
+            disabled={busy}
+            onClick={() => void run(() => setLogo(""))}
+          >
+            Clear game logo
+          </button>
+        </div>
+      )}
       {error && (
         <p role="alert" className="text-red">
           {error}
@@ -604,6 +643,17 @@ export function AssetPanel({
           {version && (
             <>
               <p className="text-xs break-all">Version: {version.id}</p>
+              {version.kind === "sprite" && version.source && (
+                <button
+                  className={button}
+                  disabled={busy || version.id === logoVersionId}
+                  onClick={() => void run(() => setLogo(version.id))}
+                >
+                  {version.id === logoVersionId
+                    ? "Current game logo"
+                    : "Use as game logo"}
+                </button>
+              )}
               {version.source &&
                 (kind === "sprite" ||
                   kind === "spriteset" ||
