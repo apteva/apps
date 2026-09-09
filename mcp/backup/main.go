@@ -29,7 +29,10 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,10 +54,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.4
+version: 0.3.5
 description: |
-  Periodic database backups of the platform DB and app.db from running
-  sidecars. Supports local disk, AWS S3, Cloudflare R2, and local Fleet tenants.
+  Verified platform snapshots stored on local disk, AWS S3, or Cloudflare R2,
+  with durable scheduling, isolated retention, and optional encryption.
+  Supports individual local Fleet tenants. Archive coverage depends on the
+  server: format-v2 includes managed app and agent data; legacy snapshots
+  include the platform DB and running sidecar databases. External storage
+  and unmanaged host files are outside the archive.
 author: Apteva
 scopes: [global]
 min_apteva_version: "0.10.0"
@@ -106,7 +113,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.4
+    ref: backup/v0.3.5
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -133,7 +140,10 @@ config_schema:
 upgrade_policy: auto-patch
 `
 
-type App struct{}
+type App struct {
+	queueCancel context.CancelFunc
+	queueDone   chan struct{}
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -154,12 +164,21 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := pruneFailedRunHistory(ctx); err != nil {
 		ctx.Logger().Warn("prune failed backup history", "err", err.Error())
 	}
+	queueCtx, cancel := context.WithCancel(context.Background())
+	a.queueCancel, a.queueDone = cancel, make(chan struct{})
+	go func() { defer close(a.queueDone); runBackupQueue(queueCtx, ctx) }()
 	ctx.Logger().Info("backup mounted",
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.queueCancel != nil {
+		a.queueCancel()
+		<-a.queueDone
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -188,12 +207,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "backup_now",
 			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination), scope_kind? (default platform), scope_id?, source_app?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
 			InputSchema: schemaObject(map[string]any{
-				"policy_id":      map[string]any{"type": "integer"},
-				"destination_id": map[string]any{"type": "integer"},
-				"scope_kind":     map[string]any{"type": "string"},
-				"scope_id":       map[string]any{"type": "string"},
-				"source_app":     map[string]any{"type": "string"},
-				"async":          map[string]any{"type": "boolean", "description": "Return after queueing the run. Used by Jobs schedules."},
+				"policy_id":       map[string]any{"type": "integer"},
+				"policy_identity": map[string]any{"type": "string"},
+				"destination_id":  map[string]any{"type": "integer"},
+				"scope_kind":      map[string]any{"type": "string"},
+				"scope_id":        map[string]any{"type": "string"},
+				"source_app":      map[string]any{"type": "string"},
+				"async":           map[string]any{"type": "boolean", "description": "Return after queueing the run. Used by Jobs schedules."},
 			}, nil),
 			Handler: a.toolBackupNow,
 		},
@@ -223,7 +243,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "backup_restore",
-			Description: "Restore the bytes of a past run after explicit operator confirmation. App DBs swap live; the platform DB is staged for the next server boot. Args: run_id and confirm=true (both required).",
+			Description: "Restore the bytes of a past run after explicit operator confirmation. Format-v2 recovery activates on server restart; legacy servers may replace app DBs live. Args: run_id and confirm=true (both required).",
 			InputSchema: schemaObject(map[string]any{
 				"run_id":  map[string]any{"type": "integer"},
 				"confirm": map[string]any{"type": "boolean", "description": "Must be true after the operator explicitly approves this destructive restore."},
@@ -243,17 +263,19 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		if identity := getStringArg(args, "policy_identity"); identity != "" && identity != policy.StorageID {
+			return nil, errors.New("scheduled policy identity no longer matches")
+		}
 		dest, err := dbGetDestination(ctx.AppDB(), policy.DestinationID)
 		if err != nil {
 			return nil, err
 		}
 		if boolArg(args, "async") {
-			go func() {
-				if _, runErr := runBackup(ctx, dest, policy, policy.Scope); runErr != nil {
-					ctx.Logger().Error("scheduled backup failed", "policy_id", policy.ID, "err", runErr.Error())
-				}
-			}()
-			return map[string]any{"status": "accepted", "policy_id": policy.ID}, nil
+			run, err := enqueueBackup(ctx, dest, policy)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"status": "accepted", "policy_id": policy.ID, "run": run}, nil
 		}
 		run, err := runBackup(ctx, dest, policy, policy.Scope)
 		if err != nil {
@@ -361,9 +383,13 @@ func failedHistoryRetentionDays(ctx *sdk.AppCtx) int {
 func reconcileInterruptedRuns(ctx *sdk.AppCtx) error {
 	_, err := ctx.AppDB().Exec(
 		`UPDATE runs
-		 SET status = 'failed', stage = 'failed', finished_at = CURRENT_TIMESTAMP,
+		 SET status = 'failed', stage = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
 		     error = CASE WHEN error = '' THEN 'backup process restarted before completion' ELSE error END
 		 WHERE status = 'running'`)
+	if err != nil {
+		return err
+	}
+	_, err = ctx.AppDB().Exec(`DELETE FROM backup_queue WHERE run_id NOT IN (SELECT id FROM runs WHERE status='queued')`)
 	return err
 }
 
@@ -389,8 +415,8 @@ func (a *App) handleScopes(w http.ResponseWriter, r *http.Request) {
 		"encryption_enabled": backupPassphrase(ctx) != "",
 		"platform": map[string]any{
 			"kind": "platform", "label": "Platform databases",
-			"coverage": "Platform DB and app.db from running sidecars",
-			"gaps":     []string{"non-database app files", "stopped sidecars", "external storage", "repositories", "host configuration"},
+			"coverage": "platform database plus managed app data, agent data, and custom MCP sources on current servers (legacy snapshots contain databases only)",
+			"gaps":     []string{"local backup object storage", "external storage", "unmanaged repositories", "host configuration"},
 		},
 		"fleet_bound":   false,
 		"fleet_tenants": []any{},
@@ -661,15 +687,12 @@ func (a *App) handlePolicyItem(w http.ResponseWriter, r *http.Request) {
 		// cancellation cannot leave a recurring call to a missing policy.
 		if p, err := dbGetPolicy(ctx.AppDB(), id); err == nil && p.JobsID != "" {
 			projectID := p.JobsProjectID
-			if projectID == "" {
-				projectID = r.URL.Query().Get("project_id")
-			}
 			if err := cancelViaJobs(ctx, p.JobsID, projectID); err != nil {
 				httpErr(w, http.StatusBadGateway, "cancel scheduled job: "+err.Error())
 				return
 			}
 		}
-		if _, err := ctx.AppDB().Exec(`DELETE FROM policies WHERE id = ?`, id); err != nil {
+		if err := deletePolicy(ctx.AppDB(), id); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -692,16 +715,44 @@ func (a *App) handleRunsCollection(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	runs, err := dbListRuns(ctx.AppDB(), destID, limit+1)
+	opts := runListOptions{DestinationID: destID, Limit: limit + 1, Cursor: r.URL.Query().Get("cursor"), ScopeKind: r.URL.Query().Get("scope_kind"), ScopeID: r.URL.Query().Get("scope_id")}
+	if opts.ScopeKind != "" && opts.ScopeKind != "platform" && opts.ScopeKind != "fleet_tenant" {
+		httpErr(w, 400, "invalid scope_kind")
+		return
+	}
+	runs, err := dbListRunsPage(ctx.AppDB(), opts)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	hasMore := len(runs) > limit
+	nextCursor := ""
 	if hasMore {
 		runs = runs[:limit]
+		nextCursor = encodeRunCursor(runs[len(runs)-1])
 	}
-	httpJSON(w, map[string]any{"runs": runs, "has_more": hasMore})
+	// Summaries describe the latest live configuration, independently of the
+	// history page being viewed.
+	opts.Cursor, opts.Limit, opts.ActiveDestinations = "", 1, true
+	latest, err := dbListRunsPage(ctx.AppDB(), opts)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	opts.Status = "success"
+	success, err := dbListRunsPage(ctx.AppDB(), opts)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	var lastRun, lastSuccess *Run
+	if len(latest) > 0 {
+		lastRun = latest[0]
+	}
+	if len(success) > 0 {
+		lastSuccess = success[0]
+	}
+	httpJSON(w, map[string]any{"runs": runs, "has_more": hasMore, "next_cursor": nextCursor, "last_run": lastRun, "last_success": lastSuccess})
 }
 
 func (a *App) handleRunItem(w http.ResponseWriter, r *http.Request) {
@@ -833,12 +884,14 @@ type Policy struct {
 	Enabled       bool   `json:"enabled"`
 	JobsID        string `json:"jobs_id,omitempty"`
 	JobsProjectID string `json:"jobs_project_id,omitempty"`
+	StorageID     string `json:"storage_id,omitempty"`
 	Scope         Scope  `json:"scope"`
 	CreatedAt     string `json:"created_at,omitempty"`
 	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
 type Run struct {
+	StorageID       string `json:"-"`
 	ID              int64  `json:"id"`
 	PolicyID        int64  `json:"policy_id,omitempty"`
 	DestinationID   int64  `json:"destination_id"`
@@ -945,15 +998,21 @@ func dbSoftDeleteDestination(db *sql.DB, id int64) error {
 }
 
 func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
+	identity := make([]byte, 16)
+	if _, err := rand.Read(identity); err != nil {
+		return nil, err
+	}
+	p.StorageID = "policy-" + hex.EncodeToString(identity)
+
 	now := time.Now().UTC().Format(time.RFC3339)
 	if p.Scope.Kind == "" {
 		p.Scope = defaultScope()
 	}
 	res, err := db.Exec(
-		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, scope_kind, scope_id, source_app, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?)`,
+		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id, scope_kind, scope_id, source_app, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.Schedule, p.DestinationID, p.RetentionKeep, boolToInt(true),
-		p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, now, now)
+		p.StorageID, p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -966,7 +1025,7 @@ func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 
 func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	rows, err := db.Query(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id,
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id,
 		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies ORDER BY id`)
 	if err != nil {
@@ -977,7 +1036,7 @@ func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	for rows.Next() {
 		p := &Policy{}
 		var enabled int
-		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID,
+		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID, &p.StorageID,
 			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
@@ -991,10 +1050,10 @@ func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 	p := &Policy{}
 	var enabled int
 	err := db.QueryRow(
-		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id,
+		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id,
 		        scope_kind, scope_id, source_app, created_at, updated_at
 		 FROM policies WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID,
+		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID, &p.StorageID,
 			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("policy %d not found", id)
@@ -1006,7 +1065,12 @@ func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 	return p, nil
 }
 
-func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
+func dbInsertRun(db interface {
+	Exec(string, ...any) (sql.Result, error)
+}, r *Run) (int64, error) {
+	if r.Status == "" {
+		r.Status = "running"
+	}
 	if r.Scope.Kind == "" {
 		r.Scope = defaultScope()
 	}
@@ -1015,9 +1079,9 @@ func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
 	}
 	res, err := db.Exec(
 		`INSERT INTO runs (policy_id, destination_id, destination_name, started_at, status, scope_kind, scope_id, source_app)
-		 VALUES (?, ?, ?, ?, 'running', ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullInt(r.PolicyID), r.DestinationID, r.DestinationName,
-		r.StartedAt, r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
+		r.StartedAt, r.Status, r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
 	if err != nil {
 		return 0, err
 	}
@@ -1027,7 +1091,7 @@ func dbInsertRun(db *sql.DB, r *Run) (int64, error) {
 
 func dbFinishRun(db *sql.DB, id int64, status string, bytes int64, sha, remoteKey, manifestJSON, errMsg string, encrypted bool) error {
 	_, err := db.Exec(
-		`UPDATE runs SET status = ?, finished_at = CURRENT_TIMESTAMP,
+		`UPDATE runs SET status = ?, finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
 		   stage = ?, bytes_compressed = ?, sha256 = ?, remote_key = ?, manifest_json = ?, error = ?, encrypted = ?
 		 WHERE id = ?`,
 		status, status, bytes, sha, remoteKey, manifestJSON, errMsg, boolToInt(encrypted), id)
@@ -1040,17 +1104,60 @@ func dbUpdateRunStage(db *sql.DB, id int64, stage string) error {
 }
 
 func dbListRuns(db *sql.DB, destID int64, limit int) ([]*Run, error) {
+	return dbListRunsPage(db, runListOptions{DestinationID: destID, Limit: limit})
+}
+
+type runListOptions struct {
+	DestinationID                      int64
+	Limit                              int
+	Cursor, ScopeKind, ScopeID, Status string
+	ActiveDestinations                 bool
+}
+type runCursor struct {
+	StartedAt string `json:"time"`
+	ID        int64  `json:"id"`
+}
+
+func encodeRunCursor(run *Run) string {
+	raw, _ := json.Marshal(runCursor{run.StartedAt, run.ID})
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+func dbListRunsPage(db *sql.DB, opts runListOptions) ([]*Run, error) {
 	q := `SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 	             started_at, COALESCE(finished_at,''), status, bytes_compressed,
 		             sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app
 	      FROM runs`
 	args := []any{}
-	if destID > 0 {
-		q += ` WHERE destination_id = ?`
-		args = append(args, destID)
+	filters := []string{}
+	if opts.DestinationID > 0 {
+		filters = append(filters, "destination_id = ?")
+		args = append(args, opts.DestinationID)
 	}
-	q += ` ORDER BY started_at DESC LIMIT ?`
-	args = append(args, limit)
+	if opts.ScopeKind != "" {
+		filters = append(filters, "scope_kind = ? AND scope_id = ?")
+		args = append(args, opts.ScopeKind, opts.ScopeID)
+	}
+	if opts.Status != "" {
+		filters = append(filters, "status = ?")
+		args = append(args, opts.Status)
+	}
+	if opts.ActiveDestinations {
+		filters = append(filters, "EXISTS (SELECT 1 FROM destinations d WHERE d.id=runs.destination_id AND d.enabled=1 AND d.deleted_at='')")
+	}
+	if opts.Cursor != "" {
+		var cursor runCursor
+		raw, err := base64.RawURLEncoding.DecodeString(opts.Cursor)
+		if err != nil || json.Unmarshal(raw, &cursor) != nil || cursor.ID <= 0 || cursor.StartedAt == "" {
+			return nil, errors.New("invalid history cursor")
+		}
+		filters = append(filters, "(started_at,id) < (?,?)")
+		args = append(args, cursor.StartedAt, cursor.ID)
+	}
+	if len(filters) > 0 {
+		q += " WHERE " + strings.Join(filters, " AND ")
+	}
+	q += ` ORDER BY started_at DESC, id DESC LIMIT ?`
+	args = append(args, opts.Limit)
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err

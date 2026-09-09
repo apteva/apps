@@ -783,8 +783,10 @@ func TestRestoreRejectsIntegrityMismatch(t *testing.T) {
 
 type jobsPlatform struct {
 	tk.BasePlatformClient
-	scheduleErr error
-	input       map[string]any
+	scheduleErr    error
+	cancelErr      error
+	cancelledInput map[string]any
+	input          map[string]any
 }
 
 func (p *jobsPlatform) CallApp(appName, tool string, input map[string]any) (json.RawMessage, error) {
@@ -795,6 +797,13 @@ func (p *jobsPlatform) CallApp(appName, tool string, input map[string]any) (json
 }
 
 func (p *jobsPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if appName == "jobs" && tool == "jobs_cancel" {
+		p.cancelledInput = input
+		if p.cancelErr != nil {
+			return p.cancelErr
+		}
+		return json.Unmarshal([]byte(`{"cancelled":true}`), out)
+	}
 	if appName != "jobs" || tool != "jobs_schedule" {
 		return fmt.Errorf("unexpected app call %s.%s", appName, tool)
 	}

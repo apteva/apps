@@ -88,6 +88,7 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	}
 	if policy != nil {
 		run.PolicyID = policy.ID
+		run.StorageID = policy.StorageID
 	}
 	id, err := dbInsertRun(ctx.AppDB(), run)
 	if err != nil {
@@ -102,7 +103,13 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		return out, errors.New(msg)
 	}
 	defer release()
-	opCtx, cancelOperation := context.WithTimeout(context.Background(), transferTimeout)
+	return executeBackup(context.Background(), ctx, dest, policy, run)
+}
+
+// Caller owns operationState; queued runs have already been durably inserted.
+func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, policy *Policy, run *Run) (*Run, error) {
+	id, scope := run.ID, run.Scope
+	opCtx, cancelOperation := context.WithTimeout(parent, transferTimeout)
 	defer cancelOperation()
 
 	finish := func(status, errMsg string, bytes int64, sha, key, manifestJSON string, encrypted bool) (*Run, error) {
@@ -155,6 +162,16 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	if err != nil {
 		return finish("failed", "validate snapshot: "+err.Error(), written, sha, "", "", false)
 	}
+	if scope.Kind == "platform" && backupPassphrase(ctx) != "" {
+		var recovery struct {
+			FormatVersion int    `json:"format_version"`
+			KeyPolicy     string `json:"key_policy"`
+			WrappedKey    string `json:"wrapped_key"`
+		}
+		if json.Unmarshal([]byte(manifestJSON), &recovery) != nil || recovery.FormatVersion < 2 || recovery.KeyPolicy != "passphrase_wrapped" || recovery.WrappedKey == "" {
+			return finish("failed", "server did not wrap the recovery key; update Apteva Server before creating portable encrypted backups", written, sha, "", manifestJSON, false)
+		}
+	}
 	if providerManifest != "" && !json.Valid([]byte(providerManifest)) {
 		return finish("failed", "validate provider manifest: invalid JSON", written, sha, "", manifestJSON, false)
 	}
@@ -174,35 +191,42 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 		return finish("failed", "upload: "+err.Error(), uploadSize, uploadSHA, "", manifestJSON, encrypted)
 	}
 
-	// 5) Retention prune. Best-effort; failures here don't taint the
-	// successful run, but the stage remains visible while large prefixes
-	// are being cleaned up.
-	if policy != nil && policy.RetentionKeep > 0 {
-		_ = dbUpdateRunStage(ctx.AppDB(), id, "pruning")
-		if err := pruneRetention(opCtx, ctx, writer, dest, policy); err != nil {
-			ctx.Logger().Warn("retention prune failed",
-				"destination", dest.Name, "err", err.Error())
-		}
-	}
-
-	// 6) Success — record the row after all observable work is complete.
+	// Commit the recoverable object before deleting any predecessor. If the
+	// database write or subsequent read fails, preserve both old and new bytes.
 	successful, err := finish("success", "", uploadSize, uploadSHA, key, manifestJSON, encrypted)
 	if err != nil {
-		_ = writer.Delete(opCtx, key)
 		return nil, err
+	}
+	if policy != nil && policy.RetentionKeep > 0 {
+		if err := pruneRetention(opCtx, ctx, writer, dest, policy); err != nil {
+			ctx.Logger().Warn("retention prune failed", "destination", dest.Name, "err", err.Error())
+		}
 	}
 	return successful, nil
 }
 
 // streamSnapshot copies an app-authorized platform snapshot into dst. The SDK
-// owns authentication and keeps the response streaming; Backup never receives
+// and the recovery adapter use install authentication and keep responses streaming; Backup never receives
 // an administrator API key and never calls the management route directly.
 func streamSnapshot(ctx context.Context, appCtx *sdk.AppCtx, dst io.Writer) (int64, error) {
 	api, err := platformBackupAPI(appCtx)
 	if err != nil {
 		return 0, err
 	}
-	reader, err := api.OpenPlatformSnapshot(ctx)
+	var reader io.ReadCloser
+	passphrase := backupPassphrase(appCtx)
+	if passphrase != "" {
+		recovery, recoveryErr := platformRecoveryAPI(api)
+		if recoveryErr != nil {
+			return 0, recoveryErr
+		}
+		if len(passphrase) < 12 || strings.ContainsAny(passphrase, "\r\n") {
+			return 0, errors.New("platform recovery passphrase must be at least 12 characters and contain no line breaks")
+		}
+		reader, err = recovery.OpenPlatformSnapshotWithPassphrase(ctx, passphrase)
+	} else {
+		reader, err = api.OpenPlatformSnapshot(ctx)
+	}
 	if err != nil {
 		return 0, normalizePlatformBackupError(err)
 	}
@@ -397,7 +421,7 @@ func buildRemoteKey(run *Run, encrypted bool) string {
 	if encrypted {
 		ext += ".age"
 	}
-	return fmt.Sprintf("%sapteva-%s-run-%d%s", storagePrefix(run.Scope, run.PolicyID), t.UTC().Format("20060102-150405.000000000"), run.ID, ext)
+	return fmt.Sprintf("%sapteva-%s-run-%d%s", storagePrefixFor(run.Scope, run.PolicyID, run.StorageID), t.UTC().Format("20060102-150405.000000000"), run.ID, ext)
 }
 
 func storagePrefix(scope Scope, policyID int64) string {
@@ -413,6 +437,19 @@ func storagePrefix(scope Scope, policyID int64) string {
 		return prefix + fmt.Sprintf("policy-%d/", policyID)
 	}
 	return prefix + "adhoc/"
+}
+
+func storagePrefixFor(scope Scope, policyID int64, storageID string) string {
+	if storageID == "" {
+		return storagePrefix(scope, policyID)
+	}
+	return strings.TrimSuffix(storagePrefix(scope, 0), "adhoc/") + storageID + "/"
+}
+
+// Optional SDK extension keeps this consumer buildable with published SDKs.
+type platformRecoveryClient interface {
+	OpenPlatformSnapshotWithPassphrase(context.Context, string) (io.ReadCloser, error)
+	RestorePlatformSnapshotWithPassphrase(context.Context, io.Reader, int64, string) (map[string]any, error)
 }
 
 func safeKeySegment(value string) string {
@@ -435,7 +472,7 @@ func safeKeySegment(value string) string {
 // table — so that pruning still works after a database reset (the
 // objects are the source of truth for "what's on the destination").
 func pruneRetention(ctx context.Context, app *sdk.AppCtx, w Destination_writer, d *Destination, policy *Policy) error {
-	prefix := storagePrefix(policy.Scope, policy.ID)
+	prefix := storagePrefixFor(policy.Scope, policy.ID, policy.StorageID)
 	objects, err := w.List(ctx, prefix)
 	if err != nil {
 		return err
@@ -519,7 +556,7 @@ func scheduleViaJobs(ctx *sdk.AppCtx, p *Policy, callerProjectID string) error {
 			// Jobs' app-to-app request has a shorter deadline than a large
 			// snapshot. Queue the durable run and return immediately; the run
 			// row and Backup history remain the source of execution status.
-			"input": map[string]any{"policy_id": p.ID, "async": true},
+			"input": map[string]any{"policy_id": p.ID, "policy_identity": p.StorageID, "async": true},
 		},
 		"idempotency_key": fmt.Sprintf("backup-policy-%d", p.ID),
 		"owner_app":       "backup",
@@ -564,9 +601,18 @@ func cancelViaJobs(ctx *sdk.AppCtx, jobsID, callerProjectID string) error {
 	if err != nil {
 		return fmt.Errorf("bad jobs_id %q: %w", jobsID, err)
 	}
-	_, err = ctx.PlatformAPI().CallApp("jobs", "jobs_cancel", map[string]any{
+	var result struct {
+		Cancelled bool `json:"cancelled"`
+	}
+	err = ctx.PlatformAPI().CallAppResult("jobs", "jobs_cancel", map[string]any{
 		"id":          id,
 		"_project_id": callerProjectID,
-	})
-	return err
+	}, &result)
+	if err != nil {
+		return err
+	}
+	if !result.Cancelled {
+		return errors.New("Jobs did not confirm cancellation")
+	}
+	return nil
 }

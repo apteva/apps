@@ -118,8 +118,17 @@ func openDestination(d *Destination, ctx *sdk.AppCtx, defaultLocalDir string) (D
 			}
 			c.Path = defaultLocalDir
 		}
+		if ctx != nil && ctx.DataDir() != "" {
+			rel, err := filepath.Rel(c.Path, ctx.DataDir())
+			if err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+				return nil, errors.New("local destination must not contain the app data directory")
+			}
+		}
 		if err := os.MkdirAll(c.Path, 0o755); err != nil {
 			return nil, fmt.Errorf("local dest mkdir %s: %w", c.Path, err)
+		}
+		if err := os.WriteFile(filepath.Join(c.Path, ".apteva-backup-destination"), []byte("Backup object storage; excluded from platform snapshots.\n"), 0600); err != nil {
+			return nil, fmt.Errorf("mark backup destination: %w", err)
 		}
 		return &localDest{cfg: c}, nil
 	case kindS3:
@@ -256,7 +265,12 @@ func (d *localDest) List(ctx context.Context, prefix string) ([]storedObject, er
 	if err != nil {
 		return nil, err
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Modified.Equal(out[j].Modified) {
+			return out[i].Key > out[j].Key
+		}
+		return out[i].Modified.After(out[j].Modified)
+	})
 	return out, nil
 }
 
@@ -394,7 +408,12 @@ func (d *cloudDest) List(ctx context.Context, keyPrefix string) ([]storedObject,
 		key := strings.TrimPrefix(object.Key, destinationPrefix)
 		out = append(out, storedObject{Key: key, Size: object.Size, Modified: object.LastModified})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Modified.After(out[j].Modified) })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Modified.Equal(out[j].Modified) {
+			return out[i].Key > out[j].Key
+		}
+		return out[i].Modified.After(out[j].Modified)
+	})
 	return out, nil
 }
 

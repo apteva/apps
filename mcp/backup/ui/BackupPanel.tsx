@@ -16,6 +16,7 @@
 // `bun run scripts/build-panels.ts` from the apps repo root.
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { normalizeTimestamp, durationOf } from "./backupTime";
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -130,7 +131,7 @@ interface Run {
   destination_name: string;
   started_at: string;
   finished_at?: string;
-  status: "running" | "success" | "failed";
+  status: "queued" | "running" | "success" | "failed";
   stage?: string;
   bytes_compressed: number;
   sha256?: string;
@@ -173,25 +174,21 @@ function formatBytes(n: number): string {
   return `${v.toFixed(v >= 100 || i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+
+interface RunsResponse {
+  runs: Run[];
+  has_more: boolean;
+  next_cursor: string;
+  last_run: Run | null;
+  last_success: Run | null;
+}
+
 function formatTime(s: string | undefined): string {
   if (!s) return "—";
-  const date = new Date(s);
+  const date = new Date(normalizeTimestamp(s));
   return Number.isNaN(date.getTime()) ? s : date.toLocaleString();
 }
 
-function durationOf(r: Run): string {
-  if (!r.finished_at) return r.status === "running" ? "running…" : "—";
-  try {
-    const start = new Date(r.started_at).getTime();
-    const end = new Date(r.finished_at).getTime();
-    const ms = end - start;
-    if (!Number.isFinite(ms) || ms < 0) return "—";
-    if (ms < 1000) return `${ms} ms`;
-    if (ms < 60_000) return `${(ms / 1000).toFixed(1)} s`;
-    if (ms < 3_600_000) return `${Math.round(ms / 60_000)} min`;
-    return `${(ms / 3_600_000).toFixed(1)} h`;
-  } catch { return "—"; }
-}
 
 function statusColor(s: Run["status"]): string {
   if (s === "success") return "bg-success";
@@ -213,10 +210,15 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const [selectedScope, setSelectedScope] = useState("platform");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [runLimit, setRunLimit] = useState(50);
+  const [cursor, setCursor] = useState("");
+  const [previousCursors, setPreviousCursors] = useState<string[]>([]);
+  const [nextCursor, setNextCursor] = useState("");
+  const [lastRun, setLastRun] = useState<Run | null>(null);
+  const [lastSuccess, setLastSuccess] = useState<Run | null>(null);
   const [hasMoreRuns, setHasMoreRuns] = useState(false);
   const [showAllScopes, setShowAllScopes] = useState(false);
   const reloadSeq = useRef(0);
+  const runsSeq = useRef(0);
 
   const withParams = useCallback((extra: Record<string, string> = {}) => {
     const u = new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra });
@@ -243,36 +245,55 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     return res.json();
   }, [withParams]);
 
+  const historyPath = useCallback(() => {
+    const query = new URLSearchParams({ limit: "50", cursor });
+    if (!showAllScopes) {
+      query.set("scope_kind", selectedScope.startsWith("fleet:") ? "fleet_tenant" : "platform");
+      if (selectedScope.startsWith("fleet:")) query.set("scope_id", selectedScope.slice(6));
+    }
+    return `/runs?${query}`;
+  }, [cursor, selectedScope, showAllScopes]);
+  const applyRuns = useCallback((result: RunsResponse) => {
+    setRuns(result.runs || []);
+    setHasMoreRuns(Boolean(result.has_more));
+    setNextCursor(result.next_cursor || "");
+    setLastRun(result.last_run);
+    setLastSuccess(result.last_success);
+  }, []);
+  useEffect(() => { setCursor(""); setPreviousCursors([]); }, [selectedScope, showAllScopes]);
+
+  const fetchRuns = useCallback(async () => {
+    const seq = ++runsSeq.current;
+    const result = await api<RunsResponse>("GET", historyPath());
+    if (seq === runsSeq.current) applyRuns(result);
+  }, [api, historyPath, applyRuns]);
+
   const reload = useCallback(async () => {
     const seq = ++reloadSeq.current;
     try {
-      const [d, p, r, s] = await Promise.all([
+      const [d, p, , s] = await Promise.all([
         api<{ destinations: Destination[] }>("GET", "/destinations"),
         api<{ policies: Policy[] }>("GET", "/policies"),
-        api<{ runs: Run[]; has_more?: boolean }>("GET", `/runs?limit=${runLimit}`),
+        fetchRuns(),
         api<ScopesResponse>("GET", "/scopes"),
       ]);
       if (seq !== reloadSeq.current) return;
       setDestinations(d.destinations || []);
       setPolicies(p.policies || []);
-      setRuns(r.runs || []);
-      setHasMoreRuns(Boolean(r.has_more));
       setScopes(s);
       setStatus("");
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
-  }, [api, runLimit]);
+  }, [api, fetchRuns]);
 
   const reloadRuns = useCallback(async () => {
     try {
-      const result = await api<{ runs: Run[]; has_more?: boolean }>("GET", `/runs?limit=${runLimit}`);
-      setRuns(result.runs || []);
-      setHasMoreRuns(Boolean(result.has_more));
+      await fetchRuns();
     } catch (e) {
       setStatus("Error refreshing backup history: " + (e as Error).message);
     }
-  }, [api, runLimit]);
+  }, [fetchRuns]);
 
   useEffect(() => { reload(); }, [reload]);
   useAppEvents("backup", projectId, () => reloadRuns());
@@ -301,24 +322,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     return { kind: "platform" };
   }, [selectedScope]);
 
-  // Status surfaces should be about *current* destinations. A run
-  // whose destination was deleted is just history — showing its
-  // error confuses the operator into thinking the live setup is
-  // broken when it's actually fine. Filter both summaries through
-  // the current destination set.
-  const liveDestIDs = new Set(destinations.map((d) => d.id));
-  const selectedScopeValue = scopeForSelection();
-  const liveRuns = runs.filter((r) =>
-    liveDestIDs.has(r.destination_id) &&
-    r.scope?.kind === selectedScopeValue.kind &&
-    (selectedScopeValue.kind === "platform" || r.scope?.id === selectedScopeValue.id),
-  );
-  const lastSuccess = liveRuns.find(r => r.status === "success");
-  const lastRun = liveRuns[0];
-  const historyRuns = showAllScopes ? runs : runs.filter((r) =>
-    r.scope?.kind === selectedScopeValue.kind &&
-    (selectedScopeValue.kind === "platform" || r.scope?.id === selectedScopeValue.id),
-  );
+  const historyRuns = runs;
   const operationBusy = busy?.startsWith("run-") || busy?.startsWith("restore-");
 
   // ─── modals (themed; replace window.confirm / window.alert) ────
@@ -353,6 +357,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     try {
       const out = await api<{ report: {
         restart_required?: boolean;
+        format_version_seen?: number;
         partial_failure?: boolean;
         failures?: string[];
         failure_count?: number;
@@ -367,7 +372,9 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
           : fleetTenant
           ? `${scopeLabel(run?.scope, scopes)} was restored and restarted if it was previously running.`
           : restart
-          ? "App databases were swapped live. Restart apteva-server to activate the platform DB swap."
+          ? out.report.format_version_seen === 2
+            ? "Recovery has been staged. Restart apteva-server to activate the restored platform and app data."
+            : "Legacy app databases were restored. Restart apteva-server to activate the platform database."
           : "Platform app databases were restored.",
       });
       await reload();
@@ -415,7 +422,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       <header>
         <h2 className="text-text text-base font-bold">Backup</h2>
         <p className="text-text-muted text-xs mt-1">
-            Verified database snapshots for the platform or one local Fleet tenant.
+            Verified recovery snapshots for the platform or one local Fleet tenant.
         </p>
       </header>
 
@@ -427,7 +434,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
           onChange={(e) => setSelectedScope(e.target.value)}
           className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text min-w-52"
         >
-          <option value="platform">Platform databases</option>
+          <option value="platform">Platform recovery</option>
           {(scopes?.fleet_tenants || []).filter((t) => t.restorable).map((tenant) => (
             <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
           ))}
@@ -588,7 +595,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
                   {" · "}{durationOf(r)}
                   {" · "}<span className="text-text">{scopeLabel(r.scope, scopes)}</span>
                   {r.encrypted ? " · encrypted" : ""}
-                  {r.status === "running" && r.stage ? ` · ${r.stage}` : ""}
+                  {(r.status === "running" || r.status === "queued") && r.stage ? ` · ${r.stage}` : ""}
                 </div>
                 {r.error && (
                   <div className="text-error text-xs mt-0.5 break-words">{r.error}</div>
@@ -606,15 +613,15 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             )}
           </Row>
         ))}
-        {hasMoreRuns && runLimit < 500 && (
-          <button
-            type="button"
-            onClick={() => setRunLimit((value) => Math.min(500, value + 50))}
-            className="text-accent text-xs hover:underline"
-          >
-            Load 50 more
-          </button>
-        )}
+        <div className="flex gap-4">
+          {previousCursors.length > 0 && <button type="button" className="text-accent text-xs hover:underline" onClick={() => {
+            setCursor(previousCursors[previousCursors.length - 1]);
+            setPreviousCursors((value) => value.slice(0, -1));
+          }}>Newer backups</button>}
+          {hasMoreRuns && <button type="button" className="text-accent text-xs hover:underline" onClick={() => {
+            setPreviousCursors((value) => [...value, cursor]); setCursor(nextCursor);
+          }}>Older backups</button>}
+        </div>
       </section>
 
       {/* Themed modals — replace window.confirm/alert which look
@@ -662,8 +669,8 @@ function ConfirmModal({
             <li>Only Fleet tenant {pending.scope.id} will be replaced and restarted if it is currently running.</li>
           ) : (
             <>
-              <li>App databases will be replaced live after integrity verification.</li>
-              <li>The platform DB will be staged and applied on the next server restart.</li>
+              <li>This restores the platform database and the app, agent, and managed source files captured in this backup.</li>
+              <li>Current snapshots stage all changes for the next server restart. Legacy database-only backups may replace app databases immediately. Local backup storage is preserved.</li>
             </>
           )}
           <li>{pending.encrypted ? "The stored object is encrypted." : "The stored object is not encrypted."}</li>
@@ -1087,7 +1094,7 @@ function PolicyForm({
         </Select>
         <Label htmlFor="backup-policy-scope">Scope</Label>
         <Select id="backup-policy-scope" value={scopeKey} onChange={setScopeKey}>
-          <option value="platform">Platform databases</option>
+          <option value="platform">Platform recovery</option>
           {(scopes?.fleet_tenants || []).filter((tenant) => tenant.restorable).map((tenant) => (
             <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
           ))}

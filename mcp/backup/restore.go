@@ -158,7 +158,16 @@ func postRestoreReader(ctx context.Context, appCtx *sdk.AppCtx, body io.Reader, 
 	if err != nil {
 		return nil, err
 	}
-	report, err := api.RestorePlatformSnapshot(ctx, body, size)
+	var report map[string]any
+	if backupPassphrase(appCtx) != "" {
+		recovery, recoveryErr := platformRecoveryAPI(api)
+		if recoveryErr != nil {
+			return nil, recoveryErr
+		}
+		report, err = recovery.RestorePlatformSnapshotWithPassphrase(ctx, body, size, backupPassphrase(appCtx))
+	} else {
+		report, err = api.RestorePlatformSnapshot(ctx, body, size)
+	}
 	if err != nil {
 		return nil, normalizePlatformBackupError(err)
 	}
