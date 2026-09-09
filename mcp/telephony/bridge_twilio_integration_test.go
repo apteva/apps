@@ -91,6 +91,11 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Reproduce the production arrival order through the authenticated callback.
+	if rec := sendTestStreamStatus(a, call, "stream-started"); rec.Code != http.StatusNoContent {
+		t.Fatalf("stream callback: %d %s", rec.Code, rec.Body.String())
+	}
+
 	handlerDone := make(chan struct{})
 	telephonyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer close(handlerDone)
@@ -121,6 +126,20 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := waitTestConnection(t, coreBridge.conn)
+	// Provider callbacks cannot release the actual socket claim. A second
+	// authenticated handshake still receives 409 while audio continues below.
+	for _, event := range []string{"stream-started", "stream-stopped", "stream-error"} {
+		if rec := sendTestStreamStatus(a, call, event); rec.Code != http.StatusNoContent {
+			t.Fatalf("%s: %d", event, rec.Code)
+		}
+		duplicate := httptest.NewRequest(http.MethodGet, mediaPath, nil)
+		duplicate.Header.Set("X-Twilio-Signature", signature)
+		rec := httptest.NewRecorder()
+		a.handleTwilioMediaStream(rec, duplicate)
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("duplicate socket after %s: %d %s", event, rec.Code, rec.Body.String())
+		}
+	}
 
 	// Caller -> Core: Twilio sends 20 ms μ-law/8 kHz packets. The real bridge
 	// must produce one continuous PCM16/24 kHz stream without boundary holes.
