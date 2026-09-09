@@ -5,6 +5,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -36,7 +37,7 @@ func cacheDir() (string, error) {
 // (fast, atomic on same FS) and fall back to copy.
 func writeLocalCacheFromPath(renderID int64, srcPath, ext string) error {
 	if renderID == 0 || srcPath == "" {
-		return nil
+		return errors.New("render id and output path required")
 	}
 	dir, err := cacheDir()
 	if err != nil {
@@ -55,21 +56,36 @@ func writeLocalCacheFromPath(renderID int64, srcPath, ext string) error {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	out, err := os.CreateTemp(dir, ".composer-cache-*")
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	tmp := out.Name()
+	defer os.Remove(tmp)
+	if _, err = io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err = out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err = out.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
-func localCacheURL(renderID int64) string {
+func localCacheURL(renderID int64, projectID ...string) string {
 	if renderID == 0 {
 		return ""
 	}
 	if _, ok := localCachePath(renderID); ok {
-		return "/api/apps/composer/cache/" + strconv.FormatInt(renderID, 10)
+		pid := ""
+		if len(projectID) > 0 {
+			pid = projectID[0]
+		}
+		return "/api/apps/composer/cache/" + strconv.FormatInt(renderID, 10) + "?project_id=" + url.QueryEscape(pid)
 	}
 	return ""
 }
@@ -87,7 +103,7 @@ func localCachePath(renderID int64) (string, bool) {
 }
 
 func (a *App) handleCacheGet(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
@@ -96,6 +112,11 @@ func (a *App) handleCacheGet(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	ctx := requestAppCtx(r)
+	if ctx == nil || !renderBelongsToProject(ctx, id, projectScope(ctx)) {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	path, ok := localCachePath(id)
@@ -115,9 +136,10 @@ func (a *App) handleCacheGet(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", mt)
 	w.Header().Set("Cache-Control", "private, max-age=300")
-	_, _ = io.Copy(w, f)
+	info, err := f.Stat()
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 }
-
-// quiet "unused" for the helper we'll reach for in v0.2 when the
-// upload-back-to-storage path lands.
-var _ = errors.New

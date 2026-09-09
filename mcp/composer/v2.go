@@ -71,7 +71,7 @@ type V2Clip struct {
 	Start      float64        `json:"start,omitempty"`
 	Duration   float64        `json:"duration,omitempty"`
 	Length     float64        `json:"length,omitempty"`
-	Volume     float64        `json:"volume,omitempty"`
+	Volume     float64        `json:"volume"`
 	Fit        string         `json:"fit,omitempty"`
 	Text       string         `json:"text,omitempty"`
 	Style      map[string]any `json:"style,omitempty"`
@@ -108,7 +108,7 @@ type V2Audio struct {
 	Start    float64 `json:"start,omitempty"`
 	Duration float64 `json:"duration,omitempty"`
 	Length   float64 `json:"length,omitempty"`
-	Volume   float64 `json:"volume,omitempty"`
+	Volume   float64 `json:"volume"`
 }
 
 type CompositionValidation struct {
@@ -219,6 +219,70 @@ func validateV2Composition(spec *V2Composition) error {
 	}
 	if spec.Output.FPS != 24 && spec.Output.FPS != 25 && spec.Output.FPS != 30 && spec.Output.FPS != 60 {
 		return fmt.Errorf("output.fps must be 24, 25, 30, or 60 (got %d)", spec.Output.FPS)
+	}
+	if spec.Output.Width > 4096 || spec.Output.Height > 4096 || spec.Output.Width%2 != 0 || spec.Output.Height%2 != 0 {
+		return errors.New("output dimensions must be even and no larger than 4096")
+	}
+	renderer := strings.ToLower(strings.TrimSpace(spec.Output.Renderer))
+	if renderer != "" && renderer != "native" && renderer != "browser" && renderer != "ffmpeg" {
+		return fmt.Errorf("unsupported renderer %q", renderer)
+	}
+	if len(spec.Scenes) > 0 {
+		for _, track := range spec.Tracks {
+			if track.Type != "audio" && len(track.Clips) > 0 {
+				return errors.New("mixed V2 scenes and visual tracks are not supported; move visual clips into scenes")
+			}
+		}
+	}
+	for _, scene := range spec.Scenes {
+		for _, el := range scene.Elements {
+			if el.Type == "component" {
+				if renderer == "native" || renderer == "ffmpeg" {
+					return errors.New("components require the browser renderer")
+				}
+				spec.Output.Renderer = "browser"
+			}
+		}
+	}
+	if strings.EqualFold(spec.Output.Renderer, "browser") && v2HasVideoElements(spec) {
+		return errors.New("browser rendering does not support video; use video-only tracks with FFmpeg")
+	}
+	if renderer == "native" && v2HasVideoElements(spec) {
+		return errors.New("native rendering does not support video")
+	}
+	if spec.Output.Format == "mp4" && !v2UseDirectRenderer(spec) {
+		visuals := 0
+		for _, track := range spec.Tracks {
+			if len(track.Clips) == 0 || track.Type == "audio" {
+				continue
+			}
+			if track.Type == "text" || track.Type == "overlay" {
+				return errors.New("V2 text/overlay tracks are not supported; use scene elements")
+			}
+			visuals++
+		}
+		if visuals > 1 {
+			return errors.New("V2 FFmpeg supports one visual track; use V1 for layered video")
+		}
+		for _, scene := range spec.Scenes {
+			images, texts := 0, 0
+			for _, el := range scene.Elements {
+				switch el.Type {
+				case "image", "video":
+					images++
+				case "text":
+					texts++
+				default:
+					return errors.New("V2 scenes containing video only support one visual and one text element; use V1 for layered video")
+				}
+			}
+			if images > 1 || texts > 1 {
+				return errors.New("V2 video scenes support one visual and one text element")
+			}
+		}
+	}
+	if v2DurationSeconds(spec) > 7200 {
+		return errors.New("composition duration exceeds two hours")
 	}
 	ids := map[string]V2Asset{}
 	for i, asset := range spec.Assets {
@@ -645,10 +709,7 @@ func v2Soundtrack(spec *V2Composition, assets map[string]V2Asset) (*Soundtrack, 
 		return nil, false, err
 	}
 	volume := audio.Volume
-	if volume <= 0 {
-		volume = 1
-	}
-	return &Soundtrack{Src: src, Volume: volume}, true, nil
+	return &Soundtrack{Src: src, Volume: volume, volumeSet: true}, true, nil
 }
 
 func v2AudioTrack(spec *V2Composition, assets map[string]V2Asset) (Track, bool, error) {
@@ -666,15 +727,12 @@ func v2AudioTrack(spec *V2Composition, assets map[string]V2Asset) (Track, bool, 
 			return Track{}, false, fmt.Errorf("audio[%d]: %w", i, err)
 		}
 		volume := audio.Volume
-		if volume <= 0 {
-			volume = 1
-		}
 		track.Clips = append(track.Clips, Clip{
 			UID:    audio.ID,
 			Asset:  Asset{Type: "audio", Src: src},
 			Start:  audio.Start,
 			Length: length,
-			Volume: volume,
+			Volume: volume, volumeSet: true,
 		})
 	}
 	for ti, srcTrack := range spec.Tracks {
@@ -697,15 +755,12 @@ func v2AudioTrack(spec *V2Composition, assets map[string]V2Asset) (Track, bool, 
 				return Track{}, false, fmt.Errorf("tracks[%d].clips[%d]: audio source must resolve to audio, got %s", ti, ci, typ)
 			}
 			volume := clip.Volume
-			if volume <= 0 {
-				volume = 1
-			}
 			track.Clips = append(track.Clips, Clip{
 				UID:    clip.UID,
 				Asset:  Asset{Type: "audio", Src: src},
 				Start:  clip.Start,
 				Length: length,
-				Volume: volume,
+				Volume: volume, volumeSet: true,
 			})
 		}
 	}
@@ -736,8 +791,7 @@ func validateCompositionJSON(s string) CompositionValidation {
 		_, _, warnings, convErr := v2ToV1FFmpeg(spec)
 		renderer := "ffmpeg"
 		if convErr != nil {
-			renderer = "web_required"
-			warnings = append(warnings, convErr.Error())
+			return CompositionValidation{Valid: false, Version: composerV2Version, Renderer: "none", Errors: []string{convErr.Error()}, Warnings: warnings}
 		}
 		return CompositionValidation{Valid: true, Version: composerV2Version, DurationSeconds: v2DurationSeconds(spec), Renderer: renderer, Warnings: warnings}
 	}
@@ -792,7 +846,7 @@ func v2UseDirectRenderer(spec *V2Composition) bool {
 	if strings.EqualFold(strings.TrimSpace(spec.Output.Renderer), "browser") {
 		return true
 	}
-	return !v2HasVideoElements(spec)
+	return !strings.EqualFold(spec.Output.Renderer, "ffmpeg") && !v2HasVideoElements(spec)
 }
 
 func composerV2Examples() []map[string]any {
@@ -899,4 +953,23 @@ func composerV2Examples() []map[string]any {
 	var examples []map[string]any
 	_ = json.Unmarshal([]byte(raw), &examples)
 	return examples
+}
+
+func (v *V2Audio) UnmarshalJSON(data []byte) error {
+	type plain V2Audio
+	value := plain{Volume: 1}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = V2Audio(value)
+	return nil
+}
+func (v *V2Clip) UnmarshalJSON(data []byte) error {
+	type plain V2Clip
+	value := plain{Volume: 1}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = V2Clip(value)
+	return nil
 }

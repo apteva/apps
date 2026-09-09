@@ -21,8 +21,8 @@ func (a *App) handleCompositionCard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	pid := projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
-	out, err := compositionCardData(globalCtx, id, pid)
+	pid := projectScopeFromArgs(requestAppCtx(r), map[string]any{"project_id": r.URL.Query().Get("project_id")})
+	out, err := compositionCardData(requestAppCtx(r), id, pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -40,13 +40,13 @@ func (a *App) handleRenderCard(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	pid := projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
+	pid := projectScopeFromArgs(requestAppCtx(r), map[string]any{"project_id": r.URL.Query().Get("project_id")})
 	if r.Method == http.MethodDelete {
-		if !renderBelongsToProject(globalCtx, id, pid) {
+		if !renderBelongsToProject(requestAppCtx(r), id, pid) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		out, err := cancelQueuedRender(globalCtx, id, pid)
+		out, err := cancelQueuedRender(requestAppCtx(r), id, pid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -54,7 +54,7 @@ func (a *App) handleRenderCard(w http.ResponseWriter, r *http.Request) {
 		jsonResp(w, out)
 		return
 	}
-	out, err := renderCardData(globalCtx, id, pid)
+	out, err := renderCardData(requestAppCtx(r), id, pid)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -177,7 +177,7 @@ func renderCardData(ctx *sdk.AppCtx, id int64, projectID string) (map[string]any
 	}
 	if storageID > 0 {
 		out["output_url"] = "/api/apps/storage/files/" + strconv.FormatInt(storageID, 10) + "/content?project_id=" + url.QueryEscape(projectID)
-	} else if url := localCacheURL(id); url != "" {
+	} else if url := localCacheURL(id, projectID); url != "" {
 		out["output_url"] = url
 	}
 	return out, nil

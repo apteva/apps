@@ -93,7 +93,7 @@ func (e *localFFmpegExecutor) Render(
 			cleanup()
 			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
-		visualHasAudio[i] = visualClipMayUseSourceAudioForLayer(c, ref.base) && probeMediaHasAudio(url)
+		visualHasAudio[i] = visualClipMayUseSourceAudioForLayer(c, ref.base) && probeMediaHasAudioContext(ctx, url)
 		inputs = append(inputs, url)
 	}
 	for i, c := range audioClips {
@@ -364,10 +364,7 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	}
 
 	if soundtrackIdx >= 0 {
-		vol := 1.0
-		if v := edit.Timeline.Soundtrack.Volume; v > 0 {
-			vol = v
-		}
+		vol := soundtrackVolume(edit.Timeline.Soundtrack)
 		fmt.Fprintf(&filter,
 			"[%d:a]volume=%g,atrim=duration=%s[snd];",
 			soundtrackIdx, vol, trimFloat(editDurationSeconds(edit)),
@@ -1070,10 +1067,7 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
 	}
 	if soundtrackIdx >= 0 {
-		vol := 1.0
-		if v := edit.Timeline.Soundtrack.Volume; v > 0 {
-			vol = v
-		}
+		vol := soundtrackVolume(edit.Timeline.Soundtrack)
 		fmt.Fprintf(&filter,
 			"[%d:a]volume=%g,atrim=duration=%s[snd];",
 			soundtrackIdx, vol, trimFloat(editDurationSeconds(edit)),

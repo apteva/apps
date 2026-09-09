@@ -6,9 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
+	"net/http"
+	"net/url"
+	"os"
 	"sort"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -20,6 +25,9 @@ type materializeResult struct {
 
 func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, projectID string, persist bool) (materializeResult, error) {
 	var out materializeResult
+	// Materialization only mutates the caller's frozen snapshot. Persisting it
+	// here could overwrite a newer edit saved while generation was running.
+	_ = persist
 	if edit == nil {
 		return out, nil
 	}
@@ -29,7 +37,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			clip := &edit.Timeline.Tracks[ti].Clips[i]
 			normalizeGeneratedAsset(clip)
 			if clip.UID == "" {
-				clip.UID = fmt.Sprintf("clip-%d", i+1)
+				clip.UID = fmt.Sprintf("track-%d-clip-%d", ti+1, i+1)
 				out.Changed = true
 			}
 			if clip.AI == nil {
@@ -96,13 +104,6 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 	}
 	if finalizeTimelineTiming(edit) {
 		out.Changed = true
-	}
-	if out.Changed && persist {
-		b, _ := json.Marshal(edit)
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE compositions SET edit_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-			string(b), editDurationSeconds(edit), compositionID,
-		)
 	}
 	return out, nil
 }
@@ -323,6 +324,9 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		ai.Status = "failed"
 		ai.Error = "prompt required"
 		return true, "", errors.New(label + ": AI prompt required")
+	}
+	if ai.JobID > 0 {
+		return pollAIAsset(ctx, ai, label, projectID)
 	}
 	args := map[string]any{
 		"kind":         ai.MediaKind,
@@ -1292,4 +1296,54 @@ func audioAnalysisFromMeta(v any) *AudioAnalysis {
 		a.Codec = codec
 	}
 	return a
+}
+
+// Resume the saved job instead of repeating a refresh generation request.
+func pollAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string) (bool, string, error) {
+	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if base == "" {
+		return false, "", fmt.Errorf("%s: gateway URL required to resume AI job %d", label, ai.JobID)
+	}
+	endpoint := fmt.Sprintf("%s/api/apps/callback/apps/media-studio/proxy/video-jobs/%d?project_id=%s", base, ai.JobID, url.QueryEscape(projectID))
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+outboundToken())
+	res, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return false, "", fmt.Errorf("poll AI job: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, "", fmt.Errorf("poll AI job %d: HTTP %d", ai.JobID, res.StatusCode)
+	}
+	var result struct {
+		Job struct {
+			Status       string  `json:"status"`
+			Error        string  `json:"error"`
+			StorageID    int64   `json:"result_storage_id"`
+			GenerationID int64   `json:"generation_id"`
+			Duration     float64 `json:"actual_duration_seconds"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(io.LimitReader(res.Body, 1<<20)).Decode(&result); err != nil {
+		return false, "", err
+	}
+	switch result.Job.Status {
+	case "queued", "polling", "generating", "running":
+		ai.Status = "generating"
+		return true, fmt.Sprintf("%s waiting for media-studio job #%d", label, ai.JobID), nil
+	case "complete":
+		if result.Job.StorageID <= 0 {
+			return false, "", fmt.Errorf("AI job %d completed without a Storage file", ai.JobID)
+		}
+		ai.StorageID, ai.GenerationID = result.Job.StorageID, result.Job.GenerationID
+		ai.ActualDurationSeconds = result.Job.Duration
+		ai.Status, ai.Error = "ready", ""
+		return true, "", nil
+	default:
+		ai.Status, ai.Error = "failed", firstNonEmpty(result.Job.Error, "AI job failed or returned an unknown status")
+		return true, "", fmt.Errorf("%s: %s", label, ai.Error)
+	}
 }

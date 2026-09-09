@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -26,6 +28,9 @@ func projectScope(ctx *sdk.AppCtx) string {
 }
 
 func projectScopeFromArgs(ctx *sdk.AppCtx, args map[string]any) string {
+	if pid := projectScope(ctx); pid != "" {
+		return pid
+	}
 	if pid := strings.TrimSpace(strArg(args, "project_id", "")); pid != "" {
 		return pid
 	}
@@ -62,7 +67,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		ctx.EmitWithProject("composition.created", pid, map[string]any{
 			"composition_id": id, "name": name, "duration_seconds": dur,
 		})
-		return map[string]any{"id": id, "version": version, "duration_seconds": dur}, nil
+		return map[string]any{"id": id, "revision": int64(1), "version": version, "duration_seconds": dur}, nil
 	}
 	edit, err := editFromArgs(args)
 	if err != nil {
@@ -92,7 +97,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	ctx.EmitWithProject("composition.created", pid, map[string]any{
 		"composition_id": id, "name": name, "duration_seconds": dur,
 	})
-	return map[string]any{"id": id, "version": "composer/v1", "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
+	return map[string]any{"id": id, "revision": int64(1), "version": "composer/v1", "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
 }
 
 func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -108,11 +113,15 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// Load current row.
 	var (
 		name, editJSON, outputJSON, projectID string
+		revision                              int64
 	)
 	if err := ctx.AppDB().QueryRow(
-		`SELECT project_id, name, edit_json, output_json FROM compositions WHERE id=?`, id,
-	).Scan(&projectID, &name, &editJSON, &outputJSON); err != nil {
+		`SELECT project_id, name, edit_json, output_json, revision FROM compositions WHERE id=? AND project_id=?`, id, projectScope(ctx),
+	).Scan(&projectID, &name, &editJSON, &outputJSON, &revision); err != nil {
 		return nil, fmt.Errorf("load: %w", err)
+	}
+	if expected := int64Arg(patch, "expected_revision", 0); expected > 0 && expected != revision {
+		return nil, errors.New("composition changed since loading; reload before saving")
 	}
 	currentIsV2 := isV2EditJSON(editJSON)
 	if currentIsV2 && !composerV2Enabled() {
@@ -125,22 +134,25 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		if err != nil {
 			return nil, err
 		}
-		_, err := ctx.AppDB().Exec(
-			`UPDATE compositions SET name=?, edit_json=?, output_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-			name, nextEditJSON, nextOutputJSON, dur, id,
+		updated, err := ctx.AppDB().Exec(
+			`UPDATE compositions SET name=?, edit_json=?, output_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP, revision=revision+1 WHERE id=? AND project_id=? AND revision=?`,
+			name, nextEditJSON, nextOutputJSON, dur, id, projectID, revision,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("update: %w", err)
 		}
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return nil, errors.New("composition changed while saving; reload before saving")
+		}
 		ctx.EmitWithProject("composition.updated", projectID, map[string]any{
 			"composition_id": id, "name": name, "duration_seconds": dur,
 		})
-		return map[string]any{"id": id, "version": version, "duration_seconds": dur}, nil
+		return map[string]any{"id": id, "revision": revision + 1, "version": version, "duration_seconds": dur}, nil
 	}
 	if currentIsV2 {
-		_, err := ctx.AppDB().Exec(
-			`UPDATE compositions SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-			name, id,
+		updated, err := ctx.AppDB().Exec(
+			`UPDATE compositions SET name=?, updated_at=CURRENT_TIMESTAMP, revision=revision+1 WHERE id=? AND project_id=? AND revision=?`,
+			name, id, projectID, revision,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("update: %w", err)
@@ -148,10 +160,13 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		var spec V2Composition
 		_ = json.Unmarshal([]byte(editJSON), &spec)
 		dur := v2DurationSeconds(&spec)
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return nil, errors.New("composition changed while saving; reload before saving")
+		}
 		ctx.EmitWithProject("composition.updated", projectID, map[string]any{
 			"composition_id": id, "name": name, "duration_seconds": dur,
 		})
-		return map[string]any{"id": id, "version": composerV2Version, "duration_seconds": dur}, nil
+		return map[string]any{"id": id, "revision": revision + 1, "version": composerV2Version, "duration_seconds": dur}, nil
 	}
 	edit, _ := parseEditJSON(editJSON)
 	var output Output
@@ -213,17 +228,20 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	newOutputJSON, _ := json.Marshal(output)
 	dur := editDurationSeconds(edit)
 
-	_, err := ctx.AppDB().Exec(
-		`UPDATE compositions SET name=?, edit_json=?, output_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
-		name, string(newEditJSON), string(newOutputJSON), dur, id,
+	updated, err := ctx.AppDB().Exec(
+		`UPDATE compositions SET name=?, edit_json=?, output_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP, revision=revision+1 WHERE id=? AND project_id=? AND revision=?`,
+		name, string(newEditJSON), string(newOutputJSON), dur, id, projectID, revision,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update: %w", err)
 	}
+	if n, _ := updated.RowsAffected(); n != 1 {
+		return nil, errors.New("composition changed while saving; reload before saving")
+	}
 	ctx.EmitWithProject("composition.updated", projectID, map[string]any{
 		"composition_id": id, "name": name, "duration_seconds": dur,
 	})
-	return map[string]any{"id": id, "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
+	return map[string]any{"id": id, "revision": revision + 1, "duration_seconds": dur, "warnings": v1TypographyWarnings(edit)}, nil
 }
 
 func compositionPayloadFromV2Args(args map[string]any) (editJSON string, outputJSON string, duration float64, version string, ok bool, err error) {
@@ -392,7 +410,7 @@ func (a *App) toolCompositionDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, errors.New("id required")
 	}
 	var projectID string
-	if err := ctx.AppDB().QueryRow(`SELECT project_id FROM compositions WHERE id=?`, id).Scan(&projectID); err != nil {
+	if err := ctx.AppDB().QueryRow(`SELECT project_id FROM compositions WHERE id=? AND project_id=?`, id, projectScope(ctx)).Scan(&projectID); err != nil {
 		return nil, fmt.Errorf("not found: %w", err)
 	}
 	_, err := ctx.AppDB().Exec(`DELETE FROM compositions WHERE id=?`, id)
@@ -445,19 +463,21 @@ func (a *App) toolCompositionExamples(ctx *sdk.AppCtx, args map[string]any) (any
 
 func loadComposition(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 	var (
+		revision                   int64
 		name, editJSON, outputJSON string
 		dur                        float64
 		createdAt, updatedAt       string
 		projectID                  string
 	)
 	err := ctx.AppDB().QueryRow(
-		`SELECT project_id, name, edit_json, output_json, duration_seconds, created_at, updated_at
-		 FROM compositions WHERE id=?`, id,
-	).Scan(&projectID, &name, &editJSON, &outputJSON, &dur, &createdAt, &updatedAt)
+		`SELECT project_id, name, edit_json, output_json, duration_seconds, created_at, updated_at, revision
+		 FROM compositions WHERE id=? AND project_id=?`, id, projectScope(ctx),
+	).Scan(&projectID, &name, &editJSON, &outputJSON, &dur, &createdAt, &updatedAt, &revision)
 	if err != nil {
 		return nil, fmt.Errorf("not found (id=%d): %w", id, err)
 	}
 	return map[string]any{
+		"revision":         revision,
 		"id":               id,
 		"project_id":       projectID,
 		"name":             name,
@@ -502,10 +522,10 @@ func loadLatestRender(ctx *sdk.AppCtx, compID int64) map[string]any {
 		"qa":           decodeRenderQA(qaJSON),
 	}
 	if storageID > 0 {
-		row["storage_url"] = "/api/apps/storage/files/" + strconv.FormatInt(storageID, 10) + "/content"
+		row["storage_url"] = "/api/apps/storage/files/" + strconv.FormatInt(storageID, 10) + "/content?project_id=" + url.QueryEscape(projectScope(ctx))
 	}
 	if storageID == 0 {
-		if u := localCacheURL(id); u != "" {
+		if u := localCacheURL(id, projectScope(ctx)); u != "" {
 			row["local_cache_url"] = u
 		}
 	}
@@ -515,18 +535,25 @@ func loadLatestRender(ctx *sdk.AppCtx, compID int64) map[string]any {
 // --- render orchestration ----------------------------------------
 
 func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.renderComposition(composerLifetimeContext(), ctx, args, 0)
+}
+
+func (a *App) renderComposition(parent context.Context, ctx *sdk.AppCtx, args map[string]any, renderID int64) (any, error) {
 	id := int64Arg(args, "id", 0)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
 	executorOverride := strArg(args, "executor", "")
 	wait := boolArg(args, "wait", true)
-	renderID := int64Arg(args, "_render_id", 0)
+
 	resumePhase := ""
 
 	row, err := loadComposition(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if expected := int64Arg(args, "expected_revision", 0); renderID == 0 && expected > 0 && expected != row["revision"].(int64) {
+		return nil, errors.New("composition changed before render; save again to render the latest draft")
 	}
 	rawEditJSON := row["edit_json"].(string)
 	rawOutputJSON := row["output_json"].(string)
@@ -570,6 +597,18 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 			}, nil
 		}
 	}
+	rctx, cancel := context.WithTimeout(parent, 30*time.Minute)
+	unregister := registerRenderCancel(renderID, cancel)
+	defer func() { cancel(); unregister() }()
+	var currentStatus string
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM renders WHERE id=?`, renderID).Scan(&currentStatus)
+	if currentStatus == "cancelled" {
+		cancel()
+	}
+	if err := rctx.Err(); err != nil {
+		failRender(ctx, renderID, id, pid, err, "")
+		return nil, err
+	}
 	if resumePhase != "generating_assets" {
 		setRenderProgress(ctx, renderID, id, pid, "rendering", "preparing", 2, map[string]any{
 			"message": "Preparing composition",
@@ -592,8 +631,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 				}
 				_, _ = ctx.AppDB().Exec(`UPDATE renders SET executor=?, phase='rendering', progress_pct=50, updated_at=CURRENT_TIMESTAMP WHERE id=?`, executorName, renderID)
 				setRenderProgress(ctx, renderID, id, pid, "rendering", "rendering", 50, map[string]any{"message": "Rendering composition", "executor": executorName})
-				rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-				defer cancel()
+
 				rctx = withJobRenderProgress(rctx, ctx, renderID, id, pid, executorName)
 				result, nativeWarnings, err := renderFn(rctx, ctx.WithProject(pid), spec, pid)
 				if err != nil {
@@ -601,24 +639,41 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 					return nil, err
 				}
 				if result.Cleanup != nil {
-					defer result.Cleanup()
+					defer func() {
+						if result.Cleanup != nil {
+							result.Cleanup()
+						}
+					}()
 				}
-				qa := analyzeRender(result.LocalPath, nil)
+				qa := analyzeRenderContext(rctx, result.LocalPath, nil)
 				qa.Warnings = append(qa.Warnings, nativeWarnings...)
 				setRenderProgress(ctx, renderID, id, pid, "rendering", "uploading", 90, map[string]any{"message": "Uploading render output"})
-				storageID := saveRenderOutput(ctx, result.LocalPath, output.Format, pid, id)
+				storageID := saveRenderOutputContext(rctx, ctx, result.LocalPath, output.Format, pid, id)
 				if storageID == 0 {
 					if cacheErr := writeLocalCacheFromPath(renderID, result.LocalPath, output.Format); cacheErr != nil {
-						ctx.Logger().Warn("local cache write failed", "render_id", renderID, "err", cacheErr)
+						result.Cleanup = nil // Retain the encoded file for recovery.
+						err := fmt.Errorf("output persistence failed; encoded file retained at %s: %w", result.LocalPath, cacheErr)
+						failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
+						return nil, err
 					}
 				}
-				ctx.AppDB().Exec(
+				if err := rctx.Err(); err != nil {
+					failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
+					return nil, err
+				}
+				completion, completeErr := ctx.AppDB().Exec(
 					`UPDATE renders
 				 SET status='complete', phase='complete', progress_pct=100, storage_id=?, duration_ms=?, cost_usd=?,
 				     ffmpeg_command=?, qa_json=?, finished_at=CURRENT_TIMESTAMP, next_attempt_at=NULL, updated_at=CURRENT_TIMESTAMP
-				 WHERE id=?`,
+				 WHERE id=? AND status='rendering'`,
 					storageID, result.DurationMS, result.CostUSD, result.FFmpegCommand, encodeRenderQA(qa), renderID,
 				)
+				if completeErr != nil {
+					return nil, completeErr
+				}
+				if n, _ := completion.RowsAffected(); n != 1 {
+					return nil, context.Canceled
+				}
 				ctx.EmitWithProject("composition.rendered", pid, map[string]any{
 					"composition_id": id,
 					"render_id":      renderID,
@@ -701,8 +756,6 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"executor": exec.Name(),
 	})
 
-	rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
 	rctx = withJobRenderProgress(rctx, ctx, renderID, id, pid, exec.Name())
 	result, err := exec.Render(rctx, ctx, edit, output, pid)
 	if err != nil {
@@ -710,7 +763,11 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	if result.Cleanup != nil {
-		defer result.Cleanup()
+		defer func() {
+			if result.Cleanup != nil {
+				result.Cleanup()
+			}
+		}()
 	}
 
 	// Sync executors deliver bytes via LocalPath. Persist to storage
@@ -726,24 +783,37 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 			storageID = id
 		}
 	} else if result.Sync && result.LocalPath != "" {
-		qa = analyzeRender(result.LocalPath, edit)
+		qa = analyzeRenderContext(rctx, result.LocalPath, edit)
 		setRenderProgress(ctx, renderID, id, pid, "rendering", "uploading", 90, map[string]any{"message": "Uploading render output"})
-		storageID = saveRenderOutput(ctx, result.LocalPath, output.Format, pid, id)
+		storageID = saveRenderOutputContext(rctx, ctx, result.LocalPath, output.Format, pid, id)
 		if storageID == 0 {
 			if cacheErr := writeLocalCacheFromPath(renderID, result.LocalPath, output.Format); cacheErr != nil {
-				ctx.Logger().Warn("local cache write failed", "render_id", renderID, "err", cacheErr)
+				result.Cleanup = nil // Retain the encoded file for recovery.
+				err := fmt.Errorf("output persistence failed; encoded file retained at %s: %w", result.LocalPath, cacheErr)
+				failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
+				return nil, err
 			}
 		}
 	}
 
-	ctx.AppDB().Exec(
+	if err := rctx.Err(); err != nil {
+		failRender(ctx, renderID, id, pid, err, result.FFmpegCommand)
+		return nil, err
+	}
+	completion, completeErr := ctx.AppDB().Exec(
 		`UPDATE renders
 		 SET status='complete', phase='complete', progress_pct=100, storage_id=?, duration_ms=?, cost_usd=?,
 		     ffmpeg_command=?, qa_json=?, finished_at=CURRENT_TIMESTAMP, next_attempt_at=NULL, updated_at=CURRENT_TIMESTAMP
-		 WHERE id=?`,
+		 WHERE id=? AND status='rendering'`,
 		storageID, result.DurationMS, result.CostUSD, result.FFmpegCommand, encodeRenderQA(qa), renderID,
 	)
 
+	if completeErr != nil {
+		return nil, completeErr
+	}
+	if n, _ := completion.RowsAffected(); n != 1 {
+		return nil, context.Canceled
+	}
 	ctx.EmitWithProject("composition.rendered", pid, map[string]any{
 		"composition_id": id,
 		"render_id":      renderID,
@@ -819,36 +889,96 @@ func renderEditFromStoredJSON(editJSON, outputJSON string) (*Edit, Output, strin
 	return edit, output, "composer/v1", v1TypographyWarnings(edit), nil
 }
 
-// saveRenderOutput uploads the bytes to storage and returns the
-// resulting storage id (or 0 when storage is unbound / fails).
-// Reads the file into memory via base64 — fine for v0.1 video sizes;
-// streaming upload is a follow-up if outputs grow past ~50 MB.
+// saveRenderOutput keeps upload memory bounded to a single 1 MiB part.
 func saveRenderOutput(ctx *sdk.AppCtx, path, format, projectID string, compID int64) int64 {
+	return saveRenderOutputContext(context.Background(), ctx, path, format, projectID, compID)
+}
+func saveRenderOutputContext(c context.Context, ctx *sdk.AppCtx, path, format, projectID string, compID int64) int64 {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0
 	}
-	bytes, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		ctx.Logger().Warn("read render output failed", "path", path, "err", err)
 		return 0
 	}
-	name := fmt.Sprintf("composition-%d-%d.%s", compID, time.Now().Unix(), format)
-	var got struct {
-		ID int64 `json:"id"`
-	}
-	err = ctx.PlatformAPI().CallAppResult("storage", "files_upload", map[string]any{
-		"name":           name,
-		"content_base64": base64Encode(bytes),
-		"folder":         "/.composer/",
-		"content_type":   renderContentType(format),
-		"tags":           []string{"composer", "render"},
-		"_project_id":    projectID,
-	}, &got)
-	if err != nil {
-		ctx.Logger().Warn("storage upload failed", "err", err)
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.Size() <= 0 {
 		return 0
 	}
-	return got.ID
+	args := map[string]any{"name": fmt.Sprintf("composition-%d-%d.%s", compID, time.Now().UnixNano(), format), "folder": "/.composer/", "content_type": renderContentType(format), "tags": []string{"composer", "render"}, "_project_id": projectID}
+	call := func(tool string, args map[string]any, out any) error {
+		if err := c.Err(); err != nil {
+			return err
+		}
+		return ctx.PlatformAPI().CallAppResult("storage", tool, args, out)
+	}
+	if st.Size() <= 1<<20 {
+		data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+		if err != nil || len(data) > 1<<20 {
+			return 0
+		}
+		args["content_base64"] = base64Encode(data)
+		var got struct {
+			ID int64 `json:"id"`
+		}
+		if call("files_upload", args, &got) != nil {
+			return 0
+		}
+		return got.ID
+	}
+	args["size_bytes"] = st.Size()
+	var init struct {
+		UploadID string `json:"upload_id"`
+		PartSize int    `json:"part_size"`
+		File     struct {
+			ID int64 `json:"id"`
+		} `json:"file"`
+	}
+	if call("storage_upload_init", args, &init) != nil {
+		return 0
+	}
+	if init.File.ID > 0 {
+		return init.File.ID
+	}
+	if init.UploadID == "" {
+		return 0
+	}
+	completed := false
+	defer func() {
+		if !completed {
+			var out any
+			_ = ctx.PlatformAPI().CallAppResult("storage", "storage_abort_upload", map[string]any{"id": init.UploadID, "reason": "Composer upload interrupted", "_project_id": projectID}, &out)
+		}
+	}()
+	partSize := init.PartSize
+	if partSize <= 0 || partSize > 1<<20 {
+		partSize = 1 << 20
+	}
+	buf := make([]byte, partSize)
+	for part := 1; ; part++ {
+		n, err := io.ReadFull(f, buf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil && err != io.ErrUnexpectedEOF {
+			return 0
+		}
+		var out any
+		if call("storage_upload_part", map[string]any{"upload_id": init.UploadID, "part_number": part, "content_base64": base64Encode(buf[:n]), "_project_id": projectID}, &out) != nil {
+			return 0
+		}
+	}
+	var result struct {
+		File struct {
+			ID int64 `json:"id"`
+		} `json:"file"`
+	}
+	if call("storage_upload_complete", map[string]any{"upload_id": init.UploadID, "_project_id": projectID}, &result) != nil {
+		return 0
+	}
+	completed = result.File.ID > 0
+	return result.File.ID
 }
 
 func renderContentType(format string) string {
@@ -890,7 +1020,7 @@ func (a *App) toolRenderStatus(ctx *sdk.AppCtx, args map[string]any) (any, error
 	err := ctx.AppDB().QueryRow(
 		`SELECT composition_id, executor, status, COALESCE(phase,''), COALESCE(progress_pct,0), COALESCE(progress_json,'{}'),
 		        storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at, qa_json
-		 FROM renders WHERE id=?`, id,
+		 FROM renders WHERE id=? AND project_id=?`, id, projectScope(ctx),
 	).Scan(&compID, &executor, &status, &phase, &progressPct, &progressJSON, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt, &qaJSON)
 	if err != nil {
 		return nil, fmt.Errorf("not found: %w", err)
@@ -970,7 +1100,7 @@ func (a *App) handleAssetResolve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "src required", http.StatusBadRequest)
 		return
 	}
-	url, err := resolveAssetURL(globalCtx, src)
+	url, err := resolveAssetURL(requestAppCtx(r), src)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1006,10 +1136,10 @@ func (a *App) handleStorageAssets(w http.ResponseWriter, r *http.Request) {
 		"folder":      folder,
 		"recursive":   recursive,
 		"limit":       limit,
-		"_project_id": projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")}),
+		"_project_id": projectScopeFromArgs(requestAppCtx(r), map[string]any{"project_id": r.URL.Query().Get("project_id")}),
 	}
 	var got map[string]any
-	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_list", args, &got); err != nil {
+	if err := requestAppCtx(r).PlatformAPI().CallAppResult("storage", "files_list", args, &got); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
@@ -1047,7 +1177,7 @@ func (a *App) handleListCompositions(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	out, err := a.toolCompositionList(globalCtx, map[string]any{
+	out, err := a.toolCompositionList(requestAppCtx(r), map[string]any{
 		"limit":      limit,
 		"project_id": r.URL.Query().Get("project_id"),
 		"summary":    r.URL.Query().Get("summary") == "1" || r.URL.Query().Get("summary") == "true",
@@ -1075,7 +1205,7 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 		if body["project_id"] == nil {
 			body["project_id"] = r.URL.Query().Get("project_id")
 		}
-		out, err := a.toolCompositionCreate(globalCtx, body)
+		out, err := a.toolCompositionCreate(requestAppCtx(r), body)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1090,7 +1220,7 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolCompositionGet(globalCtx, map[string]any{"id": id})
+		out, err := a.toolCompositionGet(requestAppCtx(r), map[string]any{"id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -1102,14 +1232,14 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		out, err := a.toolCompositionUpdate(globalCtx, map[string]any{"id": id, "patch": body})
+		out, err := a.toolCompositionUpdate(requestAppCtx(r), map[string]any{"id": id, "patch": body})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 		jsonResp(w, out)
 	case http.MethodDelete:
-		out, err := a.toolCompositionDelete(globalCtx, map[string]any{"id": id})
+		out, err := a.toolCompositionDelete(requestAppCtx(r), map[string]any{"id": id})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1134,7 +1264,7 @@ func (a *App) handleRender(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	out, err := a.toolCompositionRender(globalCtx, body)
+	out, err := a.toolCompositionRender(requestAppCtx(r), body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1170,7 +1300,8 @@ func (a *App) handleAIGenerate(w http.ResponseWriter, r *http.Request) {
 	if pid == "" {
 		pid = projectScope(globalCtx)
 	}
-	ctx := globalCtx.WithProject(pid)
+	ctx := requestAppCtx(r)
+	pid = projectScope(ctx)
 
 	var ai *AIAsset
 	var continuity ttsContinuityPlan
@@ -1225,7 +1356,7 @@ func (a *App) handleRenderStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	out, err := a.toolRenderStatus(globalCtx, map[string]any{"render_id": id})
+	out, err := a.toolRenderStatus(requestAppCtx(r), map[string]any{"render_id": id})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -1242,7 +1373,7 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
-	pid := projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
+	pid := projectScopeFromArgs(requestAppCtx(r), map[string]any{"project_id": r.URL.Query().Get("project_id")})
 	out := map[string]any{
 		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": pid}),
 		"instances_bound":   appToolAvailable(globalCtx, "instances", "instance_get", map[string]any{"id": 0, "_project_id": pid}),

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"math"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type RenderQA struct {
@@ -19,10 +21,13 @@ type RenderQA struct {
 }
 
 func analyzeRender(path string, edit *Edit) RenderQA {
+	return analyzeRenderContext(context.Background(), path, edit)
+}
+func analyzeRenderContext(ctx context.Context, path string, edit *Edit) RenderQA {
 	qa := RenderQA{Warnings: timelineWarnings(edit)}
 	if strings.TrimSpace(path) != "" {
-		qa.DurationSeconds = probeRenderDuration(path)
-		peak, rms := probeRenderVolume(path)
+		qa.DurationSeconds = probeRenderDurationContext(ctx, path)
+		peak, rms := probeRenderVolumeContext(ctx, path)
 		if !math.IsNaN(peak) {
 			qa.PeakDB = peak
 		}
@@ -95,7 +100,12 @@ func clipLabel(c Clip) string {
 }
 
 func probeRenderDuration(path string) float64 {
-	cmd := exec.Command(ffprobePath(),
+	return probeRenderDurationContext(context.Background(), path)
+}
+func probeRenderDurationContext(ctx context.Context, path string) float64 {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffprobePath(),
 		"-v", "error",
 		"-show_entries", "format=duration",
 		"-of", "default=noprint_wrappers=1:nokey=1",
@@ -113,7 +123,12 @@ func probeRenderDuration(path string) float64 {
 }
 
 func probeRenderVolume(path string) (float64, float64) {
-	cmd := exec.Command(ffmpegPath(), "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-")
+	return probeRenderVolumeContext(context.Background(), path)
+}
+func probeRenderVolumeContext(ctx context.Context, path string) (float64, float64) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, ffmpegPath(), "-hide_banner", "-nostats", "-i", path, "-af", "volumedetect", "-f", "null", "-")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

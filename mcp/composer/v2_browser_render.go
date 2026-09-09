@@ -99,6 +99,8 @@ func renderV2Browser(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, 
 		filepath.Join(scratch, "chrome-profile"),
 	}
 	cmd := exec.CommandContext(ctx, nodePath, args...)
+	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+	cmd.WaitDelay = 5 * time.Second
 	var stderr strings.Builder
 	var stdout strings.Builder
 	cmd.Stdout = &stdout
@@ -146,8 +148,22 @@ func browserResolvedSpec(app *sdk.AppCtx, spec *V2Composition) (*V2Composition, 
 	}
 	for i := range out.Assets {
 		if out.Assets[i].Type == "image" || out.Assets[i].Type == "video" {
-			if resolved, err := resolveAssetLocal(app, out.Assets[i].Src); err == nil && resolved != "" {
-				out.Assets[i].Src = fileURL(resolved)
+			resolved, err := resolveAssetLocal(app, out.Assets[i].Src)
+			if err != nil {
+				return nil, err
+			}
+			out.Assets[i].Src = fileURL(resolved)
+		}
+	}
+	for i := range out.Scenes {
+		for j := range out.Scenes[i].Elements {
+			el := &out.Scenes[i].Elements[j]
+			if el.Type == "image" && el.Asset == "" && el.Src != "" {
+				resolved, err := resolveAssetLocal(app, el.Src)
+				if err != nil {
+					return nil, err
+				}
+				el.Src = fileURL(resolved)
 			}
 		}
 	}
@@ -196,6 +212,9 @@ func freeTCPPort() (int, error) {
 }
 
 func fileURL(p string) string {
+	if strings.HasPrefix(p, "https://") || strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "data:") {
+		return p
+	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
 		abs = p
@@ -269,7 +288,7 @@ function ease(t){t=Math.max(0,Math.min(1,t)); return 1-Math.pow(1-t,3);}
 function lerp(a,b,p){return a+(b-a)*p}
 function styleNum(o,k,d){let v=o?.[k]; return typeof v==='number'?v:d}
 function styleStr(o,k,d){let v=o?.[k]; return typeof v==='string'?v:d}
-function key(anim,k,t,d){let arr=anim?.[k]; if(!Array.isArray(arr)) return d; for(const it of arr){let st=it.start||0, du=it.duration||it.length||0; if(du>0 && t>=st && t<=st+du){return lerp(it.from??d,it.to??d,ease((t-st)/du));}} return d}
+function key(anim,k,t,d){let arr=anim?.[k]; if(!Array.isArray(arr)||!arr.length)return d; let value=arr[0].from??d; for(const it of arr){let st=it.start||0, du=it.duration||it.length||0; if(t<st) return value; if(du>0&&t<st+du){let p=Math.max(0,Math.min(1,(t-st)/du)); const e=it.easing||it.ease; if(e==='ease_in')p=p*p; else if(e==='ease_in_out')p=p<.5?2*p*p:1-Math.pow(-2*p+2,2)/2; else if(e!=='linear')p=ease(p); return lerp(it.from??d,it.to??d,p);} value=it.to??d;} return value}
 function motion(el,t,dur){let op=styleNum(el.style,'opacity',1), x=0, y=0, sc=1; const apply=(m,enter)=>{ if(!m)return; let type=(m.type||m.preset||'').toLowerCase(); let du=m.duration||.5, delay=m.delay||0; let p=enter?ease((t-delay)/du):ease((dur-t-delay)/du); p=Math.max(0,Math.min(1,p)); if(type==='fade'){op*=p} if(type==='rise'||type==='fade_up'){op*=p;y+=(1-p)*28*sy;sc*=.98+.02*p} if(type==='drop'||type==='fade_down'){op*=p;y-=(1-p)*28*sy;sc*=.98+.02*p} if(type==='slide_left'){op*=p;x+=(1-p)*140*sx} if(type==='slide_right'){op*=p;x-=(1-p)*140*sx} if(type==='slide_up'){op*=p;y+=(1-p)*110*sy} if(type==='slide_down'){op*=p;y-=(1-p)*110*sy} if(type==='zoom_in'){op*=p;sc*=.94+.06*p} if(type==='zoom_out'){op*=p;sc*=1.06-.06*p} if(type==='pop'||type==='scale_pop'){op*=p;sc*=.82+.18*p} };
  apply(el.enter,true); apply(el.exit,false); x+=key(el.animate,'x',t,0)*sx; y+=key(el.animate,'y',t,0)*sy; op=key(el.animate,'opacity',t,op); sc*=key(el.animate,'scale',t,1); return {op,x,y,sc};}
 function box(el){return {x:meas(el.x??el.style?.x,W,sx),y:meas(el.y??el.style?.y,H,sy),w:meas(el.width??el.style?.width,W,sx)||W,h:meas(el.height??el.style?.height,H,sy)||H};}
@@ -282,7 +301,7 @@ function applySharedStyle(n,el){if(!el.style)return; if(el.style.background)n.st
 function makeEl(el){let n=document.createElement('div'); n.className='el '+el.type; n.dataset.id=el.id||''; applySharedStyle(n,el); if(el.type==='shape'||el.type==='group'){n.classList.add('shape'); n.style.background=el.style?.gradient?gradientCSS(el.style.gradient):color(el.style?.fill||el.style?.background,'transparent'); n.style.borderRadius=(el.style?.kind==='ellipse'||el.style?.kind==='circle')?'50%':(styleNum(el.style,'radius',0)*ss)+'px'; if(el.style?.stroke)n.style.border=(styleNum(el.style,'stroke_width',1)*ss)+'px solid '+el.style.stroke; if(el.style?.shadow)n.style.boxShadow=shadowCSS(el.style.shadow); if(el.style?.filter)n.style.filter=el.style.filter;} else if(el.type==='text'){n.classList.add('text'); n.textContent=el.text||''; n.style.color=color(el.style?.color,'#111'); n.style.fontSize=(styleNum(el.style,'font_size',styleNum(el.style,'fontSize',48))*ss)+'px'; n.style.fontWeight=styleNum(el.style,'weight',400); n.style.textAlign=styleStr(el.style,'align','left'); n.style.fontFamily=styleStr(el.style,'font_family',styleStr(el.style,'fontFamily','inherit')); n.style.display='flex'; n.style.alignItems=styleStr(el.style,'vertical_align','center'); n.style.justifyContent=styleStr(el.style,'align','left')==='center'?'center':'flex-start'; n.style.overflowWrap='anywhere';} else if(el.type==='image'){let img=document.createElement('img'); img.src=assets[el.asset]?.src||el.src||''; img.style.width='100%'; img.style.height='100%'; img.style.objectFit=el.fit||el.style?.fit||'cover'; n.appendChild(img);} else if(el.type==='component'){n.classList.add('component'); n.innerHTML=componentHTML(el);} return n;}
 const sceneNodes = (SPEC.scenes||[]).map((scene,si)=>{let root=document.createElement('div'); root.style.position='absolute'; root.style.inset='0'; root.style.overflow='hidden'; root.style.background=scene.background||'transparent'; stage.appendChild(root); let nodes=(scene.elements||[]).map(el=>{let node=makeEl(el); root.appendChild(node); return {el,node};}); return {scene,root,nodes,start:starts[si]};});
 window.__setComposerTime = async function(t){ for(const s of sceneNodes){let local=t-s.start; let active=local>=0 && local<=s.scene.duration; s.root.style.display=active?'block':'none'; if(!active) continue; const cam=s.scene.meta?.camera||{}; const cm={op:1,x:key(cam,'x',local,0)*sx,y:key(cam,'y',local,0)*sy,sc:key(cam,'scale',local,1)}; s.root.style.transformOrigin='50% 50%'; s.root.style.transform='translate('+cm.x+'px,'+cm.y+'px) scale('+cm.sc+')'; const byId=Object.fromEntries(s.nodes.map(x=>[x.el.id,x])); for(const item of s.nodes){let el=item.el; let st=el.start||0, dur=el.duration||Math.max(.001,s.scene.duration-st); let on=local>=st && local<=st+dur; item.node.style.display=on?'block':'none'; if(!on)continue; let b=box(el), m=motion(el,local-st,dur); if(el.parent && byId[el.parent]){let p=byId[el.parent].el; let pm=motion(p,local-(p.start||0),p.duration||s.scene.duration); m.op*=pm.op; m.x+=pm.x; m.y+=pm.y; m.sc*=pm.sc;} applyBox(item.node,b,m);} } await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))); };
-window.__setComposerTime(0);
+window.__composerReady = (async()=>{ await document.fonts.ready; await Promise.all(Array.from(document.images).map(img=>img.decode())); await window.__setComposerTime(0); })();
 `
 }
 
@@ -294,12 +313,14 @@ const [chromePath, url, framesDir, wRaw, hRaw, fpsRaw, countRaw, portRaw, profil
 const width=Number(wRaw), height=Number(hRaw), fps=Number(fpsRaw), frames=Number(countRaw), port=Number(portRaw);
 fs.mkdirSync(framesDir,{recursive:true});
 const chrome = spawn(chromePath, ['--headless=new','--disable-gpu','--hide-scrollbars','--mute-audio','--allow-file-access-from-files','--remote-debugging-port='+port,'--user-data-dir='+profile,'about:blank'], {stdio:['ignore','pipe','pipe']});
+process.once('SIGINT',()=>{chrome.kill('SIGTERM');process.exit(130)});
+process.once('SIGTERM',()=>{chrome.kill('SIGTERM');process.exit(143)});
 chrome.stderr.on('data', d => process.stderr.write(d));
 chrome.stdout.on('data', d => process.stderr.write(d));
 async function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 async function getJSON(path){const res=await fetch('http://127.0.0.1:'+port+path); if(!res.ok) throw new Error('HTTP '+res.status+' '+path); return res.json();}
 async function waitChrome(){for(let i=0;i<80;i++){try{return await getJSON('/json/list')}catch(e){await sleep(100)}} throw new Error('Chrome did not start');}
 function cdp(wsUrl){return new Promise((resolve,reject)=>{const ws=new WebSocket(wsUrl); let id=0; const pending=new Map(); ws.onopen=()=>resolve({send(method,params={}){return new Promise((res,rej)=>{const mid=++id; pending.set(mid,{res,rej}); ws.send(JSON.stringify({id:mid,method,params}));});}, close(){ws.close();}}); ws.onerror=reject; ws.onmessage=e=>{const msg=JSON.parse(e.data); if(msg.id&&pending.has(msg.id)){const p=pending.get(msg.id); pending.delete(msg.id); msg.error?p.rej(new Error(JSON.stringify(msg.error))):p.res(msg.result)}};});}
-(async()=>{try{let pages=await waitChrome(); let page=pages.find(p=>p.type==='page')||pages[0]; let dev=await cdp(page.webSocketDebuggerUrl); await dev.send('Page.enable'); await dev.send('Runtime.enable'); await dev.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false}); await dev.send('Page.navigate',{url}); await sleep(700); for(let i=0;i<frames;i++){let t=i/fps; await dev.send('Runtime.evaluate',{expression:'window.__setComposerTime('+t+')',awaitPromise:true}); const cap=await dev.send('Page.captureScreenshot',{format:'jpeg',quality:92,clip:{x:0,y:0,width,height,scale:1},captureBeyondViewport:false}); fs.writeFileSync(framesDir+'/frame_'+String(i+1).padStart(6,'0')+'.jpg', Buffer.from(cap.data,'base64')); if(i%120===0) process.stderr.write('frame '+i+'/'+frames+'\\n');} dev.close(); chrome.kill('SIGTERM');}catch(e){chrome.kill('SIGTERM'); console.error(e.stack||e); process.exit(1);}})();
+(async()=>{try{let pages=await waitChrome(); let page=pages.find(p=>p.type==='page')||pages[0]; let dev=await cdp(page.webSocketDebuggerUrl); await dev.send('Page.enable'); await dev.send('Runtime.enable'); await dev.send('Emulation.setDeviceMetricsOverride',{width,height,deviceScaleFactor:1,mobile:false}); await dev.send('Page.navigate',{url}); for(let attempt=0;attempt<100;attempt++){const ready=await dev.send('Runtime.evaluate',{expression:'typeof window.__composerReady !== \"undefined\"',returnByValue:true}); if(ready.result?.value)break; if(attempt===99)throw new Error('Composer page did not load'); await sleep(100);} const ready=await dev.send('Runtime.evaluate',{expression:'window.__composerReady',awaitPromise:true}); if(ready.exceptionDetails)throw new Error('Composer assets failed to load: '+JSON.stringify(ready.exceptionDetails)); for(let i=0;i<frames;i++){let t=i/fps; const evaluated=await dev.send('Runtime.evaluate',{expression:'window.__setComposerTime('+t+')',awaitPromise:true}); if(evaluated.exceptionDetails)throw new Error(JSON.stringify(evaluated.exceptionDetails)); const cap=await dev.send('Page.captureScreenshot',{format:'jpeg',quality:92,clip:{x:0,y:0,width,height,scale:1},captureBeyondViewport:false}); fs.writeFileSync(framesDir+'/frame_'+String(i+1).padStart(6,'0')+'.jpg', Buffer.from(cap.data,'base64')); if(i%120===0) process.stderr.write('frame '+i+'/'+frames+'\\n');} dev.close(); chrome.kill('SIGTERM');}catch(e){chrome.kill('SIGTERM'); console.error(e.stack||e); process.exit(1);}})();
 `
 }

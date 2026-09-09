@@ -41,10 +41,11 @@ type Marker struct {
 }
 
 type Soundtrack struct {
-	Src    string   `json:"src"`              // storage:N | https://… | mediastudio:N
-	Volume float64  `json:"volume,omitempty"` // 0..1, default 1.0
-	Timing *Timing  `json:"timing,omitempty"`
-	AI     *AIAsset `json:"ai,omitempty"`
+	volumeSet bool
+	Src       string   `json:"src"`    // storage:N | https://… | mediastudio:N
+	Volume    float64  `json:"volume"` // 0..1, default 1.0
+	Timing    *Timing  `json:"timing,omitempty"`
+	AI        *AIAsset `json:"ai,omitempty"`
 }
 
 type Track struct {
@@ -54,6 +55,7 @@ type Track struct {
 }
 
 type Clip struct {
+	volumeSet       bool
 	UID             string      `json:"uid,omitempty"`
 	SectionID       string      `json:"section_id,omitempty"`
 	GroupID         string      `json:"group_id,omitempty"`
@@ -79,7 +81,7 @@ type Clip struct {
 	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated | fit_generated_keep_start | fit_generated_reflow
 	EstimatedLength float64     `json:"estimated_length,omitempty"`
 	ActualLength    float64     `json:"actual_length,omitempty"`
-	Volume          float64     `json:"volume,omitempty"`
+	Volume          float64     `json:"volume"`
 	SourceAudio     string      `json:"source_audio,omitempty"` // auto|keep|mute
 	AfterClipID     string      `json:"after_clip_id,omitempty"`
 	GapSeconds      float64     `json:"gap_seconds,omitempty"`
@@ -335,6 +337,7 @@ func validateEdit(e *Edit) error {
 	if len(e.Timeline.Tracks) == 0 {
 		return errors.New("at least one track required")
 	}
+	ensureClipUIDs(e)
 	visualTracks := 0
 	for ti := range e.Timeline.Tracks {
 		track := &e.Timeline.Tracks[ti]
@@ -766,6 +769,9 @@ func hasVisualTrack(e *Edit) bool {
 }
 
 func validateEditOutput(e *Edit, o Output) error {
+	if err := validateOutputValues(o); err != nil {
+		return err
+	}
 	if err := validateEdit(e); err != nil {
 		return err
 	}
@@ -1059,7 +1065,7 @@ func clipDuration(c Clip) float64 {
 }
 
 func clipVolume(c Clip) float64 {
-	if c.Volume > 0 {
+	if c.volumeSet || c.Volume > 0 {
 		return c.Volume
 	}
 	return 1
@@ -1258,4 +1264,41 @@ func outputFromArgs(args map[string]any) Output {
 	}
 	validateOutput(&o)
 	return o
+}
+
+func (v *Clip) UnmarshalJSON(data []byte) error {
+	type plain Clip
+	value := plain{Volume: 1, volumeSet: true}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = Clip(value)
+	return nil
+}
+func (v Clip) MarshalJSON() ([]byte, error) {
+	type plain Clip
+	value := plain(v)
+	value.Volume = clipVolume(v)
+	return json.Marshal(value)
+}
+func (v *Soundtrack) UnmarshalJSON(data []byte) error {
+	type plain Soundtrack
+	value := plain{Volume: 1, volumeSet: true}
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	*v = Soundtrack(value)
+	return nil
+}
+func (v Soundtrack) MarshalJSON() ([]byte, error) {
+	type plain Soundtrack
+	value := plain(v)
+	value.Volume = soundtrackVolume(&v)
+	return json.Marshal(value)
+}
+func soundtrackVolume(s *Soundtrack) float64 {
+	if s.volumeSet || s.Volume > 0 {
+		return s.Volume
+	}
+	return 1
 }

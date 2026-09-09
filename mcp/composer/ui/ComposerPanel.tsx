@@ -48,6 +48,7 @@ function withProject(path: string, projectId: string): string {
 
 interface Composition {
   id: number;
+  revision?: number;
   name: string;
   edit_json?: string;
   output_json?: string;
@@ -282,7 +283,7 @@ interface OutputDraft {
   format: OutputFormat;
   resolution: "sd" | "hd" | "fullhd" | "4k";
   aspect: Aspect;
-  fps: 24 | 30 | 60;
+  fps: 24 | 25 | 30 | 60;
 }
 
 interface DraftState {
@@ -613,7 +614,7 @@ function parseComposition(c: Composition | null): DraftState {
     });
     if (clips.length) {
       draft.clips = normalizeClips(clips.map(({ clip, trackID, clipIndex }: any) => ({
-        id: String(clip.uid || `clip-${clipIndex + 1}`),
+        id: String(clip.uid || `${trackID}-clip-${clipIndex + 1}`),
         track_id: trackID,
         section_id: clip.section_id,
         group_id: clip.group_id,
@@ -705,14 +706,14 @@ function parseComposition(c: Composition | null): DraftState {
     if (timeline.soundtrack?.src) {
       draft.soundtrack = {
         src: String(timeline.soundtrack.src),
-        volume: Number(timeline.soundtrack.volume) || 1,
+        volume: Number(timeline.soundtrack.volume ?? 1),
         timing: timeline.soundtrack.timing,
         ai: timeline.soundtrack.ai,
       };
     } else if (timeline.soundtrack?.ai) {
       draft.soundtrack = {
         src: String(timeline.soundtrack.src || ""),
-        volume: Number(timeline.soundtrack.volume) || 1,
+        volume: Number(timeline.soundtrack.volume ?? 1),
         timing: timeline.soundtrack.timing,
         ai: timeline.soundtrack.ai,
       };
@@ -724,7 +725,7 @@ function parseComposition(c: Composition | null): DraftState {
       format: ["mp4", "mp3", "wav", "m4a", "aac"].includes(output.format) ? output.format : "mp4",
       resolution: ["sd", "hd", "fullhd", "4k"].includes(output.resolution) ? output.resolution : "hd",
       aspect: ["16:9", "9:16", "1:1", "4:3"].includes(output.aspect) ? output.aspect : "16:9",
-      fps: [24, 30, 60].includes(output.fps) ? output.fps : 30,
+      fps: [24, 25, 30, 60].includes(output.fps) ? output.fps : 30,
     };
   } catch {}
   return draft;
@@ -1264,8 +1265,18 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const [storageLoading, setStorageLoading] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [aiBusy, setAIBusy] = useState("");
-  const [libraryOpen, setLibraryOpen] = useState(true);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [libraryOpen, setLibraryOpen] = useState(() => window.innerWidth >= 1120);
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1120);
+  const editEpoch = useRef(0);
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
+  const draftRevision = useRef<number | undefined>(undefined);
+  const savingRef = useRef(false);
+  const renderBusy = useRef(false);
+  const loadedDraftId = useRef<number | null>(null);
+  const detailRequest = useRef(0);
+  const resolvePending = useRef(new Set<string>());
+  const [dirty, setDirty] = useState(false);
   const undoStack = useRef<DraftState[]>([]);
   const redoStack = useRef<DraftState[]>([]);
 
@@ -1301,6 +1312,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   }, [projectId]);
 
   const loadCompositionDetail = useCallback(async (id: number) => {
+    const request = ++detailRequest.current;
     setDetailLoading(true);
     try {
       const res = await fetch(withProject(`${API}/composition/${id}`, projectId), { credentials: "same-origin" });
@@ -1311,12 +1323,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
       const row = await res.json();
       const [enriched] = await enrichCompositionsWithMediaStudio(projectId, [row]);
       const detail = enriched || row;
+      if (request !== detailRequest.current) return;
       setSelectedDetail(detail);
       setCompositions((prev) => prev.map((c) => (c.id === detail.id ? { ...c, ...detail } : c)));
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
-      setDetailLoading(false);
+      if (request === detailRequest.current) setDetailLoading(false);
     }
   }, [projectId]);
 
@@ -1343,6 +1356,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   }, []);
 
   useEffect(() => {
+    detailRequest.current++;
+    loadedDraftId.current = null;
+    setDraft(cloneDefault());
+    setResolved({});
+    setDirty(false);
     setSelectedDetail(null);
     setSelectedId(null);
     setPlaying(false);
@@ -1369,7 +1387,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   }, [selectedId, selectedFull?.latest_render?.id, selectedFull?.latest_render?.status, loadCompositionDetail]);
 
   useEffect(() => {
-    if (selectedId != null && !selectedFull) return;
+    if (selectedId == null || !selectedFull || loadedDraftId.current === selectedId) return;
+    loadedDraftId.current = selectedId;
+    draftRevision.current = selectedFull.revision;
+    setDirty(false);
+    if (isV2CompositionJSON(selectedFull.edit_json || "")) setTab("json");
     const next = parseComposition(selectedFull);
     undoStack.current = [];
     redoStack.current = [];
@@ -1384,9 +1406,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
   useEffect(() => {
     if (!playing) return;
+    let last = performance.now();
     const id = window.setInterval(() => {
+      const now = performance.now();
+      const elapsed = (now - last) / 1000;
+      last = now;
       setPlayhead((t) => {
-        const next = t + 0.1;
+        const next = t + elapsed;
         if (next >= totalDuration) {
           setPlaying(false);
           return 0;
@@ -1404,35 +1430,43 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
       draft.soundtrack?.src?.trim() || "",
     ].filter(Boolean)));
     for (const src of sources) {
-      if (resolved[src]) continue;
+      const requestKey = `${projectId}:${src}`;
+      if (resolved[src] || resolvePending.current.has(requestKey)) continue;
       if (src.startsWith("http://") || src.startsWith("https://")) {
         setResolved((prev) => ({ ...prev, [src]: { src, url: src, kind: src.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? "image" : "video" } }));
         continue;
       }
+      resolvePending.current.add(requestKey);
       fetch(withProject(`${API}/assets/resolve?src=${encodeURIComponent(src)}`, projectId), { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))
         .then((asset) => {
-          if (!asset?.url) return;
+          if (!asset?.url || activeProject.current !== projectId) return;
           setResolved((prev) => ({ ...prev, [src]: asset }));
         })
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() => resolvePending.current.delete(requestKey));
     }
   }, [clips, audioClips, draft.soundtrack?.src, resolved, projectId]);
 
   const updateDraft = (fn: (draft: DraftState) => DraftState) => {
+    editEpoch.current++;
+    setDirty(true);
     setDraft((cur) => {
       const next = fn(cur);
       const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips), textClips: normalizeTextClips(next.textClips) };
       if (JSON.stringify(cur) === JSON.stringify(normalized)) return cur;
       undoStack.current = [...undoStack.current.slice(-79), cloneDraft(cur)];
       redoStack.current = [];
-      setJsonEdit(editJSONFromDraft(normalized));
-      setJsonOutput(outputJSONFromDraft(normalized));
+      if (!isV2CompositionJSON(jsonEdit)) {
+        setJsonEdit(editJSONFromDraft(normalized));
+        setJsonOutput(outputJSONFromDraft(normalized));
+      }
       return normalized;
     });
   };
 
   const restoreDraft = (next: DraftState) => {
+    editEpoch.current++; setDirty(true);
     setDraft(next);
     setJsonEdit(editJSONFromDraft(next));
     setJsonOutput(outputJSONFromDraft(next));
@@ -1589,13 +1623,27 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
   const splitSelectedClip = () => {
     const splitAt = Number(playhead.toFixed(3));
-    const split = <T extends { id: string; start: number; length: number }>(items: T[], prefix: string): T[] => {
+    const split = <T extends { id: string; start: number; length: number; source_start?: number; source_end?: number; playback_rate?: number; transform?: ClipDraft["transform"]; timing?: Timing; duration_mode?: DurationMode }>(items: T[], prefix: string): T[] => {
       const index = items.findIndex((item) => item.id === selectedClipId);
       if (index < 0) return items;
       const source = items[index];
       if (splitAt <= source.start + 0.1 || splitAt >= source.start + source.length - 0.1) return items;
       const right = { ...JSON.parse(JSON.stringify(source)), id: `${prefix}-${Date.now()}`, start: splitAt, length: source.start + source.length - splitAt } as T;
       const left = { ...source, length: splitAt - source.start };
+      const elapsed = splitAt - source.start;
+      if (prefix !== "text") {
+        right.source_start = (source.source_start ?? 0) + elapsed * (source.playback_rate || 1);
+        left.source_end = right.source_start;
+        // A manual split defines fixed durations, even for generated clips.
+        left.timing = { ...source.timing, mode: "fixed" };
+        right.timing = { ...source.timing, mode: "fixed" };
+        left.duration_mode = right.duration_mode = "fixed_trim_pad";
+      }
+      if (source.transform?.keyframes?.length) {
+        const atSplit = previewCameraAt(source.transform, elapsed);
+        left.transform = { ...source.transform, keyframes: [...source.transform.keyframes.filter(k => k.time < elapsed), { time: elapsed, ...atSplit }] };
+        right.transform = { ...atSplit, keyframes: source.transform.keyframes.filter(k => k.time > elapsed).map(k => ({ ...k, time: k.time - elapsed })) };
+      }
       const next = [...items];
       next.splice(index, 1, left, right);
       setSelectedClipId(right.id);
@@ -1734,7 +1782,10 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     updateDraft((cur) => ({ ...cur, textClips: cur.textClips.filter((clip) => clip.id !== id) }));
   };
 
-  const save = async () => {
+  const save = async (): Promise<number | undefined> => {
+    if (savingRef.current) { setStatus("Save already in progress."); return; }
+    savingRef.current = true;
+    const epoch = editEpoch.current;
     setStatus("Saving...");
     try {
       if (tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0 && draft.textClips.length === 0) {
@@ -1746,6 +1797,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         setStatus("Add at least one track before saving.");
         return;
       }
+      if (selectedId != null && draftRevision.current) (body as any).expected_revision = draftRevision.current;
       const url = withProject(selectedId == null ? `${API}/composition/new` : `${API}/composition/${selectedId}`, projectId);
       const method = selectedId == null ? "POST" : "PUT";
       const res = await fetch(url, {
@@ -1759,15 +1811,19 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         setStatus(`Save failed: ${res.status} ${text.slice(0, 300)}`);
         return;
       }
-      const result = JSON.parse(text || "{}") as { id?: number };
+      const result = JSON.parse(text || "{}") as { id?: number; revision?: number };
       setStatus("Saved.");
+      if (epoch === editEpoch.current) setDirty(false);
       await load();
       const id = result.id || selectedId || 0;
+      draftRevision.current = result.revision;
+      loadedDraftId.current = id;
       if (result.id) setSelectedId(result.id);
       if (id > 0) await loadCompositionDetail(id);
+      return id || undefined;
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
-    }
+      setStatus("Save failed: " + (e as Error).message);
+    } finally { savingRef.current = false; }
   };
 
   const applyJSON = () => {
@@ -1806,15 +1862,14 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
       setStatus("Add at least one clip before rendering.");
       return;
     }
-    if (selectedId == null) {
-      await save();
-      setStatus("Saved. Render after selecting the new composition.");
-      return;
-    }
+    if (renderBusy.current) return;
+    renderBusy.current = true;
+    const savedId = await save();
+    if (!savedId) { renderBusy.current = false; return; }
     setRendering(true);
     setStatus("Rendering...");
     try {
-      const body: Record<string, unknown> = { id: selectedId, wait: false };
+      const body: Record<string, unknown> = { id: savedId, wait: false, expected_revision: draftRevision.current };
       if (executor !== "auto") body.executor = executor;
       const res = await fetch(withProject(`${API}/render`, projectId), {
         method: "POST",
@@ -1834,6 +1889,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
+      renderBusy.current = false;
       setRendering(false);
     }
   };
@@ -1841,14 +1897,23 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const deleteSelected = async () => {
     if (selectedId == null) return;
     if (!confirm(`Delete composition #${selectedId}?`)) return;
-    await fetch(withProject(`${API}/composition/${selectedId}`, projectId), { method: "DELETE", credentials: "same-origin" });
+    const response = await fetch(withProject(`${API}/composition/${selectedId}`, projectId), { method: "DELETE", credentials: "same-origin" });
+    if (!response.ok) { setStatus(`Delete failed: ${response.status}`); return; }
+    setDraft(cloneDefault());
+    loadedDraftId.current = null;
     setSelectedId(null);
     await load();
   };
 
   const loadExample = (example: DraftExample) => {
+    if (savingRef.current || renderBusy.current) { setStatus("Wait for the current save or render submission to finish."); return; }
+    if (dirty && !confirm("Discard unsaved changes?")) return;
     const next = JSON.parse(JSON.stringify(example.draft)) as DraftState;
     const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips), textClips: normalizeTextClips(next.textClips) };
+    detailRequest.current++;
+    loadedDraftId.current = null;
+    setDirty(true);
+    undoStack.current = []; redoStack.current = [];
     setSelectedId(null);
     setDraft(normalized);
     setSelectedClipId(normalized.clips[0]?.id || normalized.textClips[0]?.id || normalized.audioClips[0]?.id || "");
@@ -1869,7 +1934,8 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         void save();
         return;
       }
-      if (editing) return;
+      if (event.key === "Escape") { setPickerTarget(null); setClipEditor(null); closeLightbox(); return; }
+      if (editing || lightbox || pickerTarget || clipEditor || target?.closest("button, a, [role='button']")) return;
       if (mod && event.key.toLowerCase() === "z") {
         event.preventDefault();
         event.shiftKey ? redo() : undo();
@@ -2013,6 +2079,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setStatus("Generating AI soundtrack...");
     try {
       const { ai: nextAI } = await callComposerGenerate(ai);
+      if (nextAI.status === "generating" && nextAI.job_id) {
+        updateDraft(cur => ({ ...cur, soundtrack: { ...cur.soundtrack, src: cur.soundtrack?.src || "", volume: cur.soundtrack?.volume ?? 1, ai: nextAI } }));
+        setStatus(`AI soundtrack job #${nextAI.job_id} queued. Render will wait for it automatically.`);
+        return;
+      }
       const storageId = Number(nextAI.storage_id || 0);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
       updateDraft((cur) => ({
@@ -2097,7 +2168,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         }
       `}</style>
       <header className="border-b border-border px-3 py-2 flex items-center gap-2 bg-bg-card">
-        <IconButton label={libraryOpen ? "Hide compositions" : "Show compositions"} onClick={() => setLibraryOpen((value) => !value)}>
+        <IconButton label={libraryOpen ? "Hide compositions" : "Show compositions"} onClick={() => { setLibraryOpen((value) => !value); if (window.innerWidth < 1120) setInspectorOpen(false); }}>
           {libraryOpen ? <ChevronLeft size={16} /> : <ChevronRight size={16} />}
         </IconButton>
         <div className="composer-command-title min-w-0 flex-1">
@@ -2125,15 +2196,15 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
           <option value="local">local</option>
           <option value="remote">remote</option>
         </select>
-        <button onClick={save} className="h-8 px-3 text-sm border border-border rounded flex items-center gap-2 hover:bg-bg-input"><Save size={15} />Save</button>
+        <button onClick={save} className="h-8 px-3 text-sm border border-border rounded flex items-center gap-2 hover:bg-bg-input"><Save size={15} />{dirty ? "Save changes" : "Save"}</button>
         <button
           onClick={render}
           disabled={rendering}
           className="h-8 px-3 text-sm bg-accent text-bg rounded font-semibold flex items-center gap-2 disabled:opacity-50"
         >
-          <Sparkles size={15} />{rendering ? "Rendering..." : "Render"}
+          <Sparkles size={15} />{rendering ? "Rendering..." : "Save & render"}
         </button>
-        <IconButton label={inspectorOpen ? "Hide inspector" : "Show inspector"} onClick={() => setInspectorOpen((value) => !value)}>
+        <IconButton label={inspectorOpen ? "Hide inspector" : "Show inspector"} onClick={() => { setInspectorOpen((value) => !value); if (window.innerWidth < 1120) setLibraryOpen(false); }}>
           {inspectorOpen ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
         </IconButton>
       </header>
@@ -2144,10 +2215,19 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
           examples={examples}
           selectedId={selectedId}
           onSelect={(id) => {
+            if (savingRef.current || renderBusy.current) { setStatus("Wait for the current save or render submission to finish."); return; }
+            if (dirty && !confirm("Discard unsaved changes?")) return;
+            loadedDraftId.current = null;
+            detailRequest.current++;
             setSelectedId(id);
             if (window.innerWidth < 1120) setLibraryOpen(false);
           }}
           onNew={() => {
+            if (savingRef.current || renderBusy.current) { setStatus("Wait for the current save or render submission to finish."); return; }
+            if (dirty && !confirm("Discard unsaved changes?")) return;
+            detailRequest.current++; loadedDraftId.current = null;
+            setDraft(cloneDefault()); setDirty(false); setTab("timeline");
+            setJsonEdit(editJSONFromDraft(cloneDefault())); setJsonOutput(outputJSONFromDraft(cloneDefault()));
             setSelectedId(null);
             if (window.innerWidth < 1120) setLibraryOpen(false);
           }}
@@ -2159,7 +2239,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
         <main className="flex-1 min-w-0 flex flex-col">
           <nav className="border-b border-border px-3 pt-2 flex gap-1 text-xs">
-            <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>Timeline</TabButton>
+            <TabButton active={tab === "timeline"} onClick={() => { if (isV2CompositionJSON(jsonEdit)) { setStatus("V2 scene compositions are edited in JSON. The timeline editor supports V1 clips."); return; } setTab("timeline"); }}>Timeline</TabButton>
             <TabButton active={tab === "json"} onClick={() => setTab("json")}>JSON</TabButton>
           </nav>
           {detailLoading && selectedId != null && (
@@ -2179,6 +2259,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   resolved={resolved}
                   background={draft.background}
                   aspect={draft.output.aspect}
+                  resolution={draft.output.resolution}
                   playing={playing}
                   playhead={playhead}
                   duration={totalDuration}
@@ -2251,8 +2332,8 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
             <JSONEditor
               editText={jsonEdit}
               outputText={jsonOutput}
-              onEdit={setJsonEdit}
-              onOutput={setJsonOutput}
+              onEdit={(value) => { editEpoch.current++; setDirty(true); setJsonEdit(value); }}
+              onOutput={(value) => { editEpoch.current++; setDirty(true); setJsonOutput(value); }}
               onApply={applyJSON}
             />
           )}
@@ -2508,6 +2589,7 @@ function PreviewStage({
   resolved,
   background,
   aspect,
+  resolution,
   playing,
   playhead,
   duration,
@@ -2523,6 +2605,7 @@ function PreviewStage({
   resolved: Record<string, ResolvedAsset>;
   background: string;
   aspect: Aspect;
+  resolution: OutputDraft["resolution"];
   playing: boolean;
   playhead: number;
   duration: number;
@@ -2533,6 +2616,15 @@ function PreviewStage({
 }) {
   const stageRef = useRef<HTMLDivElement | null>(null);
   const [muted, setMuted] = useState(false);
+  const [frameWidth, setFrameWidth] = useState(480);
+  useEffect(() => {
+    const stage = stageRef.current; if (!stage) return;
+    const observer = new ResizeObserver(entries => setFrameWidth(entries[0].contentRect.width));
+    observer.observe(stage); return () => observer.disconnect();
+  }, []);
+  const shortSide = { sd: 480, hd: 720, fullhd: 1080, "4k": 2160 }[resolution];
+  const ratio = { "16:9": 16/9, "9:16": 9/16, "1:1": 1, "4:3": 4/3 }[aspect];
+  const textScale = frameWidth / (ratio >= 1 ? Math.round(shortSide * ratio / 2) * 2 : shortSide);
   const activeVisuals = clips
     .filter((clip) => playhead >= clip.start && playhead < clip.start + clip.length)
     .sort((a, b) => Number(a.layout?.z_index || a.z_index || 0) - Number(b.layout?.z_index || b.z_index || 0));
@@ -2579,7 +2671,7 @@ function PreviewStage({
               asset={resolved[clip.asset.src]}
               playing={playing}
               playhead={playhead}
-              muted={muted || clip.source_audio !== "keep"}
+              muted={muted || clip.source_audio === "mute" || (clip.source_audio !== "keep" && (clip.track_id || "visual-1") !== (clips[0]?.track_id || "visual-1"))}
               base={index === 0 && (clip.track_id || "visual-1") === (clips[0]?.track_id || "visual-1")}
             />
           ))}
@@ -2607,14 +2699,14 @@ function PreviewStage({
               )}
             </div>
           )}
-          {activeVisuals.filter((clip) => clip.text?.body).map((clip) => <div key={`${clip.id}-text`} className={`absolute z-40 left-6 right-6 text-center font-medium ${clip.text?.position === "top" ? "top-6" : clip.text?.position === "center" ? "top-1/2 -translate-y-1/2" : "bottom-6"}`} style={{ color: clip.text?.color || "#fff", fontSize: Math.max(12, clip.text?.font_size || 32), textShadow: "0 1px 3px rgba(0,0,0,.7)" }}>{clip.text?.body}</div>)}
+          {activeVisuals.filter((clip) => clip.text?.body).map((clip) => <div key={`${clip.id}-text`} className={`absolute z-40 left-6 right-6 text-center font-medium ${clip.text?.position === "top" ? "top-6" : clip.text?.position === "center" ? "top-1/2 -translate-y-1/2" : "bottom-6"}`} style={{ color: clip.text?.color || "#fff", fontSize: (clip.text?.font_size || 32) * textScale, textShadow: "0 1px 3px rgba(0,0,0,.7)" }}>{clip.text?.body}</div>)}
           {activeText.map((text) => (
             <div
               key={text.id}
               className="absolute font-bold pointer-events-none"
-              style={previewTextStyle(text)}
+              style={previewTextStyle(text, textScale, playhead - text.start)}
             >
-              {text.asset.text}
+              {previewTextContent(text, playhead - text.start)}
             </div>
           ))}
           {!muted && activeAudio.map((clip) => {
@@ -2669,7 +2761,12 @@ function PreviewVisualLayer({ clip, asset, playing, playhead, muted, base }: { c
     const media = mediaRef.current;
     if (!media) return;
     const playbackRate = clip.playback_rate || 1;
-    const sourceTime = (clip.source_start || 0) + localTime * playbackRate;
+    const sourceStart = clip.source_start || 0;
+    const end = Math.min(clip.source_end ?? Infinity, media.duration);
+    const span = end - sourceStart;
+    const loop = clip.timing?.behavior === "loop" || clip.timing?.behavior === "trim_or_loop" || (clip.timing as any)?.mode === "loop";
+    const elapsed = localTime * playbackRate;
+    const sourceTime = sourceStart + (loop && span > 0 && Number.isFinite(span) ? elapsed % span : elapsed);
     const cappedTime = clip.source_end ? Math.min(sourceTime, Math.max(0, clip.source_end - 0.01)) : sourceTime;
     if (Number.isFinite(media.duration) && Math.abs(media.currentTime - cappedTime) > 0.35) media.currentTime = Math.min(cappedTime, Math.max(0, media.duration - 0.05));
     media.playbackRate = playbackRate;
@@ -2693,18 +2790,19 @@ function SyncedAudio({ src, playing, playhead, start, volume, loop, sourceStart 
   useEffect(() => {
     const audio = ref.current;
     if (!audio) return;
-    const raw = sourceStart + Math.max(0, playhead - start) * playbackRate;
-    const local = loop && Number.isFinite(audio.duration) && audio.duration > 0 ? raw % audio.duration : raw;
+    const elapsed = Math.max(0, playhead - start) * playbackRate;
+    const span = Math.min(sourceEnd ?? Infinity, audio.duration) - sourceStart;
+    const local = sourceStart + (loop && Number.isFinite(span) && span > 0 ? elapsed % span : elapsed);
     const capped = sourceEnd ? Math.min(local, Math.max(0, sourceEnd - 0.01)) : local;
     if (Math.abs(audio.currentTime - capped) > 0.35) audio.currentTime = Math.min(capped, Math.max(0, (audio.duration || capped + 1) - 0.05));
-    audio.volume = Math.max(0, Math.min(1, volume || 1));
+    audio.volume = Math.max(0, Math.min(1, volume ?? 1));
     audio.playbackRate = playbackRate;
     if (playing) audio.play().catch(() => {}); else audio.pause();
   }, [playing, playhead, start, src, volume, loop, sourceStart, sourceEnd, playbackRate]);
   return <audio ref={ref} src={src} preload="metadata" />;
 }
 
-function previewTextStyle(text: TextClipDraft): React.CSSProperties {
+function previewTextStyle(text: TextClipDraft, scale = 1, localTime = 0): React.CSSProperties {
   const align = text.asset.align || {};
   const position = text.position || {};
   const anchor = position.anchor || "center";
@@ -2718,26 +2816,26 @@ function previewTextStyle(text: TextClipDraft): React.CSSProperties {
   return {
     left,
     top,
-    transform: transform.trim() || undefined,
+    transform: `${transform} ${previewTextMotion(text, localTime, scale)}`.trim() || undefined,
     color: text.asset.font?.color || "#ffffff",
-    fontSize: Math.max(12, Math.min(96, text.asset.font?.size || 64)) / 2,
+    fontSize: (text.asset.font?.size || 64) * scale,
     fontWeight: text.asset.font?.weight || 800,
-    opacity: text.asset.font?.opacity ?? 1,
+    opacity: (text.asset.font?.opacity ?? 1) * previewTextOpacity(text, localTime),
     textTransform: text.asset.style?.transform === "uppercase" ? "uppercase" : text.asset.style?.transform === "lowercase" ? "lowercase" : undefined,
     letterSpacing: text.asset.style?.letter_spacing ? `${text.asset.style.letter_spacing}px` : undefined,
     textAlign: align.horizontal || "center",
-    WebkitTextStroke: `${text.asset.stroke?.width || 3}px ${text.asset.stroke?.color || "#000000"}`,
-    textShadow: text.asset.shadow ? `${(text.asset.shadow.offset_x || 0) / 2}px ${(text.asset.shadow.offset_y || 2) / 2}px 0 ${text.asset.shadow.color || "#ff2f6d"}` : "0 1px 0 rgba(0,0,0,.8)",
+    WebkitTextStroke: `${(text.asset.stroke?.width ?? 3) * scale}px ${text.asset.stroke?.color || "#000000"}`,
+    textShadow: text.asset.shadow ? `${(text.asset.shadow.offset_x || 0) * scale}px ${(text.asset.shadow.offset_y || 2) * scale}px 0 ${text.asset.shadow.color || "#ff2f6d"}` : "0 1px 0 rgba(0,0,0,.8)",
     whiteSpace: "pre-wrap",
     overflowWrap: text.asset.style?.wrap ? "anywhere" : undefined,
     lineHeight: text.asset.style?.line_height || 1.22,
-    padding: text.asset.style?.padding ? `${text.asset.style.padding / 2}px` : undefined,
+    padding: text.asset.style?.padding ? `${text.asset.style.padding * scale}px` : undefined,
     boxSizing: "border-box",
     maxWidth: text.asset.style?.max_width
-      ? (text.asset.style.max_width <= 1 ? `${text.asset.style.max_width * 100}%` : `${text.asset.style.max_width / 2}px`)
+      ? (text.asset.style.max_width <= 1 ? `${text.asset.style.max_width * 100}%` : `${text.asset.style.max_width * scale}px`)
       : "84%",
     maxHeight: text.asset.style?.max_height
-      ? (text.asset.style.max_height <= 1 ? `${text.asset.style.max_height * 100}%` : `${text.asset.style.max_height / 2}px`)
+      ? (text.asset.style.max_height <= 1 ? `${text.asset.style.max_height * 100}%` : `${text.asset.style.max_height * scale}px`)
       : undefined,
   };
 }
@@ -3645,6 +3743,7 @@ function Inspector({
             <Field label="FPS">
               <select value={draft.output.fps} onChange={(e) => onDraft((cur) => ({ ...cur, output: { ...cur.output, fps: Number(e.target.value) as OutputDraft["fps"] } }))} className={field}>
                 <option value={24}>24</option>
+                <option value={25}>25</option>
                 <option value={30}>30</option>
                 <option value={60}>60</option>
               </select>
@@ -4521,4 +4620,31 @@ function Lightbox({ render, outputFormat, onClose }: { render: RenderRow; output
       </div>
     </div>
   );
+}
+
+function previewTextOpacity(text: TextClipDraft, time: number): number {
+ const enter = text.animation?.in, exit = text.animation?.out;
+ const fadeIn = enter && !["none", "typewriter", "word_by_word"].includes(enter.preset || "none") ? Math.min(1, Math.max(0, time / Math.max(.001, enter.duration ?? .6))) : 1;
+ const fadeOut = exit && exit.preset !== "none" ? Math.min(1, Math.max(0, (text.length - time) / Math.max(.001, exit.duration ?? .35))) : 1;
+ return fadeIn * fadeOut;
+}
+function previewTextContent(text: TextClipDraft, time: number): string {
+ const enter = text.animation?.in;
+ const p = Math.min(1, Math.max(0, time / Math.max(.001, enter?.duration ?? .6)));
+ if (enter?.preset === "typewriter") return Array.from(text.asset.text).slice(0, Math.ceil(Array.from(text.asset.text).length * p)).join("");
+ if (enter?.preset === "word_by_word") { const words = text.asset.text.split(/\s+/); return words.slice(0, Math.ceil(words.length * p)).join(" "); }
+ return text.asset.text;
+}
+function previewTextMotion(text: TextClipDraft, time: number, scale: number): string {
+ const enter = text.animation?.in;
+ const p = 1 - Math.min(1, Math.max(0, time / Math.max(.001, enter?.duration ?? .6)));
+ const distance = 40 * scale * p;
+ switch (enter?.preset) {
+ case "fade_up": return `translateY(${distance}px)`;
+ case "fade_down": return `translateY(${-distance}px)`;
+ case "slide_left": return `translateX(${distance}px)`;
+ case "slide_right": return `translateX(${-distance}px)`;
+ case "scale_pop": return `scale(${1 - .2*p})`;
+ default: return "";
+ }
 }

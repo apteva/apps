@@ -29,8 +29,17 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.7.4
+version: 0.7.5
 description: |
+  v0.7.5 hardens project isolation and remote output validation, protects saved
+  drafts with revision checks, and polls existing AI jobs without duplicate
+  refresh requests. Save & render persists the current draft first. Split clips,
+  zero volume, examples, looping previews, and mobile drawers behave correctly.
+  Rendering supports active cancellation, bounded chunk uploads, durable cache
+  fallback with Range requests, and silent remote video inputs. V2 holds final
+  keyframes, waits for browser images/fonts, and rejects unsupported content.
+  Small native elements allocate only their own bounds instead of a full frame.
+
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
   AI music soundtrack quick-add, timed AI audio clips, audio-only renders,
@@ -111,7 +120,7 @@ requires:
     - platform.connections.execute
     - platform.apps.call
   apps:
-    - { name: storage, version: ">=0.9.0" }
+    - { name: storage, version: ">=0.10.13" }
     - { name: instances, version: ">=0.2.0", optional: true }
     - { name: media-studio, version: ">=0.10.14", optional: true }
   integrations:

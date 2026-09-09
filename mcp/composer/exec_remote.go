@@ -49,6 +49,9 @@ func (e *remoteFFmpegExecutor) Render(
 	projectID string,
 ) (Result, error) {
 	start := time.Now()
+	if err := validateEditOutput(edit, output); err != nil {
+		return Result{}, err
+	}
 
 	// Pre-flight: instances app must be bound (best-effort check via
 	// CallApp dry-run; instances will surface the error if not).
@@ -139,7 +142,7 @@ func (e *remoteFFmpegExecutor) Render(
 	for _, face := range fontFaces {
 		fontURLs[face.ID] = strings.TrimRight(publicURL, "/") + "/api/apps/composer/render-font?project_id=" + url.QueryEscape(projectID) + "&face=" + url.QueryEscape(face.ID)
 	}
-	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURLs)
+	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURLs, remoteAudioInputIndices(edit)...)
 
 	app.Logger().Info("remote ffmpeg render", "host_id", e.hostID, "inputs", len(urls), "format", output.Format)
 
@@ -213,7 +216,7 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 // Convention: input URLs become ./in0, ./in1, … in the working dir,
 // the ffmpeg command is appended verbatim, and the output is
 // echoed back as APTEVA_RESULT:{...} for the parser.
-func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string, fontURLs map[string]string) string {
+func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string, fontURLs map[string]string, audioInputs ...int) string {
 	var b strings.Builder
 	b.WriteString("set -eu -o pipefail\n")
 	b.WriteString("WORKDIR=$(mktemp -d)\n")
@@ -230,9 +233,12 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	for i, u := range urls {
 		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %s\n", i, shellQuote(u))
 	}
+	for _, idx := range audioInputs {
+		b.WriteString(remoteEnsureAudioScript(fmt.Sprintf("./in%d", idx)))
+	}
 	b.WriteString(ffmpegCmd)
 	b.WriteByte('\n')
-	fmt.Fprintf(&b, "BYTES=$(stat -c %%s ./out.%s 2>/dev/null || stat -f %%z ./out.%s)\n", format, format)
+	fmt.Fprintf(&b, "BYTES=$(stat -c %%s %s 2>/dev/null || stat -f %%z %s)\n", shellQuote("./out."+format), shellQuote("./out."+format))
 	b.WriteString("if command -v sha256sum >/dev/null 2>&1; then\n")
 	b.WriteString("  SHA=$(sha256sum ./out.* | awk '{print $1}')\n")
 	b.WriteString("elif command -v shasum >/dev/null 2>&1; then\n")
@@ -247,7 +253,7 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString("export FOLDER=/.composer/\n")
 	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(shellFormValue(filename)))
 	fmt.Fprintf(&b, "export CT=%s\n", shellQuote(shellFormValue(contentType)))
-	fmt.Fprintf(&b, "export OUT=./out.%s\n", format)
+	fmt.Fprintf(&b, "export OUT=%s\n", shellQuote("./out."+format))
 	b.WriteString(remoteStorageUploadScriptFragment)
 	b.WriteString(`echo "APTEVA_RESULT:{\"storage_id\":${STORAGE_ID},\"bytes\":${BYTES},\"sha256\":\"${SHA}\",\"format\":\"` + format + `\"}"` + "\n")
 	return b.String()
@@ -323,6 +329,7 @@ if [ "$NEED_MULTIPART" = "1" ]; then
         while [ "$OFFSET" -lt "$BYTES" ]; do
           dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$OFFSET" count="$PART_SIZE" iflag=skip_bytes,count_bytes status=none
           curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT \
+            -H "Authorization: Bearer $STORAGE_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$PART_FILE" \
             "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
@@ -568,4 +575,19 @@ func decodeComposerMCPContent(raw json.RawMessage, appName, tool string, out any
 		return true, fmt.Errorf("%s.%s: decode inner JSON: %w (text: %.200s)", appName, tool, err, inner)
 	}
 	return true, nil
+}
+
+func remoteAudioInputIndices(edit *Edit) []int {
+	var out []int
+	for i, enabled := range remoteVisualAudioDefaults(edit) {
+		if enabled {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+func remoteEnsureAudioScript(path string) string {
+	p := shellQuote(path)
+	return "if [ -z \"$(ffprobe -v error -select_streams a:0 -show_entries stream=index -of csv=p=0 " + p + ")\" ]; then\n" +
+		" ffmpeg -nostdin -y -v error -i " + p + " -f lavfi -i anullsrc=r=48000:cl=stereo -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -shortest -f matroska " + shellQuote(path+".audio") + "\n mv " + shellQuote(path+".audio") + " " + p + "\nfi\n"
 }

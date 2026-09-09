@@ -48,6 +48,9 @@ type v2NativeRender struct {
 
 func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, projectID string) (Result, []string, error) {
 	start := time.Now()
+	if err := ctx.Err(); err != nil {
+		return Result{}, nil, err
+	}
 	if err := validateV2Composition(spec); err != nil {
 		return Result{}, nil, err
 	}
@@ -124,7 +127,7 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 	for _, asset := range spec.Assets {
 		r.assets[asset.ID] = asset
 	}
-	if err := r.loadImages(app); err != nil {
+	if err := r.loadImagesContext(ctx, app); err != nil {
 		cleanup()
 		return Result{}, nil, err
 	}
@@ -137,6 +140,10 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 		app.Logger().Info("native composer/v2 render", "scratch", scratch, "frames", frameCount, "width", w, "height", h, "fps", fps)
 	}
 	for i := 0; i < frameCount; i++ {
+		if err := ctx.Err(); err != nil {
+			cleanup()
+			return Result{}, nil, err
+		}
 		t := float64(i) / float64(fps)
 		img := r.renderFrame(t)
 		framePath := filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpg", i+1))
@@ -205,11 +212,14 @@ func v2HasVideoElements(spec *V2Composition) bool {
 }
 
 func (r *v2NativeRender) loadImages(app *sdk.AppCtx) error {
+	return r.loadImagesContext(context.Background(), app)
+}
+func (r *v2NativeRender) loadImagesContext(ctx context.Context, app *sdk.AppCtx) error {
 	for _, asset := range r.assets {
 		if asset.Type != "image" {
 			continue
 		}
-		img, err := loadImageAsset(app, asset.Src)
+		img, err := loadImageAssetContext(ctx, app, asset.Src)
 		if err != nil {
 			return fmt.Errorf("asset %q: %w", asset.ID, err)
 		}
@@ -224,7 +234,7 @@ func (r *v2NativeRender) loadImages(app *sdk.AppCtx) error {
 			if src == "" || r.images[src] != nil {
 				continue
 			}
-			img, err := loadImageAsset(app, src)
+			img, err := loadImageAssetContext(ctx, app, src)
 			if err != nil {
 				return fmt.Errorf("image element %q: %w", el.ID, err)
 			}
@@ -235,12 +245,19 @@ func (r *v2NativeRender) loadImages(app *sdk.AppCtx) error {
 }
 
 func loadImageAsset(app *sdk.AppCtx, src string) (image.Image, error) {
+	return loadImageAssetContext(context.Background(), app, src)
+}
+func loadImageAssetContext(ctx context.Context, app *sdk.AppCtx, src string) (image.Image, error) {
 	resolved, err := resolveAssetLocal(app, src)
 	if err != nil {
 		return nil, err
 	}
 	if strings.HasPrefix(resolved, "http://") || strings.HasPrefix(resolved, "https://") {
-		resp, err := http.Get(resolved)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, resolved, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -457,7 +474,7 @@ func (r *v2NativeRender) drawShape(dst *image.RGBA, el V2Element, box image.Rect
 	if shadow, ok := styleObject(el.Style, "shadow"); ok {
 		r.drawShapeShadow(dst, box, radius, kind, shadow, opacity)
 	}
-	layer := image.NewRGBA(dst.Bounds())
+	layer := image.NewRGBA(box.Intersect(dst.Bounds()))
 	if strokeW > 0 && stroke.A > 0 {
 		fillShape(layer, box, radius, kind, stroke)
 		inner := image.Rect(box.Min.X+strokeW, box.Min.Y+strokeW, box.Max.X-strokeW, box.Max.Y-strokeW)
@@ -601,8 +618,9 @@ func (r *v2NativeRender) drawShapeShadow(dst *image.RGBA, box image.Rectangle, r
 	blur := maxInt(0, int(mapFloat(shadow, "blur", 20)*r.scale))
 	shadowOpacity := clamp01(mapFloat(shadow, "opacity", 0.35)) * opacity
 	base := color.NRGBAModel.Convert(parseColor(mapString(shadow, "color", "#000000"), color.RGBA{0, 0, 0, 255})).(color.NRGBA)
-	mask := image.NewAlpha(dst.Bounds())
 	shadowBox := box.Add(image.Pt(offsetX, offsetY))
+	shadowBounds := shadowBox.Inset(-blur).Intersect(dst.Bounds())
+	mask := image.NewAlpha(shadowBounds)
 	for y := shadowBox.Min.Y; y < shadowBox.Max.Y; y++ {
 		for x := shadowBox.Min.X; x < shadowBox.Max.X; x++ {
 			if pointInsideShape(x, y, shadowBox, radius, kind) && image.Pt(x, y).In(mask.Bounds()) {
@@ -613,7 +631,7 @@ func (r *v2NativeRender) drawShapeShadow(dst *image.RGBA, box image.Rectangle, r
 	if blur > 0 {
 		mask = blurAlpha(mask, blur)
 	}
-	layer := image.NewRGBA(dst.Bounds())
+	layer := image.NewRGBA(shadowBounds)
 	for y := layer.Bounds().Min.Y; y < layer.Bounds().Max.Y; y++ {
 		for x := layer.Bounds().Min.X; x < layer.Bounds().Max.X; x++ {
 			a := float64(mask.AlphaAt(x, y).A) / 255 * shadowOpacity
@@ -686,7 +704,7 @@ func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rect
 	}
 	tw, th := int(math.Round(float64(sw)*scale)), int(math.Round(float64(sh)*scale))
 	target := image.Rect(box.Min.X+(dw-tw)/2, box.Min.Y+(dh-th)/2, box.Min.X+(dw-tw)/2+tw, box.Min.Y+(dh-th)/2+th)
-	layer := image.NewRGBA(dst.Bounds())
+	layer := image.NewRGBA(box.Intersect(dst.Bounds()))
 	xdraw.CatmullRom.Scale(layer, target, img, src, stddraw.Over, nil)
 	compositeRect(dst, layer, box, opacity)
 }
@@ -724,7 +742,8 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 	if strings.ToLower(styleString(el.Style, "vertical_align", "")) == "top" {
 		y = contentBox.Min.Y + int(size)
 	}
-	layer := image.NewRGBA(dst.Bounds())
+	pad := maxInt(2, int(math.Ceil(size*0.75)))
+	layer := image.NewRGBA(contentBox.Inset(-pad).Intersect(dst.Bounds()))
 	d := &font.Drawer{Dst: layer, Src: image.NewUniform(col), Face: face}
 	for i, line := range lines {
 		measureLine := line
@@ -743,7 +762,6 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 		d.DrawString(line)
 		y += lineH
 	}
-	pad := maxInt(2, int(math.Ceil(size*0.75)))
 	compositeRect(dst, layer, contentBox.Inset(-pad), opacity)
 }
 
@@ -833,10 +851,7 @@ func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output
 		}
 	}
 	if hasSoundtrack {
-		vol := soundtrack.Volume
-		if vol <= 0 {
-			vol = 1
-		}
+		vol := soundtrackVolume(soundtrack)
 		fmt.Fprintf(&filter, "[%d:a]volume=%g,atrim=duration=%s[snd];", soundtrackIdx, vol, trimFloat(duration))
 		mixLabels = append(mixLabels, "[snd]")
 	}
@@ -1167,12 +1182,16 @@ func applyKeyframe(anim map[string]any, key string, t, current float64) float64 
 		}
 		start := mapFloat(m, "start", 0)
 		length := mapFloat(m, "length", mapFloat(m, "duration", 0))
-		if length <= 0 || t < start || t > start+length {
+		if length <= 0 || t < start {
 			continue
 		}
 		from := mapFloat(m, "from", current)
 		to := mapFloat(m, "to", current)
-		return from + (to-from)*easeOutCubic(clamp01((t-start)/length))
+		if t >= start+length {
+			current = to
+			continue
+		}
+		return from + (to-from)*animationEase(clamp01((t-start)/length), mapString(m, "easing", "ease_out"))
 	}
 	return current
 }
@@ -1334,4 +1353,21 @@ func maxInt(a, b int) int {
 
 func errorsf(msg string, args ...any) error {
 	return fmt.Errorf(msg, args...)
+}
+
+func animationEase(t float64, easing string) float64 {
+	t = clamp01(t)
+	switch easing {
+	case "linear":
+		return t
+	case "ease_in":
+		return t * t
+	case "ease_in_out":
+		if t < 0.5 {
+			return 2 * t * t
+		}
+		return 1 - math.Pow(-2*t+2, 2)/2
+	default:
+		return easeOutCubic(t)
+	}
 }

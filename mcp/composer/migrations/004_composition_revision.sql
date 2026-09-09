@@ -1,0 +1,1 @@
+ALTER TABLE compositions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;

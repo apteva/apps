@@ -38,7 +38,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_update",
-			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, markers, soundtrack, background, output}. Video/audio clips support source ranges and playback_rate. Visual clips support normalized crop, source-space transform keyframes, Shotstack-style layout fields, or Composer's layout alias.",
+			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, markers, soundtrack, background, output, expected_revision}. Video/audio clips support source ranges and playback_rate. Visual clips support normalized crop, source-space transform keyframes, Shotstack-style layout fields, or Composer's layout alias.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},
@@ -89,9 +89,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "composition_render",
 			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder), wait? (default true for compatibility). Set wait=false for a durable background render: the call returns {render_id,status:'queued'} immediately, AI assets generate automatically, and render_status or the Composer render-card follows the result.",
 			InputSchema: schemaObject(map[string]any{
-				"id":       map[string]any{"type": "integer"},
-				"executor": map[string]any{"type": "string", "enum": []string{"local", "remote"}},
-				"wait":     map[string]any{"type": "boolean", "default": true},
+				"id":                map[string]any{"type": "integer"},
+				"executor":          map[string]any{"type": "string", "enum": []string{"local", "remote"}},
+				"wait":              map[string]any{"type": "boolean", "default": true},
+				"expected_revision": map[string]any{"type": "integer", "description": "Optional revision returned by create/update/get; rejects rendering if it changed."},
 			}, []string{"id"}),
 			Handler: a.toolCompositionRender,
 		},
@@ -105,7 +106,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "render_cancel",
-			Description: "Cancel a queued render before execution begins. Args: render_id. Completed, failed, or already-cancelled renders are idempotent; an actively executing render cannot yet be interrupted safely.",
+			Description: "Cancel a queued or running render. Args: render_id. Active encoding is interrupted; completed, failed, or already-cancelled renders are idempotent.",
 			InputSchema: schemaObject(map[string]any{
 				"render_id": map[string]any{"type": "integer"},
 			}, []string{"render_id"}),

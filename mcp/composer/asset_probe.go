@@ -34,11 +34,12 @@ func probeAssetDurationSeconds(app *sdk.AppCtx, src string) float64 {
 	return v
 }
 
-func probeMediaHasAudio(url string) bool {
+func probeMediaHasAudio(url string) bool { return probeMediaHasAudioContext(context.Background(), url) }
+func probeMediaHasAudioContext(parent context.Context, url string) bool {
 	if strings.TrimSpace(url) == "" {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ffprobePath(),
 		"-v", "error",
