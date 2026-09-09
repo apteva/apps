@@ -34,6 +34,8 @@ export class HeadlessSoftphone {
   private cancellation = new AbortController();
   private hangingUp?: Promise<void>;
   private intent?: { value: string; request: DialRequest };
+  private leaseTimer?: ReturnType<typeof setTimeout>;
+  private leaseGeneration = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
   private readonly runtime: AudioRuntime;
@@ -109,7 +111,7 @@ export class HeadlessSoftphone {
       this.intent = undefined;
       this.assertCurrent(generation);
       attached = true;
-      await this.attach(placed, generation);
+      await this.attachAudio(placed, generation);
       return placed.call_id;
     } catch (error) {
       if (placed && (this.current(generation) || !attached || this.disposed)) {
@@ -129,7 +131,7 @@ export class HeadlessSoftphone {
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
-      await this.attach(claimed, generation);
+      await this.attachAudio(claimed, generation);
     } catch (error) {
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
         await this.recoverStartup(claimed, generation, () => this.client.release(claimed!));
@@ -155,11 +157,31 @@ export class HeadlessSoftphone {
   /** Explicitly rejoin a known call after a reload; server permissions still apply. */
   async join(id: string): Promise<void> { await this.answer(id, { rejoin: true }); }
 
+  /** Resume a backend-assigned call without placing a new carrier leg. */
+  async attach(id: string): Promise<void> { await this.acquireSession(id, false); }
+
+  /** Explicit supervisor action; normal attach/join cannot displace another user. */
+  async takeover(id: string): Promise<void> { await this.acquireSession(id, true); }
+
+  private async acquireSession(id: string, takeover: boolean): Promise<void> {
+    const generation = this.begin(true);
+    try {
+      await this.cancellable(this.runtime.preflight(this.audioOptions), generation);
+      this.assertCurrent(generation);
+      const session = await (takeover ? this.client.takeover(id) : this.client.attach(id));
+      this.assertCurrent(generation);
+      await this.attachAudio(session, generation);
+    } catch (error) {
+      if (this.current(generation)) this.update({ detail: message(error) });
+      throw error;
+    } finally { this.finish(generation); }
+  }
+
   async reconnect(audio?: Partial<SoftphoneAudioOptions>): Promise<void> {
     if (!this.session) throw new Error("No call to reconnect");
     const generation = this.begin(false);
     if (audio) this.audioOptions = { ...this.audioOptions, ...audio };
-    try { await this.attach(this.session, generation); }
+    try { await this.attachAudio(this.session, generation); }
     catch (error) { if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
     finally { this.finish(generation); }
   }
@@ -225,7 +247,7 @@ export class HeadlessSoftphone {
     else this.update({ carrierStatus: call.status });
   }
 
-  private async attach(session: CallSession, generation: number) {
+  private async attachAudio(session: CallSession, generation: number) {
     this.assertCurrent(generation);
     this.stopAudio();
     this.session = session;
@@ -255,6 +277,7 @@ export class HeadlessSoftphone {
       this.audio = audio;
       this.assertCurrent(generation);
       this.startPolling();
+      this.startLease(session);
       audio.setMuted(this.snapshot.muted);
       await this.cancellable(audio.start(this.client.mediaURL(session), this.audioOptions), generation);
       this.assertCurrent(generation);
@@ -282,7 +305,27 @@ export class HeadlessSoftphone {
     } catch { /* normal monitoring or explicit recovery can retry */ }
   }
 
+  private startLease(session: CallSession) {
+    const leaseGeneration = ++this.leaseGeneration;
+    if (!session.lease_seconds) return;
+    const renew = async () => {
+      if (this.disposed || this.session !== session || leaseGeneration !== this.leaseGeneration) return;
+      try {
+        await this.client.renew(session);
+        if (leaseGeneration === this.leaseGeneration) this.leaseTimer = setTimeout(renew, session.lease_seconds! * 1000 / 3);
+      } catch (error) {
+        if (leaseGeneration !== this.leaseGeneration) return;
+        this.stopAudio();
+        this.update({ audioState: "error", detail: `Audio authorization ended: ${message(error)}` });
+      }
+    };
+    this.leaseTimer = setTimeout(renew, session.lease_seconds * 1000 / 3);
+  }
+
   private stopAudio() {
+    ++this.leaseGeneration;
+    clearTimeout(this.leaseTimer);
+    this.leaseTimer = undefined;
     const audio = this.audio;
     this.audio = undefined;
     try { audio?.stop(); } catch { /* adapters must not block call cleanup */ }

@@ -1,3 +1,3 @@
 import type { AppHandle } from "@apteva/web-sdk";
-import { TelephonyClient } from "./src/client";
-export function createClient({ app }: { app: AppHandle }) { return new TelephonyClient(app); }
+import { TelephonyClient, type TelephonyClientOptions } from "./src/client";
+export function createClient({ app }: { app: AppHandle }, options?: TelephonyClientOptions) { return new TelephonyClient(app, options); }

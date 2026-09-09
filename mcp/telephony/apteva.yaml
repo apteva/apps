@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.3.11
+version: 0.4.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -60,6 +60,10 @@ provides:
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
     - { prefix: /routing/ }
+    - { prefix: /access/ }
+    - { prefix: /user/, no_auth: true }
+    - { prefix: /ui/frontend.json, no_auth: true }
+    - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
