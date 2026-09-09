@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { telephonyExtension, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -329,5 +329,57 @@ test("a server rollback after carrier answer failure makes the same call answera
   expect(f.phone.getSnapshot().carrierStatus).toBe("pending");
   await f.phone.answer("call-1");
   expect(f.phone.getSnapshot().audioState).toBe("live");
+  f.phone.dispose();
+});
+
+describe("authorized application-user sessions", () => {
+  test("attach uses the existing call and never places or answers a carrier leg", async () => {
+    const f = fixture();
+    await f.phone.attach("call-1");
+    expect(f.requests).toHaveLength(1);
+    expect(f.requests[0].url.pathname).toEndWith("/softphone/attach/call-1");
+    expect(f.phone.getSnapshot().callId).toBe("call-1");
+    expect(f.preflighted).toBe(1);
+    f.phone.dispose();
+  });
+  test("takeover is an explicit separate endpoint", async () => {
+    const f = fixture();
+    await f.phone.takeover("call-1");
+    expect(f.requests[0].url.pathname).toEndWith("/softphone/takeover/call-1");
+    f.phone.dispose();
+  });
+  test("renewal uses current SDK auth, with the session token only in the body", async () => {
+    const f = fixture();
+    f.sdk.setAccessToken("refreshed-user-session");
+    await f.client.renew(f.session);
+    expect(f.requests[0].headers.get("Authorization")).toBe("Bearer refreshed-user-session");
+    expect(f.requests[0].body).toEqual({ session_token: "secret" });
+    expect(f.requests[0].url.search).not.toContain("secret");
+  });
+});
+
+
+test("online provider routes calls through authenticated user API", async () => {
+  const f = fixture();
+  const client = new TelephonyClient(f.client.app, { authProvider: "customer-login" });
+  await client.listCalls();
+  await client.attach("call-1");
+  expect(f.requests.every(r => r.url.pathname.includes("/telephony/user/"))).toBe(true);
+  expect(f.requests.every(r => r.url.searchParams.get("auth_provider") === "customer-login")).toBe(true);
+  expect(f.requests.every(r => r.headers.get("Authorization") === "Bearer first")).toBe(true);
+});
+
+test("lease renewal runs without status polling and stops audio on revoked authentication", async () => {
+  const f = fixture();
+  f.setResponse(async url => {
+    if (url.pathname.includes("/renew/")) throw new Error("login revoked");
+    return { ...f.session, lease_seconds: 10 };
+  });
+  await f.phone.attach("call-1");
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  expect(f.requests.some(r => r.url.pathname.includes("/renew/"))).toBe(true);
+  expect(f.stopped).toBe(1);
+  expect(f.phone.getSnapshot().audioState).toBe("error");
+  expect(f.phone.getSnapshot().detail).toContain("login revoked");
   f.phone.dispose();
 });

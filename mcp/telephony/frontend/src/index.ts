@@ -1,5 +1,5 @@
 export { TelephonyClient, telephonyExtension, isTerminalCall, isIncomingBrowserCall } from "./client";
-export type { Call, CallSession, DialRequest, AnswerRequest, WatchCallsOptions } from "./client";
+export type { TelephonyClientOptions, Call, CallSession, DialRequest, AnswerRequest, WatchCallsOptions } from "./client";
 export { HeadlessSoftphone } from "./softphone";
 export type { SoftphoneSnapshot, SoftphoneOptions } from "./softphone";
 export type { AudioRuntime, AudioConnection } from "./audio";

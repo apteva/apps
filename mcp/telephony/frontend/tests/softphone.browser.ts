@@ -4,7 +4,7 @@ test("installed headless client talks through real Telephony with host-owned UI"
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
-  await page.goto("/");
+  await page.goto(process.env.TELEPHONY_TEST_SURFACE === "application-user" ? "/?application-user" : "/");
   await page.waitForFunction(() => typeof (window as any).loadPhone === "function");
   await page.evaluate(url => (window as any).loadPhone(url), gateway);
   expect(await page.evaluate(() => Object.keys((window as any).loaded.components))).toEqual([]);

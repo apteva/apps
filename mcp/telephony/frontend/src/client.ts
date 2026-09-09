@@ -15,6 +15,7 @@ export interface CallSession {
   call_id: string;
   media_url: string;
   session_token?: string;
+  lease_seconds?: number;
 }
 export interface DialRequest {
   to: string;
@@ -42,16 +43,26 @@ function callID(id: string): string {
   return encodeURIComponent(id);
 }
 
+export interface TelephonyClientOptions {
+  /** Online provider configured by the installation administrator. */
+  authProvider?: string;
+}
+
 /** Human-call API. Does not invoke the AI-call MCP tools or open a microphone. */
 export class TelephonyClient {
-  constructor(readonly app: AppHandle) {
+  constructor(readonly app: AppHandle, private readonly options: TelephonyClientOptions = {}) {
     if (app.name !== "telephony" || !app.projectId || !app.installId) {
       throw new Error("Telephony requires an explicit project and installation");
     }
   }
 
+  private path(path: string): string {
+    if (!this.options.authProvider) return path;
+    return `/user${path}${path.includes("?") ? "&" : "?"}auth_provider=${encodeURIComponent(this.options.authProvider)}`;
+  }
+
   async listCalls(signal?: AbortSignal): Promise<Call[]> {
-    const result = await this.app.get<{ calls: Call[] }>("/calls", { signal });
+    const result = await this.app.get<{ calls: Call[] }>(this.path("/calls"), { signal });
     if (!Array.isArray(result?.calls) || result.calls.some(c => !c || typeof c.id !== "string" || typeof c.status !== "string")) {
       throw new Error("Invalid Telephony calls response");
     }
@@ -59,7 +70,7 @@ export class TelephonyClient {
   }
 
   async getCall(id: string, signal?: AbortSignal): Promise<Call | undefined> {
-    const result = await this.app.get<{ calls: Call[] }>(`/calls?call_id=${callID(id)}`, { signal });
+    const result = await this.app.get<{ calls: Call[] }>(this.path(`/calls?call_id=${callID(id)}`), { signal });
     if (!Array.isArray(result?.calls)) throw new Error("Invalid Telephony call response");
     return result.calls.find(call => call.id === id);
   }
@@ -98,20 +109,33 @@ export class TelephonyClient {
     if (!/^\+[1-9]\d{7,14}$/.test(request.to) || !request.idempotency_key?.trim()) {
       throw new Error("Dial requires an E.164 number and an idempotency key");
     }
-    return this.session(await this.app.post("/softphone/place", request));
+    return this.session(await this.app.post(this.path("/softphone/place"), request));
   }
 
   async answer(id: string, request: AnswerRequest = {}): Promise<CallSession> {
-    return this.session(await this.app.post(`/softphone/answer/${callID(id)}`, request), id);
+    return this.session(await this.app.post(this.path(`/softphone/answer/${callID(id)}`), request), id);
+  }
+
+  /** Attach an assigned human call; never dials or takes another user's call. */
+  async attach(id: string): Promise<CallSession> {
+    return this.session(await this.app.post(this.path(`/softphone/attach/${callID(id)}`), {}), id);
+  }
+
+  async takeover(id: string): Promise<CallSession> {
+    return this.session(await this.app.post(this.path(`/softphone/takeover/${callID(id)}`), {}), id);
+  }
+
+  async renew(session: CallSession): Promise<void> {
+    await this.app.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
   }
 
   async release(session: CallSession): Promise<void> {
     if (!session.session_token) throw new Error("Answer session has no release token");
-    await this.app.post(`/softphone/release/${callID(session.call_id)}`, { session_token: session.session_token });
+    await this.app.post(this.path(`/softphone/release/${callID(session.call_id)}`), { session_token: session.session_token });
   }
 
   async hangup(id: string): Promise<void> {
-    await this.app.post(`/calls/${callID(id)}/hangup`, {});
+    await this.app.post(this.path(`/calls/${callID(id)}/hangup`), {});
   }
 
   createSoftphone(options: SoftphoneOptions = {}): HeadlessSoftphone {
@@ -139,6 +163,7 @@ export class TelephonyClient {
         (session.session_token !== undefined && typeof session.session_token !== "string")) {
       throw new Error("Invalid Telephony session response");
     }
+    if (session.lease_seconds !== undefined && (!Number.isFinite(session.lease_seconds) || session.lease_seconds < 10 || session.lease_seconds > 3600 || !session.session_token)) throw new Error("Invalid media lease");
     callID(session.call_id);
     this.mediaURL(session);
     return session;

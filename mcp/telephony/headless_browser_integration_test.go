@@ -29,7 +29,7 @@ import (
 // Chromium executes the actual app-served SDK bundle, AudioWorklet and Worker.
 // Only the platform gateway and carrier are fixtures; HTTP/WS and Telephony are real.
 func TestTier2HeadlessBrowser(t *testing.T) {
-	for _, surface := range []string{"headless", "panel"} {
+	for _, surface := range []string{"headless", "panel", "application-user"} {
 		t.Run(surface, func(t *testing.T) { runHeadlessBrowser(t, surface) })
 	}
 }
@@ -40,6 +40,47 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	created := tier2MCPAs(t, sc, "telephony_routes_create", map[string]any{"phone_number": tier2Number, "answer_mode": "human_browser"})
 	route := created["route"].(map[string]any)
 	tier2MCPAs(t, sc, "telephony_routes_configure_carrier", map[string]any{"route_id": route["id"]})
+	var identityServer *httptest.Server
+	if surface == "application-user" {
+		identityServer = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer headless-browser-fixture" {
+				http.Error(w, "invalid login", 401)
+				return
+			}
+			writeTier2JSON(w, map[string]any{"user": map[string]any{"id": "browser-user", "organization_id": "test-org", "project_id": tier2Project}})
+		}))
+		defer identityServer.Close()
+		// Route this number to a browser destination assigned to the user.
+		request := func(method, path string, body any) map[string]any {
+			data, _ := json.Marshal(body)
+			req, _ := http.NewRequest(method, sc.URL()+path, bytes.NewReader(data))
+			req.Header.Set("Authorization", "Bearer "+sc.Token())
+			req.Header.Set("X-Apteva-Project-ID", tier2Project)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			var result map[string]any
+			if resp.StatusCode != 200 {
+				raw, _ := io.ReadAll(resp.Body)
+				t.Fatalf("fixture %s: %d %s", path, resp.StatusCode, raw)
+			}
+			if err = json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		destination := request("POST", "/routing/destinations/save", map[string]any{"name": "User desk", "kind": "browser", "config": map[string]any{}, "enabled": true})["id"].(string)
+		flow := request("POST", "/routing/flows/save", map[string]any{"name": "User routing", "draft": map[string]any{"entry": "desk", "nodes": []any{map[string]any{"id": "desk", "type": "destination", "config": map[string]any{"destination_id": destination}}}}})
+		request("POST", "/routing/flows/publish", map[string]any{"id": flow["id"]})
+		request("POST", "/routing/routes/assign", map[string]any{"flow_id": flow["id"], "route_id": route["id"]})
+		request("PUT", "/access/policy", phonePolicy{
+			Users:     []phoneUser{{Identity: phoneIdentity{"auth", "11", "user", "browser-user", "test-org"}, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{destination}}}},
+			Providers: []phoneAuthProvider{{ID: "browser-login", IssuerApp: "auth", IssuerInstallID: "11", URL: identityServer.URL, Format: "apteva-auth", Actions: []string{"call.read", "call.answer", "call.attach", "call.hangup"}}},
+		})
+	}
+
 	incoming, _ := json.Marshal(map[string]any{"data": map[string]any{
 		"id": "headless-incoming", "event_type": "call.initiated", "occurred_at": time.Now().UTC().Format(time.RFC3339Nano),
 		"payload": map[string]any{"call_control_id": "call-control-test-1", "connection_id": "application-test-1", "direction": "incoming", "from": tier2Caller, "to": tier2Number},
@@ -63,7 +104,9 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 	proxy.Director = func(r *http.Request) {
 		r.URL.Scheme, r.URL.Host = target.Scheme, target.Host
 		r.Host = target.Host
-		r.Header.Set("Authorization", "Bearer "+sc.Token())
+		if !strings.HasPrefix(r.URL.Path, "/user/") {
+			r.Header.Set("Authorization", "Bearer "+sc.Token())
+		}
 		r.Header.Set("X-User-ID", "1")
 		r.Header.Set("X-Apteva-Project-ID", tier2Project)
 	}
@@ -93,14 +136,21 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 		if media {
 			path = strings.TrimPrefix(path, "/_install/42")
 		}
+		if surface == "application-user" && !media && !strings.HasPrefix(path, "/user/") && !strings.HasPrefix(path, "/ui/frontend") {
+			http.Error(w, "operator API unavailable to application browser", 403)
+			return
+		}
 		r.URL.Path = path
 		proxy.ServeHTTP(w, r)
 	}))
 	defer public.Close()
-	script := exec.CommandContext(t.Context(), "bun", "frontend/tests/script-client.ts")
-	script.Env = append(os.Environ(), "TELEPHONY_TEST_GATEWAY="+public.URL)
-	if output, err := script.CombinedOutput(); err != nil {
-		t.Fatalf("script-only client: %v\n%s", err, output)
+	if surface != "application-user" {
+		script := exec.CommandContext(t.Context(), "bun", "frontend/tests/script-client.ts")
+		script.Env = append(os.Environ(), "TELEPHONY_TEST_GATEWAY="+public.URL)
+		if output, err := script.CombinedOutput(); err != nil {
+			t.Fatalf("script-only client: %v\n%s", err, output)
+		}
+
 	}
 
 	// A deterministic microphone file provides measurable browser capture audio.

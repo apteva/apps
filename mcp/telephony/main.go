@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.3.11
+version: 0.4.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -88,6 +88,10 @@ provides:
     - { prefix: /recording-settings }
     - { prefix: /numbers/ }
     - { prefix: /routing/ }
+    - { prefix: /access/ }
+    - { prefix: /user/, no_auth: true }
+    - { prefix: /ui/frontend.json, no_auth: true }
+    - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
@@ -358,7 +362,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // ─── HTTP routes ───────────────────────────────────────────────────
 
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{
+	routes := []sdk.Route{
 		// Carrier media stream WS — opened by the carrier when the call connects.
 		{Pattern: "/media/twilio/", Handler: a.handleTwilioMediaStream, NoAuth: true},
 		{Pattern: "/media/signalwire/", Handler: a.handleSignalWireMediaStream, NoAuth: true},
@@ -387,6 +391,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
 		{Pattern: "/routing/", Handler: a.handleRouting},
+		{Pattern: "/access/", Handler: a.handlePhoneAccess},
+		{Pattern: "/user/", Handler: a.handleApplicationSession, NoAuth: true},
 		// Browser softphone. /softphone/ is panel-authenticated; the operator's
 		// audio socket is token-gated in-path like the carrier /media/ routes,
 		// and /peer/ is the loopback endpoint the carrier bridge dials.
@@ -394,12 +400,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/softphone/media/", Handler: a.handleSoftphoneMedia, NoAuth: true},
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
+	for i := range routes {
+		if !routes[i].NoAuth {
+			routes[i].Handler = a.applicationUserHTTP(routes[i].Handler)
+		}
+	}
+	return routes
 }
 
 // ─── MCP tools ─────────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
@@ -794,6 +806,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
 		},
 	}
+	for i := range tools {
+		if tools[i].HandlerCtx != nil {
+			tools[i].HandlerCtx = operatorPhoneTool(tools[i].HandlerCtx)
+		}
+	}
+	return tools
 }
 
 // ─── telephony_place_call ──────────────────────────────────────────
@@ -991,6 +1009,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	if err := a.db().insertCall(*row, true); err != nil {
 		unwind()
 		return errors.New("persist call before carrier placement: " + err.Error())
+	}
+	if row.ApplicationUser != nil {
+		if err := a.setPhoneOwner(row, row.ApplicationUser, ""); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", "could not persist call owner")
+			unwind()
+			return errors.New("persist call owner before carrier placement")
+		}
 	}
 
 	placed, err := carrier.Place(ctx, carrierPlaceRequest{
@@ -2827,7 +2852,7 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	rows, err := a.db().recent(project, 100)
+	rows, err := a.recentPhoneCalls(r, project, 100)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -2851,10 +2876,15 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load ring offers", 500)
 			return
 		}
-		writeJSON(w, map[string]any{"calls": callsPanelPublic(detail, true)})
+		detail = a.filterPhoneCalls(r, detail)
+		if len(detail) == 0 {
+			http.Error(w, "call not found", 404)
+			return
+		}
+		writeJSON(w, map[string]any{"calls": callsPanelPublic(detail, phoneUserFrom(r) == nil)})
 		return
 	}
-	writeJSON(w, map[string]any{"calls": callsPanelPublic(rows)})
+	writeJSON(w, map[string]any{"calls": callsPanelPublic(a.filterPhoneCalls(r, rows))})
 }
 
 func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
@@ -2878,9 +2908,15 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := globalCtx.WithProject(project)
+	unlock := a.softphones.lockClaim(parts[1])
+	defer unlock()
 	row, loadErr := a.db().findCall(parts[1])
 	if loadErr != nil {
 		http.Error(w, "load call: "+loadErr.Error(), http.StatusInternalServerError)
+		return
+	}
+	if p := phoneUserFrom(r); p != nil && (row == nil || !a.phoneCallAllowed(p, row, true)) {
+		http.Error(w, "call not found", 404)
 		return
 	}
 	if row != nil && row.ProjectID == project && row.PeerKind == peerKindHuman &&
@@ -3428,6 +3464,8 @@ func newSecret() string {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
+	ApplicationUser *phonePrincipal // transient placement context, persisted separately before dialing
+
 	RingOffers              []ringOffer
 	ID                      string
 	ThreadID                string

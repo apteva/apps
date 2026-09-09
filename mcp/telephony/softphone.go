@@ -413,7 +413,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	if row.PeerToken == "" || !secureEqual(token, row.PeerToken) {
+	if !a.validPhoneMedia(row, token) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -492,6 +492,27 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	unlock()
 	unlock = nil
 
+	// Recheck grants even when a revoked browser sends no frames. Renewal uses
+	// authenticated HTTP, so expired/revoked login tokens cannot extend a lease.
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	defer func() { close(done); <-watcherDone }()
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if !a.validPhoneMedia(row, token) {
+					_ = conn.Close()
+					return
+				}
+			}
+		}
+	}()
 	for {
 		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
 		if err != nil {
@@ -630,7 +651,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodPost {
+	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && r.URL.Path == "/softphone/access") {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -644,7 +665,22 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
+	if r.URL.Path == "/softphone/access" {
+		p := phoneUserFrom(r)
+		if p == nil {
+			writeJSON(w, map[string]any{"operator": true})
+		} else {
+			writeJSON(w, map[string]any{"identity": p.Identity, "destinations": p.Destinations, "outbound_numbers": p.Numbers, "supervisor": p.Supervisor})
+		}
+		return
+	}
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/softphone/"), "/")
+	for _, name := range []string{"attach", "takeover", "renew"} {
+		if strings.HasPrefix(action, name+"/") {
+			a.handlePhoneSession(w, r, project, name, strings.TrimPrefix(action, name+"/"))
+			return
+		}
+	}
 	switch {
 	case action == "place":
 		a.softphonePlace(w, r, project)
@@ -661,6 +697,7 @@ type softphoneSession struct {
 	CallID       string `json:"call_id"`
 	MediaURL     string `json:"media_url"`
 	SessionToken string `json:"session_token,omitempty"`
+	LeaseSeconds int    `json:"lease_seconds,omitempty"`
 	To           string `json:"to,omitempty"`
 	From         string `json:"from,omitempty"`
 }
@@ -695,11 +732,46 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		http.Error(w, "to must be a valid E.164 number (+ followed by 8-15 digits)", http.StatusBadRequest)
 		return
 	}
+	p := phoneUserFrom(r)
+	if p != nil {
+		if !p.Numbers[body.From] {
+			http.Error(w, "outbound number not allowed; explicit from required", 403)
+			return
+		}
+		if body.IdempotencyKey == "" || len(body.IdempotencyKey) > 128 {
+			http.Error(w, "idempotency_key required (maximum 128 characters)", 400)
+			return
+		}
+		body.IdempotencyKey = "user-" + phoneHash(p.Identity.key()+"\x00"+body.IdempotencyKey)
+	}
+	unlock := a.softphones.lockClaim("dial:" + project + ":" + body.IdempotencyKey)
+	defer unlock()
 	ctx := globalCtx.WithProject(project)
-	session, err := a.placeHumanCall(ctx, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording, body.IdempotencyKey)
+	session, err := a.placeHumanCallForUser(ctx, p, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording, body.IdempotencyKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
+	}
+	if p != nil {
+		row, e := a.db().findCall(session.CallID)
+		if e != nil || row == nil {
+			http.Error(w, "call unavailable", 500)
+			return
+		}
+		owner, _, e := a.phoneOwner(row.ID)
+		if e != nil || (owner != "" && owner != p.Identity.key()) {
+			http.Error(w, "call ownership conflict", 409)
+			return
+		}
+		if e = a.setPhoneOwner(row, p, ""); e != nil {
+			http.Error(w, "call ownership unavailable", 500)
+			return
+		}
+		session, e = a.issuePhoneSession(row, p)
+		if e != nil {
+			http.Error(w, e.Error(), 403)
+			return
+		}
 	}
 	writeJSON(w, session)
 }
@@ -731,6 +803,20 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
+	p := phoneUserFrom(r)
+	if p != nil {
+		if row.Status == "pending" {
+			dest := a.phoneOfferDestination(p, row, request.DestinationID)
+			if dest == "" {
+				http.Error(w, "call not offered to user", 404)
+				return
+			}
+			request.DestinationID = dest
+		} else if !a.phoneCallAllowed(p, row, false) {
+			http.Error(w, "call not owned; explicit supervisor takeover required", 403)
+			return
+		}
+	}
 	offers, err := a.db().activeRingOffers(callID, project)
 	if err != nil {
 		http.Error(w, "load ring offers", 500)
@@ -749,6 +835,27 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		}
 		if row.PeerToken == "" {
 			http.Error(w, "call is answered but has no operator session", http.StatusConflict)
+			return
+		}
+		if p != nil {
+			session, e := a.issuePhoneSession(row, p)
+			if e != nil {
+				http.Error(w, e.Error(), 403)
+				return
+			}
+			writeJSON(w, session)
+			return
+		}
+		// Managed calls also require fresh browser grants for trusted operators.
+		var managed int
+		_ = a.db().db.QueryRow(`SELECT COUNT(*) FROM telephony_media_sessions WHERE call_id=?`, row.ID).Scan(&managed)
+		if owner, _, _ := a.phoneOwner(row.ID); owner != "" || managed > 0 {
+			session, e := a.issuePhoneSession(row, nil)
+			if e != nil {
+				http.Error(w, "session unavailable", 500)
+				return
+			}
+			writeJSON(w, session)
 			return
 		}
 		writeJSON(w, softphoneSession{
@@ -791,6 +898,21 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		http.Error(w, "persist call answer: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if p != nil {
+		if e := a.setPhoneOwner(row, p, request.DestinationID); e != nil {
+			_ = a.db().releaseAnswerClaim(callID)
+			http.Error(w, "ownership unavailable", 500)
+			return
+		}
+		session, e := a.issuePhoneSession(row, p)
+		if e != nil {
+			_ = a.db().releaseAnswerClaim(callID)
+			http.Error(w, e.Error(), 403)
+			return
+		}
+		writeJSON(w, session)
+		return
+	}
 	writeJSON(w, softphoneSession{
 		CallID:       callID,
 		MediaURL:     a.softphoneMediaURL(callID, peerToken),
@@ -823,6 +945,16 @@ func (a *App) softphoneReleaseAnswer(w http.ResponseWriter, r *http.Request, pro
 	if row == nil || row.ProjectID != project {
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
+	}
+	if p := phoneUserFrom(r); p != nil {
+		if !a.phoneCallAllowed(p, row, false) || !a.validPhoneMedia(row, body.SessionToken) {
+			http.Error(w, "session not owned", 403)
+			return
+		}
+		body.SessionToken = row.PeerToken
+	}
+	if phoneUserFrom(r) == nil && a.validPhoneMedia(row, body.SessionToken) {
+		body.SessionToken = row.PeerToken
 	}
 	if row.Status != "answering" || row.PeerKind != peerKindHuman ||
 		row.PeerToken == "" || !secureEqual(body.SessionToken, row.PeerToken) {
@@ -884,6 +1016,10 @@ func decodeJSONBody(r *http.Request, out any) error {
 // side of the bridge: a loopback softphone hub instead of a spawned realtime
 // thread. No agent id is involved, because no thread is spawned.
 func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool, keys ...string) (*softphoneSession, error) {
+	return a.placeHumanCallForUser(ctx, nil, projectID, to, requestedFrom, timeoutSec, recordingOverride, keys...)
+}
+
+func (a *App) placeHumanCallForUser(ctx *sdk.AppCtx, principal *phonePrincipal, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool, keys ...string) (*softphoneSession, error) {
 	// Carriers dial this app's public wss:// media endpoint (publicWSStreamURL),
 	// so an unreachable public URL must fail here rather than after the callee's
 	// phone has already rung. Mirrors the check toolPlaceCall makes.
@@ -967,6 +1103,7 @@ func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom strin
 		PeerKind:               peerKindHuman,
 		PeerToken:              peerToken,
 	}
+	row.ApplicationUser = principal
 	row.AudioBridgeURL = a.peerLoopbackURL(&row)
 
 	if err := a.placeOutboundLeg(ctx, carrier, &row, timeoutSec, 3600, nil); err != nil {

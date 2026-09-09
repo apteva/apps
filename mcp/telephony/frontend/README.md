@@ -82,8 +82,9 @@ Telephony gateway's HTTPS/WSS connections in its CSP.
   If placement is already in flight, the controller stays busy until its outcome
   is known and attempts to hang up any accepted leg. Local audio stops immediately
   when hanging up an identified call; failed hangup retains controls for retry.
-- Taking over an existing call requires `join(callId)` or `answer(callId,
-  { rejoin: true })`; stale Answer clicks cannot displace the current operator.
+- Reconnecting your own call uses `join(callId)` or `answer(callId,
+  { rejoin: true })`; taking another user’s call requires `takeover(callId)` and
+  explicit supervisor permission.
 - Media failure preserves carrier call identity. `reconnect()` recreates audio
   and preserves mute; durable terminal status stops devices and monitoring.
 - `dispose()` releases local audio and polling; it does **not** hang up an
@@ -127,12 +128,16 @@ also be bundled locally for script hosts. No standalone npm package is published
 
 ## Access and scope
 
-This first version uses the existing operator API. It requires credentials already
-authorized to access that Telephony project/installation and configured host CORS.
-It does not add Conversations-style application-user authorization, per-operator
-ownership, or permissions to see another user's calls. Browser groups currently
-represent shared operator pools. Do not treat a scoped handle as an access grant.
-New untrusted end-user embedding requires a separate backend authorization change.
+Telephony 0.4.0 supports application-user softphones with verified online Auth
+sessions or scoped platform delegated identities. Configure installation grants
+and use `clientOptions: { authProvider: "customer-login" }` when loading the app
+for an online Auth session. The same controller enforces user ownership and
+renews short-lived media leases automatically. Operator access remains supported.
+
+See [Application-user setup, routing and backend attachment](../docs/application-users.md)
+for the complete policy, authentication, ringing, revocation and supervisor model.
+`phone.attach(callId)` connects a backend-assigned human call without redialing;
+`phone.takeover(callId)` is a separate explicit supervisor action.
 
 ## Build and verify
 
