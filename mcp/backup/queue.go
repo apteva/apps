@@ -109,9 +109,11 @@ func processQueuedBackup(parent context.Context, ctx *sdk.AppCtx) error {
 	if err := json.Unmarshal([]byte(destJSON), &dest); err != nil {
 		return fail(err)
 	}
-	current, err := dbGetPolicy(ctx.AppDB(), policy.ID)
-	if err != nil || current.StorageID != policy.StorageID || !current.Enabled {
-		return fail(fmt.Errorf("queued policy was removed or disabled"))
+	if policy.ID != 0 {
+		current, err := dbGetPolicy(ctx.AppDB(), policy.ID)
+		if err != nil || current.StorageID != policy.StorageID || !current.Enabled {
+			return fail(fmt.Errorf("queued policy was removed or disabled"))
+		}
 	}
 	currentDest, err := dbGetDestination(ctx.AppDB(), dest.ID)
 	if err != nil || !currentDest.Enabled {
@@ -130,7 +132,20 @@ func processQueuedBackup(parent context.Context, ctx *sdk.AppCtx) error {
 	if err != nil || count == 0 {
 		return err
 	}
-	_, runErr := executeBackup(parent, ctx, &dest, &policy, run)
+	var activePolicy *Policy
+	if policy.ID != 0 {
+		activePolicy = &policy
+	}
+	_, runErr := executeBackup(parent, ctx, &dest, activePolicy, run)
+	if parent.Err() != nil && runErr != nil && run.Scope.Kind == "instance" {
+		result, e := ctx.AppDB().Exec(`UPDATE runs SET status='queued',stage='reconnecting instance',finished_at=NULL,error='' WHERE id=? AND status!='success'`, id)
+		if e != nil {
+			return e
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			return nil
+		}
+	}
 	if _, err = ctx.AppDB().Exec(`DELETE FROM backup_queue WHERE run_id=?`, id); err != nil {
 		return err
 	}
@@ -153,4 +168,33 @@ func deletePolicy(db *sql.DB, id int64) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Interactive instance backups use the same durable dispatcher as Jobs.
+func enqueueInstanceRun(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) (*Run, error) {
+	if policy != nil {
+		return enqueueBackup(ctx, dest, policy)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	run := &Run{DestinationID: dest.ID, DestinationName: dest.Name, Scope: scope, Status: "queued", Stage: "queued"}
+	id, err := dbInsertRun(tx, run)
+	if err != nil {
+		return nil, err
+	}
+	run.ID = id
+	raw, err := json.Marshal(dest)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(`INSERT INTO backup_queue(run_id,policy_json,destination_json) VALUES(?,'{}',?)`, id, string(raw)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return run, nil
 }

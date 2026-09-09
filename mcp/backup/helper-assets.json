@@ -1,0 +1,18 @@
+{
+  "darwin-amd64": {
+    "sha256": "ad62d68713a5842dfb0bd5fead11bae88c7ca816aa7b0154c009183c6550b0b6",
+    "url": "https://github.com/apteva/apps/releases/download/backup%2Fv0.3.6/backup-helper-darwin-amd64"
+  },
+  "darwin-arm64": {
+    "sha256": "e62cf476a822491acdd2f31c29562da30ae44a9f2a9ae29a9c3c8a470335ac73",
+    "url": "https://github.com/apteva/apps/releases/download/backup%2Fv0.3.6/backup-helper-darwin-arm64"
+  },
+  "linux-amd64": {
+    "sha256": "dc137ff4f661b19616209607de55c3a319a2e65e6beb7afe4c11aa3867bac2f1",
+    "url": "https://github.com/apteva/apps/releases/download/backup%2Fv0.3.6/backup-helper-linux-amd64"
+  },
+  "linux-arm64": {
+    "sha256": "d1cf9fae1d5bc17bc4c313489fe6cab759233396af174bb8f73fd0fa965e2b2d",
+    "url": "https://github.com/apteva/apps/releases/download/backup%2Fv0.3.6/backup-helper-linux-arm64"
+  }
+}

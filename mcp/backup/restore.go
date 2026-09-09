@@ -21,6 +21,10 @@ import (
 )
 
 func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
+	return restoreFromRunWithOptions(ctx, runID, InstanceRestore{})
+}
+
+func restoreFromRunWithOptions(ctx *sdk.AppCtx, runID int64, options InstanceRestore) (map[string]any, error) {
 	run, err := dbGetRun(ctx.AppDB(), runID)
 	if err != nil {
 		return nil, err
@@ -83,6 +87,9 @@ func restoreFromRun(ctx *sdk.AppCtx, runID int64) (map[string]any, error) {
 		}
 	}
 	defer restoreBody.Close()
+	if run.Scope.Kind == "instance" {
+		return restoreInstanceRun(opCtx, ctx, run, restoreBody, options)
+	}
 	if run.Scope.Kind != "" && run.Scope.Kind != "platform" {
 		return restoreProviderRunStream(opCtx, ctx, run, restoreBody)
 	}

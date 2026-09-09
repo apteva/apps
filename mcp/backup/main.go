@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: backup
 display_name: Backup
-version: 0.3.5
+version: 0.3.6
 description: |
   Verified platform snapshots stored on local disk, AWS S3, or Cloudflare R2,
   with durable scheduling, isolated retention, and optional encryption.
@@ -78,6 +78,12 @@ requires:
       version: ">=0.1.8"
       reason: Cron scheduling for periodic backup runs.
   integrations:
+    - role: instances_provider
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances (optional)
+      hint: Bind Instances to back up selected folders on registered macOS and Linux SSH hosts.
     - role: fleet_provider
       kind: app
       required: false
@@ -113,7 +119,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.5
+    ref: backup/v0.3.6
     entry: mcp/backup
   port: 8080
   health_check: /health
@@ -194,6 +200,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/runs", Handler: a.handleRunsCollection},
 		{Pattern: "/runs/", Handler: a.handleRunItem},
 		{Pattern: "/scopes", Handler: a.handleScopes},
+		{Pattern: "/instance-capabilities", Handler: a.handleInstanceCapabilities},
+		{Pattern: "/instance-retry", Handler: a.handleInstanceRetry},
 		{Pattern: "/run", Handler: a.handleRunNow},      // cron + UI entry
 		{Pattern: "/restore", Handler: a.handleRestore}, // POST {run_id}
 	}
@@ -205,11 +213,13 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "backup_now",
-			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination), scope_kind? (default platform), scope_id?, source_app?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
+			Description: "Run a backup immediately. Args: destination_id (default: only enabled destination), scope_kind? (default platform), scope_id?, source_app?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>. For instance folders use scope_kind=instance, source_app=instances, scope_id=<registered id>, source_config={method:folders,paths:[absolute folders]}. Instance runs return a durable queued run.",
 			InputSchema: schemaObject(map[string]any{
+				"retry_run_id":    map[string]any{"type": "integer", "description": "Retry an interrupted instance recovery point using the same run and operation identity."},
 				"policy_id":       map[string]any{"type": "integer"},
 				"policy_identity": map[string]any{"type": "string"},
 				"destination_id":  map[string]any{"type": "integer"},
+				"source_config":   map[string]any{"type": "object", "description": "Instance folder source: method=folders, paths=[absolute folder paths]."},
 				"scope_kind":      map[string]any{"type": "string"},
 				"scope_id":        map[string]any{"type": "string"},
 				"source_app":      map[string]any{"type": "string"},
@@ -228,12 +238,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "backup_schedule",
-			Description: "Create a scheduled backup policy through the Jobs app. Args: name, schedule (cron), destination_id? (defaults to only enabled destination), retention_keep? (default 14), scope_kind? (default platform), scope_id?, source_app?, project_id?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>.",
+			Description: "Create a scheduled backup policy through the Jobs app. Args: name, schedule (cron), destination_id? (defaults to only enabled destination), retention_keep? (default 14), scope_kind? (default platform), scope_id?, source_app?, project_id?. For Fleet tenant backups use scope_kind=fleet_tenant, source_app=fleet, scope_id=<tenant_id>. For instance folders use scope_kind=instance, source_app=instances, scope_id=<registered id>, source_config={method:folders,paths:[absolute folders]}. Instance runs return a durable queued run.",
 			InputSchema: schemaObject(map[string]any{
 				"name":           map[string]any{"type": "string"},
 				"schedule":       map[string]any{"type": "string"},
 				"destination_id": map[string]any{"type": "integer"},
 				"retention_keep": map[string]any{"type": "integer"},
+				"source_config":  map[string]any{"type": "object", "description": "Instance folder source: method=folders, paths=[absolute folder paths]."},
 				"scope_kind":     map[string]any{"type": "string"},
 				"scope_id":       map[string]any{"type": "string"},
 				"source_app":     map[string]any{"type": "string"},
@@ -245,8 +256,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "backup_restore",
 			Description: "Restore the bytes of a past run after explicit operator confirmation. Format-v2 recovery activates on server restart; legacy servers may replace app DBs live. Args: run_id and confirm=true (both required).",
 			InputSchema: schemaObject(map[string]any{
-				"run_id":  map[string]any{"type": "integer"},
-				"confirm": map[string]any{"type": "boolean", "description": "Must be true after the operator explicitly approves this destructive restore."},
+				"run_id":             map[string]any{"type": "integer"},
+				"target_instance_id": map[string]any{"type": "integer", "description": "Instance restore destination; omitted uses original instance."},
+				"target_path":        map[string]any{"type": "string", "description": "Required new absolute directory for instance folder restores; existing directories are never overwritten."},
+				"confirm":            map[string]any{"type": "boolean", "description": "Must be true after the operator explicitly approves this destructive restore."},
 			}, []string{"run_id", "confirm"}),
 			Handler: a.toolBackupRestore,
 		},
@@ -258,6 +271,9 @@ func main() { sdk.Run(&App{}) }
 // ─── Tool handlers ─────────────────────────────────────────────────
 
 func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if id := int64Arg(args, "retry_run_id"); id > 0 {
+		return retryInstanceRun(ctx, id)
+	}
 	if policyID := int64Arg(args, "policy_id"); policyID != 0 {
 		policy, err := dbGetPolicy(ctx.AppDB(), policyID)
 		if err != nil {
@@ -281,7 +297,11 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil {
 			return map[string]any{"run": run, "status": "failed", "error": err.Error()}, err
 		}
-		return map[string]any{"run": run, "status": "success"}, nil
+		status := "success"
+		if run.Status == "queued" {
+			status = "accepted"
+		}
+		return map[string]any{"run": run, "status": status}, nil
 	}
 	destID := int64Arg(args, "destination_id")
 	dest, err := pickDestination(ctx.AppDB(), destID)
@@ -289,14 +309,18 @@ func (a *App) toolBackupNow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	scope := scopeFromArgs(args)
-	if err := validateScope(scope); err != nil {
+	if err := prepareScope(ctx, &scope); err != nil {
 		return nil, err
 	}
 	run, err := runBackup(ctx, dest, nil, scope)
 	if err != nil {
 		return map[string]any{"run": run, "status": "failed", "error": err.Error()}, err
 	}
-	return map[string]any{"run": run, "status": "success"}, nil
+	status := "success"
+	if run.Status == "queued" {
+		status = "accepted"
+	}
+	return map[string]any{"run": run, "status": status}, nil
 }
 
 func (a *App) toolBackupList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -332,7 +356,7 @@ func (a *App) toolBackupSchedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, fmt.Errorf("destination check failed: %w", err)
 	}
 	scope := scopeFromArgs(args)
-	if err := validateScope(scope); err != nil {
+	if err := prepareScope(ctx, &scope); err != nil {
 		return nil, err
 	}
 	keep := intArg(args, "retention_keep", defaultRetention(ctx))
@@ -381,6 +405,9 @@ func failedHistoryRetentionDays(ctx *sdk.AppCtx) int {
 }
 
 func reconcileInterruptedRuns(ctx *sdk.AppCtx) error {
+	if _, err := ctx.AppDB().Exec(`UPDATE runs SET status='queued',stage='reconnecting instance' WHERE status='running' AND scope_kind='instance' AND id IN (SELECT run_id FROM backup_queue)`); err != nil {
+		return err
+	}
 	_, err := ctx.AppDB().Exec(
 		`UPDATE runs
 		 SET status = 'failed', stage = 'failed', finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
@@ -421,6 +448,7 @@ func (a *App) handleScopes(w http.ResponseWriter, r *http.Request) {
 		"fleet_bound":   false,
 		"fleet_tenants": []any{},
 	}
+	addInstanceScopes(ctx, out)
 	if ctx.IntegrationFor("fleet_provider") == nil {
 		httpJSON(w, out)
 		return
@@ -462,7 +490,7 @@ func (a *App) toolBackupRestore(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if !confirmed {
 		return nil, errors.New("confirm=true is required after explicit operator approval")
 	}
-	report, err := restoreFromRun(ctx, runID)
+	report, err := restoreFromRunWithOptions(ctx, runID, InstanceRestore{InstanceID: int64Arg(args, "target_instance_id"), Path: getStringArg(args, "target_path")})
 	if err != nil {
 		return nil, err
 	}
@@ -622,7 +650,7 @@ func (a *App) handlePoliciesCollection(w http.ResponseWriter, r *http.Request) {
 		if body.Scope.Kind == "" {
 			body.Scope = defaultScope()
 		}
-		if err := validateScope(body.Scope); err != nil {
+		if err := prepareScope(ctx, &body.Scope); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -716,7 +744,7 @@ func (a *App) handleRunsCollection(w http.ResponseWriter, r *http.Request) {
 		limit = 50
 	}
 	opts := runListOptions{DestinationID: destID, Limit: limit + 1, Cursor: r.URL.Query().Get("cursor"), ScopeKind: r.URL.Query().Get("scope_kind"), ScopeID: r.URL.Query().Get("scope_id")}
-	if opts.ScopeKind != "" && opts.ScopeKind != "platform" && opts.ScopeKind != "fleet_tenant" {
+	if opts.ScopeKind != "" && opts.ScopeKind != "platform" && opts.ScopeKind != "fleet_tenant" && opts.ScopeKind != "instance" {
 		httpErr(w, 400, "invalid scope_kind")
 		return
 	}
@@ -780,11 +808,12 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := getAppCtx(r)
 	var body struct {
-		PolicyID      int64  `json:"policy_id"`
-		DestinationID int64  `json:"destination_id"`
-		ScopeKind     string `json:"scope_kind"`
-		ScopeID       string `json:"scope_id"`
-		SourceApp     string `json:"source_app"`
+		PolicyID      int64          `json:"policy_id"`
+		DestinationID int64          `json:"destination_id"`
+		ScopeKind     string         `json:"scope_kind"`
+		ScopeID       string         `json:"scope_id"`
+		SourceApp     string         `json:"source_app"`
+		SourceConfig  InstanceSource `json:"source_config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
@@ -817,12 +846,12 @@ func (a *App) handleRunNow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		dest = d
-		scope = Scope{Kind: body.ScopeKind, ID: body.ScopeID, SourceApp: body.SourceApp}
+		scope = Scope{Kind: body.ScopeKind, ID: body.ScopeID, SourceApp: body.SourceApp, Config: body.SourceConfig}
 		if scope.Kind == "" {
 			scope = defaultScope()
 		}
 	}
-	if err := validateScope(scope); err != nil {
+	if err := prepareScope(ctx, &scope); err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -844,8 +873,10 @@ func (a *App) handleRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := getAppCtx(r)
 	var body struct {
-		RunID   int64 `json:"run_id"`
-		Confirm bool  `json:"confirm"`
+		RunID            int64  `json:"run_id"`
+		Confirm          bool   `json:"confirm"`
+		TargetInstanceID int64  `json:"target_instance_id"`
+		TargetPath       string `json:"target_path"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.RunID == 0 {
 		httpErr(w, http.StatusBadRequest, "run_id required")
@@ -855,7 +886,7 @@ func (a *App) handleRestore(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "confirm=true is required after explicit operator approval")
 		return
 	}
-	report, err := restoreFromRun(ctx, body.RunID)
+	report, err := restoreFromRunWithOptions(ctx, body.RunID, InstanceRestore{InstanceID: body.TargetInstanceID, Path: body.TargetPath})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -909,9 +940,10 @@ type Run struct {
 }
 
 type Scope struct {
-	Kind      string `json:"kind"`
-	ID        string `json:"id,omitempty"`
-	SourceApp string `json:"source_app,omitempty"`
+	Kind      string         `json:"kind"`
+	ID        string         `json:"id,omitempty"`
+	SourceApp string         `json:"source_app,omitempty"`
+	Config    InstanceSource `json:"config,omitempty"`
 }
 
 // ─── DB helpers ────────────────────────────────────────────────────
@@ -1009,10 +1041,10 @@ func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 		p.Scope = defaultScope()
 	}
 	res, err := db.Exec(
-		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id, scope_kind, scope_id, source_app, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO policies (name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id, scope_kind, scope_id, source_app, source_config, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, '', '', ?, ?, ?, ?, ?, ?, ?)`,
 		p.Name, p.Schedule, p.DestinationID, p.RetentionKeep, boolToInt(true),
-		p.StorageID, p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, now, now)
+		p.StorageID, p.Scope.Kind, p.Scope.ID, p.Scope.SourceApp, p.Scope.Config, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1026,7 +1058,7 @@ func dbCreatePolicy(db *sql.DB, p *Policy) (*Policy, error) {
 func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 	rows, err := db.Query(
 		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id,
-		        scope_kind, scope_id, source_app, created_at, updated_at
+		        scope_kind, scope_id, source_app, source_config, created_at, updated_at
 		 FROM policies ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -1037,7 +1069,7 @@ func dbListPolicies(db *sql.DB) ([]*Policy, error) {
 		p := &Policy{}
 		var enabled int
 		if err := rows.Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID, &p.StorageID,
-			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.Scope.Config, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			return nil, err
 		}
 		p.Enabled = enabled != 0
@@ -1051,10 +1083,10 @@ func dbGetPolicy(db *sql.DB, id int64) (*Policy, error) {
 	var enabled int
 	err := db.QueryRow(
 		`SELECT id, name, schedule, destination_id, retention_keep, enabled, jobs_id, jobs_project_id, storage_id,
-		        scope_kind, scope_id, source_app, created_at, updated_at
+		        scope_kind, scope_id, source_app, source_config, created_at, updated_at
 		 FROM policies WHERE id = ?`, id).
 		Scan(&p.ID, &p.Name, &p.Schedule, &p.DestinationID, &p.RetentionKeep, &enabled, &p.JobsID, &p.JobsProjectID, &p.StorageID,
-			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.CreatedAt, &p.UpdatedAt)
+			&p.Scope.Kind, &p.Scope.ID, &p.Scope.SourceApp, &p.Scope.Config, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("policy %d not found", id)
 	}
@@ -1078,10 +1110,10 @@ func dbInsertRun(db interface {
 		r.StartedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	}
 	res, err := db.Exec(
-		`INSERT INTO runs (policy_id, destination_id, destination_name, started_at, status, scope_kind, scope_id, source_app)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (policy_id, destination_id, destination_name, started_at, status, scope_kind, scope_id, source_app, source_config)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullInt(r.PolicyID), r.DestinationID, r.DestinationName,
-		r.StartedAt, r.Status, r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp)
+		r.StartedAt, r.Status, r.Scope.Kind, r.Scope.ID, r.Scope.SourceApp, r.Scope.Config)
 	if err != nil {
 		return 0, err
 	}
@@ -1125,7 +1157,7 @@ func encodeRunCursor(run *Run) string {
 func dbListRunsPage(db *sql.DB, opts runListOptions) ([]*Run, error) {
 	q := `SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 	             started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		             sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app
+		             sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app, source_config
 	      FROM runs`
 	args := []any{}
 	filters := []string{}
@@ -1168,7 +1200,7 @@ func dbListRunsPage(db *sql.DB, opts runListOptions) ([]*Run, error) {
 		r := &Run{}
 		if err := rows.Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp); err != nil {
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp, &r.Scope.Config); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -1181,11 +1213,11 @@ func dbGetRun(db *sql.DB, id int64) (*Run, error) {
 	err := db.QueryRow(
 		`SELECT id, COALESCE(policy_id,0), destination_id, destination_name,
 		        started_at, COALESCE(finished_at,''), status, bytes_compressed,
-		        sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app
+		        sha256, remote_key, error, encrypted, stage, scope_kind, scope_id, source_app, source_config
 		 FROM runs WHERE id = ?`, id).
 		Scan(&r.ID, &r.PolicyID, &r.DestinationID, &r.DestinationName,
 			&r.StartedAt, &r.FinishedAt, &r.Status, &r.BytesCompressed,
-			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp)
+			&r.SHA256, &r.RemoteKey, &r.Error, &r.Encrypted, &r.Stage, &r.Scope.Kind, &r.Scope.ID, &r.Scope.SourceApp, &r.Scope.Config)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("run %d not found", id)
 	}
@@ -1238,6 +1270,10 @@ func scopeFromArgs(args map[string]any) Scope {
 		ID:        strings.TrimSpace(getStringArg(args, "scope_id")),
 		SourceApp: strings.TrimSpace(getStringArg(args, "source_app")),
 	}
+	if raw, ok := args["source_config"]; ok {
+		b, _ := json.Marshal(raw)
+		_ = json.Unmarshal(b, &s.Config)
+	}
 	if s.Kind == "" {
 		return defaultScope()
 	}
@@ -1247,10 +1283,12 @@ func scopeFromArgs(args map[string]any) Scope {
 func validateScope(s Scope) error {
 	switch s.Kind {
 	case "", "platform":
-		if s.ID != "" || s.SourceApp != "" {
+		if s.ID != "" || s.SourceApp != "" || s.Config.Method != "" || len(s.Config.Paths) > 0 {
 			return errors.New("platform backups must not set scope_id or source_app")
 		}
 		return nil
+	case "instance":
+		return validateInstanceScope(s)
 	case "fleet_tenant":
 		if s.ID == "" {
 			return errors.New("fleet_tenant backups require scope_id")

@@ -81,6 +81,12 @@ func runBackup(ctx *sdk.AppCtx, dest *Destination, policy *Policy, scope Scope) 
 	if scope.Kind == "" {
 		scope = defaultScope()
 	}
+	if scope.Kind == "instance" {
+		if err := prepareScope(ctx, &scope); err != nil {
+			return nil, err
+		}
+		return enqueueInstanceRun(ctx, dest, policy, scope)
+	}
 	run := &Run{
 		DestinationID:   dest.ID,
 		DestinationName: dest.Name,
@@ -146,7 +152,13 @@ func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, p
 
 	hash := sha256.New()
 	_ = dbUpdateRunStage(ctx.AppDB(), id, "snapshotting")
-	written, providerManifest, err := writeSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), scope)
+	var written int64
+	var providerManifest string
+	if scope.Kind == "instance" {
+		written, err = streamInstanceSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), run)
+	} else {
+		written, providerManifest, err = writeSnapshot(opCtx, ctx, io.MultiWriter(tmp, hash), scope)
+	}
 	if errClose := tmp.Close(); err == nil {
 		err = errClose
 	}
@@ -201,6 +213,9 @@ func executeBackup(parent context.Context, ctx *sdk.AppCtx, dest *Destination, p
 		if err := pruneRetention(opCtx, ctx, writer, dest, policy); err != nil {
 			ctx.Logger().Warn("retention prune failed", "destination", dest.Name, "err", err.Error())
 		}
+	}
+	if scope.Kind == "instance" {
+		cleanupInstanceOperation(ctx, run.ID, "backup")
 	}
 	return successful, nil
 }
@@ -430,6 +445,9 @@ func storagePrefix(scope Scope, policyID int64) string {
 		kind = "platform"
 	}
 	prefix := kind + "/"
+	if scope.Kind == "instance" {
+		prefix += "admin/" + safeKeySegment(scope.Config.Identity) + "/"
+	}
 	if scope.ID != "" {
 		prefix += safeKeySegment(scope.ID) + "/"
 	}

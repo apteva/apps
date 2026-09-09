@@ -142,7 +142,8 @@ interface Run {
 }
 
 interface Scope {
-  kind: "platform" | "fleet_tenant";
+  kind: "platform" | "fleet_tenant" | "instance";
+  config?: { method: "folders"; paths: string[]; identity?: string };
   id?: string;
   source_app?: string;
 }
@@ -154,7 +155,12 @@ interface FleetTenantScope {
   restorable: boolean;
 }
 
+interface InstanceChoice { id: number; name: string; eligible: boolean; reason?: string }
+
 interface ScopesResponse {
+  instances_bound?: boolean;
+  instances_error?: string;
+  instances?: InstanceChoice[];
   default_retention: number;
   encryption_enabled: boolean;
   platform: { label: string; coverage: string; gaps: string[] };
@@ -198,6 +204,7 @@ function statusColor(s: Run["status"]): string {
 
 function scopeLabel(scope: Scope | undefined, scopes: ScopesResponse | null): string {
   if (!scope || scope.kind === "platform") return "Platform";
+  if (scope.kind === "instance") return `Instance: ${scopes?.instances?.find(i => String(i.id) === scope.id)?.name || scope.id} · folders`;
   const tenant = scopes?.fleet_tenants.find((item) => item.id === scope.id);
   return tenant ? `Fleet: ${tenant.slug}` : `Fleet: ${scope.id || "tenant"}`;
 }
@@ -208,6 +215,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const [runs, setRuns] = useState<Run[]>([]);
   const [scopes, setScopes] = useState<ScopesResponse | null>(null);
   const [selectedScope, setSelectedScope] = useState("platform");
+  const [instancePaths, setInstancePaths] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [cursor, setCursor] = useState("");
@@ -248,8 +256,9 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   const historyPath = useCallback(() => {
     const query = new URLSearchParams({ limit: "50", cursor });
     if (!showAllScopes) {
-      query.set("scope_kind", selectedScope.startsWith("fleet:") ? "fleet_tenant" : "platform");
+      query.set("scope_kind", selectedScope.startsWith("fleet:") ? "fleet_tenant" : selectedScope.startsWith("instance:") ? "instance" : "platform");
       if (selectedScope.startsWith("fleet:")) query.set("scope_id", selectedScope.slice(6));
+      if (selectedScope.startsWith("instance:")) query.set("scope_id", selectedScope.slice(9));
     }
     return `/runs?${query}`;
   }, [cursor, selectedScope, showAllScopes]);
@@ -316,11 +325,12 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
   }, [scopes, selectedScope]);
 
   const scopeForSelection = useCallback((): Scope => {
+    if (selectedScope.startsWith("instance:")) return instanceFolderScope(selectedScope, instancePaths);
     if (selectedScope.startsWith("fleet:")) {
       return { kind: "fleet_tenant", id: selectedScope.slice(6), source_app: "fleet" };
     }
     return { kind: "platform" };
-  }, [selectedScope]);
+  }, [selectedScope, instancePaths]);
 
   const historyRuns = runs;
   const operationBusy = busy?.startsWith("run-") || busy?.startsWith("restore-");
@@ -345,6 +355,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         scope_kind: scope.kind,
         scope_id: scope.id,
         source_app: scope.source_app,
+        source_config: scope.config,
       });
       await reload();
     } catch (e) {
@@ -352,7 +363,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     } finally { setBusy(null); }
   };
 
-  const doRestore = async (runID: number) => {
+  const doRestore = async (runID: number, options?: InstanceRestoreOptions) => {
     setBusy(`restore-${runID}`);
     try {
       const out = await api<{ report: {
@@ -361,7 +372,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         partial_failure?: boolean;
         failures?: string[];
         failure_count?: number;
-      } }>("POST", "/restore", { run_id: runID, confirm: true });
+      } }>("POST", "/restore", { run_id: runID, confirm: true, ...options });
       const restart = out?.report?.restart_required;
       const run = runs.find((item) => item.id === runID);
       const fleetTenant = run?.scope?.kind === "fleet_tenant";
@@ -369,6 +380,8 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         title: out?.report?.partial_failure ? "Restore partially completed" : "Restore complete",
         body: out?.report?.partial_failure
           ? `${out.report.failure_count || out.report.failures?.length || 0} item(s) could not be restored: ${(out.report.failures || []).join("; ")}`
+          : run?.scope?.kind === "instance"
+          ? `Folders restored to ${options?.target_path}. Source folders are numbered 0, 1, …; .apteva-recovery.json records their original paths.`
           : fleetTenant
           ? `${scopeLabel(run?.scope, scopes)} was restored and restarted if it was previously running.`
           : restart
@@ -406,11 +419,11 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
     catch (e) { setStatus("Delete failed: " + (e as Error).message); }
   };
 
-  const onConfirm = async () => {
+  const onConfirm = async (options?: InstanceRestoreOptions) => {
     if (!pending) return;
     const p = pending;
     setPending(null);
-    if (p.kind === "restore") return doRestore(p.runID);
+    if (p.kind === "restore") return doRestore(p.runID, options);
     if (p.kind === "delete-destination") return doDeleteDestination(p.id);
     if (p.kind === "delete-policy") return doDeletePolicy(p.id);
   };
@@ -422,7 +435,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
       <header>
         <h2 className="text-text text-base font-bold">Backup</h2>
         <p className="text-text-muted text-xs mt-1">
-            Verified recovery snapshots for the platform or one local Fleet tenant.
+            Verified recovery snapshots for the platform, a local Fleet tenant, or selected instance folders.
         </p>
       </header>
 
@@ -435,6 +448,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
           className="bg-bg border border-border rounded px-2 py-1.5 text-sm text-text min-w-52"
         >
           <option value="platform">Platform recovery</option>
+          {(scopes?.instances || []).map(i => <option key={`instance-${i.id}`} value={`instance:${i.id}`} disabled={!i.eligible}>Instance: {i.name}{!i.eligible ? " (unavailable)" : ""}</option>)}
           {(scopes?.fleet_tenants || []).filter((t) => t.restorable).map((tenant) => (
             <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
           ))}
@@ -443,10 +457,14 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
         {scopes && !scopes.fleet_bound && (
           <span className="text-text-muted text-xs">Bind Fleet to enable per-tenant backup.</span>
         )}
+        {!scopes?.instances_bound && <span className="text-text-muted text-xs">Bind Instances to enable folder backups.</span>}
+        {scopes?.instances_error && <span className="text-error text-xs">Instances unavailable: {scopes.instances_error}</span>}
         {scopes?.fleet_error && (
           <span className="text-error text-xs">Fleet unavailable: {scopes.fleet_error}</span>
         )}
       </section>
+
+      {selectedScope.startsWith("instance:") && <InstanceFolderFields instanceID={Number(selectedScope.slice(9))} paths={instancePaths} setPaths={setInstancePaths} api={api} />}
 
       {selectedScope === "platform" && scopes?.platform && (
         <div className="text-text-muted text-xs border-l-2 border-warn pl-3">
@@ -508,7 +526,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => runNow(d.id)}
-                disabled={Boolean(operationBusy || busy?.startsWith("test-"))}
+                disabled={Boolean(operationBusy || busy?.startsWith("test-") || (selectedScope.startsWith("instance:") && !instancePaths.trim()))}
                 className="px-3 py-1 text-xs bg-accent text-bg rounded font-bold hover:bg-accent-hover disabled:opacity-50"
               >
                 {busy === `run-${d.id}` ? "Running…" : "Run now"}
@@ -595,13 +613,14 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
                   {" · "}{durationOf(r)}
                   {" · "}<span className="text-text">{scopeLabel(r.scope, scopes)}</span>
                   {r.encrypted ? " · encrypted" : ""}
-                  {(r.status === "running" || r.status === "queued") && r.stage ? ` · ${r.stage}` : ""}
+                  {(r.status === "running" || r.status === "queued" || r.stage?.startsWith("instance restore")) && r.stage ? ` · ${r.stage}` : ""}
                 </div>
                 {r.error && (
                   <div className="text-error text-xs mt-0.5 break-words">{r.error}</div>
                 )}
               </div>
             </div>
+            {r.status === "failed" && r.scope.kind === "instance" && <button disabled={Boolean(busy)} className="text-accent text-xs" onClick={async () => { setBusy(`run-${r.id}`); try { await api("POST", "/instance-retry", {run_id:r.id}); await reloadRuns(); } catch(e) {setStatus((e as Error).message);} finally {setBusy(null);} }}>Retry same recovery point</button>}
             {r.status === "success" && r.remote_key && (
               <button
                 onClick={() => setPending({ kind: "restore", runID: r.id, destName: r.destination_name, scope: r.scope, encrypted: r.encrypted })}
@@ -628,6 +647,7 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
           out of place against the dashboard chrome. */}
       <ConfirmModal
         pending={pending}
+        instances={scopes?.instances || []}
         onCancel={() => setPending(null)}
         onConfirm={onConfirm}
       />
@@ -638,14 +658,20 @@ export default function BackupPanel({ projectId, installId }: NativePanelProps) 
 
 // ─── modal + confirm types ────────────────────────────────────────
 
+interface InstanceRestoreOptions { target_instance_id?: number; target_path?: string }
+
 type PendingAction =
   | { kind: "restore"; runID: number; destName: string; scope: Scope; encrypted: boolean }
   | { kind: "delete-destination"; id: number; name: string }
   | { kind: "delete-policy"; id: number; name: string };
 
 function ConfirmModal({
-  pending, onCancel, onConfirm,
-}: { pending: PendingAction | null; onCancel: () => void; onConfirm: () => void }) {
+  pending, onCancel, onConfirm, instances,
+}: { pending: PendingAction | null; instances: InstanceChoice[]; onCancel: () => void; onConfirm: (options?: InstanceRestoreOptions) => void }) {
+  const [targetID, setTargetID] = useState("");
+  const [targetPath, setTargetPath] = useState("");
+  useEffect(() => { setTargetID(pending?.kind === "restore" ? pending.scope.id || "" : ""); setTargetPath(""); }, [pending]);
+  const instanceRestore = pending?.kind === "restore" && pending.scope.kind === "instance";
   if (!pending) return null;
 
   let title = "";
@@ -665,7 +691,7 @@ function ConfirmModal({
           <span className="text-text font-bold">{pending.destName}</span> (run #{pending.runID}).
         </div>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-text-muted">
-          {fleetTenant ? (
+          {instanceRestore ? <li>Restore folders into a new directory on the original or a compatible replacement host. Existing data will not be overwritten.</li> : fleetTenant ? (
             <li>Only Fleet tenant {pending.scope.id} will be replaced and restarted if it is currently running.</li>
           ) : (
             <>
@@ -674,7 +700,7 @@ function ConfirmModal({
             </>
           )}
           <li>{pending.encrypted ? "The stored object is encrypted." : "The stored object is not encrypted."}</li>
-          <li>This is destructive and cannot be undone.</li>
+          {!instanceRestore && <li>This is destructive and cannot be undone.</li>}
         </ul>
       </>
     );
@@ -703,6 +729,14 @@ function ConfirmModal({
   return (
     <ModalShell title={title} onClose={onCancel}>
       <div className="text-text-muted text-sm">{body}</div>
+      {instanceRestore && <div className="space-y-2">
+        <label className="block text-xs">Restore host<select aria-label="Restore host" className="block w-full bg-bg border border-border p-2 rounded" value={targetID} onChange={e=>setTargetID(e.target.value)}>
+          <option value="">Choose a compatible instance</option>
+          {instances.filter(i=>i.eligible).map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
+        </select></label>
+        <label className="block text-xs">New destination folder<input aria-label="New destination folder" className="block w-full bg-bg border border-border p-2 rounded" value={targetPath} onChange={e=>setTargetPath(e.target.value)} placeholder="/Users/operator/Recovered" /></label>
+        <p className="text-xs text-text-muted">The parent must exist. File contents, ordinary POSIX modes and modification times are preserved. ACLs, extended attributes and original ownership are not supported.</p>
+      </div>}
       <div className="flex justify-end gap-2 pt-1">
         <button
           onClick={onCancel}
@@ -711,7 +745,8 @@ function ConfirmModal({
           Cancel
         </button>
         <button
-          onClick={onConfirm}
+          disabled={instanceRestore && (!targetID || !targetPath.startsWith("/") || targetPath === "/")}
+          onClick={() => onConfirm(instanceRestore ? {target_instance_id:Number(targetID),target_path:targetPath} : undefined)}
           className={`px-3 py-1.5 text-sm rounded font-bold ${
             danger
               ? "bg-error text-bg hover:opacity-90"
@@ -1027,6 +1062,7 @@ function PolicyForm({
   const [destID, setDestID] = useState<number | "">(destinations[0]?.id ?? "");
   const [keep, setKeep] = useState("");
   const [scopeKey, setScopeKey] = useState("platform");
+  const [instancePaths, setInstancePaths] = useState("");
   const [err, setErr] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -1063,7 +1099,7 @@ function PolicyForm({
     if (!destID) { setErr("Pick a destination"); return; }
     const retention = Number(keep);
     if (!Number.isInteger(retention) || retention < 0) { setErr("Retention must be a whole number of 0 or greater"); return; }
-    const scope: Scope = scopeKey.startsWith("fleet:")
+    const scope: Scope = scopeKey.startsWith("instance:") ? instanceFolderScope(scopeKey, instancePaths) : scopeKey.startsWith("fleet:")
       ? { kind: "fleet_tenant", id: scopeKey.slice(6), source_app: "fleet" }
       : { kind: "platform" };
     setSubmitting(true);
@@ -1095,10 +1131,12 @@ function PolicyForm({
         <Label htmlFor="backup-policy-scope">Scope</Label>
         <Select id="backup-policy-scope" value={scopeKey} onChange={setScopeKey}>
           <option value="platform">Platform recovery</option>
+          {(scopes?.instances || []).map(i => <option key={`instance-${i.id}`} value={`instance:${i.id}`} disabled={!i.eligible}>Instance: {i.name}{!i.eligible ? " (unavailable)" : ""}</option>)}
           {(scopes?.fleet_tenants || []).filter((tenant) => tenant.restorable).map((tenant) => (
             <option key={tenant.id} value={`fleet:${tenant.id}`}>Fleet: {tenant.slug}</option>
           ))}
         </Select>
+        {scopeKey.startsWith("instance:") && <div className="col-span-2"><InstanceFolderFields instanceID={Number(scopeKey.slice(9))} paths={instancePaths} setPaths={setInstancePaths} api={api} /></div>}
         <Label htmlFor="backup-policy-retention">Retention (last N)</Label>
         <Input id="backup-policy-retention" value={keep} onChange={setKeep} placeholder="0 keeps all backups" />
       </FormGrid>
@@ -1161,4 +1199,33 @@ function Select({
       {children}
     </select>
   );
+}
+
+
+function instanceFolderScope(selection: string, paths: string): Scope {
+  return {kind:"instance",id:selection.slice(9),source_app:"instances",config:{method:"folders",paths:paths.split("\n").map(p=>p.trim()).filter(Boolean)}};
+}
+
+function InstanceFolderFields({instanceID,paths,setPaths,api}: {
+  instanceID:number; paths:string; setPaths:(value:string)=>void;
+  api:<T>(method:string,path:string,body?:unknown)=>Promise<T>;
+}) {
+  const [message,setMessage]=useState("");
+  const [checking,setChecking]=useState(false);
+  const seq=useRef(0);
+  useEffect(()=>{seq.current++;setMessage("");setChecking(false);},[instanceID,paths]);
+  return <div className="space-y-2 text-xs w-full">
+    <p className="text-text">Method: selected folders (macOS / Linux)</p>
+    <label className="block text-text-muted">Source folders — one absolute path per line
+      <textarea aria-label="Source folders" className="block mt-1 w-full bg-bg border border-border rounded p-2 text-text" rows={3} value={paths} onChange={e=>setPaths(e.target.value)} placeholder={"/Users/operator/Documents\n/Users/operator/Projects"} />
+    </label>
+    <p className="text-text-muted">Uses a native Go helper over SSH; no runtime installation required. Preserves files, directories, ordinary permissions and modification times. Symlinks, ACLs and extended attributes are unsupported; changing files fail the run. This is a folder backup, not full-machine recovery.</p>
+    <button type="button" disabled={checking} className="text-accent hover:underline" onClick={async()=>{
+      const request=++seq.current;setChecking(true);setMessage("");
+      try{const out=await api<{os:string}>("POST","/instance-capabilities",{id:instanceID,paths:paths.split("\n").map(p=>p.trim()).filter(Boolean)});if(request===seq.current)setMessage(`Ready: ${out.os.toLowerCase() === "darwin" ? "macOS" : out.os === "linux" ? "Linux" : out.os} folder backup is supported.`);}
+      catch(e){if(request===seq.current)setMessage((e as Error).message);}
+      finally{if(request===seq.current)setChecking(false);}
+    }}>{checking ? "Checking host…" : "Check host and folders"}</button>
+    {message && <p role="status" className="text-text-muted">{message}</p>}
+  </div>;
 }

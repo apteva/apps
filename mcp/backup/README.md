@@ -143,3 +143,85 @@ repository root with:
 ```bash
 bun run scripts/build-panels.ts
 ```
+
+
+## Optional Instances source
+
+Bind `instances_provider` to the Instances app. It is optional: Backup's
+platform and Fleet flows work without it, and Instances has no dependency on
+Backup. This is a global administrator workflow through the Server's protected
+Backup surface. Booking-scoped customer access is not implemented here.
+
+Select an instance, enter 1–32 non-overlapping absolute folder paths, and use
+**Check host and folders**. Supported hosts are registered, ready remote SSH
+instances with command, upload and tunnel capabilities, running macOS or Linux
+on amd64 or arm64. No language runtime or compiler is required on the host. Provider names do not establish backup support. Source symlinks,
+special files, root/virtual filesystems and changing files are rejected.
+
+The method preserves regular-file contents, directories, ordinary POSIX modes
+and modification times. It does not preserve ownership, ACLs, extended
+attributes, resource forks, symlinks, or full-machine bootability. Use a quiet
+source directory; this is not a filesystem snapshot or a database-consistency
+mechanism. Restore ownership belongs to the SSH user.
+
+Backup downloads the matching native Go worker from this version’s GitHub
+release assets and checks its embedded SHA-256 checksum. It sends that executable
+through `instance_upload_file`, verifies it again on the host, and starts it
+through `instance_run_command`. The helper is built with `CGO_ENABLED=0`.
+The worker binds only the remote loopback address; Backup transfers archive
+bytes through `instance_open_tunnel`, using an operation-specific bearer token.
+No archive bytes go through MCP command output or base64 file responses, and
+Backup never obtains SSH keys. As with existing Fleet tunnel consumers, Backup
+and Instances must share a network namespace where Instances' loopback tunnel
+is reachable. Separate network namespaces are reported as unavailable.
+
+The worker materializes a gzip archive in a private `/tmp/apteva-backup-<uid>`
+operation directory. Backup streams it into its existing verification,
+encryption and local/S3/R2 destination pipeline. Allow disk space for a source
+archive on the host and a temporary archive on Backup's host. Temporary worker
+files are removed on successful completion, or when the two-hour worker limit
+expires. A powered-off host cannot run expiry cleanup until it starts again.
+
+Both scheduled and immediate instance backups enter the durable SQL queue.
+Restart reconciliation reuses the run and remote operation IDs; a completed
+remote archive is reused after transfer interruption. **Retry same recovery
+point** requeues a failed instance run without generating another recovery
+point. If temporary remote data has expired, capture starts again under that
+same pending run. Completed recovery points are never retried or overwritten
+by this action. Jobs scheduling, destinations, install-configured encryption
+and policy retention remain owned by Backup.
+
+Object prefixes include the administrator namespace, pinned Instances binding
+and host identity, instance ID, and random policy identity. Host deletion does
+not delete recovery points. Restore can select another compatible registered
+host without querying the original host. Every restore requires confirmation
+and a **new** absolute target directory with an existing parent; existing data
+is never overwritten. Archive integrity, member paths and types are checked
+before staged files are activated with an atomic no-replace rename. Restored
+folders are numbered `0`, `1`, etc.; `.apteva-recovery.json` maps them to original
+source paths and records the restore operation for retry reconciliation.
+
+Policy scope example:
+
+```json
+{
+  "kind": "instance",
+  "id": "41",
+  "source_app": "instances",
+  "config": {"method": "folders", "paths": ["/Users/operator/Documents"]}
+}
+```
+
+`backup_now` / `backup_schedule` use `scope_kind`, `scope_id`, `source_app`,
+and `source_config` for the same fields. `backup_restore` adds `target_path`
+and optional `target_instance_id` alongside `run_id` and `confirm: true`.
+`backup_now` with `retry_run_id` retries a failed instance run.
+
+Worker regression tests are included in `go test ./...`. To build all four
+helper release assets, run `go run ./cmd/build-helpers -version 0.3.6 -out /tmp/backup-helper-assets`.
+Commit the resulting `helper-assets.json` and attach those exact binaries to
+the matching Backup release before publishing its registry entry.
+Go tests exercise the real worker and HTTP streams through a local test adapter
+for Instances, including encrypted archives larger than the generic file-tool
+limit, replacement restore, metadata, restart reconciliation, and retry reuse.
+They do not contact a registered production host.

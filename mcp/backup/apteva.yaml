@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: backup
 display_name: Backup
-version: 0.3.5
+version: 0.3.6
 description: |
   Verified platform snapshots stored on local disk, AWS S3, or Cloudflare R2,
   with durable scheduling, isolated retention, and optional encryption.
@@ -32,6 +32,12 @@ requires:
       version: ">=0.1.8"
       reason: Cron scheduling for periodic backup runs.
   integrations:
+    - role: instances_provider
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances (optional)
+      hint: Bind Instances to back up selected folders on registered macOS and Linux SSH hosts.
     - role: fleet_provider
       kind: app
       required: false
@@ -74,7 +80,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: backup/v0.3.5
+    ref: backup/v0.3.6
     entry: mcp/backup
   port: 8080
   health_check: /health
