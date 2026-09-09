@@ -6,7 +6,7 @@ test("installed headless client talks through real Telephony with host-owned UI"
   page.on("pageerror", error => errors.push(error.message));
   await page.goto(process.env.TELEPHONY_TEST_SURFACE === "application-user" ? "/?application-user" : "/");
   await page.waitForFunction(() => typeof (window as any).loadPhone === "function");
-  await page.evaluate(url => (window as any).loadPhone(url), gateway);
+  await page.evaluate(({ url, token }) => (window as any).loadPhone(url, token), { url: gateway, token: process.env.TELEPHONY_TEST_USER_TOKEN });
   expect(await page.evaluate(() => Object.keys((window as any).loaded.components))).toEqual([]);
   expect(await page.evaluate(() => (window as any).calls[0].status)).toBe("pending");
   await page.click("#answer");
@@ -23,6 +23,14 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await page.evaluate(() => (window as any).phone.hangup());
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().callId)).toBeUndefined();
   await page.evaluate(() => { const w = window as any; w.phone.dispose(); w.loaded.dispose(); });
+  if (process.env.TELEPHONY_TEST_SURFACE === "application-user") {
+    expect((await page.request.post(gateway + "/fixture/logout")).status()).toBe(204);
+    const denied = await page.evaluate(async () => {
+      try { await (window as any).client.listCalls(); return false; }
+      catch (error: any) { return error.status === 401; }
+    });
+    expect(denied).toBe(true);
+  }
   expect(errors).toEqual([]);
   expect(await page.evaluate(() => (window as any).answerError)).toBeUndefined();
 });
