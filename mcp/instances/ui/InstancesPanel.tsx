@@ -17,7 +17,10 @@ interface NativePanelProps {
   projectId: string;
 }
 
+interface SetupOptions { baseline: boolean; docker: boolean; runtimes: boolean; }
 interface Instance {
+  enrollment_peer?: string;
+  setup?: { requested: SetupOptions; status: string; stage: string; completed: string[]; error?: string; facts?: { platform: string; architecture: string; os: string }; verified?: { docker: boolean; runtimes: boolean; metrics: boolean } };
   provider_connection_id?: number;
   id: number;
   name: string;
@@ -428,6 +431,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  const [onboarding, setOnboarding] = useState<Instance | "new" | null>(null);
   const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
   const [pendingUpgrade, setPendingUpgrade] = useState<Instance | null>(null);
   const [volumeInstance, setVolumeInstance] = useState<Instance | null>(null);
@@ -546,6 +550,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           onClick={() => setShowCreate(true)}
           className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
         >+ Provision</button>}
+        {view === "compute" && <button type="button" onClick={() => setOnboarding("new")} className="px-2 py-0.5 text-xs border border-accent text-accent rounded">+ Add your server</button>}
         <button
           type="button"
           onClick={() => view !== "compute" ? setObjectStorageRefresh((value) => value + 1) : load()}
@@ -573,11 +578,13 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               onUpgrade={() => setPendingUpgrade(inst)}
               onVolumes={() => setVolumeInstance(inst)}
               onDestroy={() => setPendingDestroy(inst)}
+              onSetup={() => setOnboarding(inst)}
             />
           ))
         )}
       </main>
 
+      {onboarding && <HostOnboardingDialog initial={onboarding === "new" ? undefined : onboarding} withParams={withParams} onClose={() => setOnboarding(null)} onChange={load} />}
       {pendingDestroy && (
         <DestroyConfirmDialog
           inst={pendingDestroy}
@@ -993,10 +1000,10 @@ function DestroyConfirmDialog({
           style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}
         >
           <h2 id="destroy-instance-title" className="text-text font-semibold">
-            Destroy instance
+            {inst.provider === "external" ? "Remove server" : "Destroy instance"}
           </h2>
           <p className="text-xs text-text-muted">
-            This removes the host from Instances and terminates the upstream resource.
+            {inst.provider === "external" ? "This forgets the registration. Your server and its workloads remain intact. Any enrollment VPN peer is revoked." : "This removes the host from Instances and terminates the upstream resource."}
           </p>
         </div>
 
@@ -1236,7 +1243,7 @@ const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 export function InstanceCard({
-  inst, withParams, busy, onUpgrade, onVolumes, onDestroy,
+  inst, withParams, busy, onUpgrade, onVolumes, onDestroy, onSetup,
 }: {
   inst: Instance;
   withParams: () => string;
@@ -1244,6 +1251,7 @@ export function InstanceCard({
   onUpgrade: () => void;
   onVolumes: () => void;
   onDestroy: () => void;
+  onSetup?: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
   const [metricsError, setMetricsError] = useState("");
@@ -1365,10 +1373,11 @@ export function InstanceCard({
 				{diagnosticBusy ? "Comparing…" : "Compare provider"}
 			</button>
 		)}
+        {!isLocal && onSetup && <button type="button" onClick={onSetup} className="px-2 py-0.5 text-[10px] border border-border rounded">Setup</button>}
         {canDestroy && (
           <button type="button" onClick={onDestroy} disabled={busy}
             className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50">
-            Destroy
+            {inst.provider === "external" ? "Remove" : "Destroy"}
           </button>
         )}
         <button
@@ -1382,6 +1391,7 @@ export function InstanceCard({
         </button>
       </div>
 
+      {inst.setup && <div className="px-3 py-2 text-xs text-text-muted border-t border-border">Setup: {inst.setup.stage} · {inst.setup.status}{inst.setup.facts?.os ? ` · ${inst.setup.facts.os} / ${inst.setup.facts.architecture}` : ""}{inst.setup.verified?.docker ? " · Docker ✓" : ""}{inst.setup.verified?.runtimes ? " · Language tools ✓" : ""}</div>}
       {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.lifecycle_stage ? `${inst.lifecycle_stage}: ` : ""}{inst.error}{inst.cleanup_error ? ` · cleanup: ${inst.cleanup_error}` : ""}</div>}
 	  {comparison && <div className={`px-3 py-1.5 text-[10px] border-t ${(!comparison.complete || comparison.differences?.length) ? "text-amber border-amber/20" : "text-green border-green/20"}`}>Provider {comparison.provider_state || "state"}: {comparison.differences?.length ? comparison.differences.join(" · ") : comparison.complete ? "matches checked state" : "comparison incomplete"}</div>}
 
@@ -1734,6 +1744,7 @@ export function CreateDialog({
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [storageCapabilities, setStorageCapabilities] = useState<StorageCapabilitiesWire | null>(null);
+  const [hostSetup, setHostSetup] = useState<SetupOptions>({ baseline: false, docker: false, runtimes: false });
   const [customBootStorage, setCustomBootStorage] = useState(false);
   const [bootSizeGB, setBootSizeGB] = useState(80);
   const [bootStorageClass, setBootStorageClass] = useState("block");
@@ -1913,6 +1924,7 @@ export function CreateDialog({
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          setup: hostSetup.baseline || hostSetup.docker || hostSetup.runtimes ? hostSetup : undefined,
           name: name.trim(), provider, provider_connection_id: providerConnectionID, size, region, image,
           storage: customBootStorage ? { boot: { size_gb: bootSizeGB, storage_class: bootStorageClass, tier: bootTier, delete_policy: "with_instance" } } : undefined,
 		  elastic_metal: size.startsWith("elastic-metal/") && elasticRAID ? { raid_level: elasticRAID } : undefined,
@@ -2133,6 +2145,7 @@ export function CreateDialog({
 			</select>
 		  </div>
 		)}
+        <HostSetupOptions value={hostSetup} onChange={setHostSetup} disabled={busy} />
         <div className="flex justify-end gap-2 pt-1">
           {selectedType?.resource_class === "bare_metal" && selectedType.platform === "macos" && (
             <span className="mr-auto text-[11px] text-amber">24-hour minimum allocation</span>
@@ -2196,4 +2209,88 @@ function GlobalVolumes({withParams, instances, refresh}: {withParams: () => stri
       </div>;
     })}
   </section>;
+}
+
+export function HostSetupOptions({ value, onChange, disabled }: { value: SetupOptions; onChange: (value: SetupOptions) => void; disabled?: boolean }) {
+  return <fieldset className="space-y-2 border border-border rounded p-3" disabled={disabled}>
+    <legend className="text-sm font-medium px-1">Configure this server</legend>
+    {([['baseline', 'Common utilities and metrics'], ['docker', 'Docker engine'], ['runtimes', 'Node.js, npm, and Go']] as const).map(([key, label]) =>
+      <label key={key} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{label}</label>)}
+    <p className="text-xs text-text-dim">Automatic installation supports Ubuntu/Debian on AMD64 or ARM64 and needs root or passwordless sudo. Instances installs the selected software directly over SSH. Language tools use distribution packages; existing installations are reused.</p>
+  </fieldset>;
+}
+
+export function HostOnboardingDialog({ initial, withParams, onClose, onChange }: { initial?: Instance; withParams: () => string; onClose: () => void; onChange: () => void }) {
+  const [instance, setInstance] = useState<Instance | undefined>(initial);
+  const [name, setName] = useState("");
+  const [host, setHost] = useState("");
+  const [user, setUser] = useState("apteva");
+  const [port, setPort] = useState(22);
+  const [vpn, setVPN] = useState(false);
+  const [setup, setSetup] = useState<SetupOptions>(initial?.setup?.requested || { baseline: true, docker: true, runtimes: false });
+  const [command, setCommand] = useState("");
+  const [publicKey, setPublicKey] = useState(initial?.ssh_public_key || "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!instance?.id) return;
+    let stopped = false;
+    const controller = new AbortController();
+    const poll = async () => {
+      try {
+        const response = await fetch(`${API}/instances/${instance.id}?${withParams()}`, { credentials: "same-origin", signal: controller.signal });
+        if (!response.ok) throw new Error(await response.text());
+        const result = await response.json();
+        if (!stopped) setInstance(result.instance);
+      } catch (e) { if (!stopped) setError((e as Error).message); }
+    };
+    const timer = setInterval(poll, 3000);
+    return () => { stopped = true; controller.abort(); clearInterval(timer); };
+  }, [instance?.id, withParams]);
+  const post = async (path: string, body: unknown) => {
+    const response = await fetch(`${API}/${path}?${withParams()}`, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Request failed (${response.status})`);
+    return result;
+  };
+  const register = async () => {
+    setBusy(true); setError("");
+    try {
+      const result = await post('instances-register', instance ? { id: instance.id } : { name, ssh_host: vpn ? undefined : host, ssh_user: user, ssh_port: port, vpn, setup });
+      setInstance(result.instance); setCommand(result.authorization.command); setPublicKey(result.authorization.public_key); setCopied(false); onChange();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  const configure = async () => {
+    if (!instance) return;
+    setBusy(true); setError("");
+    try {
+      const retry = instance.status === "ready" || instance.status === "error";
+      const result = await post(`instances/${instance.id}/wait-ready`, { async: true, ...(retry ? { retry: true, setup } : {}) });
+      setInstance(result.instance); onChange();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  return <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="host-onboarding-title">
+    <div className="bg-bg border border-border rounded-lg p-5 space-y-4 w-full overflow-y-auto" style={{ width: "min(640px, 100%)", maxHeight: "90vh" }}>
+      <h2 id="host-onboarding-title" className="font-semibold text-text">{instance ? `Configure ${instance.name}` : 'Add your server'}</h2>
+      {!instance && <div className="space-y-3">
+        <label className="block text-sm">Name<input className="block w-full bg-bg-input border border-border rounded p-2" value={name} onChange={e => setName(e.target.value)} placeholder="Home server" /></label>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={vpn} onChange={e => { setVPN(e.target.checked); if (e.target.checked) setPort(22); }} />Connect through the VPN app</label>
+        {vpn ? <p className="text-xs text-text-dim">Requires a bound, installed WireGuard VPN server reachable from home, and a route from Instances to its VPN subnet. The command below will join your server without router port forwarding.</p> : <label className="block text-sm">SSH address<input className="block w-full bg-bg-input border border-border rounded p-2" value={host} onChange={e => setHost(e.target.value)} placeholder="192.168.1.20 or server.example.com" /></label>}
+        <div className="flex gap-3"><label className="text-sm flex-1">SSH user<input className="block w-full bg-bg-input border border-border rounded p-2" value={user} onChange={e => setUser(e.target.value)} /></label><label className="text-sm w-24">Port<input type="number" min="1" max="65535" disabled={vpn} className="block w-full bg-bg-input border border-border rounded p-2" value={port} onChange={e => setPort(Number(e.target.value))} /></label></div>
+      </div>}
+      <HostSetupOptions value={setup} onChange={setSetup} disabled={busy || instance?.status === "provisioning"} />
+      {instance && <div className="text-sm space-y-1" aria-live="polite"><p>{instance.setup?.stage || instance.status} · {instance.setup?.status || instance.status}</p>{instance.setup?.completed?.map(stage => <p key={stage} className="text-green">✓ {stage}</p>)}{instance.setup?.error && <p className="text-red">{instance.setup.error}</p>}</div>}
+      {command && <div className="space-y-2"><p className="text-sm">Run this command on your server. It authorizes SSH, creates the selected account if needed, and enables the selected connection. {instance?.setup?.requested && (instance.setup.requested.baseline || instance.setup.requested.docker || instance.setup.requested.runtimes) ? "Software setup grants this account passwordless sudo." : ""}</p>{instance?.enrollment_peer && <p className="text-xs text-amber">This command contains the VPN peer credential. Keep it private.</p>}<pre className="text-xs whitespace-pre-wrap break-all max-h-48 overflow-auto bg-bg-input p-3 rounded">{command}</pre><button type="button" className="text-sm text-blue" onClick={async () => { try { await navigator.clipboard.writeText(command); setCopied(true); } catch { setError('Clipboard unavailable; select and copy the command above.'); } }}>{copied ? 'Copied' : 'Copy command'}</button></div>}
+      {instance?.provider === 'external' && publicKey && <details className="text-xs"><summary>Authorize an existing SSH account manually</summary><p className="mt-2">Add this public key to the account’s ~/.ssh/authorized_keys. Configure VPN separately if selected. Package setup needs passwordless sudo; discovery-only registration supports macOS too.</p><pre className="whitespace-pre-wrap break-all mt-2">{publicKey}</pre></details>}
+      {error && <p role="alert" className="text-sm text-red">{error}</p>}
+      <div className="flex justify-end gap-3">
+        <button type="button" onClick={onClose} className="px-3 py-2 text-sm border border-border rounded">Close</button>
+        {!instance ? <button type="button" disabled={busy || !name.trim() || !user.trim() || (!vpn && !host.trim())} onClick={register} className="px-3 py-2 text-sm bg-blue text-white rounded disabled:opacity-50">{busy ? 'Registering…' : 'Register server'}</button> : <>
+          {instance.provider === 'external' && !command && <button type="button" disabled={busy} onClick={register} className="px-3 py-2 text-sm border border-border rounded">Show connection command</button>}
+          <button type="button" disabled={busy || instance.setup?.status === 'running'} onClick={configure} className="px-3 py-2 text-sm bg-blue text-white rounded disabled:opacity-50">{instance.status === 'ready' ? 'Check / apply setup' : instance.status === 'error' ? 'Retry setup' : 'Verify connection'}</button>
+        </>}
+      </div>
+    </div>
+  </div>;
 }

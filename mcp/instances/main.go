@@ -14,7 +14,7 @@
 // self-vps tunnel, Deploy's SSHRuntime, Backup off-host targets,
 // Containers, Database). Each consumer binds Instances as a
 // kind=app integration and calls these tools instead of binding a
-// VPS provider directly. Single source of truth for the host fleet.
+// VPS provider directly. Single source of truth for the host runtimes.
 //
 // Naming: "instance" here = compute machine (AWS-style). Apteva-
 // core's existing "instance" concept (a thinking loop per project)
@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.47
+version: 0.4.48
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -59,9 +59,15 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
     - platform.connections.execute
     - platform.connections.read_public_config
   integrations:
+    - role: vpn
+      kind: app
+      required: false
+      compatible_app_names: [vpn]
+      label: Home server connectivity
     - role: provider
       kind: integration
       mode: multiple
@@ -100,7 +106,7 @@ provides:
     - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
     - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
     - { name: object_storage_destroy, description: "Permanently delete an object-storage resource with explicit confirmation." }
-    - { name: instance_register,     description: "Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key. Args: name, ssh_host, ssh_user, ssh_port?, tags_json?." }
+    - { name: instance_register,     description: "Register an existing SSH host; optionally configure baseline utilities, Docker, and language tools. Returns an enrollment command; vpn=true reuses the bound VPN app. Args: name, ssh_host (unless vpn), ssh_user, ssh_port?, setup?, vpn?, tags_json?; or id to resume enrollment." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate a managed instance and remove its row, or forget an external host without modifying it (refused for local id 0 and Contabo). Args: id." }
@@ -187,7 +193,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.47
+    ref: instances/v0.4.48
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -238,7 +244,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// because destroy must only target an upstream id recorded from
 	// the original create response.
 	startInstanceWorker(ctx, -1, func(work context.Context) {
-		for _, reconcile := range []func(*sdk.AppCtx){reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState} {
+		for _, reconcile := range []func(*sdk.AppCtx){reconcileHetznerProvisioning, reconcileDigitalOceanProvisioning, reconcileRunPodProvisioning, reconcileAPIProviderProvisioning, reconcileHetznerUpgrading, reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileTrackedProviderState, reconcileExternalHosts} {
 			if work.Err() != nil {
 				return
 			}
@@ -253,7 +259,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 				return
 			default:
 			}
-			for _, reconcile := range []func(*sdk.AppCtx){reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying} {
+			for _, reconcile := range []func(*sdk.AppCtx){reconcileVolumeOperations, reconcileObjectStorage, reconcileRollbacks, reconcileDestroying, reconcileExternalHosts} {
 				if work.Err() != nil {
 					return
 				}
@@ -281,6 +287,7 @@ func main() { sdk.Run(&App{}) }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/api/instances-register", Handler: a.httpRegister},
 		{Pattern: "/api/instances", Handler: a.handleInstancesCollection},
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
 		{Pattern: "/api/instances-providers", Handler: a.handleListProviders},

@@ -109,14 +109,17 @@ func TestBoundInstanceProviders_ReportsConfiguredDefault(t *testing.T) {
 func TestEmbeddedManifest_AllowsVerifiedVPSProviders(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if len(m.Requires.Integrations) != 1 {
-		t.Fatalf("integrations = %d, want 1", len(m.Requires.Integrations))
+	var provider sdk.IntegrationDep
+	for _, dep := range m.Requires.Integrations {
+		if dep.Role == "provider" {
+			provider = dep
+		}
 	}
-	if m.Requires.Integrations[0].Mode != "multiple" {
-		t.Fatalf("provider integration mode = %q, want multiple", m.Requires.Integrations[0].Mode)
+	if provider.Mode != "multiple" {
+		t.Fatalf("provider mode=%q", provider.Mode)
 	}
 	got := map[string]bool{}
-	for _, slug := range m.Requires.Integrations[0].CompatibleSlugs {
+	for _, slug := range provider.CompatibleSlugs {
 		got[slug] = true
 	}
 	for _, slug := range compatibleProviderSlugs {

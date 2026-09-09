@@ -158,8 +158,8 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
 	switch normalizeProvider(inst.Provider) {
 	case "external":
-		cap.Metrics = false // the current remote collector is Linux-/proc-specific
-		cap.Destroy = true  // forget the inventory row; never destroys the host
+		cap.Metrics = inst.Platform == "linux" || inst.Platform == "macos"
+		cap.Destroy = true // forget the inventory row; never destroys the host
 	case "hetzner":
 		cap.Destroy, cap.Upgrade = true, true
 	case "digitalocean", "runpod":
@@ -173,10 +173,15 @@ func instanceCapabilities(inst *Instance) InstanceCapabilities {
 	if cap.Destroy && isScalewayAppleInstance(inst) && !scalewayAppleCanDelete(inst, time.Now()) {
 		cap.Destroy = false
 	}
+	if inst.Status == "ready" && inst.Setup != nil && inst.Setup.Status == "ready" {
+		cap.Docker = inst.Setup.Verified.Docker
+		cap.Runtimes = inst.Setup.Verified.Runtimes
+	}
 	return cap
 }
 
 func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
+
 	provider, err := resolveInstanceProvider(ctx, in.Provider)
 	if err != nil {
 		return nil, err
@@ -210,7 +215,7 @@ func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, erro
 func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 	switch normalizeProvider(inst.Provider) {
 	case "external":
-		return nil
+		return revokeEnrollmentPeer(ctx, inst)
 	case "hetzner":
 		return hetznerDestroy(ctx, inst)
 	case "digitalocean":

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.47
+version: 0.4.48
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -39,9 +39,15 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
     - platform.connections.execute
     - platform.connections.read_public_config
   integrations:
+    - role: vpn
+      kind: app
+      required: false
+      compatible_app_names: [vpn]
+      label: Home server connectivity
     - role: provider
       kind: integration
       mode: multiple
@@ -65,7 +71,7 @@ provides:
     - name: instance_list_providers
       description: List the VPS provider connections bound to this Instances install and identify the default provider.
     - name: instance_create
-      description: Provision a new instance via a bound VPS provider. The provider argument selects a binding; when omitted, the configured default is used.
+      description: Provision a new instance via a bound VPS provider. The provider argument selects a binding; when omitted, the configured default is used. Optional setup configures baseline utilities, Docker, and language tools after provider readiness.
     - name: instance_storage_capabilities
       description: Describe provider support for configurable boot disks and managed data volumes.
     - name: instance_list_storage_types
@@ -103,7 +109,7 @@ provides:
     - name: object_storage_destroy
       description: Permanently delete a managed object-storage resource with explicit confirmation.
     - name: instance_register
-      description: Register an externally managed SSH host such as a Mac. Generates a dedicated SSH key and returns the public key to authorize on that host.
+      description: Register an existing SSH host with optional baseline, Docker, and Language tools setup. Returns a connection command and public key. vpn=true reuses the VPN app; id alone resumes enrollment.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
@@ -129,7 +135,7 @@ provides:
     - name: instance_close_tunnel
       description: Close a loopback TCP tunnel for an instance target port.
     - name: instance_wait_ready
-      description: Poll the instance until SSH accepts the key and can run a non-interactive command.
+      description: Wait for SSH access and requested host setup. Optional retry rechecks or repairs setup; setup changes desired capabilities; async returns progress immediately.
     - name: instance_metrics
       description: CPU / memory / disk / network / load / uptime (local gopsutil, remote Linux or macOS collector). 5s cache.
     - name: instance_list_server_types
@@ -222,7 +228,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.47
+    ref: instances/v0.4.48
     entry: mcp/instances
   port: 8080
   health_check: /health

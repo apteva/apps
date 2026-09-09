@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -245,6 +246,7 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request, id int64) {
 func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 	ctx := appCtxForRequest(r)
 	var body struct {
+		Setup                *SetupOptions          `json:"setup"`
 		Name                 string                 `json:"name"`
 		Provider             string                 `json:"provider"`
 		Region               string                 `json:"region"`
@@ -265,7 +267,7 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in := CreateInstanceInput{
-		Name: body.Name, Provider: body.Provider,
+		Setup: body.Setup, Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
 		TagsJSON: body.TagsJSON, ProviderConnectionID: body.ProviderConnectionID, Storage: body.Storage, ElasticMetal: body.ElasticMetal,
 	}
@@ -487,20 +489,23 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	var body struct {
-		TimeoutS int `json:"timeout_s"`
+	var args map[string]any
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil && err != io.EOF {
+			httpErr(w, 400, "invalid JSON")
+			return
+		}
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	timeout := time.Duration(body.TimeoutS) * time.Second
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
+	if args == nil {
+		args = map[string]any{}
 	}
-	inst, err := waitInstanceReady(r.Context(), ctx, id, timeout)
+	args["id"] = id
+	result, err := waitReadyWithOptions(r.Context(), ctx, args)
 	if err != nil {
 		httpErr(w, http.StatusConflict, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"ready": true, "id": id, "status": inst.Status})
+	httpJSON(w, result)
 }
 
 func (a *App) httpMetrics(w http.ResponseWriter, r *http.Request, id int64) {

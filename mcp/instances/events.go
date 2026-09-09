@@ -150,6 +150,11 @@ func transitionInstanceAndEmit(ctx *sdk.AppCtx, id int64, from []string, to stri
 	if err != nil {
 		return nil, false, err
 	}
+	if to == "ready" && before.Status == "provisioning" && before.Setup != nil {
+		if err := prepareInstance(ctx, before); err != nil {
+			return before, false, err
+		}
+	}
 	ok, err := dbTransitionStatus(ctx.AppDB(), id, from, to, fields)
 	if err != nil || !ok {
 		return before, ok, err

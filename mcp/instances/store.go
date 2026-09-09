@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -13,6 +14,9 @@ import (
 // consumer (Live Link, Deploy, Backup, future Containers) sees this
 // shape via `instance_get` / `instance_list`.
 type Instance struct {
+	Setup                *InstanceSetup `json:"setup,omitempty"`
+	SetupJSON            string         `json:"-"`
+	EnrollmentPeer       string         `json:"enrollment_peer,omitempty"`
 	workContext          context.Context
 	ID                   int64  `json:"id"`
 	Name                 string `json:"name"`
@@ -59,6 +63,8 @@ type Instance struct {
 }
 
 type InstanceCapabilities struct {
+	Docker   bool `json:"docker"`
+	Runtimes bool `json:"runtimes"`
 	Run      bool `json:"run"`
 	Upload   bool `json:"upload"`
 	Download bool `json:"download"`
@@ -87,6 +93,7 @@ func (i *Instance) stripSecrets() *Instance {
 // ─── Inputs ────────────────────────────────────────────────────────
 
 type CreateInstanceInput struct {
+	Setup                *SetupOptions
 	Name                 string
 	Provider             string
 	ProviderConnectionID int64
@@ -151,7 +158,7 @@ const instanceCols = `id, name, provider, provider_connection_id, provider_id, p
 		status, region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
 		tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, error_message,
 		lifecycle_stage, primary_error, cleanup_error, retain_on_failure, provider_inventory_json, COALESCE(provider_checked_at,''),
-		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,''), create_pending, destroy_options_json`
+		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,''), create_pending, destroy_options_json, setup_json, enrollment_peer`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
@@ -160,9 +167,15 @@ func scanInstance(s rowScanner) (*Instance, error) {
 		&i.TagsJSON, &i.ResourcesJSON, &i.StorageJSON, &i.ProviderMetadataJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
 		&i.LifecycleStage, &i.PrimaryError, &i.CleanupError, &i.RetainOnFailure, &i.ProviderInventoryJSON, &i.ProviderCheckedAt,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
-		&i.CreatePending, &i.DestroyOptionsJSON,
+		&i.CreatePending, &i.DestroyOptionsJSON, &i.SetupJSON, &i.EnrollmentPeer,
 	); err != nil {
 		return nil, err
+	}
+	if i.SetupJSON != "" && i.SetupJSON != "{}" {
+		i.Setup = &InstanceSetup{}
+		if err := json.Unmarshal([]byte(i.SetupJSON), i.Setup); err != nil {
+			return nil, fmt.Errorf("decode instance setup: %w", err)
+		}
 	}
 	return &i, nil
 }
@@ -212,12 +225,12 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 		INSERT INTO instances (
 			id, create_pending, name, provider, provider_connection_id, provider_id, public_ipv4, public_ipv6, status,
 				region, size, image, platform, resource_class, deletable_at, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
-				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				tags_json, resources_json, storage_json, provider_metadata_json, ports_json, monthly_cost_cents, pending_size, retain_on_failure, created_at, setup_json
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, in.Status == "provisioning" && in.ProviderID == "",
 		in.Name, in.Provider, in.ProviderConnectionID, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
 		in.Region, in.Size, in.Image, in.Platform, in.ResourceClass, in.DeletableAt, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
-		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(),
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), storageJSON, nullStr(in.ProviderMetadataJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, in.RetainOnFailure, nowUTC(), initialSetupJSON(in.Setup),
 	)
 	if err != nil {
 		return nil, err
@@ -243,7 +256,7 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "storage_json", "provider_metadata_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
 		"lifecycle_stage", "primary_error", "cleanup_error", "retain_on_failure", "provider_inventory_json", "provider_checked_at",
-		"create_pending", "destroy_options_json",
+		"create_pending", "destroy_options_json", "setup_json", "enrollment_peer",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -280,7 +293,7 @@ func dbTransitionStatus(db *sql.DB, id int64, from []string, to string, fields m
 	fields["status"] = to
 	cols := make([]string, 0, len(fields))
 	args := make([]any, 0, len(fields)+len(from)+1)
-	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at", "destroy_options_json", "provider_id", "public_ipv4", "public_ipv6", "create_pending"} {
+	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at", "lifecycle_stage", "primary_error", "cleanup_error", "provider_inventory_json", "provider_checked_at", "destroy_options_json", "provider_id", "public_ipv4", "public_ipv6", "create_pending", "setup_json"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

@@ -1,0 +1,2 @@
+ALTER TABLE instances ADD COLUMN setup_json TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE instances ADD COLUMN enrollment_peer TEXT NOT NULL DEFAULT '';

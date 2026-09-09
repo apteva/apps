@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -126,6 +127,9 @@ func waitInstanceReady(ctx context.Context, app *sdk.AppCtx, id int64, timeout t
 		}
 		if inst.Status == "ready" {
 			return inst, nil
+		}
+		if inst.Status == "error" && inst.Setup != nil && inst.Setup.Error != "" {
+			return nil, fmt.Errorf("%s: %s", inst.Setup.Stage, inst.Setup.Error)
 		}
 		if inst.Status != "provisioning" && inst.Status != "pending" {
 			return nil, ErrOperationSuperseded

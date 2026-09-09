@@ -193,19 +193,94 @@ Destroy uses provider APIs even when the guest is unreachable. Managed Flexible
 IPs are deleted by default and can be explicitly retained. Scaleway continues
 billing a powered-off Elastic Metal server until it is fully deleted.
 
-## Existing SSH hosts and Macs
+## Existing servers and automatic setup
 
-`instance_register(name, ssh_host, ssh_user, ssh_port?)` adds an existing
-machine without provisioning or otherwise changing it. Instances returns a
-new Ed25519 public key. Add that key to the selected user's
-`~/.ssh/authorized_keys`, then call `instance_wait_ready(id)` to verify access
-and mark the row ready.
+Use **Add your server** in the Instances panel or the existing MCP tool:
 
-These hosts use the same command, file-transfer, and loopback tunnel tools as
-managed instances. `instance_destroy` only forgets an external row; it never
-shuts down, deletes, or reconfigures the machine. The current remote metrics
-collector requires a declared platform, so metrics are not advertised for
-external hosts by default.
+```json
+{
+  "name": "Home server",
+  "ssh_host": "192.168.1.20",
+  "ssh_user": "apteva",
+  "setup": { "baseline": true, "docker": true, "runtimes": true }
+}
+```
+
+Pass this to `instance_register`. The response contains the instance and an
+`authorization.command` to run locally on the server. On Ubuntu/Debian this
+command installs/enables SSH, creates the account if missing, and authorizes
+its dedicated SSH key. When software setup is selected, the command grants
+that account passwordless sudo; Docker access also gives control of the host.
+Existing SSH accounts can instead authorize `authorization.public_key` manually.
+Use `instance_register({"id": 123})` to recover the same command and identity.
+Do not repeat a new registration when the ID already exists.
+
+`instance_wait_ready({"id": 123})` starts/verifies connectivity and waits for
+setup to finish. The sidecar also resumes pending external registrations on
+startup and every 30 seconds. `instance_get` and `instance_list` expose
+`setup.requested`, `setup.status`, `setup.stage`, `setup.completed`, detected OS
+and architecture, verified capabilities, and the last setup error. No new MCP
+tools are required.
+
+The same optional `setup` object is accepted by `instance_create`. Cloud hosts
+complete their provider-specific readiness checks before the shared setup runs.
+Omitting setup on cloud creation preserves existing behavior. Omitting setup on
+external registration performs discovery and SSH/file/metrics verification
+without installing packages. Discovery supports Linux and macOS; automatic
+package installation is initially limited to Ubuntu/Debian on AMD64 and ARM64.
+
+- `baseline`: install missing common utilities and prepare an Apteva data directory.
+- `docker`: Instances installs Docker if missing, enables its service, authorizes
+  the SSH user, and verifies daemon access and a disposable container over a fresh
+  SSH session. The Containers app is not called or modified.
+- `runtimes`: Instances installs distribution-provided Node.js, npm, and Go if
+  missing, verifies their commands, and records versions. Existing installations
+  are reused. This prepares language tools; it does not install an Apteva tenant,
+  promise app-specific runtime versions, or call Fleet.
+
+All software setup runs directly through Instances' existing SSH implementation.
+Neither Containers nor Fleet bindings or updates are required. The optional VPN
+connection flow below uses the VPN app's existing tools without changing that app.
+
+Setup does not advertise Docker/language-tool readiness until all selected steps pass.
+`instance_wait_ready({"id":123,"retry":true,"async":true})` retries a failed
+setup or rechecks an already-ready host. Supply `setup` to change desired
+capabilities. Setup is additive: unchecking an option does not uninstall software.
+Scripts reuse existing installations, can run again after interruption, and
+never format a disk. Progress is durable; an interrupted step reruns rather than
+trusting stale success. Retry does not reprovision a cloud resource. Provider
+creation failures must be resolved separately.
+
+### Home servers behind a router
+
+Bind the existing **VPN** app to Instances and install a reachable WireGuard
+server using `vpn_install`. Instances must have network access to that VPN
+subnet (run it on the VPN server host or configure routing to the subnet).
+Then call `instance_register` with `vpn:true` instead of `ssh_host`.
+
+Instances reuses `vpn_status`, `vpn_peer_list`, `vpn_peer_add`, and
+`vpn_peer_config`. The returned local enrollment command installs the generated
+WireGuard client configuration, enables it on boot, and configures SSH. It
+contains a VPN credential: keep it private. Instances stores only the peer
+reference and SSH address; VPN retains ownership of its keys. Resume reuses the
+same peer. Enrollment leaves the home machine's default internet route and DNS
+unchanged, and refuses configurations with executable WireGuard hooks.
+
+The VPN endpoint must be reachable from home. There is no NAT relay or automatic
+route installation on the Instances host. A firewall blocking SSH on the VPN
+interface must be adjusted by the host administrator. SSH readiness remains
+pending until the path works; it never falsely reports a disconnected host ready.
+
+HTTP routes mirror the MCP operations: `POST /api/instances-register`,
+`POST /api/instances` with setup, and `POST /api/instances/<id>/wait-ready` with
+`retry`, `setup`, or `async`. The UI uses these same handlers.
+
+External hosts support commands, file transfer, SSH tunnels, and metrics after
+platform discovery. `instance_destroy` forgets their row without deleting or
+shutting down the machine. If enrollment created a VPN peer it revokes that peer
+first. Software, the SSH account, and its authorized key remain on the server;
+remove them locally when decommissioning access. Instances never uninstalls an
+existing workload as a side effect of forgetting a host.
 
 ## Object storage
 

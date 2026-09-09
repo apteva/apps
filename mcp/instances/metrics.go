@@ -348,7 +348,7 @@ func collectRemoteMetrics(inst *Instance) (*Metrics, error) {
 		script = remoteMacOSVitalsScript
 	}
 	output, exit, err := runSSH(inst, script, 10*time.Second)
-	if err != nil && exit != 0 {
+	if err != nil || exit != 0 {
 		return nil, fmt.Errorf("vitals script failed (exit=%d): %v · output=%q", exit, err, truncate(output, 200))
 	}
 	// The script prints the JSON on the last line; strip any preamble
