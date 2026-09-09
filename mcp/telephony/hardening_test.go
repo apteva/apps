@@ -576,9 +576,12 @@ func TestTwilioStreamErrorPreservesCarrierStatusAndRealtimeThread(t *testing.T) 
 	if err != nil || stored.Status != "answered" || stored.ErrorMessage != "" {
 		t.Fatalf("stored call=%+v err=%v", stored, err)
 	}
-	if stored.MediaStatus != "error" || stored.MediaErrorMessage != "handshake rejected" ||
-		stored.MediaCloseCode != 1011 || stored.MediaDisconnectedAt == "" {
-		t.Fatalf("media state not persisted: %+v", stored)
+	if stored.MediaStatus != "idle" || stored.MediaErrorMessage != "" || stored.StateExpiresAt != call.StateExpiresAt {
+		t.Fatalf("provider notification changed bridge state: %+v", stored)
+	}
+	var providerStatus, providerError string
+	if err := a.db().db.QueryRow(`SELECT status,error_message FROM telephony_twilio_streams WHERE call_id=?`, call.ID).Scan(&providerStatus, &providerError); err != nil || providerStatus != "stream-error" || providerError != "handshake rejected" {
+		t.Fatalf("provider diagnostic: %q %q %v", providerStatus, providerError, err)
 	}
 	if len(platform.killed) != 0 {
 		t.Fatalf("killed threads=%v", platform.killed)
@@ -590,7 +593,7 @@ func TestTwilioStreamErrorPreservesCarrierStatusAndRealtimeThread(t *testing.T) 
 		t.Fatal(err)
 	}
 	stored, err = a.db().findCall(call.ID)
-	if err != nil || stored.Status != "completed" || stored.MediaStatus != "error" {
+	if err != nil || stored.Status != "completed" || stored.MediaStatus != "idle" {
 		t.Fatalf("carrier completion did not win: call=%+v err=%v", stored, err)
 	}
 }
@@ -621,7 +624,7 @@ func TestTwilioStreamErrorAfterCompletionDoesNotRegressCall(t *testing.T) {
 
 	stored, err := a.db().findCall(call.ID)
 	if rec.Code != http.StatusNoContent || err != nil || stored.Status != "completed" ||
-		stored.MediaStatus != "error" || stored.MediaErrorMessage != "late transport error" {
+		stored.MediaStatus != "idle" || stored.MediaErrorMessage != "" || stored.StateExpiresAt != call.StateExpiresAt {
 		t.Fatalf("status=%d call=%+v err=%v", rec.Code, stored, err)
 	}
 	if len(platform.killed) != 0 {

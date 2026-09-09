@@ -184,36 +184,36 @@ func parseRealtimeBridgeControl(data []byte) (realtimeBridgeControl, bool) {
 func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	callID := callIDFromMediaPath(r.URL.Path, "/media/twilio/")
 	if callID == "" {
-		http.Error(w, "missing call_id", http.StatusBadRequest)
+		a.rejectTwilioHandshake(w, callID, "missing_call_id", "missing call_id", http.StatusBadRequest)
 		return
 	}
 	row, err := a.db().findCall(callID)
 	if err != nil || row == nil {
-		http.Error(w, "unknown call_id", http.StatusNotFound)
+		a.rejectTwilioHandshake(w, callID, "unknown_call", "unknown call_id", http.StatusNotFound)
 		return
 	}
 	if err := a.authorizeCallRequest(r, row); err != nil {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		a.rejectTwilioHandshake(w, callID, "invalid_callback_auth", "forbidden", http.StatusForbidden)
 		return
 	}
 	if row.CarrierSlug != "twilio" || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
-		http.Error(w, "no audio bridge for this call", http.StatusGone)
+		a.rejectTwilioHandshake(w, callID, "bridge_unavailable_or_call_terminal", "no audio bridge for this call", http.StatusGone)
 		return
 	}
 	claimed, err := a.db().claimMedia(callID)
 	if err != nil {
-		http.Error(w, "claim media", http.StatusInternalServerError)
+		a.rejectTwilioHandshake(w, callID, "claim_database_error", "claim media", http.StatusInternalServerError)
 		return
 	}
 	if !claimed {
-		http.Error(w, "media bridge already active", http.StatusConflict)
+		a.rejectTwilioHandshake(w, callID, "socket_claim_unavailable", "media bridge already active", http.StatusConflict)
 		return
 	}
 	defer a.db().releaseMedia(callID)
 	bridgeURL, err := a.mediaBridgeURL(row)
 	if err != nil {
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "audio bridge unavailable", string(mediaCloseLegLocalError))
-		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
+		a.rejectTwilioHandshake(w, callID, "audio_bridge_unavailable", "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -596,4 +596,12 @@ func bytesToPCM16(b []byte) []int16 {
 		out[i] = int16(binary.LittleEndian.Uint16(b[i*2:]))
 	}
 	return out
+}
+
+// Log only stable reason codes and call IDs; media URLs contain callback secrets.
+func (a *App) rejectTwilioHandshake(w http.ResponseWriter, callID, reason, message string, status int) {
+	if globalCtx != nil {
+		globalCtx.Logger().Warn("twilio websocket handshake rejected", "call", callID, "reason", reason, "http_status", status)
+	}
+	http.Error(w, message, status)
 }

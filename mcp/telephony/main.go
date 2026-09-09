@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.4.1
+version: 0.4.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2218,23 +2218,22 @@ func (a *App) handleTwilioStreamStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch strings.ToLower(strings.TrimSpace(r.FormValue("StreamEvent"))) {
-	case "stream-started":
-		_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
-		_ = a.db().clearStateExpiry(callID)
-	case "stream-stopped":
-		_ = a.db().updateMediaStatusWithLeg(callID, "disconnected", "", 1000, "Twilio call media ended normally", string(mediaCloseLegCarrier))
-		_ = a.db().clearStateExpiry(callID)
-	case "stream-error":
-		reason := strings.TrimSpace(r.FormValue("StreamError"))
-		if reason == "" {
-			reason = "Twilio media stream failed"
-		}
-		if err := a.db().updateMediaStatusWithLeg(callID, "error", reason, 1011, reason, string(mediaCloseLegCarrier)); err != nil {
-			http.Error(w, "persist stream failure", http.StatusInternalServerError)
+	event := strings.ToLower(strings.TrimSpace(r.FormValue("StreamEvent")))
+	switch event {
+	case "stream-started", "stream-stopped", "stream-error":
+		// Provider notifications are observations, never socket ownership or
+		// evidence that the local audio bridge connected. They may arrive first,
+		// be duplicated, or be delivered after the call/socket has ended.
+		recorded, err := a.db().recordTwilioStreamNotification(callID,
+			strings.TrimSpace(r.FormValue("StreamSid")), event,
+			strings.TrimSpace(r.FormValue("StreamError")))
+		if err != nil {
+			http.Error(w, "persist stream notification", http.StatusInternalServerError)
 			return
 		}
-		_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
+		// Do not log request URLs, callback credentials, or provider error text.
+		globalCtx.Logger().Info("twilio provider stream notification", "call", callID,
+			"event", event, "recorded", recorded)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -3912,6 +3911,8 @@ func (c *callsDB) updateMediaStatus(id, status, errMsg string, closeCode int, cl
 	return c.updateMediaStatusWithLeg(id, status, errMsg, closeCode, closeReason, "")
 }
 
+// Media status never grants or releases the exclusive socket claim. The owning
+// handler retains it until releaseMedia, including during error/close cleanup.
 func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode int, closeReason, closeLeg string) error {
 	switch status {
 	case "idle", "connecting", "connected", "disconnected", "degraded", "error":
@@ -3919,14 +3920,12 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		return fmt.Errorf("invalid media status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	active := status == "connecting" || status == "connected" || status == "degraded"
 	terminalMedia := status == "disconnected" || status == "error"
 	_, err := c.db.Exec(`UPDATE calls SET
         media_status = CASE
             WHEN media_status = 'error' AND ? = 'disconnected' THEN media_status
             ELSE ?
         END,
-        media_active = ?,
         media_error_message = CASE
             WHEN ? <> '' THEN ?
             WHEN ? IN ('connecting','connected') THEN ''
@@ -3951,7 +3950,7 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		END,
         updated_at = ?
         WHERE id = ?`,
-		status, status, active, errMsg, errMsg, status,
+		status, status, errMsg, errMsg, status,
 		status, now, status, terminalMedia, now, status, closeCode, closeCode,
 		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id)
 	return err
