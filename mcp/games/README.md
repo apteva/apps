@@ -1,4 +1,6 @@
-# Games v0.3
+# Games v0.4
+
+See [Assets and content](ASSETS.md) for all thirteen asset kinds, Media Studio generation, immutable manifests and Unity/Godot importers.
 
 A game backend for Apteva with multiple independent games per project: players,
 cloud saves, statistics, leaderboards, achievements, and moderation. Identity and

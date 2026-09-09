@@ -1,0 +1,1 @@
+{"name":"Apteva.Games.Editor","rootNamespace":"Apteva.Games","references":["Apteva.Games.Runtime"],"includePlatforms":["Editor"]}

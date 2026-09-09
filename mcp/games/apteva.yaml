@@ -2,8 +2,10 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.3.0
+version: 0.4.0
 description: |
+  Versioned game assets and content for thirteen asset kinds, with Media Studio
+  generation, deterministic sprite baking and Unity/Godot importers.
   Multi-game backend for Apteva: independent games, players, cloud saves,
   transactional statistics, leaderboards and achievements within each project.
   Links Code source and Deploy releases to each game, imports reporting from
@@ -39,7 +41,24 @@ requires:
       version: ">=0.26.0"
       optional: true
       reason: Owns command pipelines, artifacts, store releases and release policies.
+    - name: storage
+      optional: true
+      reason: Imports original asset files into the retained game content archive.
+    - name: media-studio
+      version: ">=0.10.61"
+      optional: true
+      reason: Generates candidate artwork and audio with a verifiable source receipt.
   integrations:
+    - role: storage
+      kind: app
+      required: false
+      compatible_app_names: [storage]
+      label: Asset sources
+    - role: media-studio
+      kind: app
+      required: false
+      compatible_app_names: [media-studio]
+      label: Asset generation
     - role: code
       kind: app
       required: false
@@ -70,6 +89,34 @@ provides:
       no_auth: true
     - prefix: /admin/
   mcp_tools:
+    - name: games_asset_versions
+      description: List recent immutable versions of one asset.
+    - name: games_renditions_list
+      description: List recent baked game asset renditions.
+    - name: games_assets_list
+      description: "List game assets with pagination."
+    - name: games_asset_save
+      description: "Save an immutable asset version. Requires asset_id, name, kind, spec, expected_parent; optional storage_id or retained source SHA. Empty expected_parent creates an asset."
+    - name: games_asset_version
+      description: "Get an exact asset version including its recipe and dependency versions."
+    - name: games_asset_bake
+      description: "Bake an exact version for target generic, unity or godot, engine_version, platform, optional scale (1-4)."
+    - name: games_content_freeze
+      description: "Freeze exact rendition_ids and dependencies into a content manifest."
+    - name: games_content_manifest
+      description: "Read an immutable manifest by digest."
+    - name: games_content_list
+      description: "List recent manifests and environment heads."
+    - name: games_content_approve
+      description: "Approve the exact manifest digest with a review note before production promotion."
+    - name: games_content_promote
+      description: "Atomically move dev/staging/prod to a digest with expected_head; production requires a review."
+    - name: games_asset_generate
+      description: "Generate a candidate for a recipe version via Media Studio once per request_key. Paid provider call; retries do not repeat uncertain dispatch."
+    - name: games_asset_generation_sync
+      description: "Attach a completed generation to a new version; optional generation_id reconciles uncertain dispatch after verifying the saved request marker."
+    - name: games_asset_jobs
+      description: "Inspect recent generation jobs and retained outcomes."
     - name: games_halt
       description: Halt an Android rollout or expire a TestFlight build through Deploy.
     - name: games_rollout
@@ -278,7 +325,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: games/v0.4.0
     entry: mcp/games
   port: 8080
   health_check: /health

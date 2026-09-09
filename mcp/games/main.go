@@ -1,4 +1,4 @@
-// Games v0.3 — game studio, players and progression.
+// Games v0.4 — game content studio, players and progression.
 //
 // The Games app is the game-domain layer of Apteva: the pieces a studio
 // would otherwise get from PlayFab, Nakama, or Unity Gaming Services,
@@ -64,6 +64,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return err
 	}
 	if err := initializeStudio(ctx); err != nil {
+		return err
+	}
+	if err := initializeContent(ctx); err != nil {
 		return err
 	}
 	globalCtx = ctx
@@ -168,6 +171,17 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		routes = append(routes, sdk.Route{Method: spec.method, Pattern: spec.path, Handler: a.handleGames})
 	}
 	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/admin/games/{game_id}/login-ticket", Handler: a.handleLoginTicket})
+	for _, method := range []string{"GET", "POST"} {
+		routes = append(routes, sdk.Route{Method: method, Pattern: "/admin/games/{game_id}/assets/{action}", Handler: a.handleContent})
+	}
+	routes = append(routes, sdk.Route{Method: "GET", Pattern: "/admin/games/{game_id}/content/{digest}", Handler: a.handleContentBytes}, sdk.Route{Method: "GET", Pattern: "/admin/games/{game_id}/content/{digest}/blobs/{sha}", Handler: a.handleContentBytes})
+	for _, pattern := range []string{"/v2/games/{game_id}/content/{digest}", "/v2/games/{game_id}/content/{digest}/blobs/{sha}"} {
+		routes = append(routes, sdk.Route{Method: "GET", Pattern: pattern, NoAuth: true, Handler: func(w http.ResponseWriter, r *http.Request) {
+			r.SetPathValue("public", "true")
+			a.handleContentBytes(w, r)
+		}})
+	}
+
 	routes = append(routes, sdk.Route{Method: "POST", Pattern: "/v2/games/{game_id}/events", Handler: a.handleTelemetry, NoAuth: true})
 	for _, method := range []string{"GET", "POST"} {
 		routes = append(routes, sdk.Route{Method: method, Pattern: "/admin/games/{game_id}/studio/{action}", Handler: a.handleStudio})

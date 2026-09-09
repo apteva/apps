@@ -1,0 +1,1 @@
+{"name":"Apteva.Games.Editor.Tests","references":["Apteva.Games.Runtime","Apteva.Games.Editor"],"includePlatforms":["Editor"],"optionalUnityReferences":["TestAssemblies"]}

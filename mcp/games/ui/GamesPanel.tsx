@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { StudioPanel, Portfolio } from "./StudioViews";
+import { AssetPanel } from "./AssetViews";
 
 const API = "/api/apps/games";
 
@@ -270,6 +271,7 @@ function Pill({
 // ─── panel ───────────────────────────────────────────────────────────
 
 type Tab =
+  | "assets"
   | "players"
   | "leaderboards"
   | "definitions"
@@ -552,6 +554,7 @@ function GamesWorkspace({
   );
 
   const tabs: { key: Tab; label: string }[] = [
+    { key: "assets", label: "Assets" },
     { key: "source", label: "Source" },
     { key: "releases", label: "Releases" },
     { key: "store", label: "Store listing" },
@@ -614,6 +617,9 @@ function GamesWorkspace({
             gameId={gameId}
             view={tab as "source" | "releases" | "store" | "metrics"}
           />
+        )}
+        {tab === "assets" && (
+          <AssetPanel key={gameId} projectId={projectId} gameId={gameId} />
         )}
         {tab === "players" && (
           <PlayersTab
