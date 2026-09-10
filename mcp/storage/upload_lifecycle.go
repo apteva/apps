@@ -77,6 +77,9 @@ func writeUploadPart(c context.Context, app *sdk.AppCtx, id string, n int, r io.
 			return 0, err
 		}
 	}
+	if meta.Direct != nil {
+		return 0, errors.New("send this part directly to its signed backend URL")
+	}
 	var committed int
 	if err = app.AppDB().QueryRow(`SELECT count(*) FROM completed_uploads WHERE upload_id=?`, id).Scan(&committed); err != nil {
 		return 0, err

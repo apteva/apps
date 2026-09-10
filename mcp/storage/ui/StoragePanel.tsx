@@ -165,8 +165,7 @@ interface UploadJob {
   name: string;
   total: number;
   loaded: number;
-  prepared?: number;
-  phase?: "checking" | "preparing" | "uploading" | "finalizing";
+  phase?: "checking" | "uploading" | "finalizing";
   status: "uploading" | "done" | "error" | "cancelled";
   error?: string;
   // Set when the user clicks the row's Cancel button. The
@@ -289,8 +288,8 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
             installId,
             signal: job.controller!.signal,
             onPhase: (phase) => updateJob(job.id, { phase }),
-            onPreparationProgress: (prepared) => updateJob(job.id, { prepared }),
             onUploadIdAssigned: (sid) => {
+              job.serverUploadId = sid;
               updateJob(job.id, { serverUploadId: sid });
             },
             onProgress: (bytes, total) => {
@@ -314,6 +313,9 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
             // the rest of a multi-file selection.
             continue;
           }
+          // The panel releases the File after this attempt; reclaim its
+          // session so selecting it again cannot exhaust the pending quota.
+          if (job.serverUploadId) await abortUploadServer(job.serverUploadId, { projectId, installId });
           setStatus("Upload failed: " + (e as Error).message);
           continue;
         }
@@ -1020,7 +1022,7 @@ function UploadProgressRow({
   onDismiss: () => void;
   onCancel: () => void;
 }) {
-  const shownBytes = job.phase === "preparing" ? (job.prepared || 0) : job.loaded;
+  const shownBytes = job.loaded;
   const pct = job.total > 0 ? Math.min(100, Math.floor((shownBytes / job.total) * 100)) : 0;
   const isError = job.status === "error";
   const isDone = job.status === "done";
@@ -1043,8 +1045,6 @@ function UploadProgressRow({
     ? "cancelled"
     : job.phase === "checking"
     ? "Checking upload…"
-    : job.phase === "preparing"
-    ? `Preparing file · ${pct}%`
     : job.phase === "finalizing"
     ? "Finishing upload…"
     : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`;

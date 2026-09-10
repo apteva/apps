@@ -1,4 +1,7 @@
 import {test,expect} from '@playwright/test';
+import {mkdtempSync,openSync,ftruncateSync,closeSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 const row=(id:number,name:string,visibility='private')=>({id,name,folder:'/',size_bytes:5,content_type:'text/plain',sha256:'abc',visibility,created_at:'2026-09-05',url:`http://127.0.0.1:19180/api/apps/storage/public/files/${id}/content?project_id=p1&install_id=42`});
 test('selection follows visibility changes and paginated lists',async({page})=>{
  let visibility='public';const offsets:string[]=[];
@@ -47,7 +50,7 @@ test('resuming reuses verified parts after a transient failure',async({page})=>{
  return route.fulfill({json:{declared_size:30*1024*1024,parts}});
  });
  await page.goto('/');
- const run=()=>page.evaluate(async()=>{const f=new File([new Uint8Array(30*1024*1024)],'large.bin',{type:'application/octet-stream'});try{return await (window as any).uploadResumable(f,{projectId:'p1',installId:42,parallel:1})}catch(e){return {error:String(e)}}});
+ const run=()=>page.evaluate(async()=>{const f=(window as any).retryFile ||= new File([new Uint8Array(30*1024*1024)],'large.bin',{type:'application/octet-stream'});try{return await (window as any).uploadResumable(f,{projectId:'p1',installId:42,parallel:1})}catch(e){return {error:String(e)}}});
  const first=await run();expect(first.error).toContain('failed');fail=false;const second=await run();expect(second.id).toBe(7);expect(inits).toBe(1);expect(firstPartWrites).toBe(1);
 });
 
@@ -68,30 +71,68 @@ test('oversized pending allowance fails before reading a large file',async({page
  expect(result.error).toContain('pending-upload allowance (1024 MiB)');expect(result.read).toBe(false);expect(posts).toBe(0);
 });
 
-test('shipped panel shows preparation before uploading large files',async({page})=>{
- await page.addInitScript(()=>{
-  const original=File.prototype.stream;
-  File.prototype.stream=function(){
-   const file=this;
-   return new ReadableStream({async start(controller){
-    await new Promise<void>(resolve=>{(window as any).releasePreparation=resolve});
-    const reader=original.call(file).getReader();
-    try{while(true){const {done,value}=await reader.read();if(done)break;controller.enqueue(value)}controller.close()}
-    catch(error){controller.error(error)}finally{reader.releaseLock()}
-   }});
-  };
- });
+test('shipped panel starts large uploads without reading the file first',async({page})=>{
+ await page.addInitScript(()=>{File.prototype.stream=function(){throw Error('Unexpected preparation read')};File.prototype.arrayBuffer=async function(){throw Error('Unexpected whole-file read')};});
  let posts=0;
  await page.route('**/api/apps/storage/**',async route=>{
   const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
   if(u.pathname.endsWith('/uploads')){
    if(r.method()==='GET')return route.fulfill({json:{max_file_bytes:4*1024**3,max_pending_bytes:4*1024**3}});
-   posts++;return route.fulfill({json:{was_existing:true,file:row(8,'prepared.bin')}});
+   posts++;expect(r.postDataJSON().sha256).toBeUndefined();expect(r.postDataJSON().direct).toBe(true);
+   return route.fulfill({json:{was_existing:true,file:row(8,'immediate.bin')}});
   }
   return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
  });
- await page.goto('/');await page.locator('input[type=file]').setInputFiles({name:'prepared.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(26*1024*1024)});
- await expect(page.getByText('Preparing file · 0%',{exact:true})).toBeVisible();expect(posts).toBe(0);
- await page.evaluate(()=>{(window as any).releasePreparation()});await expect.poll(()=>posts).toBe(1);
- await expect(page.getByText('uploaded',{exact:true})).toBeVisible();
+ await page.goto('/');await page.locator('input[type=file]').setInputFiles({name:'immediate.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(26*1024*1024)});
+ await expect.poll(()=>posts).toBe(1);await expect(page.getByText('uploaded',{exact:true})).toBeVisible();
+ await expect(page.getByText(/Preparing file/)).toHaveCount(0);
+});
+
+test('2 GiB upload uses parallel direct parts, retries with fresh signatures, and sends no bytes through Apteva',async({page})=>{
+ let active=0,peak=0,bytes=0,attempts=0,signs=0,complete=0;
+ await page.route('https://bucket.example/**',async route=>{
+  expect(route.request().method()).toBe('PUT');expect(route.request().headers().cookie).toBeUndefined();
+  active++;peak=Math.max(peak,active);attempts++;const attempt=attempts;
+  await new Promise(r=>setTimeout(r,20));active--;
+  if(attempt===1)return route.fulfill({status:503,body:'temporary'});
+  bytes+=route.request().postDataBuffer()!.length;
+  return route.fulfill({status:200,headers:{'Access-Control-Allow-Origin':'*'}});
+ });
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  expect(r.method()).not.toBe('PUT');
+  if(u.pathname.endsWith('/uploads'))return route.fulfill({json:r.method()==='GET'?{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}:{upload_id:'DIRECT0001',mode:'s3_multipart',part_size:16*1024**2,max_parallel:4,max_parts:10000}});
+  if(u.pathname.includes('/parts/')){signs++;return route.fulfill({json:{url:'https://bucket.example/'+u.pathname.split('/').at(-1),headers:{}}})}
+  if(u.pathname.endsWith('/complete')){complete++;return route.fulfill({json:{file:row(9,'video.mp4')}})}
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ const result=await page.evaluate(async()=>{
+  // A 2 GiB descriptor exercises all 128 slices without allocating a 2 GiB
+  // fixture. Smaller payloads keep intercepted browser traffic bounded.
+  const slices:number[]=[];
+  const file={name:'video.mp4',type:'video/mp4',size:2*1024**3,stream(){throw Error('whole-file read')},arrayBuffer(){throw Error('whole-file read')},slice(start:number,end:number){slices.push(end-start);return new Blob([new Uint8Array(1024)])}};
+  const out=await (window as any).uploadResumable(file,{projectId:'p1',installId:42});return {out,slices};
+ });
+ expect(result.out.id).toBe(9);expect(result.slices.length).toBeGreaterThanOrEqual(128);expect(result.slices.every((n:number)=>n===16*1024**2)).toBe(true);
+ expect(peak).toBeGreaterThan(1);expect(peak).toBeLessThanOrEqual(4);expect(complete).toBe(1);expect(bytes).toBe(128*1024);expect(signs).toBe(129);
+});
+
+test('real 2 GiB body streams directly to a cross-origin backend',async({page,request})=>{
+ test.setTimeout(120000);
+ const id='STREAMREAL2G';
+ await page.goto('/');
+ const directory=mkdtempSync(join(tmpdir(),'storage-2g-'));
+ const path=join(directory,'real-2g.mp4');const fd=openSync(path,'w');ftruncateSync(fd,2*1024**3);closeSync(fd);
+ const start=Date.now();
+ try{
+  await page.evaluate(()=>{File.prototype.stream=function(){throw Error('whole-file read')};File.prototype.arrayBuffer=async function(){throw Error('whole-file read')};});
+  await page.locator('input[type=file]').setInputFiles(path);
+  await expect(page.getByText('uploaded',{exact:true})).toBeVisible({timeout:100000});
+ }finally{rmSync(directory,{recursive:true,force:true})}
+ const elapsed=Date.now()-start;
+ const stats=await (await request.get(`http://127.0.0.1:19181/${id}`)).json();
+ expect(stats.bytes).toBe(2*1024**3);expect(stats.parts).toBe(128);expect(stats.peak).toBeGreaterThan(1);expect(stats.peak).toBeLessThanOrEqual(4);
+ expect(stats.apiBytes).toBeLessThan(2048);
+ console.log(`2 GiB direct transfer: ${elapsed} ms; ${stats.parts} parts; peak concurrency ${stats.peak}; Apteva API bytes ${stats.apiBytes}`);
 });

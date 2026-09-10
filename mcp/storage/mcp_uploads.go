@@ -247,6 +247,12 @@ func completeUploadSessionForTool(app *sdk.AppCtx, c context.Context, id, suppli
 	if err != nil {
 		return nil, errUploadSessionNotFound
 	}
+	if meta.Direct != nil {
+		if suppliedSHA != "" {
+			return nil, errors.New("whole-file sha256 is not available for direct multipart uploads")
+		}
+		return completeDirectMultipart(c, app, id, meta)
+	}
 	parts, err := listParts(app, id)
 	if err != nil {
 		return nil, err

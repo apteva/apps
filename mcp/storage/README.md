@@ -1,9 +1,33 @@
-# Storage 0.11.3
+# Storage 0.12.0
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
-sidecar uses app-sdk v0.73.0; the build requires Go 1.26.8 or newer. The React
+sidecar uses app-sdk v0.78.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.0: immediate direct multipart uploads
+
+Large browser uploads start after the limits check, without a whole-file read
+or SHA-256 preparation phase. With S3 connected, `POST /uploads` with
+`direct: true` returns `mode: s3_multipart`. `GET /uploads/{id}/parts/{n}`
+returns a short-lived, size-constrained signed UploadPart URL. The browser sends
+parts directly to the bucket (16 MiB and four workers by default, configurable
+with `s3_part_size_mb` and `s3_upload_concurrency`). Completion lists and verifies
+part sizes and ETags with the provider, completes the object there, checks its
+size, and publishes metadata. No video download, staging, or second upload is
+needed. Cancellation and expiry abort the provider multipart session.
+
+The bucket CORS policy must allow the dashboard origin and `PUT` (and
+`Content-Type` if the browser sends it). The browser does not need access to
+ETag response headers: completion reads authoritative ETags from S3. Signing
+and completion credentials stay on the server. A completed multipart upload ID
+cannot be reused to overwrite the published object.
+
+Direct multipart files have an empty `sha256` field; whole-file digest deduplication
+is skipped for these files. S3 part ETags and sizes validate the submitted
+multipart assembly. Callers requiring whole-file SHA verification can continue
+using the existing proxy upload protocol with a supplied SHA. Disk uploads
+continue to use parallel app chunks and compute their digest at completion.
 
 Version 0.11.3 fixes large uploads being refused by a smaller default pending
 allowance. The automatic allowance is at least the configured maximum file size
@@ -60,14 +84,15 @@ different parts transfer concurrently, while completion freezes the session.
 Completion receipts remain for seven days, so retrying a completed request
 returns the original file. Replacing committed parts is refused.
 
-The browser hashes large files incrementally and saves only session metadata
-in localStorage. Selecting the same file in the same project/install resumes
-verified parts after a transient failure. Cancel deletes the session; closing
-an interrupted browser leaves it available until the idle TTL expires.
+The browser retains session metadata in memory for the same immutable File
+object; retries can reuse provider-confirmed parts. A new selection or reload
+starts a fresh session rather than trusting name/size/timestamp as a content
+identity. The panel aborts failed attempts when releasing the File; Cancel also
+aborts the session. Interrupted pages are reclaimed by the idle sweeper.
 
 The install defaults to 64 pending sessions and an automatic combined declared
 size allowance of max(1024 MiB, configured file limit)
-(`max_upload_sessions`, `max_pending_upload_mb=auto`). Direct uploads retain
+(`max_upload_sessions`, `max_pending_upload_mb=auto`). Legacy single-PUT direct uploads retain
 reservations until their PUT URL expires. Aborting a session releases its
 reservation. Four full-file transfers run concurrently per process.
 
