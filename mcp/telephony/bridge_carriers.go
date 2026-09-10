@@ -343,8 +343,9 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			Provider: cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
-			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			InputAudio: audioFrontend.transportSnapshot(),
+			Provider:   cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
+			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
 		}); err != nil {
@@ -462,6 +463,7 @@ func validateCarrierStartFormat(cfg jsonMediaBridgeConfig, frame carrierMediaFra
 // to a person-to-person call can suppress quiet syllables and make the browser
 // leg sound substantially worse than the carrier recording.
 func processCarrierInput(row *callRow, frontend *carrierAudioFrontend, pcm []int16) audioFrontendResult {
+	frontend.observeInput(len(pcm), time.Now())
 	if row != nil && (row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal) {
 		return audioFrontendResult{PCM: pcm}
 	}
@@ -590,7 +592,8 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			Provider: "vonage", Codec: carrierCodecL16_16, SampleRate: 16000,
+			InputAudio: audioFrontend.transportSnapshot(),
+			Provider:   "vonage", Codec: carrierCodecL16_16, SampleRate: 16000,
 			PacerMode: "direct_live", PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 		})
 	}()

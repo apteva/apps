@@ -7,6 +7,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 var (
@@ -43,7 +45,21 @@ func liveHumanCarrierPacerPolicy() carrierPacerPolicy {
 	// A human microphone already arrives at real-time cadence. A very small
 	// cushion absorbs scheduler jitter; anything older than this is stale
 	// conversation and must not turn into seconds of perceived latency.
-	return carrierPacerPolicy{bufferMS: 40, maxQueueMS: 180, adaptiveMaxQueueMS: 220, trimToMS: 110, dropStale: true}
+	var config sdk.Config
+	if globalCtx != nil {
+		config = globalCtx.Config()
+	}
+	return humanCarrierPacerPolicy(config)
+}
+
+func humanCarrierPacerPolicy(config sdk.Config) carrierPacerPolicy {
+	bufferMS := configInt(config, "human_audio_send_ahead_ms", "TELEPHONY_HUMAN_AUDIO_SEND_AHEAD_MS", 40)
+	switch bufferMS {
+	case 20, 40, 60, 80:
+	default:
+		bufferMS = 40
+	}
+	return carrierPacerPolicy{bufferMS: bufferMS, maxQueueMS: 180, adaptiveMaxQueueMS: 220, trimToMS: 110, dropStale: true}
 }
 
 type carrierPacerCommand struct {

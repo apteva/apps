@@ -24,19 +24,20 @@ function fixture() {
   let preflight = async () => {};
   let start = async () => { callbacks.onState?.("live"); };
   let muted = false, dtmf = "";
+  const startedOptions: any[] = [];
   const runtime: AudioRuntime = {
     async preflight() { preflighted++; await preflight(); },
     create(cb) {
       callbacks = cb;
       return {
-        async start(url) { expect(url).toBe("wss://gateway.example" + session.media_url); started++; await start(); },
+        async start(url, options) { startedOptions.push(options); expect(url).toBe("wss://gateway.example" + session.media_url); started++; await start(); },
         stop() { stopped++; }, setMuted(value) { muted = value; },
         sendDTMF(value) { dtmf = value; }, setOutputVolume() {},
       };
     },
   };
   const phone = client.createSoftphone({ audioRuntime: runtime, pollIntervalMs: 0 });
-  return { sdk, client, phone, requests, session,
+  return { sdk, client, phone, requests, session, runtime, startedOptions,
     setResponse(value: typeof response) { response = value; },
     setPreflight(value: typeof preflight) { preflight = value; },
     setStart(value: typeof start) { start = value; },
@@ -382,4 +383,19 @@ test("lease renewal runs without status polling and stops audio on revoked authe
   expect(f.phone.getSnapshot().audioState).toBe("error");
   expect(f.phone.getSnapshot().detail).toContain("login revoked");
   f.phone.dispose();
+});
+
+test("audio tuning passes through create/reconnect and invalid profiles leave a live call alone", async () => {
+ const f = fixture();
+ const phone = f.client.createSoftphone({ audioRuntime: f.runtime, pollIntervalMs: 0, audio: { inputGainDB: 0, playbackTargetMs: 40 } });
+ try {
+  await phone.dial({ to: "+14155550100" });
+  expect(f.startedOptions.at(-1).playbackTargetMs).toBe(40);
+  await phone.reconnect({ inputGainDB: -6, playbackTargetMs: 80, playbackMaxMs: 120 });
+  expect(f.startedOptions.at(-1)).toMatchObject({ inputGainDB: -6, playbackTargetMs: 80, playbackMaxMs: 120 });
+  const stopped = f.stopped, started = f.started;
+  await expect(phone.reconnect({ playbackTargetMs: 200 })).rejects.toThrow();
+  expect(f.stopped).toBe(stopped); expect(f.started).toBe(started);
+ } finally { await phone.dispose(); await f.phone.dispose(); }
+ expect(() => f.client.createSoftphone({ audio: { playbackTargetMs: NaN } })).toThrow();
 });

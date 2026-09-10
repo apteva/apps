@@ -436,8 +436,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
-			Provider: "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
-			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			InputAudio: audioFrontend.transportSnapshot(),
+			Provider:   "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
+			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
 		})

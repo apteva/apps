@@ -97,6 +97,8 @@ type carrierAudioFrontend struct {
 	previousOutput float64
 
 	mu                     sync.Mutex
+	transport              audioTransportSnapshot
+	lastInputAt            time.Time
 	frames                 int64
 	samples                int64
 	rmsSum                 float64
@@ -423,7 +425,8 @@ func logAudioFrontendDiagnostics(logger audioDiagnosticsLogger, frontend *carrie
 	if row.PeerKind == peerKindHuman || row.PeerKind == peerKindExternal {
 		processing = "passthrough"
 	}
-	logger.Info("carrier audio diagnostics",
+	transport := frontend.transportSnapshot()
+	fields := []any{
 		"provider", provider,
 		"call", row.ID,
 		"codec", codec,
@@ -432,19 +435,27 @@ func logAudioFrontendDiagnostics(logger audioDiagnosticsLogger, frontend *carrie
 		"processing", processing,
 		"ingress_path", firstNonEmpty(row.IngressPath, "direct_or_unreported"),
 		"forwarded", row.ForwardedFrom != "",
-		"frames", snapshot.Frames,
-		"input_rms_avg_dbfs", math.Round(rmsDBFS(snapshot.AverageRMS)*10)/10,
-		"input_rms_max_dbfs", math.Round(rmsDBFS(snapshot.MaxRMS)*10)/10,
-		"adaptive_noise_floor_dbfs", math.Round(rmsDBFS(snapshot.NoiseFloor)*10)/10,
-		"vad_speech_ms", snapshot.VADSpeechMS,
-		"local_vad_max_activation_ms", snapshot.MaxActivationMS,
-		"local_speech_starts", snapshot.LocalSpeechStarts,
-		"suppressed_frames", snapshot.SuppressedFrames,
-		"local_interrupts", snapshot.LocalInterrupts,
-		"provider_or_core_interrupts", snapshot.ProviderCoreInterrupts,
+		"frames", transport.Frames,
+		"input_audio_ms", transport.AudioMS,
+		"input_max_gap_ms", transport.MaxGapMS,
+		"analyzed_frames", snapshot.Frames,
 		"max_queued_ms", maxQueuedMS,
 		"dropped_stale_ms", droppedStaleMS,
-	)
+	}
+	if processing != "passthrough" {
+		fields = append(fields,
+			"input_rms_avg_dbfs", math.Round(rmsDBFS(snapshot.AverageRMS)*10)/10,
+			"input_rms_max_dbfs", math.Round(rmsDBFS(snapshot.MaxRMS)*10)/10,
+			"adaptive_noise_floor_dbfs", math.Round(rmsDBFS(snapshot.NoiseFloor)*10)/10,
+			"vad_speech_ms", snapshot.VADSpeechMS,
+			"local_vad_max_activation_ms", snapshot.MaxActivationMS,
+			"local_speech_starts", snapshot.LocalSpeechStarts,
+			"suppressed_frames", snapshot.SuppressedFrames,
+			"local_interrupts", snapshot.LocalInterrupts,
+			"provider_or_core_interrupts", snapshot.ProviderCoreInterrupts,
+		)
+	}
+	logger.Info("carrier audio diagnostics", fields...)
 }
 
 func logLocalBargeIn(logger audioDiagnosticsLogger, provider, callID string, result audioFrontendResult) {

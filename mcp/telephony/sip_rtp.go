@@ -701,8 +701,9 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(row.ID, carrierAudioDiagnostics{
-			Provider: "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
-			PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			InputAudio: audioFrontend.transportSnapshot(),
+			Provider:   "sip_direct", Codec: carrierCodecPCMU8, SampleRate: 8000,
+			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
 			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int(coreWriter.audioDropped.Load())*20, InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,

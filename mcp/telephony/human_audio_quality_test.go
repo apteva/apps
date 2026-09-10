@@ -70,7 +70,7 @@ func TestBrowserMediaPathHasHeadroomWorkerAndTimestampedFrames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"inputGainDB ?? -6", "lookaheadSamples", "ceiling", "timestamp_ms", "sequence", "applyCrossfade"} {
+	for _, required := range []string{"lookaheadSamples", "ceiling", "timestamp_ms", "sequence", "applyCrossfade"} {
 		if !strings.Contains(string(worklet), required) {
 			t.Fatalf("worklet missing %q", required)
 		}
