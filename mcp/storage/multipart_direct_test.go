@@ -28,7 +28,8 @@ type multipartFake struct {
 func (b *multipartFake) Put(context.Context, string, string, io.Reader, int64) error {
 	panic("direct completion must not upload object bytes")
 }
-func (b *multipartFake) PrepareBrowserUpload(context.Context, string) error { return b.corsError }
+func (b *multipartFake) PrepareDashboardUpload(context.Context, *sdk.AppCtx) error { return nil }
+func (b *multipartFake) PrepareBrowserUpload(context.Context, string) error        { return b.corsError }
 func (b *multipartFake) PutMultipartPart(c context.Context, _ string, _ string, n int, r io.Reader, size int64) (remotePart, error) {
 	if b.relay != nil {
 		return b.relay(c, n, r, size)

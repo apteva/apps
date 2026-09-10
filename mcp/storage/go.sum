@@ -1,5 +1,5 @@
-github.com/apteva/app-sdk v0.78.0 h1:cil+BRsM8G+fU8cLbPENmJXyhUdeDsJUuRUUWKf31RQ=
-github.com/apteva/app-sdk v0.78.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
+github.com/apteva/app-sdk v0.79.0 h1:owDIuWNXJWyt3x7JXHF2oE6YCWMts4DD97Eip3WU/ds=
+github.com/apteva/app-sdk v0.79.0/go.mod h1:9+UMOOLTkKFf88SZHD/fxYHtByoJa/t2/EHi5gTtWKc=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=

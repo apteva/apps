@@ -125,6 +125,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 				return
 			case <-t.C:
 			}
+			prepareBrowserUpload(sweepCtx, ctx, "")
 			sweepBlobCleanup(ctx)
 			sweepStaleUploads(ctx)
 			sweepStalePendingUploads(ctx)

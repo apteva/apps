@@ -4,7 +4,9 @@ package main
 // '^TestBrowserMultipartServer$' -timeout 10m, then STORAGE_TEST_BACKEND=http://127.0.0.1:19182
 // bun run test. Only loopback servers and temporary data are used.
 import (
+	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
 	"github.com/minio/minio-go/v7"
@@ -29,7 +32,8 @@ func TestBrowserMultipartServer(t *testing.T) {
 		t.Skip("optional browser fixture")
 	}
 	rec := tk.NewEmitRecorder()
-	ctx := newTestCtx(t, tk.WithProjectID(""), tk.WithEmitter(rec), tk.WithEnv("APTEVA_PUBLIC_URL", "http://127.0.0.1:19180"), tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"max_upload_size_mb": "5120", "s3_part_size_mb": "16"}))
+	platform := &dashboardPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(platform), tk.WithProjectID(""), tk.WithEmitter(rec), tk.WithEnv("APTEVA_PUBLIC_URL", "http://127.0.0.1:19180"), tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"max_upload_size_mb": "5120", "s3_part_size_mb": "16"}))
 	type session struct {
 		key      string
 		parts    map[int]remotePart
@@ -41,9 +45,15 @@ func TestBrowserMultipartServer(t *testing.T) {
 	var config cors.Config
 	serial, active, peak, writes, eventsBefore := 0, 0, 0, 0, 0
 	var received, apiBytes int64
-	s3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s3 := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		q := r.URL.Query()
+		if r.URL.Path == "/__browser-probe" {
+			mu.Unlock()
+			w.Header().Set("Access-Control-Allow-Origin", "http://127.0.0.1:19180")
+			w.WriteHeader(200)
+			return
+		}
 		if r.Method == "OPTIONS" {
 			allowed := len(config.CORSRules) > 0 || (scenario == "browser-denied" && !strings.Contains(r.UserAgent(), "Chrome"))
 			mu.Unlock()
@@ -162,7 +172,10 @@ func TestBrowserMultipartServer(t *testing.T) {
 		w.WriteHeader(400)
 	}))
 	defer s3.Close()
-	client, err := minio.New(strings.TrimPrefix(s3.URL, "http://"), &minio.Options{Creds: credentials.NewStaticV4("test-key", "test-secret", ""), Region: "us-east-1"})
+	originalTransport := http.DefaultTransport
+	http.DefaultTransport = s3.Client().Transport
+	defer func() { http.DefaultTransport = originalTransport }()
+	client, err := minio.New(strings.TrimPrefix(s3.URL, "https://"), &minio.Options{Creds: credentials.NewStaticV4("test-key", "test-secret", ""), Region: "us-east-1", Secure: true, Transport: s3.Client().Transport})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,6 +193,7 @@ func TestBrowserMultipartServer(t *testing.T) {
 			close(done)
 			return
 		case "/__scenario":
+			be.dashboardMu.Lock()
 			be.corsMu.Lock()
 			mu.Lock()
 			scenario = r.URL.Query().Get("name")
@@ -191,9 +205,30 @@ func TestBrowserMultipartServer(t *testing.T) {
 			writes = 0
 			eventsBefore = len(rec.EventsByTopic("file.added"))
 			be.corsOrigin = ""
+			be.dashboardUntil = time.Time{}
+			platform.mu.Lock()
+			platform.calls = nil
+			platform.err = nil
+			if scenario == "csp-unapproved" {
+				platform.err = errors.New("HTTP 403 permission not approved")
+			}
+			platform.mu.Unlock()
 			mu.Unlock()
 			be.corsMu.Unlock()
+			be.dashboardMu.Unlock()
+			if scenario != "csp-stale" {
+				_ = reconcileDashboardUploadOrigin(context.Background(), ctx)
+			}
 			httpJSON(w, map[string]any{"ok": true})
+			return
+		case "/__csp":
+			origins := []string{}
+			platform.mu.Lock()
+			if platform.err == nil && len(platform.calls) > 0 {
+				origins = platform.calls[len(platform.calls)-1].Origins
+			}
+			platform.mu.Unlock()
+			httpJSON(w, map[string]any{"policy": "connect-src 'self' ws: wss: " + strings.Join(origins, " ")})
 			return
 		case "/__stats":
 			mu.Lock()
@@ -209,7 +244,7 @@ func TestBrowserMultipartServer(t *testing.T) {
 				}
 				return nil
 			})
-			httpJSON(w, map[string]any{"bytes": received, "apiBytes": apiBytes, "parts": parts, "peak": peak, "corsWrites": writes, "events": len(rec.EventsByTopic("file.added")) - eventsBefore, "scratchBytes": scratch})
+			httpJSON(w, map[string]any{"bytes": received, "apiBytes": apiBytes, "parts": parts, "peak": peak, "corsWrites": writes, "events": len(rec.EventsByTopic("file.added")) - eventsBefore, "scratchBytes": scratch, "origin": s3.URL})
 			return
 		}
 		r.Header.Set("X-User-ID", "1")

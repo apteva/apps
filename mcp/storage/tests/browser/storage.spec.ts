@@ -185,7 +185,7 @@ test('cancelling a direct upload does not start the relay',async({page})=>{
  expect(result).toBe('AbortError');expect(relays).toBe(0);expect(aborts).toBe(1);
 });
 
-for(const scenario of ['cors-denied','auto-cors','browser-denied']) test(`real 2 GiB through Go and S3: ${scenario}`,async({page,request})=>{
+for(const scenario of ['cors-denied','auto-cors','browser-denied','csp-unapproved','csp-stale']) test(`real 2 GiB through Go and S3: ${scenario}`,async({page,request})=>{
  test.skip(!process.env.STORAGE_TEST_BACKEND,'requires optional local Go/S3 fixture');
  test.setTimeout(120000);
  const backend=process.env.STORAGE_TEST_BACKEND!;
@@ -203,8 +203,16 @@ for(const scenario of ['cors-denied','auto-cors','browser-denied']) test(`real 2
   const stats=await (await request.get(backend+'/__stats')).json();
   expect(stats.bytes).toBe(2*1024**3);expect(stats.parts).toBe(128);expect(stats.peak).toBeGreaterThan(1);expect(stats.peak).toBeLessThanOrEqual(4);
   expect(stats.apiBytes).toBe(scenario==='auto-cors'?0:2*1024**3);
-  expect(stats.corsWrites).toBe(scenario==='auto-cors'?1:0);expect(stats.events).toBe(1);expect(stats.scratchBytes).toBe(0);
+  expect(stats.corsWrites).toBe(scenario==='auto-cors'||scenario==='csp-stale'?1:0);expect(stats.events).toBe(1);expect(stats.scratchBytes).toBe(0);
   console.log(`2 GiB Go/S3 ${scenario}: ${Date.now()-start} ms; ${JSON.stringify(stats)}`);
+  if(scenario==='csp-stale'){
+   const probe=stats.origin+'/__browser-probe';
+   const before=await page.evaluate(async(url)=>{try{await fetch(url);return 'allowed'}catch(e){return (e as Error).name}},probe);
+   expect(before).toBe('TypeError');
+   await page.reload();
+   const after=await page.evaluate(async(url)=>(await fetch(url)).status,probe);
+   expect(after).toBe(200);
+  }
  }finally{rmSync(directory,{recursive:true,force:true});await request.post('/__go?enabled=false')}
 });
 

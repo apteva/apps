@@ -52,15 +52,18 @@ import (
 )
 
 type s3Backend struct {
-	corsMu        sync.Mutex
-	corsOrigin    string
-	corsUntil     time.Time
-	corsErr       error
-	client        *minio.Client
-	bucket        string
-	region        string
-	partSize      uint64
-	uploadThreads uint
+	dashboardMu    sync.Mutex
+	dashboardUntil time.Time
+	dashboardErr   error
+	corsMu         sync.Mutex
+	corsOrigin     string
+	corsUntil      time.Time
+	corsErr        error
+	client         *minio.Client
+	bucket         string
+	region         string
+	partSize       uint64
+	uploadThreads  uint
 }
 
 // newS3Backend reads the bound connection's credentials, resolves the

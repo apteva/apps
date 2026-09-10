@@ -74,6 +74,10 @@ Bun.serve({
     }
     const asset = assets.get(path);
     if (asset) return new Response(asset, { headers: { 'Content-Type': 'text/javascript' } });
+    if(path==='/' && goBackend){
+      const response=await fetch(process.env.STORAGE_TEST_BACKEND!+'/__csp');const {policy}=await response.json() as {policy:string};
+      return new Response(`<meta http-equiv="Content-Security-Policy" content="${policy}">`+html,{headers:{'Content-Type':'text/html','Cache-Control':'no-store'}});
+    }
     return path === '/' ? new Response(html, { headers: { 'Content-Type': 'text/html' } }) : new Response('Not found', { status: 404 });
   },
 });

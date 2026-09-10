@@ -33,6 +33,9 @@ func configuredUploadOrigin(app *sdk.AppCtx) string {
 	return uploadOrigin(os.Getenv("APTEVA_PUBLIC_URL"))
 }
 func prepareBrowserUpload(c context.Context, app *sdk.AppCtx, requestOrigin string) bool {
+	if err := reconcileDashboardUploadOrigin(c, app); err != nil {
+		return false
+	}
 	be, ok := backend().(browserUploadBackend)
 	if !ok {
 		return false
