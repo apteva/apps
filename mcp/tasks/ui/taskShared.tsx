@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useTaskEvents } from "./taskEvents";
 
 export interface HostProps {
   appName?: string;
@@ -100,6 +101,21 @@ export interface TaskEvent {
   created_at: string;
 }
 
+export interface TaskExecution {
+  source_event_id: string;
+  purpose: string;
+  state?: string;
+  reason?: string;
+  updated_at: string;
+}
+
+export interface TaskDetailResponse {
+  task: Task;
+  events: TaskEvent[];
+  events_next_cursor?: string;
+  agent_executions?: TaskExecution[];
+}
+
 export interface TaskResponse {
   tasks: Task[];
   enabled: boolean;
@@ -145,10 +161,8 @@ export const taskAPI = {
       if (value) url.searchParams.set(key, value);
     return json<TaskResponse>(url.pathname + url.search, { signal });
   },
-  get: (props: HostProps, id: string) =>
-    json<{ task: Task; events: TaskEvent[]; events_next_cursor?: string }>(
-      endpoint(props, encodeURIComponent(id)),
-    ),
+  get: (props: HostProps, id: string, signal?: AbortSignal) =>
+    json<TaskDetailResponse>(endpoint(props, encodeURIComponent(id)), { signal }),
   runs: (props: HostProps, id: string, cursor = "") =>
     json<{ runs: Task[]; next_cursor?: string }>(endpoint(props, `${encodeURIComponent(id)}/runs`) + `&cursor=${encodeURIComponent(cursor)}`),
   events: (props: HostProps, id: string, cursor: string) =>
@@ -194,16 +208,26 @@ export function useTasks(
   const [error, setError] = useState("");
   const [nextCursor, setNextCursor] = useState("");
   const request = useRef<AbortController | null>(null);
+  const loadedPages = useRef(1);
   const paramsKey = JSON.stringify(params);
-  const fetchPage = useCallback(async (cursor = "") => {
+  const fetchPage = useCallback(async (cursor = "", background = false) => {
     request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
     if (!props.projectId) { setTasks([]); setNextCursor(""); setLoading(false); return; }
-    setLoading(true);
+    if (!background) setLoading(true);
     try {
-      const response = await taskAPI.list(props, { projection: "summary", ...params, cursor }, controller.signal);
+      let response = await taskAPI.list(props, { projection: "summary", ...params, cursor }, controller.signal);
       if (controller.signal.aborted) return;
+      if (background) {
+        const refreshed = [...response.tasks];
+        for (let page = 1; page < loadedPages.current && response.next_cursor; page++) {
+          response = await taskAPI.list(props, { projection: "summary", ...params, cursor: response.next_cursor }, controller.signal);
+          if (controller.signal.aborted) return;
+          refreshed.push(...response.tasks);
+        }
+        response = { ...response, tasks: [...new Map(refreshed.map(task => [task.id, task])).values()] };
+      } else loadedPages.current = cursor ? loadedPages.current + 1 : 1;
       setTasks(previous => cursor ? [...new Map([...previous, ...response.tasks].map(task => [task.id, task])).values()] : response.tasks || []);
       setNextCursor(response.next_cursor || "");
       setError("");
@@ -217,9 +241,11 @@ export function useTasks(
   useEffect(() => {
     setTasks([]);
     setNextCursor("");
+    loadedPages.current = 1;
     const timer = setTimeout(() => void reload(), 100);
     return () => { clearTimeout(timer); request.current?.abort(); };
-  }, [reload, props.eventRevision]);
+  }, [reload]);
+  useTaskEvents(props, () => fetchPage("", true));
   return { tasks, loading, error, reload, setTasks, hasMore: !!nextCursor, loadMore: () => fetchPage(nextCursor) };
 }
 
@@ -428,11 +454,8 @@ export function TaskDetails({
   onClose: () => void;
   onChanged: () => void;
 }) {
-  const [detail, setDetail] = useState<{
-    task: Task;
-    events: TaskEvent[];
-    events_next_cursor?: string;
-  } | null>(null);
+  const [detail, setDetail] = useState<TaskDetailResponse | null>(null);
+  const [openedRun, setOpenedRun] = useState<Task | null>(null);
   const [runs, setRuns] = useState<Task[]>([]);
   const [runsCursor, setRunsCursor] = useState("");
   const [editing, setEditing] = useState(false);
@@ -442,25 +465,35 @@ export function TaskDetails({
   const dialogRef = useTaskDialog(onClose);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const request = useRef(0);
+  const refresh = useCallback(async () => {
+    const revision = ++request.current;
+    try {
+      const [next, child] = await Promise.all([
+        taskAPI.get(props, task.id),
+        isSchedule(task) ? taskAPI.runs(props, task.id) : Promise.resolve({ runs: [], next_cursor: "" }),
+      ]);
+      if (revision !== request.current) return;
+      setDetail(previous => previous ? {
+        ...next,
+        events: [...new Map([...previous.events, ...next.events].map(event => [event.id, event])).values()]
+          .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)),
+        events_next_cursor: previous.events_next_cursor,
+      } : next);
+      setRuns(previous => [...new Map([...previous, ...child.runs].map(run => [run.id, run])).values()]
+        .sort((a, b) => (b.scheduled_for || b.created_at).localeCompare(a.scheduled_for || a.created_at)));
+      setRunsCursor(previous => previous || child.next_cursor || "");
+      setError("");
+    } catch (reason) {
+      if (revision === request.current) setError(reason instanceof Error ? reason.message : "Unable to load task");
+    }
+  }, [props.appName, props.installId, props.projectId, task.id]);
   useEffect(() => {
-    let current = true;
-    setDetail(null); setRuns([]); setError("");
-    void Promise.all([
-      taskAPI.get(props, task.id),
-      isSchedule(task)
-        ? taskAPI.runs(props, task.id)
-        : Promise.resolve({ runs: [], next_cursor: "" }),
-    ]).then(([next, child]) => {
-      if (current) { setDetail(next); setRuns(child.runs); setRunsCursor(child.next_cursor || ""); }
-    }).catch(reason => { if (current) setError(reason instanceof Error ? reason.message : "Unable to load task"); });
-    return () => { current = false; };
-  }, [
-    props.appName,
-    props.installId,
-    props.projectId,
-    task.id,
-    props.eventRevision,
-  ]);
+    setDetail(null); setRuns([]); setRunsCursor(""); setOpenedRun(null); setError("");
+    void refresh();
+    return () => { request.current++; };
+  }, [refresh]);
+  useTaskEvents(props, refresh);
   const current = detail?.task || task;
   const action = async (name: "pause" | "resume" | "run-now" | "cancel") => {
     setBusy(true);
@@ -588,9 +621,19 @@ export function TaskDetails({
           )}
           <section>
             <h3 className="text-[10px] font-bold uppercase tracking-wide text-text-dim">
-              Timeline
+              Execution activity
             </h3>
-            <div className="mt-2 space-y-1">
+            <p className="mt-1 text-[10px] text-text-muted">Progress, execution changes, and outcomes update automatically.</p>
+            {current.telemetry_reference && <a href={current.telemetry_reference} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-accent">Open agent telemetry ↗</a>}
+            {!detail && !error && <p className="mt-3 text-xs text-text-dim">Loading activity…</p>}
+            {detail && !detail.events.length && <p className="mt-3 text-xs text-text-dim">No activity yet.</p>}
+            {!!detail?.agent_executions?.length && <div className="mt-3 space-y-2">
+              {detail.agent_executions.map(execution => <div key={execution.source_event_id} className="rounded border border-border px-3 py-2 text-xs">
+                <div className="flex items-center gap-2"><span className="text-text">{execution.purpose === "terminalization" ? "Finishing task" : "Agent execution"}</span><span className="ml-auto text-text-muted">{execution.state || "dispatched"}</span></div>
+                {execution.reason && <p className="mt-1 text-text-muted">{execution.reason}</p>}
+              </div>)}
+            </div>}
+            <div className="mt-2 space-y-1" role="log" aria-label="Execution activity" aria-live="polite">
               {(detail?.events || []).map((event) => (
                 <div
                   key={event.id}
@@ -602,6 +645,7 @@ export function TaskDetails({
                       {relativeWhen(event.created_at)}
                     </span>
                   </div>
+                  {!!event.data?.reason && <p className="mt-1 text-[10px] text-text-muted">{String(event.data.reason)}</p>}
                   {event.data?.current_step ? (
                     <p className="mt-1 text-[10px] text-text-muted">
                       {String(event.data.current_step)}
@@ -621,7 +665,7 @@ export function TaskDetails({
                 {runs.map((run) => (
                   <div key={run.id} className="border-b border-border p-3 last:border-b-0">
                     <div className="flex items-center gap-2">
-                      <StatePill task={run} />
+                      <button onClick={() => setOpenedRun(run)} className="flex items-center gap-2 text-xs text-accent hover:underline" aria-label={`Open run ${formatWhen(run.scheduled_for || run.created_at)}`}><StatePill task={run} /> View execution →</button>
                       <span className="ml-auto text-[9px] text-text-dim">{formatWhen(run.scheduled_for || run.created_at)}</span>
                     </div>
                     <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[9px] text-text-muted">
@@ -680,6 +724,7 @@ export function TaskDetails({
           </footer>
         )}
       </aside>
+      {openedRun && <TaskDetails key={openedRun.id} props={props} task={openedRun} onClose={() => setOpenedRun(null)} onChanged={() => { void refresh(); onChanged(); }} />}
     </div>
   );
 }
@@ -707,6 +752,13 @@ export function taskEventLabel(event: TaskEvent) {
         : "Occurrence redispatched";
   } else if (event.event_type === "occurrence_accepted")
     label = "Occurrence accepted";
+  else if (event.event_type === "agent_execution_active") label = "Agent executing";
+  else if (event.event_type === "agent_execution_settled") label = "Agent execution finished";
+  else if (event.event_type === "agent_execution_error") label = "Agent execution failed";
+  else if (event.event_type === "terminalization_requested") label = "Final result requested";
+  else if (event.event_type === "terminalization_execution_claimed") label = "Final result accepted";
+  else if (event.event_type === "terminalization_execution_active") label = "Agent finishing task";
+  else if (event.event_type === "terminalization_execution_settled") label = "Final execution finished";
   else label = event.event_type.replaceAll("_", " ");
 
   const progress = event.data?.progress;
@@ -847,7 +899,8 @@ export function useTaskDialog(onClose: () => void) {
     if (!dialog) return;
     if (!dialog.contains(document.activeElement)) dialog.focus();
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") { event.preventDefault(); close.current(); return; }
+      if ((event.target as HTMLElement)?.closest('[role="dialog"]') !== dialog) return;
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close.current(); return; }
       if (event.key !== "Tab") return;
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),a[href],[tabindex="0"]')).filter(element => element.getClientRects().length > 0);
       const first = focusable[0], last = focusable[focusable.length - 1];

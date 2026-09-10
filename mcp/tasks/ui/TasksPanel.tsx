@@ -46,9 +46,6 @@ export default function TasksPanel(props: HostProps) {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-bold text-text">Tasks</h1>
-              <span className="rounded border border-green/25 bg-green/10 px-1.5 py-0.5 text-[8px] font-bold uppercase text-green">
-                Live
-              </span>
             </div>
             <p className="mt-1 text-xs text-text-dim">
               Track work in progress, upcoming schedules, and completed tasks.

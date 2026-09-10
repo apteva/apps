@@ -1,5 +1,13 @@
 # Tasks changelog
 
+## 3.5.3 — 2026-09-10
+
+- Subscribe directly to the project app bus in the Tasks page, widgets, task details, and chat cards; accept every task event and filter by project and install.
+- Refresh after bus reconnects and coalesce event bursts without clearing visible rows or losing loaded inventory pages.
+- Remove the static Live badge. Task cards and scheduled occurrences open execution details with automatically updated activity, progress, lifecycle reasons, and execution records.
+- Preserve earlier loaded activity and in-progress edits while background updates arrive.
+- Add app-owned UI regression coverage for bus updates, scope isolation, reconnects, pagination, execution drawers, chat cards, and standalone event subscriptions.
+
 ## 3.5.2 — 2026-09-10
 
 - Open All tasks by default, with active work and scheduled tasks ahead of
