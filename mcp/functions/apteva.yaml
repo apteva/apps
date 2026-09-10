@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.14.0
+version: 1.14.1
 description: |
+  v1.14.1 Accepts opaque business payloads, including new-user passwords,
+  while excluding caller credentials from identity claims and authenticated
+  request bodies from invocation history. Trusted admission and nested
+  identity propagation remain enforced.
+
   v1.14.0 Adds generic authenticated invocation admission, trusted caller
   policies, bounded principal propagation to nested Functions, per-invocation
   identity auditing, and authenticated worker isolation. Existing invocation
@@ -134,7 +139,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.14.0
+    ref: functions/v1.14.1
     entry: mcp/functions
   port: 8080
   health_check: /health

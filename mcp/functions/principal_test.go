@@ -69,6 +69,12 @@ func TestTrustedAdmissionRejectsUnverifiedOrOutOfScope(t *testing.T) {
 			a["principal"].(map[string]any)["claims"] = map[string]any{"nested": []any{map[string]any{"refresh_token": "secret"}}}
 		}},
 		{"unknown principal credential", nil, func(a map[string]any) { a["principal"].(map[string]any)["session_token"] = "secret" }},
+		{"password in identity", nil, func(a map[string]any) {
+			a["principal"].(map[string]any)["claims"] = map[string]any{"password": "caller-secret"}
+		}},
+		{"nested caller credential", nil, func(a map[string]any) {
+			a["principal"].(map[string]any)["claims"] = map[string]any{"nested": []any{map[string]any{"Authorization": "Bearer caller-secret"}}}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -329,5 +335,112 @@ func TestAuthenticatedEntryExposureOverMCP(t *testing.T) {
 		if success != bound {
 			t.Fatalf("bound=%v response=%s", bound, b)
 		}
+	}
+}
+
+func TestTrustedBusinessPayloadIsOpaque(t *testing.T) {
+	business := map[string]any{
+		"password": "new-user-password",
+		"body":     map[string]any{"users": []any{map[string]any{"password": "nested-password", "credentials": map[string]any{"token": "business-token"}, "role": "custom-role", "centre": "centre-123", "crm": map[string]any{"rule": "application-owned"}}}},
+	}
+	for _, authenticated := range []bool{false, true} {
+		t.Run(fmt.Sprint("authenticated=", authenticated), func(t *testing.T) {
+			s := &invocationSecurity{}
+			if authenticated {
+				s.Principal = &Principal{Subject: "verified-subject", Claims: map[string]any{"roles": []string{"opaque-role"}, "centres": []string{"opaque-centre"}}}
+			}
+			clean, err := trustedEvent(business, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			obj := clean.(map[string]any)
+			if authenticated {
+				rc := obj["requestContext"].(map[string]any)
+				authorizer, _ := json.Marshal(rc["authorizer"])
+				if strings.Contains(string(authorizer), "password") || !strings.Contains(string(authorizer), "verified-subject") {
+					t.Fatalf("business data entered identity: %s", authorizer)
+				}
+				delete(obj, "requestContext")
+			}
+			before, _ := json.Marshal(business)
+			after, _ := json.Marshal(obj)
+			if string(before) != string(after) {
+				t.Fatalf("business payload changed: %s -> %s", before, after)
+			}
+		})
+	}
+}
+
+func TestBusinessPasswordThroughNestedExecutionIsNotStoredAsInput(t *testing.T) {
+	for _, runtime := range []string{"node", "go"} {
+		t.Run(runtime, func(t *testing.T) {
+			requireBin(t, runtime)
+			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+			app := mountApp(t, ctx)
+			source := `export default async(e)=>{
+    if(e.body.user.password!=="business-only-secret" || e.body.user.role!=="new-custom-role" || e.body.user.centre!=="centre-123")throw Error("business input changed");
+    if(e.fail)throw Error("business handler failure");
+    return {accepted:true,subject:e.requestContext.authorizer.principal.subject};
+   };`
+			if runtime == "go" {
+				source = `package main
+import("encoding/json";"fmt")
+func Handle(event json.RawMessage,c *Context)(any,error){
+ var e struct{Body struct{User struct{Password,Role,Centre string}};Fail bool;RequestContext struct{Authorizer struct{Principal struct{Subject string}}}}
+ if err:=json.Unmarshal(event,&e);err!=nil{return nil,err}
+ if e.Body.User.Password!="business-only-secret"||e.Body.User.Role!="new-custom-role"||e.Body.User.Centre!="centre-123"{return nil,fmt.Errorf("business input changed")}
+ if e.Fail{return nil,fmt.Errorf("business handler failure")}
+ return map[string]any{"accepted":true,"subject":e.RequestContext.Authorizer.Principal.Subject},nil
+}`
+			}
+			child := createFn(t, app, ctx, map[string]any{"name": "business-child", "runtime": runtime, "source": source, "invocation_policy": principalPolicy()})
+			requireBin(t, "node")
+			root := createFn(t, app, ctx, map[string]any{"name": "business-root", "source": fmt.Sprintf(`export default async(e,c)=>c.call("functions","functions_invoke",{id:%d,event:e});`, child.ID), "invocation_policy": principalPolicy()})
+			for _, fail := range []bool{false, true} {
+				args := principalArgs(root, root.ID, child.ID)
+				args["event"] = map[string]any{"body": map[string]any{"user": map[string]any{"password": "business-only-secret", "role": "new-custom-role", "centre": "centre-123"}}, "fail": fail}
+				out, err := app.toolInvokeAuthenticated(trustedCaller(), ctx, args)
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := out.(map[string]any)
+				if !fail && (result["status"] != "ok" || !strings.Contains(result["response"].(string), "user-123")) {
+					t.Fatalf("business input rejected: %v", result)
+				}
+				if fail && (result["status"] != "error" || !strings.Contains(fmt.Sprint(result["error"]), "business handler failure")) {
+					t.Fatalf("failure path: %v", result)
+				}
+			}
+			for _, fn := range []*Function{root, child} {
+				invs, err := dbListInvocations(ctx.AppDB(), testProj, fn.ID, 10)
+				if err != nil || len(invs) != 2 {
+					t.Fatalf("history: %v %v", invs, err)
+				}
+				for _, inv := range invs {
+					if inv.EventJSON != "[authenticated event omitted]" {
+						t.Fatalf("business body stored: %s", inv.EventJSON)
+					}
+					detail, err := dbGetInvocation(ctx.AppDB(), testProj, inv.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					logs, err := app.toolLogs(ctx, map[string]any{"invocation_id": inv.ID})
+					if err != nil {
+						t.Fatal(err)
+					}
+					b, _ := json.Marshal([]any{inv, detail, logs})
+					if strings.Contains(string(b), "business-only-secret") || strings.Contains(string(b), "new-custom-role") || strings.Contains(string(b), "centre-123") {
+						t.Fatalf("business body leaked into history: %s", b)
+					}
+					var identity InvocationIdentity
+					if err := json.Unmarshal(inv.Identity, &identity); err != nil {
+						t.Fatal(err)
+					}
+					if identity.Subject != "user-123" || identity.CallerInstallationID != 42 || (fn.ID == child.ID && identity.ParentInvocationID == 0) {
+						t.Fatalf("lost trusted identity: %+v", identity)
+					}
+				}
+			}
+		})
 	}
 }

@@ -82,10 +82,19 @@ The return shape is the existing `functions_invoke` result.
 The caller is trusted to assert the principal and restrict the Function scope
 for that request. Functions does not resolve users, interpret roles, refresh
 sessions, or contact an Auth installation. The principal schema has no credential
-field. Callers must omit all session credentials from claims and events. Standard
-credential keys (including nested authorization/cookie/session/access-token/
-refresh-token fields) are rejected; arbitrary opaque claim strings cannot be
-classified as secrets by Functions. Principal and policy input are capped at
+field. Standard credential keys in identity claims (including nested
+password/authorization/cookie/session/access-token/refresh-token fields) are
+rejected; arbitrary opaque claim strings cannot be classified as secrets by
+Functions. The authenticating caller must exclude its transport/session
+credentials when constructing the event.
+
+Business event fields are opaque to Functions: a new user's `password`, a
+business `token`, or nested `credentials` input passes through unchanged. These
+fields never become invocation identity. Functions does not interpret roles,
+centres, or CRM rules. Authenticated event bodies remain omitted from invocation
+history for both root and nested execution, regardless of field names. The
+reserved `requestContext.authorizer` still comes exclusively from the admitted
+principal. Principal and policy input are capped at
 32 KiB and scope at 100 Function IDs.
 
 ## Handler contract and nested calls

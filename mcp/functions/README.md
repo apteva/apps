@@ -1,4 +1,6 @@
-# Functions 1.14.0
+# Functions 1.14.1
+
+**Fixed in 1.14.1:** business event fields such as a new user’s `password` pass through unchanged. Credential validation applies to identity claims; authenticated request bodies remain excluded from invocation history. Trusted admission and nested propagation remain enforced.
 
 **New in 1.14.0:** generic trusted principal admission, bounded nested propagation, and invocation identities. Existing invocation methods remain available by default. See [the caller contract, configuration, and compatibility notes](TRUSTED_INVOCATIONS.md).
 

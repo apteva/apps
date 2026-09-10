@@ -114,9 +114,10 @@ func (p *InvocationPolicy) allows(installation int64, issuer string) bool {
 	return false
 }
 
-// Reject credential fields, including nested claims. No role/claim semantics
-// are evaluated, and Functions never calls an identity provider.
-func containsCredentials(value any) bool {
+// Reject caller credentials only in identity claims. Business event fields
+// are opaque, even when named password, token, or credentials. No role/claim
+// semantics are evaluated, and Functions never calls an identity provider.
+func containsIdentityCredentials(value any) bool {
 	switch v := value.(type) {
 	case map[string]any:
 		for key, x := range v {
@@ -125,13 +126,13 @@ func containsCredentials(value any) bool {
 			case "token", "bearertoken", "apikey", "authorization", "cookie", "setcookie", "session", "sessionid", "sessiontoken", "accesstoken", "refreshtoken", "idtoken", "password", "clientsecret", "credentials":
 				return true
 			}
-			if containsCredentials(x) {
+			if containsIdentityCredentials(x) {
 				return true
 			}
 		}
 	case []any:
 		for _, x := range v {
-			if containsCredentials(x) {
+			if containsIdentityCredentials(x) {
 				return true
 			}
 		}
@@ -162,7 +163,7 @@ func (a *App) toolInvokeAuthenticated(parent context.Context, ctx *sdk.AppCtx, a
 	if args["principal"] == nil || strictDecode(args["principal"], &principal) != nil {
 		return nil, errInvocationDenied
 	}
-	if !validIdentityText(principal.Subject) || !validIdentityText(principal.Issuer) || principal.ProjectID != pid || len(principal.FunctionIDs) == 0 || len(principal.FunctionIDs) > 100 || containsCredentials(principal.Claims) {
+	if !validIdentityText(principal.Subject) || !validIdentityText(principal.Issuer) || principal.ProjectID != pid || len(principal.FunctionIDs) == 0 || len(principal.FunctionIDs) > 100 || containsIdentityCredentials(principal.Claims) {
 		return nil, errInvocationDenied
 	}
 	for _, id := range principal.FunctionIDs {
@@ -270,9 +271,8 @@ func trustedEvent(event any, s *invocationSecurity) (any, error) {
 		delete(rc, "authorizer")
 	}
 	if s.Principal != nil {
-		if containsCredentials(obj) {
-			return nil, errors.New("authenticated event must not contain session credentials")
-		}
+		// Business payloads are opaque. Only the principal is credential-checked;
+		// authenticated event bodies are omitted from invocation history.
 		if rc == nil {
 			rc = map[string]any{}
 			obj["requestContext"] = rc
