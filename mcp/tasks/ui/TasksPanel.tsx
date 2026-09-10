@@ -1,13 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import { SchedulePicker } from "./SchedulePicker";
 import {
   Agent,
   HostProps,
   Task,
   TaskDetails,
   TaskRow,
-  isActive,
-  isScheduleDefinition,
-  isTerminal,
   taskAPI,
   useAgentNames,
   useTasks,
@@ -19,7 +17,7 @@ type View = "active" | "attention" | "scheduled" | "completed" | "all";
 export default function TasksPanel(props: HostProps) {
   const names = useAgentNames(props.projectId);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [view, setView] = useState<View>("active");
+  const [view, setView] = useState<View>("all");
   const [agentId, setAgentId] = useState(0);
   const [search, setSearch] = useState("");
   const { tasks, loading, error, reload, hasMore, loadMore } = useTasks(props, { limit: "100", view, agent_id: agentId ? String(agentId) : "", q: search.trim(), include_runs: "true" });
@@ -53,7 +51,7 @@ export default function TasksPanel(props: HostProps) {
               </span>
             </div>
             <p className="mt-1 text-xs text-text-dim">
-              Durable work, schedules, and outcomes owned by this app.
+              Track work in progress, upcoming schedules, and completed tasks.
             </p>
           </div>
           <button
@@ -85,21 +83,22 @@ export default function TasksPanel(props: HostProps) {
         </div>
       </header>
       <main className="min-h-0 flex-1 overflow-auto p-4 sm:p-6">
-        <div className="overflow-hidden rounded border border-border bg-bg-card">
+        <div className="overflow-hidden rounded border border-border">
           <nav className="flex flex-wrap gap-1 border-b border-border p-2">
             {(
-              ["active", "attention", "scheduled", "completed", "all"] as View[]
+              ["all", "active", "scheduled", "attention", "completed"] as View[]
             ).map((item) => (
               <button
                 key={item}
                 onClick={() => setView(item)}
+                aria-pressed={view === item}
                 className={`rounded px-3 py-2 text-[10px] font-bold capitalize ${view === item ? "bg-accent/15 text-accent" : "text-text-dim hover:bg-bg-hover hover:text-text"}`}
               >
-                {item === "attention" ? "Needs attention" : item}
+                {item === "attention" ? "Needs attention" : item === "all" ? "All tasks" : item}
               </button>
             ))}
             <span className="ml-auto self-center px-2 text-[9px] text-text-dim">
-              {visible.length} shown
+              {visible.length} shown{view === "all" && " · Active → Scheduled → History"}
             </span>
           </nav>
           {error ? (
@@ -116,7 +115,7 @@ export default function TasksPanel(props: HostProps) {
               />
             ))
           ) : (
-            <div className="grid min-h-64 place-items-center p-8 text-xs text-text-dim">
+            <div className="grid min-h-32 place-items-center p-8 text-xs text-text-dim">
               No matching tasks.
             </div>
           )}
@@ -219,12 +218,12 @@ function NewTask({
         onClick={onClose}
         aria-label="Close"
       />
-      <div className="relative w-full max-w-xl rounded border border-border bg-bg-card shadow-2xl">
+      <div className="relative max-h-[90vh] overflow-y-auto w-full max-w-xl rounded border border-border bg-bg-card shadow-2xl">
         <header className="flex items-center border-b border-border px-5 py-4">
           <div>
             <h2 className="text-sm font-bold text-text">New task</h2>
             <p className="mt-1 text-[10px] text-text-dim">
-              Assign durable work to an agent thread.
+              Choose an agent and when the work should begin.
             </p>
           </div>
           <button
@@ -265,48 +264,21 @@ function NewTask({
               className="min-h-28 w-full rounded border border-border bg-bg-input px-3 py-2 text-xs leading-5 text-text placeholder:text-text-dim"
             />
           </Field>
-          <Field label="Schedule (optional)">
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              <select
-                value={scheduleKind}
-                onChange={(event) => {
-                  setScheduleKind(event.target.value as any);
-                  setScheduleValue("");
-                }}
-                className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
-              >
-                <option value="">Start now</option>
-                <option value="once">One time</option>
-                <option value="interval">Recurring interval</option>
-                <option value="cron">Recurring cron</option>
-              </select>
-              {scheduleKind && (
-                <input
-                  type={scheduleKind === "once" ? "datetime-local" : "text"}
-                  value={scheduleValue}
-                  onChange={(event) => setScheduleValue(event.target.value)}
-                  placeholder={
-                    scheduleKind === "interval"
-                      ? "e.g. 1h"
-                      : scheduleKind === "cron"
-                        ? "0 9 * * *"
-                        : ""
-                  }
-                  className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text placeholder:text-text-dim"
-                />
-              )}
-              {scheduleKind === "once" && <span className="self-center text-xs text-text-muted">Local time · {localTimezone}{scheduleValue && <span className="block">{schedulePreview(scheduleValue)}</span>}</span>}
-              {scheduleKind && scheduleKind !== "once" && (
-                <input
-                  aria-label="Schedule timezone"
-                  value={timezone}
-                  onChange={(event) => setTimezone(event.target.value)}
-                  placeholder="UTC"
-                  className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text"
-                />
-              )}
+          <div>
+            <span className="mb-2 block text-[10px] font-bold uppercase tracking-wide text-text-dim">When to start</span>
+            <div className="mb-3 flex flex-wrap gap-1.5" role="group" aria-label="Schedule type">
+              {([["", "Now"], ["once", "One time"], ["interval", "Repeat"], ["cron", "Custom"]] as const).map(([kind, label]) => (
+                <button key={kind} type="button" aria-pressed={scheduleKind === kind} onClick={() => { setScheduleKind(kind); setScheduleValue(""); }}
+                  className={`rounded border px-3 py-2 text-xs ${scheduleKind === kind ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted hover:bg-bg-hover"}`}>{label}</button>
+              ))}
             </div>
-          </Field>
+            {scheduleKind === "once" && <SchedulePicker value={scheduleValue} onChange={setScheduleValue} timezone={localTimezone} />}
+            {scheduleKind && scheduleKind !== "once" && <div className="grid grid-cols-2 gap-2">
+              <input aria-label={scheduleKind === "interval" ? "Repeat interval" : "Cron expression"} value={scheduleValue} onChange={event => setScheduleValue(event.target.value)} placeholder={scheduleKind === "interval" ? "e.g. 1h" : "0 9 * * *"} className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text" />
+              <input aria-label="Schedule timezone" value={timezone} onChange={event => setTimezone(event.target.value)} className="rounded border border-border bg-bg-input px-3 py-2 text-xs text-text" />
+            </div>}
+            {scheduleKind === "once" && scheduleValue && <p className="mt-2 text-[10px] text-text-muted">{schedulePreview(scheduleValue)}</p>}
+          </div>
           {error && <p className="text-xs text-red">{error}</p>}
         </div>
         <footer className="flex justify-end gap-2 border-t border-border px-5 py-4">

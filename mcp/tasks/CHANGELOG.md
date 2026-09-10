@@ -1,5 +1,23 @@
 # Tasks changelog
 
+## 3.5.2 — 2026-09-10
+
+- Open All tasks by default, with active work and scheduled tasks ahead of
+  completed and canceled history. Apply priority ordering across pagination.
+- Place status badges on the left, show the next run time clearly, and improve
+  row summaries across the panel and widgets.
+- Replace the native date/time popup with an Apteva-themed calendar and time
+  inputs. Preserve local-time and daylight-saving validation.
+- Clarify task selection: bare waiting and agent cadence use Core pace; a
+  concrete future action or explicit reminder still uses a scheduled task.
+- Add three Tier 3 Codex scenarios covering direct main-thread wait/idle events
+  and future work, each repeated three times. See TESTING.md for runner support
+  and the launcher that reads fresh local-server credentials at runtime.
+- Update app-sdk to v0.77.1.
+
+All v3.5.1 scheduling, delivery, recovery, migration, and lifecycle changes are
+retained. This release adds no Tasks database migrations or data cleanup.
+
 ## 3.5.1 — 2026-09-05
 
 Tasks now persists notifications with the task mutation and retries delivery

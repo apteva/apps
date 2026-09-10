@@ -29,6 +29,22 @@ must update that task; do not create a second “setup” task. Recurring execut
 are bounded occurrence records created by Tasks and are not additional user
 requests.
 
+## Idle time and agent pacing
+
+A duration alone is not a work outcome. “Wait for one hour”, “stay idle for
+60 minutes”, or “slow down” changes the agent's own pace. Use Core's `pace`
+tool (for example `pace(sleep: "1h")`) without creating a task, schedule,
+reminder, or worker. Do not invent “resume processing requests” or “report that
+the wait ended” as an outcome. This applies to direct console/admin events as
+well as requests from other threads.
+
+A scheduled task requires a concrete requested future action or result, such
+as “in one hour, review the inbox” or “remind me in one hour”. An explicitly
+requested reminder is itself work. Agent-owned cadence for existing
+responsibilities belongs in `pace`; do not duplicate it in Tasks. When actual
+unfinished work awaits a dependency, keep and update its existing task rather
+than creating a separate waiting task.
+
 ## Ownership and threads
 
 The calling thread is always the creator. Immediate work defaults to that
@@ -139,6 +155,9 @@ the user. Core lifecycle settlement is only a safety net for an omitted terminal
 write; it does not replace this MCP obligation.
 
 ## Scheduling
+
+Schedules require a concrete future action or result. Bare waiting and the
+agent’s own cadence use `pace`, as described above.
 
 Use `once` with an RFC3339 `at` timestamp or a relative `after` duration. Use
 `interval` or five-field `cron` for recurrence. Server time is authoritative.

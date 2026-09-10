@@ -48,3 +48,35 @@ test("detail load and mutation failures are visible, and Escape restores focus",
   await act(async () => root!.unmount()); root = undefined;
   expect(document.activeElement).toBe(opener);
 });
+
+import TasksPanel from "./TasksPanel";
+import { SchedulePicker } from "./SchedulePicker";
+
+test("Tasks opens the complete inventory so scheduled work is not hidden", async () => {
+  const urls: string[] = [];
+  globalThis.fetch = ((url: unknown) => {
+    urls.push(String(url));
+    return Promise.resolve(Response.json(String(url).includes("/tasks?") ? { tasks: [{ ...fixture, state: "waiting", schedule_kind: "once", schedule_enabled: true, next_run_at: "2028-02-29T09:30:00Z" }] } : []));
+  }) as typeof fetch;
+  const container = mount();
+  await act(async () => root!.render(<TasksPanel projectId="a" />));
+  await act(async () => sleep(120));
+  expect(urls.some(url => url.includes("view=all"))).toBe(true);
+  expect(container.querySelector('button[aria-pressed="true"]')?.textContent).toBe("All tasks");
+  expect(container.textContent).toContain("scheduled");
+  expect(container.textContent).toContain("Next:");
+});
+
+test("the themed calendar selects leap days and preserves local time", async () => {
+  let selected = "";
+  const container = mount();
+  await act(async () => root!.render(<SchedulePicker value="2028-02-14T09:30" timezone="Europe/Madrid" onChange={value => { selected = value; }} />));
+  expect(container.querySelector('input[type="datetime-local"]')).toBeNull();
+  const day = container.querySelector('button[aria-label="February 29, 2028"]') as HTMLButtonElement;
+  expect(day).not.toBeNull();
+  await act(async () => day.click());
+  expect(selected).toBe("2028-02-29T09:30");
+  await act(async () => (container.querySelector('[aria-label="Next month"]') as HTMLButtonElement).click());
+  expect(container.textContent).toContain("March 2028");
+  expect(container.querySelector('button[aria-label="March 31, 2028"]')).not.toBeNull();
+});

@@ -55,6 +55,9 @@ func pageLimit(n int) int {
 const definitionPredicate = `(schedule_kind<>'' AND scheduled_for IS NULL AND parent_task_id='')`
 const queueRankExpression = `CASE WHEN state='failed' OR last_occurrence_status='failed' THEN 0 WHEN state='blocked' OR last_occurrence_status='blocked' THEN 1 WHEN state='running' THEN 2 WHEN state='queued' THEN 3 WHEN schedule_kind='' OR scheduled_for IS NOT NULL THEN 4 ELSE 5 END`
 
+// All-task inventory keeps live work and schedule definitions ahead of history.
+const inventoryRankExpression = `CASE WHEN state='running' THEN 0 WHEN state='queued' THEN 1 WHEN state='blocked' THEN 2 WHEN state='waiting' AND NOT ` + definitionPredicate + ` THEN 3 WHEN state='waiting' AND ` + definitionPredicate + ` THEN 4 WHEN state='failed' THEN 5 WHEN state IN ('completed','cancelled') THEN 6 ELSE 7 END`
+
 const attentionPredicate = `(state IN ('blocked','failed') OR (schedule_kind<>'' AND last_occurrence_status IN ('blocked','failed')))`
 
 func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
@@ -113,7 +116,11 @@ func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
 	if filter.View == "upcoming" {
 		column, direction, comparison = "next_run_at", "ASC", ">"
 	}
-	ranked := filter.View == "work" || filter.View == "operational"
+	ranked := filter.View == "work" || filter.View == "operational" || filter.View == "all"
+	rankExpression := queueRankExpression
+	if filter.View == "all" {
+		rankExpression = inventoryRankExpression
+	}
 	if filter.Cursor != "" {
 		cursor, err := decodeCursor(filter.Cursor, filter.View)
 		if err != nil {
@@ -121,7 +128,7 @@ func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
 		}
 		condition := `(` + column + comparison + `? OR (` + column + `=? AND id` + comparison + `?))`
 		if ranked {
-			where += ` AND (` + queueRankExpression + `>? OR (` + queueRankExpression + `=? AND ` + condition + `))`
+			where += ` AND (` + rankExpression + `>? OR (` + rankExpression + `=? AND ` + condition + `))`
 			args = append(args, cursor.Rank, cursor.Rank)
 		} else {
 			where += ` AND ` + condition
@@ -132,7 +139,7 @@ func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
 	args = append(args, limit+1)
 	order := column + ` ` + direction + `,id ` + direction
 	if ranked {
-		order = queueRankExpression + ` ASC,` + order
+		order = rankExpression + ` ASC,` + order
 	}
 	rows, err := s.db.Query(`SELECT `+taskColumns+` FROM tasks`+where+` ORDER BY `+order+` LIMIT ?`, args...)
 	if err != nil {
@@ -157,7 +164,11 @@ func (s *taskStore) ListPage(filter TaskFilter) (TaskPage, error) {
 		if filter.View == "upcoming" {
 			at = *last.NextRunAt
 		}
-		page.NextCursor = encodeCursor(pageCursor{Time: at.Format(timeFormat), ID: last.ID, View: filter.View, Rank: taskQueueRank(last)})
+		rank := taskQueueRank(last)
+		if filter.View == "all" {
+			rank = taskInventoryRank(last)
+		}
+		page.NextCursor = encodeCursor(pageCursor{Time: at.Format(timeFormat), ID: last.ID, View: filter.View, Rank: rank})
 	}
 	return page, nil
 }
@@ -224,4 +235,26 @@ func taskQueueRank(task Task) int {
 		return 4
 	}
 	return 5
+}
+
+func taskInventoryRank(task Task) int {
+	switch task.State {
+	case stateRunning:
+		return 0
+	case stateQueued:
+		return 1
+	case stateBlocked:
+		return 2
+	case stateWaiting:
+		if task.ScheduleKind != "" && task.ScheduledFor == nil && task.ParentTaskID == "" {
+			return 4
+		}
+		return 3
+	case stateFailed:
+		return 5
+	case stateCompleted, stateCancelled:
+		return 6
+	default:
+		return 7
+	}
 }

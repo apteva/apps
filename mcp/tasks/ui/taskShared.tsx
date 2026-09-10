@@ -341,7 +341,7 @@ export function StatePill({ task }: { task: Task }) {
     <span
       className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${tone}`}
     >
-      {label}
+      {label === "running" ? "In progress" : label}
     </span>
   );
 }
@@ -388,37 +388,21 @@ export function TaskRow({
       onClick={onOpen}
       className={`block w-full border-b border-border px-4 py-3 text-left last:border-b-0 hover:bg-bg-hover/60 ${attentionTone}`}
     >
-      <div className="flex min-w-0 items-center gap-2">
-        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-text">
-          {task.title}
-        </span>
-        <StatePill task={task} />
-        <span className="shrink-0 text-[9px] text-text-dim">
-          {relativeWhen(task.updated_at)}
-        </span>
-      </div>
-      {summary && (
-        <p className="mt-1 truncate text-[10px] text-text-muted">
-          {summary}
-        </p>
-      )}
-      <Progress task={task} />
-      <div className="mt-1.5 flex flex-wrap gap-1.5 text-[9px] text-text-dim">
-        {agentName && <span>{agentName}</span>}
-        {isSchedule(task) && (
-          <>
-            <span>·</span>
-            <span className={isRecurring(task) ? "text-purple-300" : ""}>
-              {scheduleLabel(task)}
-            </span>
-            {task.next_run_at && task.schedule_enabled !== false && (
-              <>
-                <span>·</span>
-                <span>{relativeWhen(task.next_run_at)}</span>
-              </>
-            )}
-          </>
-        )}
+      <div className="flex items-start gap-3">
+        <div className="w-24 shrink-0 pt-0.5"><StatePill task={task} /></div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+            <span className="min-w-0 flex-1 break-words text-xs font-semibold text-text">{task.title}</span>
+            <span className="shrink-0 text-[9px] text-text-dim">{relativeWhen(task.updated_at)}</span>
+          </div>
+          {summary && <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-text-muted">{summary}</p>}
+          <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-text-dim">
+            {agentName && <span>{agentName}</span>}
+            {isSchedule(task) && <span className={isRecurring(task) ? "text-purple-300" : "text-blue"}>{isScheduleDefinition(task) && task.schedule_kind === "once" ? "One-time schedule" : scheduleLabel(task)}</span>}
+            {task.next_run_at && task.schedule_enabled !== false && !isTerminal(task) && <span className="font-medium text-blue">Next: {new Date(task.next_run_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {relativeWhen(task.next_run_at)}</span>}
+          </div>
+          <Progress task={task} />
+        </div>
       </div>
     </button>
   );

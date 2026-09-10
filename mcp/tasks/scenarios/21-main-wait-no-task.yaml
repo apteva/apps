@@ -1,0 +1,54 @@
+name: main-wait-does-not-create-task
+description: |
+  A direct admin event requests idle time with no work outcome. The real model
+  must use Core pacing without manufacturing a durable task or worker. The
+  directive does not prescribe a tool; installed Tasks guidance is under test.
+
+timeout: 2m
+settle_for: 6s
+max_iterations: 8
+runs: 3
+required_pass_rate: 1.0
+
+setup:
+  mode: autonomous
+  interaction: event
+  initial_wake:
+    after: 24h
+    sleep: 24h
+  app:
+    path: ./
+
+directive: |
+  # Role
+  You are this agent.
+  # Inputs and Events
+  Treat user messages, app events, and channel messages as work requests.
+  # Schedule
+  Work reactively unless a subscription, schedule, or user request says otherwise.
+
+prompt: "[admin] Wait for one hour"
+
+assert:
+  - tool_called_with:
+      tool: pace
+      thread_id: main
+      min_count: 1
+  - tool_not_called: tasks_create | tasks_set_progress | tasks_edit | tasks_fail | tasks_update | tasks_complete | tasks_assign | tasks_run_now | tasks_recover_occurrence | spawn
+  - http: GET /api/apps/tasks/tasks?agent_id=${APTEVA_TEST_AGENT_ID}
+    expect_count_at: tasks
+    expect_count: 0
+  - http: GET /api/instances/${APTEVA_TEST_AGENT_ID}/status
+    expect_field_at: rate
+    expect_field_eq: '1.0h'
+  - http: GET /api/instances/${APTEVA_TEST_AGENT_ID}/status
+    expect_field_at: llm_active
+    expect_field_eq: false
+  - http: GET /api/instances/${APTEVA_TEST_AGENT_ID}/status
+    expect_field_at: next_wake_at
+    expect_field_matches: '^20[0-9]{2}-[0-9]{2}-[0-9]{2}T'
+  - iterations_at_most: 8
+
+budget:
+  total_tokens: 100000
+  cost_usd: 1.00

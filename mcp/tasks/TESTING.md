@@ -71,3 +71,34 @@ Agent/project resolution runs at startup and every five minutes. Unresolved
 records stay quarantined rather than being assigned to a guessed project.
 Records already deleted by an earlier release's migration require an existing
 backup; a forward migration cannot reconstruct them.
+
+## Main-agent pacing regression (Tier 3)
+
+Scenarios 21–23 replay direct console/admin events on the main thread using
+`interaction: event`. Both “Wait for one hour” and “Stay idle for 60 minutes”
+must leave the Tasks inventory empty, call Core pace, and set a one-hour rate
+with a pending wake. The positive control “In one hour, review the inbox” must
+create exactly one waiting one-time task. All three use a neutral directive
+and the app's installed skill/tool descriptions, with three runs and a required
+100% pass rate. Each run waits for six seconds of stable assertions and cleans
+up its temporary agent and app data; it does not wait an actual hour.
+
+Run individual YAML files normally with `apteva test --tier 3`. The CLI runner
+must support `setup.interaction: event` and current random app-install tokens
+(the disposable-server fixture requires `sqlite3` on PATH). To run all three using only the freshly
+authenticated local server connection, the opt-in launcher reads and decrypts
+that connection at runtime (no token is copied into source or printed):
+
+```sh
+RUN_TASKS_CODEX_PACING=1 \
+APTEVA_CODEX_SERVER_HOME="$HOME/.apteva" \
+APTEVA_CODEX_CONNECTION_ID=1 \
+APTEVA_TEST_CLI_BIN=/absolute/path/to/apteva \
+APTEVA_SERVER_BIN=/absolute/path/to/apteva-server \
+APTEVA_CORE_BIN=/absolute/path/to/apteva-core \
+go test -run '^TestTier3CodexPacing$' -count=1 -v -timeout 20m .
+```
+
+The launcher defaults to Codex `gpt-5.6-terra`; override with
+`APTEVA_TEST_CODEX_MODEL`. It starts a disposable server and installs this local
+Tasks source, leaving the real agent and its task records untouched.
