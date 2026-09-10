@@ -9,6 +9,7 @@ const approval=(user:string)=>({id:92,conversation_id:`chat-${user}`,role:"agent
 const conversation=(user:string)=>({id:`chat-${user}`,project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",origin:"web",audience:"public",created_at:"",updated_at:""});
 Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();resolved.clear();calls.length=0;return Response.json({ok:true});}
  if(url.pathname==="/health")return new Response("ok");
  if(url.pathname==="/dashboard.js")return new Response(Bun.file(join(root,".example/dashboard.js")),{headers:{"Content-Type":"text/javascript"}});
  if(url.pathname==="/main.js")return new Response(Bun.file(join(root,".example/main.js")),{headers:{"Content-Type":"text/javascript"}});

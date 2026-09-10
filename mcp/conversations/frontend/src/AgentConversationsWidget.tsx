@@ -1,3 +1,4 @@
+import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -18,7 +19,7 @@ import {
   type AgentConversationWidgetSettings,
 } from "./agentConversations";
 
-export interface AgentConversationsWidgetProps {
+export interface AgentConversationsWidgetProps extends ConversationLocalization {
   appName: string;
   installId: number;
   projectId: string;
@@ -34,15 +35,6 @@ interface UnreadEntry {
 }
 
 const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
-
-function relativeTime(iso: string): string {
-  const elapsed = Date.now() - new Date(iso).getTime();
-  if (!Number.isFinite(elapsed) || elapsed < 60_000) return "now";
-  const minutes = Math.floor(elapsed / 60_000);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
-}
 
 function useWideWidgetLayout(): boolean {
   const query = "(min-width: 768px)";
@@ -65,6 +57,7 @@ function ConversationBrowser({
   eventRevision,
   widgetSettings,
 }: AgentConversationsWidgetProps) {
+  const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
   const showCreate = showNewConversation(widgetSettings);
@@ -143,7 +136,7 @@ function ConversationBrowser({
   if (!projectId || !validAgent) {
     return (
       <div className="grid h-full place-items-center bg-bg p-6 text-center text-sm text-text-muted">
-        Agent conversations needs a valid project and target agent.
+        {t("chat.invalidScope")}
       </div>
     );
   }
@@ -166,7 +159,7 @@ function ConversationBrowser({
               onClick={() => setCreating(true)}
               className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
             >
-              New conversation
+              {t("chat.new")}
             </button>
           )}
           <button
@@ -177,7 +170,7 @@ function ConversationBrowser({
             }}
             className={`ml-auto rounded px-2 py-1.5 text-xs ${archived ? "bg-bg-input text-text" : "text-text-muted hover:bg-bg-input hover:text-text"}`}
           >
-            {archived ? "Active" : "Archived"}
+            {archived ? t("common.active") : t("common.archived")}
           </button>
         </div>
         {showCreate && creating && (
@@ -191,16 +184,16 @@ function ConversationBrowser({
             <input
               value={title}
               onChange={(event) => setTitle(event.target.value)}
-              placeholder="Conversation title (optional)"
+              placeholder={t("chat.titlePlaceholder")}
               autoFocus
               className="w-full rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text focus:border-accent focus:outline-none"
             />
             <div className="flex gap-2">
               <button type="submit" disabled={saving} className="rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40">
-                {saving ? "Creating…" : "Create"}
+                {saving ? t("common.creating") : t("common.create")}
               </button>
               <button type="button" disabled={saving} onClick={() => setCreating(false)} className="rounded px-2.5 py-1.5 text-xs text-text-muted hover:bg-bg-input">
-                Cancel
+                {t("common.cancel")}
               </button>
             </div>
           </form>
@@ -209,7 +202,7 @@ function ConversationBrowser({
         <div className="min-h-0 flex-1 overflow-auto">
           {conversations.length === 0 ? (
             <p className="p-5 text-center text-xs text-text-muted">
-              {archived ? "No archived conversations." : "No conversations with this agent yet."}
+              {archived ? t("chat.noArchived") : t("chat.noAgentConversations")}
             </p>
           ) : (
             <ul className="divide-y divide-border">
@@ -230,7 +223,7 @@ function ConversationBrowser({
                         )}
                       </div>
                       <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
-                        {conversation.kind === "room" && <span>room</span>}
+                        {conversation.kind === "room" && <span>{t("chat.room")}</span>}
                         <span className="ml-auto">{relativeTime(conversation.updated_at)}</span>
                       </div>
                     </button>
@@ -255,7 +248,7 @@ function ConversationBrowser({
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
-          Select a conversation or create one with this agent.
+          {t("chat.selectOrCreate")}
         </section>
       )}
     </div>
@@ -273,6 +266,7 @@ function SingleConversation({
   eventRevision,
   widgetSettings,
 }: AgentConversationsWidgetProps) {
+  const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const validAgent = Number.isInteger(instanceId) && instanceId > 0;
   const showCreate = showNewConversation(widgetSettings);
@@ -410,12 +404,12 @@ function SingleConversation({
   if (!projectId || !validAgent) {
     return (
       <div className="grid h-full place-items-center bg-bg p-6 text-center text-sm text-text-muted">
-        Agent conversations needs a valid project and target agent.
+        {t("chat.invalidScope")}
       </div>
     );
   }
 
-  const displayAgentName = agentName || `agent ${instanceId}`;
+  const displayAgentName = agentName || t("chat.agentName", { id: String(instanceId) });
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-bg text-text">
@@ -424,7 +418,7 @@ function SingleConversation({
       )}
       {loading ? (
         <section className="grid min-h-0 flex-1 place-items-center p-6 text-sm text-text-muted">
-          Loading conversation…
+          {t("chat.loading")}
         </section>
       ) : selected ? (
         <ConversationChat key={`${selected.project_id}:${selected.id}`}
@@ -439,7 +433,7 @@ function SingleConversation({
                   disabled={creating}
                   className="rounded px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-40"
                 >
-                  {creating ? "Starting…" : "New conversation"}
+                  {creating ? t("chat.starting") : t("chat.new")}
                 </button>
               )}
               <button
@@ -447,7 +441,7 @@ function SingleConversation({
                 onClick={() => void openHistory()}
                 className="rounded px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text"
               >
-                History
+                {t("chat.history")}
               </button>
             </>
           )}
@@ -458,9 +452,9 @@ function SingleConversation({
         <section className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
           <div>
             <h2 className="text-sm font-semibold text-text">
-              {showCreate ? `Start a conversation with ${displayAgentName}` : `No conversation with ${displayAgentName} yet`}
+              {showCreate ? t("chat.startWith", { name: displayAgentName }) : t("chat.noneWith", { name: displayAgentName })}
             </h2>
-            <p className="mt-1 text-xs text-text-muted">Messages will stay in this agent's durable conversation history.</p>
+            <p className="mt-1 text-xs text-text-muted">{t("chat.historyHint")}</p>
           </div>
           {showCreate && (
             <button
@@ -469,14 +463,14 @@ function SingleConversation({
               disabled={creating}
               className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40"
             >
-              {creating ? "Starting…" : "Start conversation"}
+              {creating ? t("chat.starting") : t("chat.start")}
             </button>
           )}
           {error && (
             <div className="space-y-2">
               <p className="text-xs text-error">{error}</p>
               <button type="button" onClick={() => void loadLatest()} className="text-xs text-text-muted underline hover:text-text">
-                Try again
+                {t("common.tryAgain")}
               </button>
             </div>
           )}
@@ -492,11 +486,11 @@ function SingleConversation({
               historyGeneration.current += 1;
               setHistoryOpen(false);
             }}
-            aria-label="Close conversation history"
+            aria-label={t("chat.closeHistory")}
           />
           <aside className="relative flex h-full w-full max-w-sm flex-col border-l border-border bg-bg-card shadow-xl">
             <div className="flex shrink-0 items-center border-b border-border px-4 py-3">
-              <h2 className="text-sm font-semibold text-text">Conversation history</h2>
+              <h2 className="text-sm font-semibold text-text">{t("chat.historyTitle")}</h2>
               <button
                 type="button"
                 onClick={() => {
@@ -505,14 +499,14 @@ function SingleConversation({
                 }}
                 className="ml-auto rounded px-2 py-1 text-xs text-text-muted hover:bg-bg-input hover:text-text"
               >
-                Close
+                {t("common.close")}
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-auto">
               {historyLoading ? (
-                <p className="p-5 text-center text-xs text-text-muted">Loading history…</p>
+                <p className="p-5 text-center text-xs text-text-muted">{t("chat.loadingHistory")}</p>
               ) : history.length === 0 ? (
-                <p className="p-5 text-center text-xs text-text-muted">No earlier conversations.</p>
+                <p className="p-5 text-center text-xs text-text-muted">{t("chat.noEarlier")}</p>
               ) : (
                 <ul className="divide-y divide-border">
                   <li><MoreConversations path={singleConversationListPath(instanceId,50)} projectId={projectId} rows={history} onRows={setHistory}/></li>

@@ -1,3 +1,4 @@
+import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { reportSectionsText } from "./messageContent";
 // InboxWidget — the conversations app's dashboard.home widget, a
 // faithful recreation of the dashboard's AptevaInbox (the operator's
@@ -14,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 
-export interface HostProps {
+export interface HostProps extends ConversationLocalization {
   agentId?: number;
   conversationsHref?: string;
   appName?: string;
@@ -157,18 +158,6 @@ function parseTime(value?: string): Date | null {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-function relativeTime(date: Date | null, now: number): string {
-  if (!date) return "";
-  const seconds = Math.max(0, Math.floor((now - date.getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ${hours % 24}h ago`;
-}
-
 // ─── card prop readers ───────────────────────────────────────────────
 
 function card(message: InboxMessage, name: string): Record<string, unknown> {
@@ -246,6 +235,7 @@ function DetailModal({
   onClose: () => void;
   onDismiss?: () => void;
 }) {
+  const { t } = useConversationLocalization();
   return (
     <Overlay open={open} onClose={onClose} ariaLabel={label}>
       <div className="px-5 py-4 border-b border-border flex items-start justify-between gap-4">
@@ -264,7 +254,7 @@ function DetailModal({
               }}
               className="text-text-muted hover:text-text border border-border rounded px-2 py-1 text-xs"
             >
-              Dismiss
+              {t("common.dismiss")}
             </button>
           )}
           <button
@@ -272,12 +262,12 @@ function DetailModal({
             onClick={onClose}
             className="text-text-muted hover:text-text border border-border rounded px-2 py-1 text-xs"
           >
-            Close
+            {t("common.close")}
           </button>
         </div>
       </div>
       <div className="overflow-auto px-5 py-4">
-        {body ? <InboxMarkdown source={body} /> : <p className="text-sm text-text-dim">No detail.</p>}
+        {body ? <InboxMarkdown source={body} /> : <p className="text-sm text-text-dim">{t("common.noDetail")}</p>}
       </div>
     </Overlay>
   );
@@ -298,6 +288,7 @@ function ApprovalModal({
   onActed: () => void;
   projectId: string;
 }) {
+  const { t } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const props = card(message, "approval-card");
   const [note, setNote] = useState("");
@@ -322,9 +313,9 @@ function ApprovalModal({
   };
 
   return (
-    <Overlay open={open} onClose={onClose} ariaLabel="Review approval">
+    <Overlay open={open} onClose={onClose} ariaLabel={t("approval.review")}>
       <div className="px-5 py-4 border-b border-border">
-        <div className="text-[10px] uppercase tracking-wide text-blue font-bold">Approval</div>
+        <div className="text-[10px] uppercase tracking-wide text-blue font-bold">{t("card.approval")}</div>
         <h2 className="mt-1 text-lg font-bold text-text break-words">{String(props.title ?? "")}</h2>
         <div className="mt-1 text-xs text-text-dim">{agentName}</div>
       </div>
@@ -334,7 +325,7 @@ function ApprovalModal({
           type="text"
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Optional note for the agent"
+          placeholder={t("approval.notePlaceholder")}
           className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
         />
         {error && <p className="text-xs text-error">{error}</p>}
@@ -346,7 +337,7 @@ function ApprovalModal({
           disabled={busy}
           className="rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:text-text"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         {actions.map((a) => (
           <button
@@ -385,6 +376,7 @@ function InboxRow({
   onChanged: () => void;
   projectId: string;
 }) {
+  const { t, relativeTime, dateTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [detailOpen, setDetailOpen] = useState(false);
  const [actionError,setActionError]=useState("");
@@ -393,7 +385,7 @@ function InboxRow({
   const kind = m.component_kind || "report";
   const severity = m.severity || "";
   const tone = inboxTone(kind, severity);
-  const label = kind === "approval" ? "Approval" : kind === "report" ? "Report" : "Alert";
+  const label = kind === "approval" ? t("card.approval") : kind === "report" ? t("card.report") : t("card.alert");
   const meta =
     kind === "approval"
       ? String(card(m, "approval-card").status ?? "pending")
@@ -420,7 +412,7 @@ function InboxRow({
           <div className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-text-dim">
             <span className={`rounded border px-1.5 py-0.5 font-bold ${tone.badge}`}>{label}</span>
             {meta && (
-              <span className="text-text-muted normal-case tracking-normal truncate">{meta}</span>
+              <span className="text-text-muted normal-case tracking-normal truncate">{kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}</span>
             )}
           </div>
           <div className="mt-0.5 text-xs text-text truncate">{itemTitle(m)}</div>
@@ -437,7 +429,7 @@ function InboxRow({
         <div className="shrink-0 flex items-center gap-3">
           <time
             dateTime={createdAt?.toISOString() || m.created_at}
-            title={createdAt ? createdAt.toLocaleString() : m.created_at}
+            title={createdAt ? dateTime(createdAt) : m.created_at}
             className="text-[10px] text-text-dim tabular-nums whitespace-nowrap"
           >
             {relativeTime(createdAt, now)}
@@ -448,7 +440,7 @@ function InboxRow({
               onClick={() => (kind === "approval" ? setApprovalOpen(true) : setDetailOpen(true))}
               className={`rounded border px-2.5 py-1 text-[11px] ${tone.action}`}
             >
-              {kind === "approval" ? "Review" : "Open"}
+              {kind === "approval" ? t("common.review") : t("common.open")}
             </button>
             {kind !== "approval" && (
               <button
@@ -456,7 +448,7 @@ function InboxRow({
                 onClick={() => void dismiss()}
                 className="rounded border border-border px-2.5 py-1 text-[11px] text-text-dim hover:text-text hover:border-text-muted"
               >
-                Dismiss
+                {t("common.dismiss")}
               </button>
             )}
           </div>
@@ -477,7 +469,7 @@ function InboxRow({
           open={detailOpen}
           label={label}
           title={itemTitle(m)}
-          meta={`${agentName}${meta ? ` · ${meta}` : ""}`}
+          meta={`${agentName}${meta ? ` · ${kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}` : ""}`}
           body={itemBody(m)}
           onClose={() => setDetailOpen(false)}
           onDismiss={() => void dismiss()}
@@ -490,6 +482,7 @@ function InboxRow({
 // ─── widget root ─────────────────────────────────────────────────────
 
 export default function InboxWidget(props: HostProps) {
+  const { t, number } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
 	const projectId = props.projectId ?? "";
   const [items, setItems] = useState<InboxItem[]>([]);
@@ -539,27 +532,27 @@ export default function InboxWidget(props: HostProps) {
 
   const visible = items.slice(0, limit);
   const agentName = (id?: number) =>
-    (id && agents.get(id)) || (id ? `Agent #${id}` : "app");
+    (id && agents.get(id)) || (id ? t("inbox.agentName", { id: String(id) }) : t("common.app"));
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <h2 className="text-text text-sm font-bold">Inbox</h2>
+            <h2 className="text-text text-sm font-bold">{t("inbox.title")}</h2>
             {total > 0 && (
               <span className="inline-flex min-w-5 items-center justify-center rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] font-bold tabular-nums text-accent">
-                {total}
+                {number(total)}
               </span>
             )}
           </div>
           <p className="text-text-dim text-[11px] mt-0.5">
-            Approvals, reports, and alerts from agents
+            {t("inbox.description")}
           </p>
         </div>
         <div className="flex items-center gap-3">
           {props.conversationsHref && <a href={props.conversationsHref} className="text-[11px] text-text-muted hover:text-text">
-            Open conversations →
+            {t("inbox.openConversations")}
           </a>}
           <button
             type="button"
@@ -567,7 +560,7 @@ export default function InboxWidget(props: HostProps) {
             disabled={loading}
             className="text-[11px] text-text-muted hover:text-text disabled:opacity-40"
           >
-            {loading ? "Loading…" : "Refresh"}
+            {loading ? t("common.loading") : t("common.refresh")}
           </button>
         </div>
       </div>
@@ -581,9 +574,9 @@ export default function InboxWidget(props: HostProps) {
         {!loading && !error && visible.length === 0 && (
           <div className="h-full min-h-[88px] flex items-center px-1 text-xs text-text-muted">
             <div>
-              <p className="font-medium">You're all caught up</p>
+              <p className="font-medium">{t("inbox.caughtUp")}</p>
               <p className="mt-1 text-[11px] text-text-dim">
-                Approvals, alerts, and new reports will appear here.
+                {t("inbox.emptyHint")}
               </p>
             </div>
           </div>
@@ -599,7 +592,7 @@ export default function InboxWidget(props: HostProps) {
           />
         ))}
         {total > visible.length && (props.conversationsHref ? (
-          <a href={props.conversationsHref} className="text-xs text-text-muted">{total-visible.length} more items →</a>
+          <a href={props.conversationsHref} className="text-xs text-text-muted">{t("inbox.moreCount", { count: total - visible.length })}</a>
         ) : (
           <button type="button" disabled={loading} className="text-xs text-text-muted" onClick={async()=>{
             setLoading(true);
@@ -607,7 +600,7 @@ export default function InboxWidget(props: HostProps) {
               if(limit>=items.length&&cursor){const page=await conversationsClient.inbox({agent_id:props.agentId,cursor,limit:100});setItems(current=>[...current,...page.items.filter(row=>!current.some(old=>old.message.id===row.message.id))]);setCursor(page.next_cursor);}
               setLimit(current=>current+12);
             }catch(err){setError(String(err));}finally{setLoading(false);}
-          }}>Show more items</button>
+          }}>{t("inbox.showMore")}</button>
         ))}
       </div>
     </section>

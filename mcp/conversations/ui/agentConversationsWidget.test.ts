@@ -81,13 +81,12 @@ describe("AgentConversationsWidget scope", () => {
   test("both surfaces use the same transport/controller and shared chat view", () => {
     const panel = readFileSync(new URL("../frontend/src/ConversationsPanel.tsx", import.meta.url), "utf8");
     const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
-    const view = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
     expect(panel).toContain("<ConversationChatView");
     expect(panel).toContain("<ConversationChat");
     expect(widget).toContain("<ConversationChat");
     expect(widget).not.toContain("new EventSource");
     expect(widget).not.toContain("/messages?chat_id");
-    expect(view).toContain("Message the agent…");
+    // Localized composer behavior is exercised by the rendered UI tests.
   });
 
   test("single mode is focused, refreshes only while empty, lazy-loads history, and guards agent switches", () => {
@@ -119,13 +118,4 @@ describe("AgentConversationsWidget scope", () => {
     expect(isSoftBreakMetadata({ intent: "hard_stop" })).toBe(false);
   });
 
-  test("shared chat UI describes a soft request rather than a hard stop", () => {
-    const panel = readFileSync(new URL("../frontend/src/ConversationsPanel.tsx", import.meta.url), "utf8");
-    const view = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
-    expect(panel).toContain("softBreakMessageInput");
-    expect(panel).toContain("Break requested");
-    expect(view).toContain("Ask the agent to pause and reconsider");
-    expect(view).toContain("it does not stop the agent or cancel running work");
-    expect(view).not.toContain("Stop generating");
-  });
 });

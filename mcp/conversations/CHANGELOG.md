@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.0 — 2026-09-10
+
+- Add per-surface `locale`, `timeZone`, and `messages` props to the app-served React components and dashboard wrappers, with English, French, and Spanish UI dictionaries and locale-aware dates, relative times, numbers, and plurals.
+- Keep UI language changes independent of chat state: drafts, pending sends, transcripts, and subscriptions survive locale updates. Preserve authored content and API values.
+- Document host wording overrides and add rendered and browser regression coverage for localization through the existing Web SDK loader.
+
 ## 0.21.2 — 2026-09-07
 
 - Add an app-only identity resolver for explicitly trusted backend installations. Resolve external principals from active conversation bindings; deny unbound workers, wrong scopes and archived conversations. Resolution is disabled until trusted installation IDs are configured.

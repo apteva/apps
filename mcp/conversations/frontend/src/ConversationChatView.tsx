@@ -1,3 +1,4 @@
+import { useConversationLocalization } from "./i18n";
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 
 export interface ConversationChatViewProps {
@@ -64,15 +65,16 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
  * streaming slot, and composer implementation.
  */
 export default function ConversationChatView(props: ConversationChatViewProps) {
+  const { t } = useConversationLocalization();
   return (
     <section className="min-h-0 flex-1 flex flex-col">
-      <div className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
-        <div className="min-w-0">
+      <div className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
+        <div className="min-w-0 flex-1 basis-32">
           <div className="flex items-center gap-2 min-w-0">
             <h2 className="text-sm font-semibold text-text truncate">{props.title}</h2>
             {props.publicAudience && (
               <span className="px-1.5 py-0.5 rounded text-xs bg-accent/15 border border-accent/30 text-accent shrink-0">
-                public
+                {t("chat.public")}
               </span>
             )}
           </div>
@@ -83,15 +85,15 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         )}
         <span
           className={`${props.headerActions ? "" : "ml-auto"} shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
-          title={props.connected ? "Live" : "Reconnecting — the 5s poll keeps history current"}
+          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
         />
         {!props.archived && props.onOpenDetails && (
           <button
             type="button"
             onClick={props.onOpenDetails}
             className="shrink-0 inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
-            aria-label="Conversation details"
-            title="Details"
+            aria-label={t("chat.details")}
+            title={t("common.details")}
           >
             <Glyph d={GLYPH_MORE} size={16} />
           </button>
@@ -104,7 +106,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <span className="text-text-dim">
               <Glyph d={GLYPH_CHAT} size={32} />
             </span>
-            <p className="text-sm">No messages yet — say something.</p>
+            <p className="text-sm text-center">{t("chat.empty")}</p>
           </div>
         ) : (
           <>
@@ -117,7 +119,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
 
       {props.archived ? (
         <footer className="shrink-0 border-t border-border p-3 flex items-center gap-2">
-          <span className="text-xs text-text-muted">Archived conversation — read only.</span>
+          <span className="text-xs text-text-muted">{t("chat.archivedReadOnly")}</span>
           <span className="ml-auto flex items-center gap-2">
             <button
               type="button"
@@ -126,7 +128,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
             >
               <Glyph d={GLYPH_RESTORE} size={13} />
-              Unarchive
+              {t("common.unarchive")}
             </button>
             {props.confirmDelete ? (
               <>
@@ -136,7 +138,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                   disabled={props.archiveBusy}
                   className="rounded bg-error px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
                 >
-                  Confirm delete
+                  {t("common.confirmDelete")}
                 </button>
                 <button
                   type="button"
@@ -144,7 +146,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                   disabled={props.archiveBusy}
                   className="rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text"
                 >
-                  Cancel
+                  {t("common.cancel")}
                 </button>
               </>
             ) : (
@@ -155,7 +157,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                 className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-error hover:bg-bg-input disabled:opacity-40"
               >
                 <Glyph d={GLYPH_TRASH} size={13} />
-                Delete
+                {t("common.delete")}
               </button>
             )}
           </span>
@@ -170,11 +172,11 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                 onClick={props.onSoftBreak}
                 disabled={props.breakBusy || props.breakRequested}
                 className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-card px-3 py-1.5 text-xs text-text-muted transition-colors enabled:hover:border-accent/50 enabled:hover:text-text disabled:cursor-default disabled:opacity-60"
-                aria-label="Ask the agent to pause and reconsider"
-                title="Sends a new request; it does not stop the agent or cancel running work"
+                aria-label={t("chat.breakLabel")}
+                title={t("chat.breakHint")}
               >
                 <Glyph d={GLYPH_PAUSE} size={13} />
-                {props.breakRequested ? "Break requested" : props.breakBusy ? "Requesting break…" : "Break"}
+                {props.breakRequested ? t("chat.breakRequested") : props.breakBusy ? t("chat.breakRequesting") : t("chat.break")}
               </button>
             </div>
           )}
@@ -192,7 +194,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               onKeyDown={props.onComposerKeyDown}
               rows={1}
               style={{ lineHeight: "20px", minHeight: "36px" }}
-              placeholder={props.connected ? "Message the agent…" : "Reconnecting — messages still send"}
+              placeholder={props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
               className="block min-w-0 flex-1 resize-none bg-transparent py-2 text-base text-text placeholder:text-text-dim focus:outline-none sm:text-sm"
               autoFocus={
                 typeof window !== "undefined" &&
@@ -203,8 +205,8 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               type="submit"
               disabled={props.sending || !props.draft.trim()}
               className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
-              aria-label="Send"
-              title="Send (Enter)"
+              aria-label={t("chat.send")}
+              title={t("chat.sendHint")}
             >
               <svg
                 viewBox="0 0 20 20"

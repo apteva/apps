@@ -1,3 +1,4 @@
+import { useConversationLocalization } from "./i18n";
 export function reportSectionsText(value: unknown): string {
   if (!Array.isArray(value)) return "";
   return value.map(section => {
@@ -7,9 +8,10 @@ export function reportSectionsText(value: unknown): string {
   }).filter(Boolean).join("\n\n");
 }
 export function AttachmentContent({attachments=[]}: {attachments?: Array<{type:string;data_url?:string;name?:string}>}) {
+  const { t } = useConversationLocalization();
   return <>{attachments.map((attachment,index) => attachment.type === "image" && /^data:image\/(png|jpeg|gif|webp);base64,/i.test(attachment.data_url ?? "")
-    ? <img key={index} src={attachment.data_url} alt={attachment.name || "Image attachment"} loading="lazy" className="max-h-96 max-w-full rounded border border-border" />
-    : <p key={index} role="status">Attachment cannot be displayed: {attachment.name || attachment.type}</p>)}</>;
+    ? <img key={index} src={attachment.data_url} alt={attachment.name || t("attachment.image")} loading="lazy" className="max-h-96 max-w-full rounded border border-border" />
+    : <p key={index} role="status">{t("attachment.unavailable")} {attachment.name || attachment.type}</p>)}</>;
 }
 export function GenericComponents({components=[]}: {components?:Array<{app:string;name:string;props:Record<string,unknown>}>}) {
  return <>{components.filter(c => !["approval-card","report-card","alert-card"].includes(c.name)).map((c,i) => <details key={i} className="rounded border border-border p-2"><summary>{c.app}: {c.name}</summary><pre className="whitespace-pre-wrap break-words text-xs">{JSON.stringify(c.props,null,2)}</pre></details>)}</>;

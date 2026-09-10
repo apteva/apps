@@ -1,3 +1,4 @@
+import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
 // ConversationsPanel — chat + inbox for the conversations app.
 //
@@ -66,7 +67,7 @@ function closeOpenMarkdown(s: string): string {
 
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
-export interface NativePanelProps {
+export interface NativePanelProps extends ConversationLocalization {
   appName: string;
   installId: number;
   projectId: string;
@@ -188,21 +189,6 @@ function newClientMessageId(): string {
   return `panel-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function relTime(iso: string): string {
-  if (!iso) return "";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "";
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-// ─── glyphs (inline SVG, currentColor — no emojis, no Tailwind color
-//     utilities inside SVG) ──────────────────────────────────────────
-
 function Glyph({ d, size = 16 }: { d: string; size?: number }) {
   return (
     <svg
@@ -242,9 +228,10 @@ const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h
 // users (site chatbot visitors behind a gateway) rather than
 // operators. Inbox items are structurally refused there.
 function PublicTag() {
+  const { t } = useConversationLocalization();
   return (
     <span className="px-1.5 py-0.5 rounded text-xs bg-accent/15 border border-accent/30 text-accent shrink-0">
-      public
+      {t("chat.public")}
     </span>
   );
 }
@@ -258,6 +245,7 @@ export function ApprovalCard({
   message: Message;
   onAction: (messageId: number, actionId: string, note: string) => Promise<void>;
 }) {
+  const { t, statusLabel } = useConversationLocalization();
   const card = message.components.find((c) => c.name === "approval-card");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
@@ -286,12 +274,12 @@ export function ApprovalCard({
         <span className="text-warn">
           <Glyph d={GLYPH_ALERT} size={14} />
         </span>
-        <span className="font-semibold uppercase tracking-wide">Approval</span>
+        <span className="font-semibold uppercase tracking-wide">{t("card.approval")}</span>
         {status !== "pending" && (
           <span
             className={`ml-auto px-1.5 py-0.5 rounded text-bg ${status === "approve" ? "bg-success" : "bg-error"}`}
           >
-            {status === "approve" ? "approved" : status}
+            {statusLabel(status)}
           </span>
         )}
       </div>
@@ -305,7 +293,7 @@ export function ApprovalCard({
             type="text"
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="Optional note for the agent"
+            placeholder={t("approval.notePlaceholder")}
             className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs text-text"
           />
           <div className="flex items-center gap-2">
@@ -331,13 +319,14 @@ export function ApprovalCard({
         </div>
       )}
       {status !== "pending" && card.props.note ? (
-        <p className="mt-1.5 text-xs text-text-dim">Note: {String(card.props.note)}</p>
+        <p className="mt-1.5 text-xs text-text-dim">{t("approval.note")} {String(card.props.note)}</p>
       ) : null}
     </div>
   );
 }
 
 export function ReportCard({ message }: { message: Message }) {
+  const { t } = useConversationLocalization();
   const card = message.components.find((c) => c.name === "report-card");
   if (!card) return null;
   return (
@@ -346,7 +335,7 @@ export function ReportCard({ message }: { message: Message }) {
         <span className="text-info">
           <Glyph d={GLYPH_REPORT} size={14} />
         </span>
-        <span className="font-semibold uppercase tracking-wide">Report</span>
+        <span className="font-semibold uppercase tracking-wide">{t("card.report")}</span>
         {card.props.period ? <span className="ml-auto">{String(card.props.period)}</span> : null}
       </div>
       <p className="mt-1.5 text-sm font-medium text-text">{String(card.props.title ?? "")}</p>
@@ -359,6 +348,7 @@ export function ReportCard({ message }: { message: Message }) {
 }
 
 export function AlertCard({ message }: { message: Message }) {
+  const { statusLabel } = useConversationLocalization();
   const card = message.components.find((c) => c.name === "alert-card");
   if (!card) return null;
   const severity = String(card.props.severity ?? "info");
@@ -368,7 +358,7 @@ export function AlertCard({ message }: { message: Message }) {
     <div className="rounded-md border border-border bg-bg-card p-3">
       <div className={`flex items-center gap-2 text-xs ${tone}`}>
         <Glyph d={GLYPH_ALERT} size={14} />
-        <span className="font-semibold uppercase tracking-wide">{severity}</span>
+        <span className="font-semibold uppercase tracking-wide">{statusLabel(severity)}</span>
       </div>
       <p className="mt-1.5 text-sm text-text whitespace-pre-wrap">{String(card.props.text ?? "")}</p>
     </div>
@@ -415,12 +405,13 @@ function StreamingBubble({ text }: { text: string }) {
 // animated chat-thinking-dots (class from the dashboard stylesheet)
 // with the label, occupying transcript space like a message.
 function ThinkingMessagePlaceholder() {
+  const { t } = useConversationLocalization();
   return (
     <div
       className="grid min-h-[42px] min-w-0 shrink-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
       role="status"
       aria-live="polite"
-      aria-label="Thinking"
+      aria-label={t("chat.thinkingLabel")}
     >
       <span
         className="chat-thinking-dots inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1"
@@ -430,7 +421,7 @@ function ThinkingMessagePlaceholder() {
         <span />
         <span />
       </span>
-      <span className="text-[13px] leading-5 text-text-muted">Thinking…</span>
+      <span className="text-[13px] leading-5 text-text-muted">{t("chat.thinking")}</span>
       <span className="h-4 w-4 shrink-0" aria-hidden="true" />
     </div>
   );
@@ -495,6 +486,7 @@ function NewConversationDialog({
   onClose: () => void;
   onCreated: (conversation: Conversation) => void;
 }) {
+  const { t } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [selected, setSelected] = useState<number[]>([]);
   const [leadId, setLeadId] = useState<number | null>(null);
@@ -557,59 +549,58 @@ function NewConversationDialog({
   };
 
   return (
-    <Overlay open={open} onClose={close} ariaLabel="New conversation">
+    <Overlay open={open} onClose={close} ariaLabel={t("chat.new")}>
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-text">New conversation</h2>
+        <h2 className="text-sm font-semibold text-text">{t("chat.new")}</h2>
         <button
           type="button"
           onClick={close}
           className="inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
-          aria-label="Close"
+          aria-label={t("common.close")}
         >
           <Glyph d={GLYPH_X} size={14} />
         </button>
       </div>
       <div className="space-y-4 overflow-auto p-4">
         <label className="block">
-          <span className="mb-1 block text-xs uppercase text-text-muted">Title</span>
+          <span className="mb-1 block text-xs uppercase text-text-muted">{t("common.title")}</span>
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
-            placeholder="Optional"
+            placeholder={t("common.optional")}
             className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-xs uppercase text-text-muted">Audience</span>
+          <span className="mb-1 block text-xs uppercase text-text-muted">{t("chat.audience")}</span>
           <select
             value={audience}
             onChange={(e) => setAudience(e.target.value as "operator" | "public")}
             className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
           >
-            <option value="operator">Operator — approvals and internal inbox items allowed</option>
-            <option value="public">Public visitor — replies only, no internal inbox items</option>
+            <option value="operator">{t("chat.operatorOption")}</option>
+            <option value="public">{t("chat.publicOption")}</option>
           </select>
         </label>
         <div>
-          <div className="mb-1 text-xs uppercase text-text-muted">Agents</div>
+          <div className="mb-1 text-xs uppercase text-text-muted">{t("common.agents")}</div>
           {agents === null && !agentsError ? (
-            <p className="text-xs text-text-dim">Loading agents…</p>
+            <p className="text-xs text-text-dim">{t("chat.loadingAgents")}</p>
           ) : agentsError ? (
             <p className="text-xs text-error">{agentsError}</p>
           ) : selectable.length === 0 ? (
-            <p className="text-xs text-text-dim">No agents in this project yet.</p>
+            <p className="text-xs text-text-dim">{t("chat.noAgents")}</p>
           ) : (
             <>
               {!bindingKnown && (
                 <p className="mb-2 text-xs text-text-dim">
-                  None of these agents report the conversations app attached — an agent without it
-                  cannot reply here. Attach the app in the agent's settings first.
+                  {t("chat.attachAppHint")}
                 </p>
               )}
               <input
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-                placeholder="Search agents"
+                placeholder={t("chat.searchAgents")}
                 className="mb-2 w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
               />
               <div className="max-h-56 divide-y divide-border overflow-y-auto rounded border border-border">
@@ -636,7 +627,7 @@ function NewConversationDialog({
                             checked={leadId === agent.id}
                             onChange={() => setLeadId(agent.id)}
                           />
-                          lead
+                          {t("chat.lead")}
                         </label>
                       )}
                     </div>
@@ -654,7 +645,7 @@ function NewConversationDialog({
           onClick={close}
           className="rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text"
         >
-          Cancel
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -662,7 +653,7 @@ function NewConversationDialog({
           disabled={selected.length === 0 || saving}
           className="rounded bg-accent px-3 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
         >
-          {saving ? "Creating…" : "Create"}
+          {saving ? t("common.creating") : t("common.create")}
         </button>
       </div>
     </Overlay>
@@ -687,6 +678,7 @@ function DetailsDialog({
   onChanged: () => void;
   onRemoved: () => void;
 }) {
+  const { t } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [title, setTitle] = useState(conversation.title);
   const [directive, setDirective] = useState(conversation.directive || "");
@@ -710,7 +702,7 @@ function DetailsDialog({
   }, [open, conversation.id, conversation.title, conversation.directive]);
 
   const agentName = (id: number) =>
-    agents?.find((a) => a.id === id)?.name || `agent ${id}`;
+    agents?.find((a) => a.id === id)?.name || t("chat.agentName", { id: String(id) });
   // Same scoping as the new-conversation picker: only agents holding
   // this app's MCP can participate usefully.
   const available = useMemo(
@@ -795,21 +787,21 @@ function DetailsDialog({
   };
 
   return (
-    <Overlay open={open} onClose={onClose} ariaLabel="Conversation details">
+    <Overlay open={open} onClose={onClose} ariaLabel={t("chat.details")}>
       <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h2 className="text-sm font-semibold text-text">Conversation details</h2>
+        <h2 className="text-sm font-semibold text-text">{t("chat.details")}</h2>
         <button
           type="button"
           onClick={onClose}
           className="inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text"
-          aria-label="Close"
+          aria-label={t("common.close")}
         >
           <Glyph d={GLYPH_X} size={14} />
         </button>
       </div>
       <div className="space-y-4 overflow-auto p-4">
         <div>
-          <div className="mb-1 text-xs uppercase text-text-muted">Title</div>
+          <div className="mb-1 text-xs uppercase text-text-muted">{t("common.title")}</div>
           <div className="flex gap-2">
             <input
               value={title}
@@ -826,45 +818,45 @@ function DetailsDialog({
               disabled={saving || !title.trim() || title.trim() === conversation.title}
               className="rounded border border-border px-2.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
             >
-              Save
+              {t("common.save")}
             </button>
           </div>
         </div>
 
         <div>
-          <div className="mb-1 text-xs uppercase text-text-muted">Conversation instructions</div>
+          <div className="mb-1 text-xs uppercase text-text-muted">{t("chat.instructions")}</div>
           <textarea
             value={directive}
             onChange={(e) => setDirective(e.target.value)}
             maxLength={8000}
             rows={4}
-            placeholder="Optional context or behavior specific to this conversation"
+            placeholder={t("chat.instructionsPlaceholder")}
             className="w-full resize-y rounded border border-border bg-bg-input px-2 py-1.5 text-sm text-text focus:border-accent focus:outline-none"
           />
           <div className="mt-1 flex items-center justify-between gap-2">
-            <span className="text-[11px] text-text-dim">Platform policy and tool permissions cannot be overridden here.</span>
+            <span className="text-[11px] text-text-dim">{t("chat.policyHint")}</span>
             <button
               type="button"
               onClick={saveDirective}
               disabled={saving || directive.trim() === (conversation.directive || "")}
               className="rounded border border-border px-2.5 py-1 text-xs text-text-muted hover:text-text disabled:opacity-40"
             >
-              Save
+              {t("common.save")}
             </button>
           </div>
         </div>
 
         <div>
-          <div className="mb-2 text-xs uppercase text-text-muted">Participants</div>
+          <div className="mb-2 text-xs uppercase text-text-muted">{t("chat.participants")}</div>
           {participants === null ? (
-            <p className="text-xs text-text-dim">Loading…</p>
+            <p className="text-xs text-text-dim">{t("common.loading")}</p>
           ) : (
             <div className="space-y-1.5">
               {participants.agent_ids.map((id) => (
                 <div key={id} className="flex items-center gap-2 text-sm">
                   <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
                   {id === participants.lead_agent_id ? (
-                    <span className="text-xs uppercase text-accent">lead</span>
+                    <span className="text-xs uppercase text-accent">{t("chat.lead")}</span>
                   ) : (
                     <button
                       type="button"
@@ -872,7 +864,7 @@ function DetailsDialog({
                       disabled={saving}
                       className="text-xs text-text-dim hover:text-error"
                     >
-                      Remove
+                      {t("common.remove")}
                     </button>
                   )}
                 </div>
@@ -886,7 +878,7 @@ function DetailsDialog({
                 onChange={(e) => setAddAgentId(e.target.value)}
                 className="min-w-0 flex-1 rounded border border-border bg-bg-input px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none"
               >
-                <option value="">Add an agent…</option>
+                <option value="">{t("chat.addAgent")}</option>
                 {available.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.name}
@@ -899,7 +891,7 @@ function DetailsDialog({
                 disabled={!addAgentId || saving}
                 className="rounded border border-border px-2.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
               >
-                Add
+                {t("common.add")}
               </button>
             </div>
           )}
@@ -915,18 +907,18 @@ function DetailsDialog({
           className="inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text disabled:opacity-40"
         >
           <Glyph d={GLYPH_ARCHIVE} size={13} />
-          Archive
+          {t("common.archive")}
         </button>
         {confirmDelete ? (
           <span className="ml-auto flex items-center gap-2">
-            <span className="text-xs text-text-muted">Delete permanently?</span>
+            <span className="text-xs text-text-muted">{t("chat.deletePermanently")}</span>
             <button
               type="button"
               onClick={remove}
               disabled={saving}
               className="rounded bg-error px-2.5 py-1.5 text-xs font-semibold text-bg disabled:opacity-40"
             >
-              {saving ? "Deleting…" : "Delete"}
+              {saving ? t("common.deleting") : t("common.delete")}
             </button>
             <button
               type="button"
@@ -934,7 +926,7 @@ function DetailsDialog({
               disabled={saving}
               className="rounded border border-border px-2.5 py-1.5 text-xs text-text-muted hover:text-text"
             >
-              Cancel
+              {t("common.cancel")}
             </button>
           </span>
         ) : (
@@ -945,7 +937,7 @@ function DetailsDialog({
             className="ml-auto inline-flex items-center gap-1.5 rounded border border-border px-2.5 py-1.5 text-xs text-error hover:bg-bg-input disabled:opacity-40"
           >
             <Glyph d={GLYPH_TRASH} size={13} />
-            Delete
+            {t("common.delete")}
           </button>
         )}
       </div>
@@ -975,6 +967,7 @@ function ContextColumn({
   // the roster refetches so its edits show up immediately.
   refreshHold: boolean;
 }) {
+  const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [participants, setParticipants] = useState<ParticipantsInfo | null>(null);
 
@@ -996,23 +989,23 @@ function ContextColumn({
     };
   }, [conversation.id, refreshHold]);
 
-  const agentName = (id: number) => agents?.find((a) => a.id === id)?.name || `agent ${id}`;
+  const agentName = (id: number) => agents?.find((a) => a.id === id)?.name || t("chat.agentName", { id: String(id) });
   const facts: Array<[string, string]> = [
-    ["Audience", conversation.audience === "public" ? "public (visitors)" : "operator"],
-    ["Origin", conversation.origin],
-    ["Type", conversation.kind],
-    ["Created", relTime(conversation.created_at) || "—"],
-    ["Updated", relTime(conversation.updated_at) || "—"],
+    [t("chat.audience"), conversation.audience === "public" ? t("chat.publicVisitors") : t("chat.operator")],
+    [t("chat.origin"), conversation.origin],
+    [t("chat.type"), statusLabel(conversation.kind)],
+    [t("common.created"), relativeTime(conversation.created_at) || "—"],
+    [t("common.updated"), relativeTime(conversation.updated_at) || "—"],
   ];
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
       <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
-        <span className="text-xs font-semibold uppercase text-text-muted">Details</span>
+        <span className="text-xs font-semibold uppercase text-text-muted">{t("common.details")}</span>
       </div>
       <div className="flex-1 min-h-0 overflow-auto p-4 space-y-5">
         <div>
-          <div className="mb-2 text-xs uppercase text-text-dim">Conversation</div>
+          <div className="mb-2 text-xs uppercase text-text-dim">{t("chat.conversation")}</div>
           <div className="space-y-1.5">
             {facts.map(([label, value]) => (
               <div key={label} className="flex items-center justify-between gap-2 text-xs">
@@ -1024,16 +1017,16 @@ function ContextColumn({
         </div>
 
         <div>
-          <div className="mb-2 text-xs uppercase text-text-dim">Participants</div>
+          <div className="mb-2 text-xs uppercase text-text-dim">{t("chat.participants")}</div>
           {participants === null ? (
-            <p className="text-xs text-text-dim">Loading…</p>
+            <p className="text-xs text-text-dim">{t("common.loading")}</p>
           ) : (
             <div className="space-y-1.5">
               {participants.agent_ids.map((id) => (
                 <div key={id} className="flex items-center gap-2 text-xs">
                   <span className="min-w-0 flex-1 truncate text-text-muted">{agentName(id)}</span>
                   {id === participants.lead_agent_id && (
-                    <span className="uppercase text-accent">lead</span>
+                    <span className="uppercase text-accent">{t("chat.lead")}</span>
                   )}
                 </div>
               ))}
@@ -1044,7 +1037,7 @@ function ContextColumn({
             onClick={onManage}
             className="mt-3 w-full rounded border border-border px-2 py-1.5 text-xs text-text-muted hover:text-text hover:bg-bg-input"
           >
-            Manage conversation
+            {t("chat.manage")}
           </button>
         </div>
       </div>
@@ -1059,8 +1052,9 @@ function ContextColumn({
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
 function MessageRow(props: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
+  const { t } = useConversationLocalization();
  return <div className="min-w-0 shrink-0 flex flex-col gap-2">
- {props.message.agent_id ? <p className="text-xs text-text-muted">Agent {props.message.agent_id}</p> : null}
+ {props.message.agent_id ? <p className="text-xs text-text-muted">{t("common.agent")} {props.message.agent_id}</p> : null}
  <MessageBody {...props}/><AttachmentContent attachments={props.message.attachments}/><GenericComponents components={props.message.components}/>
  </div>;
 }
@@ -1071,6 +1065,7 @@ function MessageBody({
   message: Message;
   onAction: (messageId: number, actionId: string, note: string) => Promise<void>;
 }) {
+  const { t, relativeTime } = useConversationLocalization();
   const isMarkdown = message.role !== "user" && message.role !== "system" && !message.component_kind;
   const html = useMemo(
     () => (isMarkdown ? renderSafeMarkdown(message.content) : ""),
@@ -1096,10 +1091,10 @@ function MessageBody({
       <div
         className="flex shrink-0 items-center gap-2 py-1 text-xs text-text-muted"
         role="status"
-        title={`${message.content} · ${relTime(message.created_at)}`}
+        title={`${message.content} · ${relativeTime(message.created_at)}`}
       >
         <span className="h-px flex-1 bg-border" />
-        <span>Break requested</span>
+        <span>{t("chat.breakRequested")}</span>
         <span className="h-px flex-1 bg-border" />
       </div>
     );
@@ -1109,7 +1104,7 @@ function MessageBody({
       <div className="flex justify-end min-w-0 shrink-0">
         <div
           className="bg-accent/15 border border-accent/30 rounded-xl rounded-br-sm px-3 py-2 max-w-[92%] sm:max-w-[80%] min-w-0"
-          title={relTime(message.created_at)}
+          title={relativeTime(message.created_at)}
         >
           <p className="text-text text-[15px] sm:text-sm leading-relaxed whitespace-pre-wrap break-words">
             {message.content}
@@ -1119,7 +1114,7 @@ function MessageBody({
     );
   }
   return (
-    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0" title={relTime(message.created_at)}>
+    <div className="flex min-h-[42px] min-w-0 flex-col justify-center shrink-0" title={relativeTime(message.created_at)}>
       <div
         className="chat-md text-text text-[15px] sm:text-sm break-words leading-relaxed"
         dangerouslySetInnerHTML={{ __html: html }}
@@ -1230,7 +1225,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
           if (!page.has_more) break;
         }
         setHistoryError("");
-      } catch (err) { if (!cancelled) setHistoryError(`History refresh failed: ${String(err)}`); }
+      } catch (err) { if (!cancelled) setHistoryError(String(err)); }
       finally { loading=false; }
     };
     const es = conversationsClient.subscribe(conversationID, {
@@ -1268,18 +1263,20 @@ export async function refreshConversationList(path:string, conversations:Convers
 }
 
 export function MoreConversations({path,projectId,rows,onRows}: {path:string;projectId:string;rows:Conversation[];onRows:(rows:Conversation[])=>void}) {
+  const { t } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
  const [busy,setBusy]=useState(false),[error,setError]=useState("");
+ const [exhausted,setExhausted]=useState(false);
  const scopeRef=useRef("");scopeRef.current=projectId+":"+path;
- const more=async()=>{if(busy||!rows.length)return;const scope=scopeRef.current;setBusy(true);try{
+ const more=async()=>{if(busy||!rows.length)return;const scope=scopeRef.current;setBusy(true);setExhausted(false);try{
   const last=rows.at(-1)!;
   const cursor=btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
   const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(cursor)}`,projectId);
   if(scope!==scopeRef.current)return;
-  if(!page.conversations.length){setError("No earlier conversations");return}
+  if(!page.conversations.length){setExhausted(true);setError("");return}
   onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);setError("");
  }catch(err){setError(String(err));}finally{setBusy(false)}};
- return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?"Loading…":"Load earlier conversations"}</button>{error&&<p role="status">{error}</p>}</div>;
+ return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?t("common.loading"):t("chat.loadEarlier")}</button>{(error||exhausted)&&<p role="status">{error || t("chat.noEarlierStatus")}</p>}</div>;
 }
 
 export function ConversationChat({
@@ -1297,6 +1294,7 @@ export function ConversationChat({
   onActed: () => void;
   onRemoved: () => void;
 }) {
+  const { t } = useConversationLocalization();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   const storageKey = `conversations:draft:${conversationsClient.storageKey}:${conversation.id}`;
@@ -1324,6 +1322,7 @@ export function ConversationChat({
   const [breakRequested, setBreakRequested] = useState(false);
   const breakRequestRef = useRef<{ callId: string; agentId?: number; clientId: string } | null>(null);
   const [sendError, setSendError] = useState("");
+  const [unconfirmedSendError, setUnconfirmedSendError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -1394,14 +1393,14 @@ export function ConversationChat({
     if (!request) request={content,client_message_id:newClientMessageId()};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
-    setSending(true);setSendError("");
+    setSending(true);setSendError(""); setUnconfirmedSendError("");
     try {
       const row=await conversationsClient.send(conversation.id, request);
       pendingSendRef.current=null;try {sessionStorage.removeItem(storageKey+":pending"); if ((sessionStorage.getItem(storageKey) ?? "").trim() === request.content) sessionStorage.removeItem(storageKey);} catch {}
       if (!mountedRef.current) return;
       mergeMessages([row]);setDraft(current => current.trim()===request!.content ? "" : current);
       inputRef.current?.focus();
-    } catch(err) {if(mountedRef.current)setSendError(`Send was not confirmed. Retry will reuse the same message: ${String(err)}`);}
+    } catch(err) {if(mountedRef.current)setUnconfirmedSendError(String(err));}
     finally {if(mountedRef.current)setSending(false);}
   };
 
@@ -1418,7 +1417,7 @@ export function ConversationChat({
     };
     breakRequestRef.current = request;
     setBreakBusy(true);
-    setSendError("");
+    setSendError(""); setUnconfirmedSendError("");
     try {
       const row = await apiPost<Message>(`/messages?chat_id=${encodeURIComponent(conversation.id)}`,
         softBreakMessageInput(conversation.lead_agent_id, {
@@ -1445,18 +1444,18 @@ export function ConversationChat({
   return (
     <ConversationChatView
       title={conversation.title}
-      subtitle={`${conversation.lead_agent_name || `agent ${conversation.lead_agent_id}`}${conversation.origin !== "web" ? ` · via ${conversation.origin}` : ""}`}
+      subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
       publicAudience={conversation.audience === "public"}
       connected={connected}
       archived={archived}
       messageNodes={<>
-        {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>Load earlier messages</button>}
+        {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
         {messages.map(message => <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} onAction={onAction}/></fieldset>
- {deliveries.filter(d=>d.message_id===message.id).map(d=><div key={d.id} role="status" className="mt-1 text-xs text-text-muted">{d.status === "processing" ? "Sending" : d.status === "pending" ? (d.attempts ? "Retrying" : "Queued") : d.status} · {d.target.split(":")[0]} {d.last_error && <span>{d.last_error}</span>}{["failed","ambiguous"].includes(d.status) && <button type="button" className="ml-2 text-accent" onClick={()=>retryDelivery(d)}>{d.status==="ambiguous"?"Retry (may duplicate)":"Retry delivery"}</button>}</div>)}
+ {deliveries.filter(d=>d.message_id===message.id).map(d=><div key={d.id} role="status" className="mt-1 text-xs text-text-muted">{d.status === "processing" ? t("chat.sending") : d.status === "pending" ? (d.attempts ? t("chat.retrying") : t("chat.queued")) : d.status} · {d.target.split(":")[0]} {d.last_error && <span>{d.last_error}</span>}{["failed","ambiguous"].includes(d.status) && <button type="button" className="ml-2 text-accent" onClick={()=>retryDelivery(d)}>{d.status==="ambiguous"?t("chat.retryDuplicate"):t("chat.retryDelivery")}</button>}</div>)}
  </div>)}
       </>}
       hasMessages={messages.length > 0}
-      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}><p className="text-xs text-text-muted">Agent {b.agentId}</p>{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
+      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}><p className="text-xs text-text-muted">{t("common.agent")} {b.agentId}</p>{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
@@ -1465,7 +1464,7 @@ export function ConversationChat({
       responseActive={Boolean(bubble)}
       breakBusy={breakBusy}
       breakRequested={breakRequested}
-      sendError={sendError || historyError}
+      sendError={unconfirmedSendError ? t("chat.sendUnconfirmed", { error: unconfirmedSendError }) : sendError || (historyError ? t("chat.historyFailed", { error: historyError }) : "")}
       archiveBusy={archiveBusy}
       confirmDelete={confirmDelete}
       onDraftChange={(value, element) => {
@@ -1511,9 +1510,11 @@ function InboxTab({
   projectId: string;
   instanceId?: number;
 }) {
+  const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
+ const [total, setTotal] = useState<number | null>(null);
  const [cursor,setCursor]=useState("");
  const expandedRef=useRef(false);
 
@@ -1524,7 +1525,7 @@ function InboxTab({
         projectId,
       );
       setItems(inbox.items);setCursor(inbox.next_cursor);expandedRef.current=false;
-      setNote(`${inbox.total} item${inbox.total === 1 ? "" : "s"}`);
+      setTotal(inbox.total); setNote("");
     } catch (err) {
       setNote(err instanceof Error ? err.message : String(err));
     }
@@ -1554,15 +1555,15 @@ function InboxTab({
   return (
     <div className="flex-1 min-h-0 flex flex-col">
       <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
- <div className="flex gap-3 text-xs"><button className="text-accent" onClick={load}>Refresh inbox</button>{cursor&&<button className="text-accent" onClick={loadMore}>Load more items</button>}</div>
+ <div className="flex gap-3 text-xs"><button className="text-accent" onClick={load}>{t("inbox.refresh")}</button>{cursor&&<button className="text-accent" onClick={loadMore}>{t("inbox.loadMore")}</button>}</div>
         {items.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">
               <Glyph d={GLYPH_INBOX} size={32} />
             </span>
-            <p className="text-sm">Inbox zero.</p>
+            <p className="text-sm">{t("inbox.empty")}</p>
             <p className="text-xs text-text-dim text-center">
-              Approvals, alerts, and reports from agents and apps land here, most urgent first.
+              {t("inbox.priorityHint")}
             </p>
           </div>
         ) : (
@@ -1571,14 +1572,14 @@ function InboxTab({
             return (
               <div key={item.message.id} className="rounded-md border border-border bg-bg p-0.5">
                 <div className="flex items-center gap-2 px-2.5 pt-2 text-xs">
-                  <span className={`px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.label}</span>
-                  <span className="text-text-dim">{relTime(item.message.created_at)}</span>
+                  <span className={`px-1.5 py-0.5 rounded ${badge.cls}`}>{statusLabel(badge.label)}</span>
+                  <span className="text-text-dim">{relativeTime(item.message.created_at)}</span>
                   <span className="ml-auto flex items-center gap-1">
                     <button
                       type="button"
                       onClick={() => onOpenConversation(item.message.conversation_id)}
                       className="px-1.5 py-0.5 rounded text-text-muted hover:text-text hover:bg-bg-input"
-                      title="Open the conversation"
+                      title={t("chat.open")}
                     >
                       <Glyph d={GLYPH_CHAT} size={13} />
                     </button>
@@ -1587,7 +1588,7 @@ function InboxTab({
                         type="button"
                         onClick={() => dismiss(item.message.id)}
                         className="px-1.5 py-0.5 rounded text-text-muted hover:text-text hover:bg-bg-input"
-                        title="Dismiss"
+                        title={t("common.dismiss")}
                       >
                         <Glyph d={GLYPH_X} size={13} />
                       </button>
@@ -1603,15 +1604,19 @@ function InboxTab({
         )}
       </div>
       <footer className="shrink-0 border-t border-border px-4 py-2 text-xs text-text-muted">
-        {note}
+        {note || (total !== null ? t("inbox.count", { count: total }) : "")}
       </footer>
     </div>
   );
 }
 
+type LocalizedNotice = { key: ConversationMessageKey; params?: ConversationMessageParams };
+const noticeMessage = (key: ConversationMessageKey, params?: ConversationMessageParams): LocalizedNotice => ({ key, params });
+
 // ─── Telegram transport tab ─────────────────────────────────────────
 
 function TelegramTab({ projectId, conversations }: { projectId: string; conversations: Conversation[] }) {
+  const { t, dateTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [connections, setConnections] = useState<TelegramConnectionView[]>([]);
   const [bindings, setBindings] = useState<TelegramBindingView[]>([]);
@@ -1637,7 +1642,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
   const [manualChat, setManualChat] = useState("");
   const [manualUsers, setManualUsers] = useState("");
   const [busy, setBusy] = useState("");
-  const [notice, setNotice] = useState("");
+  const [notice, setNotice] = useState<string | LocalizedNotice>("");
 
   const load = useCallback(async () => {
     try {
@@ -1697,7 +1702,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     setSetupStep(!connection?.enabled ? 1 : !policy ? 2 : 3);
   }, [connectionId, connection?.enabled, policy?.connection_id]);
 
-  const run = async (key: string, action: () => Promise<string | void>, refresh = true) => {
+  const run = async (key: string, action: () => Promise<LocalizedNotice | void>, refresh = true) => {
     setBusy(key);
     setNotice("");
     try {
@@ -1714,16 +1719,16 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
   const activate = () => connection && run("activate", async () => {
     const result = await apiPost<TelegramConnectionView>("/telegram-connections", { connection_id: connection.connection_id }, projectId);
     setSetupStep(2);
-    return result.bot_username ? `@${result.bot_username} is connected.` : "Telegram bot connected.";
+    return result.bot_username ? noticeMessage("telegram.namedConnected", { name: `@${result.bot_username}` }) : noticeMessage("telegram.connected");
   });
 
   const deactivate = () => connection && run("deactivate", async () => {
-    if (!window.confirm(`Disconnect ${connection.bot_username ? `@${connection.bot_username}` : connection.name}? Telegram routing and pending access requests for this bot will be removed.`)) return;
+    if (!window.confirm(t("telegram.confirmDisconnectBot", { name: connection.bot_username ? `@${connection.bot_username}` : connection.name }))) return;
     await apiDelete(`/telegram-connections?id=${connection.connection_id}`, projectId);
     setInviteURL("");
     setInviteExpiresAt("");
     setSetupStep(1);
-    return "Telegram bot disconnected from Conversations.";
+    return noticeMessage("telegram.disconnected");
   });
 
   const savePolicy = () => run("policy", async () => {
@@ -1734,7 +1739,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     }, projectId);
     dirtyPolicyRef.current=false;
     setSetupStep(3);
-    return mode === "pairing" ? "Secure pairing is active." : mode === "public" ? "Public intake is active." : "Unknown chats are closed.";
+    return mode === "pairing" ? noticeMessage("telegram.pairingActive") : mode === "public" ? noticeMessage("telegram.publicActive") : noticeMessage("telegram.closed");
   });
 
   const setAutoName = (enabled: boolean) => connection && run("auto-name", async () => {
@@ -1743,8 +1748,8 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       auto_name_enabled: enabled,
     }, projectId);
     return enabled
-      ? "Telegram will show the agent name whenever this bot routes to only one agent."
-      : `Telegram bot name restored to ${connection.original_bot_name || "its original name"}.`;
+      ? noticeMessage("telegram.soleNameHint")
+      : noticeMessage("telegram.nameRestored", { name: connection.original_bot_name || t("telegram.originalName") });
   });
 
   const setResponseFeedback = (mode: "live" | "typing" | "off") => connection && run("response-feedback", async () => {
@@ -1752,9 +1757,9 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       connection_id: connection.connection_id,
       response_feedback: mode,
     }, projectId);
-    return mode === "live" ? "Live Telegram response previews are active."
-      : mode === "typing" ? "Telegram will show typing until the final answer arrives."
-      : "Telegram response feedback is off.";
+    return mode === "live" ? noticeMessage("telegram.previewActive")
+      : mode === "typing" ? noticeMessage("telegram.typingActive")
+      : noticeMessage("telegram.feedbackOff");
   });
 
   const createInvite = () => run("invite", async () => {
@@ -1763,18 +1768,18 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
     }, projectId);
     setInviteURL(result.invite_url);
     setInviteExpiresAt(result.expires_at);
-    return "One-time invite created. It expires in 15 minutes.";
+    return noticeMessage("telegram.inviteCreated");
   }, false);
 
   const resolveRequest = (request: TelegramAccessRequest, action: "approve" | "dismiss" | "block" | "unblock") => run(`${action}-${request.id}`, async () => {
     await apiPost("/telegram-access", { id: request.id, action, conversation_id: action === "approve" ? requestTargets[request.id] ?? "" : "" }, projectId);
-    return action === "approve" ? `${request.display_name} is connected.` : action === "block" ? `${request.display_name} was blocked.` : action === "unblock" ? `${request.display_name} can request access again.` : "Request dismissed.";
+    return action === "approve" ? noticeMessage("telegram.namedConnected", { name: request.display_name }) : action === "block" ? noticeMessage("telegram.namedBlocked", { name: request.display_name }) : action === "unblock" ? noticeMessage("telegram.canRequest", { name: request.display_name }) : noticeMessage("telegram.requestDismissed");
   });
 
   const removeBinding = (binding: TelegramBindingView) => run(`remove-${binding.id}`, async () => {
-    if (!window.confirm(`Disconnect ${binding.chat_title || "this Telegram chat"} from Conversations?`)) return;
+    if (!window.confirm(t("telegram.confirmDisconnectChat", { name: binding.chat_title || t("telegram.thisChat") }))) return;
     await apiDelete(`/telegram-bindings?id=${encodeURIComponent(binding.id)}`, projectId);
-    return `${binding.chat_title || "Telegram chat"} disconnected.`;
+    return noticeMessage("telegram.namedDisconnected", { name: binding.chat_title || t("telegram.chat") });
   });
 
   const createManualBinding = (event: React.FormEvent) => {
@@ -1784,11 +1789,11 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
       await apiPost("/telegram-bindings", { connection_id: Number(connectionId), conversation_id: manualConversation, chat_id: manualChat.trim(), allowed_user_ids: allowed }, projectId);
       setManualChat("");
       setManualUsers("");
-      return "Advanced route created.";
+      return noticeMessage("telegram.routeCreated");
     });
   };
 
-  const stepLabels = ["Connect bot", "Choose access", "Invite or receive"] as const;
+  const stepLabels = [t("telegram.connectStep"), t("telegram.accessStep"), t("telegram.inviteStep")] as const;
 
   return (
     <div className="flex-1 min-h-0 overflow-auto p-4">
@@ -1796,53 +1801,53 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
         <section className="rounded-md border border-border bg-bg-card p-4">
           <div className="flex gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-accent text-bg"><Glyph d={GLYPH_CHAT} size={19} /></div>
-            <div><h2 className="text-base font-semibold text-text">Telegram, without the setup friction</h2><p className="mt-1 text-sm text-text-muted">Connect a bot once. Conversations discovers people and groups, handles secure access, and keeps every message in the same durable conversation system.</p><p className="mt-2 text-xs text-text-dim">No Telegram IDs or API commands. Bot credentials remain in the platform integration connection.</p></div>
+            <div><h2 className="text-base font-semibold text-text">{t("telegram.title")}</h2><p className="mt-1 text-sm text-text-muted">{t("telegram.description")}</p><p className="mt-2 text-xs text-text-dim">{t("telegram.credentialsHint")}</p></div>
           </div>
           <div className="mt-4 flex items-center gap-3 rounded border border-border bg-bg px-3 py-2.5">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent text-xs font-semibold text-accent">{setupStep}</div>
-            <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wide text-text-dim">Step {setupStep} of 3</p><p className="text-sm font-medium text-text">{stepLabels[setupStep - 1]}</p></div>
-            {setupStep > 1 && <button type="button" onClick={() => { setNotice(""); setSetupStep((setupStep - 1) as 1 | 2); }} disabled={busy !== ""} className="ml-auto rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-40">Back</button>}
+            <div className="min-w-0"><p className="text-[10px] font-semibold uppercase tracking-wide text-text-dim">{t("telegram.stepCount", { step: setupStep, count: 3 })}</p><p className="text-sm font-medium text-text">{stepLabels[setupStep - 1]}</p></div>
+            {setupStep > 1 && <button type="button" onClick={() => { setNotice(""); setSetupStep((setupStep - 1) as 1 | 2); }} disabled={busy !== ""} className="ml-auto rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text disabled:opacity-40">{t("common.back")}</button>}
           </div>
         </section>
 
         {setupStep === 1 && <section className="rounded-md border border-border bg-bg-card p-4">
-          <div className="flex items-start gap-3"><div><h2 className="text-sm font-semibold text-text">Bot connection</h2><p className="mt-1 text-xs text-text-muted">Choose a Telegram connection bound in the Conversations installation settings.</p></div>{connection?.enabled && <span className={`ml-auto whitespace-nowrap rounded bg-bg-input px-2 py-1 text-xs ${connection.webhook_status === "healthy" ? "text-success" : "text-warn"}`}>{connection.webhook_status === "healthy" ? "Webhook healthy" : connection.webhook_status === "drifted" ? "Webhook replaced" : "Needs attention"}</span>}</div>
-          {connections.length === 0 ? <div className="mt-4 rounded border border-border bg-bg px-3 py-3 text-xs text-text-muted">No Telegram connection is bound yet. Add one in the app installation settings, then return here.</div> : <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Telegram bot<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text">{connections.map((item) => <option key={item.connection_id} value={item.connection_id}>{item.bot_username ? `@${item.bot_username}` : item.name}</option>)}</select></label><div className="flex flex-wrap items-end gap-2"><button type="button" onClick={activate} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "activate" ? "Connecting…" : connection?.enabled ? "Verify & reconnect" : "Activate bot"}</button>{connection?.bot_username && <a href={`https://t.me/${connection.bot_username}`} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">Open bot ↗</a>}{connection?.enabled && <button type="button" onClick={deactivate} disabled={busy !== ""} className="rounded px-2 py-2 text-xs text-error hover:bg-bg-input disabled:opacity-40">{busy === "deactivate" ? "Disconnecting…" : "Disconnect"}</button>}</div></div>}
-          {connection?.last_webhook_error && <p className="mt-3 text-xs text-error">Telegram reports: {connection.last_webhook_error}</p>}
-          <p className="mt-3 text-xs text-text-dim">Activation verifies the bot and installs a signed webhook automatically. Reconnecting intentionally reclaims Telegram’s one webhook for this bot.</p>
-          {connection?.enabled && <div className="mt-4 flex justify-end"><button type="button" onClick={() => { setNotice(""); setSetupStep(2); }} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">Continue</button></div>}
+          <div className="flex items-start gap-3"><div><h2 className="text-sm font-semibold text-text">{t("telegram.connection")}</h2><p className="mt-1 text-xs text-text-muted">{t("telegram.chooseConnection")}</p></div>{connection?.enabled && <span className={`ml-auto whitespace-nowrap rounded bg-bg-input px-2 py-1 text-xs ${connection.webhook_status === "healthy" ? "text-success" : "text-warn"}`}>{connection.webhook_status === "healthy" ? t("telegram.webhookHealthy") : connection.webhook_status === "drifted" ? t("telegram.webhookReplaced") : t("telegram.attention")}</span>}</div>
+          {connections.length === 0 ? <div className="mt-4 rounded border border-border bg-bg px-3 py-3 text-xs text-text-muted">{t("telegram.noConnection")}</div> : <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">{t("telegram.bot")}<select value={connectionId} onChange={(event) => setConnectionId(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text">{connections.map((item) => <option key={item.connection_id} value={item.connection_id}>{item.bot_username ? `@${item.bot_username}` : item.name}</option>)}</select></label><div className="flex flex-wrap items-end gap-2"><button type="button" onClick={activate} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "activate" ? t("common.connecting") : connection?.enabled ? t("telegram.reconnect") : t("telegram.activate")}</button>{connection?.bot_username && <a href={`https://t.me/${connection.bot_username}`} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">{t("telegram.openBot")}</a>}{connection?.enabled && <button type="button" onClick={deactivate} disabled={busy !== ""} className="rounded px-2 py-2 text-xs text-error hover:bg-bg-input disabled:opacity-40">{busy === "deactivate" ? t("common.disconnecting") : t("common.disconnect")}</button>}</div></div>}
+          {connection?.last_webhook_error && <p className="mt-3 text-xs text-error">{t("telegram.reports")} {connection.last_webhook_error}</p>}
+          <p className="mt-3 text-xs text-text-dim">{t("telegram.activationHint")}</p>
+          {connection?.enabled && <div className="mt-4 flex justify-end"><button type="button" onClick={() => { setNotice(""); setSetupStep(2); }} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{t("common.continue")}</button></div>}
         </section>}
 
         {setupStep === 2 && connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">Choose who can start conversations</h2><p className="mt-1 text-xs text-text-muted">This policy applies to unknown chats. Existing routes keep working.</p>
-          <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", "Secure pairing", "Approve each person or group before messages reach an agent."], ["public", "Public intake", "Every new private chat gets its own public conversation."], ["closed", "Invites only", "Ignore unknown chats; one-time invites still work."] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => {dirtyPolicyRef.current=true;setMode(value);}} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
-          <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">Lead agent for new conversations<select value={agentId} onChange={(event) => {dirtyPolicyRef.current=true;setAgentId(event.target.value);}} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select an agent</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation title prefix<input value={defaultTitle} onChange={(event) => {dirtyPolicyRef.current=true;setDefaultTitle(event.target.value);}} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
-          <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => {dirtyPolicyRef.current=true;setRequireMention(event.target.checked);}} className="mt-0.5" /><span><span className="font-medium text-text">Require a bot mention in groups</span><span className="mt-0.5 block text-text-dim">Recommended: ordinary group chatter does not trigger the agent.</span></span></label>
-          <label className="mt-3 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={connection.auto_name_enabled} onChange={(event) => setAutoName(event.target.checked)} disabled={busy !== ""} className="mt-0.5" /><span><span className="font-medium text-text">Show the sole agent’s name in Telegram</span><span className="mt-0.5 block text-text-dim">{connection.name_sync_error ? `Name update needs attention: ${connection.name_sync_error}` : connection.synced_bot_name ? `Telegram currently shows “${connection.synced_bot_name}”.` : connection.routed_agent_count > 1 ? `This bot routes to ${connection.routed_agent_count} agents, so Telegram keeps “${connection.original_bot_name || connection.name}”.` : "The original bot name is kept until this connection routes to exactly one agent."}</span></span></label>
-          <label className="mt-3 grid gap-1 text-xs text-text-muted sm:max-w-md"><span className="font-medium text-text">Response feedback</span><select value={connection.response_feedback || "live"} onChange={(event) => setResponseFeedback(event.target.value as "live" | "typing" | "off")} disabled={busy !== ""} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="live">Live preview (recommended)</option><option value="typing">Typing only</option><option value="off">Off</option></select><span className="text-text-dim">Private chats get Telegram’s native animated draft; groups show typing until the durable final message arrives.</span></label>
-          {mode === "public" && <div className="mt-4 rounded border border-warn bg-bg px-3 py-2 text-xs text-text-muted">Public intake accepts any private Telegram user and creates a public conversation. Pairing is safer for internal bots.</div>}
-          <div className="mt-4 flex justify-end"><button type="button" onClick={savePolicy} disabled={busy !== "" || !agentId} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "policy" ? "Saving…" : policy ? "Save & continue" : "Continue"}</button></div>
+          <h2 className="text-sm font-semibold text-text">{t("telegram.chooseAccess")}</h2><p className="mt-1 text-xs text-text-muted">{t("telegram.policyHint")}</p>
+          <div className="mt-4 grid gap-2 sm:grid-cols-3">{([ ["pairing", t("telegram.pairing"), t("telegram.pairingHint")], ["public", t("telegram.public"), t("telegram.publicHint")], ["closed", t("telegram.invitesOnly"), t("telegram.invitesOnlyHint")] ] as const).map(([value, title, description]) => <button key={value} type="button" aria-pressed={mode === value} onClick={() => {dirtyPolicyRef.current=true;setMode(value);}} className={`rounded border p-3 text-left ${mode === value ? "border-accent bg-bg-input" : "border-border bg-bg hover:bg-bg-input"}`}><span className="text-sm font-medium text-text">{title}</span><span className="mt-1 block text-xs leading-relaxed text-text-dim">{description}</span></button>)}</div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2"><label className="flex flex-col gap-1 text-xs text-text-muted">{t("telegram.leadAgent")}<select value={agentId} onChange={(event) => {dirtyPolicyRef.current=true;setAgentId(event.target.value);}} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">{t("telegram.selectAgent")}</option>{(selectableAgents.length ? selectableAgents : agents).map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">{t("telegram.titlePrefix")}<input value={defaultTitle} onChange={(event) => {dirtyPolicyRef.current=true;setDefaultTitle(event.target.value);}} maxLength={120} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label></div>
+          <label className="mt-4 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={requireMention} onChange={(event) => {dirtyPolicyRef.current=true;setRequireMention(event.target.checked);}} className="mt-0.5" /><span><span className="font-medium text-text">{t("telegram.requireMention")}</span><span className="mt-0.5 block text-text-dim">{t("telegram.mentionHint")}</span></span></label>
+          <label className="mt-3 flex items-start gap-2 text-xs text-text-muted"><input type="checkbox" checked={connection.auto_name_enabled} onChange={(event) => setAutoName(event.target.checked)} disabled={busy !== ""} className="mt-0.5" /><span><span className="font-medium text-text">{t("telegram.soleName")}</span><span className="mt-0.5 block text-text-dim">{connection.name_sync_error ? t("telegram.nameError", { error: connection.name_sync_error }) : connection.synced_bot_name ? t("telegram.currentName", { name: connection.synced_bot_name }) : connection.routed_agent_count > 1 ? t("telegram.sharedName", { count: connection.routed_agent_count, name: connection.original_bot_name || connection.name }) : t("telegram.keepName")}</span></span></label>
+          <label className="mt-3 grid gap-1 text-xs text-text-muted sm:max-w-md"><span className="font-medium text-text">{t("telegram.feedback")}</span><select value={connection.response_feedback || "live"} onChange={(event) => setResponseFeedback(event.target.value as "live" | "typing" | "off")} disabled={busy !== ""} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="live">{t("telegram.livePreview")}</option><option value="typing">{t("telegram.typingOnly")}</option><option value="off">{t("common.off")}</option></select><span className="text-text-dim">{t("telegram.previewHint")}</span></label>
+          {mode === "public" && <div className="mt-4 rounded border border-warn bg-bg px-3 py-2 text-xs text-text-muted">{t("telegram.publicWarning")}</div>}
+          <div className="mt-4 flex justify-end"><button type="button" onClick={savePolicy} disabled={busy !== "" || !agentId} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "policy" ? t("common.saving") : policy ? t("telegram.saveContinue") : t("common.continue")}</button></div>
         </section>}
 
         {setupStep === 3 && policy && <section className="rounded-md border border-border bg-bg-card p-4">
-          <h2 className="text-sm font-semibold text-text">Invite without asking for IDs</h2><p className="mt-1 text-xs text-text-muted">Telegram supplies the identity securely when a person opens the link or adds the bot to a group.</p>
-          <div className="mt-4 grid gap-3 sm:grid-cols-3"><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">Destination<select value={inviteConversation} onChange={(event) => setInviteConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Create a new conversation when opened</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title} ({item.audience})</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Invite type<select value={inviteKind} onChange={(event) => setInviteKind(event.target.value as "private" | "group")} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="private">Person</option><option value="group">Telegram group</option></select></label></div>
-          <div className="mt-3"><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "invite" ? "Creating…" : inviteKind === "group" ? "Create add-to-group link" : "Create Telegram invite"}</button></div>
-          {inviteURL ? <div className="mt-4 rounded border border-success bg-bg px-3 py-3" role="region" aria-label="Telegram invite ready"><div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-success text-xs font-bold text-bg">✓</span><div><p className="text-sm font-medium text-text">Invite ready</p><p className="text-xs text-text-dim">One use · expires {inviteExpiresAt ? `at ${new Date(inviteExpiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "after 15 minutes"}</p></div></div><input readOnly value={inviteURL} onFocus={(event) => event.currentTarget.select()} aria-label="Telegram invite URL" className="mt-3 w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text" /><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => navigator.clipboard.writeText(inviteURL).then(() => setNotice("Invite link copied."), () => setNotice("Select the link and copy it manually."))} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">Copy link</button><a href={inviteURL} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-accent hover:bg-bg-input">Open in Telegram ↗</a><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded px-3 py-2 text-xs text-text-muted hover:bg-bg-input disabled:opacity-40">Create another</button></div></div> : <p className="mt-2 text-xs text-text-dim">The link will appear here and remain visible until you change the destination or invite type.</p>}
+          <h2 className="text-sm font-semibold text-text">{t("telegram.inviteTitle")}</h2><p className="mt-1 text-xs text-text-muted">{t("telegram.identityHint")}</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-3"><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">{t("telegram.destination")}<select value={inviteConversation} onChange={(event) => setInviteConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">{t("telegram.createOnOpen")}</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title} ({statusLabel(item.audience || "operator")})</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">{t("telegram.inviteType")}<select value={inviteKind} onChange={(event) => setInviteKind(event.target.value as "private" | "group")} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="private">{t("telegram.person")}</option><option value="group">{t("telegram.group")}</option></select></label></div>
+          <div className="mt-3"><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{busy === "invite" ? t("common.creating") : inviteKind === "group" ? t("telegram.createGroupLink") : t("telegram.createInvite")}</button></div>
+          {inviteURL ? <div className="mt-4 rounded border border-success bg-bg px-3 py-3" role="region" aria-label={t("telegram.inviteReadyLabel")}><div className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full bg-success text-xs font-bold text-bg">✓</span><div><p className="text-sm font-medium text-text">{t("telegram.inviteReady")}</p><p className="text-xs text-text-dim">{t("telegram.inviteExpires", { expiry: inviteExpiresAt ? t("telegram.expiresAt", { time: dateTime(inviteExpiresAt, { hour: "2-digit", minute: "2-digit" }) }) : t("telegram.expiresLater") })}</p></div></div><input readOnly value={inviteURL} onFocus={(event) => event.currentTarget.select()} aria-label={t("telegram.inviteURL")} className="mt-3 w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text" /><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => navigator.clipboard.writeText(inviteURL).then(() => setNotice(noticeMessage("telegram.linkCopied")), () => setNotice(noticeMessage("telegram.copyManually")))} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input hover:text-text">{t("common.copyLink")}</button><a href={inviteURL} target="_blank" rel="noreferrer" className="rounded border border-border px-3 py-2 text-xs text-accent hover:bg-bg-input">{t("telegram.open")}</a><button type="button" onClick={createInvite} disabled={busy !== ""} className="rounded px-3 py-2 text-xs text-text-muted hover:bg-bg-input disabled:opacity-40">{t("common.createAnother")}</button></div></div> : <p className="mt-2 text-xs text-text-dim">{t("telegram.linkHint")}</p>}
         </section>}
 
-        {notice && <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">{notice}</div>}
+        {notice && <div className="rounded border border-border bg-bg px-3 py-2 text-xs text-text-muted" role="status">{typeof notice === "string" ? notice : t(notice.key, notice.params)}</div>}
 
         {currentRequests.length > 0 && <section className="rounded-md border border-accent bg-bg-card p-4">
-          <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-accent" /><h2 className="text-sm font-semibold text-text">Pending access requests</h2><span className="rounded bg-bg-input px-1.5 py-0.5 text-xs text-text-muted">{currentRequests.length}</span></div><p className="mt-1 text-xs text-text-muted">Message content stays private until approval; only identity and chat metadata are shown.</p>
-          <div className="mt-3 flex flex-col gap-2">{currentRequests.map((request) => <div key={request.id} className="rounded border border-border bg-bg p-3"><div className="flex items-start gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-bg-input text-sm font-semibold text-text">{request.display_name.slice(0, 1).toUpperCase()}</div><div className="min-w-0"><p className="text-sm font-medium text-text truncate">{request.chat_title || request.display_name}</p><p className="text-xs text-text-dim truncate">{request.username ? `@${request.username} · ` : ""}{request.chat_type || "private"} · request {request.pairing_code}</p></div></div><div className="mt-3 flex flex-col gap-2 sm:flex-row"><select value={requestTargets[request.id] ?? ""} onChange={(event) => setRequestTargets((current) => ({ ...current, [request.id]: event.target.value }))} className="min-w-0 flex-1 rounded border border-border bg-bg-input px-2.5 py-2 text-xs text-text"><option value="">Create a new operator conversation</option>{conversations.map((item) => <option key={item.id} value={item.id}>Bind to {item.title}</option>)}</select><button type="button" onClick={() => resolveRequest(request, "approve")} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">Approve</button><button type="button" onClick={() => resolveRequest(request, "dismiss")} disabled={busy !== ""} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input">Dismiss</button><button type="button" onClick={() => resolveRequest(request, "block")} disabled={busy !== ""} className="rounded px-2 py-2 text-xs text-error hover:bg-bg-input">Block</button></div></div>)}</div>
+          <div className="flex items-center gap-2"><span className="h-2 w-2 rounded-full bg-accent" /><h2 className="text-sm font-semibold text-text">{t("telegram.pendingRequests")}</h2><span className="rounded bg-bg-input px-1.5 py-0.5 text-xs text-text-muted">{currentRequests.length}</span></div><p className="mt-1 text-xs text-text-muted">{t("telegram.requestPrivacy")}</p>
+          <div className="mt-3 flex flex-col gap-2">{currentRequests.map((request) => <div key={request.id} className="rounded border border-border bg-bg p-3"><div className="flex items-start gap-3"><div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-bg-input text-sm font-semibold text-text">{request.display_name.slice(0, 1).toUpperCase()}</div><div className="min-w-0"><p className="text-sm font-medium text-text truncate">{request.chat_title || request.display_name}</p><p className="text-xs text-text-dim truncate">{request.username ? `@${request.username} · ` : ""}{statusLabel(request.chat_type || "private")} {t("telegram.request")} {request.pairing_code}</p></div></div><div className="mt-3 flex flex-col gap-2 sm:flex-row"><select value={requestTargets[request.id] ?? ""} onChange={(event) => setRequestTargets((current) => ({ ...current, [request.id]: event.target.value }))} className="min-w-0 flex-1 rounded border border-border bg-bg-input px-2.5 py-2 text-xs text-text"><option value="">{t("telegram.newOperator")}</option>{conversations.map((item) => <option key={item.id} value={item.id}>{t("telegram.bindTo")} {item.title}</option>)}</select><button type="button" onClick={() => resolveRequest(request, "approve")} disabled={busy !== ""} className="rounded bg-accent px-3 py-2 text-xs font-semibold text-bg disabled:opacity-40">{t("common.approve")}</button><button type="button" onClick={() => resolveRequest(request, "dismiss")} disabled={busy !== ""} className="rounded border border-border px-3 py-2 text-xs text-text-muted hover:bg-bg-input">{t("common.dismiss")}</button><button type="button" onClick={() => resolveRequest(request, "block")} disabled={busy !== ""} className="rounded px-2 py-2 text-xs text-error hover:bg-bg-input">{t("common.block")}</button></div></div>)}</div>
         </section>}
 
-        {currentBlocked.length > 0 && <section className="rounded-md border border-border bg-bg-card p-4"><h2 className="text-sm font-semibold text-text">Blocked senders</h2><p className="mt-1 text-xs text-text-muted">Blocked chats stay silent until you allow them to request access again.</p><div className="mt-3 flex flex-col gap-2">{currentBlocked.map((request) => <div key={request.id} className="flex items-center gap-3 rounded border border-border bg-bg px-3 py-2"><div className="min-w-0"><p className="text-sm text-text truncate">{request.chat_title || request.display_name}</p><p className="text-xs text-text-dim">{request.username ? `@${request.username} · ` : ""}{request.chat_type || "private"}</p></div><button type="button" onClick={() => resolveRequest(request, "unblock")} disabled={busy !== ""} className="ml-auto rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text">Allow requests</button></div>)}</div></section>}
+        {currentBlocked.length > 0 && <section className="rounded-md border border-border bg-bg-card p-4"><h2 className="text-sm font-semibold text-text">{t("telegram.blockedSenders")}</h2><p className="mt-1 text-xs text-text-muted">{t("telegram.blockedHint")}</p><div className="mt-3 flex flex-col gap-2">{currentBlocked.map((request) => <div key={request.id} className="flex items-center gap-3 rounded border border-border bg-bg px-3 py-2"><div className="min-w-0"><p className="text-sm text-text truncate">{request.chat_title || request.display_name}</p><p className="text-xs text-text-dim">{request.username ? `@${request.username} · ` : ""}{statusLabel(request.chat_type || "private")}</p></div><button type="button" onClick={() => resolveRequest(request, "unblock")} disabled={busy !== ""} className="ml-auto rounded border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text">{t("telegram.allowRequests")}</button></div>)}</div></section>}
 
-        <section className="rounded-md border border-border bg-bg-card p-4"><h2 className="text-sm font-semibold text-text">Connected Telegram chats</h2><p className="mt-1 text-xs text-text-muted">Every route points to an ordinary Conversations conversation.</p>{currentBindings.length === 0 ? <div className="mt-3 rounded border border-border bg-bg px-3 py-3 text-xs text-text-muted">No chats connected yet. Message the bot, approve a request, or share an invite.</div> : <div className="mt-3 flex flex-col gap-2">{currentBindings.map((binding) => <div key={binding.id} className="flex items-center gap-3 rounded border border-border bg-bg px-3 py-2"><div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-bg-input text-accent"><Glyph d={GLYPH_CHAT} size={14} /></div><div className="min-w-0"><p className="text-sm text-text truncate">{binding.chat_title || (binding.chat_username ? `@${binding.chat_username}` : "Telegram chat")}</p><p className="text-xs text-text-dim truncate">{binding.conversation_title || binding.conversation_id} · {binding.audience || "operator"} · {binding.access_mode || "manual"}{binding.require_mention ? " · mention only" : ""}</p></div><button type="button" onClick={() => removeBinding(binding)} disabled={busy !== ""} className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-error" aria-label="Disconnect Telegram chat"><Glyph d={GLYPH_TRASH} size={14} /></button></div>)}</div>}</section>
+        <section className="rounded-md border border-border bg-bg-card p-4"><h2 className="text-sm font-semibold text-text">{t("telegram.connectedChats")}</h2><p className="mt-1 text-xs text-text-muted">{t("telegram.routesHint")}</p>{currentBindings.length === 0 ? <div className="mt-3 rounded border border-border bg-bg px-3 py-3 text-xs text-text-muted">{t("telegram.noChats")}</div> : <div className="mt-3 flex flex-col gap-2">{currentBindings.map((binding) => <div key={binding.id} className="flex items-center gap-3 rounded border border-border bg-bg px-3 py-2"><div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-bg-input text-accent"><Glyph d={GLYPH_CHAT} size={14} /></div><div className="min-w-0"><p className="text-sm text-text truncate">{binding.chat_title || (binding.chat_username ? `@${binding.chat_username}` : t("telegram.chat"))}</p><p className="text-xs text-text-dim truncate">{binding.conversation_title || binding.conversation_id} · {statusLabel(binding.audience || "operator")} · {statusLabel(binding.access_mode || "manual")}{binding.require_mention ? t("telegram.mentionOnly") : ""}</p></div><button type="button" onClick={() => removeBinding(binding)} disabled={busy !== ""} className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-error" aria-label={t("telegram.disconnectChat")}><Glyph d={GLYPH_TRASH} size={14} /></button></div>)}</div>}</section>
 
-        {connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4"><button type="button" onClick={() => setAdvancedOpen((open) => !open)} className="flex w-full items-center justify-between text-left text-sm text-text-muted"><span>Advanced manual routing</span><span>{advancedOpen ? "−" : "+"}</span></button>{advancedOpen && <form onSubmit={createManualBinding} className="mt-4 grid gap-3 sm:grid-cols-2"><p className="text-xs text-text-dim sm:col-span-2">Recovery-only: bind known numeric IDs directly. The guided flow is preferred.</p><label className="flex flex-col gap-1 text-xs text-text-muted">Conversation<select value={manualConversation} onChange={(event) => setManualConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">Select a conversation</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">Telegram chat ID<input value={manualChat} onChange={(event) => setManualChat(event.target.value)} placeholder="123456789 or -100…" className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">Allowed user IDs<input value={manualUsers} onChange={(event) => setManualUsers(event.target.value)} placeholder="Comma-separated; optional for public conversations" className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={busy !== "" || !manualConversation || !manualChat.trim()} className="rounded border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">{busy === "manual" ? "Binding…" : "Create manual route"}</button></div></form>}</section>}
+        {connection?.enabled && <section className="rounded-md border border-border bg-bg-card p-4"><button type="button" onClick={() => setAdvancedOpen((open) => !open)} className="flex w-full items-center justify-between text-left text-sm text-text-muted"><span>{t("telegram.advanced")}</span><span>{advancedOpen ? "−" : "+"}</span></button>{advancedOpen && <form onSubmit={createManualBinding} className="mt-4 grid gap-3 sm:grid-cols-2"><p className="text-xs text-text-dim sm:col-span-2">{t("telegram.advancedHint")}</p><label className="flex flex-col gap-1 text-xs text-text-muted">{t("chat.conversation")}<select value={manualConversation} onChange={(event) => setManualConversation(event.target.value)} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text"><option value="">{t("telegram.selectConversation")}</option>{conversations.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}</select></label><label className="flex flex-col gap-1 text-xs text-text-muted">{t("telegram.chatID")}<input value={manualChat} onChange={(event) => setManualChat(event.target.value)} placeholder={t("telegram.chatIDPlaceholder")} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><label className="flex flex-col gap-1 text-xs text-text-muted sm:col-span-2">{t("telegram.allowedUsers")}<input value={manualUsers} onChange={(event) => setManualUsers(event.target.value)} placeholder={t("telegram.allowedUsersHint")} className="rounded border border-border bg-bg-input px-2.5 py-2 text-sm text-text" /></label><div className="sm:col-span-2 flex justify-end"><button type="submit" disabled={busy !== "" || !manualConversation || !manualChat.trim()} className="rounded border border-border px-3 py-2 text-xs text-text hover:bg-bg-input disabled:opacity-40">{busy === "manual" ? t("telegram.binding") : t("telegram.createRoute")}</button></div></form>}</section>}
 
       </div>
     </div>
@@ -1852,6 +1857,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 // ─── root panel ──────────────────────────────────────────────────────
 
 export default function ConversationsPanel({ projectId, instanceId }: NativePanelProps) {
+  const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -1952,15 +1958,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
       <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
         <div>
-          <h1 className="text-sm font-semibold">Conversations</h1>
-          <p className="text-xs text-text-muted">Chat, inbox, and optional Telegram delivery in one durable system.</p>
+          <h1 className="text-sm font-semibold">{t("panel.title")}</h1>
+          <p className="text-xs text-text-muted">{t("panel.description")}</p>
         </div>
         <nav className="ml-auto flex items-center gap-1">
           {(
             [
-              { id: "chats", label: "Chats", glyph: GLYPH_CHAT },
-              { id: "inbox", label: "Inbox", glyph: GLYPH_INBOX },
-              { id: "telegram", label: "Telegram", glyph: GLYPH_CHAT },
+              { id: "chats", label: t("panel.chats"), glyph: GLYPH_CHAT },
+              { id: "inbox", label: t("inbox.title"), glyph: GLYPH_INBOX },
+              { id: "telegram", label: t("panel.telegram"), glyph: GLYPH_CHAT },
             ] as const
           ).map((entry) => (
             <button
@@ -2012,7 +2018,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 className="inline-flex items-center gap-1.5 rounded bg-accent px-2.5 py-1.5 text-xs font-semibold text-bg"
               >
                 <Glyph d={GLYPH_PLUS} size={13} />
-                New conversation
+                {t("chat.new")}
               </button>
               <button
                 type="button"
@@ -2025,15 +2031,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                     ? "bg-bg-input text-text"
                     : "text-text-muted hover:bg-bg-input hover:text-text"
                 }`}
-                aria-label="Archived conversations"
-                title={showArchived ? "Back to active conversations" : "Archived conversations"}
+                aria-label={t("chat.archivedTitle")}
+                title={showArchived ? t("chat.backToActive") : t("chat.archivedTitle")}
               >
                 <Glyph d={GLYPH_ARCHIVE} size={15} />
               </button>
             </div>
             {showArchived && (
               <div className="shrink-0 border-b border-border px-3 py-1.5 text-xs text-text-muted">
-                Archived
+                {t("common.archived")}
               </div>
             )}
             <div className="flex-1 min-h-0 overflow-auto">
@@ -2042,10 +2048,10 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 <span className="text-text-dim">
                   <Glyph d={showArchived ? GLYPH_ARCHIVE : GLYPH_CHAT} size={28} />
                 </span>
-                <p>{showArchived ? "No archived conversations." : "No conversations yet."}</p>
+                <p>{showArchived ? t("chat.noArchived") : t("chat.noConversations")}</p>
                 {!showArchived && (
                   <p className="text-xs text-text-dim">
-                    Start one with New conversation, or wait for an agent or app to open one.
+                    {t("chat.createHint")}
                   </p>
                 )}
               </div>
@@ -2069,7 +2075,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                           {(attentionByConv.get(c.id) ?? 0) > 0 && (
                             <span
                               className={`w-2 h-2 rounded-full shrink-0 ${attentionDotClass(attentionByConv.get(c.id) ?? 0)}`}
-                              title="Pending inbox item"
+                              title={t("inbox.pendingItem")}
                             />
                           )}
                           <span className="text-sm font-medium text-text truncate">{c.title}</span>
@@ -2081,7 +2087,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                         </div>
                         <div className="mt-1 flex items-center gap-2 text-xs text-text-dim">
                           <span className="truncate">
-                            {c.lead_agent_name || `agent ${c.lead_agent_id}`}
+                            {c.lead_agent_name || t("chat.agentName", { id: String(c.lead_agent_id) })}
                           </span>
                           {c.audience === "public" && <PublicTag />}
                           {c.origin !== "web" && c.origin !== "app" && (
@@ -2090,9 +2096,9 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                             </span>
                           )}
                           {c.kind === "room" && (
-                            <span className="px-1.5 py-0.5 rounded bg-bg border border-border">room</span>
+                            <span className="px-1.5 py-0.5 rounded bg-bg border border-border">{t("chat.room")}</span>
                           )}
-                          <span className="ml-auto shrink-0">{relTime(c.updated_at)}</span>
+                          <span className="ml-auto shrink-0">{relativeTime(c.updated_at)}</span>
                         </div>
                       </button>
                     </li>
@@ -2119,7 +2125,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               <span className="text-text-dim">
                 <Glyph d={GLYPH_CHECK} size={32} />
               </span>
-              <p className="text-sm">Select a conversation.</p>
+              <p className="text-sm">{t("chat.select")}</p>
             </section>
           )}
           {hasContextColumn && selected && (

@@ -1,3 +1,5 @@
+import { type ConversationLocalization } from "../frontend/src/i18n";
+import { ConversationThread, ReportCard, AlertCard, ConversationLocalizationProvider } from "../frontend/src/react";
 import "./testDom";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
@@ -11,8 +13,8 @@ import { conversationsExtension, type ConversationsClient } from "../frontend/sr
 import { ConversationsProvider } from "../frontend/src/context";
 import type { ComponentProps } from "react";
 let conversations: ConversationsClient;
-function ConversationChat(props: ComponentProps<typeof ChatSource>) {
- return <ConversationsProvider conversations={conversations}><ChatSource {...props}/></ConversationsProvider>;
+function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization) {
+ return <ConversationsProvider conversations={conversations} locale={props.locale} timeZone={props.timeZone} messages={props.messages}><ChatSource {...props}/></ConversationsProvider>;
 }
 let win: Window, root: Root, element: HTMLElement;
 let fetcher: (url:string, init?:RequestInit) => Promise<Response>;
@@ -164,4 +166,65 @@ test("changing the SDK client resets displayed history and drafts before the new
  await render();
  expect(element.textContent).not.toContain("first user history");
  expect(element.querySelector("textarea")!.value).toBe("");
+});
+
+test("exported thread changes locale and copy without replacing the draft, stream, or subscription", async () => {
+ const renderThread = async (locale: string, messages?: ConversationLocalization["messages"]) => {
+  await act(async () => root.render(<ConversationThread conversations={conversations} conversation={conv("a")} locale={locale} messages={messages}/>));
+  await settle();
+ };
+ await renderThread("en");
+ expect(element.textContent).toContain("No messages yet — say something.");
+ await act(async () => FakeEvents.instances[0].listeners.get("open")?.({data:""}));
+ expect(element.querySelector("textarea")!.placeholder).toBe("Message the agent…");
+ await type("Mon brouillon");
+ const input = element.querySelector("textarea")!;
+ const eventSource = FakeEvents.instances[0];
+ await renderThread("fr-FR", { "chat.empty": "Bienvenue <img src=x onerror=alert(1)>" });
+ expect(element.querySelector("textarea")).toBe(input);
+ expect(input.value).toBe("Mon brouillon");
+ expect(input.placeholder).toBe("Écrivez à l’agent…");
+ expect(element.querySelector('[aria-label="Envoyer"]')).not.toBeNull();
+ expect(element.querySelector('[lang="fr-FR"]')).not.toBeNull();
+ expect(element.textContent).toContain("Bienvenue <img src=x onerror=alert(1)>");
+ expect(element.querySelector("img")).toBeNull();
+ await act(async () => eventSource.listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"locale-stream",run_id:"1",text:"Original agent response"})}));
+ await renderThread("es-ES");
+ expect(element.textContent).toContain("Original agent response");
+ expect(element.querySelector("textarea")).toBe(input);
+ expect(input.value).toBe("Mon brouillon");
+ expect(input.placeholder).toBe("Escribe al agente…");
+ expect(FakeEvents.instances).toEqual([eventSource]);
+});
+
+test("localization providers and individual surfaces isolate overrides and preserve authored card content", async () => {
+ const report = {...message(10), role:"agent", component_kind:"report", components:[{app:"conversations",name:"report-card",props:{title:"Original report title",summary:"Original report content"}}]} as any;
+ const alert = {...message(11), role:"agent", component_kind:"alert", components:[{app:"conversations",name:"alert-card",props:{text:"Original alert",severity:"warn"}}]} as any;
+ await act(async () => root.render(<>
+  <ConversationLocalizationProvider locale="fr" messages={{"card.report":"Compte rendu"}}>
+   <section id="french"><ReportCard message={report}/></section>
+   <section id="spanish"><ReportCard message={report} locale="es" messages={{"card.report":"Informe propio"}}/></section>
+   <section id="alert"><AlertCard message={alert}/></section>
+  </ConversationLocalizationProvider>
+  <section id="english"><ReportCard message={report}/></section>
+ </>));
+ expect(element.querySelector("#french")!.textContent).toContain("Compte rendu");
+ expect(element.querySelector("#spanish")!.textContent).toContain("Informe propio");
+ expect(element.querySelector("#english")!.textContent).toContain("Report");
+ expect(element.querySelector("#alert")!.textContent).toContain("avertissement");
+ for (const id of ["french","spanish","english"]) expect(element.querySelector(`#${id}`)!.textContent).toContain("Original report content");
+});
+
+test("soft break copy describes an advisory request and existing send failures follow locale changes", async () => {
+ fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?Promise.reject(new Error("lost response")):url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ await render();
+ await act(async () => FakeEvents.instances[0].listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"active",run_id:"1",text:"Working"})}));
+ const breakButton=element.querySelector('[aria-label="Ask the agent to pause and reconsider"]')!;
+ expect(breakButton.getAttribute("title")).toContain("it does not stop the agent or cancel running work");
+ await type("Request"); await send(); await settle();
+ expect(element.textContent).toContain("Send was not confirmed.");
+ await act(async () => root.render(<ConversationChat key="a" conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}} locale="fr"/>));
+ expect(element.textContent).toContain("L’envoi n’a pas été confirmé.");
+ expect(element.textContent).toContain("lost response");
+ expect(element.querySelector("textarea")!.value).toBe("Request");
 });

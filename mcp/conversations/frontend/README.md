@@ -65,6 +65,68 @@ a stable `client_message_id`; preserve the entire request when retrying an
 uncertain response. REST change pages own the durable replay cursor. SSE stream
 frames remain ephemeral and cannot advance that cursor or suppress later edits.
 
+## Localization and host wording
+
+All eight exported surfaces accept optional `locale`, `timeZone`, and `messages`
+props. This includes `conversation-chat`, `agent-conversations`,
+`conversation-thread`, `conversations-panel`, `inbox-overview`, and the three cards.
+No Web SDK change or extra frontend dependency is required:
+
+```tsx
+const Chat = loaded.components["conversation-chat"];
+<Chat
+  conversations={loaded.client}
+  agentId={agentId}
+  locale="fr-FR"
+  timeZone="Europe/Paris"
+  messages={{
+    "chat.empty": "Aucun message pour le moment. Comment puis-je vous aider ?",
+    "chat.placeholder": "Écrivez votre message…",
+  }}
+/>
+```
+
+English remains the default. Bundled dictionaries cover English, French, and
+Spanish, including dialogs, inbox/card chrome, accessibility text, and Telegram
+administration. Regional locales such as `fr-CA` use the French dictionary while
+retaining regional number/date formatting. Unsupported languages fall back to
+English copy; invalid locale tags fall back to `en`. Absolute timestamps use the
+supplied IANA timezone, or the browser timezone when omitted/invalid. Relative
+times and plurals use `Intl` with the selected locale.
+
+`messages` overrides individual stable keys; missing keys use the selected
+language, then English. An empty string is a valid override. Strings are rendered
+as text, never HTML. Keys and bundled translations are in `src/locales.ts` and
+`src/telegramLocales.ts`. Common host overrides include `chat.empty`,
+`chat.placeholder`, `chat.reconnectingPlaceholder`, `chat.history`, `chat.new`,
+`chat.send`, and `inbox.caughtUp`.
+
+Messages with parameters use `{name}` or `{count}`. For plural copy, provide an
+object with `other` and optional CLDR categories (`zero`, `one`, `two`, `few`,
+`many`), for example:
+
+```tsx
+messages={{
+  "inbox.count": { one: "{count} demande", other: "{count} demandes" },
+}}
+```
+
+The host owns the current language and its override dictionary. Pass updated
+props when the user changes language; keep `loaded.client` and component keys
+stable. Updating localization does not reload the app, reset drafts, or restart
+chat subscriptions. The example hosts demonstrate live language switching.
+Settings are scoped to each mounted surface, so separate users/embeds do not
+share a global locale. Source consumers can also use
+`ConversationLocalizationProvider` or the localization props on
+`ConversationsProvider`; nested component props override inherited settings.
+The dashboard wrappers accept the same props. Connecting them to the dashboard's
+language preference is a separate host change.
+
+Localization applies to UI chrome. Authored chat content, conversation titles,
+reports, custom approval action labels, and server-provided error details are
+preserved. It does not change agent instructions, generated response language,
+API enum values, or the default stored Telegram conversation-title prefix.
+
 ## Application-user boundary
 
 Application-user credentials are platform-issued tokens, not arbitrary Auth JWTs.
@@ -92,7 +154,7 @@ origin in the issuer policy; dashboard session cookies stay on the dashboard.
 ## Validation
 
 ```sh
-bun test mcp/conversations/ui mcp/conversations/frontend/tests/client.test.ts
+bun test mcp/conversations/ui mcp/conversations/frontend/tests/client.test.ts mcp/conversations/frontend/tests/localization.test.ts
 bunx --no-install tsc -p mcp/conversations/tsconfig.json
 bun run scripts/build-panels.ts --app conversations
 bunx --no-install playwright test -c mcp/conversations/frontend/playwright.config.ts

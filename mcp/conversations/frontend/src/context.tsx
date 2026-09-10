@@ -1,10 +1,11 @@
+import { ConversationLocalizationProvider, type ConversationLocalization } from "./i18n";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { ConversationsClient } from "./client";
 
 const Context = createContext<{ client: ConversationsClient; legacyDrafts: boolean } | null>(null);
-export function ConversationsProvider({ conversations, children, legacyDrafts = false }: { conversations: ConversationsClient; children: ReactNode; legacyDrafts?: boolean }) {
+export function ConversationsProvider({ conversations, children, legacyDrafts = false, locale, timeZone, messages }: ConversationLocalization & { conversations: ConversationsClient; children: ReactNode; legacyDrafts?: boolean }) {
   const value = useMemo(() => ({ client: conversations, legacyDrafts }), [conversations, legacyDrafts]);
-  return <Context.Provider key={conversations.instanceKey} value={value}>{children}</Context.Provider>;
+  return <ConversationLocalizationProvider locale={locale} timeZone={timeZone} messages={messages}><Context.Provider key={conversations.instanceKey} value={value}>{children}</Context.Provider></ConversationLocalizationProvider>;
 }
 export function useConversationAPI() {
   const context = useContext(Context);
