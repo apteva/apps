@@ -25,13 +25,14 @@ type Principal struct {
 }
 
 type authorizerPolicy struct {
-	Kind     string   `json:"kind"`
-	Provider string   `json:"provider,omitempty"`
-	App      string   `json:"app,omitempty"`
-	Path     string   `json:"path,omitempty"`
-	Issuer   string   `json:"issuer,omitempty"`
-	TenantID string   `json:"tenant_id,omitempty"`
-	Claims   []string `json:"claims,omitempty"`
+	FunctionIDs []int64  `json:"function_ids,omitempty"`
+	Kind        string   `json:"kind"`
+	Provider    string   `json:"provider,omitempty"`
+	App         string   `json:"app,omitempty"`
+	Path        string   `json:"path,omitempty"`
+	Issuer      string   `json:"issuer,omitempty"`
+	TenantID    string   `json:"tenant_id,omitempty"`
+	Claims      []string `json:"claims,omitempty"`
 }
 
 var authorizerName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,63}$`)
@@ -50,7 +51,7 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	}
 	for name, value := range obj {
 		switch name {
-		case "kind", "provider", "app", "path", "issuer", "tenant_id", "claims":
+		case "kind", "provider", "app", "path", "issuer", "tenant_id", "claims", "function_ids":
 		default:
 			return policy, errors.New("unsupported auth field: " + name)
 		}
@@ -61,8 +62,24 @@ func parseAuthPolicy(raw string) (authorizerPolicy, error) {
 	if len(obj) > 0 && obj["kind"] == nil {
 		return policy, errors.New("auth.kind is required")
 	}
+	if len(policy.FunctionIDs) > 100 {
+		return policy, errors.New("auth.function_ids accepts at most 100 Function IDs")
+	}
+	seenIDs := map[int64]bool{}
+	for _, id := range policy.FunctionIDs {
+		if id <= 0 || seenIDs[id] {
+			return policy, errors.New("auth.function_ids must contain unique positive Function IDs")
+		}
+		seenIDs[id] = true
+	}
 	switch policy.Kind {
-	case "public", "api_key":
+	case "api_key":
+		for key := range obj {
+			if key != "kind" && key != "function_ids" {
+				return policy, errors.New("api_key accepts only kind and function_ids")
+			}
+		}
+	case "public":
 		if len(obj) > 1 {
 			return policy, errors.New("this auth kind does not accept authorizer settings")
 		}
@@ -125,7 +142,7 @@ func safeClaimName(name string) bool {
 		}
 	}
 	switch low {
-	case "issuer", "iss", "subject", "sub", "project_id", "tenant_id", "principal", "authorization", "auth":
+	case "issuer", "iss", "subject", "sub", "project_id", "tenant_id", "principal", "authorization", "auth", "function_ids":
 		return false
 	}
 	return true
@@ -317,13 +334,14 @@ func authPolicySchema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"description": "Empty route auth inherits API auth; otherwise replaces the full policy. authorizer selects provider auth or a bound app implementing the authorizer contract. Claims are an explicit allowlist; no claims by default.",
 		"properties": map[string]any{
-			"kind":      map[string]any{"type": "string", "enum": []string{"public", "api_key", "auth_jwt", "authorizer"}},
-			"provider":  map[string]any{"type": "string", "enum": []string{"auth", "app"}},
-			"app":       map[string]any{"type": "string", "description": "Installed and bound authorizer app name (provider=app)."},
-			"path":      map[string]any{"type": "string", "description": "Absolute POST endpoint on the authorizer app (provider=app)."},
-			"issuer":    map[string]any{"type": "string", "description": "Required expected issuer (provider=app)."},
-			"tenant_id": map[string]any{"type": "string", "description": "Optional required tenant; Auth uses the organization slug."},
-			"claims":    map[string]any{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"kind":         map[string]any{"type": "string", "enum": []string{"public", "api_key", "auth_jwt", "authorizer"}},
+			"provider":     map[string]any{"type": "string", "enum": []string{"auth", "app"}},
+			"app":          map[string]any{"type": "string", "description": "Installed and bound authorizer app name (provider=app)."},
+			"path":         map[string]any{"type": "string", "description": "Absolute POST endpoint on the authorizer app (provider=app)."},
+			"issuer":       map[string]any{"type": "string", "description": "Required expected issuer (provider=app)."},
+			"tenant_id":    map[string]any{"type": "string", "description": "Optional required tenant; Auth uses the organization slug."},
+			"function_ids": map[string]any{"type": "array", "maxItems": 100, "uniqueItems": true, "items": map[string]any{"type": "integer", "minimum": 1}, "description": "Exact permitted Function IDs including the root and nested targets. Required for authenticated Function routes; never taken from the request or authorizer response."},
+			"claims":       map[string]any{"type": "array", "maxItems": 32, "uniqueItems": true, "items": map[string]any{"type": "string"}},
 		},
 	}
 }

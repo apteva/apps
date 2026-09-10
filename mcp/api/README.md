@@ -101,7 +101,9 @@ and [PERFORMANCE.md](PERFORMANCE.md) for reproducible measurements.
 - App targets require an installed, bound app, declared dependency, or the
   optional `upstream` integration binding. Creation checks its `/health`
   callback. Dispatch uses the outbound token and resolved project through the
-  platform's bound-app callback. Function routes use the same callback contract.
+  platform's bound-app callback. Public Function routes use that HTTP callback contract. Authenticated
+  Function routes use the app-only `functions_invoke_authenticated` MCP
+  callback with configured `auth.function_ids`; see [AUTHORIZATION.md](AUTHORIZATION.md).
 - Lower route priority wins; at equal priority, literal segments beat named
   parameters, which beat terminal `*`; exact methods beat `ANY` for equal
   path specificity. Exact paths beat a catch-all with an empty suffix. Zero

@@ -10,7 +10,7 @@ the verified principal and permitted claims.
 Pass `auth` to `api_create`, `api_update`, or `api_route_add`, or use the API
 panel's authentication controls. An empty route policy `{}` inherits the API
 policy. Any nonempty route policy replaces it completely, including provider,
-tenant restriction, and claim allowlist.
+tenant restriction, claim allowlist, and permitted Function IDs.
 
 Existing `public`, `api_key`, and `auth_jwt` policies remain supported.
 `auth_jwt` is the compatibility name for the Auth provider. New configuration:
@@ -20,7 +20,8 @@ Existing `public`, `api_key`, and `auth_jwt` policies remain supported.
   "kind": "authorizer",
   "provider": "auth",
   "tenant_id": "example-organization",
-  "claims": ["roles", "permissions", "authorization_version"]
+  "claims": ["roles", "permissions", "authorization_version"],
+  "function_ids": [12, 34]
 }
 ```
 
@@ -48,7 +49,13 @@ A route chooses its Function independently:
   "target_kind": "function",
   "target_ref": "update-item",
   "timeout_ms": 30000,
-  "auth": {}
+  "auth": {
+    "kind": "authorizer",
+    "provider": "auth",
+    "tenant_id": "example-organization",
+    "claims": ["roles", "permissions"],
+    "function_ids": [12, 34]
+  }
 }
 ```
 
@@ -66,7 +73,8 @@ authorizers. The platform enforces authenticated app-to-app calls and bindings.
   "path": "/authorize",
   "issuer": "https://identity.example.com",
   "tenant_id": "tenant-a",
-  "claims": ["roles", "permissions"]
+  "claims": ["roles", "permissions"],
+  "function_ids": [12, 34]
 }
 ```
 
@@ -105,55 +113,120 @@ providers and timeouts fail closed. Authorizer requests have a five-second
 maximum and honor earlier request deadlines and browser cancellation.
 Authenticated `app_events` streams also close at the returned identity expiry.
 
-## Trusted Function envelope
+## Trusted Function admission
 
-API constructs a new event and invokes the existing protected Functions
-`/fn/<name>` interface through the authenticated platform bound-app proxy.
-Browser JSON is nested under `body`; it is never merged into the outer event.
-Non-JSON text is passed as a string body; an empty body is `null`.
-The outbound app credential stays in the transport, outside the event.
+Authenticated Function routes (Auth, custom authorizer, or API key) invoke
+`functions_invoke_authenticated` through
+`POST /api/apps/callback/apps/functions/call`. API sends its outbound app token;
+the platform validates the installation, binding, permission, and project before
+minting verified caller headers. API never supplies caller-installation headers
+or accepts a browser-supplied caller ID.
+
+`auth.function_ids` is an explicit list of 1–100 unique positive IDs including
+the named root Function and every permitted nested target. It comes only from
+configuration, never from the authorizer response or browser input. Route
+policies replace the whole API auth policy; `{}` inherits it. Empty scope is
+not a wildcard or an automatic root grant. Missing scope fails closed, and an
+out-of-scope root is rejected by Functions before execution.
+
+Each target Function needs an `invocation_policy` configured through Functions:
 
 ```json
 {
-  "method": "POST",
-  "path": "/items/42",
-  "query": { "view": "summary" },
-  "params": { "id": "42" },
-  "headers": { "Content-Type": "application/json", "Last-Event-Id": "cursor-7" },
-  "body": { "name": "Updated item" },
-  "raw_body": "{\"name\":\"Updated item\"}",
-  "principal": {
-    "issuer": "apteva:auth:example-organization",
-    "subject": "123",
-    "project_id": "project-id",
-    "tenant_id": "example-organization",
-    "claims": { "roles": ["editor"] }
-  },
-  "auth": { "kind": "authorizer", "subject": "123" },
-  "request_id": "gateway-generated-request-id",
-  "deadline": "2026-09-10T17:00:30Z",
-  "received_at": "2026-09-10T17:00:00Z"
+  "require_authenticated": true,
+  "authenticated_callers": [
+    {
+      "installation_id": 42,
+      "issuers": ["apteva:auth:example-organization"]
+    }
+  ]
 }
 ```
 
-`principal`, `auth`, `request_id`, and `deadline` belong to API. Identically
-named browser fields remain untrusted data inside `body` or `query`. Read
-identity from `event.principal`, never `event.body.principal` or request headers.
-Existing `event.auth.kind` / `event.auth.subject` are retained for compatibility.
-Public routes have `principal: null`. API-key principals use issuer `apteva:api`,
-subject `api_key:<key-id>` and the gateway project; the actual key is never copied.
+Use the real API installation ID and exact verified issuer. Configure nested
+Functions separately. `require_authenticated: true` closes alternative ordinary
+invocation paths for that Function. Functions still enforces its outbound access
+policy for nested calls. See [Functions' trusted invocation contract](../functions/TRUSTED_INVOCATIONS.md).
+
+API sends identity separately from the request event:
+
+```json
+{
+  "tool": "functions_invoke_authenticated",
+  "input": {
+    "name": "update-item",
+    "_project_id": "project-id",
+    "principal": {
+      "issuer": "apteva:auth:example-organization",
+      "subject": "123",
+      "project_id": "project-id",
+      "function_ids": [12, 34],
+      "claims": {"tenant_id": "example-organization", "roles": ["editor"]}
+    },
+    "request_id": "gateway-generated-request-id",
+    "deadline": "2026-09-10T17:00:30Z",
+    "event": {
+      "method": "POST",
+      "path": "/items/42",
+      "query": {"view": "summary"},
+      "params": {"id": "42"},
+      "headers": {"Content-Type": "application/json", "Last-Event-Id": "cursor-7"},
+      "body": {"name": "Updated item"},
+      "raw_body": "{\"name\":\"Updated item\"}",
+      "auth": {"kind": "authorizer", "subject": "123"},
+      "request_id": "gateway-generated-request-id",
+      "deadline": "2026-09-10T17:00:30Z",
+      "received_at": "2026-09-10T17:00:00Z"
+    }
+  }
+}
+```
+
+Functions constructs the authoritative handler context after admission:
+
+```js
+const { principal, claims } = event.requestContext.authorizer;
+// principal.subject, issuer, project_id, function_ids
+// claims.tenant_id and the explicitly allowed authorization claims
+```
+
+API maps verified tenant identity to reserved `principal.claims.tenant_id`
+because the Functions principal schema carries tenant information in claims.
+An arbitrary provider claim cannot overwrite this field. Application claims
+still require an explicit allowlist. API-key identity uses issuer `apteva:api`,
+subject `api_key:<key-id>`, and the gateway project, without copying the key.
+
+Browser JSON remains nested under `body`; it is never merged into the event or
+invocation arguments. Non-JSON text is a string body; an empty body is `null`.
+Identically named browser fields such as principal, function_ids, deadline or
+requestContext remain untrusted body/query data. Read identity exclusively from
+`event.requestContext.authorizer`, not `event.body` or the legacy `event.auth`.
+The old top-level `event.principal` is not sent on authenticated invocations.
 
 Authorization, cookies, API keys, hop-by-hop, forwarding and reserved identity
 headers are removed. Platform routing and API-key query parameters are removed.
-Other body and query data are passed as application input. The deadline covers
-authorization and upstream work for ordinary routes; streaming and cancellation
-continue through the existing transport.
+Business body fields remain opaque application data, including fields named
+password or token; they never become invocation identity. Functions rejects
+credential fields in identity claims and omits authenticated bodies from its
+invocation history.
+The original deadline bounds authentication, transport and execution; browser
+cancellation cancels the MCP callback. API unwraps the tool result and preserves
+nonstreaming Function responses, including structured status, headers and body.
+Tool/admission errors fail closed and never fall back to `/fn`.
 
-This envelope is trusted because API constructs it on an authenticated
-invocation path. It is not a signed assertion valid on arbitrary entry points.
-A Function exposing an additional public Function URL must separately secure
-that entry point and must not accept a browser-supplied principal as verified.
-No changes to Functions are required to consume the event.
+### Migration and streaming
+
+This path requires Functions **1.14.1 or newer** and a platform that supplies
+verified bound-caller headers. Existing authenticated Function routes must add
+`auth.function_ids` and configure their targets' trusted callers before use.
+Handlers that used `event.principal` must switch to the authoritative context
+above. No Function scope is inferred from a name or expanded automatically.
+
+The current authenticated MCP tool returns a buffered result; it does not expose
+live HTTP streaming. Authenticated handlers should return ordinary or structured
+nonstreaming responses. Public Function routes continue using the existing
+`/fn/<name>` path, including streaming, and `app_events` remains unchanged.
+There is no legacy fallback when an authenticated invocation fails.
 
 ## CORS and resumable streams
 

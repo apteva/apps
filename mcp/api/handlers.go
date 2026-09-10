@@ -504,6 +504,9 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 			event["body"] = string(raw)
 		}
 	}
+	if auth.Principal != nil || (auth.Kind != "" && auth.Kind != "public") {
+		return a.dispatchAuthenticatedFunction(w, r, api, route, event, auth)
+	}
 	eventJSON, err := json.Marshal(event)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())

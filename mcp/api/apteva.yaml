@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.7.0
+version: 0.8.0
 description: |
+  v0.8.0 Authenticated Function routes use functions_invoke_authenticated with
+  verified principals, explicit permitted Function IDs, and original deadlines.
+
   v0.7.0 Configurable Auth or installed-app authorizers produce normalized principals
   for authenticated Function invocations, with explicitly allowed claims.
 
@@ -64,8 +67,9 @@ requires:
       hint: Bind an app implementing the API authorizer contract before selecting provider=app.
   apps:
     - name: functions
+      version: ">=1.14.1"
       optional: true
-      reason: Used when an API route targets a serverless function.
+      reason: Authenticated Function routes use trusted MCP admission with configured Function IDs.
     - name: domains
       optional: true
       reason: Used to write DNS records when attaching a public hostname.
@@ -113,7 +117,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.7.0
+    ref: api/v0.8.0
     entry: mcp/api
   port: 8080
   health_check: /health

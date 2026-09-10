@@ -83,12 +83,13 @@ func TestAuthPrincipalUsesOnlyServerManagedAllowedClaims(t *testing.T) {
 
 func TestGatewayAuthorizerTrustedFunctionEnvelope(t *testing.T) {
 	var event map[string]any
+	var admitted map[string]any
 	var authCalls, functionCalls int
 	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer gateway-outbound" {
 			t.Error("missing app-to-app authentication")
 		}
-		if r.URL.Query().Get("project_id") != testProject {
+		if r.URL.Path != "/api/apps/callback/apps/functions/call" && r.URL.Query().Get("project_id") != testProject {
 			t.Error("browser changed project")
 		}
 		switch r.URL.Path {
@@ -103,12 +104,27 @@ func TestGatewayAuthorizerTrustedFunctionEnvelope(t *testing.T) {
 				t.Errorf("authorizer input=%v", input)
 			}
 			fmt.Fprintf(w, `{"authenticated":true,"expires_at":%q,"principal":{"issuer":"example-issuer","subject":"person-123","project_id":%q,"tenant_id":"tenant-a","claims":{"roles":["reader"],"session_token":"secret","password":"secret"}}}`, time.Now().Add(time.Minute).Format(time.RFC3339), testProject)
-		case "/api/apps/callback/apps/functions/proxy/fn/list-items":
+		case "/api/apps/callback/apps/functions/call":
 			functionCalls++
-			if json.NewDecoder(r.Body).Decode(&event) != nil {
-				t.Error("bad function envelope")
+			var callback struct {
+				Tool  string         `json:"tool"`
+				Input map[string]any `json:"input"`
 			}
-			fmt.Fprint(w, `{"statusCode":200,"body":"ok"}`)
+			if json.NewDecoder(r.Body).Decode(&callback) != nil {
+				t.Error("bad function callback")
+			}
+			if callback.Tool != "functions_invoke_authenticated" || callback.Input["_project_id"] != testProject || callback.Input["name"] != "list-items" {
+				t.Errorf("callback=%+v", callback)
+			}
+			if r.Header.Get("X-Apteva-Bound-Caller-Install-ID") != "" {
+				t.Error("API minted caller identity")
+			}
+			admitted, _ = callback.Input["principal"].(map[string]any)
+			event, _ = callback.Input["event"].(map[string]any)
+			if event["principal"] != nil || callback.Input["deadline"] != event["deadline"] || callback.Input["request_id"] != event["request_id"] {
+				t.Error("incorrect trusted metadata separation")
+			}
+			fmt.Fprint(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"status\":\"ok\",\"response\":\"{\\\"statusCode\\\":200,\\\"body\\\":\\\"ok\\\"}\"}"}]}}`)
 		default:
 			t.Errorf("unexpected destination: %s", r.URL)
 			w.WriteHeader(500)
@@ -118,7 +134,7 @@ func TestGatewayAuthorizerTrustedFunctionEnvelope(t *testing.T) {
 	t.Setenv("APTEVA_GATEWAY_URL", platform.URL)
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "gateway-outbound")
 	app, ctx := mountTestApp(t)
-	api, err := dbCreateAPI(ctx.AppDB(), apiInput{ProjectID: testProject, Slug: "trusted", AuthJSON: `{"kind":"authorizer","provider":"app","app":"identity","path":"/authorize","issuer":"example-issuer","tenant_id":"tenant-a","claims":["roles"]}`, CORSJSON: `{"enabled":true,"origins":["https://browser.example"],"allow_methods":["POST"],"allow_headers":["authorization","content-type","last-event-id"]}`})
+	api, err := dbCreateAPI(ctx.AppDB(), apiInput{ProjectID: testProject, Slug: "trusted", AuthJSON: `{"kind":"authorizer","provider":"app","app":"identity","path":"/authorize","issuer":"example-issuer","tenant_id":"tenant-a","claims":["roles"],"function_ids":[12,34]}`, CORSJSON: `{"enabled":true,"origins":["https://browser.example"],"allow_methods":["POST"],"allow_headers":["authorization","content-type","last-event-id"]}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,9 +157,14 @@ func TestGatewayAuthorizerTrustedFunctionEnvelope(t *testing.T) {
 	if rec.Code != 200 || authCalls != 1 || functionCalls != 1 {
 		t.Fatalf("status=%d auth=%d fn=%d body=%s", rec.Code, authCalls, functionCalls, rec.Body.String())
 	}
-	principal, _ := event["principal"].(map[string]any)
+	principal := admitted
 	if principal["subject"] != "person-123" || principal["project_id"] != testProject {
 		t.Fatalf("principal=%v", principal)
+	}
+	claims, _ := principal["claims"].(map[string]any)
+	ids, _ := principal["function_ids"].([]any)
+	if principal["tenant_id"] != nil || claims["tenant_id"] != "tenant-a" || len(ids) != 2 || ids[0] != float64(12) || ids[1] != float64(34) {
+		t.Fatalf("admitted principal=%v", principal)
 	}
 	principalJSON, _ := json.Marshal(principal)
 	if strings.Contains(string(principalJSON), "secret") || strings.Contains(string(principalJSON), "admin") {

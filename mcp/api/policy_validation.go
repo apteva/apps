@@ -19,9 +19,13 @@ func validateEffectivePolicies(db *sql.DB, api *API, replacement *APIRoute, remo
 	}
 	origins := map[string]bool{}
 	validate := func(route *APIRoute) error {
-		kind, err := effectiveAuthKind(api.AuthJSON, route.AuthJSON)
+		policy, err := effectiveAuthPolicy(api.AuthJSON, route.AuthJSON)
+		kind := policy.Kind
 		if err != nil {
 			return err
+		}
+		if route.Enabled && route.TargetKind == "function" && kind != "public" && len(policy.FunctionIDs) == 0 {
+			return errors.New("authenticated Function routes require auth.function_ids including the root and permitted nested Functions")
 		}
 		if route.TargetKind == "app_events" && (kind != "api_key" && kind != "auth_jwt" && kind != "authorizer") {
 			return errors.New("app_events routes require api_key, auth_jwt, or authorizer authentication")

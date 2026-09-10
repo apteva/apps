@@ -456,7 +456,7 @@ function DetailsView({ api, busy, onSave, onDelete }: {
           </div>
         </Field>
       </div>
-      {(authKind === "authorizer" || authKind === "auth_jwt") && <AuthorizerFields kind={authKind} value={authorizer} onChange={setAuthorizer} />}
+      {(authKind === "authorizer" || authKind === "auth_jwt" || authKind === "api_key") && <AuthorizerFields kind={authKind} value={authorizer} onChange={setAuthorizer} />}
       {corsEnabled && (
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_220px] gap-4">
           <Field label="Allowed browser origins">
@@ -545,7 +545,7 @@ function RoutesView({ api, routes, busy, onAdd, onDelete, projectId, installId }
         <Field label={targetKind === "app_events" ? "Source app" : "Ref"}><input className={inputCls} value={targetRef} onChange={(e) => setTargetRef(e.target.value)} placeholder={targetKind === "http" ? "https://..." : targetKind === "function" ? "function-name" : targetKind === "app_events" ? "tables" : "app-name"} /></Field>
         <Field label="Target path"><input className={inputCls} value={targetPath} onChange={(e) => setTargetPath(e.target.value)} placeholder={targetKind === "app_events" ? "not used" : "/upstream"} disabled={targetKind === "app_events"} /></Field>
         <Field label="Auth"><select className={inputCls} value={auth} onChange={(e) => setAuth(e.target.value)}>{(targetKind === "app_events" ? ["default", "api_key", "auth_jwt", "authorizer"] : ["default", "public", "api_key", "auth_jwt", "authorizer"]).map((k) => <option key={k}>{k}</option>)}</select></Field>
-        {(auth === "authorizer" || auth === "auth_jwt") && <div className="lg:col-span-6"><AuthorizerFields kind={auth} value={authorizer} onChange={setAuthorizer} /></div>}
+        {(auth === "authorizer" || auth === "auth_jwt" || auth === "api_key") && <div className="lg:col-span-6"><AuthorizerFields kind={auth} value={authorizer} onChange={setAuthorizer} /></div>}
         {targetKind === "app_events" && (
           <div className="lg:col-span-6 grid grid-cols-1 lg:grid-cols-4 gap-2 border border-border rounded p-3">
             <Field label="Topics (comma separated)"><input className={inputCls} value={eventTopics} onChange={(e) => setEventTopics(e.target.value)} placeholder="row.inserted, row.updated" /></Field>
@@ -675,13 +675,15 @@ function AuthorizerFields({ kind, value, onChange }: { kind: string; value: Reco
   const field = (name: string, text: string) => onChange({ ...value, [name]: text });
   return <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 border border-border rounded p-3">
     {kind === "authorizer" && <Field label="Authentication provider"><select className={inputCls} value={provider} onChange={e => field("provider", e.target.value)}><option value="auth">Auth</option><option value="app">Installed authorizer app</option></select></Field>}
-    {provider === "app" && <>
+    {kind !== "api_key" && provider === "app" && <>
       <Field label="Authorizer app"><input className={inputCls} required value={String(value.app || "")} onChange={e => field("app", e.target.value)} placeholder="identity-provider" /></Field>
       <Field label="Authorizer endpoint"><input className={inputCls} required value={String(value.path || "/authorize")} onChange={e => field("path", e.target.value)} placeholder="/authorize" /></Field>
       <Field label="Expected issuer"><input className={inputCls} required value={String(value.issuer || "")} onChange={e => field("issuer", e.target.value)} placeholder="https://identity.example.com" /></Field>
     </>}
-    <Field label="Required tenant (optional)"><input className={inputCls} value={String(value.tenant_id || "")} onChange={e => field("tenant_id", e.target.value)} placeholder="Accept only this tenant" /></Field>
-    <Field label="Allowed authorization claims"><input className={inputCls} value={Array.isArray(value.claims) ? value.claims.join(", ") : ""} onChange={e => onChange({ ...value, claims: e.target.value.split(",").map(s => s.trim()) })} placeholder="roles, permissions" /></Field>
+    {kind !== "api_key" && <><Field label="Required tenant (optional)"><input className={inputCls} value={String(value.tenant_id || "")} onChange={e => field("tenant_id", e.target.value)} placeholder="Accept only this tenant" /></Field>
+    <Field label="Allowed authorization claims"><input className={inputCls} value={Array.isArray(value.claims) ? value.claims.join(", ") : ""} onChange={e => onChange({ ...value, claims: e.target.value.split(",").map(s => s.trim()) })} placeholder="roles, permissions" /></Field></>}
+    <Field label="Permitted Function IDs"><input className={inputCls} value={Array.isArray(value.function_ids) ? value.function_ids.join(", ") : ""} onChange={e => onChange({ ...value, function_ids: e.target.value.split(",").map(s => s.trim()) })} placeholder="12, 34" /></Field>
+    <p className="lg:col-span-2 text-xs text-text-dim">Authenticated Function routes require the destination ID and every permitted nested Function ID. Each Function must trust this API installation and issuer.</p>
     <p className="lg:col-span-2 text-xs text-text-dim">Only allowed claims from the verified provider are passed to Functions. Auth supplies server-managed authorization claims. No claims are forwarded by default.</p>
   </div>;
 }
