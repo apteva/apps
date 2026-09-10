@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.22.1 — 2026-09-10
+
+- Ship the same scoped stylesheet in native dashboard panels and exported chat, including Tailwind utilities, Markdown and mobile layout. Preserve host theme tokens and contain defaults within Conversations.
+- Restore uncluttered transcripts: hide successful delivery diagnostics and single-agent identity labels, resolve display names for multiple speakers, and restore message spacing. Keep localized failed/unconfirmed delivery notices and retry actions.
+- Pin the app’s Go SDK to v0.77.0, the latest tagged ancestor of SDK HEAD.
+- Verify real Markdown replies, long links, mobile widths, live streams, retries, theme inheritance and computed layout parity in both hosts.
+
 ## 0.22.0 — 2026-09-10
 
 - Add per-surface `locale`, `timeZone`, and `messages` props to the app-served React components and dashboard wrappers, with English, French, and Spanish UI dictionaries and locale-aware dates, relative times, numbers, and plurals.

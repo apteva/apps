@@ -41,6 +41,8 @@ storage. A parent must supply a usable height. Styles are loaded automatically,
 scoped under `.apteva-conversations`, and removed after the final consumer disposes.
 
 Run `bun run scripts/build-panels.ts --app conversations` from the apps repository.
+Native dashboard panels embed the same generated, scoped CSS that the Web SDK loader mounts for external hosts. They do not depend on a dashboard Tailwind source scan or a separate dashboard release. Host theme tokens (for example `--font-base`, `--bg`, `--text`, and `--accent`) are inherited; unthemed hosts get local defaults.
+
 It builds dashboard bundles and `/ui/frontend.json` plus content-addressed client,
 UI and style assets. The normal app release includes these files. No npm app
 publication or platform upgrade is needed. The old npm package 0.20.0 remains
@@ -160,7 +162,7 @@ bun run scripts/build-panels.ts --app conversations
 bunx --no-install playwright test -c mcp/conversations/frontend/playwright.config.ts
 ```
 
-The browser fixture tests both hosts at desktop/mobile widths and exercises
+The browser fixture deliberately supplies no app stylesheet to the dashboard: its panel must carry its own. It compares computed typography and layout with SDK-loaded chat, checks theme inheritance and isolation, and renders real Markdown replies, multiple speakers, delivery failures and streaming text. It tests both hosts at desktop/mobile widths and exercises
 report/approval UI over a controlled HTTP/SSE service. Real platform/token and
 real-Codex evidence is recorded separately; a fixture token does not establish
 backend isolation.

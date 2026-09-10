@@ -1,6 +1,8 @@
 import { telegramCatalog } from "./telegramLocales";
 /** App-owned UI copy. Tuple order: English, French, Spanish. Never translate message content. */
 export const catalog = {
+  "chat.deliveryFailed": ["Message could not be delivered.", "Le message n’a pas pu être envoyé.", "No se pudo entregar el mensaje."],
+  "chat.deliveryUnconfirmed": ["Delivery could not be confirmed.", "L’envoi n’a pas pu être confirmé.", "No se pudo confirmar la entrega."],
   ...telegramCatalog,
   "chat.room": ["room", "salon", "sala"],
   "chat.direct": ["direct", "directe", "directa"],

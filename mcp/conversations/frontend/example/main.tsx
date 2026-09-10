@@ -21,7 +21,7 @@ function Example(){
  if(!loaded)return <p>Loading Conversations…</p>;
  const name=new URLSearchParams(location.search).get("surface")==="inbox"?"inbox-overview":"conversation-chat";
  const Component=loaded.components[name];
- return <main style={{height:"100vh",padding:16,display:"flex",flexDirection:"column",gap:8}}>
+ return <main style={{height:"100vh",boxSizing:"border-box",padding:16,display:"flex",flexDirection:"column",gap:8}}>
   <label style={{color:"white"}}>Language <select style={{color:"#111",background:"#fff"}} aria-label="Example language" value={locale} onChange={event=>setLocale(event.target.value)}><option value="en">English</option><option value="fr-FR">Français</option><option value="es-ES">Español</option></select></label>
   <div style={{flex:1,minHeight:0}}><Component conversations={loaded.client} agentId={config.agentId} locale={locale} timeZone="Europe/Paris" messages={messages}/></div>
  </main>;

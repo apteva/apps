@@ -1051,10 +1051,9 @@ function ContextColumn({
 //   user   — right-aligned accent-tinted bubble, plain text
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
-function MessageRow(props: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
-  const { t } = useConversationLocalization();
+function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
  return <div className="min-w-0 shrink-0 flex flex-col gap-2">
- {props.message.agent_id ? <p className="text-xs text-text-muted">{t("common.agent")} {props.message.agent_id}</p> : null}
+ {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
  <MessageBody {...props}/><AttachmentContent attachments={props.message.attachments}/><GenericComponents components={props.message.components}/>
  </div>;
 }
@@ -1297,6 +1296,22 @@ export function ConversationChat({
   const { t } = useConversationLocalization();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  // Resolve display names only for a room or a transcript with multiple speakers.
+  const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId)].filter((id): id is number => Boolean(id)));
+  const showAgentNames = conversation.kind === "room" || speakerIds.size > 1;
+  const [agentNames, setAgentNames] = useState<Record<number, string>>({});
+  useEffect(() => {
+    setAgentNames({});
+    if (!showAgentNames) return;
+    const abort = new AbortController();
+    void conversationsClient.agents({ signal: abort.signal }).then(agents => {
+      if (!abort.signal.aborted) setAgentNames(Object.fromEntries(agents.map(a => [a.id, a.name])));
+    }).catch(() => {});
+    return () => abort.abort();
+  }, [conversationsClient, conversation.id, showAgentNames]);
+  const agentName = (id?: number) => showAgentNames && id
+    ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
+    : undefined;
   const storageKey = `conversations:draft:${conversationsClient.storageKey}:${conversation.id}`;
   const [draft, setDraft] = useState(() => { try {
     if (legacyDrafts) for (const suffix of ["", ":pending"]) {
@@ -1450,12 +1465,15 @@ export function ConversationChat({
       archived={archived}
       messageNodes={<>
         {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
-        {messages.map(message => <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} onAction={onAction}/></fieldset>
- {deliveries.filter(d=>d.message_id===message.id).map(d=><div key={d.id} role="status" className="mt-1 text-xs text-text-muted">{d.status === "processing" ? t("chat.sending") : d.status === "pending" ? (d.attempts ? t("chat.retrying") : t("chat.queued")) : d.status} · {d.target.split(":")[0]} {d.last_error && <span>{d.last_error}</span>}{["failed","ambiguous"].includes(d.status) && <button type="button" className="ml-2 text-accent" onClick={()=>retryDelivery(d)}>{d.status==="ambiguous"?t("chat.retryDuplicate"):t("chat.retryDelivery")}</button>}</div>)}
+        {messages.map(message => <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
+ {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
+   <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
+   <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
+ </div>)}
  </div>)}
       </>}
       hasMessages={messages.length > 0}
-      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}><p className="text-xs text-text-muted">{t("common.agent")} {b.agentId}</p>{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
+      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}

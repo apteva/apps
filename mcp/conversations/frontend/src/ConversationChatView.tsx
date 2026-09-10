@@ -77,16 +77,16 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                 {t("chat.public")}
               </span>
             )}
+        <span
+          className={`shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
+          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
+        />
           </div>
           <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
         </div>
         {props.headerActions && (
           <div className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
         )}
-        <span
-          className={`${props.headerActions ? "" : "ml-auto"} shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
-          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
-        />
         {!props.archived && props.onOpenDetails && (
           <button
             type="button"
@@ -100,7 +100,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
+      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
         {!props.hasMessages && !props.streamNode ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">

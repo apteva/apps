@@ -1,4 +1,64 @@
 import { expect,test } from "@playwright/test";
+for (const host of ["dashboard", "external"]) {
+ test(`${host}: app-owned CSS renders real replies and preserves host themes`, async ({page,request}) => {
+  await request.post("/reset"); await request.post("/seed", {data:{}});
+  const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));
+  for (const theme of ["clean", "terminal"]) {
+   await page.goto(`/?host=${host}&theme=${theme}`);
+   const answer=page.locator(".chat-md").first();
+   await expect(answer.getByRole("heading",{name:"Here’s the update"})).toBeVisible();
+   await expect(page.getByText("Agent 41",{exact:true})).toHaveCount(0);
+   await expect(page.getByRole("status")).toHaveCount(0);
+   const style=await answer.evaluate(el=>({font:getComputedStyle(el).fontFamily,color:getComputedStyle(el).color,fontSize:getComputedStyle(el).fontSize}));
+   expect(style.font).toContain(theme==="clean"?"Arial":"monospace");
+   expect(style.color).toBe(theme==="clean"?"rgb(32, 32, 32)":"rgb(232, 232, 232)");
+   expect(await answer.locator("ul").evaluate(el=>getComputedStyle(el).listStyleType)).toBe("disc");
+   expect(await answer.locator("pre").evaluate(el=>getComputedStyle(el).borderTopWidth)).toBe("1px");
+   expect(await answer.locator("strong").evaluate(el=>getComputedStyle(el).fontWeight)).toBe("600");
+   expect(await page.locator("#host-sentinel").evaluate(el=>({spacing:getComputedStyle(el).getPropertyValue("--spacing"),color:getComputedStyle(el).getPropertyValue("--color-border")}))).toEqual({spacing:"13px",color:""});
+   for (const width of [1280,390]) {
+    await page.setViewportSize({width,height:1000});
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+    const box=await page.getByRole("textbox").boundingBox();expect(box!.width).toBeGreaterThan(100);expect(box!.x+box!.width).toBeLessThanOrEqual(width);
+    await page.screenshot({path:test.info().outputPath(`reply-${theme}-${width}.png`)});
+   }
+  }
+  expect(errors).toEqual([]);
+ });
+ test(`${host}: named speakers and actionable delivery failures share the same UI`, async ({page,request}) => {
+  await request.post("/reset");await request.post("/seed",{data:{room:true,deliveryStatus:"ambiguous"}});
+  await page.goto(`/?host=${host}`);
+  await expect(page.getByText("Scheduling assistant",{exact:true})).toBeVisible();
+  await expect(page.getByText("Agent 42",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveText(/Delivery could not be confirmed/);
+  await expect(page.getByText(/agent-inbound|internal transport detail/)).toHaveCount(0);
+  await page.getByRole("button",{name:"Retry (may duplicate)",exact:true}).click();
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await request.post("/seed",{data:{room:true,deliveryStatus:"failed"}});
+  await page.reload();
+  await expect(page.getByRole("status")).toHaveText(/Message could not be delivered/);
+  await page.getByRole("button",{name:"Retry delivery",exact:true}).click();
+  await expect(page.getByRole("status")).toHaveCount(0);
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  await request.post("/emit",{data:{chat_id:chat,agent_id:42,thread_id:chat,call_id:"fixture-stream",run_id:"run",text:"Checking **availability**…"}});
+  await expect(page.getByText("Checking availability…",{exact:true})).toBeVisible();
+  await expect(page.getByText("Scheduling assistant",{exact:true})).toHaveCount(2);
+ });
+}
+
+test("dashboard and exported chat have matching computed layout",async({page,request})=>{
+ await request.post("/reset");await request.post("/seed",{data:{}});
+ const snapshots=[];
+ for(const host of ["dashboard","external"]){
+  await page.goto(`/?host=${host}&theme=clean`);
+  await expect(page.locator(".chat-md h2")).toBeVisible();
+  snapshots.push(await page.evaluate(()=>[".chat-md",".chat-md h2",".chat-md ul",".chat-md pre",".chat-md th","textarea"].map(selector=>{
+   const el=document.querySelector(selector)!;const s=getComputedStyle(el);const r=el.getBoundingClientRect();
+   return {selector,font:s.fontFamily,size:s.fontSize,line:s.lineHeight,color:s.color,margin:s.margin,padding:s.padding,width:r.width};
+  })));
+ }
+ expect(snapshots[0]).toEqual(snapshots[1]);
+});
 for(const host of ["dashboard","external"]){
  test(`${host}: shared chat sends, scopes transport and renders at desktop/mobile widths`,async({page,request})=>{
   const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));

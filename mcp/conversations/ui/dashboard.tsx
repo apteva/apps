@@ -1,3 +1,4 @@
+import { conversationStyleId, conversationStyles } from "./styles";
 import { ConversationLocaleRegion, type ConversationLocalization } from "../frontend/src/i18n";
 import { useMemo, type ReactNode } from "react";
 import { AptevaClient } from "@apteva/web-sdk";
@@ -9,5 +10,5 @@ export function DashboardConversations({ projectId, installId, children, ...loca
   const conversations = useMemo(() => new AptevaClient({ baseURL: "" }).use(
     conversationsExtension({ storageKey: "dashboard" }), { projectId, installId },
   ), [projectId, installId]);
-  return <ConversationsProvider legacyDrafts conversations={conversations} {...localization} key={`${projectId}:${installId ?? ""}`}><ConversationLocaleRegion>{children}</ConversationLocaleRegion></ConversationsProvider>;
+  return <ConversationsProvider legacyDrafts conversations={conversations} {...localization} key={`${projectId}:${installId ?? ""}`}><ConversationLocaleRegion><style href={conversationStyleId} precedence="apteva-app">{conversationStyles}</style>{children}</ConversationLocaleRegion></ConversationsProvider>;
 }
