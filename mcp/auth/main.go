@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.12.0
+version: 0.12.1
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
@@ -199,7 +199,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: auth/v0.12.0
+    ref: auth/v0.12.1
     entry: mcp/auth
   port: 8080
   health_check: /health

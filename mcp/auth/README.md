@@ -1,8 +1,10 @@
-# Auth v0.12.0
+# Auth v0.12.1
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. v0.12.0 adds opt-in role-bound platform credentials and a renewal
+permissions. v0.12.1 distinguishes retryable refresh failures from uncertain
+rotation outcomes for persistent SDK sessions. v0.12.0 added opt-in role-bound
+platform credentials and a renewal
 endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
 migration and preserves existing Auth sessions. Configure explicit role bindings
 and platform policies before enabling delegated access.
@@ -251,7 +253,7 @@ Already-open streams and in-flight work can outlive admission unless their targe
 app enforces expiry. Do not promise immediate stream termination from this feature.
 There is no session schema migration and existing Auth sessions remain valid.
 
-### Refresh failures and persistent browser sessions
+### Refresh failures and persistent browser sessions (v0.12.1)
 
 Refresh clients must distinguish rejection from a failed or uncertain rotation:
 
