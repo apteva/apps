@@ -199,7 +199,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: auth/v0.12.0
     entry: mcp/auth
   port: 8080
   health_check: /health
