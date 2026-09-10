@@ -56,6 +56,10 @@ func (a *App) writeAuthorizationError(w http.ResponseWriter, r *http.Request, er
 	if a.ctx != nil {
 		a.ctx.Logger().Warn("gateway authorization failed", "request_id", row.RequestID, "connection_key", connection, "status", status, "parent_context", fmt.Sprint(r.Context().Err()), "parent_deadline", deadline, "elapsed_ms", time.Since(start).Milliseconds(), "cause", safeUpstreamError(cause))
 	}
+	if errors.Is(context.Cause(r.Context()), errGatewayDeadline) {
+		_, _ = writeGatewayFailure(w, r.Context(), err)
+		return
+	}
 	if r.Context().Err() != nil {
 		panic(http.ErrAbortHandler)
 	}

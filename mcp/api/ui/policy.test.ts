@@ -34,3 +34,12 @@ test("failed detail loading remains an error rather than an empty list", async (
   const fake = (() => Promise.resolve(new Response("not authorized", { status: 403 }))) as typeof fetch;
   await expect(fetchPanelRows(fake, "https://test/rows", "routes", new AbortController().signal)).rejects.toThrow("403");
 });
+
+test("changing providers clears stale routing and preserves allowed claims", async () => {
+  const { updatedAuth } = await import("./policy");
+  const prior = { provider: "app", app: "identity", path: "/authorize", issuer: "example", tenant_id: "tenant-a", claims: ["roles", "permissions", ""] };
+  expect(updatedAuth("authorizer", prior)).toEqual({ kind: "authorizer", ...prior, claims: ["roles", "permissions"] });
+  expect(updatedAuth("auth_jwt", prior)).toEqual({ kind: "auth_jwt", tenant_id: "tenant-a", claims: ["roles", "permissions"] });
+  expect(updatedAuth("public", prior)).toEqual({ kind: "public" });
+  expect(updatedAuth("default", prior)).toEqual({});
+});

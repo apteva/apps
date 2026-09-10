@@ -3,6 +3,9 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+See [AUTHORIZATION.md](AUTHORIZATION.md) for configurable authorizers, normalized
+principals, trusted Function request envelopes, and CORS for resumable streams.
+
 ## AppBus invalidation routes
 
 Use `target_kind: app_events` to turn events from any installed app into an
@@ -67,8 +70,8 @@ remain static.
 Coalescing is keyed by the rendered output. If several allowed resources change
 inside one window, each resource receives one invalidation in AppBus sequence
 order; repeated changes to the same resource collapse into one frame. Topic
-patterns can be exact, `prefix.*`, or `*`. Streams require `api_key` or
-`auth_jwt`; public event routes are rejected. Clients can reconnect with
+patterns can be exact, `prefix.*`, or `*`. Streams require `api_key`,
+`auth_jwt`, or `authorizer`; public event routes are rejected. Clients can reconnect with
 `Last-Event-ID` or `since`, and the endpoint sends 15-second heartbeat comments.
 
 API Gateway shares one internal AppBus connection per project and source app,
@@ -117,7 +120,8 @@ and [PERFORMANCE.md](PERFORMANCE.md) for reproducible measurements.
 HTTP/app request bodies stream with an 8 MiB limit. Buffered function input is
 limited to 1 MiB and nonstreaming function output to 2 MiB; overflow fails
 explicitly. Management JSON is limited to 1 MiB. Body reads have a 30-second
-limit, auth calls five seconds, and upstream response headers ten seconds.
+limit and auth calls five seconds. Upstream response headers use the route
+budget, with no separate header cutoff.
 Route timeouts accept integer milliseconds from 1 to 300,000 (default 30,000).
 Streaming writes have a 15-second deadline. These are fixed implementation
 bounds in this candidate, rather than per-route configuration options.
@@ -162,11 +166,11 @@ owner or cleanup record exists.
 ## Upstream deadlines and correlation
 
 For `function`, `http`, and `app` routes, `timeout_ms` is the configurable total
-upstream budget (default 30,000 ms, range 1–300,000 ms). It starts at dispatch
-and includes request forwarding, upstream queueing/preparation, execution, and
+request budget (default 30,000 ms, range 1–300,000 ms). It starts before
+authorization and includes request forwarding, upstream queueing/preparation, execution, and
 response transfer. Response headers may arrive at any point within that budget;
 there is no separate 10-second header cutoff. Authentication and upload read
-limits remain independently bounded. `app_events` retains its streaming policy.
+limits are also independently capped and cannot extend the route budget. `app_events` retains its streaming policy.
 
 Set a route budget to cover the intended upstream work **and** queue/preparation
 and transfer time. For example, a 45,000 ms route can allow a 30,000 ms Function
