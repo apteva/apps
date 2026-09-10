@@ -219,6 +219,12 @@ Tool/admission errors fail closed and never fall back to `/fn`.
 This path requires Functions **1.14.1 or newer** and a platform that supplies
 verified bound-caller headers. Existing authenticated Function routes must add
 `auth.function_ids` and configure their targets' trusted callers before use.
+Routes can be repaired individually with `api_route_add`: another unchanged
+legacy route without `function_ids` does not block saving a corrected route.
+The edited route still needs valid scope, and all effective CORS policies and
+the shared origin limit remain enforced. Unrepaired routes still fail closed
+when invoked. API-wide policy changes continue to validate every affected route.
+
 Handlers that used `event.principal` must switch to the authoritative context
 above. No Function scope is inferred from a name or expanded automatically.
 

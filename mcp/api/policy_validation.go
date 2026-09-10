@@ -18,13 +18,13 @@ func validateEffectivePolicies(db *sql.DB, api *API, replacement *APIRoute, remo
 		return err
 	}
 	origins := map[string]bool{}
-	validate := func(route *APIRoute) error {
+	validate := func(route *APIRoute, requireFunctionScope bool) error {
 		policy, err := effectiveAuthPolicy(api.AuthJSON, route.AuthJSON)
 		kind := policy.Kind
 		if err != nil {
 			return err
 		}
-		if route.Enabled && route.TargetKind == "function" && kind != "public" && len(policy.FunctionIDs) == 0 {
+		if requireFunctionScope && route.Enabled && route.TargetKind == "function" && kind != "public" && len(policy.FunctionIDs) == 0 {
 			return errors.New("authenticated Function routes require auth.function_ids including the root and permitted nested Functions")
 		}
 		if route.TargetKind == "app_events" && (kind != "api_key" && kind != "auth_jwt" && kind != "authorizer") {
@@ -48,12 +48,16 @@ func validateEffectivePolicies(db *sql.DB, api *API, replacement *APIRoute, remo
 		if replacement != nil && route.Method == replacement.Method && route.PathPattern == replacement.PathPattern {
 			continue
 		}
-		if err := validate(route); err != nil {
+		// A route edit leaves sibling auth unchanged. Allow legacy siblings
+		// without Function scope to be repaired separately, while retaining
+		// their auth syntax, event authentication and shared CORS checks.
+		// API-wide changes still validate Function scope on every route.
+		if err := validate(route, replacement == nil); err != nil {
 			return err
 		}
 	}
 	if replacement != nil {
-		if err := validate(replacement); err != nil {
+		if err := validate(replacement, true); err != nil {
 			return err
 		}
 	}

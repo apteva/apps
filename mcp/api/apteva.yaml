@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.8.0
+version: 0.8.1
 description: |
+  v0.8.1 Allows independent repair of legacy authenticated Function routes while
+  preserving edited-route validation, shared CORS checks, and fail-closed calls.
+
   v0.8.0 Authenticated Function routes use functions_invoke_authenticated with
   verified principals, explicit permitted Function IDs, and original deadlines.
 
@@ -117,7 +120,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.8.0
+    ref: api/v0.8.1
     entry: mcp/api
   port: 8080
   health_check: /health
