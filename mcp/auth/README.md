@@ -250,3 +250,28 @@ this is bounded credential issuance, not immediate platform token revocation.
 Already-open streams and in-flight work can outlive admission unless their target
 app enforces expiry. Do not promise immediate stream termination from this feature.
 There is no session schema migration and existing Auth sessions remain valid.
+
+### Refresh failures and persistent browser sessions
+
+Refresh clients must distinguish rejection from a failed or uncertain rotation:
+
+- `401 {"error":"invalid_grant"}`: invalid/revoked session or an account/client
+  that is no longer eligible. Discard the saved session. Reusing a previously
+  rotated credential still revokes its entire session family.
+- `503 {"error":"refresh_unavailable"}`: failure before rotation committed,
+  including a rolled-back database operation. `Retry-After` is supplied; the
+  same saved credential can be retried explicitly.
+- `503 {"error":"refresh_uncertain"}`: commit outcome cannot be confirmed. Do not
+  replay the old credential. Require login if no replacement was safely saved.
+
+A generic proxy 5xx or lost response also leaves rotation uncertain. Browser
+clients should serialize refreshes, re-read the saved credential under a cross-tab
+lock, and save an in-progress marker before sending the credential. Persist the
+replacement before releasing the lock. Platform mint denial still permits a
+successful normal Auth refresh. Logout database lookup failures report an error
+instead of falsely confirming revocation.
+
+The opt-in `TestWebSDKPersistentBrowserIntegration` exercises the generic Web SDK
+in real Chromium tabs against these handlers, including reload restoration,
+rotation, logout and recovery after a rolled-back database failure. Set
+`AUTH_WEB_SDK_TEST_DIR` to a checkout with Playwright Chromium installed to run it.

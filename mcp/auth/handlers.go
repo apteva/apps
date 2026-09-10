@@ -531,7 +531,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
-		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		writeRefreshError(w, clientErr)
 		return
 	}
 	if err := requireAllowedOrigin(client, r.Header.Get("Origin")); err != nil {
@@ -540,12 +540,12 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := authenticateClient(ctx, pid, client, r, body.ClientSecret); err != nil {
-		httpErr(w, 401, err.Error())
+		writeRefreshError(w, err)
 		return
 	}
 	tokens, org, user, err := refreshSession(ctx, pid, client, body.RefreshToken, strings.ToLower(strings.TrimSpace(body.OrganizationSlug)), r)
 	if err != nil {
-		httpErr(w, 401, err.Error())
+		writeRefreshError(w, err)
 		return
 	}
 	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, tokens)
@@ -593,7 +593,12 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.RefreshToken != "" {
 		var family string
-		if err := ctx.AppDB().QueryRow(`SELECT IFNULL(family_id,'') FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(body.RefreshToken)).Scan(&family); err == nil && family != "" {
+		err := ctx.AppDB().QueryRow(`SELECT IFNULL(family_id,'') FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(body.RefreshToken)).Scan(&family)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			httpErr(w, 503, "logout unavailable")
+			return
+		}
+		if err == nil && family != "" {
 			if err := revokeFamily(ctx.AppDB(), pid, family); err != nil {
 				httpErr(w, 500, "logout unavailable")
 				return
