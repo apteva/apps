@@ -163,3 +163,25 @@ does not establish external application-user authorization.
 The new controller and existing worker/worklet tests run in separate Bun
 processes: the existing UI tests evaluate worker scripts as code, while the
 headless bundle imports the same files as text assets.
+
+### Microphone selector and local preview (Telephony 0.4.4+)
+
+The served client includes `listMicrophones()` and
+`createMicrophonePreview(onLevel)`. Enumeration returns `{deviceId, label}[]`
+and does not request permission. Start the preview from a user gesture, then
+refresh the device list if the browser initially hid labels:
+
+```ts
+const inputs = await client.listMicrophones();
+const preview = client.createMicrophonePreview(level => updateMeter(level));
+await preview.start({ inputDeviceId: inputs[0]?.deviceId });
+// Call when stopping the test, closing the selector, or starting a call:
+await preview.stop();
+```
+
+A preview is single-use; create a new one for each test. It is local, uses the
+shared capture engine, and opens no carrier or audio WebSocket. Microphone tracks,
+AudioContext and worklet URLs are released on stop or startup failure. The meter
+returns to zero on stop. `phone.configureAudio({inputDeviceId})` selects the device
+for future calls; `phone.reconnect({inputDeviceId})` applies it to an active call.
+The 0.4.3 gain/playback options remain available.

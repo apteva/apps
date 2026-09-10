@@ -1,6 +1,48 @@
-import { SoftphoneSession, microphoneConstraints, type SoftphoneAudioOptions, type SoftphoneCallbacks } from "../../ui/softphone-audio";
+import { SoftphoneSession, MicrophoneTestSession, DEFAULT_SOFTPHONE_AUDIO_OPTIONS, microphoneConstraints, type SoftphoneAudioOptions, type SoftphoneCallbacks } from "../../ui/softphone-audio";
 import workletSource from "../../ui/softphone-worklet.js" with { type: "text" };
 import workerSource from "../../ui/softphone-worker.js" with { type: "text" };
+
+export interface MicrophoneDevice { deviceId: string; label: string }
+export interface MicrophonePreview {
+  start(options?: Partial<SoftphoneAudioOptions>): Promise<void>;
+  stop(): Promise<void>;
+}
+
+/** Enumerates inputs without opening the microphone or requesting permission. */
+export async function listMicrophones(): Promise<MicrophoneDevice[]> {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return devices.filter(device => device.kind === "audioinput").map((device, index) => ({
+    deviceId: device.deviceId, label: device.label || `Microphone ${index + 1}`,
+  }));
+}
+
+/** Local meter using the call capture pipeline; no recording, carrier, or socket. */
+export function createMicrophonePreview(onLevel?: (level: number) => void): MicrophonePreview {
+  const session = new MicrophoneTestSession(onLevel, false);
+  let url: string | undefined;
+  let used = false;
+  let stopping: Promise<void> | undefined;
+  const stop = () => {
+    used = true;
+    return stopping ??= (async () => {
+      try { await session.cancel(); }
+      finally {
+        if (url) URL.revokeObjectURL(url);
+        url = undefined;
+      }
+    })();
+  };
+  return {
+    async start(options = {}) {
+      if (used) throw new Error("Microphone preview is already used");
+      used = true;
+      url = URL.createObjectURL(new Blob([workletSource], { type: "text/javascript" }));
+      try { await session.start(url, { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options }); }
+      catch (error) { await stop(); throw error; }
+    },
+    stop,
+  };
+}
 
 export interface AudioConnection {
   start(url: string, options: SoftphoneAudioOptions): Promise<void>;

@@ -394,6 +394,7 @@ test("audio tuning passes through create/reconnect and invalid profiles leave a 
   await phone.reconnect({ inputGainDB: -6, playbackTargetMs: 80, playbackMaxMs: 120 });
   expect(f.startedOptions.at(-1)).toMatchObject({ inputGainDB: -6, playbackTargetMs: 80, playbackMaxMs: 120 });
   const stopped = f.stopped, started = f.started;
+  expect(() => phone.configureAudio({ playbackTargetMs: 200 })).toThrow();
   await expect(phone.reconnect({ playbackTargetMs: 200 })).rejects.toThrow();
   expect(f.stopped).toBe(stopped); expect(f.started).toBe(started);
  } finally { await phone.dispose(); await f.phone.dispose(); }

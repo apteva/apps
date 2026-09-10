@@ -231,7 +231,7 @@ export class MicrophoneTestSession {
   private resampler = new PreviewResampler();
   private ensureOpen(): void { if (this.stopped) { void this.release(); throw new Error("Microphone test cancelled."); } }
 
-  constructor(private readonly onLevel?: (level: number) => void) {}
+  constructor(private readonly onLevel?: (level: number) => void, private readonly recordAudio = true) {}
 
   async start(workletURL: string, options: SoftphoneAudioOptions): Promise<MicrophoneAppliedSettings> {
     try {
@@ -270,9 +270,8 @@ export class MicrophoneTestSession {
         if (contextRate !== SAMPLE_RATE) frame = this.resampler.process(frame, contextRate, SAMPLE_RATE);
         const level = rms(frame);
         this.onLevel?.(level);
-        const pcm = new Int16Array(floatToPCM16(frame));
-        this.frames.push(pcm);
-        this.samples += pcm.length;
+        if (this.recordAudio) this.frames.push(new Int16Array(floatToPCM16(frame)));
+        this.samples += frame.length;
         // Exclude silence from the speech-level estimate so a pause before or
         // after speaking does not make a healthy microphone look too quiet.
         if (level >= 0.005) {
