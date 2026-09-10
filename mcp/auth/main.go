@@ -43,11 +43,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.11.2
+version: 0.12.0
 description: |
   Organization-scoped first-party authentication with EdDSA access tokens,
   atomic refresh rotation, revocation, email verification and password reset,
-  RBAC and trusted sibling-app identity login. Browser origins synchronize
+  RBAC, trusted sibling-app identity login and opt-in role-bound platform tokens
+  with a maximum 60-second lifetime. Browser origins synchronize
   with platform CORS. OAuth/OIDC, magic-link login and MFA challenges are not
   implemented; accounts requiring MFA fail closed. v0.11.0 invalidates old
   sessions and recovery links and requires login after recovery.
@@ -89,6 +90,9 @@ provides:
       method: POST
       no_auth: true
     - prefix: /logout
+      method: POST
+      no_auth: true
+    - prefix: /delegated-token
       method: POST
       no_auth: true
     - prefix: /refresh
@@ -247,6 +251,11 @@ config_schema:
     default: "true"
     label: Require verified email to log in
     description: When true, /login refuses unverified accounts. true | false.
+  - name: delegated_token_bindings
+    type: text
+    default: "[]"
+    label: Delegated token role bindings (JSON)
+    description: Trusted project, organization, client and role/permission mappings to platform policy identifiers. Empty disables issuance. Platform policies must use a lifetime of at most 60 seconds.
   - name: audit_retention_days
     type: text
     default: "90"
@@ -351,6 +360,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "POST", Pattern: "/email/verify", Handler: a.handleEmailVerify, NoAuth: true},
 		{Method: "POST", Pattern: "/email/verification/resend", Handler: a.handleEmailVerificationResend, NoAuth: true},
 		{Pattern: "/logout", Handler: a.handleLogout, NoAuth: true},
+		{Pattern: "/delegated-token", Handler: a.handleDelegatedToken, NoAuth: true},
 		{Pattern: "/refresh", Handler: a.handleRefresh, NoAuth: true},
 		{Pattern: "/me", Handler: a.handleMe, NoAuth: true},
 		{Method: "PATCH", Pattern: "/me/metadata", Handler: a.handleMeMetadata, NoAuth: true},

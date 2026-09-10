@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/auth
 go 1.25.13
 
 require (
-	github.com/apteva/app-sdk v0.76.0
+	github.com/apteva/app-sdk v0.78.0
 	golang.org/x/crypto v0.32.0
 	modernc.org/sqlite v1.50.0
 )

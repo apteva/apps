@@ -149,7 +149,7 @@ func mintSessionTx(ctx *sdk.AppCtx, tx *sql.Tx, pid string, oid, uid int64, cid 
 	if err != nil {
 		return tokenPair{}, err
 	}
-	return tokenPair{access: access, refresh: refresh, expiresIn: int(accessExpiry.Sub(now).Seconds()), authorization: authorization}, nil
+	return tokenPair{request: r, access: access, refresh: refresh, expiresIn: int(accessExpiry.Sub(now).Seconds()), authorization: authorization}, nil
 }
 
 func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r *http.Request) (tokenPair, *Organization, *User, error) {
