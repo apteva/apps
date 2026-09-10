@@ -5,8 +5,8 @@ class SoftphoneCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const config = options.processorOptions || {};
-    this.inputGain = 10 ** ((config.inputGainDB ?? -6) / 20);
-    this.inputGainDB = config.inputGainDB ?? -6;
+    this.inputGain = 10 ** ((config.inputGainDB ?? 0) / 20);
+    this.inputGainDB = config.inputGainDB ?? 0;
     this.highpass = config.highpassFilter !== false;
     this.ceiling = 10 ** (-3 / 20);
     this.lookaheadSamples = Math.max(1, Math.round(sampleRate * 0.005));
@@ -110,7 +110,7 @@ class SoftphonePlaybackProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const config = options.processorOptions || {};
-    this.initialTargetMs = config.initialTargetMs || 80;
+    this.initialTargetMs = config.initialTargetMs || 60;
     this.minTargetMs = config.minTargetMs || 60;
     this.maxTargetMs = config.maxTargetMs || 160;
     this.hardMaxMs = config.hardMaxMs || 320;

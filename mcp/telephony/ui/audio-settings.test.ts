@@ -7,7 +7,7 @@ describe("softphone audio setting migration", () => {
       echoCancellation: true,
       noiseSuppression: false,
       autoGainControl: false,
-      inputGainDB: -6,
+      inputGainDB: 0,
       highpassFilter: true,
     });
   });
@@ -21,7 +21,7 @@ describe("softphone audio setting migration", () => {
       echoCancellation: false,
       noiseSuppression: true,
       autoGainControl: false,
-      inputGainDB: -6,
+      inputGainDB: 0,
       highpassFilter: true,
     });
   });
@@ -35,14 +35,18 @@ describe("softphone audio setting migration", () => {
       echoCancellation: false,
       noiseSuppression: true,
       autoGainControl: false,
-      inputGainDB: -6,
+      inputGainDB: 0,
       highpassFilter: true,
     });
   });
 
-  test("preserves an explicit v3 preference while adding safe headroom", () => {
+  test("preserves an explicit v3 preference while using unity gain by default", () => {
     const result = resolveAudioOptions(null, JSON.stringify({ autoGainControl: true }), null);
     expect(result.autoGainControl).toBe(true);
-    expect(result.inputGainDB).toBe(-6);
+    expect(result.inputGainDB).toBe(0);
   });
 });
+
+ test("preserves a saved explicit microphone gain", () => {
+  expect(resolveAudioOptions(JSON.stringify({ inputGainDB: -6 }), null, null).inputGainDB).toBe(-6);
+ });

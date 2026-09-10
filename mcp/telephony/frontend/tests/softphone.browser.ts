@@ -16,9 +16,12 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await expect.poll(async () => (await page.request.get(gateway + "/fixture/audio-ready")).json()).toEqual({ ready: true });
   await page.evaluate(() => { const w = window as any; w.phone.setMuted(true); w.phone.sendDTMF("12#"); });
   await expect.poll(() => page.evaluate(() => (window as any).notices)).toContain("Keypad tone sent");
-  await page.evaluate(() => (window as any).phone.reconnect());
+  await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.micInputGainDb)).toBe(0);
+  await page.evaluate(() => (window as any).phone.reconnect({ inputGainDB: -6, playbackTargetMs: 80 }));
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().muted)).toBe(true);
+  await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.micInputGainDb)).toBe(-6);
+  await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.targetMs)).toBeGreaterThanOrEqual(80);
   await page.evaluate(() => (window as any).phone.setMuted(false));
   await page.evaluate(() => (window as any).phone.hangup());
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().callId)).toBeUndefined();

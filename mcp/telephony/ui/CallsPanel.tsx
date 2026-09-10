@@ -643,17 +643,23 @@ function AudioProcessingSettings({
         <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: true })} className={`rounded border px-2 py-1 ${value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Speakers</button>
         <button type="button" disabled={disabled} onClick={() => onChange({ ...value, echoCancellation: false })} className={`rounded border px-2 py-1 ${!value.echoCancellation ? "border-accent text-accent" : "border-border text-text-muted"}`}>Headset</button>
         <label className="ml-2 flex items-center gap-2 text-text-muted">
-          Mic headroom
+          Microphone gain
           <select disabled={disabled} value={value.inputGainDB} onChange={(event) => onChange({ ...value, inputGainDB: Number(event.target.value) })} className="rounded border border-border bg-bg px-2 py-1">
             <option value={-9}>-9 dB</option>
-            <option value={-6}>-6 dB (recommended)</option>
+            <option value={-6}>-6 dB</option>
             <option value={-3}>-3 dB</option>
-            <option value={0}>0 dB</option>
+            <option value={0}>0 dB (default)</option>
           </select>
         </label>
       </div>
+      <label className="mt-2 flex items-center gap-2 text-text-muted">
+        Playback buffer
+        <select disabled={disabled} value={value.playbackTargetMs ?? 60} onChange={event => onChange({ ...value, playbackTargetMs: Number(event.target.value) })} className="rounded border border-border bg-bg px-2 py-1">
+          {[40, 60, 80, 100, 120, 160].map(ms => <option key={ms} value={ms}>{ms} ms{ms === 60 ? " (default)" : ""}</option>)}
+        </select>
+      </label>
       <p className="mt-2 text-xs text-text-dim">
-        Speakers enable echo cancellation; headsets disable it. The -6 dB headroom and -3 dBFS limiter protect the carrier stream from clipping. Changes apply to the next call.
+        Speakers enable echo cancellation; headsets disable it. The limiter protects against clipping at every gain setting. Smaller playback buffers reduce delay; larger ones tolerate more jitter. Buffering still adapts to interruptions. Changes apply to the next call.
       </p>
     </div>
   );

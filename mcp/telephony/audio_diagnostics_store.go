@@ -75,19 +75,21 @@ type audioDropEvent struct {
 }
 
 type carrierAudioDiagnostics struct {
-	InboundDroppedMS             int              `json:"inbound_dropped_ms,omitempty"`
-	InboundMaxQueueAgeMS         int              `json:"inbound_max_queue_age_ms,omitempty"`
-	InboundJitterMS              float64          `json:"inbound_jitter_ms,omitempty"`
-	UpdatedAt                    string           `json:"updated_at"`
-	Provider                     string           `json:"provider"`
-	Codec                        string           `json:"codec"`
-	SampleRate                   int              `json:"sample_rate"`
-	PacerMode                    string           `json:"pacer_mode"`
-	MaxQueuedMS                  int              `json:"max_queued_ms"`
-	DroppedStaleMS               int              `json:"dropped_stale_ms"`
-	PreAnswerMicrophoneDroppedMS int64            `json:"pre_answer_microphone_dropped_ms"`
-	SequenceGaps                 int              `json:"sequence_gaps"`
-	DropEvents                   []audioDropEvent `json:"drop_events,omitempty"`
+	SendAheadMS                  int                    `json:"send_ahead_ms"`
+	InputAudio                   audioTransportSnapshot `json:"input_audio"`
+	InboundDroppedMS             int                    `json:"inbound_dropped_ms,omitempty"`
+	InboundMaxQueueAgeMS         int                    `json:"inbound_max_queue_age_ms,omitempty"`
+	InboundJitterMS              float64                `json:"inbound_jitter_ms,omitempty"`
+	UpdatedAt                    string                 `json:"updated_at"`
+	Provider                     string                 `json:"provider"`
+	Codec                        string                 `json:"codec"`
+	SampleRate                   int                    `json:"sample_rate"`
+	PacerMode                    string                 `json:"pacer_mode"`
+	MaxQueuedMS                  int                    `json:"max_queued_ms"`
+	DroppedStaleMS               int                    `json:"dropped_stale_ms"`
+	PreAnswerMicrophoneDroppedMS int64                  `json:"pre_answer_microphone_dropped_ms"`
+	SequenceGaps                 int                    `json:"sequence_gaps"`
+	DropEvents                   []audioDropEvent       `json:"drop_events,omitempty"`
 }
 
 func clampDiagnosticInt(value, maximum int) int {

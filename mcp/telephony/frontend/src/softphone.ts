@@ -1,4 +1,4 @@
-import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, type SoftphoneAudioOptions, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { browserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallSession, type DialRequest, type TelephonyClient } from "./client";
 
@@ -45,6 +45,7 @@ export class HeadlessSoftphone {
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
     this.runtime = options.audioRuntime ?? browserAudio;
     this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio };
+    playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;
     if (!Number.isFinite(this.interval) || (this.interval !== 0 && this.interval < 100)) throw new Error("Call poll interval must be 0 or at least 100 ms");
   }
@@ -179,8 +180,10 @@ export class HeadlessSoftphone {
 
   async reconnect(audio?: Partial<SoftphoneAudioOptions>): Promise<void> {
     if (!this.session) throw new Error("No call to reconnect");
+    const nextOptions = { ...this.audioOptions, ...audio };
+    playbackBufferOptions(nextOptions);
     const generation = this.begin(false);
-    if (audio) this.audioOptions = { ...this.audioOptions, ...audio };
+    this.audioOptions = nextOptions;
     try { await this.attachAudio(this.session, generation); }
     catch (error) { if (this.current(generation)) this.update({ detail: message(error) }); throw error; }
     finally { this.finish(generation); }

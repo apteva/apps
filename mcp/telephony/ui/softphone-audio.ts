@@ -10,7 +10,7 @@
 // failing the call.
 
 const SAMPLE_RATE = 24_000;
-const JITTER_TARGET_MS = 80;
+const JITTER_TARGET_MS = 60;
 const MAX_RECONNECT_MS = 30_000;
 
 function floatToPCM16(input: Float32Array): ArrayBuffer {
@@ -70,6 +70,12 @@ export interface SoftphoneAudioOptions {
   noiseSuppression: boolean;
   autoGainControl: boolean;
   inputGainDB: number;
+  /** Initial playback cushion in ms (40–160). Default 60. Applied on start/reconnect. */
+  playbackTargetMs?: number;
+  /** Adaptive lower bound (40–160). Default min(60, target). */
+  playbackMinMs?: number;
+  /** Adaptive upper bound (40–160). Default 160. */
+  playbackMaxMs?: number;
   highpassFilter: boolean;
 }
 
@@ -111,9 +117,20 @@ export const DEFAULT_SOFTPHONE_AUDIO_OPTIONS: SoftphoneAudioOptions = {
   echoCancellation: true,
   noiseSuppression: false,
   autoGainControl: false,
-  inputGainDB: -6,
+  inputGainDB: 0,
   highpassFilter: true,
 };
+
+export function playbackBufferOptions(options: Partial<SoftphoneAudioOptions>) {
+  const initialTargetMs = options.playbackTargetMs ?? JITTER_TARGET_MS;
+  const minTargetMs = options.playbackMinMs ?? Math.min(JITTER_TARGET_MS, initialTargetMs);
+  const maxTargetMs = options.playbackMaxMs ?? 160;
+  for (const value of [initialTargetMs, minTargetMs, maxTargetMs]) {
+    if (!Number.isFinite(value) || value < 40 || value > 160) throw new RangeError("Playback buffers must be between 40 and 160 ms");
+  }
+  if (minTargetMs > initialTargetMs || initialTargetMs > maxTargetMs) throw new RangeError("Playback buffers require min <= target <= max");
+  return { initialTargetMs, minTargetMs, maxTargetMs, hardMaxMs: 320 };
+}
 
 export function microphoneConstraints(options: SoftphoneAudioOptions): MediaTrackConstraints {
   return {
@@ -350,6 +367,8 @@ export class SoftphoneSession {
     workerURL: string,
     options: SoftphoneAudioOptions = DEFAULT_SOFTPHONE_AUDIO_OPTIONS,
   ): Promise<void> {
+    const playbackOptions = playbackBufferOptions(options);
+    this.diagnostics.targetMs = playbackOptions.initialTargetMs;
     this.callbacks.onState?.("connecting");
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({ audio: microphoneConstraints(options) });
@@ -381,7 +400,7 @@ export class SoftphoneSession {
       });
       this.playback = new AudioWorkletNode(this.ctx, "softphone-playback", {
         numberOfInputs: 0, outputChannelCount: [1],
-        processorOptions: { initialTargetMs: JITTER_TARGET_MS, minTargetMs: 60, maxTargetMs: 160, hardMaxMs: 320 },
+        processorOptions: playbackOptions,
       });
       // A headless host can reconnect an already-muted call. Apply the gate
       // before capture starts, rather than after the socket has connected.
