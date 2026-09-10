@@ -45,10 +45,19 @@ const imports = {
   '@apteva/ui-kit': '/vendor/ui-kit.mjs',
 };
 const html = `<div id="root"></div><script type="importmap">${JSON.stringify({ imports })}</script><script type="module" src="/test.js"></script>`;
+let goBackend=false;
 Bun.serve({
-  port: 19180, hostname: '127.0.0.1',
+  port: 19180, hostname: '127.0.0.1', maxRequestBodySize:128*1024**2,
   async fetch(req) {
     const path = new URL(req.url).pathname;
+    if(path==='/__go'){
+      goBackend=new URL(req.url).searchParams.get('enabled')==='true';
+      return Response.json({ok:true});
+    }
+    if(goBackend && path.startsWith('/api/apps/storage/') && !path.includes('/ui/')){
+      const target=new URL(req.url);const base=new URL(process.env.STORAGE_TEST_BACKEND!);target.host=base.host;
+      return fetch(target,{method:req.method,headers:req.headers,body:req.body,signal:req.signal});
+    }
     // For the real large-body test, serve the control API here so Playwright
     // never intercepts/buffers the 2 GiB of browser-to-backend traffic.
     if(path.startsWith('/api/apps/storage/') && !path.includes('/ui/')){

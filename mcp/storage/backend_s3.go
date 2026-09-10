@@ -43,6 +43,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -51,6 +52,10 @@ import (
 )
 
 type s3Backend struct {
+	corsMu        sync.Mutex
+	corsOrigin    string
+	corsUntil     time.Time
+	corsErr       error
 	client        *minio.Client
 	bucket        string
 	region        string

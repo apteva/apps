@@ -77,15 +77,15 @@ func writeUploadPart(c context.Context, app *sdk.AppCtx, id string, n int, r io.
 			return 0, err
 		}
 	}
-	if meta.Direct != nil {
-		return 0, errors.New("send this part directly to its signed backend URL")
-	}
 	var committed int
 	if err = app.AppDB().QueryRow(`SELECT count(*) FROM completed_uploads WHERE upload_id=?`, id).Scan(&committed); err != nil {
 		return 0, err
 	}
 	if committed > 0 {
 		return 0, errors.New("upload already completed")
+	}
+	if meta.Direct != nil {
+		return relayUploadPart(c, app, id, n, meta, mu, r, length)
 	}
 	mu.budget.Lock()
 	if mu.sizes == nil {

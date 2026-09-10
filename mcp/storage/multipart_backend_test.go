@@ -22,6 +22,12 @@ func TestS3MultipartWireProtocol(t *testing.T) {
 		q := r.URL.Query()
 		w.Header().Set("Content-Type", "application/xml")
 		switch {
+		case r.Method == "PUT" && q.Get("uploadId") == "remote-id":
+			body, _ := io.ReadAll(r.Body)
+			if string(body) != "abc" || q.Get("partNumber") != "2" || r.Header.Get("Authorization") == "" {
+				t.Error("invalid relay request")
+			}
+			w.Header().Set("ETag", `"etag2"`)
 		case r.Method == "POST" && q.Has("uploads"):
 			fmt.Fprint(w, `<InitiateMultipartUploadResult><Bucket>test-bucket</Bucket><Key>00/video.mp4</Key><UploadId>remote-id</UploadId></InitiateMultipartUploadResult>`)
 		case r.Method == "GET" && q.Get("uploadId") == "remote-id":
@@ -65,6 +71,10 @@ func TestS3MultipartWireProtocol(t *testing.T) {
 	q := u.Query()
 	if q.Get("uploadId") != id || q.Get("partNumber") != "2" || !strings.Contains(q.Get("X-Amz-SignedHeaders"), "content-length") {
 		t.Fatalf("unbounded part capability: %s", u.RawQuery)
+	}
+	p, err := be.PutMultipartPart(c, "00/video.mp4", id, 2, strings.NewReader("abc"), 3)
+	if err != nil || p.Size != 3 || p.ETag != "etag2" || p.Number != 2 {
+		t.Fatalf("relay: %+v %v", p, err)
 	}
 	parts, err := be.MultipartParts(c, "00/video.mp4", id)
 	if err != nil || len(parts) != 2 || lists != 2 {

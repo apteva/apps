@@ -108,6 +108,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.sweepDone = make(chan struct{})
 	go func() {
 		defer close(a.sweepDone)
+		prepareBrowserUpload(sweepCtx, ctx, "")
 		sweepBlobCleanup(ctx)
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)

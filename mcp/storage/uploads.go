@@ -140,10 +140,8 @@ type uploadMeta struct {
 	CreatedAt      string           `json:"created_at"`
 }
 
-// completeMu serializes the complete() critical section per session
-// (concat + hash + insert + cleanup must run once even if the
-// client retries complete twice). PUT /parts/N has no shared lock —
-// each part writes to its own file.
+// Session locks allow concurrent part transfers while completion and abort
+// run exclusively. completeMu protects the lifecycle lock registry.
 type uploadLock struct {
 	sync.RWMutex
 	budget  sync.Mutex
@@ -152,6 +150,7 @@ type uploadLock struct {
 	total   int64
 	refs    int
 	retired bool
+	relayed bool
 }
 
 var completeMu sync.Mutex
@@ -427,7 +426,13 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	reserved = false
 	ctx.Logger().Info("upload initialized", "upload_id", id, "project_id", pid, "filename", meta.Filename, "bytes", meta.DeclaredSize, "direct", meta.Direct != nil)
 	if meta.Direct != nil {
-		httpJSON(w, map[string]any{"upload_id": id, "mode": "s3_multipart", "part_size": meta.Direct.PartSize, "max_parallel": configIntClamped(ctx.Config().Get("s3_upload_concurrency"), 4, 1, 8), "max_parts": maxPartNumber})
+		mode := "s3_relay"
+		if prepareBrowserUpload(r.Context(), ctx, r.Header.Get("Origin")) {
+			mode = "s3_multipart"
+		}
+		_, relaySupported := backend().(multipartRelayBackend)
+		ctx.Logger().Info("multipart transport selected", "upload_id", id, "mode", mode)
+		httpJSON(w, map[string]any{"upload_id": id, "mode": mode, "relay_supported": relaySupported, "part_size": meta.Direct.PartSize, "max_parallel": configIntClamped(ctx.Config().Get("s3_upload_concurrency"), 4, 1, 8), "max_parts": maxPartNumber})
 		return
 	}
 	httpJSON(w, map[string]any{

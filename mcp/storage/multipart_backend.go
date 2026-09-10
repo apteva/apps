@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -76,4 +77,15 @@ func (s *s3Backend) AbortMultipart(c context.Context, key, id string) error {
 		return nil
 	}
 	return err
+}
+
+// The relay streams a bounded part into the existing provider upload. The SDK
+// must not hash/spool the body before sending it; SigV4 still authenticates it.
+type multipartRelayBackend interface {
+	PutMultipartPart(context.Context, string, string, int, io.Reader, int64) (remotePart, error)
+}
+
+func (s *s3Backend) PutMultipartPart(c context.Context, key, id string, n int, r io.Reader, size int64) (remotePart, error) {
+	p, err := (minio.Core{Client: s.client}).PutObjectPart(c, s.bucket, key, id, n, r, size, minio.PutObjectPartOptions{DisableContentSha256: true})
+	return remotePart{Number: p.PartNumber, Size: p.Size, ETag: p.ETag}, err
 }

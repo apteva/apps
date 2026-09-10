@@ -1,11 +1,11 @@
-# Storage 0.12.0
+# Storage 0.12.1
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.78.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
 
-## Version 0.12.0: immediate direct multipart uploads
+## Version 0.12.1: automatic bucket CORS and streaming fallback
 
 Large browser uploads start after the limits check, without a whole-file read
 or SHA-256 preparation phase. With S3 connected, `POST /uploads` with
@@ -17,11 +17,25 @@ part sizes and ETags with the provider, completes the object there, checks its
 size, and publishes metadata. No video download, staging, or second upload is
 needed. Cancellation and expiry abort the provider multipart session.
 
-The bucket CORS policy must allow the dashboard origin and `PUT` (and
-`Content-Type` if the browser sends it). The browser does not need access to
-ETag response headers: completion reads authoritative ETags from S3. Signing
-and completion credentials stay on the server. A completed multipart upload ID
-cannot be reused to overwrite the published object.
+Storage checks the bucket's upload CORS policy and automatically adds a rule
+for the dashboard origin from the platform's configured public URL. It preserves
+existing bucket rules; it never trusts arbitrary request origins. This requires
+`GetBucketCORS` and `PutBucketCORS` permissions unless the existing policy already
+allows uploads. Setup is bounded to five seconds and cached (ten minutes on
+success, one minute on failure).
+
+If CORS cannot be configured or verified, init returns `mode: s3_relay`.
+The browser sends parallel parts to `PUT /uploads/{id}/parts/{n}` on Apteva;
+Storage streams each part directly into the same S3 multipart session without
+temporary files or a whole-file hash pass. A direct transfer failure also
+switches to this route when the server advertises `relay_supported: true`.
+Completed parts remain valid, retries remain bounded, and completion and
+cancellation use the same events and project scope. Relay traffic uses Apteva's
+bandwidth, so direct transfer remains preferred when CORS works.
+
+Signing and completion credentials stay on the server. The browser does not
+need ETag response headers because completion reads authoritative ETags from S3.
+A completed multipart upload ID cannot overwrite the published object.
 
 Direct multipart files have an empty `sha256` field; whole-file digest deduplication
 is skipped for these files. S3 part ETags and sizes validate the submitted
@@ -183,3 +197,19 @@ The profile verifies actual signed PUTs, checksum validation, immutable
 publication, completion retries, ranged reads, revocation, and deletion.
 Provider-specific connection/endpoint behavior also has unit fixtures. MinIO
 coverage does not certify live AWS, R2, B2, Hetzner, or Scaleway accounts.
+
+### Local multipart browser validation
+
+Go unit tests include the CORS API, streaming relay, ownership, cancellation,
+and completion events. To also exercise actual 2 GiB Chrome transfers through
+the Go handlers and a temporary local S3 server, run in two terminals:
+
+```sh
+STORAGE_BROWSER_TEST_SERVER=1 go test -run '^TestBrowserMultipartServer$' -timeout 10m -v
+STORAGE_TEST_BACKEND=http://127.0.0.1:19182 bun run test
+```
+
+The browser suite covers automatic CORS setup, missing CORS permissions, and
+browser-only CORS failures. Stop the fixture with
+`curl -X POST http://127.0.0.1:19182/__stop`. It uses loopback endpoints, dummy
+credentials, sparse temporary video files, and temporary Storage data only.

@@ -15,6 +15,8 @@ import (
 )
 
 type multipartFake struct {
+	corsError error
+	relay     func(context.Context, int, io.Reader, int64) (remotePart, error)
 	Backend
 	parts           []remotePart
 	size            int64
@@ -25,6 +27,14 @@ type multipartFake struct {
 
 func (b *multipartFake) Put(context.Context, string, string, io.Reader, int64) error {
 	panic("direct completion must not upload object bytes")
+}
+func (b *multipartFake) PrepareBrowserUpload(context.Context, string) error { return b.corsError }
+func (b *multipartFake) PutMultipartPart(c context.Context, _ string, _ string, n int, r io.Reader, size int64) (remotePart, error) {
+	if b.relay != nil {
+		return b.relay(c, n, r, size)
+	}
+	read, err := io.Copy(io.Discard, r)
+	return remotePart{n, read, "relay-etag"}, err
 }
 func (b *multipartFake) Kind() string { return "s3" }
 func (b *multipartFake) BeginMultipart(context.Context, string, string) (string, error) {
@@ -55,7 +65,7 @@ func (b *multipartFake) OpenObject(context.Context, string, ObjectReadOptions) (
 
 func directFixture(t *testing.T) (*sdk.AppCtx, *App, *multipartFake, string) {
 	t.Helper()
-	ctx := newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"s3_part_size_mb": "5", "max_upload_size_mb": "5120"}))
+	ctx := newTestCtx(t, tk.WithEnv("APTEVA_PUBLIC_URL", "https://dashboard.example"), tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"s3_part_size_mb": "5", "max_upload_size_mb": "5120"}))
 	be := &multipartFake{Backend: backend(), size: 5*1024*1024 + 3}
 	globalBackend = be
 	t.Cleanup(func() { globalBackend = nil })

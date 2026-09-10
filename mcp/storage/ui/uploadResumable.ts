@@ -12,7 +12,8 @@
 //     point of parts vs offset.
 //
 // Start transferring immediately. S3 parts go directly to the bucket; disk
-// parts use the app endpoint. Never read the whole file before uploading.
+// parts use the app endpoint. If direct transfer fails, stream S3 parts through
+// the same-origin app endpoint. Never read the whole file before uploading.
 
 const STORAGE_API = "/api/apps/storage";
 const simpleUploadCap = 25 * 1024 * 1024;
@@ -118,7 +119,8 @@ interface InitResponse {
   max_parallel?: number;
   max_parts?: number;
   expires_at?: string;
-  mode?: "s3_multipart";
+  mode?: "s3_multipart" | "s3_relay";
+  relay_supported?: boolean;
   // Pre-dedup short-circuit shape:
   file?: UploadedFile;
   was_existing?: boolean;
@@ -222,6 +224,7 @@ async function uploadChunked(
   // overall upload aborts.
   let firstErr: Error | null = null;
   let nextPart = 0;
+  let useRelay = init.mode === "s3_relay";
   const work = async () => {
     while (nextPart < queue.length) {
       if (opts.signal?.aborted) return;
@@ -230,6 +233,7 @@ async function uploadChunked(
       if (!part) return;
       let attempt = 0;
       while (attempt < maxRetriesPerPart) {
+        let directAttempt = false;
         try {
           const timeout = AbortSignal.timeout(5 * 60 * 1000);
           const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
@@ -237,14 +241,15 @@ async function uploadChunked(
           const partURL = `${STORAGE_API}/uploads/${id}/parts/${part.n}${scopeQS(opts)}`;
           let target = partURL;
           let headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
-          if (init.mode === "s3_multipart") {
+          if (init.mode === "s3_multipart" && !useRelay) {
             const signed = (await jsonFetch<{ url: string; headers: Record<string, string> }>("GET", partURL, { signal })).body;
             target = signed.url;
             headers = signed.headers;
+            directAttempt = true;
           }
           const res = await fetch(target, {
             method: "PUT",
-            credentials: init.mode === "s3_multipart" ? "omit" : "same-origin",
+            credentials: directAttempt ? "omit" : "same-origin",
             headers,
             body: blob,
             signal,
@@ -253,13 +258,20 @@ async function uploadChunked(
             // Do not include presigned URLs (credentials) in errors.
             throw new Error(`PUT part ${part.n} → ${res.status}: ${await res.text()}`);
           }
-          const j = init.mode === "s3_multipart" ? { size: blob.size } : (await res.json()) as { size: number };
+          const j = directAttempt ? { size: blob.size } : (await res.json()) as { size: number };
           confirmedBytes += j.size - (partBytes.get(part.n) || 0);
           partBytes.set(part.n, j.size);
           reportProgress();
           break;
         } catch (e) {
-          if ((e as DOMException).name === "AbortError") return;
+          if (opts.signal?.aborted) return;
+          if (directAttempt && init.relay_supported) {
+            // Keep the same upload ID and confirmed parts. New work uses the
+            // same-origin streaming route; in-flight direct parts may finish.
+            useRelay = true;
+            init.mode = "s3_relay";
+            continue;
+          }
           attempt += 1;
           if (attempt >= maxRetriesPerPart) {
             firstErr = new Error(

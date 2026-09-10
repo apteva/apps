@@ -136,3 +136,93 @@ test('real 2 GiB body streams directly to a cross-origin backend',async({page,re
  expect(stats.apiBytes).toBeLessThan(2048);
  console.log(`2 GiB direct transfer: ${elapsed} ms; ${stats.parts} parts; peak concurrency ${stats.peak}; Apteva API bytes ${stats.apiBytes}`);
 });
+
+for (const initialRelay of [false,true]) test(`multipart ${initialRelay?'starts with relay':'switches to relay without restarting completed parts'}`,async({page})=>{
+ let inits=0,signs=0,complete=0;const relayed:number[]=[];
+ await page.route('https://bucket.example/**',async route=>{
+  if(route.request().url().endsWith('/1'))return route.fulfill({status:200});
+  return route.abort('failed');
+ });
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(u.pathname.endsWith('/uploads')){
+   if(r.method()==='GET')return route.fulfill({json:{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}});
+   inits++;return route.fulfill({json:{upload_id:'SAMESESSION',mode:initialRelay?'s3_relay':'s3_multipart',relay_supported:true,part_size:16*1024**2,max_parallel:1}});
+  }
+  if(u.pathname.includes('/parts/')){
+   expect(u.pathname).toContain('/SAMESESSION/');const n=Number(u.pathname.split('/').at(-1));
+   if(r.method()==='GET'){signs++;return route.fulfill({json:{url:'https://bucket.example/'+n,headers:{}}})}
+   relayed.push(n);return route.fulfill({json:{size:r.postDataBuffer()!.length}});
+  }
+  if(u.pathname.endsWith('/complete')){complete++;return route.fulfill({json:{file:row(12,'fallback.mp4')}})}
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ const result=await page.evaluate(async()=>{
+  const phases:string[]=[];const file={name:'fallback.mp4',type:'video/mp4',size:64*1024**2,stream(){throw Error('preparation')},arrayBuffer(){throw Error('preparation')},slice(){return new Blob([new Uint8Array(1024)])}};
+  const out=await (window as any).uploadResumable(file,{projectId:'p1',installId:42,onPhase:(p:string)=>phases.push(p)});return {out,phases};
+ });
+ expect(result.out.id).toBe(12);expect(inits).toBe(1);expect(complete).toBe(1);expect(signs).toBe(initialRelay?0:2);expect(relayed).toEqual(initialRelay?[1,2,3,4]:[2,3,4]);expect(result.phases).toEqual(['checking','uploading','finalizing']);
+});
+
+test('cancelling a direct upload does not start the relay',async({page})=>{
+ let relays=0,aborts=0;
+ await page.route('https://bucket.example/**',async route=>{await new Promise(r=>setTimeout(r,200));await route.abort('failed').catch(()=>{})});
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(r.method()==='PUT'){relays++;return route.fulfill({status:500})}
+  if(r.method()==='DELETE'){aborts++;return route.fulfill({json:{ok:true}})}
+  if(u.pathname.endsWith('/uploads'))return route.fulfill({json:r.method()==='GET'?{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}:{upload_id:'CANCELS3',mode:'s3_multipart',relay_supported:true,part_size:16*1024**2,max_parallel:1}});
+  if(u.pathname.includes('/parts/'))return route.fulfill({json:{url:'https://bucket.example/cancel',headers:{}}});
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ const result=await page.evaluate(async()=>{
+  const controller=new AbortController();const original=window.fetch;window.fetch=async(input,init)=>{if(String(input).startsWith('https://bucket.example'))setTimeout(()=>controller.abort(),10);return original(input,init)};
+  const file={name:'cancel.mp4',type:'video/mp4',size:32*1024**2,slice(){return new Blob([new Uint8Array(1024)])}};
+  try{await (window as any).uploadResumable(file,{projectId:'p1',installId:42,signal:controller.signal});return 'unexpected success'}catch(e){return (e as Error).name}finally{window.fetch=original}
+ });
+ expect(result).toBe('AbortError');expect(relays).toBe(0);expect(aborts).toBe(1);
+});
+
+for(const scenario of ['cors-denied','auto-cors','browser-denied']) test(`real 2 GiB through Go and S3: ${scenario}`,async({page,request})=>{
+ test.skip(!process.env.STORAGE_TEST_BACKEND,'requires optional local Go/S3 fixture');
+ test.setTimeout(120000);
+ const backend=process.env.STORAGE_TEST_BACKEND!;
+ await request.post(backend+'/__scenario?name='+scenario);
+ await request.post('/__go?enabled=true');
+ const directory=mkdtempSync(join(tmpdir(),'storage-go-2g-'));
+ const path=join(directory,'real-2g.mp4');const fd=openSync(path,'w');ftruncateSync(fd,2*1024**3);closeSync(fd);
+ const start=Date.now();
+ try{
+  await page.goto('/');
+  await page.evaluate(()=>{File.prototype.stream=function(){throw Error('whole-file preparation')};File.prototype.arrayBuffer=async function(){throw Error('whole-file preparation')};});
+  await page.locator('input[type=file]').setInputFiles(path);
+  await expect(page.getByText('uploaded',{exact:true})).toBeVisible({timeout:100000});
+  await expect(page.getByText(/Preparing file/)).toHaveCount(0);
+  const stats=await (await request.get(backend+'/__stats')).json();
+  expect(stats.bytes).toBe(2*1024**3);expect(stats.parts).toBe(128);expect(stats.peak).toBeGreaterThan(1);expect(stats.peak).toBeLessThanOrEqual(4);
+  expect(stats.apiBytes).toBe(scenario==='auto-cors'?0:2*1024**3);
+  expect(stats.corsWrites).toBe(scenario==='auto-cors'?1:0);expect(stats.events).toBe(1);expect(stats.scratchBytes).toBe(0);
+  console.log(`2 GiB Go/S3 ${scenario}: ${Date.now()-start} ms; ${JSON.stringify(stats)}`);
+ }finally{rmSync(directory,{recursive:true,force:true});await request.post('/__go?enabled=false')}
+});
+
+test('relay retries are bounded after a direct network failure',async({page})=>{
+ let relays=0,direct=0,complete=0;
+ await page.route('https://bucket.example/**',async route=>{direct++;return route.abort('failed')});
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(r.method()==='PUT'){relays++;return route.fulfill({status:502,body:'provider unavailable'})}
+  if(u.pathname.endsWith('/uploads'))return route.fulfill({json:r.method()==='GET'?{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}:{upload_id:'RETRYBOUND',mode:'s3_multipart',relay_supported:true,part_size:16*1024**2,max_parallel:1}});
+  if(u.pathname.includes('/parts/'))return route.fulfill({json:{url:'https://bucket.example/failure',headers:{}}});
+  if(u.pathname.endsWith('/complete'))complete++;
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ const result=await page.evaluate(async()=>{
+  const file={name:'failure.mp4',type:'video/mp4',size:32*1024**2,slice(){return new Blob([new Uint8Array(1024)])}};
+  try{await (window as any).uploadResumable(file,{projectId:'p1',installId:42});return 'unexpected success'}catch(e){return String(e)}
+ });
+ expect(result).toContain('failed after 5 attempts');expect(direct).toBe(1);expect(relays).toBe(5);expect(complete).toBe(0);
+});
