@@ -17,6 +17,7 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Function struct {
+	InvocationPolicy   *InvocationPolicy  `json:"invocation_policy,omitempty"`
 	Limits             RuntimePolicy      `json:"limits"`
 	RuntimeReadiness   *RuntimeReadiness  `json:"runtime_readiness,omitempty"`
 	InstanceKey        string             `json:"-"`
@@ -73,6 +74,7 @@ type FunctionVersion struct {
 }
 
 type Invocation struct {
+	Identity     StoredResources `json:"identity,omitempty"`
 	Resources    StoredResources `json:"resources,omitempty"`
 	BuildMS      int64           `json:"build_ms"`
 	QueueMS      int64           `json:"queue_ms"`
@@ -185,6 +187,13 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	if fn.InvocationPolicy != nil {
+		b, _ := json.Marshal(fn.InvocationPolicy)
+		if _, err := db.Exec("INSERT INTO function_invocation_policies(function_id,policy_json) VALUES (?,?)", id, string(b)); err != nil {
+			db.Exec("DELETE FROM functions WHERE id=?", id)
+			return nil, err
+		}
+	}
 	if fn.Limits != (RuntimePolicy{}) {
 		b, _ := json.Marshal(fn.Limits)
 		if _, err := db.Exec("INSERT INTO function_runtime_policies(function_id,policy_json) VALUES (?,?)", id, string(b)); err != nil {
@@ -291,7 +300,8 @@ func dbUpdateFunction(db *sql.DB, pid string, id int64, patch map[string]any, ne
 		args = append(args, newSourceHash)
 	}
 
-	if len(sets) == 0 && patch["limits"] == nil {
+	_, hasInvocationPolicy := patch["invocation_policy"]
+	if len(sets) == 0 && patch["limits"] == nil && !hasInvocationPolicy {
 		return cur, nil
 	}
 
@@ -304,6 +314,17 @@ func dbUpdateFunction(db *sql.DB, pid string, id int64, patch map[string]any, ne
 		return nil, err
 	}
 	defer tx.Rollback()
+	if raw, has := patch["invocation_policy"]; has {
+		policy, err := parseInvocationPolicy(raw)
+		if err != nil {
+			return nil, err
+		}
+		b, _ := json.Marshal(policy)
+		if _, err := tx.Exec("INSERT INTO function_invocation_policies(function_id,policy_json) VALUES (?,?) ON CONFLICT(function_id) DO UPDATE SET policy_json=excluded.policy_json", id, string(b)); err != nil {
+			return nil, err
+		}
+	}
+
 	if raw, ok := patch["limits"]; ok {
 		b, _ := json.Marshal(raw)
 		if _, err = tx.Exec("INSERT INTO function_runtime_policies(function_id,policy_json) VALUES (?,?) ON CONFLICT(function_id) DO UPDATE SET policy_json=excluded.policy_json", id, string(b)); err != nil {
@@ -406,7 +427,7 @@ const fnColumns = `id, project_id, name, runtime, source_kind,
 		source_hash, COALESCE(env_json,''),
 		timeout_ms, max_memory_mb, status,
 		COALESCE(function_url_json,''),
-		active_version_id, created_at, updated_at, instance_key, deployment_revision, COALESCE(access_json,''), COALESCE((SELECT policy_json FROM function_runtime_policies WHERE function_id=functions.id),'{}')`
+		active_version_id, created_at, updated_at, instance_key, deployment_revision, COALESCE(access_json,''), COALESCE((SELECT policy_json FROM function_runtime_policies WHERE function_id=functions.id),'{}'), COALESCE((SELECT policy_json FROM function_invocation_policies WHERE function_id=functions.id),'null')`
 
 type scanRow interface {
 	Scan(dest ...any) error
@@ -415,18 +436,21 @@ type scanRow interface {
 func scanFunction(row scanRow) (*Function, error) {
 	fn := &Function{}
 	var repoID, activeVer sql.NullInt64
-	var envJSON, fnURLJSON, accessJSON, policyJSON string
+	var envJSON, fnURLJSON, accessJSON, policyJSON, invocationPolicyJSON string
 	err := row.Scan(
 		&fn.ID, &fn.ProjectID, &fn.Name, &fn.Runtime, &fn.SourceKind,
 		&fn.Source, &repoID, &fn.RepoPath,
 		&fn.SourceHash, &envJSON,
 		&fn.TimeoutMS, &fn.MaxMemoryMB, &fn.Status,
 		&fnURLJSON,
-		&activeVer, &fn.CreatedAt, &fn.UpdatedAt, &fn.InstanceKey, &fn.DeploymentRevision, &accessJSON, &policyJSON)
+		&activeVer, &fn.CreatedAt, &fn.UpdatedAt, &fn.InstanceKey, &fn.DeploymentRevision, &accessJSON, &policyJSON, &invocationPolicyJSON)
 	if err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(policyJSON), &fn.Limits)
+	if err := decodeStoredInvocationPolicy(invocationPolicyJSON, &fn.InvocationPolicy); err != nil {
+		return nil, err
+	}
 	if accessJSON != "" {
 		if err := json.Unmarshal([]byte(accessJSON), &fn.Access); err != nil {
 			return nil, err
@@ -612,6 +636,12 @@ func dbInsertInvocation(db *sql.DB, pid string, inv *Invocation, owner ...string
 		return 0, err
 	}
 	id, _ := res.LastInsertId()
+	if len(inv.Identity) > 0 {
+		if _, err = tx.Exec("INSERT INTO function_invocation_identities(invocation_id,identity_json) VALUES (?,?)", id, string(inv.Identity)); err != nil {
+			return 0, err
+		}
+	}
+
 	if firstString(owner) != "" {
 		if _, err = tx.Exec("INSERT INTO function_active_work(kind,id,owner) VALUES('invocation',?,?)", id, firstString(owner)); err != nil {
 			return 0, err
@@ -628,7 +658,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
 			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null')
+			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
 		 FROM function_invocations
 		 WHERE project_id = ? AND function_id = ? AND (?=0 OR id<?)
 		 ORDER BY id DESC LIMIT ?`,
@@ -643,7 +673,7 @@ func dbListInvocations(db *sql.DB, pid string, fnID int64, limit int, before ...
 		if err := rows.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
 			&inv.DurationMS, &inv.Status, &inv.ExitCode,
 			&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources); err == nil {
+			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity); err == nil {
 			out = append(out, inv)
 		} else {
 			return nil, err
@@ -657,7 +687,7 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
 			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null')
+			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
 		 FROM function_invocations
 		 WHERE project_id = ? AND id = ?`,
 		pid, id)
@@ -665,7 +695,7 @@ func dbGetInvocation(db *sql.DB, pid string, id int64) (*Invocation, error) {
 	err := row.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
 		&inv.DurationMS, &inv.Status, &inv.ExitCode,
 		&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources)
+		&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -692,7 +722,7 @@ func dbRecentInvocations(db *sql.DB, pid string, limit int) ([]*Invocation, erro
 		`SELECT id, function_id, started_at, COALESCE(finished_at,''),
 			COALESCE(duration_ms,0), status, COALESCE(exit_code,0),
 			trigger_kind, COALESCE(event_json,''), COALESCE(response_body,''),
-			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null')
+			COALESCE(stderr,''), COALESCE(error,''), version_id, COALESCE(config_hash,''), truncated,build_ms,queue_ms,cold_start_ms,execution_ms,COALESCE((SELECT resources_json FROM function_invocation_resources WHERE invocation_id=function_invocations.id),'null'),COALESCE((SELECT identity_json FROM function_invocation_identities WHERE invocation_id=function_invocations.id),'null')
 		 FROM function_invocations
 		 WHERE project_id = ?
 		 ORDER BY started_at DESC LIMIT ?`,
@@ -707,7 +737,7 @@ func dbRecentInvocations(db *sql.DB, pid string, limit int) ([]*Invocation, erro
 		if err := rows.Scan(&inv.ID, &inv.FunctionID, &inv.StartedAt, &inv.FinishedAt,
 			&inv.DurationMS, &inv.Status, &inv.ExitCode,
 			&inv.TriggerKind, &inv.EventJSON, &inv.ResponseBody,
-			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources); err == nil {
+			&inv.Stderr, &inv.Error, &inv.VersionID, &inv.ConfigHash, &inv.Truncated, &inv.BuildMS, &inv.QueueMS, &inv.ColdStartMS, &inv.ExecutionMS, &inv.Resources, &inv.Identity); err == nil {
 			out = append(out, inv)
 		} else {
 			return nil, err

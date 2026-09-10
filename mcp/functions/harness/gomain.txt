@@ -38,6 +38,7 @@ const maxHarnessLogs = 16 << 10
 // Context is handed to Handle. Call reaches other Apteva apps through
 // the sidecar — the worker never holds a platform token itself.
 type Context struct {
+	Invocation   json.RawMessage // runtime-owned identity and audit metadata; never authority for Call
 	FunctionName string
 	FunctionID   string
 	Runtime      string
@@ -270,13 +271,14 @@ type callAnswer struct {
 }
 
 type inFrame struct {
-	Type   string          `json:"type"`
-	ID     int64           `json:"id"`
-	Event  json.RawMessage `json:"event"`
-	CallID int64           `json:"callId"`
-	OK     bool            `json:"ok"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error"`
+	Type     string          `json:"type"`
+	ID       int64           `json:"id"`
+	Event    json.RawMessage `json:"event"`
+	Identity json.RawMessage `json:"identity"`
+	CallID   int64           `json:"callId"`
+	OK       bool            `json:"ok"`
+	Result   json.RawMessage `json:"result"`
+	Error    string          `json:"error"`
 }
 
 func (h *harness) writeFrame(v any) error {
@@ -471,16 +473,17 @@ func main() {
 		// Invocation request — run in a goroutine so the read loop
 		// stays free to route call_result frames back to a Handle
 		// that's blocked mid-context.Call.
-		go runInvocation(h, baseCtx, msg.ID, msg.Event)
+		go runInvocation(h, baseCtx, msg.ID, msg.Event, msg.Identity)
 	}
 }
 
-func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage) {
+func runInvocation(h *harness, ctx *Context, id int64, event json.RawMessage, identity json.RawMessage) {
 	env := make(map[string]string, len(ctx.Env))
 	for k, v := range ctx.Env {
 		env[k] = v
 	}
 	invocationCtx := &Context{
+		Invocation:   identity,
 		FunctionName: ctx.FunctionName,
 		FunctionID:   ctx.FunctionID,
 		Runtime:      ctx.Runtime,

@@ -1,4 +1,6 @@
-# Functions 1.12.0
+# Functions 1.14.0
+
+**New in 1.14.0:** generic trusted principal admission, bounded nested propagation, and invocation identities. Existing invocation methods remain available by default. See [the caller contract, configuration, and compatibility notes](TRUSTED_INVOCATIONS.md).
 
 **New in 1.13.0:** parallel execution/downstream accounting without CPU-learning gates; unset function concurrency follows resource capacity while explicit policies and all recovery, streaming, and capacity APIs are preserved. See [behavior and tests](AUTOMATIC_ADMISSION.md).
 

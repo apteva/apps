@@ -194,6 +194,9 @@ func resourceError(code, reason string) *ResourceError {
 	return &ResourceError{Code: code, Reason: reason, Retryable: true}
 }
 func errorCode(err error) string {
+	if errors.Is(err, errInvocationDenied) {
+		return "invocation_denied"
+	}
 	var e *ResourceError
 	if errors.As(err, &e) {
 		return e.Code

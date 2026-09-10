@@ -69,8 +69,9 @@ type worker struct {
 
 // wireRequest is an invocation request sent to the worker.
 type wireRequest struct {
-	ID    int64 `json:"id"`
-	Event any   `json:"event"`
+	Identity *InvocationIdentity `json:"identity,omitempty"`
+	ID       int64               `json:"id"`
+	Event    any                 `json:"event"`
 }
 
 // wireResponse is a frame received from the worker. Which fields are
@@ -236,7 +237,11 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 	w.stderr.Reset()
 	w.seq++
 	id := w.seq
-	reqBytes, err := json.Marshal(wireRequest{ID: id, Event: event})
+	var identity *InvocationIdentity
+	if s := securityFrom(parent); s != nil {
+		identity = &s.Identity
+	}
+	reqBytes, err := json.Marshal(wireRequest{ID: id, Event: event, Identity: identity})
 	if err != nil {
 		return nil, fmt.Errorf("encode event: %w", err)
 	}

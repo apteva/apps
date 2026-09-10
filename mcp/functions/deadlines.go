@@ -72,7 +72,7 @@ func classifyDownstreamError(parent, child context.Context, err error, kind stri
 	return "downstream_error"
 }
 func extractErrorCode(message string) string {
-	for _, code := range []string{"adaptive_queue_full", "adaptive_queue_timeout", "adaptive_nested_overload", "adaptive_key_limit", "adaptive_stopped", "adaptive_coordination_unavailable", "worker_oom", "worker_memory_limit", "protocol_memory_limit", "protocol_host_memory_pressure", "integration_timeout", "app_call_timeout", "invocation_timeout", "caller_canceled", "upstream_timeout", "nested_capacity_exhausted", "nested_cycle", "nested_depth_limit", "memory_budget_exhausted", "worker_limit", "function_worker_limit", "queue_limit", "function_queue_limit", "nested_downstream_limit"} {
+	for _, code := range []string{"invocation_denied", "adaptive_queue_full", "adaptive_queue_timeout", "adaptive_nested_overload", "adaptive_key_limit", "adaptive_stopped", "adaptive_coordination_unavailable", "worker_oom", "worker_memory_limit", "protocol_memory_limit", "protocol_host_memory_pressure", "integration_timeout", "app_call_timeout", "invocation_timeout", "caller_canceled", "upstream_timeout", "nested_capacity_exhausted", "nested_cycle", "nested_depth_limit", "memory_budget_exhausted", "worker_limit", "function_worker_limit", "queue_limit", "function_queue_limit", "nested_downstream_limit"} {
 		if strings.Contains(message, "["+code+"]") {
 			return code
 		}

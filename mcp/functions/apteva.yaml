@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.13.1
+version: 1.14.0
 description: |
+  v1.14.0 Adds generic authenticated invocation admission, trusted caller
+  policies, bounded principal propagation to nested Functions, per-invocation
+  identity auditing, and authenticated worker isolation. Existing invocation
+  paths remain available by default.
+
   v1.13.1 Parallel execution and downstream calls without CPU-learning gates; default function concurrency follows resource capacity while explicit policies remain intact.
 
   v1.12.0 adds automatic CPU-aware execution and managed-call admission.
@@ -90,6 +95,9 @@ provides:
     - prefix: /url/
       no_auth: true
   mcp_tools:
+    - name: functions_invoke_authenticated
+      exposure: app_only
+      description: "Invoke with a separate principal, exact Function scope, and original deadline; restricted to configured platform-verified caller installations."
     - name: functions_capacity
       description: "Live per-call memory, function worker reservations, queues, settings and rejection reasons."
     - name: functions_prepare
@@ -126,7 +134,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: functions/v1.13.1
+    ref: functions/v1.14.0
     entry: mcp/functions
   port: 8080
   health_check: /health
