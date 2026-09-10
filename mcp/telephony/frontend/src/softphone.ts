@@ -222,7 +222,9 @@ export class HeadlessSoftphone {
   /** Device/processing changes apply on the next dial, answer, or reconnect. */
   configureAudio(options: Partial<SoftphoneAudioOptions>): void {
     this.assertOpen();
-    this.audioOptions = { ...this.audioOptions, ...options };
+    const nextOptions = { ...this.audioOptions, ...options };
+    playbackBufferOptions(nextOptions);
+    this.audioOptions = nextOptions;
   }
 
   setMuted(muted: boolean): void {
