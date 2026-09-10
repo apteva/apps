@@ -167,3 +167,51 @@ HTTP/MCP integration, platform test doubles and Chromium editor behavior.
 The configured Apteva scenarios under `scenarios/` include a real
 Code → Workspaces → Code round trip; run those separately before release.
 Mock platform tests do not prove production provider compatibility.
+
+## Git Auto-sync
+
+Auto-sync is **off by default**, configured separately for each Git-backed
+repository. Connect or import an HTTPS remote, reconcile any initial differences,
+and select a branch that tracks `origin`. The Code toolbar shows the local and
+remote branch before enabling synchronization.
+
+- Saved edits from the UI, agents, uploads, and external dev processes are detected
+  every two seconds. Unsaved editor buffers do not participate.
+- Changes are committed after 10 seconds without another observed edit. Continuous
+  editing produces a checkpoint after 60 seconds. `.gitignore` is respected.
+- Remote refs are fetched at least once per idle minute. Remote-only changes
+  fast-forward; local-only commits push to the pinned upstream branch.
+- If both histories advanced, synchronization pauses as **Needs attention**.
+  Local work has already been committed. Resolve the histories using Git, then
+  choose **Retry sync**. There is no automatic merge, reset, discard, or force push.
+- Network failures show **Offline**, retaining local commits and retrying with
+  exponential backoff (15 seconds to 5 minutes). Local checkpoints continue during
+  backoff. Settings, pending change timing, and retries survive app restarts.
+- Authentication failures, protected-branch rejections, missing remote branches,
+  or a changed checked-out branch require attention. Re-enable after switching
+  branches to explicitly choose the new branch.
+- **Sync now**, **Pause**, **View history**, and the last successful sync time are
+  available in the toolbar. Archived repositories are excluded from background work.
+
+Agent tools:
+
+```text
+repos_git_sync_configure {slug, enabled, branch?, _project_id?}
+repos_git_sync_status    {slug, _project_id?}
+repos_git_sync_now       {slug, _project_id?}
+```
+
+HTTP equivalents, with `?project_id=...` for global installs:
+
+```text
+GET   /api/repos/:slug/git/sync
+PATCH /api/repos/:slug/git/sync       {"enabled": true|false}
+POST  /api/repos/:slug/git/sync/now
+GET   /api/repos/:slug/git/log
+```
+
+Status timestamps use Unix milliseconds. `needs_attention` is a persisted state,
+not an HTTP failure: clients must inspect `status` and `last_error` after a sync.
+Auto-sync currently requires the fetch and push URL to match and an existing
+origin-tracking branch. Unusually large Git status/index responses that
+exceed the 2 MB command-output cap stop safely with a visible error.

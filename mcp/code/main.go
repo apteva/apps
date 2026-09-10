@@ -32,6 +32,7 @@ type App struct {
 	dev       *devSupervisor
 	commands  commandCoordinator
 	git       *gitService
+	syncer    *autoSyncSupervisor
 	locks     *repoLockSet
 	summaries summaryCache
 }
@@ -92,6 +93,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return fmt.Errorf("initialize Git service: %w", err)
 	}
 	a.git = gitService
+	a.syncer = newAutoSyncSupervisor(gitService)
+	a.syncer.start(ctx)
 	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)
 	portEnd := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_END"), 6199)
 	a.dev = newDevSupervisor(dataDir, a.store, a, portStart, portEnd)
@@ -107,6 +110,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.syncer != nil {
+		a.syncer.stop()
+	}
 	a.commands.cancelAll()
 	if a.dev != nil {
 		a.dev.stopAll()

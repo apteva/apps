@@ -1204,6 +1204,7 @@ func (a *App) handleGithubReposList(w http.ResponseWriter, r *http.Request) {
 	// Pass the upstream payload through verbatim — a JSON array of
 	// repo objects with the fields the panel needs (name, full_name,
 	// default_branch, language, private, pushed_at, …).
+	w.Header().Set("X-GitHub-Connection-ID", strconv.FormatInt(bound.ConnectionID, 10))
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(res.Data)
 }

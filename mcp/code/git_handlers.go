@@ -90,6 +90,8 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 	}
 
 	switch action {
+	case "sync", "sync/now":
+		a.httpRepoSync(w, r, repo, action)
 	case "", "status":
 		if r.Method != http.MethodGet {
 			httpErr(w, http.StatusMethodNotAllowed, "GET")

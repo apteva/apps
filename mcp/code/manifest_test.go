@@ -19,8 +19,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 56 {
-		t.Errorf("expected 56 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 59 {
+		t.Errorf("expected 59 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))

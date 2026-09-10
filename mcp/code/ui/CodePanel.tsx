@@ -1,3 +1,4 @@
+import { AutoSyncControls } from "./components/AutoSyncControls";
 import { encodeFilePath, containsPath, RequestGate } from "./components/editorState";
 import { useDebouncedRefresh } from "./components/codeCards";
 // CodePanel — native React panel for the code app. Three-pane:
@@ -1098,6 +1099,10 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         </main>
       ) : (
         <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+        {selectedSlug && gitStatus?.git_backed && activeView === "code" && <AutoSyncControls
+          key={`${projectId}:${selectedSlug}`} slug={selectedSlug} branch={gitStatus.branch} upstream={gitStatus.upstream} api={api}
+          onSynced={() => { void loadGitStatus(selectedSlug); void loadTree(selectedSlug); if (openFile && !dirty) void openPath(selectedSlug, openFile.path); }}
+        />}
           <header className="px-4 py-3 border-b border-border flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 min-w-0">
@@ -2064,6 +2069,7 @@ function ImportGithubDialog({
   const [owner, setOwner] = useState("");
   const [repo, setRepo] = useState("");
   const [remoteUrl, setRemoteUrl] = useState("");
+  const [connectionId, setConnectionId] = useState<number | undefined>();
   const [ref, setRef] = useState("");
   const [slug, setSlug] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS_IMPORT)[number]>("");
@@ -2085,6 +2091,7 @@ function ImportGithubDialog({
           if (r.status === 424) throw new Error("github_not_connected");
           throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
         }
+        if (!cancelled) setConnectionId(Number(r.headers.get("X-GitHub-Connection-ID")) || undefined);
         return r.json() as Promise<GithubRepo[]>;
       })
       .then((j) => {
@@ -2127,6 +2134,7 @@ function ImportGithubDialog({
     try {
       const r = await api<{ repository: { slug: string } }>("POST", "/git/import", {
         remote_url: cloneURL,
+        connection_id: mode === "picker" ? connectionId : undefined,
         ref: ref.trim(),
         slug: slug.trim(),
         name: mode === "picker" && owner && repo ? `${owner}/${repo}` : undefined,

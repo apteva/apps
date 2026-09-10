@@ -537,7 +537,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDevLogs,
 		},
 	}
-	return authenticatedTools(append(tools, a.gitMCPTools()...))
+	tools = append(tools, a.gitMCPTools()...)
+	return authenticatedTools(append(tools, a.autoSyncTools()...))
 }
 
 // ─── repos_dev_* handlers ─────────────────────────────────────────

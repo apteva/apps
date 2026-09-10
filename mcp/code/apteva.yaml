@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.10.0
+version: 0.11.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -25,6 +25,8 @@ description: |
   v0.8.1 adds monorepo-scoped workspaces: editable path globs and read-only
   support inputs are transferred independently and only editable paths can be
   applied back to Code.
+  v0.11.0 adds opt-in automatic commits and origin synchronization with
+  debounced checkpoints, offline retries, divergence protection and toolbar controls.
   v0.10.0 adds immutable source snapshots with revision, checksum, size,
   bounded authenticated chunk reads and optional subdirectory exports.
   v0.9.0 hardens transactional edits, conditional saves, Git commits, source
@@ -133,6 +135,12 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: repos_git_sync_configure
+      description: Enable or pause automatic commits and origin synchronization.
+    - name: repos_git_sync_status
+      description: Read automatic sync state, retry time and required action.
+    - name: repos_git_sync_now
+      description: Checkpoint and synchronize an enabled repository now.
     - { name: repos_mark_template, description: "Mark a repository as a reusable template." }
     - { name: repos_unmark_template, description: "Clear the template flag." }
     - { name: templates_list, description: "List accessible user and embedded templates." }
@@ -284,7 +292,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.10.0
+    ref: code/v0.11.0
     entry: mcp/code
   port: 8080
   health_check: /health

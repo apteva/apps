@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -52,8 +53,12 @@ func boundGitIntegrations(ctx *sdk.AppCtx) []*sdk.BoundIntegration {
 	}
 	out := []*sdk.BoundIntegration{}
 	seen := map[int64]bool{}
-	for _, role := range []string{"git", "github"} {
-		for _, bound := range ctx.IntegrationsFor(role) {
+	for _, role := range []string{"github", "git"} {
+		bounds := append([]*sdk.BoundIntegration(nil), ctx.IntegrationsFor(role)...)
+		sort.SliceStable(bounds, func(i, j int) bool {
+			return bounds[i] != nil && bounds[i].IsDefault && (bounds[j] == nil || !bounds[j].IsDefault)
+		})
+		for _, bound := range bounds {
 			if bound == nil || bound.ConnectionID <= 0 || seen[bound.ConnectionID] {
 				continue
 			}

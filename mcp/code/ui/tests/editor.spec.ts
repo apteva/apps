@@ -71,3 +71,35 @@ test('issues beyond the first page and long histories remain accessible',async({
 test('a deep-linked issue outside the first page loads directly',async({page})=>{
  await issueFixture(page);await page.goto('/?view=issues&repo=alpha&issue=205');await expect(page.getByPlaceholder('Describe the issue…')).toHaveValue('Body 205');await expect(page.getByText('205 issues',{exact:true})).toBeVisible();
 });
+
+
+test('auto-sync enables the selected branch, syncs, shows history and pauses without losing a draft', async ({page}) => {
+ let state = {enabled:false,branch:'main',remote_branch:'main',status:'paused',last_sync_at:0,retry_at:0};
+ let confirmedBranch = '';
+ await fixture(page, async (route,path) => {
+  if(path.endsWith('/git/status')) { await route.fulfill({json:{git_backed:true,branch:'main',upstream:'origin/main',changes:[]}}); return true; }
+  if(path.endsWith('/git/sync')) {
+   if(route.request().method()==='PATCH') { const body=route.request().postDataJSON(); confirmedBranch=body.branch; state={...state,enabled:body.enabled,status:body.enabled?'pending':'paused'}; }
+   await route.fulfill({json:state}); return true;
+  }
+  if(path.endsWith('/git/sync/now')) { state={...state,status:'synced',last_sync_at:Date.now()}; await route.fulfill({json:state}); return true; }
+  if(path.endsWith('/git/log')) { await route.fulfill({json:{commits:[{sha:'abc123456789',subject:'Auto-save: update a.txt',authored_at:'2026-09-10T00:00:00Z'}]}}); return true; }
+  return false;
+ });
+ await openAlpha(page);
+ await page.getByRole('button',{name:'Enable auto-sync',exact:true}).click();
+ await expect(page.getByRole('dialog',{name:'Enable auto-sync'})).toContainText('origin/main');
+ await page.getByRole('button',{name:'Enable',exact:true}).click();
+ await expect(page.getByRole('status')).toHaveText('Pending changes');
+ expect(confirmedBranch).toBe('main');
+ await page.getByRole('button',{name:'Edit',exact:true}).click();
+ await page.locator('textarea').fill('Unsaved work');
+ await page.getByRole('button',{name:'Sync now',exact:true}).click();
+ await expect(page.getByRole('status')).toHaveText('Synced');
+ await expect(page.locator('textarea')).toHaveValue('Unsaved work');
+ await page.getByRole('button',{name:'View history',exact:true}).click();
+ await expect(page.getByRole('dialog',{name:'Git history'})).toContainText('Auto-save: update a.txt');
+ await page.getByRole('button',{name:'Pause',exact:true}).click();
+ await expect(page.getByRole('status')).toHaveText('Paused');
+ await expect(page.locator('textarea')).toHaveValue('Unsaved work');
+});
