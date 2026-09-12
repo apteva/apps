@@ -8,6 +8,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 	"sync"
+	"time"
 )
 
 //go:embed apteva.yaml
@@ -41,10 +42,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.db = ctx.AppDB()
 	return nil
 }
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+
 func (a *App) Workers() []sdk.Worker {
-	return []sdk.Worker{{Name: "task-sync", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx) }}}
+	return []sdk.Worker{{Name: "direct-runs", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.tickDirect(ctx, time.Now().UTC()) }}, {Name: "task-sync", Schedule: "@every 30s", Run: func(ctx context.Context, app *sdk.AppCtx) error { return a.retryPending(ctx) }}}
 }
 func main() { sdk.Run(&App{}) }

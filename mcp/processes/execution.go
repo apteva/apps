@@ -28,12 +28,19 @@ func (a *App) callTasks(project, process, action string, args map[string]any, ou
 	return nil
 }
 func snapshot(p *Process, d Definition, r Run) string {
-	return fmt.Sprintf("Company process: %s\nProcess ID: %s\nProcedure version: %d\n\nPurpose\n%s\n\nProcedure\n%s\n\nRequired inputs / sources\n%s\n\nStanding context\n%s\n\nRun context\n%s\n\nApproval requirements\n%s\n\nCompletion criteria and evidence\n%s\n\nExecution contract\nRead this task with Tasks get before domain actions. Follow this exact procedure version. Track milestones, blockers, delegation, and completion evidence in Tasks. Do not change the company procedure during execution. Obtain required approvals before the corresponding action; these instructions do not grant authority. If inputs or approval are missing, record the blocker and request them. Do not create another task for this same run.\n", d.Name, p.ID, r.Version, d.Description, d.Instructions, d.RequiredInputs, d.DefaultInputs, r.Inputs, d.ApprovalRequirements, d.CompletionCriteria)
+	contract := "Read this task with Tasks get before domain actions. Track milestones, blockers and completion evidence in Tasks."
+	if r.Backend == "agent" {
+		contract = fmt.Sprintf("Read Processes run_get with process_id=%s and run_id=%s before domain actions; stop if the run is already completed, failed, or cancelled. Track progress with Processes run_update. Explicitly report completed with a concrete result and evidence, or blocked/waiting/failed with a reason. Do not create a Task for this run.", p.ID, r.ID)
+	}
+	return fmt.Sprintf("Company process: %s\nProcess ID: %s\nProcedure version: %d\n\nPurpose\n%s\n\nProcedure\n%s\n\nRequired inputs / sources\n%s\n\nStanding context\n%s\n\nRun context\n%s\n\nApproval requirements\n%s\n\nCompletion criteria and evidence\n%s\n\nExecution contract\n%s Follow this exact procedure version. Obtain required approvals before acting; this procedure does not grant authority. Do not modify the company procedure during execution.\n", d.Name, p.ID, r.Version, d.Description, d.Instructions, d.RequiredInputs, d.DefaultInputs, r.Inputs, d.ApprovalRequirements, d.CompletionCriteria, contract)
 }
 func (a *App) dispatch(p *Process, r *Run) (*TaskResult, error) {
 	d, err := a.definition(p.ID, r.Version)
 	if err != nil {
 		return nil, err
+	}
+	if r.Backend == "agent" {
+		return &TaskResult{}, a.dispatchAgent(p, r)
 	}
 	var result TaskResult
 	if r.TaskID != "" && r.DeliveryWarning == "" {
@@ -78,7 +85,7 @@ func (a *App) synchronize(p *Process) (err error) {
 	// schedule before enabling the current version. Schedules are born paused.
 	for i := range runs {
 		r := &runs[i]
-		if r.Kind != "schedule" {
+		if r.Kind != "schedule" || r.Backend != "tasks" {
 			continue
 		}
 		if r.TaskID == "" {
@@ -86,12 +93,21 @@ func (a *App) synchronize(p *Process) (err error) {
 				return err
 			}
 		}
-		if p.Status != "active" || r.Version != p.Version {
+		if p.Status != "active" || r.Version != p.Version || p.ExecutionMode != "tasks" {
+			if r.SchedulePaused {
+				continue
+			}
 			var result TaskResult
 			if err = a.callTasks(p.ProjectID, p.ID, "pause", map[string]any{"task_id": r.TaskID}, &result); err != nil {
 				return err
 			}
+			if _, err = a.db.Exec(`UPDATE process_runs SET schedule_paused=1 WHERE id=?`, r.ID); err != nil {
+				return err
+			}
 		}
+	}
+	if p.ExecutionMode == "agent" {
+		return a.syncDirectSchedule(p)
 	}
 	if p.Status == "active" && p.Schedule != nil {
 		r, e := a.reserveRun(p, "schedule", fmt.Sprintf("schedule:v%d", p.Version), "")
@@ -102,6 +118,11 @@ func (a *App) synchronize(p *Process) (err error) {
 			return err
 		}
 		var result TaskResult
+		// A lost resume response means the schedule might be active. Invalidate
+		// the old pause confirmation before sending the request.
+		if _, err = a.db.Exec(`UPDATE process_runs SET schedule_paused=0 WHERE id=?`, r.ID); err != nil {
+			return err
+		}
 		err = a.callTasks(p.ProjectID, p.ID, "resume", map[string]any{"task_id": r.TaskID}, &result)
 	}
 	return err
@@ -171,23 +192,34 @@ func (a *App) runs(project, id string) (any, error) {
 	if _, err := a.get(project, id); err != nil {
 		return nil, err
 	}
-	// Task status and results are read live, never maintained in a second ledger.
-	var result map[string]any
-	err := a.callTasks(project, id, "list", nil, &result)
-	if err != nil {
-		return nil, err
-	}
 	records, err := a.dispatches(id)
 	if err != nil {
 		return nil, err
 	}
+	result := map[string]any{"runs": []any{}, "has_more": false}
+	hasTasks := false
+	direct := []Run{}
+	for _, r := range records {
+		if r.Backend == "tasks" {
+			hasTasks = true
+		} else {
+			direct = append(direct, r)
+		}
+	}
+	if hasTasks {
+		if err = a.callTasks(project, id, "list", nil, &result); err != nil {
+			result["tasks_error"] = err.Error()
+		}
+	}
+	result["direct_runs"] = direct
 	result["dispatches"] = records
 	return result, nil
 }
+
 func (a *App) retryPending(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT DISTINCT p.project_id,p.id FROM processes p LEFT JOIN process_runs r ON r.process_id=p.id WHERE p.sync_pending=1 OR (r.kind='manual' AND (r.task_id='' OR r.delivery_warning<>'')) LIMIT 100`)
+	rows, err := a.db.Query(`SELECT DISTINCT p.project_id,p.id FROM processes p LEFT JOIN process_runs r ON r.process_id=p.id WHERE p.sync_pending=1 OR (r.backend='tasks' AND r.kind='manual' AND (r.task_id='' OR r.delivery_warning<>'')) LIMIT 100`)
 	if err != nil {
 		return err
 	}
@@ -228,7 +260,7 @@ func (a *App) retryPending(ctx context.Context) error {
 		}
 		for i := range records {
 			r := &records[i]
-			if r.Kind == "manual" && (r.TaskID == "" || r.DeliveryWarning != "") {
+			if r.Backend == "tasks" && r.Kind == "manual" && (r.TaskID == "" || r.DeliveryWarning != "") {
 				if _, e = a.dispatch(p, r); e != nil {
 					failures = append(failures, e)
 				}

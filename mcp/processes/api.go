@@ -22,13 +22,15 @@ func textField(description string) map[string]any {
 }
 func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria", "owner_agent_id"}, map[string]any{
-		"name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
+		"execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create a draft company procedure only when authorized to define company policy.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure and its Tasks schedule. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing tasks continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing tasks continue.", "start": "Start one active procedure on its owner agent. Supply a stable idempotency_key and reuse it on retries. Track execution using Tasks.", "runs": "Read up to 200 recent live Tasks records, including schedule definitions and occurrences. has_more indicates older history exists in Tasks."}
+	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create a draft company procedure only when authorized to define company policy.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure and its schedule. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active procedure on its owner agent. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
+	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
+	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs"} {
+	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -49,6 +51,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			if name == "update" {
 				props["expected_version"] = map[string]any{"type": "integer", "minimum": 1}
 				required = append(required, "expected_version")
+			}
+		case "run_get", "run_update":
+			props["run_id"] = textField("Run ID")
+			required = append(required, "run_id")
+			if name == "run_update" {
+				props["state"] = map[string]any{"type": "string", "enum": []string{"running", "waiting", "blocked", "completed", "failed", "cancelled"}}
+				props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
+				for _, k := range []string{"current_step", "result", "error"} {
+					props[k] = textField(k)
+				}
+				required = append(required, "state")
 			}
 		case "start":
 			props["idempotency_key"] = textField("Stable unique key for this logical execution")
@@ -118,6 +131,13 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		}
 		if action == "create" {
 			id = ""
+		} else if d.ExecutionMode == "" {
+			// Older clients omit this field; editing must not switch backends.
+			current, e := a.get(project, id)
+			if e != nil {
+				return nil, e
+			}
+			d.ExecutionMode = current.ExecutionMode
 		}
 		return a.save(project, id, actor, number(args, "expected_version"), d)
 	case "activate":
@@ -130,6 +150,8 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.start(project, id, str(args, "idempotency_key"), str(args, "inputs"))
 	case "runs":
 		return a.runs(project, id)
+	case "run_get", "run_update":
+		return a.directRun(project, actor, id, str(args, "run_id"), action, args)
 	default:
 		return nil, errors.New("unknown action")
 	}
