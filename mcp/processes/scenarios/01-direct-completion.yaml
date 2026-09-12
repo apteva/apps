@@ -1,0 +1,41 @@
+name: processes-direct-completion
+description: A real LLM creates and completes a direct process occurrence without Tasks.
+timeout: 3m
+settle_for: 3s
+max_iterations: 14
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  You are testing company procedures in an isolated project. Use only Processes
+  for this work. Your agent ID is ${APTEVA_TEST_AGENT_ID}.
+  Create exactly one procedure named "Tier 3 direct briefing" owned by you,
+  execution_mode=agent, no schedule and no structured steps. Its instructions
+  are to prepare a short briefing from these facts: revenue 1200, expenses 400.
+  Completion criteria: report the net amount as "Net: 800". You are authorized
+  to create and activate this test procedure.
+  Activate it and start its default assignment once with idempotency_key=briefing-day-1.
+  Read run_get before doing the work. Report completion using run_update with
+  result exactly "Net: 800". If a delivery event repeats, inspect the existing run;
+  do not create a second procedure or occurrence. Finish by reading runs to
+  verify the single completed occurrence. Then stop.
+assert:
+  - http: GET /api/apps/processes/processes
+    expect_count_at: processes
+    expect_count: 1
+  - http: GET /api/apps/processes/processes
+    expect_field_at: processes.0.execution_mode
+    expect_field_eq: agent
+  - tool_called: processes_run_get
+  - tool_called_with:
+      tool: processes_run_update
+      args:
+        state: completed
+        result: "Net: 800"
+  - tool_called: processes_runs
+  - tool_not_called: tasks_create
+  - iterations_at_most: 14
+budget:
+  total_tokens: 200000
+  cost_usd: 2.00
