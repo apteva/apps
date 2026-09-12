@@ -18,14 +18,15 @@ type Parameter struct {
 	Options  []string `json:"options,omitempty"`
 }
 type AssignmentConfig struct {
-	FollowLatest     bool           `json:"follow_latest"`
-	Name             string         `json:"name"`
-	Target           string         `json:"target"`
-	OwnerAgentID     int64          `json:"owner_agent_id"`
-	ExecutionMode    string         `json:"execution_mode"`
-	Schedule         *Schedule      `json:"schedule,omitempty"`
-	ProcedureVersion int            `json:"procedure_version"`
-	Parameters       map[string]any `json:"parameters"`
+	Roles            map[string]Executor `json:"roles,omitempty"`
+	FollowLatest     bool                `json:"follow_latest"`
+	Name             string              `json:"name"`
+	Target           string              `json:"target"`
+	OwnerAgentID     int64               `json:"owner_agent_id"`
+	ExecutionMode    string              `json:"execution_mode"`
+	Schedule         *Schedule           `json:"schedule,omitempty"`
+	ProcedureVersion int                 `json:"procedure_version"`
+	Parameters       map[string]any      `json:"parameters"`
 }
 type Assignment struct {
 	ID               string `json:"id"`
@@ -226,6 +227,9 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 	if agent.ProjectID != project {
 		return nil, errors.New("owner is outside this project")
 	}
+	if e = a.validateRoles(project, d, c); e != nil {
+		return nil, e
+	}
 	c.Parameters, e = validateParameters(d.Parameters, c.Parameters, false)
 	if e != nil {
 		return nil, e
@@ -289,6 +293,9 @@ func (a *App) assignmentStatus(project, process, id, status string) (*Assignment
 func (a *App) checkAssignment(project string, x Assignment) error {
 	d, e := a.definition(x.ProcessID, x.ProcedureVersion)
 	if e != nil {
+		return e
+	}
+	if e = a.validateRoles(project, d, x.AssignmentConfig); e != nil {
 		return e
 	}
 	if _, e = validateParameters(d.Parameters, x.Parameters, true); e != nil {

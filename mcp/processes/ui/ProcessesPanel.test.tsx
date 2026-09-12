@@ -254,6 +254,91 @@ test("editing a paused assignment preserves parameters and uses revision", async
     return read(url as string, init);
   }) as typeof fetch;
   await act(async () =>
+    document.querySelector("form")!.dispatchEvent(
+      new window.Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }) as unknown as Event,
+    ),
+  );
+  expect(path).toContain("/assignments/photo");
+  expect(payload.expected_revision).toBe(1);
+  expect(payload.assignment.owner_agent_id).toBe(8);
+  expect(payload.assignment.parameters.page).toBe("photo");
+});
+
+const workflowSteps = [
+  {
+    key: "write",
+    name: "Write post",
+    role: "writer",
+    kind: "work",
+    instructions: "Write the draft",
+    expected_output: "Draft",
+    depends_on: [],
+  },
+  {
+    key: "review",
+    name: "Review post",
+    role: "reviewer",
+    kind: "approval",
+    instructions: "Review the draft",
+    expected_output: "Decision",
+    depends_on: ["write"],
+  },
+  {
+    key: "publish",
+    name: "Publish post",
+    role: "publisher",
+    kind: "work",
+    instructions: "Publish approved draft",
+    expected_output: "URL",
+    depends_on: ["review"],
+  },
+];
+test("workflow template creates editable dependencies and approval gate", async () => {
+  await mount({});
+  await click("+ New process");
+  await click("Use research → write → review → publish");
+  expect(document.querySelector<HTMLInputElement>("#step-role-2")?.value).toBe(
+    "reviewer",
+  );
+  expect(document.querySelector<HTMLSelectElement>("#step-kind-2")?.value).toBe(
+    "approval",
+  );
+  expect(document.querySelectorAll("fieldset input:checked").length).toBe(3);
+});
+test("assignment saves agent role bindings and defaults approval to human", async () => {
+  await mount(
+    {},
+    {
+      steps: workflowSteps,
+      assignments: [{ ...assignment, status: "paused" }],
+    },
+  );
+  await click("Weekly review");
+  await click("Assignments");
+  await click("Edit assignment");
+  expect(
+    document.querySelector<HTMLSelectElement>("#role-reviewer")?.value,
+  ).toBe("human");
+  const select = document.querySelector<HTMLSelectElement>("#role-writer")!;
+  await act(async () => {
+    select.value = "8";
+    select.dispatchEvent(
+      new window.Event("change", { bubbles: true }) as unknown as Event,
+    );
+  });
+  const read = globalThis.fetch;
+  let payload: any;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      payload = JSON.parse(String(init.body));
+      return Response.json({});
+    }
+    return read(url as string, init);
+  }) as typeof fetch;
+  await act(async () =>
     document
       .querySelector("form")!
       .dispatchEvent(
@@ -263,8 +348,47 @@ test("editing a paused assignment preserves parameters and uses revision", async
         }) as unknown as Event,
       ),
   );
-  expect(path).toContain("/assignments/photo");
-  expect(payload.expected_revision).toBe(1);
-  expect(payload.assignment.owner_agent_id).toBe(8);
-  expect(payload.assignment.parameters.page).toBe("photo");
+  expect(payload.assignment.roles.writer).toEqual({
+    kind: "agent",
+    agent_id: 8,
+  });
+});
+test("workflow history offers human review only after predecessor completion", async () => {
+  await mount({
+    direct_runs: [
+      {
+        id: "team-run",
+        workflow: true,
+        state: "waiting",
+        version: 1,
+        created_at: "2026-09-12T10:00:00Z",
+        steps: workflowSteps.map((definition, i) => ({
+          id: `step-${i}`,
+          key: definition.key,
+          definition,
+          executor:
+            i === 1 ? { kind: "human" } : { kind: "agent", agent_id: 7 },
+          state: ["completed", "waiting", "pending"][i],
+          output: i === 0 ? "Draft evidence" : "",
+          updated_at: "2026-09-12T10:00:00Z",
+        })),
+      },
+    ],
+  });
+  await click("Weekly review");
+  await click("Runs");
+  expect(document.body.textContent).toContain("Team workflow run");
+  expect(document.body.textContent).toContain("Draft evidence");
+  expect(
+    Array.from(document.querySelectorAll("button")).filter(
+      (b) => b.textContent === "Review & decide",
+    ).length,
+  ).toBe(1);
+  expect(document.body.textContent).not.toContain("Complete human step");
+  await click("Review & decide");
+  expect(document.body.textContent).toContain("Completed inputs");
+  expect(
+    document.querySelector<HTMLButtonElement>("button.primary:disabled"),
+  ).toBeTruthy();
+  expect(document.body.textContent).toContain("Reject & stop run");
 });

@@ -260,6 +260,13 @@ func TestV02MigrationPreservesSchedulesAndRuns(t *testing.T) {
 	if _, e = db.Exec(string(raw)); e != nil {
 		t.Fatal(e)
 	}
+	next, e := os.ReadFile("migrations/004_workflow_steps.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec(string(next)); e != nil {
+		t.Fatal(e)
+	}
 	migrated := &App{ctx: a.ctx, db: db}
 	p, e := migrated.get("project-a", "p")
 	if e != nil {

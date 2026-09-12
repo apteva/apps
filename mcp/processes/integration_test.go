@@ -230,3 +230,79 @@ func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 		t.Fatal("run override mutated assignment")
 	}
 }
+
+func TestSidecarWorkflowAgentHandoffsAndHumanApproval(t *testing.T) {
+	var delivered atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/apps/callback/agents/7" || r.URL.Path == "/api/apps/callback/agents/8" {
+			id := int64(7)
+			if strings.HasSuffix(r.URL.Path, "/8") {
+				id = 8
+			}
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: id, ProjectID: "project-a", DefaultThreadID: "owner-thread"})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/event") {
+			var input sdk.AgentEventRequest
+			json.NewDecoder(r.Body).Decode(&input)
+			delivered.Add(1)
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: input.SourceEventID, SourceEventID: input.SourceEventID, ThreadID: input.ThreadID})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer gateway.Close()
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	var p Process
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": workflowDefinition()}, &p)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
+	}
+	base := "/processes/" + p.ID
+	var x Assignment
+	resp = app.POST(base+"/assignments?project_id=project-a", map[string]any{"assignment": AssignmentConfig{Name: "Team", OwnerAgentID: 7, ExecutionMode: "agent", FollowLatest: true, Roles: map[string]Executor{"researcher": {Kind: "agent", AgentID: 8}, "writer": {Kind: "agent", AgentID: 7}, "reviewer": {Kind: "human"}, "publisher": {Kind: "agent", AgentID: 8}}}}, &x)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
+	}
+	app.POST(base+"/activate?project_id=project-a", map[string]any{}, &p)
+	app.MCPAs("assignment_activate", map[string]any{"process_id": p.ID, "assignment_id": x.ID}, 7, "owner-thread", "project-a")
+	var started struct {
+		Run Run `json:"run"`
+	}
+	resp = app.POST(base+"/start?project_id=project-a", map[string]any{"assignment_id": x.ID, "idempotency_key": "team-day"}, &started)
+	if resp.Status != 200 || delivered.Load() != 1 {
+		t.Fatalf("start %s", resp.Body)
+	}
+	var detail struct {
+		Run   Run       `json:"run"`
+		Steps []StepRun `json:"steps"`
+	}
+	runpath := base + "/runs/" + started.Run.ID
+	read := func() {
+		t.Helper()
+		resp := app.GET(runpath+"?project_id=project-a", &detail)
+		if resp.Status != 200 || len(detail.Steps) != 4 {
+			t.Fatalf("detail %s", resp.Body)
+		}
+	}
+	read()
+	for i, agent := range []int64{8, 7} {
+		app.MCPAs("step_get", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID}, agent, "owner-thread", "project-a")
+		app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[i].ID, "state": "completed", "output": "Evidence"}, agent, "owner-thread", "project-a")
+	}
+	read()
+	if delivered.Load() != 2 || detail.Steps[2].State != "waiting" || detail.Steps[3].State != "pending" {
+		t.Fatal("human gate bypassed")
+	}
+	// Payload identifiers cannot override route scope.
+	resp = app.POST(runpath+"/steps/"+detail.Steps[2].ID+"?project_id=project-a", map[string]any{"state": "completed", "decision": "approved", "output": "Approved draft", "step_id": detail.Steps[3].ID, "run_id": "other"}, nil)
+	if resp.Status != 200 || delivered.Load() != 3 {
+		t.Fatalf("approval %s", resp.Body)
+	}
+	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[3].ID, "state": "completed", "output": "Published URL"}, 8, "owner-thread", "project-a")
+	read()
+	if detail.Run.State != "completed" || detail.Steps[2].Decision != "approved" || detail.Steps[2].UpdatedBy != "operator" {
+		t.Fatal("workflow did not complete", detail)
+	}
+}

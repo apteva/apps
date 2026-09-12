@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.3.0
-description: Reusable company procedures with independent assignments, typed parameters, schedules, and optional Tasks execution.
+version: 0.4.0
+description: Company procedures with agent and human roles, step dependencies, approval gates, reusable assignments, and optional Tasks execution.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
 icon: /ui/icon.svg
@@ -30,7 +30,7 @@ provides:
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: Start one execution of an active procedure. }
     - { name: runs, description: Inspect direct and Tasks-backed execution history. }
-    - { name: run_get, description: Read a direct run and its immutable instructions before acting. }
+    - { name: run_get, description: "Read a run, its immutable instructions, and workflow steps before acting." }
     - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
     - { name: assignments, description: List saved process assignments. }
     - { name: assignment_get, description: Read assignment settings. }
@@ -39,6 +39,9 @@ provides:
     - { name: assignment_activate, description: Enable an assignment. }
     - { name: assignment_pause, description: Pause one assignment. }
     - { name: assignment_archive, description: Archive one assignment. }
+    - { name: step_get, description: Read a workflow step and its dependency outputs. }
+    - { name: step_update, description: Report step output or an explicit approval decision as its assigned executor. }
+    - { name: run_cancel, description: Stop future handoffs in a structured run as coordinator or operator. }
   ui_panels:
     - slot: project.page
       label: Processes
@@ -55,7 +58,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.3.0
+    ref: processes/v0.4.0
     entry: mcp/processes
   port: 8080
   health_check: /health

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { RolesEditor, type Step, type Executor } from "./Workflow";
 export type Parameter = {
   key: string;
   label?: string;
@@ -14,6 +15,7 @@ export type Schedule = {
   timezone?: string;
 };
 export type Assignment = {
+  roles?: Record<string, Executor>;
   id: string;
   process_id: string;
   revision: number;
@@ -31,7 +33,10 @@ export type Assignment = {
   next_run_at?: string;
   last_schedule_note?: string;
 };
-type Version = { version: number; definition: { parameters?: Parameter[] } };
+type Version = {
+  version: number;
+  definition: { parameters?: Parameter[]; steps?: Step[] };
+};
 export function ParameterValues({
   fields,
   values,
@@ -273,6 +278,12 @@ export default function Assignments({
     work(async () => {
       await api(`/assignments/${x.id}/${name}`, "POST", {});
     });
+  const workflow =
+    versions.find(
+      (v) =>
+        v.version ===
+        (draft?.follow_latest ? current : draft?.procedure_version),
+    )?.definition.steps || [];
   const schema =
     versions.find(
       (v) =>
@@ -312,7 +323,17 @@ export default function Assignments({
               await api(
                 `/assignments${draft.id ? `/${draft.id}` : ""}`,
                 draft.id ? "PUT" : "POST",
-                { assignment: draft, expected_revision: draft.revision },
+                {
+                  assignment: {
+                    ...draft,
+                    roles: Object.fromEntries(
+                      Object.entries(draft.roles || {}).filter(([role]) =>
+                        workflow.some((s) => s.role === role),
+                      ),
+                    ),
+                  },
+                  expected_revision: draft.revision,
+                },
               );
               setDraft(null);
             });
@@ -345,7 +366,9 @@ export default function Assignments({
                 />
               </div>
               <div className="field">
-                <label htmlFor="assignment-agent">Responsible agent</label>
+                <label htmlFor="assignment-agent">
+                  Responsible agent / coordinator
+                </label>
                 <select
                   id="assignment-agent"
                   required
@@ -402,6 +425,13 @@ export default function Assignments({
                   take effect when the process is activated.
                 </p>
               </div>
+              <RolesEditor
+                steps={workflow}
+                roles={draft.roles || {}}
+                owner={draft.owner_agent_id}
+                agents={agents}
+                onChange={(roles) => set({ roles })}
+              />
               <h2>Parameter values</h2>
               {schema.length ? (
                 <ParameterValues
