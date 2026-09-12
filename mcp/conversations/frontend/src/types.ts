@@ -1,3 +1,4 @@
+export interface Attachment {id?:string;type:string;data_url?:string;name?:string;mime_type?:string;size?:number;file_id?:number;storage_app?:string}
 export interface Conversation {
   id: string;
   project_id: string;
@@ -29,7 +30,7 @@ export interface Message {
   component_kind?: string;
   severity?: string;
   components: CardComponent[];
-  attachments?: Array<{type:string;data_url?:string;name?:string}>;
+  attachments?: Attachment[];
   client_message_id?: string;
   metadata?: Record<string, unknown>;
   created_at: string;

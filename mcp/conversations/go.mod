@@ -4,6 +4,7 @@ go 1.26.8
 
 require (
 	github.com/apteva/app-sdk v0.77.0
+	golang.org/x/image v0.38.0
 	modernc.org/sqlite v1.50.0
 )
 

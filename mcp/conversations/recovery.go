@@ -17,7 +17,7 @@ func validateMessageSize(m *Message) error {
 	if err != nil {
 		return err
 	}
-	if len(m.Content) > maxMessageBytes || len(raw) > 1<<20 {
+	if len(m.Content) > maxMessageBytes || len(raw) > 6<<20 {
 		return errors.New("message exceeds byte limit")
 	}
 	if len(m.ClientID) > 256 {
@@ -27,6 +27,9 @@ func validateMessageSize(m *Message) error {
 		return errors.New("at most 10 attachments allowed")
 	}
 	for _, a := range m.Attachments {
+		if a.ID != "" && a.Type == "file" && a.DataURL == "" {
+			continue
+		}
 		if a.Type != "image" || !strings.HasPrefix(a.DataURL, "data:image/") || len(a.DataURL) > maxAttachmentBytes {
 			return errors.New("unsupported or oversized attachment")
 		}

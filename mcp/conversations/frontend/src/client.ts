@@ -1,5 +1,5 @@
 import { defineAppExtension, type AppHandle, type SubscribeOptions } from "@apteva/web-sdk";
-import type { AgentInfo, ChangePage, Conversation, ConversationPage, InboxPage, Message, MessageDelivery, ToolActivity, StreamFrame, UnreadEntry } from "./types";
+import type { Attachment, AgentInfo, ChangePage, Conversation, ConversationPage, InboxPage, Message, MessageDelivery, ToolActivity, StreamFrame, UnreadEntry } from "./types";
 
 export interface CreateConversation {
   title?: string;
@@ -73,6 +73,8 @@ export class ConversationsClient {
     this.app.get<ChangePage>(query("/changes", { chat_id: id, cursor }), init);
   send = (id: string, input: SendMessage, init?: RequestInit) =>
     this.app.post<Message>(query("/messages", { chat_id: id }), input, init);
+  upload = (chat:string,id:string,name:string,content_base64:string) => this.app.post<Attachment>(query("/attachments",{chat_id:chat}),{id,name,content_base64});
+  attachment = (chat:string,id:string) => this.app.get<{attachment:Attachment;content_base64:string}>(query("/attachments",{chat_id:chat,id}));
   markSeen = (id: string, lastSeenId: number, init?: RequestInit) =>
     this.app.post("/seen", { chat_id: id, last_seen_id: lastSeenId }, init);
   unread = (agentId?: number, init?: RequestInit) =>

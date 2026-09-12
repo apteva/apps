@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.0 — 2026-09-12
+
+- Add the shared configurable + composer menu for files/photos, pasted or dropped attachments, and one-frame screenshots, with native capture and custom action callbacks.
+- Persist image previews and downloadable file cards in messages and history. Support attachment-only sends, upload retry, per-chat drafts, and sending while an agent is active.
+- Store bounded originals with conversation-scoped access. Send real image content through Core thread events; expose bounded text and binary reads through conversations_read_attachment.
+- Optionally copy sent files privately into a bound Storage app and return file IDs, without exposing Storage permissions to chat visitors.
+
 ## 0.22.2 — 2026-09-12
 
 - Restore the original `ChatToolActivity` renderer and scoped styles in the shared dashboard/exported UI: stacked app icons, animated activity text, expandable groups, parallel calls, failure indicators and elapsed times.

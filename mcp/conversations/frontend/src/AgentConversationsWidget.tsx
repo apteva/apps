@@ -1,3 +1,4 @@
+import type { ComposerOptions } from "./composer";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,6 +21,7 @@ import {
 } from "./agentConversations";
 
 export interface AgentConversationsWidgetProps extends ConversationLocalization {
+ composer?:ComposerOptions;
   appName: string;
   installId: number;
   projectId: string;

@@ -82,13 +82,15 @@ type Message struct {
 }
 
 type Attachment struct {
-	ID        string `json:"id,omitempty"`
-	Type      string `json:"type"`
-	DataURL   string `json:"data_url,omitempty"`
-	Name      string `json:"name,omitempty"`
-	MimeType  string `json:"mime_type,omitempty"`
-	Size      int64  `json:"size,omitempty"`
-	Ephemeral bool   `json:"ephemeral,omitempty"`
+	FileID     int64  `json:"file_id,omitempty"`
+	StorageApp string `json:"storage_app,omitempty"`
+	ID         string `json:"id,omitempty"`
+	Type       string `json:"type"`
+	DataURL    string `json:"data_url,omitempty"`
+	Name       string `json:"name,omitempty"`
+	MimeType   string `json:"mime_type,omitempty"`
+	Size       int64  `json:"size,omitempty"`
+	Ephemeral  bool   `json:"ephemeral,omitempty"`
 }
 
 type store struct{ db *sql.DB }
@@ -668,6 +670,21 @@ func normalizeMessage(m *Message) {
 // message exists but a crash recovery scan has nothing to replay.
 func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Message, bool, error) {
 	normalizeMessage(m)
+	for _, item := range m.Attachments {
+		if item.ID != "" {
+			var meta string
+			var owner int64
+			var linked bool
+			err := s.db.QueryRow(`SELECT metadata,user_id,`+attachmentLinkedSQL()+` FROM conversation_attachments WHERE id=? AND conversation_id=?`, item.ID, m.ConversationID).Scan(&meta, &owner, &linked)
+			if err != nil || (m.Role == "user" && owner != m.UserID) || (m.Role != "user" && !linked) {
+				return nil, false, fmt.Errorf("attachment not available to sender")
+			}
+			canonical, _ := json.Marshal(item)
+			if string(canonical) != meta {
+				return nil, false, fmt.Errorf("attachment metadata differs from upload")
+			}
+		}
+	}
 	if err := validateMessageSize(m); err != nil {
 		return nil, false, err
 	}

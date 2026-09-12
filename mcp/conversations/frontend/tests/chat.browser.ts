@@ -44,7 +44,7 @@ for (const host of ["dashboard", "external"]) {
   await request.post("/reset");
   await page.goto(`/?host=${host}`);
   const composer=page.locator("form").filter({has:page.getByRole("textbox")});
-  const action=composer.getByRole("button");
+  const action=composer.locator(".chat-composer-toolbar > button");
   await expect(action).toHaveCount(1);
   await expect(action).toHaveAccessibleName("Send");
   await expect(action).toBeDisabled();
@@ -205,5 +205,51 @@ for (const host of ["dashboard", "external"]) {
   // Action labels belong to the authored card; the app translates its surrounding UI.
   await page.getByRole("button",{name:"Approve",exact:true}).click();
   await expect(page.getByText("Approve maintenance",{exact:true})).toHaveCount(0);
+ });
+}
+
+for(const host of ["dashboard","external"]){
+ test(`${host}: attachment-only images and files persist, enlarge and download`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);await expect(page.getByTitle("Live")).toBeVisible();
+  await page.getByRole("button",{name:"Add attachment",exact:true}).click();await expect(page.getByRole("button",{name:"Take a screenshot"})).toBeVisible();
+  const chooser=page.waitForEvent("filechooser");await page.getByRole("button",{name:"Add files or photos"}).click();
+  await(await chooser).setFiles([{name:"picture.png",mimeType:"image/png",buffer:Buffer.from(await page.evaluate(()=>{const canvas=document.createElement("canvas");canvas.width=480;canvas.height=240;const ctx=canvas.getContext("2d")!;ctx.fillStyle="#2563eb";ctx.fillRect(0,0,480,240);ctx.fillStyle="white";ctx.font="28px sans-serif";ctx.fillText("Conversation attachment",35,125);return canvas.toDataURL("image/png").split(",")[1];}),"base64")},{name:"notes.txt",mimeType:"text/plain",buffer:Buffer.from("Read these notes")}]);
+  await expect(page.locator(".chat-attachment-chip")).toHaveCount(2);await expect(page.getByRole("button",{name:"Send",exact:true})).toBeEnabled();
+  await page.setViewportSize({width:390,height:800});await page.screenshot({path:test.info().outputPath("attachment-composer.png")});
+  await page.getByRole("button",{name:"Send",exact:true}).click();await expect(page.locator(".chat-message-attachment")).toHaveCount(2);await expect(page.locator(".chat-attachment-chip")).toHaveCount(0);
+  await page.reload();await expect(page.locator(".chat-message-attachment")).toHaveCount(2);
+  await page.getByRole("button",{name:"Enlarge picture.png"}).click();await expect(page.locator("dialog")).toBeVisible();await page.keyboard.press("Escape");await expect(page.locator("dialog")).toHaveCount(0);
+  const downloaded=page.waitForEvent("download");await page.locator(".chat-message-attachment").filter({hasText:"notes.txt"}).getByRole("button",{name:"Download"}).click();expect((await downloaded).suggestedFilename()).toBe("notes.txt");
+  await page.screenshot({path:test.info().outputPath("attachment-history.png")});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+ });
+ test(`${host}: screenshot captures one frame and stops sharing`,async({page,request})=>{
+  await request.post("/reset");await page.addInitScript(()=>{
+   navigator.mediaDevices.getDisplayMedia=async()=>{const canvas=document.createElement("canvas");canvas.width=320;canvas.height=200;const ctx=canvas.getContext("2d")!;ctx.fillStyle="green";ctx.fillRect(0,0,320,200);const stream=canvas.captureStream(10);(window as any).captureTrack=stream.getVideoTracks()[0];return stream;};
+  });
+  await page.goto(`/?host=${host}`);await expect(page.getByTitle("Live")).toBeVisible();
+  await page.getByRole("button",{name:"Add attachment",exact:true}).click();await page.getByRole("button",{name:"Take a screenshot"}).click();
+  await expect(page.locator(".chat-attachment-chip img")).toBeVisible();expect(await page.evaluate(()=>(window as any).captureTrack.readyState)).toBe("ended");
+  await expect(page.getByRole("button",{name:"Send",exact:true})).toBeEnabled();await page.locator(".chat-attachment-chip button[aria-label]").click();await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
+ });
+}
+
+for(const host of ["dashboard","external"]){
+ test(`${host}: host-configured actions use the shared attachment pipeline`,async({page,request})=>{
+  await request.post("/reset");await page.addInitScript(()=>{(window as any).COMPOSER_OPTIONS={files:false,screenshot:false,actions:[{id:"notes",label:"Attach my notes",run:async()=>new File(["Configured action"],"custom.txt",{type:"text/plain"})}]};});
+  await page.goto(`/?host=${host}`);await expect(page.getByTitle("Live")).toBeVisible();await page.getByRole("button",{name:"Add attachment",exact:true}).click();
+  await expect(page.getByRole("button",{name:"Add files or photos"})).toHaveCount(0);await expect(page.getByRole("button",{name:"Take a screenshot"})).toHaveCount(0);
+  await page.getByRole("button",{name:"Attach my notes"}).click();await expect(page.locator(".chat-attachment-chip")).toHaveText(/custom.txt/);await page.getByRole("button",{name:"Send",exact:true}).click();await expect(page.locator(".chat-message-attachment")).toHaveText(/custom.txt/);
+ });
+ test(`${host}: upload retry preserves identity and pasted files can send while active`,async({page,request})=>{
+  await request.post("/reset");const uploadIDs:string[]=[];let attempts=0;
+  await page.route("**/attachments?**",async route=>{if(route.request().method()!=="POST")return route.continue();uploadIDs.push(route.request().postDataJSON().id);if(attempts++===0)return route.fulfill({status:503,body:"retry"});return route.continue();});
+  await page.goto(`/?host=${host}`);await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";await request.post("/emit",{data:{chat_id:chat,tool_activity:{id:555,chat_id:chat,agent_id:41,thread_id:chat,call_id:"busy",name:"tasks_list",reason:"Checking tasks",status:"running",started_at:new Date().toISOString(),revision:1}}});
+  await expect(page.getByRole("button",{name:"Ask the agent to pause and reconsider"})).toBeEnabled();
+  await page.getByRole("textbox").evaluate(el=>{const data=new DataTransfer();data.items.add(new File(["Pasted file"],"pasted.txt",{type:"text/plain"}));el.dispatchEvent(new ClipboardEvent("paste",{bubbles:true,clipboardData:data}));});
+  await expect(page.getByRole("button",{name:"Retry upload"})).toBeVisible();await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();await page.getByRole("button",{name:"Retry upload"}).click();
+  await expect(page.getByRole("button",{name:"Send",exact:true})).toBeEnabled();expect(uploadIDs).toHaveLength(2);expect(uploadIDs[0]).toBe(uploadIDs[1]);
+  await page.getByRole("button",{name:"Send",exact:true}).click();await expect(page.locator(".chat-message-attachment")).toHaveText(/pasted.txt/);
  });
 }

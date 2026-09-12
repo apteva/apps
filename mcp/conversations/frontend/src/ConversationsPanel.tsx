@@ -1,3 +1,5 @@
+import { useComposerAttachments, type ComposerOptions } from "./composer";
+import type { SendMessage } from "./client";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline } from "./toolActivityModel";
 import { toChatToolActivity, toolVisualRegistry } from "./toolActivityAdapter";
@@ -71,6 +73,7 @@ function closeOpenMarkdown(s: string): string {
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
 export interface NativePanelProps extends ConversationLocalization {
+ composer?:ComposerOptions;
   appName: string;
   installId: number;
   projectId: string;
@@ -1057,7 +1060,7 @@ function ContextColumn({
 function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
  return <div className="min-w-0 shrink-0 flex flex-col gap-2">
  {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
- <MessageBody {...props}/><AttachmentContent attachments={props.message.attachments}/><GenericComponents components={props.message.components}/>
+ {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/><GenericComponents components={props.message.components}/>
  </div>;
 }
 function MessageBody({
@@ -1346,7 +1349,8 @@ export function ConversationChat({
     }
     return sessionStorage.getItem(storageKey) ?? "";
   } catch { return ""; } });
-  const pendingSendRef = useRef<{ content:string; client_message_id:string } | null>(null);
+  const attachments = useComposerAttachments(conversation.id,storageKey);
+  const pendingSendRef = useRef<SendMessage | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current=true; return () => {mountedRef.current=false;}; }, []);
   useEffect(() => {try {sessionStorage.setItem(storageKey,draft);} catch {}},[storageKey,draft]);
@@ -1428,16 +1432,17 @@ export function ConversationChat({
   },[messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content=draft.trim(); if (!content || sending) return;
+    const content=draft.trim(); if ((!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
-    if (!request) request={content,client_message_id:newClientMessageId()};
+    if (!request) request={content,client_message_id:newClientMessageId(),...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
     setSending(true);setSendError(""); setUnconfirmedSendError("");
     try {
       const row=await conversationsClient.send(conversation.id, request);
       pendingSendRef.current=null;try {sessionStorage.removeItem(storageKey+":pending"); if ((sessionStorage.getItem(storageKey) ?? "").trim() === request.content) sessionStorage.removeItem(storageKey);} catch {}
+      attachments.clearSent(request.attachments??[]);
       if (!mountedRef.current) return;
       mergeMessages([row]);setDraft(current => current.trim()===request!.content ? "" : current);
       inputRef.current?.focus();
@@ -1484,6 +1489,7 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
+      attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
       publicAudience={conversation.audience === "public"}
@@ -1523,7 +1529,7 @@ export function ConversationChat({
         element.style.height = Math.min(element.scrollHeight, 144) + "px";
       }}
       onComposerKeyDown={(event) => {
-        if (event.key === "Enter" && !event.shiftKey) {
+        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           send();
         }

@@ -2,6 +2,7 @@ import { join } from "node:path";
 const root=join(import.meta.dir,"..");
 const result=await Bun.build({entrypoints:[join(root,"example/main.tsx"),join(root,"example/dashboard.tsx")],outdir:join(root,".example"),target:"browser",format:"esm",define:{"process.env.NODE_ENV":'"development"'},plugins:process.env.APTEVA_SDK_ENTRY?[{name:"sdk-candidate",setup(build){build.onResolve({filter:/^@apteva\/web-sdk$/},()=>({path:process.env.APTEVA_SDK_ENTRY!}));}}]:[]});
 if(!result.success)throw new AggregateError(result.logs,"example build");
+const uploaded=new Map<string,any>();
 const rows=new Map<string,any[]>();const calls:any[]=[];
 const activityRows=new Map<string,any[]>();
 const resolved=new Set<string>();
@@ -49,12 +50,17 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/inbox") {const items=[{message:report(user),priority:2},...(!resolved.has(user)?[{message:approval(user),priority:0}]:[])];return Response.json({items,total:items.length,next_cursor:""});}
  if(path==="/message-action"){const body=await req.json();if(body.message_id!==92)return new Response("missing",{status:404});resolved.add(user);return Response.json({message:approval(user)});}
  if(path==="/message-dismiss")return Response.json({ok:true});
+ if(path==="/attachments"){
+  const chat=url.searchParams.get("chat_id");
+  if(req.method==="POST") {const body=await req.json();const type=body.name.endsWith(".png")?"image":"file";const attachment={id:body.id,type,name:body.name,mime_type:type==="image"?"image/png":"text/plain",size:Buffer.from(body.content_base64,"base64").length,...(type==="image"?{data_url:`data:image/png;base64,${body.content_base64}`}:{})};uploaded.set(`${chat}:${body.id}`,{attachment,content_base64:body.content_base64});return Response.json(attachment);}
+  const found=uploaded.get(`${chat}:${url.searchParams.get("id")}`);return found?Response.json(found):new Response("missing",{status:404});
+ }
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",attached:true},{id:42,name:"Scheduling assistant",attached:true}]);
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/messages"&&req.method==="POST"){
-  const body=await req.json();const existing=rows.get(user)??[];const row={id:existing.length+1,conversation_id:conversation(user).id,role:"user",content:body.content,components:[],created_at:new Date().toISOString(),client_message_id:body.client_message_id};existing.push(row);rows.set(user,existing);return Response.json(row);
+  const body=await req.json();const existing=rows.get(user)??[];const row={id:existing.length+1,conversation_id:conversation(user).id,role:"user",content:body.content,attachments:(body.attachments??[]).map((a:any)=>uploaded.get(`${conversation(user).id}:${a.id}`)?.attachment??a),components:[],created_at:new Date().toISOString(),client_message_id:body.client_message_id};existing.push(row);rows.set(user,existing);return Response.json(row);
  }
  if(path==="/messages"||path==="/changes")return Response.json({messages:rows.get(user)??[],cursor:0,before:0,has_more:false});
  if(path==="/seen")return Response.json({ok:true});
