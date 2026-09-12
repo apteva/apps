@@ -92,12 +92,13 @@ func TestSidecarsProcessToTasks(t *testing.T) {
 	tasks.MCPAs("complete", map[string]any{"task_id": id, "result": "Approved report attached"}, 7, "opaque-owner", "project-a")
 	var history struct {
 		Runs []struct {
-			Version int            `json:"version"`
-			Task    map[string]any `json:"task"`
+			Version      int            `json:"version"`
+			AssignmentID string         `json:"assignment_id"`
+			Task         map[string]any `json:"task"`
 		} `json:"runs"`
 	}
 	resp = processes.GET("/processes/"+p.ID+"/runs?project_id=project-a", &history)
-	if resp.Status != 200 || len(history.Runs) != 1 || history.Runs[0].Task["state"] != "completed" || history.Runs[0].Version != 1 {
+	if resp.Status != 200 || len(history.Runs) != 1 || history.Runs[0].Task["state"] != "completed" || history.Runs[0].Version != 1 || history.Runs[0].AssignmentID != "assignment-"+p.ID {
 		t.Fatalf("history %d %s", resp.Status, resp.Body)
 	}
 	// SDK must reject private tools when called through an agent connection.
@@ -162,5 +163,70 @@ func TestSidecarDirectWithoutTasks(t *testing.T) {
 	resp = app.GET("/processes/"+p.ID+"/runs?project_id=project-a", &history)
 	if resp.Status != 200 || len(history.Direct) != 1 || history.Direct[0].State != "completed" || interApp.Load() != 0 {
 		t.Fatalf("direct history %s; inter-app=%d", resp.Body, interApp.Load())
+	}
+}
+
+func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
+	var delivered atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/apps/callback/agents/7" || r.URL.Path == "/api/apps/callback/agents/8" {
+			id := int64(7)
+			if strings.HasSuffix(r.URL.Path, "/8") {
+				id = 8
+			}
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: id, ProjectID: "project-a", DefaultThreadID: "owner-thread"})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/event") {
+			var request sdk.AgentEventRequest
+			json.NewDecoder(r.Body).Decode(&request)
+			delivered.Add(1)
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: request.SourceEventID, SourceEventID: request.SourceEventID, ThreadID: request.ThreadID})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer gateway.Close()
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	d := def()
+	d.ExecutionMode = "agent"
+	d.Parameters = []Parameter{{Key: "page", Type: "string", Default: "default-page"}}
+	var p Process
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d}, &p)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
+	}
+	base := "/processes/" + p.ID
+	var x Assignment
+	resp = app.POST(base+"/assignments?project_id=project-a", map[string]any{"assignment": AssignmentConfig{Name: "Cooking", OwnerAgentID: 8, ExecutionMode: "agent", FollowLatest: true, Parameters: map[string]any{"page": "cooking"}}}, &x)
+	if resp.Status != 200 || x.ID == "" {
+		t.Fatal(string(resp.Body))
+	}
+	resp = app.POST(base+"/activate?project_id=project-a", map[string]any{}, &p)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
+	}
+	app.MCPAs("assignment_activate", map[string]any{"process_id": p.ID, "assignment_id": x.ID}, 7, "operator-thread", "project-a")
+	var started struct {
+		Run Run `json:"run"`
+	}
+	resp = app.POST(base+"/assignments/"+x.ID+"/start?project_id=project-a", map[string]any{"assignment_id": "assignment-" + p.ID, "idempotency_key": "today", "parameters": map[string]any{"page": "cooking-special"}}, &started)
+	if resp.Status != 200 || started.Run.AssignmentID != x.ID || started.Run.Binding.OwnerAgentID != 8 || started.Run.Binding.Parameters["page"] != "cooking-special" {
+		t.Fatalf("route or snapshot isolation: %s", resp.Body)
+	}
+	app.MCPAs("run_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "state": "completed", "result": "Patreon post URL"}, 8, "owner-thread", "project-a")
+	app.MCPAs("start", map[string]any{"process_id": p.ID, "assignment_id": "assignment-" + p.ID, "idempotency_key": "today"}, 7, "owner-thread", "project-a")
+	var history struct {
+		Direct []Run `json:"direct_runs"`
+	}
+	resp = app.GET(base+"/runs?project_id=project-a", &history)
+	if resp.Status != 200 || len(history.Direct) != 2 || delivered.Load() != 2 {
+		t.Fatalf("history %s", resp.Body)
+	}
+	var saved Assignment
+	app.GET(base+"/assignments/"+x.ID+"?project_id=project-a", &saved)
+	if saved.Parameters["page"] != "cooking" {
+		t.Fatal("run override mutated assignment")
 	}
 }

@@ -29,19 +29,23 @@ const process = {
   instructions: "Review",
   sync_pending: false,
 };
-async function mount(history: object) {
+async function mount(history: object, overrides: object = {}) {
+  const selectedProcess = { ...process, ...overrides };
   window.history.replaceState(null, "", "/");
   globalThis.fetch = (async (url: unknown) => {
     const path = String(url).split("?")[0];
     if (path === "/api/agents")
-      return Response.json([{ id: 7, name: "Owner" }]);
+      return Response.json([
+        { id: 7, name: "Owner" },
+        { id: 8, name: "Cooking agent" },
+      ]);
     if (path.endsWith("/runs")) return Response.json(history);
     if (path.endsWith("/p"))
       return Response.json({
-        process,
-        versions: [{ version: 1, definition: process }],
+        process: selectedProcess,
+        versions: [{ version: 1, definition: selectedProcess }],
       });
-    return Response.json({ processes: [process] });
+    return Response.json({ processes: [selectedProcess] });
   }) as typeof fetch;
   const container = document.createElement("div");
   document.body.append(container);
@@ -104,4 +108,163 @@ test("mixed history renders direct evidence and links only Tasks records", async
   const links = document.querySelectorAll('a[href*="/apps/tasks/"]');
   expect(links.length).toBe(1);
   expect(links[0].getAttribute("href")).toContain("task-1");
+});
+
+const assignment = {
+  id: "photo",
+  process_id: "p",
+  revision: 1,
+  name: "Photography Patreon",
+  target: "Photo page",
+  owner_agent_id: 7,
+  execution_mode: "agent",
+  procedure_version: 1,
+  follow_latest: true,
+  parameters: { page: "photo" },
+  status: "active",
+  sync_pending: false,
+  sync_error: "",
+};
+test("assignment run sends its ID and opens parameter fields", async () => {
+  await mount(
+    {},
+    {
+      status: "active",
+      assignments: [
+        assignment,
+        {
+          ...assignment,
+          id: "cooking",
+          name: "Cooking Patreon",
+          owner_agent_id: 8,
+          parameters: { page: "cooking" },
+        },
+      ],
+      parameters: [
+        { key: "page", label: "Patreon page", type: "string", required: true },
+      ],
+    },
+  );
+  await click("Weekly review");
+  await click("Assignments");
+  const card = Array.from(document.querySelectorAll("article")).find((x) =>
+    x.textContent?.includes("Cooking Patreon"),
+  )!;
+  await act(async () =>
+    Array.from(card.querySelectorAll("button"))
+      .find((x) => x.textContent === "Run now")!
+      .click(),
+  );
+  expect(document.querySelector("[role=dialog]")?.textContent).toContain(
+    "Cooking agent",
+  );
+  expect(
+    document.querySelector<HTMLInputElement>("#run-parameter-page")?.value,
+  ).toBe("cooking");
+  const read = globalThis.fetch;
+  let payload: any;
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      payload = JSON.parse(String(init.body));
+      return Response.json({ run: { id: "run" } });
+    }
+    return read(url as string, init);
+  }) as typeof fetch;
+  await click("Start run");
+  expect(payload.assignment_id).toBe("cooking");
+  expect(payload.idempotency_key).toBeTruthy();
+});
+test("run history filters independent assignments", async () => {
+  const runs = [
+    {
+      id: "r1",
+      assignment_id: "photo",
+      assignment,
+      version: 1,
+      state: "completed",
+      result: "Photo result",
+      created_at: "2026-09-12T10:00:00Z",
+    },
+    {
+      id: "r2",
+      assignment_id: "cooking",
+      assignment: { ...assignment, name: "Cooking", owner_agent_id: 8 },
+      version: 1,
+      state: "blocked",
+      error: "Cooking approval needed",
+      created_at: "2026-09-12T11:00:00Z",
+    },
+  ];
+  await mount(
+    { direct_runs: runs },
+    {
+      assignments: [
+        assignment,
+        { ...assignment, id: "cooking", name: "Cooking", owner_agent_id: 8 },
+      ],
+    },
+  );
+  await click("Weekly review");
+  await click("Runs");
+  const select = document.querySelector<HTMLSelectElement>(
+    '[aria-label="Filter run assignment"]',
+  )!;
+  await act(async () => {
+    select.value = "photo";
+    select.dispatchEvent(
+      new window.Event("change", { bubbles: true }) as unknown as Event,
+    );
+  });
+  expect(document.body.textContent).toContain("Photo result");
+  expect(document.body.textContent).not.toContain("Cooking approval needed");
+});
+test("editing a paused assignment preserves parameters and uses revision", async () => {
+  await mount(
+    {},
+    {
+      assignments: [{ ...assignment, status: "paused" }],
+      parameters: [
+        { key: "page", label: "Patreon page", type: "string", required: true },
+      ],
+    },
+  );
+  await click("Weekly review");
+  await click("Assignments");
+  await click("Edit assignment");
+  expect(
+    document.querySelector<HTMLInputElement>("#parameter-page")?.value,
+  ).toBe("photo");
+  const select =
+    document.querySelector<HTMLSelectElement>("#assignment-agent")!;
+  await act(async () => {
+    select.value = "8";
+    select.dispatchEvent(
+      new window.Event("change", { bubbles: true }) as unknown as Event,
+    );
+  });
+  const read = globalThis.fetch;
+  let payload: any;
+  let path = "";
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PUT") {
+      payload = JSON.parse(String(init.body));
+      path = String(url);
+      return Response.json({});
+    }
+    return read(url as string, init);
+  }) as typeof fetch;
+  await act(async () =>
+    document
+      .querySelector("form")!
+      .dispatchEvent(
+        new window.Event("submit", {
+          bubbles: true,
+          cancelable: true,
+        }) as unknown as Event,
+      ),
+  );
+  expect(path).toContain("/assignments/photo");
+  expect(payload.expected_revision).toBe(1);
+  expect(payload.assignment.owner_agent_id).toBe(8);
+  expect(payload.assignment.parameters.page).toBe("photo");
 });

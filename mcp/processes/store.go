@@ -22,29 +22,32 @@ type Schedule struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 type Definition struct {
-	ExecutionMode        string    `json:"execution_mode"`
-	Name                 string    `json:"name"`
-	Description          string    `json:"description"`
-	Instructions         string    `json:"instructions"`
-	RequiredInputs       string    `json:"required_inputs"`
-	DefaultInputs        string    `json:"default_inputs"`
-	CompletionCriteria   string    `json:"completion_criteria"`
-	ApprovalRequirements string    `json:"approval_requirements"`
-	OwnerAgentID         int64     `json:"owner_agent_id"`
-	Schedule             *Schedule `json:"schedule,omitempty"`
+	Parameters           []Parameter `json:"parameters,omitempty"`
+	ExecutionMode        string      `json:"execution_mode"`
+	Name                 string      `json:"name"`
+	Description          string      `json:"description"`
+	Instructions         string      `json:"instructions"`
+	RequiredInputs       string      `json:"required_inputs"`
+	DefaultInputs        string      `json:"default_inputs"`
+	CompletionCriteria   string      `json:"completion_criteria"`
+	ApprovalRequirements string      `json:"approval_requirements"`
+	OwnerAgentID         int64       `json:"owner_agent_id"`
+	Schedule             *Schedule   `json:"schedule,omitempty"`
 }
 type Process struct {
-	NextRunAt        string `json:"next_run_at,omitempty"`
-	ScheduledVersion int    `json:"scheduled_version"`
-	LastScheduleNote string `json:"last_schedule_note,omitempty"`
-	ID               string `json:"id"`
-	ProjectID        string `json:"project_id"`
-	Status           string `json:"status"`
-	Version          int    `json:"version"`
-	SyncPending      bool   `json:"sync_pending"`
-	SyncError        string `json:"sync_error"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	Assignment       *Assignment  `json:"-"`
+	Assignments      []Assignment `json:"assignments"`
+	NextRunAt        string       `json:"next_run_at,omitempty"`
+	ScheduledVersion int          `json:"scheduled_version"`
+	LastScheduleNote string       `json:"last_schedule_note,omitempty"`
+	ID               string       `json:"id"`
+	ProjectID        string       `json:"project_id"`
+	Status           string       `json:"status"`
+	Version          int          `json:"version"`
+	SyncPending      bool         `json:"sync_pending"`
+	SyncError        string       `json:"sync_error"`
+	CreatedAt        string       `json:"created_at"`
+	UpdatedAt        string       `json:"updated_at"`
 	Definition
 }
 type Version struct {
@@ -54,21 +57,25 @@ type Version struct {
 	CreatedAt  string     `json:"created_at"`
 }
 type Run struct {
-	Backend           string `json:"backend"`
-	State             string `json:"state"`
-	Progress          int    `json:"progress"`
-	CurrentStep       string `json:"current_step"`
-	Result            string `json:"result"`
-	Error             string `json:"error"`
-	ExecutionID       string `json:"execution_id,omitempty"`
-	TargetThreadID    string `json:"target_thread_id,omitempty"`
-	DeliveredAt       string `json:"delivered_at,omitempty"`
-	DeliveryAttempts  int    `json:"delivery_attempts"`
-	NextAttemptAt     string `json:"next_attempt_at,omitempty"`
-	ScheduledFor      string `json:"scheduled_for,omitempty"`
-	SchedulePaused    bool   `json:"schedule_paused"`
-	LifecycleSequence int64  `json:"-"`
-	ExecutionState    string `json:"execution_state,omitempty"`
+	AssignmentID       string           `json:"assignment_id"`
+	AssignmentRevision int              `json:"assignment_revision"`
+	Binding            AssignmentConfig `json:"assignment"`
+	Overrides          map[string]any   `json:"parameter_overrides"`
+	Backend            string           `json:"backend"`
+	State              string           `json:"state"`
+	Progress           int              `json:"progress"`
+	CurrentStep        string           `json:"current_step"`
+	Result             string           `json:"result"`
+	Error              string           `json:"error"`
+	ExecutionID        string           `json:"execution_id,omitempty"`
+	TargetThreadID     string           `json:"target_thread_id,omitempty"`
+	DeliveredAt        string           `json:"delivered_at,omitempty"`
+	DeliveryAttempts   int              `json:"delivery_attempts"`
+	NextAttemptAt      string           `json:"next_attempt_at,omitempty"`
+	ScheduledFor       string           `json:"scheduled_for,omitempty"`
+	SchedulePaused     bool             `json:"schedule_paused"`
+	LifecycleSequence  int64            `json:"-"`
+	ExecutionState     string           `json:"execution_state,omitempty"`
 
 	ID              string `json:"id"`
 	ProcessID       string `json:"process_id"`
@@ -90,6 +97,9 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 func (d *Definition) validate() error {
+	if e := validateSchema(d.Parameters); e != nil {
+		return e
+	}
 	if d.ExecutionMode == "" {
 		d.ExecutionMode = "agent"
 	}
@@ -152,6 +162,22 @@ func (a *App) get(project, id string) (*Process, error) {
 	}
 	if p.ExecutionMode == "" {
 		p.ExecutionMode = "tasks"
+	}
+	p.Assignments, err = a.assignments(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range p.Assignments {
+		if x.SyncPending {
+			p.SyncPending = true
+			if p.SyncError == "" {
+				p.SyncError = x.SyncError
+			}
+		}
+		if x.ID == "assignment-"+p.ID {
+			p.NextRunAt = x.NextRunAt
+			p.LastScheduleNote = x.LastScheduleNote
+		}
 	}
 	return &p, nil
 }
@@ -230,6 +256,7 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	if agent.ProjectID != project {
 		return nil, errors.New("owner is outside this project")
 	}
+	var previous *Process
 	version := 1
 	now := timestamp()
 	create := id == ""
@@ -240,6 +267,7 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 		if err != nil {
 			return nil, err
 		}
+		previous = p
 		if p.Version != expected {
 			return nil, errConflict
 		}
@@ -266,6 +294,34 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	if err != nil {
 		return nil, err
 	}
+	if create {
+		c := AssignmentConfig{FollowLatest: true, Name: "Default assignment", OwnerAgentID: d.OwnerAgentID, ExecutionMode: d.ExecutionMode, Schedule: d.Schedule, ProcedureVersion: version, Parameters: map[string]any{}}
+		_, err = tx.Exec(`INSERT INTO process_assignments(id,process_id,body_json,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, "assignment-"+id, id, jsonText(c), now, now)
+	} else {
+		for _, x := range previous.Assignments {
+			c := x.AssignmentConfig
+			changed := false
+			if c.FollowLatest {
+				c.ProcedureVersion = version
+				changed = true
+			}
+			if x.ID == "assignment-"+id && (previous.OwnerAgentID != d.OwnerAgentID || previous.ExecutionMode != d.ExecutionMode || jsonText(previous.Schedule) != jsonText(d.Schedule)) {
+				c.OwnerAgentID = d.OwnerAgentID
+				c.ExecutionMode = d.ExecutionMode
+				c.Schedule = d.Schedule
+				changed = true
+			}
+			if changed {
+				_, err = tx.Exec(`UPDATE process_assignments SET revision=revision+1,body_json=?,next_run_at='',scheduled_version=0,updated_at=? WHERE id=?`, jsonText(c), now, x.ID)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -289,30 +345,64 @@ func (a *App) dispatches(id string) ([]Run, error) {
 	return out, rows.Err()
 }
 func (a *App) reserveRun(p *Process, kind, key, inputs string) (Run, error) {
-	runs, err := a.dispatches(p.ID)
-	if err != nil {
-		return Run{}, err
-	}
-	for _, r := range runs {
-		if r.RequestKey == key {
-			if r.Inputs != inputs || r.Kind != kind {
-				return Run{}, errors.New("idempotency key already used with different input")
-			}
-			return r, nil
+	return a.reserveAssignedRun(p, kind, key, inputs, nil)
+}
+func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides map[string]any) (Run, error) {
+	if p.Assignment == nil {
+		x, e := a.assignment(p.ProjectID, p.ID, "assignment-"+p.ID)
+		if e != nil {
+			return Run{}, e
+		}
+		p, e = a.assigned(p, x)
+		if e != nil {
+			return Run{}, e
 		}
 	}
-	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued"}
-	_, err = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend) VALUES(?,?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt, r.Backend)
-	return r, err
+	// Preserve legacy default keys; other assignments get independent namespaces.
+	if p.Assignment.ID != "assignment-"+p.ID {
+		key = p.Assignment.ID + ":" + key
+	}
+	r, e := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE process_id=? AND request_key=?`, p.ID, key))
+	if e == nil {
+		if r.AssignmentID != p.Assignment.ID || r.Inputs != inputs || r.Kind != kind || jsonText(params(r.Overrides)) != jsonText(params(overrides)) {
+			return Run{}, errors.New("idempotency key already used with different input")
+		}
+		return r, nil
+	}
+	if !errors.Is(e, sql.ErrNoRows) {
+		return Run{}, e
+	}
+	c := p.Assignment.AssignmentConfig
+	values := map[string]any{}
+	for k, v := range c.Parameters {
+		values[k] = v
+	}
+	for k, v := range overrides {
+		values[k] = v
+	}
+	c.Parameters, e = validateParameters(p.Parameters, values, true)
+	if e != nil {
+		return Run{}, e
+	}
+	r = Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides)}
+	_, e = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,assignment_id,assignment_revision,assignment_json,overrides_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt, r.Backend, r.AssignmentID, r.AssignmentRevision, jsonText(r.Binding), jsonText(r.Overrides))
+	return r, e
 }
 
-const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state`
+const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state,assignment_id,assignment_revision,assignment_json,overrides_json`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRun(row scanner) (Run, error) {
 	var r Run
-	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState)
+	var binding, overrides string
+	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState, &r.AssignmentID, &r.AssignmentRevision, &binding, &overrides)
+	if err == nil {
+		err = json.Unmarshal([]byte(binding), &r.Binding)
+	}
+	if err == nil {
+		err = json.Unmarshal([]byte(overrides), &r.Overrides)
+	}
 	return r, err
 }
 func (a *App) getRun(project, process, id string) (Run, error) {

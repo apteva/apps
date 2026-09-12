@@ -22,15 +22,18 @@ func textField(description string) map[string]any {
 }
 func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria", "owner_agent_id"}, map[string]any{
-		"execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
+		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
 	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create a draft company procedure only when authorized to define company policy.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure and its schedule. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active procedure on its owner agent. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
 	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
+	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
+		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
+	}
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update"} {
+	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -39,6 +42,17 @@ func (a *App) MCPTools() []sdk.Tool {
 			required = append(required, "process_id")
 		}
 		switch name {
+		case "assignment_get", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive":
+			props["assignment_id"] = textField("Assignment ID")
+			required = append(required, "assignment_id")
+			if name == "assignment_update" {
+				props["assignment"] = assignmentSchema()
+				props["expected_revision"] = map[string]any{"type": "integer", "minimum": 1}
+				required = append(required, "assignment", "expected_revision")
+			}
+		case "assignment_create":
+			props["assignment"] = assignmentSchema()
+			required = append(required, "assignment")
 		case "list":
 			props["search"] = textField("Search name and purpose")
 			props["status"] = textField("draft, active, paused, or archived")
@@ -64,6 +78,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				required = append(required, "state")
 			}
 		case "start":
+			props["assignment_id"] = textField("Assignment ID; required when there are multiple non-archived assignments")
+			props["parameters"] = map[string]any{"type": "object", "description": "Run-only overrides for declared parameters"}
 			props["idempotency_key"] = textField("Stable unique key for this logical execution")
 			props["inputs"] = textField("Optional run-specific context")
 			required = append(required, "idempotency_key")
@@ -97,8 +113,16 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 			if status := str(args, "status"); status != "" && p.Status != status {
 				continue
 			}
-			if owner := number(args, "owner_agent_id"); owner > 0 && p.OwnerAgentID != int64(owner) {
-				continue
+			if owner := number(args, "owner_agent_id"); owner > 0 {
+				found := false
+				for _, x := range p.Assignments {
+					if x.OwnerAgentID == int64(owner) {
+						found = true
+					}
+				}
+				if !found {
+					continue
+				}
 			}
 			if q != "" && !strings.Contains(strings.ToLower(p.Name+" "+p.Description), q) {
 				continue
@@ -147,7 +171,57 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	case "archive":
 		return a.changeStatus(project, id, "archived")
 	case "start":
-		return a.start(project, id, str(args, "idempotency_key"), str(args, "inputs"))
+		assignmentID := str(args, "assignment_id")
+		if assignmentID == "" {
+			if _, e := a.get(project, id); e != nil {
+				return nil, e
+			}
+			xs, e := a.assignments(id)
+			if e != nil {
+				return nil, e
+			}
+			for _, x := range xs {
+				if x.Status != "archived" {
+					if assignmentID != "" {
+						return nil, errors.New("choose assignment_id; this process has multiple assignments")
+					}
+					assignmentID = x.ID
+				}
+			}
+		}
+		overrides, ok := args["parameters"].(map[string]any)
+		if args["parameters"] != nil && !ok {
+			return nil, errors.New("parameters must be an object")
+		}
+		return a.startAssignment(project, id, assignmentID, str(args, "idempotency_key"), str(args, "inputs"), overrides)
+	case "assignments":
+		if _, e := a.get(project, id); e != nil {
+			return nil, e
+		}
+		xs, e := a.assignments(id)
+		return map[string]any{"assignments": xs}, e
+	case "assignment_get":
+		return a.assignment(project, id, str(args, "assignment_id"))
+	case "assignment_create", "assignment_update":
+		var c AssignmentConfig
+		raw, e := json.Marshal(args["assignment"])
+		if e == nil {
+			e = json.Unmarshal(raw, &c)
+		}
+		if e != nil {
+			return nil, e
+		}
+		aid := str(args, "assignment_id")
+		if action == "assignment_create" {
+			aid = ""
+		}
+		return a.saveAssignment(project, id, aid, number(args, "expected_revision"), c)
+	case "assignment_activate":
+		return a.assignmentStatus(project, id, str(args, "assignment_id"), "active")
+	case "assignment_pause":
+		return a.assignmentStatus(project, id, str(args, "assignment_id"), "paused")
+	case "assignment_archive":
+		return a.assignmentStatus(project, id, str(args, "assignment_id"), "archived")
 	case "runs":
 		return a.runs(project, id)
 	case "run_get", "run_update":
@@ -205,6 +279,35 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if len(parts) >= 2 && parts[1] == "assignments" {
+		args["process_id"] = parts[0]
+		if len(parts) == 2 {
+			if r.Method == "GET" {
+				action = "assignments"
+			}
+			if r.Method == "POST" {
+				action = "assignment_create"
+			}
+		}
+		if len(parts) == 3 {
+			args["assignment_id"] = parts[2]
+			if r.Method == "GET" {
+				action = "assignment_get"
+			}
+			if r.Method == "PUT" {
+				action = "assignment_update"
+			}
+		}
+		if len(parts) == 4 && r.Method == "POST" {
+			args["assignment_id"] = parts[2]
+			switch parts[3] {
+			case "activate", "pause", "archive":
+				action = "assignment_" + parts[3]
+			case "start":
+				action = "start"
+			}
+		}
+	}
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -218,7 +321,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k != "process_id" && k != "project_id" && k != "_project_id" {
+			if k != "process_id" && k != "project_id" && k != "_project_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
 				args[k] = v
 			}
 		}
@@ -240,6 +343,15 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	if p, ok := result.(*Process); ok && p.SyncPending {
 		status = 202
 	}
+	if x, ok := result.(*Assignment); ok && x.SyncPending {
+		status = 202
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func assignmentSchema() map[string]any {
+	d := definitionSchema()["properties"].(map[string]any)
+	return object([]string{"name", "owner_agent_id", "execution_mode"}, map[string]any{
+		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": d["owner_agent_id"], "execution_mode": d["execution_mode"], "schedule": d["schedule"], "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
