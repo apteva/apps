@@ -166,3 +166,11 @@ The browser fixture deliberately supplies no app stylesheet to the dashboard: it
 report/approval UI over a controlled HTTP/SSE service. Real platform/token and
 real-Codex evidence is recorded separately; a fixture token does not establish
 backend isolation.
+
+### Tool activity
+
+Dashboard panels and exported chat use the same port of the original `ChatToolActivity` renderer, grouping rules and scoped styles, including stacked icons, animated activity text, expandable groups, parallel calls, failure indicators and timing. Data and translations are adapted to Conversations. First-party app icons are bundled from public app metadata; custom sources use the original fallback resolver when no matching metadata is available.
+
+The shared transcript displays conversation-bound tool starts and results. Activity is stored separately from messages and replayed through `/activity` on load, reconnect and periodic reconciliation. Live updates travel in `stream` frames under `tool_activity`, with stable IDs and revisions. The endpoint uses the same conversation and delegated `message.read` access checks as history. It carries display metadata only, never tool arguments or raw results, and does not create unread messages or outbound deliveries. Activity collected after this feature is installed survives refreshes; older platform telemetry is not imported automatically.
+
+The main composer action pauses an active reply or tool when the input is empty, and switches to send as soon as a draft is entered. Pausing remains an advisory request.

@@ -3,6 +3,7 @@ const root=join(import.meta.dir,"..");
 const result=await Bun.build({entrypoints:[join(root,"example/main.tsx"),join(root,"example/dashboard.tsx")],outdir:join(root,".example"),target:"browser",format:"esm",define:{"process.env.NODE_ENV":'"development"'},plugins:process.env.APTEVA_SDK_ENTRY?[{name:"sdk-candidate",setup(build){build.onResolve({filter:/^@apteva\/web-sdk$/},()=>({path:process.env.APTEVA_SDK_ENTRY!}));}}]:[]});
 if(!result.success)throw new AggregateError(result.logs,"example build");
 const rows=new Map<string,any[]>();const calls:any[]=[];
+const activityRows=new Map<string,any[]>();
 const resolved=new Set<string>();
 let room=false;let deliveryStatus="delivered";
 const streams = new Set<ReadableStreamDefaultController>();
@@ -13,7 +14,7 @@ const approval=(user:string)=>({id:92,conversation_id:`chat-${user}`,role:"agent
 const conversation=(user:string)=>({id:`chat-${user}`,project_id:"project",lead_agent_id:41,lead_agent_name:"Assistant",title:"Support chat",kind:room?"room":"direct",origin:"web",audience:"public",created_at:"",updated_at:""});
 Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
- if(url.pathname==="/reset" && req.method==="POST"){rows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();activityRows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed" && req.method==="POST") {
   const options=await req.json();room=Boolean(options.room);deliveryStatus=options.deliveryStatus || "delivered";
   for(const user of ["operator","visitor-a"]) rows.set(user,[
@@ -25,6 +26,10 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(url.pathname==="/emit" && req.method==="POST") {
   const frame=await req.json();
+  if(frame.tool_activity) {
+   const current=activityRows.get(frame.chat_id)??[];
+   activityRows.set(frame.chat_id,[...current.filter(a=>a.id!==frame.tool_activity.id),frame.tool_activity]);
+  }
   for(const c of streams) {try {c.enqueue(new TextEncoder().encode(`event: stream\ndata: ${JSON.stringify(frame)}\n\n`));}catch{streams.delete(c);}}
   return Response.json({ok:true});
  }
@@ -44,6 +49,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/inbox") {const items=[{message:report(user),priority:2},...(!resolved.has(user)?[{message:approval(user),priority:0}]:[])];return Response.json({items,total:items.length,next_cursor:""});}
  if(path==="/message-action"){const body=await req.json();if(body.message_id!==92)return new Response("missing",{status:404});resolved.add(user);return Response.json({message:approval(user)});}
  if(path==="/message-dismiss")return Response.json({ok:true});
+ if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",attached:true},{id:42,name:"Scheduling assistant",attached:true}]);
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});

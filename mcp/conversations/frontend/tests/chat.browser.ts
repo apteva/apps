@@ -1,5 +1,81 @@
 import { expect,test } from "@playwright/test";
 for (const host of ["dashboard", "external"]) {
+ test(`${host}: tool activity streams, updates in place and survives reload`, async ({page,request}) => {
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const activity={id:71,chat_id:chat,agent_id:41,thread_id:chat,call_id:"tool-71",name:"tasks_list",reason:"Checking your tasks",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  const emit=async(item:typeof activity)=>request.post("/emit",{data:{chat_id:item.chat_id,tool_activity:item}});
+  await emit(activity);
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  await page.setViewportSize({width:390,height:800});
+  await page.screenshot({path:test.info().outputPath("live-tool-mobile.png")});
+  await expect(page.getByRole("button",{name:"Ask the agent to pause and reconsider"})).toBeEnabled();
+  await page.getByRole("textbox").fill("Also check today");
+  await expect(page.getByRole("button",{name:"Send",exact:true})).toBeEnabled();
+  await page.getByRole("textbox").fill("");
+  await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  // Delayed snapshots/events cannot regress the completed row.
+  await emit(activity);await expect(row).toHaveAttribute("aria-label",/Done/);
+  await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
+  await page.reload();await expect(row).toHaveAttribute("aria-label",/Done/);
+  await expect(row).toHaveCount(1);
+  await emit({...activity,id:72,call_id:"tool-72",status:"failed",revision:2});
+  await expect(row).toHaveAttribute("aria-label",/failed/i);
+  // The original component groups the burst into one expandable summary.
+  await expect(row).toHaveCount(1);
+  const summary=row.getByRole("button").first();
+  await expect(summary).toHaveAttribute("aria-expanded","false");
+  await expect(row.getByText("+1",{exact:true})).toBeVisible();
+  await summary.click();
+  await expect(summary).toHaveAttribute("aria-expanded","true");
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(2);
+  await expect(row.locator(".chat-tool-failed-text").last()).toBeVisible();
+  await page.screenshot({path:test.info().outputPath("original-tools-expanded.png")});
+  await emit({...activity,id:99,chat_id:"another-chat",reason:"Must not appear"});
+  await expect(page.getByText("Must not appear")).toHaveCount(0);
+ });
+}
+
+for (const host of ["dashboard", "external"]) {
+ test(`${host}: composer switches between pause and sending during a response`, async ({page,request}) => {
+  await request.post("/reset");
+  await page.goto(`/?host=${host}`);
+  const composer=page.locator("form").filter({has:page.getByRole("textbox")});
+  const action=composer.getByRole("button");
+  await expect(action).toHaveCount(1);
+  await expect(action).toHaveAccessibleName("Send");
+  await expect(action).toBeDisabled();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"composer-test",run_id:"run",text:"Thinking through the request…"};
+  await expect(page.getByTitle("Live")).toBeVisible();
+  await request.post("/emit",{data:frame});
+  await expect(action).toHaveAccessibleName("Ask the agent to pause and reconsider");
+  await expect(action).toBeEnabled();
+  await page.getByRole("textbox").press("Enter");
+  await expect(page.getByText("Pause here and reconsider before continuing.",{exact:true})).toHaveCount(0);
+  await page.getByRole("textbox").fill("Also check tomorrow");
+  await expect(action).toHaveAccessibleName("Send");
+  await action.click();
+  await expect(page.getByText("Also check tomorrow",{exact:true})).toBeVisible();
+  await expect(action).toHaveAccessibleName("Ask the agent to pause and reconsider");
+  await action.click();
+  await expect(action).toHaveAccessibleName("Break requested");
+  await expect(action).toBeDisabled();
+  await page.getByRole("textbox").fill("One more detail");
+  await expect(action).toHaveAccessibleName("Send");
+  await expect(action).toBeEnabled();
+  await page.getByRole("textbox").press("Enter");
+  await expect(page.getByText("One more detail",{exact:true})).toBeVisible();
+  await request.post("/emit",{data:{...frame,text:"",done:true}});
+  await expect(action).toHaveAccessibleName("Send");
+  await expect(action).toBeDisabled();
+ });
+}
+
+for (const host of ["dashboard", "external"]) {
  test(`${host}: app-owned CSS renders real replies and preserves host themes`, async ({page,request}) => {
   await request.post("/reset"); await request.post("/seed", {data:{}});
   const errors:string[]=[];page.on("pageerror",e=>errors.push(e.message));

@@ -66,6 +66,9 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
  */
 export default function ConversationChatView(props: ConversationChatViewProps) {
   const { t } = useConversationLocalization();
+  const hasDraft = Boolean(props.draft.trim());
+  const showBreak = props.responseActive && !hasDraft;
+  const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
     <section className="min-h-0 flex-1 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
@@ -165,25 +168,10 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
       ) : (
         <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
-          {props.responseActive && (
-            <div className="mb-2 flex justify-center">
-              <button
-                type="button"
-                onClick={props.onSoftBreak}
-                disabled={props.breakBusy || props.breakRequested}
-                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-card px-3 py-1.5 text-xs text-text-muted transition-colors enabled:hover:border-accent/50 enabled:hover:text-text disabled:cursor-default disabled:opacity-60"
-                aria-label={t("chat.breakLabel")}
-                title={t("chat.breakHint")}
-              >
-                <Glyph d={GLYPH_PAUSE} size={13} />
-                {props.breakRequested ? t("chat.breakRequested") : props.breakBusy ? t("chat.breakRequesting") : t("chat.break")}
-              </button>
-            </div>
-          )}
           <form
             onSubmit={(event) => {
               event.preventDefault();
-              props.onSend();
+              if (hasDraft && !props.sending) props.onSend();
             }}
             className="flex min-h-[54px] items-center gap-1.5 rounded-lg border border-border bg-bg-card/95 px-2 py-1.5 shadow-lg backdrop-blur-sm transition-colors focus-within:border-accent/60 sm:min-h-[58px] sm:gap-3 sm:px-4 sm:py-2"
           >
@@ -202,13 +190,15 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               }
             />
             <button
-              type="submit"
-              disabled={props.sending || !props.draft.trim()}
+              type={showBreak ? "button" : "submit"}
+              onClick={showBreak ? props.onSoftBreak : undefined}
+              disabled={showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft}
               className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
-              aria-label={t("chat.send")}
-              title={t("chat.sendHint")}
+              aria-label={showBreak ? breakLabel : t("chat.send")}
+              aria-busy={showBreak && props.breakBusy ? true : undefined}
+              title={showBreak ? (props.breakBusy || props.breakRequested ? breakLabel : t("chat.breakHint")) : t("chat.sendHint")}
             >
-              <svg
+              {showBreak ? <Glyph d={GLYPH_PAUSE} size={16} /> : <svg
                 viewBox="0 0 20 20"
                 className="w-4 h-4"
                 fill="none"
@@ -219,7 +209,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               >
                 <path d="M10 17V3" />
                 <path d="M5 8l5-5 5 5" />
-              </svg>
+              </svg>}
             </button>
           </form>
         </footer>

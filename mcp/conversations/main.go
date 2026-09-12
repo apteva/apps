@@ -60,6 +60,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("conversations requires a db block")
 	}
 	a.store = newStore(ctx.AppDB())
+	if err := a.store.interruptToolActivities(); err != nil {
+		return err
+	}
 	a.hub = newHub()
 	a.adapters = newAdapterRegistry(a, a.hub)
 	a.streamer = newStreamer(a.hub)

@@ -44,7 +44,7 @@ beforeEach(()=>{
  Object.assign(globalThis,{window:win,document:win.document,navigator:win.navigator,HTMLElement:win.HTMLElement,HTMLTextAreaElement:win.HTMLTextAreaElement,Event:win.Event,KeyboardEvent:win.KeyboardEvent,sessionStorage:win.sessionStorage,EventSource:FakeEvents,IS_REACT_ACT_ENVIRONMENT:true});
  win.HTMLElement.prototype.scrollIntoView=()=>{};
  element=win.document.createElement("div") as unknown as HTMLElement;win.document.body.appendChild(element as any);root=createRoot(element);FakeEvents.instances=[];
- fetcher=(url)=>url.includes("/deliveries")?json([]):json(url.includes("/changes")?{messages:[],cursor:0,has_more:false}:{messages:[],cursor:0,has_more:false,before:0});
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json(url.includes("/changes")?{messages:[],cursor:0,has_more:false}:{messages:[],cursor:0,has_more:false,before:0});
  globalThis.fetch=((url:unknown,init?:RequestInit)=>fetcher(String(url),init)) as typeof fetch;
  conversations=new AptevaClient({baseURL:""}).use(conversationsExtension(),{projectId:"project",installId:7});
 });
@@ -52,7 +52,7 @@ afterEach(async()=>{await act(async()=>root.unmount());await win.happyDOM.abort(
 
 test("a live row arriving before snapshot never advances durable replay cursor",async()=>{
  let resolveSnapshot!:(value:Response)=>void;const paths:string[]=[];
- fetcher=(url)=>{paths.push(url);if(url.includes("/deliveries"))return json([]);if(url.includes("page=1"))return new Promise(resolve=>{resolveSnapshot=resolve});return json({messages:[message(201)],cursor:201,has_more:false});};
+ fetcher=(url)=>{paths.push(url);if(url.includes("/deliveries")||url.includes("/activity"))return json([]);if(url.includes("page=1"))return new Promise(resolve=>{resolveSnapshot=resolve});return json({messages:[message(201)],cursor:201,has_more:false});};
  await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
  await act(async()=>FakeEvents.instances[0].emit(message(501)));
  await act(async()=>resolveSnapshot(new Response(JSON.stringify({messages:[message(200)],cursor:200,before:200,has_more:true}))));await settle();
@@ -60,7 +60,7 @@ test("a live row arriving before snapshot never advances durable replay cursor",
  expect(element.textContent).toContain("message 201");expect(element.textContent).toContain("message 501");
 });
 test("switching conversations keeps drafts and late replies out of the next chat",async()=>{
- fetcher=(url)=>url.includes("/deliveries")?json([]):json(url.includes("/changes")?{messages:[],cursor:0,has_more:false}:{messages:[message(1,url.includes("chat_id=b")?"b":"a")],cursor:1,before:1,has_more:false});
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json(url.includes("/changes")?{messages:[],cursor:0,has_more:false}:{messages:[message(1,url.includes("chat_id=b")?"b":"a")],cursor:1,before:1,has_more:false});
  await render("a");await type("private draft");await render("b");
  expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("");
  await act(async()=>FakeEvents.instances.at(-1)!.emit(message(900,"a","private late reply")));
@@ -68,7 +68,7 @@ test("switching conversations keeps drafts and late replies out of the next chat
 });
 test("ordinary retry preserves the original submission id",async()=>{
  const bodies:any[]=[];
- fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return bodies.length===1?Promise.reject(new Error("lost response")):json(message(1,"a",bodies[0].content));}return url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return bodies.length===1?Promise.reject(new Error("lost response")):json(message(1,"a",bodies[0].content));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
  await render();await type("hello");await send();await settle();await send();await settle();
  expect(bodies.length).toBe(2);expect(bodies[1]).toEqual(bodies[0]);
 });
@@ -89,14 +89,14 @@ test("two agents sharing a provider call id keep independent streaming bubbles",
 });
 test("send completion preserves text typed while the request was pending",async()=>{
  let complete!:(r:Response)=>void;
- fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?new Promise(resolve=>{complete=resolve}):url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?new Promise(resolve=>{complete=resolve}):(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
  await render();await type("first");await send();await type("next draft");
  await act(async()=>complete(new Response(JSON.stringify(message(1,"a","first")))));await settle();
  expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("next draft");
 });
 test("a send acknowledged after switching clears only its own saved draft",async()=>{
  let complete!:(r:Response)=>void;
- fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?new Promise(resolve=>{complete=resolve}):url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?new Promise(resolve=>{complete=resolve}):(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
  await render("a");await type("first");await send();await render("b");await type("second draft");
  await act(async()=>complete(new Response(JSON.stringify(message(1,"a","first")))));await settle();
  expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("second draft");
@@ -104,7 +104,7 @@ test("a send acknowledged after switching clears only its own saved draft",async
 });
 test("read marks require a visible loaded transcript at the bottom",async()=>{
  const marks:any[]=[];
- fetcher=(url,init)=>{if(url.includes("/seen")){marks.push(JSON.parse(String(init?.body)));return json({ok:true});}return url.includes("/deliveries")?json([]):json(url.includes("/changes")?{messages:[],cursor:10,has_more:false}:{messages:[message(10)],cursor:10,before:10,has_more:false});};
+ fetcher=(url,init)=>{if(url.includes("/seen")){marks.push(JSON.parse(String(init?.body)));return json({ok:true});}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json(url.includes("/changes")?{messages:[],cursor:10,has_more:false}:{messages:[message(10)],cursor:10,before:10,has_more:false});};
  Object.defineProperty(win.document,"visibilityState",{configurable:true,value:"hidden"});
  await render();expect(marks.length).toBe(0);
  const scroller=element.querySelector(".overflow-auto")! as HTMLElement;const bottom=scroller.lastElementChild! as HTMLElement;
@@ -126,7 +126,7 @@ test("list refresh reads every loaded page and drops deleted rows",async()=>{
 
 test("an older history page cannot overwrite a newer live revision",async()=>{
  let complete!:(r:Response)=>void;
- fetcher=(url)=>url.includes("/deliveries")?json([]):url.includes("before=200")?new Promise(resolve=>{complete=resolve}):url.includes("/changes")?json({messages:[],cursor:200,has_more:false}):json({messages:[{...message(200),revision:200}],cursor:200,before:200,has_more:true});
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):url.includes("before=200")?new Promise(resolve=>{complete=resolve}):url.includes("/changes")?json({messages:[],cursor:200,has_more:false}):json({messages:[{...message(200),revision:200}],cursor:200,before:200,has_more:true});
  await render();const older=[...element.querySelectorAll("button")].find(b=>b.textContent==="Load earlier messages")!;
  await act(async()=>older.click());
  await act(async()=>FakeEvents.instances[0].emit({...message(100,"a","newly edited"),revision:501}));
@@ -149,7 +149,7 @@ test("dashboard migrates drafts and pending identities into the scoped client", 
  sessionStorage.setItem(oldKey,"saved draft");
  sessionStorage.setItem(oldKey+":pending",JSON.stringify({content:"saved draft",client_message_id:"original-id"}));
  const bodies:any[]=[];
- fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return json(message(1,"a","saved draft"));}return url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return json(message(1,"a","saved draft"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
  await act(async()=>root.render(<ConversationsProvider legacyDrafts conversations={conversations}><ChatSource conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/></ConversationsProvider>));await settle();
  expect(element.querySelector("textarea")!.value).toBe("saved draft");
  expect(sessionStorage.getItem(oldKey)).toBeNull();
@@ -158,11 +158,11 @@ test("dashboard migrates drafts and pending identities into the scoped client", 
 });
 
 test("changing the SDK client resets displayed history and drafts before the new response", async () => {
- fetcher=(url)=>url.includes("/deliveries")?json([]):json({messages:[message(1,"a","first user history")],cursor:1,has_more:false,before:1});
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[message(1,"a","first user history")],cursor:1,has_more:false,before:1});
  await render();await type("first user draft");
  expect(element.textContent).toContain("first user history");
  conversations=new AptevaClient({baseURL:""}).use(conversationsExtension(),{projectId:"project",installId:7});
- fetcher=(url)=>url.includes("/deliveries")?json([]):new Promise(()=>{});
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):new Promise(()=>{});
  await render();
  expect(element.textContent).not.toContain("first user history");
  expect(element.querySelector("textarea")!.value).toBe("");
@@ -216,7 +216,7 @@ test("localization providers and individual surfaces isolate overrides and prese
 });
 
 test("soft break copy describes an advisory request and existing send failures follow locale changes", async () => {
- fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?Promise.reject(new Error("lost response")):url.includes("/deliveries")?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?Promise.reject(new Error("lost response")):(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
  await render();
  await act(async () => FakeEvents.instances[0].listeners.get("stream")?.({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"active",run_id:"1",text:"Working"})}));
  const breakButton=element.querySelector('[aria-label="Ask the agent to pause and reconsider"]')!;

@@ -1,5 +1,5 @@
 import { defineAppExtension, type AppHandle, type SubscribeOptions } from "@apteva/web-sdk";
-import type { AgentInfo, ChangePage, Conversation, ConversationPage, InboxPage, Message, MessageDelivery, StreamFrame, UnreadEntry } from "./types";
+import type { AgentInfo, ChangePage, Conversation, ConversationPage, InboxPage, Message, MessageDelivery, ToolActivity, StreamFrame, UnreadEntry } from "./types";
 
 export interface CreateConversation {
   title?: string;
@@ -77,6 +77,7 @@ export class ConversationsClient {
     this.app.post("/seen", { chat_id: id, last_seen_id: lastSeenId }, init);
   unread = (agentId?: number, init?: RequestInit) =>
     this.app.get<UnreadEntry[]>(query("/unread-summary", { agent_id: agentId }), init);
+  activity = (id: string, init?: RequestInit) => this.app.get<ToolActivity[]>(query("/activity", { chat_id: id }), init);
   agents = (init?: RequestInit) => this.app.get<AgentInfo[]>("/agents", init);
   inbox = (options: { agent_id?: number; cursor?: string; limit?: number } = {}, init?: RequestInit) =>
     this.app.get<InboxPage>(query("/inbox", { page: 1, ...options }), init);

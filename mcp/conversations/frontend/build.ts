@@ -1,5 +1,7 @@
+import { buildToolSources } from "./build-tool-sources";
 import { buildStyles } from "./build-styles";
 const root = import.meta.dir;
+await buildToolSources();
 const build=await Bun.build({entrypoints:[`${root}/src/index.ts`,`${root}/src/react.tsx`],outdir:`${root}/dist`,target:"browser",format:"esm",splitting:true,define:{"process.env.NODE_ENV":'"production"'},sourcemap:"external",external:["react","react/jsx-runtime","@apteva/web-sdk"]});
 if(!build.success)throw new AggregateError(build.logs,"Conversations package build failed");
 for(const command of [["bunx","--no-install","tsc","-p",`${root}/tsconfig.json`]]) {

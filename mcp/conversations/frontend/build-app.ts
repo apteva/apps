@@ -1,8 +1,10 @@
+import { buildToolSources } from "./build-tool-sources";
 import * as React from "react";
 import { buildStyles } from "./build-styles";
 import { join } from "node:path";
 import { readdir, unlink, mkdir } from "node:fs/promises";
 const root = import.meta.dir;
+await buildToolSources();
 const destination = join(root, "../ui/frontend");
 await mkdir(destination, { recursive: true });
 const version = (await Bun.file(join(root, "../apteva.yaml")).text()).match(/^version:\s*(\S+)/m)![1];

@@ -130,3 +130,89 @@
 }
 .chat-md th { background: var(--bg-card, #141414); font-weight: 600; }
 }
+
+
+@keyframes chat-tool-breathe {
+  0%, 100% { transform: scale(0.99); opacity: 0.82; filter: brightness(1); }
+  50% { transform: scale(1); opacity: 1; filter: brightness(1.12); }
+}
+@keyframes chat-tool-copy-breathe {
+  0%, 100% { color: var(--text-muted, #aaaaaa); opacity: 0.78; }
+  50% { color: var(--chat-tool-running, #f97316); opacity: 1; }
+}
+@keyframes chat-thinking-dot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 0.9; transform: translateY(-1px); }
+}
+/* Original dashboard tool activity presentation. */
+.apteva-conversations {
+
+
+
+
+.chat-tool-running-text {
+  color: var(--chat-tool-running, #f97316);
+}
+
+.chat-tool-failed-text {
+  color: var(--chat-tool-failed, #ff3d24);
+}
+
+.chat-tool-copy {
+  color: var(--text-muted, #aaaaaa);
+}
+
+.chat-tool-copy-running {
+  animation: chat-tool-copy-breathe 1.9s ease-in-out infinite;
+  will-change: color, opacity;
+}
+
+.chat-tool-icon-running {
+  animation: chat-tool-breathe 1.9s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform, opacity, filter;
+}
+
+.chat-tool-icon-stack-running {
+  animation: chat-tool-breathe 1.9s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform, opacity, filter;
+}
+
+.chat-tool-icon {
+  transition: transform 180ms ease, opacity 180ms ease, filter 180ms ease;
+}
+
+
+
+.chat-thinking-dots > span {
+  width: 0.22rem;
+  height: 0.22rem;
+  border-radius: 999px;
+  background: currentColor;
+  animation: chat-thinking-dot 1.35s ease-in-out infinite;
+}
+
+.chat-thinking-dots > span:nth-child(2) { animation-delay: 120ms; }
+.chat-thinking-dots > span:nth-child(3) { animation-delay: 240ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-tool-icon-running,
+  .chat-tool-icon-stack-running {
+    animation: none;
+    opacity: 1;
+  }
+
+  .chat-tool-copy-running {
+    animation: none;
+    color: var(--chat-tool-running, #f97316);
+    opacity: 1;
+  }
+
+  .chat-thinking-dots > span {
+    animation: none;
+    opacity: 0.65;
+  }
+}
+
+}

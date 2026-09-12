@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.2 — 2026-09-12
+
+- Restore the original `ChatToolActivity` renderer and scoped styles in the shared dashboard/exported UI: stacked app icons, animated activity text, expandable groups, parallel calls, failure indicators and elapsed times.
+- Restore live tool activity in the common dashboard/exported transcript, with persisted status, elapsed time, conversation-scoped access, revision-safe refresh recovery and no raw arguments/results in the client feed. Previously recorded platform telemetry is not imported.
+- Integrate advisory pause into the composer action while a reply or tool is active; typing switches back to send without waiting for the agent.
+
 ## 0.22.1 — 2026-09-10
 
 - Ship the same scoped stylesheet in native dashboard panels and exported chat, including Tailwind utilities, Markdown and mobile layout. Preserve host theme tokens and contain defaults within Conversations.

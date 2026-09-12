@@ -131,7 +131,7 @@ func delegatedAction(method, path string) string {
 		return "chat.update"
 	case "DELETE /chats":
 		return "chat.delete"
-	case "GET /messages", "GET /changes":
+	case "GET /messages", "GET /changes", "GET /activity":
 		return "message.read"
 	case "POST /messages":
 		return "message.send"

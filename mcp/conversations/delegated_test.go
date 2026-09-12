@@ -52,10 +52,16 @@ func TestExternalSubjectIsolation(t *testing.T) {
 	if create("alice").ID != alice.ID {
 		t.Fatal("subject retry did not resume")
 	}
+	if rec := visitorRequest(a, "alice", "GET", "/activity?chat_id="+alice.ID, nil, visitorActions); rec.Code != 200 {
+		t.Fatalf("own activity denied: %d %s", rec.Code, rec.Body)
+	}
+	if rec := visitorRequest(a, "alice", "GET", "/activity?chat_id="+alice.ID, nil, []string{"chat.read"}); rec.Code < 400 {
+		t.Fatal("activity requires message.read")
+	}
 	operator, _ := a.store.CreateConversation(CreateConversationInput{ProjectID: testProject, LeadAgentID: 41, OwnerUserID: 1})
 	shared, _ := a.store.CreateConversation(CreateConversationInput{ProjectID: testProject, LeadAgentID: 41, OwnerUserID: 0})
 	for _, other := range []string{bob.ID, operator.ID, shared.ID} {
-		for _, path := range []string{"/chats?id=", "/messages?chat_id=", "/changes?chat_id=", "/stream?chat_id=", "/deliveries?chat_id="} {
+		for _, path := range []string{"/chats?id=", "/messages?chat_id=", "/changes?chat_id=", "/activity?chat_id=", "/stream?chat_id=", "/deliveries?chat_id="} {
 			rec := visitorRequest(a, "alice", "GET", path+other, nil, visitorActions)
 			if rec.Code < 400 {
 				t.Fatalf("private read permitted: %s %d", path, rec.Code)
