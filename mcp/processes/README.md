@@ -1,161 +1,177 @@
 # Processes
 
-Company operating procedures that agents follow directly or through optional Tasks integration.
-The app provides its own project-page React panel, eleven MCP tools, and a SQLite
-store. It does not run domain work or call LLMs.
+Reusable company procedures, configured assignments, and independent execution
+runs. Agents can execute directly, or use the optional Tasks app for tracking.
 
-## Execution modes
+## Model
 
-New procedures default to `execution_mode: "agent"`. Processes sends the owner a
-tracked agent event and stores progress and outcomes itself; no Tasks install is
-needed. Select `"tasks"` to use Tasks 3.6.0+ for execution and scheduling. Existing
-v0.1 definitions retain Tasks mode. Pause and confirm synchronization before
-changing modes; old runs retain their original backend and procedure version.
-There is no automatic backend fallback on delivery failure.
+- **Process:** shared instructions, parameter definitions, approval guidance,
+  completion criteria, and immutable procedure versions.
+- **Assignment:** a saved target (page, client, business), agent, parameter values,
+  schedule, execution mode, and procedure version policy.
+- **Run:** one occurrence with a snapshot of the assignment, resolved parameters,
+  original owner, procedure version, delivery identity, and outcome.
+- **Task:** optional Tasks-backed work linked to a run. Direct runs need no Tasks
+  installation. A Tasks schedule creates its occurrences in Tasks; Processes
+  reads their results live and associates them with their assignment.
 
-Direct schedules use durable deadlines and atomic occurrence creation. Missed
-intervals are skipped, and an open scheduled run prevents overlap. Manual runs
-can coexist. Deliveries retry with stable event IDs and pinned threads, with
-30-second exponential backoff capped at 15 minutes. Core lifecycle settlement
-is diagnostic information, never proof of business completion.
+For example, one “Publish a Patreon post” procedure can have Photography and
+Cooking assignments with different page IDs, languages, agents, and daily times.
+The same idempotency key can be used independently on each assignment.
 
-## Features
+## Panel
 
-- Draft, active, paused, and archived procedures with an owner agent.
-- Plain-language instructions, required input sources, standing context,
-  approval checkpoints, and completion evidence.
-- Immutable versions. Pause and confirm synchronization before editing; saving
-  creates a new draft. Existing tasks retain their original procedure snapshot.
-- On-demand runs and recurring interval/five-field cron schedules with IANA
-  timezones. The selected backend owns deadlines, occurrences, and overlap policy.
-- Overview, procedure/version editor, and live run history in the app-owned panel.
-- Links from run history to Tasks, and from task snapshots back to their procedure.
-- Durable dispatch keys and desired-state reconciliation every 30 seconds. Task
-  creation retries reuse the original snapshot and key after failures/restarts.
+The project-page panel has Overview, Procedure, Assignments, and Runs tabs.
 
-Install with **Apteva >=0.50.4**. **Tasks >=3.6.0 is optional**. Both apps pin app-sdk
-v0.79.0 (the latest ancestor-verified SDK release when published). Requires `db.write.app`,
-`platform.apps.call`, `platform.instances.read`, `platform.instances.write`, and
-`platform.threads.write` for tracked delivery. Tasks is declared optional.
-The app registry advertises Processes. Source manifests pin the immutable
-`processes/v0.2.0` and `tasks/v3.6.0` release tags.
+- Create a procedure and its convenience default assignment in one form.
+- Define text, number, and yes/no parameters, required fields, and defaults.
+- Add and edit assignments with independent agents, schedules, and parameters.
+- Start, pause, activate, or archive one assignment without changing the others.
+- Override parameters for one manual run without modifying the assignment.
+- Filter run history by assignment, agent, or outcome. Only Tasks records link
+  to Tasks. Direct history remains available when Tasks history is unavailable.
+- Follow the latest procedure version, or pin an assignment to a selected version.
 
-## Agent tools
+Pause and confirm synchronization before editing an active assignment. Pausing
+or archiving the whole process stops future schedules for all assignments.
+Already requested runs continue, including pending delivery retries. Individual
+assignment pause choices survive process pause/reactivation.
 
-The manifest advertises the local names `list`, `get`, `create`, `update`,
-`activate`, `pause`, `archive`, `start`, `runs`, `run_get`, and `run_update`. The host namespaces these as
-Processes tools. MCP calls require trusted agent and project context.
+Procedure edits currently require pausing the process and confirming schedule
+synchronization. Saving creates a new draft version. Assignments that follow
+latest advance to that version, while pinned assignments stay unchanged.
+Activate the process to resume enabled assignments. New required parameters
+must be configured before activation. Runs already created never change.
 
-Create/update accepts a `definition` object:
+## Agent API
+
+MCP requires trusted agent/project context. Tools are scoped to a process in
+that project. The host namespaces these local tool names:
+
+- `list`, `get`, `create`, `update`, `activate`, `pause`, `archive`
+- `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
+  `assignment_activate`, `assignment_pause`, `assignment_archive`
+- `start`, `runs`, `run_get`, `run_update`
+
+Procedure definitions accept a `parameters` array:
+
+```json
+[
+  {"key":"page_id","label":"Patreon page","type":"string","required":true},
+  {"key":"language","label":"Language","type":"string","default":"en"},
+  {"key":"paid_only","label":"Paid members only","type":"boolean","default":true}
+]
+```
+
+String fields may also declare an `options` array. Unknown keys, invalid types,
+invalid options, and missing required values are rejected when executing.
+Use connection references and external resource IDs, never stored credentials.
+Parameters are data provided alongside the procedure; they do not grant rights
+or create permission to act on an external resource.
+
+Create an assignment with `process_id` and `assignment`:
 
 ```json
 {
-  "execution_mode": "agent",
-  "name": "Monthly financial close",
-  "description": "Produce an approved financial summary.",
-  "instructions": "Collect records, reconcile balances, investigate discrepancies, and prepare the report.",
-  "required_inputs": "Invoices, payment records, previous closing balances.",
-  "default_inputs": "Use the company reporting currency.",
-  "completion_criteria": "Approved report with reconciled totals and supporting evidence.",
-  "approval_requirements": "Finance lead approval before distributing the report.",
-  "owner_agent_id": 7,
-  "schedule": {"kind": "cron", "cron": "0 9 1 * *", "timezone": "Europe/Madrid"}
+  "name":"Photography Patreon",
+  "target":"Photography page",
+  "owner_agent_id":7,
+  "execution_mode":"agent",
+  "follow_latest":true,
+  "parameters":{"page_id":"photo-page","language":"en","paid_only":true},
+  "schedule":{"kind":"cron","cron":"0 9 * * *","timezone":"Europe/Madrid"}
 }
 ```
 
-Omit `schedule` for on-demand work. Intervals use
-`{"kind":"interval","every":"24h"}` (minimum 1m). `update` also requires
-`process_id` and `expected_version` to reject stale saves. `start` requires a
-stable `idempotency_key` and accepts optional plain-text `inputs`. Reusing a key
-with different inputs is rejected. An accepted run is retried even if the
-procedure is subsequently paused or archived; it was already requested work.
+Assignments are created paused. Activate the process, then activate the desired
+assignments. `assignment_update` also requires `assignment_id` and
+`expected_revision`; edits preserve its paused/enabled intent. Set
+`follow_latest:false` and `procedure_version` to pin a specific version.
 
-`get` returns current settings and version history; optional `version` returns
-that historical definition. `runs` returns recent live Tasks records, their
-procedure version, dispatch records, and `has_more` when history is truncated.
-`direct_runs` contains Processes-owned run history. `tasks_error` reports
-unavailable historical Tasks data without blocking direct history.
+`start` takes `process_id`, `assignment_id`, a stable `idempotency_key`, optional
+`parameters` overrides, and optional free-text `inputs`. Omitting assignment_id
+works only when exactly one non-archived assignment exists. Retries must use the
+same assignment, key, input text, and explicit overrides. They reuse the saved
+snapshot even after assignment or procedure changes.
 
-For direct runs, agents read `run_get(process_id, run_id)` and use
-`run_update(process_id, run_id, state, progress?, current_step?, result?, error?)`.
-States: running, waiting, blocked, completed, failed, cancelled. Only the immutable
-owner can update the run. Completion requires result evidence; failures and
-blockers require a reason. Terminal outcomes are immutable. Tasks-backed runs
-use Tasks get/set_progress/assign/complete.
+For direct work, read `run_get(process_id, run_id)` before domain actions.
+Use `run_update` to report running/waiting/blocked/completed/failed/cancelled,
+progress, current_step, result, and error. Only the run's original assignment
+owner can update it, including from other threads. Completion requires result
+evidence; blockers/failures need a reason. Terminal outcomes are immutable.
+Tasks-backed runs use Tasks tools for progress and completion.
 
-## HTTP panel API
+`runs` returns `direct_runs`, live Tasks `runs`, and durable `dispatches`.
+Records include assignment identity and the original assignment snapshot.
+`tasks_error` reports unavailable Tasks history; `has_more` indicates that Tasks
+has older records beyond its 200-record response limit.
 
-All routes require authenticated project scope (`X-Apteva-Project-ID` or the
-project-scoped gateway query). Mismatched header/query/install scope is rejected.
-The SDK provides bearer authentication; the platform authenticates operators.
+## HTTP
 
-- `GET/POST /processes`: list or create a draft.
-- `GET/PUT /processes/{id}`: read or save a revision.
-- `POST /processes/{id}/activate|pause|archive|start`: lifecycle or execution.
-- `GET /processes/{id}/runs`: direct and live Tasks history.
+The SDK and platform authenticate operators. Routes require a project header or
+query matching the installation's scope. Route IDs cannot be overridden in JSON.
 
-The panel is `/ui/ProcessesPanel.mjs`, declared with `slot: project.page`.
-No dashboard-specific registration or server asset embed changes are needed.
+- `GET/POST /processes`
+- `GET/PUT /processes/{process}`
+- `POST /processes/{process}/activate|pause|archive|start`
+- `GET /processes/{process}/runs`
+- `GET/POST /processes/{process}/assignments`
+- `GET/PUT /processes/{process}/assignments/{assignment}`
+- `POST /processes/{process}/assignments/{assignment}/activate|pause|archive|start`
 
-## Data and reliability
+Create/update bodies wrap the definition in `definition` or configuration in
+`assignment`. Updates require expected_version or expected_revision. Lifecycle
+operations return HTTP 202 when schedule synchronization is pending.
 
-Processes owns three tables:
+## Storage, migration, and reliability
 
-| Table | Responsibility |
-| --- | --- |
-| `processes` | Project scope, current version, desired lifecycle, sync state, direct schedule deadlines |
-| `process_versions` | Immutable definition JSON and author/timestamp |
-| `process_runs` | Dispatch keys, immutable version references, backend, direct outcomes and delivery state, optional task IDs |
+SQLite stores `processes`, immutable `process_versions`, `process_assignments`,
+and `process_runs`. Run snapshots preserve resolved parameter values, agent,
+backend, target, schedule, and assignment revision. Legacy procedure owner/mode/
+schedule fields remain as API compatibility defaults for the first assignment.
 
-A schedule dispatch row points to its Tasks schedule definition; Tasks stores
-individual occurrences. Processes reads those occurrences with their inherited
-version through the private bridge, rather than duplicating their execution
-state. Historical dispatch/version rows remain after archive.
+Migration 003 creates one default assignment per existing process and links old
+runs to it. It preserves deadlines, pending synchronization, task IDs, original
+owners, procedure versions, and idempotency keys. Existing Tasks schedules are
+reused, not recreated. No new execution is triggered by migration.
 
-Tasks adds `process_task_links` for authenticated install/project/process
-provenance. Its `process_task` MCP tool is `app_only`, hidden from agents and
-restricted to platform-authenticated Processes installs. It can create/read
-linked work and pause/resume linked schedules; it cannot complete arbitrary
-agent tasks. Inter-app calls use `CallAppResult`, not direct database access.
+Direct delivery uses stable tracked agent event IDs and pinned threads. Retries
+back off from 30 seconds to 15 minutes. Direct recurring deadlines advance in the
+same transaction that creates the occurrence. Missed intervals are skipped and
+overlap is prevented per assignment; independent assignments can run together.
+Core settling is diagnostic information, not business completion.
 
-Recurring tasks are created **paused**, and their IDs are persisted before
-activation. Reconciliation disables old schedule versions before enabling the
-current one. Unknown creation outcomes retry the same durable key. A failed
-lifecycle change returns HTTP 202 with `sync_pending` and `sync_error`; the UI
-shows the unresolved state and offers retry. Pausing/archiving does not cancel
-queued or running occurrences. Do not manage process schedules independently
-through Tasks if you want the process lifecycle to remain authoritative.
+Tasks schedules are born paused. Their IDs are persisted before resume. A lost
+resume response invalidates the previous pause confirmation, so switching modes
+requires a fresh confirmed pause. Synchronization retries every 30 seconds;
+direct scheduling/delivery is checked every 5 seconds. There is no automatic
+fallback between execution backends.
 
-## Deliberate limits
+## Installation and limits
 
-Approval and completion criteria are instructions and evidence requirements,
-not enforced approval gates. This version has no workflow graph or per-step
-execution engine. Inputs are text/source requirements, not validated form
-schemas. Runs are assigned to the owner's configured default thread. History
-shows up to 200 recent Tasks records and exposes truncation; older records
-remain in Tasks. Publishing this release does not install it into projects or
-restart production agents.
+Apteva >=0.50.4; app-sdk v0.79.0. Tasks >=3.6.0 is optional. Source manifest pins
+`processes/v0.3.0`. This release changes Processes only.
+
+Approval requirements remain instructions, not enforced approval gates. Result
+evidence is agent-reported, not automatically verified against external apps.
+Each run has one accountable agent; multi-agent step routing and multiple Tasks
+per run are not part of this release. External effects need integration-specific
+deduplication/reconciliation; event delivery alone cannot guarantee exactly-once
+publication. Direct history is currently returned without pagination.
 
 ## Verification
 
-From this directory (module-isolated commands also avoid a broken workspace
-Go toolchain selection):
-
 ```sh
-GOWORK=off go test -race ./...
 GOWORK=off go test -race -tags integration ./...
-GOWORK=off go build .
 ```
 
-From `apps/`:
+From the apps repository root:
 
 ```sh
+bun test mcp/processes/ui/ProcessesPanel.test.tsx
 bun run scripts/build-panels.ts --app processes
-bun run scripts/build-panels.ts --app tasks
 ```
 
-Tests cover revision immutability, owner/project boundaries, private tool
-exposure, duplicate/concurrent starts, lost responses, restart reconciliation,
-paused schedule creation, actual scheduled occurrences, and live completion
-history through both real sidecars. The integration test uses a local recording
-platform and never contacts production agents.
+Tests cover assignment isolation, snapshots across edits and retries, typed
+parameters, independent schedule overlap/pause, version following and pinning,
+legacy migration, real sidecars with and without Tasks, and panel interactions.

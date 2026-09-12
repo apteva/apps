@@ -53,7 +53,7 @@ func (a *App) syncDirectSchedule(p *Process) error {
 			}
 		}
 	}
-	_, err = a.db.Exec(`UPDATE processes SET next_run_at=?,scheduled_version=? WHERE id=?`, next, p.Version, p.ID)
+	_, err = a.db.Exec(`UPDATE process_assignments SET next_run_at=?,scheduled_version=? WHERE id=?`, next, p.Version, p.Assignment.ID)
 	return err
 }
 func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
@@ -66,7 +66,7 @@ func (a *App) dispatchAgent(p *Process, r *Run) (err error) {
 			return errors.New("delivery retry pending; reuse the same key")
 		}
 	}
-	d, err := a.definition(p.ID, r.Version)
+	d, err := a.runDefinition(*r)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 	if r.Backend != "agent" {
 		return nil, errors.New("use Tasks to track this run")
 	}
-	d, err := a.definition(process, r.Version)
+	d, err := a.runDefinition(r)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +190,16 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 // One transaction records each due occurrence and advances its deadline. Missed
 // intervals are skipped and an outstanding scheduled run prevents overlap.
 func (a *App) dueDirect(p *Process, now time.Time) error {
+	if p.Assignment == nil {
+		x, e := a.assignment(p.ProjectID, p.ID, "assignment-"+p.ID)
+		if e != nil {
+			return e
+		}
+		p, e = a.assigned(p, x)
+		if e != nil {
+			return e
+		}
+	}
 	if p.Status != "active" || p.SyncPending || p.ExecutionMode != "agent" || p.Schedule == nil || p.NextRunAt == "" {
 		return nil
 	}
@@ -204,25 +214,30 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 	if err != nil {
 		return err
 	}
+	binding := p.Assignment.AssignmentConfig
+	binding.Parameters, err = validateParameters(p.Parameters, binding.Parameters, true)
+	if err != nil {
+		return err
+	}
 	tx, err := a.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var outstanding int
-	if err = tx.QueryRow(`SELECT count(*) FROM process_runs WHERE process_id=? AND backend='agent' AND scheduled_for<>'' AND state NOT IN ('completed','failed','cancelled')`, p.ID).Scan(&outstanding); err != nil {
+	if err = tx.QueryRow(`SELECT count(*) FROM process_runs WHERE assignment_id=? AND backend='agent' AND scheduled_for<>'' AND state NOT IN ('completed','failed','cancelled')`, p.Assignment.ID).Scan(&outstanding); err != nil {
 		return err
 	}
 	note := ""
 	if outstanding == 0 {
-		_, err = tx.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,scheduled_for) VALUES(?,?,?,'manual',?,'',?,'agent',?)`, newID("run-"), p.ID, p.Version, fmt.Sprintf("scheduled:v%d:%s", p.Version, p.NextRunAt), timestamp(), p.NextRunAt)
+		_, err = tx.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,scheduled_for,assignment_id,assignment_revision,assignment_json) VALUES(?,?,?,'manual',?,'',?,'agent',?,?,?,?)`, newID("run-"), p.ID, p.Version, fmt.Sprintf("%s:scheduled:v%d:%s", p.Assignment.ID, p.Version, p.NextRunAt), timestamp(), p.NextRunAt, p.Assignment.ID, p.Assignment.Revision, jsonText(binding))
 		if err != nil {
 			return err
 		}
 	} else {
 		note = "Skipped an occurrence because a previous scheduled run is still open."
 	}
-	_, err = tx.Exec(`UPDATE processes SET next_run_at=?,last_schedule_note=? WHERE id=?`, next, note, p.ID)
+	_, err = tx.Exec(`UPDATE process_assignments SET next_run_at=?,last_schedule_note=? WHERE id=?`, next, note, p.Assignment.ID)
 	if err != nil {
 		return err
 	}
@@ -260,8 +275,14 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 			failures = append(failures, e)
 			continue
 		}
-		if e = a.dueDirect(p, now); e != nil {
-			failures = append(failures, e)
+		for _, x := range p.Assignments {
+			v, e := a.assigned(p, x)
+			if e == nil {
+				e = a.dueDirect(v, now)
+			}
+			if e != nil {
+				failures = append(failures, e)
+			}
 		}
 		runs, e := a.dispatches(p.ID)
 		if e != nil {
@@ -304,7 +325,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		if err != nil {
 			return err
 		}
-		d, err := a.definition(process, r.Version)
+		d, err := a.runDefinition(r)
 		if err != nil {
 			return err
 		}

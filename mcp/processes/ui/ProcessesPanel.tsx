@@ -1,4 +1,10 @@
 import { useEffect, useState } from "react";
+import Assignments, {
+  ParameterEditor,
+  ParameterValues,
+  type Parameter,
+  type Assignment,
+} from "./Assignments";
 type Props = {
   appName?: string;
   projectId?: string;
@@ -12,6 +18,7 @@ type Schedule = {
   timezone?: string;
 };
 type Definition = {
+  parameters?: Parameter[];
   execution_mode: "agent" | "tasks";
   name: string;
   description: string;
@@ -24,6 +31,7 @@ type Definition = {
   schedule?: Schedule;
 };
 type Process = Definition & {
+  assignments?: Assignment[];
   next_run_at?: string;
   last_schedule_note?: string;
   id: string;
@@ -35,6 +43,8 @@ type Process = Definition & {
 };
 type Version = { version: number; definition: Definition };
 type Entry = {
+  assignment_id?: string;
+  assignment?: Partial<Assignment>;
   backend: "agent" | "tasks";
   version: number;
   record: {
@@ -66,8 +76,17 @@ const empty: Definition = {
   owner_agent_id: 0,
 };
 type History = {
-  runs?: { version: number; task: Entry["record"] }[];
-  direct_runs?: (Entry["record"] & { version: number })[];
+  runs?: {
+    version: number;
+    task: Entry["record"];
+    assignment_id?: string;
+    assignment?: Assignment;
+  }[];
+  direct_runs?: (Entry["record"] & {
+    version: number;
+    assignment_id?: string;
+    assignment?: Assignment;
+  })[];
   tasks_error?: string;
 };
 const historyEntries = (r: History): Entry[] =>
@@ -75,11 +94,15 @@ const historyEntries = (r: History): Entry[] =>
     ...(r.runs || []).map((e) => ({
       backend: "tasks" as const,
       version: e.version,
+      assignment_id: e.assignment_id,
+      assignment: e.assignment,
       record: e.task,
     })),
     ...(r.direct_runs || []).map((e) => ({
       backend: "agent" as const,
       version: e.version,
+      assignment_id: e.assignment_id,
+      assignment: e.assignment,
       record: { ...e, title: "Direct agent run" },
     })),
   ].sort(
@@ -146,6 +169,11 @@ function Panel(props: Props) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
+  const [runAssignment, setRunAssignment] = useState<Assignment | null>(null),
+    [runParameters, setRunParameters] = useState<Record<string, unknown>>({}),
+    [assignmentFilter, setAssignmentFilter] = useState(""),
+    [runStateFilter, setRunStateFilter] = useState(""),
+    [runOwnerFilter, setRunOwnerFilter] = useState(0);
   const [runModal, setRunModal] = useState(false),
     [runInput, setRunInput] = useState(""),
     [runKey, setRunKey] = useState("");
@@ -311,16 +339,31 @@ function Panel(props: Props) {
   const visible = items.filter(
     (p) =>
       (!filter || p.status === filter) &&
-      (!owner || p.owner_agent_id === owner) &&
+      (!owner ||
+        (p.assignments || []).some((x) => x.owner_agent_id === owner) ||
+        (!p.assignments?.length && p.owner_agent_id === owner)) &&
       `${p.name} ${p.description}`.toLowerCase().includes(search.toLowerCase()),
   );
   const setField = (key: keyof Definition, value: unknown) =>
     setDraft((d) => ({ ...d, [key]: value }));
-  const executions = runs.filter((r) => !r.record.schedule_kind),
-    upcoming =
-      p?.next_run_at ||
-      runs.find((r) => r.record.schedule_enabled && r.version === p?.version)
-        ?.record.next_run_at;
+  const executions = runs.filter((r) => !r.record.schedule_kind);
+  const filteredExecutions = executions.filter(
+    (r) =>
+      (!assignmentFilter || r.assignment_id === assignmentFilter) &&
+      (!runStateFilter || r.record.state === runStateFilter) &&
+      (!runOwnerFilter || r.assignment?.owner_agent_id === runOwnerFilter),
+  );
+  const prepareRun = (x: Assignment) => {
+    setRunAssignment(x);
+    setRunParameters({});
+    setRunInput("");
+    setRunKey(crypto.randomUUID());
+    setError("");
+    setRunModal(true);
+  };
+  const runSchema =
+    detail?.versions.find((v) => v.version === runAssignment?.procedure_version)
+      ?.definition.parameters || [];
   const newProcess = () => {
     setDraft({ ...empty, owner_agent_id: agents[0]?.id || 0 });
     setCreating(true);
@@ -345,7 +388,7 @@ function Panel(props: Props) {
           </h1>
           <p className="muted">
             {selected || creating
-              ? "A clear procedure. A responsible owner. A record of every run."
+              ? "One procedure. Independent assignments. A record of every run."
               : "Define the work your company does, and let agents follow through."}
           </p>
         </div>
@@ -392,7 +435,7 @@ function Panel(props: Props) {
               setEditing(false);
               setSelected(r.id);
               setVersion(0);
-              setTab("procedure");
+              setTab(creating ? "assignments" : "procedure");
               await load();
               await loadDetail(r.id);
             });
@@ -443,143 +486,153 @@ function Panel(props: Props) {
                     />
                   </div>
                 ))}
+              <ParameterEditor
+                fields={draft.parameters || []}
+                onChange={(v) => setField("parameters", v)}
+              />
             </section>
             <aside>
-              <section className="card">
-                <h2>Ownership & timing</h2>
-                <div className="field">
-                  <label htmlFor="pc-mode">Execution</label>
-                  <select
-                    id="pc-mode"
-                    value={draft.execution_mode}
-                    onChange={(e) =>
-                      setField(
-                        "execution_mode",
-                        e.target.value as "agent" | "tasks",
-                      )
-                    }
-                  >
-                    <option value="agent">Direct agent</option>
-                    <option value="tasks">Tasks</option>
-                  </select>
+              {creating && (
+                <section className="card">
+                  <h2>First assignment</h2>
                   <p className="small muted">
-                    {draft.execution_mode === "agent"
-                      ? "Runs and results are tracked here. No Tasks app needed."
-                      : "Requires Tasks 3.6.0 or later connected to Processes."}
+                    A default assignment will be created. Add more agents,
+                    pages, and schedules after saving.
                   </p>
-                </div>
-                <div className="field">
-                  <label htmlFor="pc-owner">Responsible agent</label>
-                  <select
-                    id="pc-owner"
-                    required
-                    value={draft.owner_agent_id || ""}
-                    onChange={(e) =>
-                      setField("owner_agent_id", Number(e.target.value))
-                    }
-                  >
-                    <option value="" disabled>
-                      Choose an agent
-                    </option>
-                    {agents.map((a) => (
-                      <option key={a.id} value={a.id}>
-                        {a.name}
-                      </option>
-                    ))}
-                  </select>
-                  {!agents.length && (
-                    <p className="small muted">
-                      Create an agent in this project before saving a process.
-                    </p>
-                  )}
-                </div>
-                <div className="field">
-                  <label htmlFor="pc-cadence">Cadence</label>
-                  <select
-                    id="pc-cadence"
-                    value={draft.schedule?.kind || "manual"}
-                    onChange={(e) =>
-                      setField(
-                        "schedule",
-                        e.target.value === "manual"
-                          ? undefined
-                          : e.target.value === "interval"
-                            ? {
-                                kind: "interval",
-                                every: "24h",
-                                timezone: "UTC",
-                              }
-                            : {
-                                kind: "cron",
-                                cron: "0 9 * * 1",
-                                timezone:
-                                  Intl.DateTimeFormat().resolvedOptions()
-                                    .timeZone,
-                              },
-                      )
-                    }
-                  >
-                    <option value="manual">On demand</option>
-                    <option value="interval">Every interval</option>
-                    <option value="cron">Calendar schedule</option>
-                  </select>
-                </div>
-                {draft.schedule?.kind === "interval" && (
                   <div className="field">
-                    <label htmlFor="pc-interval">Interval</label>
-                    <input
-                      id="pc-interval"
-                      required
-                      value={draft.schedule.every}
+                    <label htmlFor="pc-mode">Execution</label>
+                    <select
+                      id="pc-mode"
+                      value={draft.execution_mode}
                       onChange={(e) =>
-                        setField("schedule", {
-                          ...draft.schedule,
-                          every: e.target.value,
-                        })
+                        setField(
+                          "execution_mode",
+                          e.target.value as "agent" | "tasks",
+                        )
                       }
-                    />
+                    >
+                      <option value="agent">Direct agent</option>
+                      <option value="tasks">Tasks</option>
+                    </select>
                     <p className="small muted">
-                      Examples: 1h, 24h, 168h. For fixed local times, use a
-                      calendar schedule.
+                      {draft.execution_mode === "agent"
+                        ? "Runs and results are tracked here. No Tasks app needed."
+                        : "Requires Tasks 3.6.0 or later connected to Processes."}
                     </p>
                   </div>
-                )}
-                {draft.schedule?.kind === "cron" && (
-                  <>
+                  <div className="field">
+                    <label htmlFor="pc-owner">Responsible agent</label>
+                    <select
+                      id="pc-owner"
+                      required
+                      value={draft.owner_agent_id || ""}
+                      onChange={(e) =>
+                        setField("owner_agent_id", Number(e.target.value))
+                      }
+                    >
+                      <option value="" disabled>
+                        Choose an agent
+                      </option>
+                      {agents.map((a) => (
+                        <option key={a.id} value={a.id}>
+                          {a.name}
+                        </option>
+                      ))}
+                    </select>
+                    {!agents.length && (
+                      <p className="small muted">
+                        Create an agent in this project before saving a process.
+                      </p>
+                    )}
+                  </div>
+                  <div className="field">
+                    <label htmlFor="pc-cadence">Cadence</label>
+                    <select
+                      id="pc-cadence"
+                      value={draft.schedule?.kind || "manual"}
+                      onChange={(e) =>
+                        setField(
+                          "schedule",
+                          e.target.value === "manual"
+                            ? undefined
+                            : e.target.value === "interval"
+                              ? {
+                                  kind: "interval",
+                                  every: "24h",
+                                  timezone: "UTC",
+                                }
+                              : {
+                                  kind: "cron",
+                                  cron: "0 9 * * 1",
+                                  timezone:
+                                    Intl.DateTimeFormat().resolvedOptions()
+                                      .timeZone,
+                                },
+                        )
+                      }
+                    >
+                      <option value="manual">On demand</option>
+                      <option value="interval">Every interval</option>
+                      <option value="cron">Calendar schedule</option>
+                    </select>
+                  </div>
+                  {draft.schedule?.kind === "interval" && (
                     <div className="field">
-                      <label htmlFor="pc-cron">Calendar expression</label>
+                      <label htmlFor="pc-interval">Interval</label>
                       <input
-                        id="pc-cron"
+                        id="pc-interval"
                         required
-                        value={draft.schedule.cron}
+                        value={draft.schedule.every}
                         onChange={(e) =>
                           setField("schedule", {
                             ...draft.schedule,
-                            cron: e.target.value,
+                            every: e.target.value,
                           })
                         }
                       />
                       <p className="small muted">
-                        “0 9 * * 1” means Mondays at 09:00.
+                        Examples: 1h, 24h, 168h. For fixed local times, use a
+                        calendar schedule.
                       </p>
                     </div>
-                    <div className="field">
-                      <label htmlFor="pc-timezone">Timezone</label>
-                      <input
-                        id="pc-timezone"
-                        required
-                        value={draft.schedule.timezone}
-                        onChange={(e) =>
-                          setField("schedule", {
-                            ...draft.schedule,
-                            timezone: e.target.value,
-                          })
-                        }
-                      />
-                    </div>
-                  </>
-                )}
-              </section>
+                  )}
+                  {draft.schedule?.kind === "cron" && (
+                    <>
+                      <div className="field">
+                        <label htmlFor="pc-cron">Calendar expression</label>
+                        <input
+                          id="pc-cron"
+                          required
+                          value={draft.schedule.cron}
+                          onChange={(e) =>
+                            setField("schedule", {
+                              ...draft.schedule,
+                              cron: e.target.value,
+                            })
+                          }
+                        />
+                        <p className="small muted">
+                          “0 9 * * 1” means Mondays at 09:00.
+                        </p>
+                      </div>
+                      <div className="field">
+                        <label htmlFor="pc-timezone">Timezone</label>
+                        <input
+                          id="pc-timezone"
+                          required
+                          value={draft.schedule.timezone}
+                          onChange={(e) =>
+                            setField("schedule", {
+                              ...draft.schedule,
+                              timezone: e.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                    </>
+                  )}
+                </section>
+              )}
               <section className="card" style={{ marginTop: 20 }}>
                 <h2>Inputs & approvals</h2>
                 {fields
@@ -634,8 +687,18 @@ function Panel(props: Props) {
                 "Active processes",
               ],
               [
-                items.filter((p) => p.status === "active" && p.schedule).length,
-                "Recurring procedures",
+                items.reduce(
+                  (n, p) =>
+                    n +
+                    (p.assignments || []).filter(
+                      (x) =>
+                        x.status === "active" &&
+                        p.status === "active" &&
+                        x.schedule,
+                    ).length,
+                  0,
+                ),
+                "Recurring assignments",
               ],
               [
                 items.filter((p) => p.sync_pending).length,
@@ -687,8 +750,8 @@ function Panel(props: Props) {
                 <thead>
                   <tr>
                     <th>Process</th>
-                    <th>Owner</th>
-                    <th>Cadence</th>
+                    <th>Agents</th>
+                    <th>Assignments</th>
                     <th>Status</th>
                     <th className="hide-small">Updated</th>
                   </tr>
@@ -700,8 +763,16 @@ function Panel(props: Props) {
                         <button onClick={() => open(p)}>{p.name}</button>
                         <div className="sub">{p.description}</div>
                       </td>
-                      <td>{ownerName(p.owner_agent_id)}</td>
-                      <td>{cadence(p.schedule)}</td>
+                      <td>
+                        {Array.from(
+                          new Set(
+                            (p.assignments || []).map((x) =>
+                              ownerName(x.owner_agent_id),
+                            ),
+                          ),
+                        ).join(", ") || ownerName(p.owner_agent_id)}
+                      </td>
+                      <td>{p.assignments?.length || 1}</td>
                       <td>
                         <Pill state={p.status} />
                         {p.sync_pending && (
@@ -760,7 +831,7 @@ function Panel(props: Props) {
             </div>
           )}
           <nav className="tabs" aria-label="Process detail">
-            {["overview", "procedure", "runs"].map((t) => (
+            {["overview", "procedure", "assignments", "runs"].map((t) => (
               <button
                 className={tab === t ? "on" : ""}
                 key={t}
@@ -812,22 +883,30 @@ function Panel(props: Props) {
               <aside className="card">
                 <h2>Operations</h2>
                 <p>
-                  <span className="muted">Owner</span> ·{" "}
-                  {ownerName(p.owner_agent_id)}
+                  {
+                    (p.assignments || []).filter((x) => x.status === "active")
+                      .length
+                  }{" "}
+                  enabled assignments · {(p.assignments || []).length} total
                 </p>
-                <p>
-                  <span className="muted">Execution</span> ·{" "}
-                  {p.execution_mode === "agent" ? "Direct agent" : "Tasks"}
+                <p className="small muted">
+                  Pause this process to stop future runs for all its
+                  assignments. Use Assignments to control one page or agent.
                 </p>
-                <p>
-                  <span className="muted">Cadence</span> · {cadence(p.schedule)}
+                <button onClick={() => setTab("assignments")}>
+                  Manage assignments
+                </button>
+                <p className="small muted">
+                  Recent runs needing attention:{" "}
+                  {
+                    executions.filter(
+                      (r) =>
+                        ["blocked", "failed", "waiting"].includes(
+                          r.record.state,
+                        ) || r.record.delivery_warning,
+                    ).length
+                  }
                 </p>
-                <p>
-                  <span className="muted">Next run</span> · {date(upcoming)}
-                </p>
-                {p.last_schedule_note && (
-                  <p className="small muted">{p.last_schedule_note}</p>
-                )}
                 <div className="row" style={{ marginTop: 25 }}>
                   {p.status === "active" ? (
                     <>
@@ -835,9 +914,11 @@ function Panel(props: Props) {
                         className="primary"
                         disabled={busy || p.sync_pending}
                         onClick={() => {
-                          setRunInput("");
-                          setRunKey(crypto.randomUUID());
-                          setRunModal(true);
+                          const active = (p.assignments || []).filter(
+                            (x) => x.status === "active" && !x.sync_pending,
+                          );
+                          if (active.length === 1) prepareRun(active[0]);
+                          else setTab("assignments");
                         }}
                       >
                         Run now
@@ -892,6 +973,28 @@ function Panel(props: Props) {
                 )}
               </aside>
             </div>
+          ) : tab === "assignments" ? (
+            <Assignments
+              items={(p.assignments || []).map((x) => ({
+                ...x,
+                next_run_at:
+                  x.next_run_at ||
+                  runs.find(
+                    (r) =>
+                      r.assignment_id === x.id && r.record.schedule_enabled,
+                  )?.record.next_run_at,
+              }))}
+              versions={detail.versions}
+              agents={agents}
+              processStatus={p.status}
+              api={(path, method, body) => api(`/${p.id}${path}`, method, body)}
+              onChanged={async () => {
+                await loadDetail(p.id);
+                await loadRuns(p.id);
+                await load();
+              }}
+              onRun={prepareRun}
+            />
           ) : tab === "procedure" ? (
             <section className="card">
               <div className="row between head">
@@ -914,6 +1017,20 @@ function Panel(props: Props) {
                 <div className="notice">
                   Historical procedure. Current settings use version {p.version}
                   .
+                </div>
+              )}
+              {!!chosen?.parameters?.length && (
+                <div className="block">
+                  <h2>Parameters</h2>
+                  {chosen.parameters.map((f) => (
+                    <p key={f.key}>
+                      <strong>{f.label || f.key}</strong> · {f.type}
+                      {f.required ? " · required" : ""}
+                      {f.default !== undefined
+                        ? ` · default: ${String(f.default)}`
+                        : ""}
+                    </p>
+                  ))}
                 </div>
               )}
               {chosen ? (
@@ -943,6 +1060,50 @@ function Panel(props: Props) {
                   Refresh history
                 </button>
               </div>
+              <div className="row filters">
+                <select
+                  aria-label="Filter run assignment"
+                  value={assignmentFilter}
+                  onChange={(e) => setAssignmentFilter(e.target.value)}
+                >
+                  <option value="">All assignments</option>
+                  {(p.assignments || []).map((x) => (
+                    <option key={x.id} value={x.id}>
+                      {x.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Filter run agent"
+                  value={runOwnerFilter}
+                  onChange={(e) => setRunOwnerFilter(Number(e.target.value))}
+                >
+                  <option value="0">All agents</option>
+                  {agents.map((x) => (
+                    <option key={x.id} value={x.id}>
+                      {x.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Filter run state"
+                  value={runStateFilter}
+                  onChange={(e) => setRunStateFilter(e.target.value)}
+                >
+                  <option value="">All outcomes</option>
+                  {[
+                    "queued",
+                    "running",
+                    "waiting",
+                    "blocked",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                  ].map((x) => (
+                    <option key={x}>{x}</option>
+                  ))}
+                </select>
+              </div>
               {historyWarning && (
                 <div className="notice" role="status">
                   Tasks history unavailable: {historyWarning}
@@ -954,8 +1115,8 @@ function Panel(props: Props) {
                   remains in Tasks.
                 </div>
               )}
-              {executions.length ? (
-                executions.map((r) => (
+              {filteredExecutions.length ? (
+                filteredExecutions.map((r) => (
                   <article className="card run" key={r.record.id}>
                     <div className="row between">
                       <div className="row">
@@ -970,6 +1131,12 @@ function Panel(props: Props) {
                         </a>
                       )}
                     </div>
+                    {r.assignment && (
+                      <p className="small muted">
+                        {r.assignment.name} · {r.assignment.target || ""} ·{" "}
+                        {ownerName(r.assignment.owner_agent_id || 0)}
+                      </p>
+                    )}
                     <p className="muted small">
                       {date(r.record.created_at)} ·{" "}
                       <button
@@ -1025,7 +1192,7 @@ function Panel(props: Props) {
           )}
         </>
       )}
-      {runModal && p && (
+      {runModal && p && runAssignment && (
         <div className="overlay">
           <section
             role="dialog"
@@ -1033,10 +1200,23 @@ function Panel(props: Props) {
             aria-labelledby="pc-run-title"
             className="card dialog"
           >
-            <h2 id="pc-run-title">Run {p.name}</h2>
+            <h2 id="pc-run-title">Run {runAssignment.name}</h2>
             <p className="muted">
-              The owner receives procedure version {p.version}, tracked{" "}
-              {p.execution_mode === "agent" ? "here in Processes" : "in Tasks"}.
+              {ownerName(runAssignment.owner_agent_id)} receives procedure
+              version {runAssignment.procedure_version}, tracked{" "}
+              {runAssignment.execution_mode === "agent"
+                ? "here in Processes"
+                : "in Tasks"}
+              .
+            </p>
+            <ParameterValues
+              fields={runSchema}
+              values={{ ...runAssignment.parameters, ...runParameters }}
+              prefix="run-parameter"
+              onChange={setRunParameters}
+            />
+            <p className="small muted">
+              Parameter changes here apply only to this run.
             </p>
             <div className="field" style={{ marginTop: 20 }}>
               <label htmlFor="pc-run-input">Run-specific context</label>
@@ -1064,6 +1244,8 @@ function Panel(props: Props) {
                 onClick={() =>
                   work(async () => {
                     const r = await api(`/${p.id}/start`, "POST", {
+                      assignment_id: runAssignment.id,
+                      parameters: runParameters,
                       idempotency_key: runKey,
                       inputs: runInput,
                     });

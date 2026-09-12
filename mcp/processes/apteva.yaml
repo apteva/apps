@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.2.0
-description: Versioned company procedures with agent ownership, direct execution, and optional Tasks tracking.
+version: 0.3.0
+description: Reusable company procedures with independent assignments, typed parameters, schedules, and optional Tasks execution.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
 icon: /ui/icon.svg
@@ -32,6 +32,13 @@ provides:
     - { name: runs, description: Inspect direct and Tasks-backed execution history. }
     - { name: run_get, description: Read a direct run and its immutable instructions before acting. }
     - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
+    - { name: assignments, description: List saved process assignments. }
+    - { name: assignment_get, description: Read assignment settings. }
+    - { name: assignment_create, description: Configure a new assignment with agent and parameters. }
+    - { name: assignment_update, description: Revise a paused assignment. }
+    - { name: assignment_activate, description: Enable an assignment. }
+    - { name: assignment_pause, description: Pause one assignment. }
+    - { name: assignment_archive, description: Archive one assignment. }
   ui_panels:
     - slot: project.page
       label: Processes
@@ -48,7 +55,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.2.0
+    ref: processes/v0.3.0
     entry: mcp/processes
   port: 8080
   health_check: /health
