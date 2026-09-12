@@ -223,12 +223,14 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
 
   const listingScope = `${folder}:${offset}:${projectId}:${installId}`;
   const currentListingScope = useRef(listingScope); currentListingScope.current = listingScope;
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
     if (currentListingScope.current !== listingScope) return;
     const generation = ++loadGeneration.current;
     loadAbort.current?.abort();
     const controller = new AbortController(); loadAbort.current = controller;
-    setLoading(true);
+    // Live updates keep the current listing interactive. Only foreground
+    // loads (navigation and actions) should dim/disable the controls.
+    if (!background) setLoading(true);
     try {
       const [foldersResp, filesResp] = await Promise.all([
         api<FoldersResp>("GET", "/folders", { parent: folder }, undefined, controller.signal),
@@ -250,7 +252,7 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
     if (ev.install_id && ev.install_id !== installId) return;
     if (["file.added", "file.deleted", "file.updated"].includes(ev.topic)) {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(() => { void load(); }, 100);
+      refreshTimer.current = setTimeout(() => { void load(true); }, 100);
     }
   });
 

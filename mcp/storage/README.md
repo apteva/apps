@@ -1,9 +1,16 @@
-# Storage 0.12.2
+# Storage 0.12.3
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.3: stable controls during live updates
+
+File events refresh the listing in the background without disabling or dimming
+Upload, New Folder, or pagination controls. Foreground navigation and actions
+retain their loading state. Browser regression coverage verifies that repeated
+file events update the listing without toggling button disabled states.
 
 ## Version 0.12.2: dashboard CSP registration
 

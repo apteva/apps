@@ -3,6 +3,36 @@ import {mkdtempSync,openSync,ftruncateSync,closeSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 const row=(id:number,name:string,visibility='private')=>({id,name,folder:'/',size_bytes:5,content_type:'text/plain',sha256:'abc',visibility,created_at:'2026-09-05',url:`http://127.0.0.1:19180/api/apps/storage/public/files/${id}/content?project_id=p1&install_id=42`});
+test('live file events refresh the listing without flashing controls', async ({page}) => {
+ let revision = 0;
+ await page.route('**/api/apps/storage/**', async route => {
+  const u = new URL(route.request().url());
+  if (u.pathname.includes('/ui/')) return route.continue();
+  if (revision > 0) await new Promise(resolve => setTimeout(resolve, 200));
+  return route.fulfill({json: u.pathname.endsWith('/folders')
+   ? {folders: []} : {files: [row(1, `note-${revision}.txt`)], has_more: true}});
+ });
+ await page.goto('/');
+ await expect(page.getByText('note-0.txt', {exact: true})).toBeVisible();
+ await page.getByPlaceholder('new folder…').fill('drafts');
+ await expect(page.getByRole('button', {name: '+ Folder', exact: true})).toBeEnabled();
+ // Observe every disabled-state change, including flashes too short for polling.
+ await page.evaluate(() => {
+  const controls = [...document.querySelectorAll('button')].filter(button =>
+   ['Upload', '+ Folder', 'Next'].includes(button.textContent || ''));
+  (window as any).disabledChanges = [];
+  const observer = new MutationObserver(records => {
+   (window as any).disabledChanges.push(...records.map(record => (record.target as HTMLElement).textContent));
+  });
+  controls.forEach(button => observer.observe(button, {attributes: true, attributeFilter: ['disabled']}));
+ });
+ for (const topic of ['file.added', 'file.updated', 'file.deleted']) {
+  revision++;
+  await page.evaluate(topic => (window as any).fireStorageEvent({topic, install_id: 42}), topic);
+  await expect(page.getByText(`note-${revision}.txt`, {exact: true})).toBeVisible();
+ }
+ expect(await page.evaluate(() => (window as any).disabledChanges)).toEqual([]);
+});
 test('selection follows visibility changes and paginated lists',async({page})=>{
  let visibility='public';const offsets:string[]=[];
  await page.route('**/api/apps/storage/**',async route=>{if(new URL(route.request().url()).pathname.includes("/ui/"))return route.continue();const r=route.request(),u=new URL(r.url());expect(u.searchParams.get('project_id')).toBe('p1');expect(u.searchParams.get('install_id')).toBe('42');
