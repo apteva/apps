@@ -39,6 +39,9 @@ func (a *App) dispatch(p *Process, r *Run) (*TaskResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if r.Workflow {
+		return &TaskResult{}, a.reconcileWorkflow(p, r)
+	}
 	if r.Backend == "agent" {
 		return &TaskResult{}, a.dispatchAgent(p, r)
 	}
@@ -96,7 +99,7 @@ func (a *App) synchronize(p *Process) (err error) {
 				return err
 			}
 		}
-		if p.Status != "active" || r.Version != p.Version || r.AssignmentRevision != p.Assignment.Revision || p.ExecutionMode != "tasks" {
+		if p.Status != "active" || r.Version != p.Version || r.AssignmentRevision != p.Assignment.Revision || p.ExecutionMode != "tasks" || len(p.Steps) > 0 {
 			if r.SchedulePaused {
 				continue
 			}
@@ -109,7 +112,7 @@ func (a *App) synchronize(p *Process) (err error) {
 			}
 		}
 	}
-	if p.ExecutionMode == "agent" {
+	if p.ExecutionMode == "agent" || len(p.Steps) > 0 {
 		return a.syncDirectSchedule(p)
 	}
 	if p.Status == "active" && p.Schedule != nil {
@@ -224,7 +227,13 @@ func (a *App) runs(project, id string) (any, error) {
 	hasTasks := false
 	direct := []Run{}
 	for _, r := range records {
-		if r.Backend == "tasks" {
+		if r.Workflow {
+			r.Steps, err = a.steps(r.ID)
+			if err != nil {
+				return nil, err
+			}
+			direct = append(direct, r)
+		} else if r.Backend == "tasks" {
 			hasTasks = true
 		} else {
 			direct = append(direct, r)
@@ -240,15 +249,21 @@ func (a *App) runs(project, id string) (any, error) {
 		for _, r := range records {
 			byID[r.ID] = r
 		}
+		filtered := []any{}
 		for _, entry := range entries {
 			if m, ok := entry.(map[string]any); ok {
 				key, _ := m["run_key"].(string)
+				if strings.HasPrefix(key, "step-") {
+					continue
+				}
+				filtered = append(filtered, entry)
 				if r, found := byID[key]; found {
 					m["assignment_id"] = r.AssignmentID
 					m["assignment"] = r.Binding
 				}
 			}
 		}
+		result["runs"] = filtered
 	}
 	result["direct_runs"] = direct
 	result["dispatches"] = records
@@ -258,7 +273,7 @@ func (a *App) runs(project, id string) (any, error) {
 func (a *App) retryPending(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	rows, err := a.db.Query(`SELECT DISTINCT p.project_id,p.id FROM processes p LEFT JOIN process_runs r ON r.process_id=p.id WHERE p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1) OR (r.backend='tasks' AND r.kind='manual' AND (r.task_id='' OR r.delivery_warning<>'')) LIMIT 100`)
+	rows, err := a.db.Query(`SELECT DISTINCT p.project_id,p.id FROM processes p LEFT JOIN process_runs r ON r.process_id=p.id WHERE p.sync_pending=1 OR EXISTS(SELECT 1 FROM process_assignments x WHERE x.process_id=p.id AND x.sync_pending=1) OR (r.workflow=0 AND r.backend='tasks' AND r.kind='manual' AND (r.task_id='' OR r.delivery_warning<>'')) LIMIT 100`)
 	if err != nil {
 		return err
 	}
@@ -299,7 +314,7 @@ func (a *App) retryPending(ctx context.Context) error {
 		}
 		for i := range records {
 			r := &records[i]
-			if r.Backend == "tasks" && r.Kind == "manual" && (r.TaskID == "" || r.DeliveryWarning != "") {
+			if !r.Workflow && r.Backend == "tasks" && r.Kind == "manual" && (r.TaskID == "" || r.DeliveryWarning != "") {
 				if _, e = a.dispatch(p, r); e != nil {
 					failures = append(failures, e)
 				}

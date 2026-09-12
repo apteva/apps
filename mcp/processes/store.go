@@ -22,6 +22,7 @@ type Schedule struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 type Definition struct {
+	Steps                []Step      `json:"steps,omitempty"`
 	Parameters           []Parameter `json:"parameters,omitempty"`
 	ExecutionMode        string      `json:"execution_mode"`
 	Name                 string      `json:"name"`
@@ -57,6 +58,8 @@ type Version struct {
 	CreatedAt  string     `json:"created_at"`
 }
 type Run struct {
+	Workflow           bool             `json:"workflow"`
+	Steps              []StepRun        `json:"steps,omitempty"`
 	AssignmentID       string           `json:"assignment_id"`
 	AssignmentRevision int              `json:"assignment_revision"`
 	Binding            AssignmentConfig `json:"assignment"`
@@ -97,6 +100,9 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 func (d *Definition) validate() error {
+	if e := validateSteps(d.Steps); e != nil {
+		return e
+	}
 	if e := validateSchema(d.Parameters); e != nil {
 		return e
 	}
@@ -373,6 +379,10 @@ func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides
 		return Run{}, e
 	}
 	c := p.Assignment.AssignmentConfig
+	if e := a.validateRoles(p.ProjectID, p.Definition, c); e != nil {
+		return Run{}, e
+	}
+	c.Roles = resolvedRoles(p.Definition, c)
 	values := map[string]any{}
 	for k, v := range c.Parameters {
 		values[k] = v
@@ -384,19 +394,19 @@ func (a *App) reserveAssignedRun(p *Process, kind, key, inputs string, overrides
 	if e != nil {
 		return Run{}, e
 	}
-	r = Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides)}
-	_, e = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,assignment_id,assignment_revision,assignment_json,overrides_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt, r.Backend, r.AssignmentID, r.AssignmentRevision, jsonText(r.Binding), jsonText(r.Overrides))
+	r = Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides), Workflow: len(p.Steps) > 0}
+	_, e = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,assignment_id,assignment_revision,assignment_json,overrides_json,workflow) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt, r.Backend, r.AssignmentID, r.AssignmentRevision, jsonText(r.Binding), jsonText(r.Overrides), r.Workflow)
 	return r, e
 }
 
-const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state,assignment_id,assignment_revision,assignment_json,overrides_json`
+const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state,assignment_id,assignment_revision,assignment_json,overrides_json,workflow`
 
 type scanner interface{ Scan(...any) error }
 
 func scanRun(row scanner) (Run, error) {
 	var r Run
 	var binding, overrides string
-	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState, &r.AssignmentID, &r.AssignmentRevision, &binding, &overrides)
+	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState, &r.AssignmentID, &r.AssignmentRevision, &binding, &overrides, &r.Workflow)
 	if err == nil {
 		err = json.Unmarshal([]byte(binding), &r.Binding)
 	}

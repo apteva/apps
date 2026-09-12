@@ -51,7 +51,8 @@ that project. The host namespaces these local tool names:
 - `list`, `get`, `create`, `update`, `activate`, `pause`, `archive`
 - `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
   `assignment_activate`, `assignment_pause`, `assignment_archive`
-- `start`, `runs`, `run_get`, `run_update`
+- `start`, `runs`, `run_get`, `run_update`, `run_cancel`
+- `step_get`, `step_update`
 
 Procedure definitions accept a `parameters` array:
 
@@ -94,7 +95,7 @@ works only when exactly one non-archived assignment exists. Retries must use the
 same assignment, key, input text, and explicit overrides. They reuse the saved
 snapshot even after assignment or procedure changes.
 
-For direct work, read `run_get(process_id, run_id)` before domain actions.
+For single-agent direct work (no structured steps), read `run_get(process_id, run_id)` before domain actions.
 Use `run_update` to report running/waiting/blocked/completed/failed/cancelled,
 progress, current_step, result, and error. Only the run's original assignment
 owner can update it, including from other threads. Completion requires result
@@ -106,6 +107,72 @@ Records include assignment identity and the original assignment snapshot.
 `tasks_error` reports unavailable Tasks history; `has_more` indicates that Tasks
 has older records beyond its 200-record response limit.
 
+## Collaborative workflows
+
+Leave `steps` empty for the existing single-agent behavior. To coordinate several
+agents within one occurrence, define work and approval steps in **Procedure**,
+then bind each role in **Assignments**. The assignment owner remains the run
+coordinator. Roles can map to different agents, the same agent, or a human project
+operator. Unbound work roles use the coordinator; roles used by any approval step
+default to human review.
+
+For example, a daily Patreon procedure can define research → write → review →
+publish. Photography and Cooking assignments reuse these steps with their own
+page parameters, schedules, coordinators, and role bindings.
+
+```json
+{
+  "steps": [
+    {"key":"write","name":"Write draft","role":"writer","kind":"work",
+     "instructions":"Write a post for the configured page.",
+     "expected_output":"Complete draft text","depends_on":[]},
+    {"key":"review","name":"Review draft","role":"reviewer","kind":"approval",
+     "instructions":"Check the draft against the publishing policy.",
+     "expected_output":"Decision with reason","depends_on":["write"]},
+    {"key":"publish","name":"Publish","role":"publisher","kind":"work",
+     "instructions":"Publish the approved draft.",
+     "expected_output":"Published URL","depends_on":["review"]}
+  ]
+}
+```
+
+Assignment configuration accepts `roles`, for example:
+
+```json
+{"writer":{"kind":"agent","agent_id":7},
+ "reviewer":{"kind":"human"},
+ "publisher":{"kind":"agent","agent_id":8}}
+```
+
+Steps without dependencies start together. Joins wait for every dependency.
+Approval steps require an explicit `approved` or `rejected` decision; only
+approval releases downstream work. Completed outputs and decisions are immutable.
+The run freezes the procedure, role bindings, and parameters at creation. Each
+step receives its instructions and all completed ancestor outputs.
+
+Agents read `step_get(process_id, run_id, step_id)` before acting, then report
+`step_update` with state, progress, output, error, and (for approvals) decision.
+Only the assigned agent can update an agent step. Human steps are completed in
+**Runs** by authenticated project operators; agents cannot approve as a human.
+Completion requires nonempty evidence; waiting/blocked/failed/cancelled reports
+require a reason. Core becoming idle does not complete a step. `run_update`
+cannot bypass a structured workflow: its outcome derives from its steps.
+
+Tasks remains optional. With Tasks execution selected, each ready agent work
+step gets its own Tasks record and reports completion through Tasks. Approval
+steps always record their decisions in Processes. Structured schedules always
+belong to Processes, including when work steps use Tasks. Scheduled occurrences
+avoid overlap per assignment. Tasks status is reconciled every five seconds.
+
+The Runs panel shows executors, dependencies, outputs, decisions, and step task
+links. It also lets the coordinator/operator call `run_cancel` with a reason.
+Cancellation stops future handoffs; work already dispatched may still finish.
+Pausing a process or assignment stops future scheduled occurrences, not a run.
+
+Migration 004 adds `process_step_runs`, append-only `process_step_events`, and a
+workflow flag on runs. Existing single-agent runs retain their original behavior.
+Step deliveries retry stable IDs after restarts without changing their executor.
+
 ## HTTP
 
 The SDK and platform authenticate operators. Routes require a project header or
@@ -115,6 +182,9 @@ query matching the installation's scope. Route IDs cannot be overridden in JSON.
 - `GET/PUT /processes/{process}`
 - `POST /processes/{process}/activate|pause|archive|start`
 - `GET /processes/{process}/runs`
+- `GET /processes/{process}/runs/{run}`
+- `GET/POST /processes/{process}/runs/{run}/steps/{step}`
+- `POST /processes/{process}/runs/{run}/cancel`
 - `GET/POST /processes/{process}/assignments`
 - `GET/PUT /processes/{process}/assignments/{assignment}`
 - `POST /processes/{process}/assignments/{assignment}/activate|pause|archive|start`
@@ -150,12 +220,14 @@ fallback between execution backends.
 ## Installation and limits
 
 Apteva >=0.50.4; app-sdk v0.79.0. Tasks >=3.6.0 is optional. Source manifest pins
-`processes/v0.3.0`. This release changes Processes only.
+`processes/v0.4.0`. This release changes Processes only.
 
-Approval requirements remain instructions, not enforced approval gates. Result
-evidence is agent-reported, not automatically verified against external apps.
-Each run has one accountable agent; multi-agent step routing and multiple Tasks
-per run are not part of this release. External effects need integration-specific
+Structured approval steps enforce downstream handoffs. Free-text approval
+requirements remain guidance. These gates do not revoke an agent’s general
+external tool permissions or verify its reported evidence against external apps.
+Human roles mean any authenticated project operator, not a named person; audit
+records identify them as `operator`. Rejection fails the run; rework loops are
+not supported yet. Correct the inputs/procedure and start a new run. External effects need integration-specific
 deduplication/reconciliation; event delivery alone cannot guarantee exactly-once
 publication. Direct history is currently returned without pagination.
 
@@ -174,4 +246,5 @@ bun run scripts/build-panels.ts --app processes
 
 Tests cover assignment isolation, snapshots across edits and retries, typed
 parameters, independent schedule overlap/pause, version following and pinning,
-legacy migration, real sidecars with and without Tasks, and panel interactions.
+legacy migration, real sidecars with and without Tasks, and panel interactions, plus role handoffs, parallel joins, frozen approval
+outputs, rejected runs, workflow cancellation, and scoped executor authorization.

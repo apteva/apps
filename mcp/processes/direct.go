@@ -118,12 +118,22 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 	if err != nil {
 		return nil, err
 	}
-	if r.Backend != "agent" {
+	if r.Backend != "agent" && !r.Workflow {
 		return nil, errors.New("use Tasks to track this run")
 	}
 	d, err := a.runDefinition(r)
 	if err != nil {
 		return nil, err
+	}
+	if r.Workflow {
+		if action == "run_update" {
+			return nil, errors.New("structured run outcomes are derived from its steps; use step_update")
+		}
+		steps, e := a.steps(r.ID)
+		if e != nil {
+			return nil, e
+		}
+		return map[string]any{"run": r, "definition": d, "steps": steps}, nil
 	}
 	if action == "run_update" {
 		if actor != "operator" && !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", d.OwnerAgentID)) {
@@ -200,7 +210,7 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 			return e
 		}
 	}
-	if p.Status != "active" || p.SyncPending || p.ExecutionMode != "agent" || p.Schedule == nil || p.NextRunAt == "" {
+	if p.Status != "active" || p.SyncPending || (p.ExecutionMode != "agent" && len(p.Steps) == 0) || p.Schedule == nil || p.NextRunAt == "" {
 		return nil
 	}
 	deadline, err := time.Parse(time.RFC3339Nano, p.NextRunAt)
@@ -215,6 +225,10 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 		return err
 	}
 	binding := p.Assignment.AssignmentConfig
+	if e := a.validateRoles(p.ProjectID, p.Definition, binding); e != nil {
+		return e
+	}
+	binding.Roles = resolvedRoles(p.Definition, binding)
 	binding.Parameters, err = validateParameters(p.Parameters, binding.Parameters, true)
 	if err != nil {
 		return err
@@ -225,12 +239,12 @@ func (a *App) dueDirect(p *Process, now time.Time) error {
 	}
 	defer tx.Rollback()
 	var outstanding int
-	if err = tx.QueryRow(`SELECT count(*) FROM process_runs WHERE assignment_id=? AND backend='agent' AND scheduled_for<>'' AND state NOT IN ('completed','failed','cancelled')`, p.Assignment.ID).Scan(&outstanding); err != nil {
+	if err = tx.QueryRow(`SELECT count(*) FROM process_runs WHERE assignment_id=? AND (backend='agent' OR workflow=1) AND scheduled_for<>'' AND state NOT IN ('completed','failed','cancelled')`, p.Assignment.ID).Scan(&outstanding); err != nil {
 		return err
 	}
 	note := ""
 	if outstanding == 0 {
-		_, err = tx.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,scheduled_for,assignment_id,assignment_revision,assignment_json) VALUES(?,?,?,'manual',?,'',?,'agent',?,?,?,?)`, newID("run-"), p.ID, p.Version, fmt.Sprintf("%s:scheduled:v%d:%s", p.Assignment.ID, p.Version, p.NextRunAt), timestamp(), p.NextRunAt, p.Assignment.ID, p.Assignment.Revision, jsonText(binding))
+		_, err = tx.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend,scheduled_for,assignment_id,assignment_revision,assignment_json,workflow) VALUES(?,?,?,'manual',?,'',?,?,?,?,?,?,?)`, newID("run-"), p.ID, p.Version, fmt.Sprintf("%s:scheduled:v%d:%s", p.Assignment.ID, p.Version, p.NextRunAt), timestamp(), p.ExecutionMode, p.NextRunAt, p.Assignment.ID, p.Assignment.Revision, jsonText(binding), len(p.Steps) > 0)
 		if err != nil {
 			return err
 		}
@@ -291,6 +305,14 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 		}
 		for i := range runs {
 			r := &runs[i]
+			if r.Workflow {
+				if !terminal(r.State) {
+					if e = a.reconcileWorkflow(p, r); e != nil {
+						failures = append(failures, e)
+					}
+				}
+				continue
+			}
 			if r.Backend != "agent" || r.DeliveredAt != "" || terminal(r.State) {
 				continue
 			}
@@ -310,6 +332,9 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		lifecycle, err := sdk.DecodeAgentEventLifecycle(event)
 		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(lifecycle.SourceEventID, "process-step:") {
+			return a.stepLifecycle(event, lifecycle)
 		}
 		if !strings.HasPrefix(lifecycle.SourceEventID, "processes:") {
 			return nil

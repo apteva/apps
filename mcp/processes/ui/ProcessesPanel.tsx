@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { StepEditor, RunSteps, type Step, type StepRun } from "./Workflow";
 import Assignments, {
   ParameterEditor,
   ParameterValues,
@@ -18,6 +19,7 @@ type Schedule = {
   timezone?: string;
 };
 type Definition = {
+  steps?: Step[];
   parameters?: Parameter[];
   execution_mode: "agent" | "tasks";
   name: string;
@@ -49,6 +51,8 @@ type Entry = {
   version: number;
   record: {
     id: string;
+    workflow?: boolean;
+    steps?: StepRun[];
     title: string;
     state: string;
     schedule_kind?: string;
@@ -103,7 +107,10 @@ const historyEntries = (r: History): Entry[] =>
       version: e.version,
       assignment_id: e.assignment_id,
       assignment: e.assignment,
-      record: { ...e, title: "Direct agent run" },
+      record: {
+        ...e,
+        title: e.workflow ? "Team workflow run" : "Direct agent run",
+      },
     })),
   ].sort(
     (a, b) => Date.parse(b.record.created_at) - Date.parse(a.record.created_at),
@@ -351,7 +358,13 @@ function Panel(props: Props) {
     (r) =>
       (!assignmentFilter || r.assignment_id === assignmentFilter) &&
       (!runStateFilter || r.record.state === runStateFilter) &&
-      (!runOwnerFilter || r.assignment?.owner_agent_id === runOwnerFilter),
+      (!runOwnerFilter ||
+        r.assignment?.owner_agent_id === runOwnerFilter ||
+        r.record.steps?.some(
+          (s) =>
+            s.executor.kind === "agent" &&
+            s.executor.agent_id === runOwnerFilter,
+        )),
   );
   const prepareRun = (x: Assignment) => {
     setRunAssignment(x);
@@ -486,6 +499,10 @@ function Panel(props: Props) {
                     />
                   </div>
                 ))}
+              <StepEditor
+                steps={draft.steps || []}
+                onChange={(steps) => setField("steps", steps)}
+              />
               <ParameterEditor
                 fields={draft.parameters || []}
                 onChange={(v) => setField("parameters", v)}
@@ -1019,6 +1036,26 @@ function Panel(props: Props) {
                   .
                 </div>
               )}
+              {!!chosen?.steps?.length && (
+                <div className="block">
+                  <h2>Steps & roles</h2>
+                  {chosen.steps.map((s) => (
+                    <div className="block" key={s.key}>
+                      <strong>{s.name}</strong>
+                      <p className="small muted">
+                        {s.role} · {s.kind}
+                        {(s.depends_on || []).length
+                          ? ` · after ${(s.depends_on || []).join(", ")}`
+                          : " · starts with run"}
+                      </p>
+                      <div className="prose">{s.instructions}</div>
+                      <p className="small muted">
+                        Expected output: {s.expected_output}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
               {!!chosen?.parameters?.length && (
                 <div className="block">
                   <h2>Parameters</h2>
@@ -1050,8 +1087,8 @@ function Panel(props: Props) {
             <>
               <div className="row between head">
                 <p className="muted">
-                  Progress and results from direct agent runs and connected
-                  Tasks.
+                  Progress, approvals, and results from single-agent and team
+                  runs.
                 </p>
                 <button
                   disabled={busy}
@@ -1180,6 +1217,19 @@ function Panel(props: Props) {
                         r.record.current_step ||
                         "Queued for the owner agent."}
                     </div>
+                    {r.record.workflow && (
+                      <RunSteps
+                        steps={r.record.steps || []}
+                        runID={r.record.id}
+                        runState={r.record.state}
+                        agents={agents}
+                        projectId={props.projectId!}
+                        api={(path, method, body) =>
+                          api(`/${p.id}${path}`, method, body)
+                        }
+                        onChanged={() => loadRuns(p.id)}
+                      />
+                    )}
                   </article>
                 ))
               ) : (
@@ -1202,12 +1252,25 @@ function Panel(props: Props) {
           >
             <h2 id="pc-run-title">Run {runAssignment.name}</h2>
             <p className="muted">
-              {ownerName(runAssignment.owner_agent_id)} receives procedure
-              version {runAssignment.procedure_version}, tracked{" "}
-              {runAssignment.execution_mode === "agent"
-                ? "here in Processes"
-                : "in Tasks"}
-              .
+              {detail?.versions.find(
+                (v) => v.version === runAssignment.procedure_version,
+              )?.definition.steps?.length ? (
+                <>
+                  This run follows procedure version{" "}
+                  {runAssignment.procedure_version} with its assigned roles.{" "}
+                  {ownerName(runAssignment.owner_agent_id)} coordinates the run.
+                  Progress and approvals appear here in Processes.
+                </>
+              ) : (
+                <>
+                  {ownerName(runAssignment.owner_agent_id)} receives procedure
+                  version {runAssignment.procedure_version}, tracked{" "}
+                  {runAssignment.execution_mode === "agent"
+                    ? "here in Processes"
+                    : "in Tasks"}
+                  .
+                </>
+              )}
             </p>
             <ParameterValues
               fields={runSchema}

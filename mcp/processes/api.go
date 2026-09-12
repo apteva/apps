@@ -22,7 +22,7 @@ func textField(description string) map[string]any {
 }
 func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria", "owner_agent_id"}, map[string]any{
-		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
+		"steps": map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()}, "parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
@@ -32,8 +32,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
+	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
+	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
+	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
+	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_update", "run_cancel"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -65,6 +68,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			if name == "update" {
 				props["expected_version"] = map[string]any{"type": "integer", "minimum": 1}
 				required = append(required, "expected_version")
+			}
+		case "run_cancel":
+			props["run_id"] = textField("Run ID")
+			props["reason"] = textField("Cancellation reason")
+			required = append(required, "run_id", "reason")
+		case "step_get", "step_update":
+			props["run_id"] = textField("Run ID")
+			props["step_id"] = textField("Step execution ID")
+			required = append(required, "run_id", "step_id")
+			if name == "step_update" {
+				props["state"] = map[string]any{"type": "string", "enum": []string{"running", "waiting", "blocked", "completed", "failed", "cancelled"}}
+				props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
+				props["output"] = textField("Concrete result and evidence (required on completion)")
+				props["error"] = textField("Reason for waiting, block, failure or cancellation")
+				props["decision"] = map[string]any{"type": "string", "enum": []string{"approved", "rejected"}}
+				required = append(required, "state")
 			}
 		case "run_get", "run_update":
 			props["run_id"] = textField("Run ID")
@@ -222,6 +241,10 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "paused")
 	case "assignment_archive":
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "archived")
+	case "run_cancel":
+		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
+	case "step_get", "step_update":
+		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
 	case "runs":
 		return a.runs(project, id)
 	case "run_get", "run_update":
@@ -308,6 +331,25 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if len(parts) >= 3 && parts[1] == "runs" {
+		args["process_id"] = parts[0]
+		args["run_id"] = parts[2]
+		if len(parts) == 4 && parts[3] == "cancel" && r.Method == "POST" {
+			action = "run_cancel"
+		}
+		if len(parts) == 3 && r.Method == "GET" {
+			action = "run_get"
+		}
+		if len(parts) == 5 && parts[3] == "steps" {
+			args["step_id"] = parts[4]
+			if r.Method == "GET" {
+				action = "step_get"
+			}
+			if r.Method == "POST" {
+				action = "step_update"
+			}
+		}
+	}
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -321,7 +363,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k != "process_id" && k != "project_id" && k != "_project_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
+			if k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
 				args[k] = v
 			}
 		}
@@ -353,5 +395,12 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 func assignmentSchema() map[string]any {
 	d := definitionSchema()["properties"].(map[string]any)
 	return object([]string{"name", "owner_agent_id", "execution_mode"}, map[string]any{
-		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": d["owner_agent_id"], "execution_mode": d["execution_mode"], "schedule": d["schedule"], "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": d["owner_agent_id"], "execution_mode": d["execution_mode"], "schedule": d["schedule"], "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+}
+
+func executorSchema() map[string]any {
+	return object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}})
+}
+func stepSchema() map[string]any {
+	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "depends_on": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})
 }
