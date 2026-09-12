@@ -74,6 +74,12 @@ func TestAttachmentRoundTripAndCoreVision(t *testing.T) {
 	if !bytes.Contains(payload, []byte(`"type":"image_url"`)) || !bytes.Contains(payload, []byte(item.DataURL)) {
 		t.Fatal("actual Core event lacks image")
 	}
+	if bytes.Contains(payload, []byte("Use conversations_read_attachment")) || bytes.Contains(payload, []byte("red.png")) || bytes.Contains(payload, []byte("file_id=")) {
+		t.Fatal("current image was described as a file requiring retrieval")
+	}
+	if !bytes.Contains(payload, []byte("reply directly with conversations_send phase=final")) {
+		t.Fatal("missing direct image-answer guidance")
+	}
 	result = attachmentRequest(a, "POST", "/messages?chat_id="+conv.ID, send)
 	if result.Code != 200 || len(p.ensures) != 1 {
 		t.Fatal("message retry duplicated delivery")
@@ -181,5 +187,34 @@ func TestAttachmentOptionalStorageReturnsStableFileID(t *testing.T) {
 	}
 	if p.uploads != 1 || msg.Attachments[0].FileID != 123 {
 		t.Fatal("storage retry or file reference wrong")
+	}
+}
+
+func TestMixedAttachmentEventPreservesVisionAndFileAccess(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	imageURL := "data:image/jpeg;base64,aW1hZ2U="
+	msg := &Message{Content: "Compare the image with my notes", Attachments: []Attachment{
+		{ID: "photo", Type: "image", DataURL: imageURL, Name: "photo.jpg"},
+		{ID: "notes", Type: "file", Name: "notes.txt", MimeType: "text/plain", Size: 12, StorageApp: "storage", FileID: 42},
+	}}
+	parts := a.agentEventPayload(conv, msg, 41, []int64{41}).([]map[string]any)
+	images := 0
+	var text strings.Builder
+	for _, part := range parts {
+		if part["type"] == "image_url" {
+			images++
+			if part["image_url"].(map[string]any)["url"] != imageURL {
+				t.Fatal("image bytes changed")
+			}
+		} else {
+			text.WriteString(part["text"].(string))
+		}
+	}
+	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "Use conversations_read_attachment") || !strings.Contains(text.String(), "file_id=42") {
+		t.Fatal("mixed attachment routing lost image or file access")
+	}
+	if strings.Contains(text.String(), "attachment_id=photo") {
+		t.Fatal("image routed to file reader")
 	}
 }

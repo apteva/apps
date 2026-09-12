@@ -302,3 +302,12 @@
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-tray,
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
 }
+
+/* User attachments belong above their text, on the same side of the chat. */
+.apteva-conversations .chat-message-attachments {display:flex;flex-wrap:wrap;gap:8px;max-width:100%;align-items:flex-end}
+.apteva-conversations .chat-message-user > .chat-message-attachments {align-self:flex-end;justify-content:flex-end}
+.apteva-conversations .chat-message-attachment.chat-message-photo {margin:0;padding:0;border:0;max-width:180px;overflow:hidden;border-radius:12px}
+.apteva-conversations .chat-message-photo .chat-image-preview {padding:0;border:0;width:auto;max-width:180px;line-height:0;border-radius:12px}
+.apteva-conversations .chat-message-photo img {display:block;width:auto;height:auto;max-width:180px;max-height:180px;object-fit:contain}
+.apteva-conversations .chat-image-caption {font-size:13px;overflow-wrap:anywhere;margin:10px 0 0}
+.apteva-conversations .chat-image-caption small {display:block;color:var(--color-text-muted,#aaa);font-size:11px}

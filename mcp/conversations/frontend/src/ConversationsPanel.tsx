@@ -1058,9 +1058,13 @@ function ContextColumn({
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
 function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
- return <div className="min-w-0 shrink-0 flex flex-col gap-2">
+ const user=props.message.role==="user";
+ const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/>;
+ return <div className={`min-w-0 shrink-0 flex flex-col gap-2 ${user?"chat-message-user":""}`}>
  {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
- {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/><GenericComponents components={props.message.components}/>
+ {user&&attachments}
+ {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
+ {!user&&attachments}<GenericComponents components={props.message.components}/>
  </div>;
 }
 function MessageBody({

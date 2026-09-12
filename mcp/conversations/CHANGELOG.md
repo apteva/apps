@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.3 — 2026-09-12
+
+- Render compact user image thumbnails above the message text, aligned right, in the shared dashboard and exported chat. Keep enlargement, image metadata and original downloads in the image dialog.
+- Deliver current images directly as visual content without file-retrieval instructions. Update Conversations-owned thread instructions and skill to answer simple image questions directly, without a preliminary acknowledgement or attachment-reading call. Core and SDK behavior are unchanged.
+- Verify original image payload preservation, mixed image/file routing, thumbnail geometry, history and downloads in both chat hosts.
+
 ## 0.23.2 — 2026-09-12
 
 - Add composer.layout (auto, compact, expanded). Auto is the default and uses a single row in chat containers up to 480px wide. Explicit modes override responsive selection.

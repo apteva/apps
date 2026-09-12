@@ -218,9 +218,22 @@ for(const host of ["dashboard","external"]){
   await page.setViewportSize({width:390,height:800});await page.screenshot({path:test.info().outputPath("attachment-composer.png")});
   await page.getByRole("button",{name:"Send",exact:true}).click();await expect(page.locator(".chat-message-attachment")).toHaveCount(2);await expect(page.locator(".chat-attachment-chip")).toHaveCount(0);
   await page.reload();await expect(page.locator(".chat-message-attachment")).toHaveCount(2);
-  await page.getByRole("button",{name:"Enlarge picture.png"}).click();await expect(page.locator("dialog")).toBeVisible();await page.keyboard.press("Escape");await expect(page.locator("dialog")).toHaveCount(0);
+  const thumb=page.locator(".chat-message-photo img");
+  const dimensions=await thumb.evaluate((img:HTMLImageElement)=>({width:img.getBoundingClientRect().width,height:img.getBoundingClientRect().height,natural:img.naturalWidth}));
+  expect(dimensions.width).toBeLessThanOrEqual(180);expect(dimensions.height).toBeLessThanOrEqual(180);expect(dimensions.natural).toBe(480);
+  await page.getByRole("button",{name:"Enlarge picture.png"}).click();await expect(page.locator("dialog")).toBeVisible();await expect(page.locator("dialog .chat-image-caption")).toContainText("picture.png");
+  const imageDownload=page.waitForEvent("download");await page.locator("dialog").getByRole("button",{name:"Download"}).click();expect((await imageDownload).suggestedFilename()).toBe("picture.png");
+  await page.keyboard.press("Escape");await expect(page.locator("dialog")).toHaveCount(0);
   const downloaded=page.waitForEvent("download");await page.locator(".chat-message-attachment").filter({hasText:"notes.txt"}).getByRole("button",{name:"Download"}).click();expect((await downloaded).suggestedFilename()).toBe("notes.txt");
   await page.screenshot({path:test.info().outputPath("attachment-history.png")});
+  await page.getByRole("textbox").fill("What do you see?");
+  await page.getByRole("button",{name:"Add attachment",exact:true}).click();const secondChooser=page.waitForEvent("filechooser");await page.getByRole("button",{name:"Add files or photos"}).click();
+  await(await secondChooser).setFiles({name:"second.png",mimeType:"image/png",buffer:Buffer.from(await thumb.getAttribute("src").then(src=>src!.split(",")[1]),"base64")});
+  await page.getByRole("button",{name:"Send",exact:true}).click();
+  const row=page.locator(".chat-message-user").filter({hasText:"What do you see?"});
+  const photo=await row.locator(".chat-message-photo").boundingBox();const bubble=await row.getByText("What do you see?",{exact:true}).boundingBox();const bounds=await row.boundingBox();
+  expect(photo!.y+photo!.height).toBeLessThan(bubble!.y);expect(Math.abs(photo!.x+photo!.width-bounds!.x-bounds!.width)).toBeLessThan(2);
+  await page.screenshot({path:test.info().outputPath("image-above-text.png")});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
  });
  test(`${host}: screenshot captures one frame and stops sharing`,async({page,request})=>{
