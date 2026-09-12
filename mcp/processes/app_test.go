@@ -88,7 +88,7 @@ func setup(t *testing.T) (*App, *fakeTasks) {
 	return a, f
 }
 func def() Definition {
-	return Definition{Name: "Monthly close", Instructions: "Reconcile invoices. Request approval.", CompletionCriteria: "Approved report and evidence", OwnerAgentID: 7}
+	return Definition{ExecutionMode: "tasks", Name: "Monthly close", Instructions: "Reconcile invoices. Request approval.", CompletionCriteria: "Approved report and evidence", OwnerAgentID: 7}
 }
 func create(t *testing.T, a *App, d Definition) *Process {
 	t.Helper()
@@ -285,7 +285,7 @@ func TestProjectIsolationAndValidation(t *testing.T) {
 func TestManifestAndPanel(t *testing.T) {
 	a, _ := setup(t)
 	m := a.Manifest()
-	if m.Name != "processes" || len(m.Requires.Apps) != 1 || m.Requires.Apps[0].Name != "tasks" || m.Requires.Apps[0].Version != ">=3.6.0" {
+	if m.Name != "processes" || len(m.Requires.Apps) != 1 || !m.Requires.Apps[0].Optional || m.Requires.Apps[0].Name != "tasks" || m.Requires.Apps[0].Version != ">=3.6.0" {
 		t.Fatalf("dependency=%+v", m.Requires)
 	}
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Slot != "project.page" {

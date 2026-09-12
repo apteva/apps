@@ -12,6 +12,7 @@ type Schedule = {
   timezone?: string;
 };
 type Definition = {
+  execution_mode: "agent" | "tasks";
   name: string;
   description: string;
   instructions: string;
@@ -23,6 +24,8 @@ type Definition = {
   schedule?: Schedule;
 };
 type Process = Definition & {
+  next_run_at?: string;
+  last_schedule_note?: string;
   id: string;
   status: string;
   version: number;
@@ -32,8 +35,9 @@ type Process = Definition & {
 };
 type Version = { version: number; definition: Definition };
 type Entry = {
+  backend: "agent" | "tasks";
   version: number;
-  task: {
+  record: {
     id: string;
     title: string;
     state: string;
@@ -41,6 +45,8 @@ type Entry = {
     schedule_enabled?: boolean;
     next_run_at?: string;
     parent_task_id?: string;
+    scheduled_for?: string;
+    delivery_warning?: string;
     progress?: number;
     current_step?: string;
     result?: string;
@@ -49,6 +55,7 @@ type Entry = {
   };
 };
 const empty: Definition = {
+  execution_mode: "agent",
   name: "",
   description: "",
   instructions: "",
@@ -58,6 +65,26 @@ const empty: Definition = {
   approval_requirements: "",
   owner_agent_id: 0,
 };
+type History = {
+  runs?: { version: number; task: Entry["record"] }[];
+  direct_runs?: (Entry["record"] & { version: number })[];
+  tasks_error?: string;
+};
+const historyEntries = (r: History): Entry[] =>
+  [
+    ...(r.runs || []).map((e) => ({
+      backend: "tasks" as const,
+      version: e.version,
+      record: e.task,
+    })),
+    ...(r.direct_runs || []).map((e) => ({
+      backend: "agent" as const,
+      version: e.version,
+      record: { ...e, title: "Direct agent run" },
+    })),
+  ].sort(
+    (a, b) => Date.parse(b.record.created_at) - Date.parse(a.record.created_at),
+  );
 const cadence = (s?: Schedule) =>
   !s
     ? "On demand"
@@ -109,6 +136,7 @@ function Panel(props: Props) {
     [editing, setEditing] = useState(false),
     [creating, setCreating] = useState(false),
     [draft, setDraft] = useState<Definition>(empty);
+  const [historyWarning, setHistoryWarning] = useState("");
   const [runs, setRuns] = useState<Entry[]>([]),
     [more, setMore] = useState(false),
     [search, setSearch] = useState(""),
@@ -148,7 +176,8 @@ function Panel(props: Props) {
   };
   const loadRuns = async (id: string) => {
     const r = await api(`/${encodeURIComponent(id)}/runs`);
-    setRuns(r.runs || []);
+    setRuns(historyEntries(r));
+    setHistoryWarning(r.tasks_error || "");
     setMore(!!r.has_more);
   };
   useEffect(() => {
@@ -199,10 +228,15 @@ function Panel(props: Props) {
     let live = true;
     if (!selected || !detail) return;
     const refresh = () =>
-      api(`/${encodeURIComponent(selected)}/runs`)
-        .then((r) => {
+      Promise.all([
+        api(`/${encodeURIComponent(selected)}/runs`),
+        api(`/${encodeURIComponent(selected)}`),
+      ])
+        .then(([r, current]) => {
           if (live) {
-            setRuns(r.runs || []);
+            setDetail(current);
+            setRuns(historyEntries(r));
+            setHistoryWarning(r.tasks_error || "");
             setMore(!!r.has_more);
           }
         })
@@ -282,10 +316,11 @@ function Panel(props: Props) {
   );
   const setField = (key: keyof Definition, value: unknown) =>
     setDraft((d) => ({ ...d, [key]: value }));
-  const executions = runs.filter((r) => !r.task.schedule_kind),
-    upcoming = runs.find(
-      (r) => r.task.schedule_enabled && r.version === p?.version,
-    )?.task.next_run_at;
+  const executions = runs.filter((r) => !r.record.schedule_kind),
+    upcoming =
+      p?.next_run_at ||
+      runs.find((r) => r.record.schedule_enabled && r.version === p?.version)
+        ?.record.next_run_at;
   const newProcess = () => {
     setDraft({ ...empty, owner_agent_id: agents[0]?.id || 0 });
     setCreating(true);
@@ -412,6 +447,27 @@ function Panel(props: Props) {
             <aside>
               <section className="card">
                 <h2>Ownership & timing</h2>
+                <div className="field">
+                  <label htmlFor="pc-mode">Execution</label>
+                  <select
+                    id="pc-mode"
+                    value={draft.execution_mode}
+                    onChange={(e) =>
+                      setField(
+                        "execution_mode",
+                        e.target.value as "agent" | "tasks",
+                      )
+                    }
+                  >
+                    <option value="agent">Direct agent</option>
+                    <option value="tasks">Tasks</option>
+                  </select>
+                  <p className="small muted">
+                    {draft.execution_mode === "agent"
+                      ? "Runs and results are tracked here. No Tasks app needed."
+                      : "Requires Tasks 3.6.0 or later connected to Processes."}
+                  </p>
+                </div>
                 <div className="field">
                   <label htmlFor="pc-owner">Responsible agent</label>
                   <select
@@ -685,7 +741,7 @@ function Panel(props: Props) {
           {p.sync_pending && (
             <div className="notice" role="status">
               <strong>Synchronization pending.</strong>{" "}
-              {p.sync_error || "Applying the requested change to Tasks."}{" "}
+              {p.sync_error || "Applying the requested schedule change."}{" "}
               Automatic retries run every 30 seconds.{" "}
               <button
                 disabled={busy}
@@ -730,15 +786,15 @@ function Panel(props: Props) {
                   {executions[0] ? (
                     <>
                       <div className="row">
-                        <Pill state={executions[0].task.state} />
+                        <Pill state={executions[0].record.state} />
                         <span className="muted small">
-                          {date(executions[0].task.created_at)}
+                          {date(executions[0].record.created_at)}
                         </span>
                       </div>
                       <p className="prose">
-                        {executions[0].task.result ||
-                          executions[0].task.error ||
-                          executions[0].task.current_step ||
+                        {executions[0].record.result ||
+                          executions[0].record.error ||
+                          executions[0].record.current_step ||
                           "Waiting for the owner to begin."}
                       </p>
                       <button
@@ -760,11 +816,18 @@ function Panel(props: Props) {
                   {ownerName(p.owner_agent_id)}
                 </p>
                 <p>
+                  <span className="muted">Execution</span> ·{" "}
+                  {p.execution_mode === "agent" ? "Direct agent" : "Tasks"}
+                </p>
+                <p>
                   <span className="muted">Cadence</span> · {cadence(p.schedule)}
                 </p>
                 <p>
                   <span className="muted">Next run</span> · {date(upcoming)}
                 </p>
+                {p.last_schedule_note && (
+                  <p className="small muted">{p.last_schedule_note}</p>
+                )}
                 <div className="row" style={{ marginTop: 25 }}>
                   {p.status === "active" ? (
                     <>
@@ -818,7 +881,7 @@ function Panel(props: Props) {
                     onClick={() => {
                       if (
                         window.confirm(
-                          "Archive this process? Future scheduled runs will stop. Existing tasks will continue.",
+                          "Archive this process? Future scheduled runs will stop. Existing runs will continue.",
                         )
                       )
                         mutate("archive");
@@ -870,7 +933,8 @@ function Panel(props: Props) {
             <>
               <div className="row between head">
                 <p className="muted">
-                  Progress and results come directly from Tasks.
+                  Progress and results from direct agent runs and connected
+                  Tasks.
                 </p>
                 <button
                   disabled={busy}
@@ -879,6 +943,11 @@ function Panel(props: Props) {
                   Refresh history
                 </button>
               </div>
+              {historyWarning && (
+                <div className="notice" role="status">
+                  Tasks history unavailable: {historyWarning}
+                </div>
+              )}
               {more && (
                 <div className="notice">
                   Showing the 200 most recent task records. Older history
@@ -887,20 +956,22 @@ function Panel(props: Props) {
               )}
               {executions.length ? (
                 executions.map((r) => (
-                  <article className="card run" key={r.task.id}>
+                  <article className="card run" key={r.record.id}>
                     <div className="row between">
                       <div className="row">
-                        <Pill state={r.task.state} />
-                        <strong>{r.task.title}</strong>
+                        <Pill state={r.record.state} />
+                        <strong>{r.record.title}</strong>
                       </div>
-                      <a
-                        href={`/apps/tasks/page?${new URLSearchParams({ project_id: props.projectId!, task_id: r.task.id })}`}
-                      >
-                        Open task ↗
-                      </a>
+                      {r.backend === "tasks" && (
+                        <a
+                          href={`/apps/tasks/page?${new URLSearchParams({ project_id: props.projectId!, task_id: r.record.id })}`}
+                        >
+                          Open task ↗
+                        </a>
+                      )}
                     </div>
                     <p className="muted small">
-                      {date(r.task.created_at)} ·{" "}
+                      {date(r.record.created_at)} ·{" "}
                       <button
                         style={{
                           padding: 0,
@@ -915,9 +986,12 @@ function Panel(props: Props) {
                       >
                         Procedure v{r.version}
                       </button>{" "}
-                      · {r.task.parent_task_id ? "Scheduled" : "Manual"}
+                      ·{" "}
+                      {r.record.parent_task_id || r.record.scheduled_for
+                        ? "Scheduled"
+                        : "Manual"}
                     </p>
-                    {r.task.progress !== undefined && (
+                    {r.record.progress !== undefined && (
                       <progress
                         style={{
                           width: "100%",
@@ -925,13 +999,18 @@ function Panel(props: Props) {
                           height: 5,
                         }}
                         max={100}
-                        value={r.task.progress}
+                        value={r.record.progress}
                       />
                     )}
                     <div className="prose">
-                      {r.task.result ||
-                        r.task.error ||
-                        r.task.current_step ||
+                      {r.record.delivery_warning && (
+                        <p className="notice">
+                          Delivery retry pending: {r.record.delivery_warning}
+                        </p>
+                      )}
+                      {r.record.result ||
+                        r.record.error ||
+                        r.record.current_step ||
                         "Queued for the owner agent."}
                     </div>
                   </article>
@@ -956,7 +1035,8 @@ function Panel(props: Props) {
           >
             <h2 id="pc-run-title">Run {p.name}</h2>
             <p className="muted">
-              The owner receives a task with procedure version {p.version}.
+              The owner receives procedure version {p.version}, tracked{" "}
+              {p.execution_mode === "agent" ? "here in Processes" : "in Tasks"}.
             </p>
             <div className="field" style={{ marginTop: 20 }}>
               <label htmlFor="pc-run-input">Run-specific context</label>
@@ -990,8 +1070,8 @@ function Panel(props: Props) {
                     setRunModal(false);
                     setNotice(
                       r.delivery_warning
-                        ? `Task created; delivery needs attention: ${r.delivery_warning}`
-                        : "Task created and sent to the owner.",
+                        ? `Run created; delivery needs attention: ${r.delivery_warning}`
+                        : "Run created and sent to the owner.",
                     );
                     setTab("runs");
                     await loadRuns(p.id);

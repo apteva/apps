@@ -1,10 +1,25 @@
 # Processes
 
-Company operating procedures that agents follow, with execution owned by Tasks.
-The app provides its own project-page React panel, nine MCP tools, and a SQLite
+Company operating procedures that agents follow directly or through optional Tasks integration.
+The app provides its own project-page React panel, eleven MCP tools, and a SQLite
 store. It does not run domain work or call LLMs.
 
-## First version
+## Execution modes
+
+New procedures default to `execution_mode: "agent"`. Processes sends the owner a
+tracked agent event and stores progress and outcomes itself; no Tasks install is
+needed. Select `"tasks"` to use Tasks 3.6.0+ for execution and scheduling. Existing
+v0.1 definitions retain Tasks mode. Pause and confirm synchronization before
+changing modes; old runs retain their original backend and procedure version.
+There is no automatic backend fallback on delivery failure.
+
+Direct schedules use durable deadlines and atomic occurrence creation. Missed
+intervals are skipped, and an open scheduled run prevents overlap. Manual runs
+can coexist. Deliveries retry with stable event IDs and pinned threads, with
+30-second exponential backoff capped at 15 minutes. Core lifecycle settlement
+is diagnostic information, never proof of business completion.
+
+## Features
 
 - Draft, active, paused, and archived procedures with an owner agent.
 - Plain-language instructions, required input sources, standing context,
@@ -12,28 +27,30 @@ store. It does not run domain work or call LLMs.
 - Immutable versions. Pause and confirm synchronization before editing; saving
   creates a new draft. Existing tasks retain their original procedure snapshot.
 - On-demand runs and recurring interval/five-field cron schedules with IANA
-  timezones. The Tasks scheduler owns deadlines, occurrences, and overlap policy.
+  timezones. The selected backend owns deadlines, occurrences, and overlap policy.
 - Overview, procedure/version editor, and live run history in the app-owned panel.
 - Links from run history to Tasks, and from task snapshots back to their procedure.
 - Durable dispatch keys and desired-state reconciliation every 30 seconds. Task
   creation retries reuse the original snapshot and key after failures/restarts.
 
-Install with **Tasks >=3.6.0** and **Apteva >=0.50.4**. Both apps pin app-sdk
+Install with **Apteva >=0.50.4**. **Tasks >=3.6.0 is optional**. Both apps pin app-sdk
 v0.79.0 (the latest ancestor-verified SDK release when published). Requires `db.write.app`,
-`platform.apps.call`, and `platform.instances.read`; Tasks is a hard dependency.
+`platform.apps.call`, `platform.instances.read`, `platform.instances.write`, and
+`platform.threads.write` for tracked delivery. Tasks is declared optional.
 The app registry advertises Processes. Source manifests pin the immutable
-`processes/v0.1.0` and `tasks/v3.6.0` release tags.
+`processes/v0.2.0` and `tasks/v3.6.0` release tags.
 
 ## Agent tools
 
 The manifest advertises the local names `list`, `get`, `create`, `update`,
-`activate`, `pause`, `archive`, `start`, and `runs`. The host namespaces these as
+`activate`, `pause`, `archive`, `start`, `runs`, `run_get`, and `run_update`. The host namespaces these as
 Processes tools. MCP calls require trusted agent and project context.
 
 Create/update accepts a `definition` object:
 
 ```json
 {
+  "execution_mode": "agent",
   "name": "Monthly financial close",
   "description": "Produce an approved financial summary.",
   "instructions": "Collect records, reconcile balances, investigate discrepancies, and prepare the report.",
@@ -56,7 +73,15 @@ procedure is subsequently paused or archived; it was already requested work.
 `get` returns current settings and version history; optional `version` returns
 that historical definition. `runs` returns recent live Tasks records, their
 procedure version, dispatch records, and `has_more` when history is truncated.
-Agents use Tasks get/set_progress/assign/complete for execution and evidence.
+`direct_runs` contains Processes-owned run history. `tasks_error` reports
+unavailable historical Tasks data without blocking direct history.
+
+For direct runs, agents read `run_get(process_id, run_id)` and use
+`run_update(process_id, run_id, state, progress?, current_step?, result?, error?)`.
+States: running, waiting, blocked, completed, failed, cancelled. Only the immutable
+owner can update the run. Completion requires result evidence; failures and
+blockers require a reason. Terminal outcomes are immutable. Tasks-backed runs
+use Tasks get/set_progress/assign/complete.
 
 ## HTTP panel API
 
@@ -67,7 +92,7 @@ The SDK provides bearer authentication; the platform authenticates operators.
 - `GET/POST /processes`: list or create a draft.
 - `GET/PUT /processes/{id}`: read or save a revision.
 - `POST /processes/{id}/activate|pause|archive|start`: lifecycle or execution.
-- `GET /processes/{id}/runs`: live Tasks history.
+- `GET /processes/{id}/runs`: direct and live Tasks history.
 
 The panel is `/ui/ProcessesPanel.mjs`, declared with `slot: project.page`.
 No dashboard-specific registration or server asset embed changes are needed.
@@ -78,9 +103,9 @@ Processes owns three tables:
 
 | Table | Responsibility |
 | --- | --- |
-| `processes` | Project scope, current version, desired lifecycle, sync state |
+| `processes` | Project scope, current version, desired lifecycle, sync state, direct schedule deadlines |
 | `process_versions` | Immutable definition JSON and author/timestamp |
-| `process_runs` | Durable manual/schedule dispatch keys, version/input snapshot references, task IDs, delivery warnings |
+| `process_runs` | Dispatch keys, immutable version references, backend, direct outcomes and delivery state, optional task IDs |
 
 A schedule dispatch row points to its Tasks schedule definition; Tasks stores
 individual occurrences. Processes reads those occurrences with their inherited

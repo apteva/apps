@@ -22,6 +22,7 @@ type Schedule struct {
 	Timezone string `json:"timezone,omitempty"`
 }
 type Definition struct {
+	ExecutionMode        string    `json:"execution_mode"`
 	Name                 string    `json:"name"`
 	Description          string    `json:"description"`
 	Instructions         string    `json:"instructions"`
@@ -33,14 +34,17 @@ type Definition struct {
 	Schedule             *Schedule `json:"schedule,omitempty"`
 }
 type Process struct {
-	ID          string `json:"id"`
-	ProjectID   string `json:"project_id"`
-	Status      string `json:"status"`
-	Version     int    `json:"version"`
-	SyncPending bool   `json:"sync_pending"`
-	SyncError   string `json:"sync_error"`
-	CreatedAt   string `json:"created_at"`
-	UpdatedAt   string `json:"updated_at"`
+	NextRunAt        string `json:"next_run_at,omitempty"`
+	ScheduledVersion int    `json:"scheduled_version"`
+	LastScheduleNote string `json:"last_schedule_note,omitempty"`
+	ID               string `json:"id"`
+	ProjectID        string `json:"project_id"`
+	Status           string `json:"status"`
+	Version          int    `json:"version"`
+	SyncPending      bool   `json:"sync_pending"`
+	SyncError        string `json:"sync_error"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
 	Definition
 }
 type Version struct {
@@ -50,6 +54,22 @@ type Version struct {
 	CreatedAt  string     `json:"created_at"`
 }
 type Run struct {
+	Backend           string `json:"backend"`
+	State             string `json:"state"`
+	Progress          int    `json:"progress"`
+	CurrentStep       string `json:"current_step"`
+	Result            string `json:"result"`
+	Error             string `json:"error"`
+	ExecutionID       string `json:"execution_id,omitempty"`
+	TargetThreadID    string `json:"target_thread_id,omitempty"`
+	DeliveredAt       string `json:"delivered_at,omitempty"`
+	DeliveryAttempts  int    `json:"delivery_attempts"`
+	NextAttemptAt     string `json:"next_attempt_at,omitempty"`
+	ScheduledFor      string `json:"scheduled_for,omitempty"`
+	SchedulePaused    bool   `json:"schedule_paused"`
+	LifecycleSequence int64  `json:"-"`
+	ExecutionState    string `json:"execution_state,omitempty"`
+
 	ID              string `json:"id"`
 	ProcessID       string `json:"process_id"`
 	Version         int    `json:"version"`
@@ -70,6 +90,12 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 func (d *Definition) validate() error {
+	if d.ExecutionMode == "" {
+		d.ExecutionMode = "agent"
+	}
+	if d.ExecutionMode != "agent" && d.ExecutionMode != "tasks" {
+		return errors.New("execution_mode must be agent or tasks")
+	}
 	d.Name = strings.TrimSpace(d.Name)
 	d.Instructions = strings.TrimSpace(d.Instructions)
 	if d.Name == "" || len(d.Name) > 160 {
@@ -114,7 +140,7 @@ func (d *Definition) validate() error {
 func (a *App) get(project, id string) (*Process, error) {
 	var p Process
 	var body string
-	err := a.db.QueryRow(`SELECT p.id,p.project_id,p.status,p.current_version,p.sync_pending,p.sync_error,p.created_at,p.updated_at,v.body_json FROM processes p JOIN process_versions v ON v.process_id=p.id AND v.version=p.current_version WHERE p.id=? AND p.project_id=?`, id, project).Scan(&p.ID, &p.ProjectID, &p.Status, &p.Version, &p.SyncPending, &p.SyncError, &p.CreatedAt, &p.UpdatedAt, &body)
+	err := a.db.QueryRow(`SELECT p.id,p.project_id,p.status,p.current_version,p.sync_pending,p.sync_error,p.created_at,p.updated_at,p.next_run_at,p.scheduled_version,p.last_schedule_note,v.body_json FROM processes p JOIN process_versions v ON v.process_id=p.id AND v.version=p.current_version WHERE p.id=? AND p.project_id=?`, id, project).Scan(&p.ID, &p.ProjectID, &p.Status, &p.Version, &p.SyncPending, &p.SyncError, &p.CreatedAt, &p.UpdatedAt, &p.NextRunAt, &p.ScheduledVersion, &p.LastScheduleNote, &body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -123,6 +149,9 @@ func (a *App) get(project, id string) (*Process, error) {
 	}
 	if err = json.Unmarshal([]byte(body), &p.Definition); err != nil {
 		return nil, err
+	}
+	if p.ExecutionMode == "" {
+		p.ExecutionMode = "tasks"
 	}
 	return &p, nil
 }
@@ -171,6 +200,9 @@ func (a *App) versions(id string) ([]Version, error) {
 		if err = json.Unmarshal([]byte(body), &v.Definition); err != nil {
 			return nil, err
 		}
+		if v.Definition.ExecutionMode == "" {
+			v.Definition.ExecutionMode = "tasks"
+		}
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -181,6 +213,9 @@ func (a *App) definition(id string, version int) (Definition, error) {
 	err := a.db.QueryRow(`SELECT body_json FROM process_versions WHERE process_id=? AND version=?`, id, version).Scan(&raw)
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &d)
+	}
+	if d.ExecutionMode == "" {
+		d.ExecutionMode = "tasks"
 	}
 	return d, err
 }
@@ -222,7 +257,7 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	if create {
 		_, err = tx.Exec(`INSERT INTO processes(id,project_id,created_at,updated_at) VALUES(?,?,?,?)`, id, project, now, now)
 	} else {
-		_, err = tx.Exec(`UPDATE processes SET current_version=?,status='draft',sync_error='',updated_at=? WHERE id=? AND project_id=?`, version, now, id, project)
+		_, err = tx.Exec(`UPDATE processes SET current_version=?,status='draft',sync_error='',next_run_at='',scheduled_version=0,last_schedule_note='',updated_at=? WHERE id=? AND project_id=?`, version, now, id, project)
 	}
 	if err != nil {
 		return nil, err
@@ -237,15 +272,16 @@ func (a *App) save(project, id, actor string, expected int, d Definition) (*Proc
 	return a.get(project, id)
 }
 func (a *App) dispatches(id string) ([]Run, error) {
-	rows, err := a.db.Query(`SELECT id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at FROM process_runs WHERE process_id=? ORDER BY created_at DESC,id DESC`, id)
+	rows, err := a.db.Query(`SELECT `+runColumns+` FROM process_runs WHERE process_id=? ORDER BY created_at DESC,id DESC`, id)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []Run{}
 	for rows.Next() {
-		var r Run
-		if err = rows.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt); err != nil {
+		r, scanErr := scanRun(rows)
+		if scanErr != nil {
+			err = scanErr
 			return nil, err
 		}
 		out = append(out, r)
@@ -265,7 +301,27 @@ func (a *App) reserveRun(p *Process, kind, key, inputs string) (Run, error) {
 			return r, nil
 		}
 	}
-	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp()}
-	_, err = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at) VALUES(?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt)
+	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued"}
+	_, err = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at,backend) VALUES(?,?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt, r.Backend)
+	return r, err
+}
+
+const runColumns = `id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at,backend,state,progress,current_step,result,error,execution_id,target_thread_id,delivered_at,delivery_attempts,next_attempt_at,scheduled_for,schedule_paused,lifecycle_sequence,execution_state`
+
+type scanner interface{ Scan(...any) error }
+
+func scanRun(row scanner) (Run, error) {
+	var r Run
+	err := row.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt, &r.Backend, &r.State, &r.Progress, &r.CurrentStep, &r.Result, &r.Error, &r.ExecutionID, &r.TargetThreadID, &r.DeliveredAt, &r.DeliveryAttempts, &r.NextAttemptAt, &r.ScheduledFor, &r.SchedulePaused, &r.LifecycleSequence, &r.ExecutionState)
+	return r, err
+}
+func (a *App) getRun(project, process, id string) (Run, error) {
+	if _, err := a.get(project, process); err != nil {
+		return Run{}, err
+	}
+	r, err := scanRun(a.db.QueryRow(`SELECT `+runColumns+` FROM process_runs WHERE process_id=? AND id=?`, process, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		err = errNotFound
+	}
 	return r, err
 }

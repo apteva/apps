@@ -107,3 +107,60 @@ func TestSidecarsProcessToTasks(t *testing.T) {
 		t.Fatalf("private bridge exposed: %s", resp.Body)
 	}
 }
+
+// Processes alone: no Tasks sidecar or inter-app gateway exists.
+func TestSidecarDirectWithoutTasks(t *testing.T) {
+	var delivered atomic.Int32
+	var interApp atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/apps/callback/agents/7":
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "owner-thread"})
+		case "/api/apps/callback/agents/7/event":
+			var request sdk.AgentEventRequest
+			json.NewDecoder(r.Body).Decode(&request)
+			delivered.Add(1)
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: "direct-execution", SourceEventID: request.SourceEventID, ThreadID: request.ThreadID})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/") {
+				interApp.Add(1)
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	d := def()
+	d.ExecutionMode = "agent"
+	var p Process
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d}, &p)
+	if resp.Status != 200 {
+		t.Fatalf("create %s", resp.Body)
+	}
+	resp = app.POST("/processes/"+p.ID+"/activate?project_id=project-a", map[string]any{}, &p)
+	if resp.Status != 200 || p.SyncPending {
+		t.Fatalf("activate %s", resp.Body)
+	}
+	var started struct {
+		Run Run `json:"run"`
+	}
+	path := "/processes/" + p.ID + "/start?project_id=project-a"
+	resp = app.POST(path, map[string]any{"idempotency_key": "direct"}, &started)
+	if resp.Status != 200 || started.Run.DeliveredAt == "" {
+		t.Fatalf("start %s", resp.Body)
+	}
+	app.POST(path, map[string]any{"idempotency_key": "direct"}, &started)
+	if delivered.Load() != 1 {
+		t.Fatal("duplicate delivery")
+	}
+	app.MCPAs("run_get", map[string]any{"process_id": p.ID, "run_id": started.Run.ID}, 7, "owner-thread", "project-a")
+	app.MCPAs("run_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "state": "completed", "result": "Approved report attached"}, 7, "owner-thread", "project-a")
+	var history struct {
+		Direct []Run `json:"direct_runs"`
+	}
+	resp = app.GET("/processes/"+p.ID+"/runs?project_id=project-a", &history)
+	if resp.Status != 200 || len(history.Direct) != 1 || history.Direct[0].State != "completed" || interApp.Load() != 0 {
+		t.Fatalf("direct history %s; inter-app=%d", resp.Body, interApp.Load())
+	}
+}
