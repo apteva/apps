@@ -96,25 +96,26 @@ type TaskEvent struct {
 }
 
 type CreateTaskInput struct {
-	AgentID               int64
-	ProjectID             string
-	Title                 string
-	Description           string
-	State                 string
-	Progress              *int
-	CurrentStep           string
-	CreatedByThreadID     string
-	AssignedThreadID      string
-	ParentTaskID          string
-	IdempotencyKey        string
-	RecoveryOfTaskID      string
-	OriginalOccurrenceKey string
-	RecoveryAttempt       int
-	RecoveryReason        string
-	OperationKey          string
-	Schedule              *ScheduleInput
-	ScheduledFor          *time.Time
-	OccurrenceKey         string
+	ScheduleInitiallyPaused bool
+	AgentID                 int64
+	ProjectID               string
+	Title                   string
+	Description             string
+	State                   string
+	Progress                *int
+	CurrentStep             string
+	CreatedByThreadID       string
+	AssignedThreadID        string
+	ParentTaskID            string
+	IdempotencyKey          string
+	RecoveryOfTaskID        string
+	OriginalOccurrenceKey   string
+	RecoveryAttempt         int
+	RecoveryReason          string
+	OperationKey            string
+	Schedule                *ScheduleInput
+	ScheduledFor            *time.Time
+	OccurrenceKey           string
 }
 
 type TaskAgentExecution struct {

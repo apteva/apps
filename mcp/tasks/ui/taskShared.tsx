@@ -495,6 +495,8 @@ export function TaskDetails({
   }, [refresh]);
   useTaskEvents(props, refresh);
   const current = detail?.task || task;
+  const processReference = current.description?.match(/^Process ID: (process-[a-f0-9]+)\nProcedure version: ([0-9]+)$/m);
+
   const action = async (name: "pause" | "resume" | "run-now" | "cancel") => {
     setBusy(true);
     try {
@@ -550,7 +552,7 @@ export function TaskDetails({
         aria-label="Close task"
       />
       <aside className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-border bg-bg-card shadow-2xl">
-        <header className="border-b border-border p-5">
+        <header className="border-b border-border p-5" style={{maxHeight: "50%", overflowY: "auto", flexShrink: 0}}>
           <div className="flex items-center gap-2">
             <StatePill task={current} />
             <button
@@ -564,6 +566,11 @@ export function TaskDetails({
           <h2 className="mt-3 text-base font-bold text-text">
             {current.title}
           </h2>
+          {processReference && props.projectId && (
+            <a className="mt-2 block text-xs text-accent" href={`/apps/processes/page?${new URLSearchParams({project_id: props.projectId, process_id: processReference[1], version: processReference[2]})}`}>
+              View procedure · version {processReference[2]} ↗
+            </a>
+          )}
           {current.description && (
             <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-text-muted">
               {current.description}

@@ -25,6 +25,15 @@ export default function TasksPanel(props: HostProps) {
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("task_id");
+    if (!id || !props.projectId) return;
+    let active = true;
+    taskAPI.get(props, id).then(({ task }) => { if (active) setSelected(task); }).catch(() => {});
+    return () => { active = false; };
+  }, [props.projectId, props.installId]);
+
+
+  useEffect(() => {
     let active = true;
     setAgents([]); setSelected(null); setCreating(false);
     if (!props.projectId) return;

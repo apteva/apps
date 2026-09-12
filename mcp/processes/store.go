@@ -1,0 +1,271 @@
+package main
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"github.com/robfig/cron/v3"
+	"strings"
+	"time"
+)
+
+var errNotFound = errors.New("process not found in this project")
+var errConflict = errors.New("procedure changed; reload before saving")
+
+type Schedule struct {
+	Kind     string `json:"kind"`
+	Every    string `json:"every,omitempty"`
+	Cron     string `json:"cron,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+}
+type Definition struct {
+	Name                 string    `json:"name"`
+	Description          string    `json:"description"`
+	Instructions         string    `json:"instructions"`
+	RequiredInputs       string    `json:"required_inputs"`
+	DefaultInputs        string    `json:"default_inputs"`
+	CompletionCriteria   string    `json:"completion_criteria"`
+	ApprovalRequirements string    `json:"approval_requirements"`
+	OwnerAgentID         int64     `json:"owner_agent_id"`
+	Schedule             *Schedule `json:"schedule,omitempty"`
+}
+type Process struct {
+	ID          string `json:"id"`
+	ProjectID   string `json:"project_id"`
+	Status      string `json:"status"`
+	Version     int    `json:"version"`
+	SyncPending bool   `json:"sync_pending"`
+	SyncError   string `json:"sync_error"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+	Definition
+}
+type Version struct {
+	Version    int        `json:"version"`
+	Definition Definition `json:"definition"`
+	CreatedBy  string     `json:"created_by"`
+	CreatedAt  string     `json:"created_at"`
+}
+type Run struct {
+	ID              string `json:"id"`
+	ProcessID       string `json:"process_id"`
+	Version         int    `json:"version"`
+	Kind            string `json:"kind"`
+	RequestKey      string `json:"request_key"`
+	Inputs          string `json:"inputs"`
+	TaskID          string `json:"task_id"`
+	DeliveryWarning string `json:"delivery_warning"`
+	CreatedAt       string `json:"created_at"`
+}
+
+func timestamp() string { return time.Now().UTC().Format(time.RFC3339Nano) }
+func newID(prefix string) string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return prefix + hex.EncodeToString(b)
+}
+func (d *Definition) validate() error {
+	d.Name = strings.TrimSpace(d.Name)
+	d.Instructions = strings.TrimSpace(d.Instructions)
+	if d.Name == "" || len(d.Name) > 160 {
+		return errors.New("name must contain 1–160 characters")
+	}
+	if d.Instructions == "" || strings.TrimSpace(d.CompletionCriteria) == "" {
+		return errors.New("instructions and completion criteria are required")
+	}
+	if d.OwnerAgentID <= 0 {
+		return errors.New("choose an owner agent")
+	}
+	raw, _ := json.Marshal(d)
+	if len(raw) > 128*1024 {
+		return errors.New("procedure exceeds 128 KB")
+	}
+	if s := d.Schedule; s != nil {
+		if s.Timezone == "" {
+			s.Timezone = "UTC"
+		}
+		loc, err := time.LoadLocation(s.Timezone)
+		if err != nil {
+			return errors.New("invalid IANA timezone")
+		}
+		switch s.Kind {
+		case "interval":
+			duration, err := time.ParseDuration(s.Every)
+			if err != nil || duration < time.Minute {
+				return errors.New("interval must be at least 1m")
+			}
+		case "cron":
+			parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+			schedule, err := parser.Parse(s.Cron)
+			if err != nil || schedule.Next(time.Now().In(loc)).IsZero() {
+				return errors.New("invalid five-field cron schedule")
+			}
+		default:
+			return errors.New("schedule kind must be interval or cron")
+		}
+	}
+	return nil
+}
+func (a *App) get(project, id string) (*Process, error) {
+	var p Process
+	var body string
+	err := a.db.QueryRow(`SELECT p.id,p.project_id,p.status,p.current_version,p.sync_pending,p.sync_error,p.created_at,p.updated_at,v.body_json FROM processes p JOIN process_versions v ON v.process_id=p.id AND v.version=p.current_version WHERE p.id=? AND p.project_id=?`, id, project).Scan(&p.ID, &p.ProjectID, &p.Status, &p.Version, &p.SyncPending, &p.SyncError, &p.CreatedAt, &p.UpdatedAt, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err = json.Unmarshal([]byte(body), &p.Definition); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+func (a *App) list(project string) ([]Process, error) {
+	rows, err := a.db.Query(`SELECT id FROM processes WHERE project_id=? ORDER BY updated_at DESC,id DESC`, project)
+	if err != nil {
+		return nil, err
+	}
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	out := []Process{}
+	for _, id := range ids {
+		p, e := a.get(project, id)
+		if e != nil {
+			return nil, e
+		}
+		out = append(out, *p)
+	}
+	return out, nil
+}
+func (a *App) versions(id string) ([]Version, error) {
+	rows, err := a.db.Query(`SELECT version,body_json,created_by,created_at FROM process_versions WHERE process_id=? ORDER BY version DESC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Version{}
+	for rows.Next() {
+		var v Version
+		var body string
+		if err = rows.Scan(&v.Version, &body, &v.CreatedBy, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(body), &v.Definition); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (a *App) definition(id string, version int) (Definition, error) {
+	var d Definition
+	var raw string
+	err := a.db.QueryRow(`SELECT body_json FROM process_versions WHERE process_id=? AND version=?`, id, version).Scan(&raw)
+	if err == nil {
+		err = json.Unmarshal([]byte(raw), &d)
+	}
+	return d, err
+}
+func (a *App) save(project, id, actor string, expected int, d Definition) (*Process, error) {
+	if err := d.validate(); err != nil {
+		return nil, err
+	}
+	agent, err := a.ctx.GetAgent(d.OwnerAgentID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve owner: %w", err)
+	}
+	if agent.ProjectID != project {
+		return nil, errors.New("owner is outside this project")
+	}
+	version := 1
+	now := timestamp()
+	create := id == ""
+	if create {
+		id = newID("process-")
+	} else {
+		p, err := a.get(project, id)
+		if err != nil {
+			return nil, err
+		}
+		if p.Version != expected {
+			return nil, errConflict
+		}
+		if p.SyncPending || p.Status == "active" || p.Status == "archived" {
+			return nil, errors.New("pause and synchronize the process before editing")
+		}
+		version = p.Version + 1
+	}
+	body, _ := json.Marshal(d)
+	tx, err := a.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if create {
+		_, err = tx.Exec(`INSERT INTO processes(id,project_id,created_at,updated_at) VALUES(?,?,?,?)`, id, project, now, now)
+	} else {
+		_, err = tx.Exec(`UPDATE processes SET current_version=?,status='draft',sync_error='',updated_at=? WHERE id=? AND project_id=?`, version, now, id, project)
+	}
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`INSERT INTO process_versions(process_id,version,body_json,created_by,created_at) VALUES(?,?,?,?,?)`, id, version, string(body), actor, now)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return a.get(project, id)
+}
+func (a *App) dispatches(id string) ([]Run, error) {
+	rows, err := a.db.Query(`SELECT id,process_id,version,kind,request_key,inputs,task_id,delivery_warning,created_at FROM process_runs WHERE process_id=? ORDER BY created_at DESC,id DESC`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Run{}
+	for rows.Next() {
+		var r Run
+		if err = rows.Scan(&r.ID, &r.ProcessID, &r.Version, &r.Kind, &r.RequestKey, &r.Inputs, &r.TaskID, &r.DeliveryWarning, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+func (a *App) reserveRun(p *Process, kind, key, inputs string) (Run, error) {
+	runs, err := a.dispatches(p.ID)
+	if err != nil {
+		return Run{}, err
+	}
+	for _, r := range runs {
+		if r.RequestKey == key {
+			if r.Inputs != inputs || r.Kind != kind {
+				return Run{}, errors.New("idempotency key already used with different input")
+			}
+			return r, nil
+		}
+	}
+	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp()}
+	_, err = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,inputs,created_at) VALUES(?,?,?,?,?,?,?)`, r.ID, r.ProcessID, r.Version, r.Kind, r.RequestKey, r.Inputs, r.CreatedAt)
+	return r, err
+}
