@@ -1,4 +1,4 @@
-# Processes Tier 3 smoke tests
+# Processes Tier 3 tests
 
 These tests run real Apteva Core agents with the `openai-codex` provider and
 `gpt-5.6-terra`. The Processes sidecar is built from this checkout. Each scenario
@@ -10,13 +10,14 @@ No Tasks integration is installed and no external publishing service is used.
 | `01-direct-completion.yaml` | Exactly one direct occurrence completes with `Net: 800`. |
 | `02-assignment-parameters.yaml` | Two assignments reuse `day-1` independently and retain distinct page parameters and results. |
 | `03-human-approval-gate.yaml` | The agent finishes the draft; human review remains waiting and publication remains pending and undispatched. |
+| `04-multi-agent-workflow.yaml` | Three distinct agents complete five steps with parallel inputs, a dependency join, explicit agent approval, and a simulated receipt. |
 
 Run from the Processes app directory:
 
 ```sh
 bun run scenarios/run.ts
 # One case:
-bun run scenarios/run.ts scenarios/03-human-approval-gate.yaml
+bun run scenarios/run.ts scenarios/04-multi-agent-workflow.yaml
 ```
 
 The wrapper invokes `apteva test --provider openai-codex --model gpt-5.6-terra`
@@ -43,9 +44,16 @@ process IDs into assertion URLs. A model's success claim or completion attempt
 cannot satisfy those checks. Use `bun run scenarios/run.ts` for full validation;
 raw `apteva test` runs only the YAML assertions.
 
-This is deliberately a starter suite. It exercises one real agent per scenario,
-including multiple workflow roles on that agent and a human boundary. It does
-not yet cover distinct-agent collaboration, operator approval/rejection,
+The fourth scenario uses `setup.topology.nodes` with a primary coordinator and
+two responder agents (writer and reviewer). Use a topology-capable CLI build
+through `APTEVA_TEST_CLI`. Generated `${PRIMARY_AGENT_ID}`, `${AGENT_writer_ID}`,
+and `${AGENT_reviewer_ID}` values bind workflow roles to the actual instances.
+Every agent uses the selected Terra model. Research and audience steps become
+ready together; drafting waits for both; review gates simulated publication.
+The verifier checks audit ordering, frozen roles, distinct executor IDs, and
+successful read/completion calls attributed to the assigned agent.
+
+This is a starter suite. It does not yet cover operator approval/rejection,
 Tasks-backed execution, scheduled dispatch, or delivery fault injection. Those
 remain covered by deterministic integration tests, not by these live-LLM cases.
 
@@ -54,4 +62,9 @@ remain covered by deterministic integration tests, not by these live-LLM cases.
 On 2026-09-12, all three scenarios and the post-run database checks passed using
 `openai-codex` / `gpt-5.6-terra`: direct completion (8 iterations), assignment
 parameters (11), and the human approval boundary (8). This is one passing smoke
-run, not a measured reliability rate. The five verifier unit tests also pass.
+run, not a measured reliability rate. The verifier unit tests also pass.
+
+The five-step, three-agent scenario also passed on 2026-09-12: 24 aggregate
+iterations, 341,939 reported tokens, approximately 92 seconds. Saved state and
+agent-attributed telemetry both passed verification. Publication was a local
+simulated receipt; no Tasks app or external publisher was installed.
