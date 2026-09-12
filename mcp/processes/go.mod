@@ -1,4 +1,4 @@
-module github.com/apteva/apps/mcp/tasks
+module github.com/apteva/apps/mcp/processes
 
 go 1.25.1
 

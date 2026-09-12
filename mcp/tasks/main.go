@@ -78,7 +78,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	}
 }
 
-func (a *App) MCPTools() []sdk.Tool           { return a.tools() }
+func (a *App) MCPTools() []sdk.Tool           { return append(a.tools(), a.processTool()) }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{{Event: sdk.AgentEventLifecycleEvent, Handler: a.handleAgentEventLifecycle}}

@@ -1,0 +1,66 @@
+schema: apteva-app/v1
+name: processes
+display_name: Processes
+version: 0.1.0
+description: Versioned company procedures with agent ownership and durable executions powered by Tasks.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/processes
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [productivity, processes, agents, operations]
+scopes: [project, global]
+min_apteva_version: "0.50.4"
+requires:
+  permissions: [db.write.app, platform.apps.call, platform.instances.read]
+  apps:
+    - name: tasks
+      version: ">=3.6.0"
+      reason: Tasks 3.6.0 or newer owns execution, assignment, and recurring schedules.
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: list, description: Find company procedures. }
+    - { name: get, description: Read a procedure and its version history. }
+    - { name: create, description: Create a draft company procedure. }
+    - { name: update, description: Create an immutable procedure revision while paused or draft. }
+    - { name: activate, description: Activate a procedure and its Tasks schedule. }
+    - { name: pause, description: Stop future scheduled runs without interrupting current work. }
+    - { name: archive, description: Retire a procedure and stop future scheduled runs. }
+    - { name: start, description: Start one execution of an active procedure. }
+    - { name: runs, description: Inspect Tasks execution history for a procedure. }
+  ui_panels:
+    - slot: project.page
+      label: Processes
+      icon: clipboard-list
+      entry: /ui/ProcessesPanel.mjs
+      suggested: true
+  skills:
+    - name: how-to-use-processes
+      body_file: skills/how-to-use-processes.md
+      description: Discover, maintain, and execute company procedures using Tasks.
+      metadata:
+        category: productivity
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: processes/v0.1.0
+    entry: mcp/processes
+  port: 8080
+  health_check: /health
+  resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 256 }
+  storage:
+    - { name: data, mount_path: /data }
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN: { from: platform }
+    APTEVA_INSTALL_ID: { from: platform }
+    APTEVA_PROJECT_ID: { from: platform }
+    APTEVA_APP_CONFIG: { from: platform }
+db:
+  driver: sqlite
+  path: /data/processes.db
+  migrations: migrations/
+config_schema: []
+upgrade_policy: auto-patch

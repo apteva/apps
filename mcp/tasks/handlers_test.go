@@ -1609,7 +1609,7 @@ func TestConcurrentSchedulerTicksClaimOneRedispatch(t *testing.T) {
 func TestManifestAndToolContract(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "tasks" || manifest.Version != "3.5.3" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
+	if manifest.Name != "tasks" || manifest.Version != "3.6.0" || manifest.MinAptevaVersion != "0.40.6" || manifest.Icon != "/ui/icon.svg" || manifest.IconStyle != "monochrome" || len(manifest.Provides.UIComponents) != 3 || len(manifest.Provides.UISurfaces) != 1 || len(manifest.Provides.Skills) != 1 {
 		t.Fatalf("manifest surfaces incomplete: %+v", manifest.Provides)
 	}
 	overview := manifest.Provides.UIComponents[0]
@@ -1650,7 +1650,7 @@ func TestManifestAndToolContract(t *testing.T) {
 			t.Fatalf("embedded Tasks skill missing classification rule %q", required)
 		}
 	}
-	want := map[string]bool{"create": false, "list": false, "get": false, "set_progress": false, "edit": false, "fail": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false, "recover_occurrence": false}
+	want := map[string]bool{"create": false, "list": false, "get": false, "set_progress": false, "edit": false, "fail": false, "update": false, "assign": false, "complete": false, "cancel": false, "pause": false, "resume": false, "run_now": false, "recover_occurrence": false, "process_task": false}
 	for _, tool := range app.MCPTools() {
 		if _, ok := want[tool.Name]; !ok {
 			t.Fatalf("unexpected tool %q", tool.Name)
