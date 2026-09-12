@@ -253,3 +253,28 @@ for(const host of ["dashboard","external"]){
   await page.getByRole("button",{name:"Send",exact:true}).click();await expect(page.locator(".chat-message-attachment")).toHaveText(/pasted.txt/);
  });
 }
+
+for (const host of ["dashboard", "external"]) {
+ test(`${host}: automatic compact composer follows chat width and preserves draft`, async ({page,request}) => {
+  await request.post("/reset");await page.setViewportSize({width:1280,height:800});await page.goto(`/?host=${host}`);
+  const input=page.getByRole("textbox");await input.fill("Keep this draft");
+  const geometry=()=>page.locator(".chat-composer-box").evaluate(el=>{const input=el.querySelector("textarea")!,add=el.querySelector(".chat-composer-add")!,send=el.querySelector(".chat-composer-send")!;return {input:input.getBoundingClientRect().toJSON(),add:add.getBoundingClientRect().toJSON(),send:send.getBoundingClientRect().toJSON(),box:el.getBoundingClientRect().toJSON()};});
+  expect((await geometry()).input.top).toBeLessThan((await geometry()).add.top);
+  // Narrow the embed itself while the browser remains desktop-sized.
+  await page.locator("main").evaluate(el=>{el.style.width="420px";});
+  await expect.poll(async()=>Math.abs((await geometry()).input.top-(await geometry()).add.top)).toBeLessThan(2);
+  expect((await geometry()).box.height).toBeLessThan(65);await expect(input).toHaveValue("Keep this draft");
+  await page.locator(".chat-composer-box").screenshot({path:test.info().outputPath("compact-composer.png")});
+  await input.fill("First line\nSecond line\nThird line");await expect.poll(async()=>(await geometry()).input.height).toBeGreaterThan(60);
+  await page.locator("main").evaluate(el=>{el.style.width="";});await expect(input).toHaveValue("First line\nSecond line\nThird line");
+ });
+ test(`${host}: explicit compact and expanded composer overrides`, async ({page,request}) => {
+  await request.post("/reset");await page.addInitScript(()=>{(window as any).COMPOSER_OPTIONS={layout:new URLSearchParams(location.search).get("layout")};});
+  for(const layout of ["compact","expanded"]){
+   await page.setViewportSize(layout==="compact"?{width:1280,height:800}:{width:390,height:800});await page.goto(`/?host=${host}&layout=${layout}`);await page.getByRole("textbox").fill("Hello");
+   const box=page.locator(".chat-composer-box");await expect(box).toHaveAttribute("data-layout",layout);
+   const distance=await box.evaluate(el=>el.querySelector(".chat-composer-add")!.getBoundingClientRect().top-el.querySelector("textarea")!.getBoundingClientRect().top);
+   if(layout==="compact")expect(Math.abs(distance)).toBeLessThan(2);else expect(distance).toBeGreaterThan(30);
+  }
+ });
+}

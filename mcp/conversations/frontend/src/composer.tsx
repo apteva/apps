@@ -4,6 +4,8 @@ import { useConversationAPI } from "./context";
 import { useConversationLocalization } from "./i18n";
 
 export interface ComposerOptions {
+  /** Auto uses one row when the chat area is 480px wide or narrower. */
+  layout?: "auto" | "compact" | "expanded";
   files?: boolean;
   screenshot?: boolean;
   accept?: string;

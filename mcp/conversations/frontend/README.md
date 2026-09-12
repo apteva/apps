@@ -179,11 +179,14 @@ The main composer action pauses an active reply or tool when the input is empty,
 
 Every chat surface uses the same attachment composer and message renderer. Its `+` menu includes files/photos and screenshot capture; paste and drag/drop work too. Attachments can be sent with or without text while an agent is active. Completed uploads remain in the per-conversation session draft; a pending send retains its original idempotency key. Unsaved uploads interrupted by a reload must be selected again.
 
+The composer defaults to `layout: "auto"`: a single row (`+`, text, send/pause) when its chat container is 480px wide or narrower, and the expanded layout otherwise. Set `composer={{ layout: "compact" }}` to always use one row, or `composer={{ layout: "expanded" }}` to always keep the larger composer. Long text grows vertically and attachment previews appear above the row. Switching layouts preserves the draft and attachments. The dashboard widget exposes the same choice under **Composer layout** (`composer_layout`).
+
 Configure `composer` on `ConversationChat`, `ConversationThread`, `AgentConversations`, `ConversationsPanel`, or `ConversationsProvider` (and the native dashboard wrappers):
 
 ```tsx
 <ConversationChat conversations={conversations} agentId={agentId}
   composer={{
+    layout: "auto",
     files: true,
     screenshot: true,
     accept: "image/*,.txt,.pdf",

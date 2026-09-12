@@ -1,6 +1,6 @@
 import { ComposerAttachments, ComposerMenu, type ComposerController } from "./composer";
 import { useConversationLocalization } from "./i18n";
-import type { KeyboardEvent, ReactNode, RefObject } from "react";
+import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
 export interface ConversationChatViewProps {
   attachments:ComposerController;
@@ -68,6 +68,19 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
  */
 export default function ConversationChatView(props: ConversationChatViewProps) {
   const { t } = useConversationLocalization();
+  const layout = props.attachments.options.layout ?? "auto";
+  // Reflow long/restored drafts when the container or selected layout changes.
+  useLayoutEffect(() => {
+    const input = props.inputRef.current;
+    if (!input) return;
+    const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 144) + "px"; };
+    resize();
+    if (typeof ResizeObserver === "undefined") return;
+    let width = input.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => { const next = input.getBoundingClientRect().width; if (next !== width) { width = next; resize(); } });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [props.draft, layout, props.archived]);
   const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
   const showBreak = props.responseActive && !hasDraft;
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
@@ -179,6 +192,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               if (hasDraft && !props.sending) props.onSend();
             }}
             className="chat-composer-box"
+            data-layout={layout}
           >
             <ComposerAttachments controller={props.attachments}/>
             <textarea

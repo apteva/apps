@@ -283,3 +283,22 @@
 
 .apteva-conversations .chat-composer-popover svg {display:block;flex:0 0 18px}
 .apteva-conversations .chat-attachment-tray {padding:2px 6px}
+
+/* Compact follows the chat width, including narrow embeds on wide screens. */
+.apteva-conversations .chat-composer-safe {container-type:inline-size;container-name:apteva-composer}
+.apteva-conversations .chat-composer-box[data-layout="compact"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-toolbar {display:contents}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-send {order:3;margin-left:0}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-tray,
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+@container apteva-composer (max-width:480px) {
+.apteva-conversations .chat-composer-box[data-layout="auto"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-toolbar {display:contents}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-send {order:3;margin-left:0}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-tray,
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+}

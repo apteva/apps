@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.2 — 2026-09-12
+
+- Add composer.layout (auto, compact, expanded). Auto is the default and uses a single row in chat containers up to 480px wide. Explicit modes override responsive selection.
+- Expose Composer layout in dashboard widget settings. Preserve drafts, attachment previews, multiline growth and send/pause behavior in both modes and both hosts.
+- Verify responsive container sizing, explicit overrides and draft preservation alongside the full 29-browser-test and 31-unit/UI-test suites.
+
 ## 0.23.1 — 2026-09-12
 
 - Refine the shared composer with explicit inherited sans-serif typography, aligned text/icon insets, matching 36px controls and 20px SVG icons, a lighter send arrow and a subtle focus border. Preserve enlarged touch hit areas and keyboard focus indicators.
