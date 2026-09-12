@@ -217,16 +217,51 @@
 
 }
 
-.apteva-conversations .chat-composer-box { position:relative; display:flex; flex-direction:column; gap:8px; border:1px solid var(--color-border,#373737); border-radius:20px; background:var(--color-bg-input,#171717); padding:12px; }
-.apteva-conversations .chat-composer-box:focus-within {border-color:var(--color-accent,#a96220)}
-.apteva-conversations .chat-composer-box textarea {width:100%;min-height:48px;max-height:144px;box-sizing:border-box}
-.apteva-conversations .chat-composer-toolbar {display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:36px}
-.apteva-conversations .chat-composer-toolbar > button:last-child {margin-left:auto}
-.apteva-conversations .chat-composer-menu {position:relative}
-.apteva-conversations .chat-composer-add {display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:10px;font-size:26px;color:var(--color-text-muted,#aaa)}
-.apteva-conversations .chat-composer-add:hover {background:var(--color-bg,#222);color:var(--color-text,#eee)}
+/* One type and spacing scale for the input and both composer controls. */
+.apteva-conversations .chat-composer-box {
+ position:relative; display:flex; flex-direction:column; gap:8px;
+ border:1px solid var(--color-border,#373737); border-radius:20px;
+ background:var(--color-bg-input,#171717); padding:12px 12px 10px;
+ transition:border-color 150ms ease;
+}
+.apteva-conversations .chat-composer-box:focus-within {
+ border-color:color-mix(in srgb,var(--color-text,#eee) 28%,var(--color-border,#373737));
+}
+.apteva-conversations .chat-composer-box .chat-composer-input {
+ display:block; width:100%; min-width:0; min-height:44px; max-height:144px;
+ box-sizing:border-box; resize:none; margin:0; padding:4px 8px;
+ border:0; border-radius:0; outline:none; box-shadow:none; background:transparent;
+ font-family:inherit; font-size:16px; font-weight:400; line-height:24px;
+ letter-spacing:normal; color:var(--color-text,#eee);
+}
+.apteva-conversations .chat-composer-input::placeholder {color:var(--color-text-muted,#999);opacity:1}
+.apteva-conversations .chat-composer-toolbar {
+ display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:36px;
+}
+.apteva-conversations .chat-composer-menu {position:relative;display:flex;align-items:center}
+.apteva-conversations .chat-composer-add,
+.apteva-conversations .chat-composer-send {
+ position:relative; display:inline-flex; flex:0 0 36px; align-items:center; justify-content:center;
+ width:36px; height:36px; min-width:36px; min-height:36px; padding:0; margin:0; border:0;
+ border-radius:50%; line-height:1; cursor:pointer; transition:background-color 150ms ease,opacity 150ms ease;
+}
+.apteva-conversations .chat-composer-add {background:transparent;color:var(--color-text-muted,#aaa)}
+.apteva-conversations .chat-composer-add:hover,
+.apteva-conversations .chat-composer-add[aria-expanded="true"] {background:color-mix(in srgb,var(--color-text,#eee) 8%,transparent);color:var(--color-text,#eee)}
+.apteva-conversations .chat-composer-toolbar > .chat-composer-send {margin-left:auto;background:var(--color-accent,#f97316);color:var(--color-bg,#0a0a0a)}
+.apteva-conversations .chat-composer-send:enabled:hover {background:var(--color-accent-hover,var(--color-accent,#f97316))}
+.apteva-conversations .chat-composer-send:disabled {opacity:.3;cursor:default}
+.apteva-conversations .chat-composer-add:disabled {opacity:.4;cursor:default}
+.apteva-conversations .chat-composer-add svg,
+.apteva-conversations .chat-composer-send svg {display:block;flex-shrink:0;width:20px;height:20px}
+.apteva-conversations .chat-composer-add:focus-visible,
+.apteva-conversations .chat-composer-send:focus-visible {outline:2px solid var(--color-accent,#f97316);outline-offset:3px}
+@media (pointer:coarse) {
+ .apteva-conversations .chat-composer-add::after,
+ .apteva-conversations .chat-composer-send::after {content:"";position:absolute;inset:-4px;border-radius:50%}
+}
 .apteva-conversations .chat-composer-popover {position:absolute;bottom:calc(100% + 10px);left:0;z-index:40;min-width:240px;max-width:calc(100vw - 50px);padding:6px;border:1px solid var(--color-border,#444);border-radius:14px;background:var(--color-bg-input,#222);box-shadow:0 8px 32px #0005}
-.apteva-conversations .chat-composer-popover button {display:flex;gap:10px;align-items:center;text-align:left;width:100%;padding:10px;border-radius:8px;font-size:14px}
+.apteva-conversations .chat-composer-popover button {display:flex;gap:10px;align-items:center;text-align:left;width:100%;min-height:40px;padding:9px 10px;border-radius:8px;font-family:inherit;font-size:14px;font-weight:400;line-height:22px}
 .apteva-conversations .chat-composer-popover button:hover {background:var(--color-bg,#333)}
 .apteva-conversations .chat-composer-popover button:disabled {opacity:.4;cursor:not-allowed}
 .apteva-conversations .chat-attachment-tray {display:flex;gap:8px;flex-wrap:wrap}
@@ -245,3 +280,6 @@
 .apteva-conversations .chat-image-dialog::backdrop {background:#000b}
 .apteva-conversations .chat-image-dialog img {max-width:85vw;max-height:75vh;object-fit:contain}
 .apteva-conversations .chat-image-dialog button {display:block;margin-left:auto;padding:8px}
+
+.apteva-conversations .chat-composer-popover svg {display:block;flex:0 0 18px}
+.apteva-conversations .chat-attachment-tray {padding:2px 6px}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.1 — 2026-09-12
+
+- Refine the shared composer with explicit inherited sans-serif typography, aligned text/icon insets, matching 36px controls and 20px SVG icons, a lighter send arrow and a subtle focus border. Preserve enlarged touch hit areas and keyboard focus indicators.
+- Align attachment-menu labels and icons; verified identical geometry in dashboard and exported chat, with desktop/mobile visual review and all 25 browser checks passing.
+
 ## 0.23.0 — 2026-09-12
 
 - Add the shared configurable + composer menu for files/photos, pasted or dropped attachments, and one-frame screenshots, with native capture and custom action callbacks.

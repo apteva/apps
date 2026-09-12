@@ -187,9 +187,8 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
               onKeyDown={props.onComposerKeyDown}
               rows={1}
-              style={{ lineHeight: "20px", minHeight: "36px" }}
               placeholder={props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
-              className="block min-w-0 flex-1 resize-none bg-transparent py-2 text-base text-text placeholder:text-text-dim focus:outline-none sm:text-sm"
+              className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
                 window.matchMedia("(hover: hover) and (pointer: fine)").matches
@@ -200,22 +199,21 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
               type={showBreak ? "button" : "submit"}
               onClick={showBreak ? props.onSoftBreak : undefined}
               disabled={showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error)}
-              className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
+              className="chat-composer-send"
               aria-label={showBreak ? breakLabel : t("chat.send")}
               aria-busy={showBreak && props.breakBusy ? true : undefined}
               title={showBreak ? (props.breakBusy || props.breakRequested ? breakLabel : t("chat.breakHint")) : t("chat.sendHint")}
             >
-              {showBreak ? <Glyph d={GLYPH_PAUSE} size={16} /> : <svg
-                viewBox="0 0 20 20"
-                className="w-4 h-4"
+              {showBreak ? <Glyph d={GLYPH_PAUSE} size={20} /> : <svg
+                viewBox="0 0 24 24"
+                width="20" height="20" aria-hidden="true"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="2.5"
+                strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
-                <path d="M10 17V3" />
-                <path d="M5 8l5-5 5 5" />
+                <path d="M12 19V5 M5 12l7-7 7 7" />
               </svg>}
             </button>
             </div>
