@@ -248,3 +248,9 @@ Tests cover assignment isolation, snapshots across edits and retries, typed
 parameters, independent schedule overlap/pause, version following and pinning,
 legacy migration, real sidecars with and without Tasks, and panel interactions, plus role handoffs, parallel joins, frozen approval
 outputs, rejected runs, workflow cancellation, and scoped executor authorization.
+
+
+Tier 3 live-LLM smoke tests are in [scenarios/README.md](scenarios/README.md).
+Run `bun run scenarios/run.ts` from this app directory to use Codex /
+`gpt-5.6-terra` and verify persisted direct-run, assignment, and approval-gate
+outcomes. These are separate from the deterministic Go integration suite.

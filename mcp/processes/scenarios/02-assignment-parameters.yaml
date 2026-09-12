@@ -1,0 +1,46 @@
+name: processes-assignment-parameters
+description: One real LLM executes the same procedure for two different page parameters.
+timeout: 5m
+settle_for: 3s
+max_iterations: 22
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  Test one reusable procedure for two pages in this isolated project. Your agent
+  ID is ${APTEVA_TEST_AGENT_ID}. Use Processes only, with direct agent execution.
+  Create exactly one procedure named "Tier 3 page briefing", owned by you,
+  no schedule and no structured steps, with required string parameter page
+  defaulting to photography. Instructions: read the run's frozen page parameter
+  and report exactly "Briefing for <page>". Completion criteria: that exact result.
+  The default assignment will use photography. Add one assignment named "Cooking"
+  with target "Cooking page", owned by you, execution_mode=agent, follow_latest=true,
+  parameters={"page":"cooking"}. You are authorized to activate the procedure and
+  both assignments.
+  Start each assignment exactly once using the SAME idempotency_key=day-1 for
+  both assignments. Read each run_get and use that run's saved parameters before
+  completing it through run_update. The photography result must be exactly
+  "Briefing for photography"; cooking must be exactly "Briefing for cooking".
+  Events may repeat: never create an extra occurrence or redo a completed run.
+  Finish by calling runs to verify both completed occurrences and their distinct
+  saved parameters. Then stop.
+assert:
+  - http: GET /api/apps/processes/processes
+    expect_count_at: processes
+    expect_count: 1
+  - http: GET /api/apps/processes/processes
+    expect_count_at: processes.0.assignments
+    expect_count: 2
+  - tool_called_with:
+      tool: processes_run_update
+      args: {state: completed, result: "Briefing for photography"}
+  - tool_called_with:
+      tool: processes_run_update
+      args: {state: completed, result: "Briefing for cooking"}
+  - tool_called: processes_runs
+  - tool_not_called: tasks_create
+  - iterations_at_most: 22
+budget:
+  total_tokens: 300000
+  cost_usd: 3.00

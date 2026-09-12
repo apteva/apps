@@ -1,0 +1,54 @@
+name: processes-human-approval-gate
+description: A real LLM completes a work step and leaves review to the human operator.
+timeout: 4m
+settle_for: 5s
+max_iterations: 18
+setup:
+  mode: autonomous
+  app:
+    path: ./
+directive: |
+  Test a workflow in this isolated project. Your agent ID is ${APTEVA_TEST_AGENT_ID}.
+  Create exactly one procedure named "Tier 3 reviewed draft", owned by you,
+  execution_mode=agent, no schedule. Shared instructions: prepare a draft and
+  wait for human approval before publishing. Completion criteria: an approved
+  publication; this test stops earlier at human review. Define these three steps:
+  - key=write, name=Write draft, role=writer, kind=work, depends_on=[],
+    instructions="Write a one-line draft: Window light makes softer portraits.",
+    expected_output="The complete one-line draft".
+  - key=review, name=Human review, role=reviewer, kind=approval, depends_on=[write],
+    instructions="Human operator must approve or reject the draft.",
+    expected_output="Decision and reason".
+  - key=publish, name=Publish approved draft, role=publisher, kind=work,
+    depends_on=[review], instructions="Publish only the approved draft.",
+    expected_output="Publication evidence".
+  Keep default role bindings: work roles use you, approval role is human.
+  You are authorized to activate this test procedure and start one occurrence
+  with idempotency_key=review-day-1. Use run_get to discover the step IDs, then
+  step_get before acting. Complete only the write step with output exactly
+  "Window light makes softer portraits." using step_update. Do not call
+  run_update for this structured run. Do not approve as a human, execute the
+  publish step, or perform any external publication.
+  Finish by calling runs to verify write=completed, review=waiting and
+  publish=pending. Leave that run waiting for the human. Then stop.
+assert:
+  - http: GET /api/apps/processes/processes
+    expect_count_at: processes
+    expect_count: 1
+  - tool_called: processes_step_get
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: completed, output: "Window light makes softer portraits."}
+      count: 1
+  - tool_not_called: processes_run_update
+  - tool_not_called_with:
+      tool: processes_step_update
+      args: {decision: approved}
+  - tool_not_called_with:
+      tool: processes_step_update
+      args: {decision: rejected}
+  - tool_called: processes_runs
+  - iterations_at_most: 18
+budget:
+  total_tokens: 250000
+  cost_usd: 2.50
