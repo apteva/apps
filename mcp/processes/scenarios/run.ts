@@ -3,7 +3,11 @@ import { resolve, basename } from "node:path";
 import { mkdir, mkdtemp, readdir } from "node:fs/promises";
 import { Database } from "bun:sqlite";
 import YAML from "yaml";
-import { check, verifyHistory } from "./verify-outcomes";
+import {
+  check,
+  verifyHistory,
+  verifyMultiAgentTrajectory,
+} from "./verify-outcomes";
 const appDir = resolve(import.meta.dir, "..");
 const outputRoot = resolve(
   process.env.APTEVA_TEST_ARTIFACTS_DIR || "/tmp/processes-tier3",
@@ -91,6 +95,11 @@ for (const scenario of report.results) {
         key: s.step_key,
         definition: JSON.parse(s.definition_json),
         executor: JSON.parse(s.executor_json),
+        events: db
+          .query(
+            "SELECT * FROM process_step_events WHERE step_id=? ORDER BY id",
+          )
+          .all(s.id),
       })),
     }));
     const history = {
@@ -98,6 +107,8 @@ for (const scenario of report.results) {
       runs: runs.filter((r) => r.backend === "tasks"),
     };
     verifyHistory(scenario.scenario, history);
+    if (scenario.scenario === "processes-multi-agent-workflow")
+      verifyMultiAgentTrajectory(scenario.tool_calls, runs[0]);
     observed[scenario.scenario] = history;
     console.log(
       `PASS ${scenario.scenario}: saved outcome verified (${scenario.iterations} iterations, ${scenario.tokens.total} tokens)`,
