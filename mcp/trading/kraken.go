@@ -164,10 +164,10 @@ func (krakenAdapter) HoldingsTool() string { return "" }
 func (krakenAdapter) ParseHoldings(raw json.RawMessage) (map[string]brokerBalance, error) {
 	return map[string]brokerBalance{}, nil
 }
-func (krakenAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (krakenAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
+func (krakenAdapter) OrdersHistoryTool() (string, map[string]any) { return "get_closed_orders", nil }
+func (krakenAdapter) OpenOrdersTool() (string, map[string]any)    { return "get_open_orders", nil }
 func (krakenAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+	return cryptoHistory("kraken", raw)
 }
 
 func (krakenAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {

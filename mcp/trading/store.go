@@ -1061,7 +1061,9 @@ func dbOrderIDByBrokerID(db *sql.DB, brokerOrderID string) (string, error) {
 // through to the column defaults (e.g. unfilled open orders that
 // haven't resolved).
 func dbInsertBackfilledOrder(
-	db *sql.DB, projectID string, portfolioID int64, id,
+	db interface {
+		Exec(string, ...any) (sql.Result, error)
+	}, projectID string, portfolioID int64, id,
 	symbol, assetClass, side, otype string,
 	qty, filledQty, avgFillPrice, limitPrice, stopPrice float64,
 	tif, status, rationale, source, placedAt, resolvedAt string,
@@ -2566,4 +2568,13 @@ func dbPortfolioMarksBySymbol(db *sql.DB, id int64) (map[string]*Mark, error) {
 		}
 	}
 	return out, nil
+}
+
+func dbPortfolioOrderIDByBrokerID(db *sql.DB, portfolioID int64, brokerID string) (string, error) {
+	var id string
+	err := db.QueryRow(`SELECT id FROM orders WHERE portfolio_id=? AND (broker_order_id=? OR id IN (SELECT json_extract(metadata,'$.order_id') FROM journal WHERE portfolio_id=? AND json_extract(metadata,'$.broker_order_id')=?)) LIMIT 1`, portfolioID, brokerID, portfolioID, brokerID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }

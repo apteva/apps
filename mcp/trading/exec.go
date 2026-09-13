@@ -1377,8 +1377,14 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		return err
 	}
 	args := bb.Adapter.StatusArgs(o, brokerOrderID)
+	statusTool := bb.toolFor("order.status")
+	if brokerOrderID == "" {
+		if tool := bb.Adapter.ToolMap()["order.status_by_client_id"]; tool != "" {
+			statusTool = tool
+		}
+	}
 	res, err := globalCtx.PlatformAPI().ExecuteIntegrationTool(
-		bb.ConnectionID, bb.toolFor("order.status"), args,
+		bb.ConnectionID, statusTool, args,
 	)
 	if err != nil {
 		noteVenueCall(bb.Adapter.Slug(), err)
@@ -1402,9 +1408,30 @@ func tryReconcile(e *engine, pf *Portfolio, o *Order) error {
 		return fmt.Errorf("broker get_order: %s: %s", code, detail)
 	}
 	br, perr := bb.Adapter.ParseOrder(res.Data)
+	if perr != nil && bb.Adapter.Slug() == "bybit" {
+		br, perr = bybitHistoricalStatus(globalCtx, bb, o, brokerOrderID)
+	}
+	if perr == nil && brokerOrderID != "" && br.BrokerOrderID != brokerOrderID {
+		perr = errors.New("broker status returned a different order")
+	}
+	if perr == nil && brokerOrderID == "" {
+		expected := o.ID
+		if bb.Adapter.Slug() == "okx" {
+			expected = okxClientOrderID(o.ID)
+		}
+		if br.ClientOrderID != "" && br.ClientOrderID != expected {
+			perr = errors.New("broker status returned a different client order")
+		}
+	}
 	if perr != nil {
 		noteVenueCall(bb.Adapter.Slug(), perr)
 		return perr
+	}
+	if br.BrokerOrderID == "" {
+		return errors.New("broker status missing order ID")
+	}
+	if _, err := e.db.Exec(`UPDATE orders SET broker_order_id=?,reconciliation_required=0 WHERE id=? AND (broker_order_id IS NULL OR broker_order_id='' OR broker_order_id=?)`, br.BrokerOrderID, o.ID, br.BrokerOrderID); err != nil {
+		return err
 	}
 	noteVenueCall(bb.Adapter.Slug(), nil)
 	previousFilled := o.FilledQty
@@ -1729,6 +1756,10 @@ func reconcileLiveAccounts(e *engine) {
 		}
 		if err := applyAccountSnapshot(e.db, p, acct, holdingsComplete, revision); err != nil {
 			e.logger.Warn("account reconciliation deferred", "portfolio_id", p.ID, "err", err)
+			continue
+		}
+		if tool, args := bb.Adapter.OpenOrdersTool(); tool != "" {
+			importBrokerOrders(globalCtx, p.ProjectID, p.ID, bb, tool, args, "open_sync")
 		}
 
 	}
