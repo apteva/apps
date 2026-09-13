@@ -35,12 +35,12 @@ type simulationSpec struct {
 
 // Pin local builds as well as release builds in portable artifacts.
 //
-//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go event_backtest.go strategy.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
+//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go event_backtest.go strategy.go strategy_indicators.go strategy_catalog.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
 var simulationSources embed.FS
 
 func simulationSourceHash() string {
 	files := map[string]string{}
-	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "event_backtest.go", "strategy.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
+	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "event_backtest.go", "strategy.go", "strategy_indicators.go", "strategy_catalog.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
 		data, _ := simulationSources.ReadFile(name)
 		files[name] = string(data)
 	}
@@ -56,6 +56,7 @@ type simulationRecord struct {
 }
 
 type simulationArtifact struct {
+	ExecutionNotes     string             `json:"execution_notes,omitempty"`
 	AgentDecisions     []agentDecision    `json:"agent_decisions,omitempty"`
 	AgentDecisionsHash string             `json:"agent_decisions_sha256,omitempty"`
 	Schema             string             `json:"schema"`
@@ -167,6 +168,31 @@ func enableSimulation(db *sql.DB, project string, id int64, options *sim.Config,
 	}
 	inputs = append(inputs, extra...)
 	return storeSimulation(db, run, spec, inputs)
+}
+
+// Describe the actual tape rather than implying millisecond market resolution.
+func simulationExecutionNotes(spec simulationSpec, inputs []sim.Input) string {
+	barQuotes, otherQuotes := 0, 0
+	for _, in := range inputs {
+		if in.Type == "market.quote" {
+			if in.Metadata["liquidity_model"] == "previous_completed_bar_volume" {
+				barQuotes++
+			} else {
+				otherQuotes++
+			}
+		}
+	}
+	if barQuotes == 0 {
+		return "Fills require a fresh captured quote after acceptance; timing precision is limited by the quote tape."
+	}
+	note := fmt.Sprintf("Execution quotes are sampled at %s bar opens; intrabar prices are unavailable. Zero latency is an idealized next-open model. Liquidity uses previous completed bar volume.", spec.Interval)
+	if spec.Config.SubmissionLatencyMS > 0 || spec.Config.CancellationLatencyMS > 0 || spec.Config.LatencyJitterMS > 0 {
+		note += " Positive latency can miss the opening quote and delay execution by an entire replay interval or longer across market closures. Compare zero-latency and delayed-quote results; use finer execution data to study latency."
+	}
+	if otherQuotes > 0 {
+		note += " This tape also contains additional quote observations."
+	}
+	return note
 }
 
 func simulationBarClose(def *StrategyDefinition, interval string, at time.Time) time.Time {
@@ -285,7 +311,7 @@ func storeSimulation(db *sql.DB, run *BacktestRun, spec simulationSpec, inputs [
 			return err
 		}
 	}
-	meta, _ := json.Marshal(map[string]any{"decision_mode": spec.DecisionMode, "engine_version": sim.Version, "input_sha256": hash, "input_events": len(inputs), "processed_events": 0, "benchmark_symbol": spec.Config.BenchmarkSymbol})
+	meta, _ := json.Marshal(map[string]any{"execution_notes": simulationExecutionNotes(spec, inputs), "decision_mode": spec.DecisionMode, "engine_version": sim.Version, "input_sha256": hash, "input_events": len(inputs), "processed_events": 0, "benchmark_symbol": spec.Config.BenchmarkSymbol})
 	if _, err = tx.Exec(`UPDATE backtest_runs SET summary_json=json_patch(summary_json,?) WHERE id=?`, string(meta), run.ID); err != nil {
 		return err
 	}
@@ -716,7 +742,7 @@ func simulationBundle(db *sql.DB, run *BacktestRun) (*simulationArtifact, error)
 	if err != nil {
 		return nil, err
 	}
-	a := &simulationArtifact{Schema: "apteva.backtest/v1", Spec: r.Spec, Inputs: r.Inputs, InputHash: r.InputHash, Outputs: []sim.Output{}}
+	a := &simulationArtifact{ExecutionNotes: simulationExecutionNotes(r.Spec, r.Inputs), Schema: "apteva.backtest/v1", Spec: r.Spec, Inputs: r.Inputs, InputHash: r.InputHash, Outputs: []sim.Output{}}
 	rows, err := db.Query(`SELECT output_json FROM backtest_simulation_outputs WHERE run_id=? ORDER BY sequence`, run.ID)
 	if err != nil {
 		return nil, err

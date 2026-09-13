@@ -470,6 +470,7 @@ interface BacktestRun {
     dataset_rows?: number;
     price_adjustment?: string;
     execution_model?: Record<string, unknown>;
+    execution_notes?: string;
     engine_version?: string;
     decision_mode?: string;
     agent_replay_only?: boolean;
@@ -3077,6 +3078,7 @@ function StrategiesTab({ portfolio, api, projectId, setError }: {
 
       <div className="grid gap-4">
         <Section title="New strategy">
+          <StrategyPresetPicker api={api} symbols={portfolio?.watchlist || []} onSelect={(preset)=>{setName(preset.name);setDescription(preset.description);setDefinitionText(JSON.stringify(preset.definition,null,2));}} />
           <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(180px, 1fr)" }}>
             <label className="text-xs">
               <FieldLabel>Name</FieldLabel>
@@ -3184,6 +3186,21 @@ function StrategyValidationPeriodCard({ title, period }: { title: string; period
       </div>
     </div>
   );
+}
+
+type IndicatorPreset = {id:string;name:string;description:string;definition:Record<string,unknown>};
+type IndicatorCatalog = {presets:IndicatorPreset[];indicators:{name:string;description:string}[];conditions:string;limitations:string;sources:string[]};
+export function StrategyPresetPicker({api,symbols,onSelect}:{api:<T>(m:string,p:string,q?:Record<string,string>,b?:unknown)=>Promise<T>;symbols:string[];onSelect:(preset:IndicatorPreset)=>void}) {
+ const [catalog,setCatalog]=useState<IndicatorCatalog|null>(null);
+ const [error,setCatalogError]=useState("");
+ useEffect(()=>{let active=true;api<IndicatorCatalog>("GET","/strategies/catalog",{symbols:symbols.join(",")}).then(r=>{if(active){setCatalog(r);setCatalogError("")}}).catch(e=>{if(active)setCatalogError(e.message)});return()=>{active=false}},[api,symbols.join(",")]);
+ return <div className="mb-3 p-3 rounded border border-border bg-bg-input">
+  <div className="text-sm font-semibold">Indicator strategy templates</div>
+  <p className="my-2 text-xs text-text-muted">Hourly signals for your watchlist. Load a draft, review its rules, then backtest against a benchmark.</p>
+  {error&&<p className="text-xs text-red">{error}</p>}
+  <div className="flex flex-wrap gap-2">{catalog?.presets.map(p=><button type="button" key={p.id} title={p.description} onClick={()=>onSelect(p)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-hover">{p.name}</button>)}</div>
+  {catalog&&<details className="mt-3 text-xs"><summary className="cursor-pointer">Indicators, formulas and rule syntax</summary><dl className="space-y-2 my-2">{catalog.indicators.map(i=><div key={i.name}><dt className="font-mono font-semibold">{i.name}</dt><dd className="text-text-muted">{i.description}</dd></div>)}</dl><p className="my-2">{catalog.conditions}</p><p className="my-2 text-text-muted">{catalog.limitations}</p><div className="flex flex-wrap gap-2">{catalog.sources.map((url,i)=><a key={url} href={url} target="_blank" rel="noreferrer" className="underline">{["EMA guide","RSI guide","MACD guide","Bollinger guide"][i]}</a>)}</div></details>}
+ </div>
 }
 
 function defaultStrategyDefinition(symbols: string[]) {
@@ -3567,12 +3584,14 @@ export function SimulationControls({run, api, onChange, setError}: {
   const download=async()=>{try{const bundle=await api<unknown>("GET",`/backtests/${run.id}/artifact`);const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download=`backtest-${run.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){setError((e as Error).message)}};
   return <div className="p-3 mb-3 border border-border rounded bg-bg-card space-y-3">
     <div className="flex items-center justify-between"><span className="text-sm font-semibold">Event simulation</span><button className="text-xs border border-border px-2 py-1 rounded" onClick={download}>Download result bundle</button></div>
+    <p className="text-xs text-amber">{run.summary?.execution_notes || `Execution uses captured quotes. With ${run.interval || "bar"} replay, even a small positive latency can miss a bar open and delay the fill until the next quote.`}</p>
     {run.summary?.result_sha256 && <div className="text-xs text-text-dim break-all">Result SHA-256: {run.summary.result_sha256}</div>}
     {run.status==="queued" && <details><summary className="cursor-pointer text-xs">Execution settings and additional inputs</summary>
       <div className="grid grid-cols-2 gap-2 mt-3">
         {([["seed","Random seed"],["submission_latency_ms","Order latency (ms)"],["cancellation_latency_ms","Cancel latency (ms)"],["latency_jitter_ms","Latency jitter (ms)"],["max_fill_qty","Maximum fill per quote (0 = unlimited)"],["participation_rate","Volume participation (0–1; 0 = unlimited)"]] as const).map(([key,label])=><label key={key} className="text-xs">{label}<input type="number" min="0" step="any" value={config[key]??0} onChange={e=>setConfig({...config,[key]:Number(e.target.value)})} className="w-full mt-1 p-2 rounded border border-border bg-bg-input"/></label>)}
         <label className="text-xs">Benchmark<select value={config.benchmark_symbol||run.symbols[0]} onChange={e=>setConfig({...config,benchmark_symbol:e.target.value})} className="w-full mt-1 p-2 rounded border border-border bg-bg-input">{run.symbols.map(symbol=><option key={symbol}>{symbol}</option>)}</select></label>
       </div>
+      <button type="button" className="my-2 px-2 py-1 text-xs border border-border rounded" onClick={()=>setConfig({...config,submission_latency_ms:0,cancellation_latency_ms:0,latency_jitter_ms:0})}>Use idealized next-open timing (zero latency)</button>
       <p className="my-2 text-xs text-text-dim">Imported features become visible at their availability time. Strategies can reference indicators such as feature:sentiment.score. Bar replay estimates liquidity from the previous completed bar; fills wait for the next available quote after latency.</p>
       <label className="text-xs">Additional input events (JSON array)<textarea rows={5} value={inputs} onChange={e=>setInputs(e.target.value)} className="block w-full my-2 p-2 rounded border border-border bg-bg-input font-mono text-xs" placeholder='[{"id":"sentiment-1","type":"feature.sentiment","symbol":"AAPL","event_time":"2026-01-05T10:00:00Z","available_at":"2026-01-05T10:05:00Z","data":{"score":0.8}}]' /></label>
       <button disabled={saving} className="px-3 py-2 text-xs rounded bg-accent text-bg disabled:opacity-50" onClick={async()=>{setSaving(true);try{const extra=JSON.parse(inputs);if(!Array.isArray(extra))throw new Error("Inputs must be a JSON array");await api("PUT",`/backtests/${run.id}/inputs`,undefined,{simulation:config,inputs:extra});await onChange();setError(null);}catch(e){setError((e as Error).message)}finally{setSaving(false)}}}>Save simulation settings</button>
