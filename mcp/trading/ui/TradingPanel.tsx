@@ -612,7 +612,7 @@ function compactText(value: unknown, fallback = ""): string {
 function parsePayload(value: unknown): unknown {
   if (typeof value !== "string") return value;
   const trimmed = value.trim();
-  if (!trimmed || !["{", "["].includes(trimmed[0])) return value;
+  if (!trimmed || !["{", "["].includes(trimmed.charAt(0))) return value;
   try { return JSON.parse(trimmed); } catch { return value; }
 }
 
@@ -948,7 +948,7 @@ function PriceChart({ symbol, assetClass, api }: {
               />
 
               {/* Hover crosshair + price dot */}
-              {hoverIdx != null && (
+              {hoverIdx != null && values[hoverIdx] != null && (
                 <>
                   <line
                     x1={toX(hoverIdx)} x2={toX(hoverIdx)}
@@ -960,7 +960,7 @@ function PriceChart({ symbol, assetClass, api }: {
                     strokeDasharray="2 3"
                   />
                   <circle
-                    cx={toX(hoverIdx)} cy={toY(values[hoverIdx])}
+                    cx={toX(hoverIdx)} cy={toY(values[hoverIdx]!)}
                     r="3"
                     fill={lineColor}
                     stroke="var(--bg-card, #111)"
@@ -1033,7 +1033,7 @@ function PriceChart({ symbol, assetClass, api }: {
             style={{ paddingRight: 60 }}
           >
             {xTicks.map((i, k) => (
-              <span key={k}>{formatTimeTick(times[i], range)}</span>
+              <span key={k}>{formatTimeTick(times[i]!, range)}</span>
             ))}
           </div>
         )}
@@ -1050,14 +1050,14 @@ function PriceChart({ symbol, assetClass, api }: {
 // flavor used by most chart libraries).
 function catmullRomPath(points: [number, number][]): string {
   if (points.length === 0) return "";
-  if (points.length === 1) return `M ${points[0][0]} ${points[0][1]}`;
-  if (points.length === 2) return `M ${points[0][0]} ${points[0][1]} L ${points[1][0]} ${points[1][1]}`;
-  let d = `M ${points[0][0]} ${points[0][1]}`;
+  if (points.length === 1) return `M ${points[0]![0]} ${points[0]![1]}`;
+  if (points.length === 2) return `M ${points[0]![0]} ${points[0]![1]} L ${points[1]![0]} ${points[1]![1]}`;
+  let d = `M ${points[0]![0]} ${points[0]![1]}`;
   for (let i = 0; i < points.length - 1; i++) {
-    const p0 = points[Math.max(i - 1, 0)];
-    const p1 = points[i];
-    const p2 = points[i + 1];
-    const p3 = points[Math.min(i + 2, points.length - 1)];
+    const p0 = points[Math.max(i - 1, 0)]!;
+    const p1 = points[i]!;
+    const p2 = points[i + 1]!;
+    const p3 = points[Math.min(i + 2, points.length - 1)]!;
     const cp1x = p1[0] + (p2[0] - p0[0]) / 6;
     const cp1y = p1[1] + (p2[1] - p0[1]) / 6;
     const cp2x = p2[0] - (p3[0] - p1[0]) / 6;
@@ -1227,7 +1227,7 @@ function TradingPanelInstance({ projectId, installId }: NativePanelProps) {
       if (generation !== portfolioGeneration.current) return;
       const list = r.portfolios || [];
       setPortfolios(list);
-      setSelectedId((cur) => cur ?? (list.length > 0 ? list[0].id : null));
+      setSelectedId((cur) => cur ?? (list[0]?.id ?? null));
       setError(null);
     } catch (e) { setError((e as Error).message); }
   }, [api]);
@@ -2344,7 +2344,7 @@ function PositionsTab({ portfolio, api, setError }: {
           <tbody>
             {positions.map((p) => {
               const spark = sparklines[p.symbol] || [];
-              const sparkUp = spark.length >= 2 ? spark[spark.length - 1] >= spark[0] : true;
+              const sparkUp = spark.length >= 2 ? spark[spark.length - 1]! >= spark[0]! : true;
               return (
                 <tr key={p.symbol + (p.outcome || "")} className="border-t border-border">
                   <td className="px-3 py-2">

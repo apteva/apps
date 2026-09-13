@@ -39,9 +39,9 @@ test("broker paper excludes live-only crypto providers", async()=>{
  const api:any=async()=>({brokers});
  await act(async()=>root.render(<CreatePortfolioForm api={api} onCreated={()=>{}} onCancel={()=>{}} setError={()=>{}}/>));
  const radios=container.querySelectorAll<HTMLInputElement>('input[type="radio"]');
- await act(async()=>radios[2].click());
+ await act(async()=>radios[2]!.click());
  expect(container.querySelector("select")!.textContent).toContain("binance-trading");
- await act(async()=>radios[1].click());
+ await act(async()=>radios[1]!.click());
  expect(container.querySelector("select")!.textContent).toContain("alpaca-trading");
  expect(container.querySelector("select")!.textContent).not.toContain("binance-trading");
 });
