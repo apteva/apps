@@ -28,6 +28,21 @@ approvals across the project, with filters, creation, settings, and history.
 Run workspaces also support adding required or optional tasks to an active run.
 See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 
+The **Processes overview** dashboard widget shows active runs, approval/blocker
+attention, upcoming assignments, and recent outcomes across the current project.
+It supports half/full width, expandable step lists (including parallel work),
+agent names, and links to run or assignment details. It is read-only and refreshes
+through host event revisions without creating a stream or invoking a model.
+A native mobile widget provides the same overview and live step summaries.
+
+`GET /processes/overview` (also `/overview` and `/processes/mobile/overview`)
+requires project context. Direct-run counts cover the project; each returned list
+is capped at 12 and each run at 60 step rows. Recent outcomes sort by run creation
+time, which the UI labels explicitly. Optional Tasks history uses authoritative
+Tasks state, with at most eight procedure lookups and 200 records per procedure;
+partial/unavailable history is disclosed instead of treating dispatch records as
+live executions. No execution or schedule settings change on an overview read.
+
 - Create an unassigned procedure with no agent or schedule, even in a project with no agents.
 - Configure execution later in Assignments; saving a procedure never creates an assignment.
 - Define text, number, and yes/no parameters, required fields, and defaults.

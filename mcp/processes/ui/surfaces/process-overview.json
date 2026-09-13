@@ -5,14 +5,151 @@
   "title": "Processes",
   "description": "Running, scheduled, and recent procedure executions",
   "icon": "clipboard-list",
-  "context": {"scope": "project"},
+  "context": {
+    "scope": "project"
+  },
   "presentation": "widget",
-  "data_sources": {"summary": {"request": {"method": "GET", "path": "/mobile/overview"}, "response": {"item": "$"}}},
+  "data_sources": {
+    "summary": {
+      "request": {
+        "method": "GET",
+        "path": "/processes/mobile/overview"
+      },
+      "response": {
+        "item": "$"
+      }
+    }
+  },
   "blocks": [
-    {"id":"counts","type":"metrics","source":"summary","metrics":[{"label":"Active","value":"$.counts.active","format":"count"},{"label":"Scheduled","value":"$.counts.scheduled","format":"count"},{"label":"Attention","value":"$.counts.attention","format":"count"}]},
-    {"id":"active","type":"list","title":"Running and attention","source":"summary","items":"$.active","limit":4,"item":{"id":"{item.id}","title":"{item.process_name}","subtitle":[{"value":"{item.current_step}","fallback":"{item.state}"},{"value":"{item.assignment_name}"}]},"empty":{"title":"Nothing running","icon":"check-circle"}},
-    {"id":"upcoming","type":"list","title":"Upcoming schedules","source":"summary","items":"$.upcoming","limit":3,"item":{"id":"{item.id}","title":"{item.process_name}","subtitle":[{"value":"{item.next_run_at}","format":"date_time"}]},"empty":{"title":"No upcoming schedules","icon":"calendar"}},
-    {"id":"recent","type":"list","title":"Recent outcomes","source":"summary","items":"$.recent","limit":4,"item":{"id":"{item.id}","title":"{item.process_name}","subtitle":[{"value":"{item.state}"}]},"empty":{"title":"No recent outcomes","icon":"history"}}
-  ],
-  "navigation": {"surface":"processes"}
+    {
+      "id": "counts",
+      "type": "metrics",
+      "source": "summary",
+      "metrics": [
+        {
+          "label": "Active",
+          "value": "$.counts.active",
+          "format": "count"
+        },
+        {
+          "label": "Scheduled",
+          "value": "$.counts.scheduled",
+          "format": "count"
+        },
+        {
+          "label": "Attention",
+          "value": "$.counts.attention",
+          "format": "count"
+        }
+      ]
+    },
+    {
+      "id": "coverage",
+      "type": "text",
+      "source": "summary",
+      "value": "$.coverage"
+    },
+    {
+      "id": "attention",
+      "type": "list",
+      "title": "Assignment attention",
+      "source": "summary",
+      "items": "$.attention",
+      "limit": 4,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.process_name}",
+        "subtitle": [
+          {
+            "value": "{item.warning}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "active",
+      "type": "list",
+      "title": "Running and attention",
+      "source": "summary",
+      "items": "$.active",
+      "limit": 4,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.process_name}",
+        "subtitle": [
+          {
+            "value": "{item.current_step}",
+            "fallback": "{item.state}"
+          },
+          {
+            "value": "{item.assignment_name}"
+          }
+        ]
+      },
+      "empty": {
+        "title": "Nothing running",
+        "icon": "check-circle"
+      }
+    },
+    {
+      "id": "steps",
+      "type": "list",
+      "title": "Live steps",
+      "source": "summary",
+      "items": "$.live_steps",
+      "limit": 8,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.name}",
+        "subtitle": [
+          {
+            "value": "{item.state}"
+          }
+        ]
+      }
+    },
+    {
+      "id": "upcoming",
+      "type": "list",
+      "title": "Upcoming schedules",
+      "source": "summary",
+      "items": "$.upcoming",
+      "limit": 3,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.process_name}",
+        "subtitle": [
+          {
+            "value": "{item.next_run_at}",
+            "format": "date_time"
+          }
+        ]
+      },
+      "empty": {
+        "title": "No upcoming schedules",
+        "icon": "calendar"
+      }
+    },
+    {
+      "id": "recent",
+      "type": "list",
+      "title": "Recent outcomes",
+      "source": "summary",
+      "items": "$.recent",
+      "limit": 4,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.process_name}",
+        "subtitle": [
+          {
+            "value": "{item.state}"
+          }
+        ]
+      },
+      "empty": {
+        "title": "No recent outcomes",
+        "icon": "history"
+      }
+    }
+  ]
 }

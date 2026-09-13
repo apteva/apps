@@ -1,3 +1,5 @@
+import {useState} from "react";
+import Widget from "../ProcessOverviewWidget";
 import { createRoot } from "react-dom/client";
 import Panel from "../ProcessesPanel";
 const step = (key: string, name: string, depends_on: string[]) => ({
@@ -47,6 +49,7 @@ if (missingAgent) {
 const originalFetch = window.fetch.bind(window);
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
+  if (path.endsWith("/overview")) return originalFetch(String(url),init);
   if (path === "/api/agents")
     return Response.json(
       location.search.includes("no_agents")
@@ -87,4 +90,5 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     });
   return Response.json({ processes: [process] });
 }) as typeof fetch;
-createRoot(document.getElementById("root")!).render(<Panel projectId="test" installId={77} />);
+function WidgetFixture(){const [revision,setRevision]=useState(0);return <div style={{maxWidth:location.search.includes("full")?1000:460,margin:12}}><button id="host-revision" onClick={()=>setRevision(v=>v+1)}>Simulate host event</button><Widget projectId="test" installId={77} eventRevision={revision} widgetSize={location.search.includes("full")?"full":"half"}/></div>}
+createRoot(document.getElementById("root")!).render(location.search.includes("widget")?<WidgetFixture/>:<Panel projectId="test" installId={77}/>);
