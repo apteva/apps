@@ -117,7 +117,7 @@ func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 }
 func phoneAction(r *http.Request) string {
 	path := r.URL.Path
-	if r.Method == "GET" && path == "/calls" {
+	if r.Method == "GET" && (path == "/calls" || path == "/calls/events") {
 		return "call.read"
 	}
 	if r.Method == "GET" && path == "/softphone/access" {
@@ -254,7 +254,7 @@ func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error 
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return a.db().commitCall(tx, row.ID)
 }
 func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) bool {
 	if p == nil {
@@ -550,6 +550,7 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "policy revision changed", 409)
 			return
 		}
+		a.routingCommitted(project)
 		p.Revision++
 		writeJSON(w, p)
 		return

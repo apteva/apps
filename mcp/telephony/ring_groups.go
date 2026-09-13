@@ -265,7 +265,7 @@ func (c *callsDB) claimRingOffer(callID, project, destinationID, kind string, ag
 	if _, err = tx.Exec(`UPDATE call_route_executions SET selected_destination_id=?,status='claimed' WHERE call_id=?`, o.DestinationID, callID); err != nil {
 		return true, false, err
 	}
-	return true, true, tx.Commit()
+	return true, true, c.commitCall(tx, callID)
 }
 
 func (c *callsDB) activeRingOffers(callID, project string) ([]ringOffer, error) {
@@ -319,7 +319,7 @@ func (c *callsDB) declineRingOffers(callID, project string, agentID int64) (bool
 	if err = advanceRingRunTx(tx, runID, time.Now()); err != nil {
 		return true, err
 	}
-	return true, tx.Commit()
+	return true, c.commitCall(tx, callID)
 }
 
 // Failed setup releases only the winning offer. The other destinations remain
@@ -360,7 +360,7 @@ func (c *callsDB) releaseRingClaim(callID string) error {
 	if err = advanceRingRunTx(tx, runID, time.Now()); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return c.commitCall(tx, callID)
 }
 
 func (a *App) runRingGroupTick(_ context.Context, ctx *sdk.AppCtx) error {
@@ -406,6 +406,7 @@ func (a *App) tickRingRun(ctx *sdk.AppCtx, runID, callID string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	a.callChanges.notify(ctx.CurrentProject())
 	var status, overflow string
 	if err = ctx.AppDB().QueryRow(`SELECT status,overflow_node_id FROM call_ring_runs WHERE id=?`, runID).Scan(&status, &overflow); err != nil {
 		return err

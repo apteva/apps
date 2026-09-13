@@ -177,6 +177,7 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if err := tx.Commit(); err != nil {
 		return false, err
 	}
+	c.committed(current.ProjectID)
 	if c.afterTransition != nil && (transitionAccepted || created) {
 		c.afterTransition(id)
 	}

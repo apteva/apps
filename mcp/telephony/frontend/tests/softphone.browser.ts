@@ -48,7 +48,17 @@ test("installed headless client talks through real Telephony with host-owned UI"
   page.off("websocket", countSocket);
   expect(previewSockets).toBe(0);
   expect(previewResult).toEqual({ selected: true, labeled: true, stopped: true, level: 0, callId: null });
+  await page.evaluate(() => {
+    const w = window as any;
+    w.watchSamples = []; w.watchCalls = [];
+    w.watcher = w.client.watchCalls((calls: any[]) => { w.watchCalls = calls; }, {
+      intervalMs: 60000, onTiming: (sample: any) => w.watchSamples.push(sample),
+    });
+  });
+  // Wait for the initial stream reconciliation, then require a later change.
+  await expect.poll(() => page.evaluate(() => (window as any).watchSamples.some((s: any) => s.trigger === "push"))).toBe(true);
   await page.click("#answer");
+  await expect.poll(() => page.evaluate(() => (window as any).watchCalls[0]?.status), { timeout: 1500 }).not.toBe("pending");
   await expect.poll(() => page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
   await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);
@@ -64,7 +74,7 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await page.evaluate(() => (window as any).phone.setMuted(false));
   await page.evaluate(() => (window as any).phone.hangup());
   expect(await page.evaluate(() => (window as any).phone.getSnapshot().callId)).toBeUndefined();
-  await page.evaluate(() => { const w = window as any; w.phone.dispose(); w.loaded.dispose(); });
+  await page.evaluate(() => { const w = window as any; w.watcher.close(); w.phone.dispose(); w.loaded.dispose(); });
   if (process.env.TELEPHONY_TEST_SURFACE === "application-user") {
     expect((await page.request.post(gateway + "/fixture/logout")).status()).toBe(204);
     const denied = await page.evaluate(async () => {

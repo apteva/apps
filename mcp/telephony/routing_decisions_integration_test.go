@@ -63,6 +63,21 @@ func TestTier2RoutingDecision(t *testing.T) {
 		t.Fatal(out)
 	}
 	request("POST", "/routing/flows/numbers/assign", map[string]any{"flow_id": flow["id"], "route_ids": []any{route["id"]}})
+	streamRequest, _ := http.NewRequestWithContext(t.Context(), "GET", sc.URL()+"/calls/events?project_id="+tier2Project, nil)
+	streamRequest.Header.Set("Authorization", "Bearer "+sc.Token())
+	for key, value := range tier2Headers() {
+		streamRequest.Header.Set(key, value)
+	}
+	stream, err := http.DefaultClient.Do(streamRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	notifications := readNotificationStream(t, stream)
+	receiveSoon(t, notifications)
+	// Exercise idle transport past the per-write deadline before a new call.
+	time.Sleep(3500 * time.Millisecond)
+	started := time.Now()
 	body, _ := json.Marshal(map[string]any{"data": map[string]any{"id": "decision-inbound", "event_type": "call.initiated", "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": map[string]any{"call_control_id": "decision-call", "connection_id": "application-test-1", "direction": "incoming", "from": tier2Caller, "to": tier2Number}}})
 	for range 2 {
 		response := tier2SignedPOST(t, gateway, localSidecarURL(t, sc, created["inbound_url"].(string)), body)
@@ -71,6 +86,9 @@ func TestTier2RoutingDecision(t *testing.T) {
 		if response.StatusCode != 204 {
 			t.Fatalf("ingress %d %s", response.StatusCode, raw)
 		}
+	}
+	if event := receiveSoon(t, notifications); event != `{"type":"calls.changed"}` {
+		t.Fatal(event)
 	}
 	calls := tier2CallList(t, sc)
 	if len(calls) != 1 {
@@ -88,6 +106,10 @@ func TestTier2RoutingDecision(t *testing.T) {
 				if d["result"].(map[string]any)["reservation_id"] != "business-reservation" {
 					t.Fatal(d)
 				}
+				if d["started_at"] == "" || d["dispatch_delay_ms"].(float64) >= 500 {
+					t.Fatalf("slow dispatch: %v", d)
+				}
+				t.Logf("signed ingress through accepted offer: %s; dispatch %.0f ms", time.Since(started), d["dispatch_delay_ms"].(float64))
 				accepted = true
 				break
 			}
