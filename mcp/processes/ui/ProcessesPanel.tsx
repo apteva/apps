@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import WorkPanel, { RunWork } from "./Work";
 import { StepEditor, RunSteps, type Step, type StepRun } from "./Workflow";
 import Assignments, {
   ParameterEditor,
@@ -138,7 +139,7 @@ const fields = [
 ] as const;
 const css = `
 .ap-processes{--pc-bg:var(--color-bg,#101216);--pc-panel:var(--color-bg-card,#181b21);--pc-line:var(--color-border,#30343e);--pc-text:var(--color-text,#eceef2);--pc-muted:var(--color-text-muted,#969eac);--pc-accent:var(--color-accent,#9ea8ff);color:var(--pc-text);background:var(--pc-bg);font-size:14px;line-height:1.55;min-height:100%;height:100%;overflow:auto;padding:28px;box-sizing:border-box}
-.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
+.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
 `;
 const Pill = ({ state }: { state: string }) => (
   <span className={`pill ${state}`}>{state}</span>
@@ -167,6 +168,7 @@ function Panel(props: Props) {
     [editing, setEditing] = useState(false),
     [creating, setCreating] = useState(false),
     [draft, setDraft] = useState<Definition>(empty);
+  const [area, setArea] = useState("processes");
   const [historyWarning, setHistoryWarning] = useState("");
   const [runs, setRuns] = useState<Entry[]>([]),
     [more, setMore] = useState(false),
@@ -186,11 +188,12 @@ function Panel(props: Props) {
     [runInput, setRunInput] = useState(""),
     [runKey, setRunKey] = useState("");
   const api = async (path = "", method = "GET", body?: unknown) => {
-    const q = new URLSearchParams();
+    const [route, searchParams] = path.split("?");
+    const q = new URLSearchParams(searchParams);
     if (props.projectId) q.set("project_id", props.projectId);
     if (props.installId) q.set("install_id", String(props.installId));
     const r = await fetch(
-      `/api/apps/${encodeURIComponent(props.appName || "processes")}/processes${path}?${q}`,
+      `/api/apps/${encodeURIComponent(props.appName || "processes")}/processes${route}?${q}`,
       {
         method,
         credentials: "same-origin",
@@ -406,7 +409,7 @@ function Panel(props: Props) {
               : "Define the work your company does, and let agents follow through."}
           </p>
         </div>
-        {!selected && !creating && (
+        {!selected && !creating && area === "processes" && (
           <button className="primary" onClick={newProcess}>
             + New process
           </button>
@@ -418,6 +421,22 @@ function Panel(props: Props) {
           </div>
         )}
       </header>
+      {!selected && !creating && (
+        <nav className="tabs" aria-label="Processes navigation">
+          <button
+            className={area === "processes" ? "on" : ""}
+            onClick={() => setArea("processes")}
+          >
+            Processes
+          </button>
+          <button
+            className={area === "work" ? "on" : ""}
+            onClick={() => setArea("work")}
+          >
+            Work
+          </button>
+        </nav>
+      )}
       {error && (
         <div role="alert" className="notice">
           {error}
@@ -432,6 +451,14 @@ function Panel(props: Props) {
         <div className="empty">Select a project to manage its processes.</div>
       ) : loading ? (
         <p className="muted">Loading processes…</p>
+      ) : !selected && !creating && area === "work" ? (
+        <WorkPanel
+          key={`${props.projectId}:${props.installId}`}
+          api={api}
+          agents={agents}
+          processes={items}
+          eventRevision={props.eventRevision}
+        />
       ) : creating || editing ? (
         <form
           onSubmit={(e) => {
@@ -1219,6 +1246,15 @@ function Panel(props: Props) {
                         r.record.current_step ||
                         "Queued for the owner agent."}
                     </div>
+                    {(r.backend === "agent" || r.record.workflow) && (
+                      <RunWork
+                        runID={r.record.id}
+                        runState={r.record.state}
+                        api={api}
+                        agents={agents}
+                        onChanged={() => loadRuns(p.id)}
+                      />
+                    )}
                     {r.record.workflow && (
                       <RunSteps
                         steps={r.record.steps || []}

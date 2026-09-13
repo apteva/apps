@@ -306,3 +306,60 @@ func TestSidecarWorkflowAgentHandoffsAndHumanApproval(t *testing.T) {
 		t.Fatal("workflow did not complete", detail)
 	}
 }
+
+// The real Processes sidecar exposes native task tools and dispatches directly
+// through the existing tracked agent API. No Tasks sidecar is present.
+func TestSidecarNativeTaskMCPWithoutTasksApp(t *testing.T) {
+	var delivered, interApp atomic.Int32
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/apps/callback/agents/7":
+			json.NewEncoder(w).Encode(sdk.PlatformInstance{ID: 7, ProjectID: "project-a", DefaultThreadID: "worker"})
+		case "/api/apps/callback/agents/7/event":
+			var event sdk.AgentEventRequest
+			json.NewDecoder(r.Body).Decode(&event)
+			delivered.Add(1)
+			if !strings.Contains(event.Message.(string), "processes_task_get") {
+				t.Error("missing native task contract")
+			}
+			json.NewEncoder(w).Encode(sdk.AgentEventReceipt{Accepted: true, ExecutionID: "native-task-execution", ThreadID: event.ThreadID, SourceEventID: event.SourceEventID})
+		default:
+			if strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/") {
+				interApp.Add(1)
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer gateway.Close()
+	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
+	args := map[string]any{"title": "Check payment", "instructions": "Verify payment record and report evidence.", "executor": map[string]any{"kind": "agent", "agent_id": 7}, "idempotency_key": "native-task"}
+	created := app.MCPAs("task_create", args, 7, "worker", "project-a")
+	s := created["task"].(map[string]any)
+	id := s["id"].(string)
+	again := app.MCPAs("task_create", args, 7, "worker", "project-a")
+	if again["task"].(map[string]any)["id"] != id || delivered.Load() != 1 {
+		t.Fatal("creation retry duplicated work")
+	}
+	read := app.MCPAs("task_get", map[string]any{"task_id": id}, 7, "worker", "project-a")
+	revision := read["task"].(map[string]any)["revision"]
+	updated := app.MCPAs("task_update", map[string]any{"task_id": id, "expected_revision": revision, "state": "completed", "output": "Verified receipt payment-123"}, 7, "worker", "project-a")
+	if updated["task"].(map[string]any)["state"] != "completed" || interApp.Load() != 0 {
+		t.Fatal("native task did not complete independently")
+	}
+	var list struct {
+		Tasks []Task `json:"tasks"`
+		Total int    `json:"total"`
+	}
+	resp := app.GET("/processes/tasks?project_id=project-a&state=completed", &list)
+	if resp.Status != 200 || list.Total != 1 || list.Tasks[0].ID != id {
+		t.Fatal("Work API failed", resp.Status, string(resp.Body))
+	}
+	var processes struct {
+		Processes []Process `json:"processes"`
+	}
+	resp = app.GET("/processes?project_id=project-a", &processes)
+	if resp.Status != 200 || len(processes.Processes) != 0 {
+		t.Fatal("standalone work created a hidden procedure")
+	}
+}
