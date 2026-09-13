@@ -127,9 +127,11 @@ func agentSimulationStrategy(ctx context.Context, run *BacktestRun, r *simulatio
 			}
 			memory = saved.Memory
 		}
-		start := state.Cursor - r.Spec.Agent.HistoryLimit
-		if start < 0 {
-			start = 0
+		start := maxInt(0, state.Cursor-r.Spec.Agent.HistoryLimit)
+		history := append([]sim.Input(nil), r.Inputs[start:state.Cursor]...)
+		if remaining := r.Spec.Agent.HistoryLimit - len(history); remaining > 0 && len(r.Spec.WarmupInputs) > 0 {
+			warmStart := maxInt(0, len(r.Spec.WarmupInputs)-remaining)
+			history = append(append([]sim.Input(nil), r.Spec.WarmupInputs[warmStart:]...), history...)
 		}
 		raw, err := json.Marshal(state)
 		if err != nil {
@@ -140,7 +142,7 @@ func agentSimulationStrategy(ctx context.Context, run *BacktestRun, r *simulatio
 			return nil, err
 		}
 		// The agent sees only already-consumed events, never the remaining tape.
-		observation := agentObservation{DecisionID: in.ID, PortfolioID: 1, At: state.Now, Event: in, State: &snapshot, Metrics: (&sim.Engine{Config: r.Spec.Config, State: state}).Metrics(), History: r.Inputs[start:state.Cursor], Memory: memory}
+		observation := agentObservation{DecisionID: in.ID, PortfolioID: 1, At: state.Now, Event: in, State: &snapshot, Metrics: (&sim.Engine{Config: r.Spec.Config, State: state}).Metrics(), History: history, Memory: memory}
 		hash := sim.Hash(observation)
 		d, err := loadAgentDecision(globalCtx.AppDB(), run.ID, in.ID)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -153,6 +155,9 @@ func agentSimulationStrategy(ctx context.Context, run *BacktestRun, r *simulatio
 			}
 			if count >= r.Spec.Agent.MaxDecisions {
 				return nil, errors.New("agent decision budget reached")
+			}
+			if err := validationDecisionBudget(globalCtx.AppDB(), run.ID); err != nil {
+				return nil, err
 			}
 			d, err = executeAgentDecision(ctx, run, r.Spec, observation)
 			if err != nil {

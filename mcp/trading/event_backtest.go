@@ -19,6 +19,7 @@ import (
 )
 
 type simulationSpec struct {
+	WarmupInputs      []sim.Input            `json:"warmup_inputs,omitempty"`
 	Agent             *agentSimulationConfig `json:"agent,omitempty"`
 	DecisionMode      string                 `json:"decision_mode,omitempty"`
 	SourceHash        string                 `json:"engine_source_sha256"`
@@ -34,12 +35,12 @@ type simulationSpec struct {
 
 // Pin local builds as well as release builds in portable artifacts.
 //
-//go:embed agent_event_backtest.go internal/backtest/engine.go event_backtest.go strategy.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
+//go:embed validation_runtime.go agent_event_backtest.go internal/backtest/engine.go event_backtest.go strategy.go strategy_replay.go market_calendar.go pricing.go integrity.go exec.go
 var simulationSources embed.FS
 
 func simulationSourceHash() string {
 	files := map[string]string{}
-	for _, name := range []string{"agent_event_backtest.go", "internal/backtest/engine.go", "event_backtest.go", "strategy.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
+	for _, name := range []string{"validation_runtime.go", "agent_event_backtest.go", "internal/backtest/engine.go", "event_backtest.go", "strategy.go", "strategy_replay.go", "market_calendar.go", "pricing.go", "integrity.go", "exec.go"} {
 		data, _ := simulationSources.ReadFile(name)
 		files[name] = string(data)
 	}
@@ -229,6 +230,9 @@ func storeSimulation(db *sql.DB, run *BacktestRun, spec simulationSpec, inputs [
 		return err
 	}
 	inputs = engine.Inputs
+	if err := validateSimulationWarmup(spec, inputs); err != nil {
+		return err
+	}
 	if spec.DecisionMode == "agent" {
 		quotes := map[string]bool{}
 		for _, in := range inputs {
@@ -313,6 +317,9 @@ func loadSimulation(db *sql.DB, id int64) (*simulationRecord, error) {
 }
 
 func updateSimulationInputs(db *sql.DB, run *BacktestRun, options *sim.Config, extra []sim.Input) error {
+	if err := forbidValidationChild(db, run.ID); err != nil {
+		return err
+	}
 	if run.Summary["agent_replay_only"] == true {
 		return errors.New("recorded agent replay inputs are immutable; create a new agent run to change the scenario")
 	}
@@ -587,7 +594,7 @@ func runEventSimulation(ctx context.Context, run *BacktestRun, one bool) (map[st
 	if r.Spec.DecisionMode == "agent" {
 		strategy = agentSimulationStrategy(ctx, run, r)
 	}
-	e, err := sim.New(r.Spec.Config, r.Inputs, r.State, strategy)
+	e, err := newSimulationEngine(r, strategy)
 	if err != nil {
 		return nil, err
 	}
@@ -657,6 +664,9 @@ func eMetricsAny(m map[string]float64) map[string]any {
 }
 
 func startEventSimulation(run *BacktestRun, one bool) (map[string]any, error) {
+	if err := forbidValidationChild(globalCtx.AppDB(), run.ID); err != nil {
+		return nil, err
+	}
 	simulationWorkers.Lock()
 	if simulationWorkers.running[run.ID] {
 		simulationWorkers.Unlock()
@@ -904,6 +914,11 @@ func (a *App) toolBacktestControl(ctx *sdk.AppCtx, args map[string]any) (any, er
 	run, err := dbGetBacktestRun(ctx.AppDB(), project, int64Arg(args, "backtest_id", 0))
 	if err != nil {
 		return nil, err
+	}
+	if strArg(args, "action") != "status" {
+		if err := forbidValidationChild(ctx.AppDB(), run.ID); err != nil {
+			return nil, err
+		}
 	}
 	switch strArg(args, "action") {
 	case "status":

@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.10.0
+version: 0.11.0
 description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
@@ -215,6 +215,14 @@ provides:
       description: "Evaluate a completed strategy backtest against its scorecard."
     - name: strategy_promotion_update
       description: "Promote, demote, or suspend a strategy under its scorecard gate."
+    - name: validation_create
+      description: "Plan validation windows and scenario batches from captured backtests."
+    - name: validation_list
+      description: "List validation suites."
+    - name: validation_control
+      description: "Run, pause, cancel or inspect a validation suite."
+    - name: validation_report
+      description: "Read validation distributions and export reproducible suite artifacts."
     - name: agent_backtest_create
       description: "Create an agent simulation from a complete event tape."
     - name: backtest_observation
@@ -281,6 +289,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return fmt.Errorf("rebuild realized P&L: %w", err)
 	}
 
+	if _, err := ctx.AppDB().Exec(`UPDATE validation_suites SET status='paused',error='Process restarted; resume the validation suite' WHERE status='running'`); err != nil {
+		return err
+	}
+	validationWorkers.Lock()
+	validationWorkers.stopping = false
+	validationWorkers.Unlock()
 	// Engine bootstrap — pricing provider, then the shared engine
 	// pointer the workers read.
 	provider := newProvider(ctx.Config().Get("pricing_provider"))
@@ -327,6 +341,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if err := stopValidationWorkers(ctx.AppDB()); err != nil {
+		return err
+	}
 	if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused' WHERE status='running' AND id IN (SELECT run_id FROM backtest_simulations)`); err != nil {
 		return err
 	}
@@ -406,6 +423,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
 		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
 		{Pattern: "/strategies/", Handler: a.handleHTTPStrategies},
+		{Pattern: "/validations", Handler: a.handleHTTPValidation},
+		{Pattern: "/validations/", Handler: a.handleHTTPValidation},
 		{Pattern: "/backtests", Handler: a.handleHTTPBacktests},
 		{Pattern: "/backtests/", Handler: a.handleHTTPBacktests},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},

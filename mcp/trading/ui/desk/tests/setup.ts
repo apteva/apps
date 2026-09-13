@@ -2,7 +2,7 @@ import { plugin } from "bun";
 // The native panel lives above the standalone desk. Resolve its external React
 // imports to this test host so both surfaces use the same React instance.
 await plugin({ name: "trading-panel-test-react", setup(build) {
-  build.onLoad({ filter: /\/TradingPanel\.tsx$/ }, async args => {
+  build.onLoad({ filter: /\/(TradingPanel|ValidationControls)\.tsx$/ }, async args => {
     const transpiler = new Bun.Transpiler({ loader: "tsx", tsconfig: { compilerOptions: { jsx: "react" } } });
     const reactPath = JSON.stringify(Bun.resolveSync("react", import.meta.dir));
     const code = transpiler.transformSync(await Bun.file(args.path).text()).replaceAll('from "react"', `from ${reactPath}`);

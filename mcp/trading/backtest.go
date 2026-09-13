@@ -95,6 +95,12 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 	if len(parts) > 1 {
 		action = parts[1]
 	}
+	if r.Method != http.MethodGet {
+		if err := forbidValidationChild(globalCtx.AppDB(), run.ID); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+	}
 	switch {
 	case action == "artifact" && r.Method == http.MethodGet:
 		a.handleSimulationArtifact(w, r, run)
@@ -550,6 +556,9 @@ func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 func pauseBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if run == nil {
 		return nil, errors.New("backtest run required")
+	}
+	if err := forbidValidationChild(globalCtx.AppDB(), run.ID); err != nil {
+		return nil, err
 	}
 	stopBacktestRunner(run.ID)
 	res, err := globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='paused',error='',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`, run.ID)

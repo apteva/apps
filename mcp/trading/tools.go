@@ -448,6 +448,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				return a.toolBacktestMarketStep(ctx, args)
 			}},
 	}
+	definitions = append(definitions, a.validationTools()...)
 	for i := range definitions {
 		original := definitions[i]
 		name := original.Name
