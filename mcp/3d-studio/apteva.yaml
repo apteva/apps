@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: 3d-studio
 display_name: 3D Studio
-version: 0.1.5
+version: 0.2.0
 description: >-
   Native Go polygon modeling for game assets. Select vertices and faces, transform
   with proportional falloff, extrude, inset, mirror, inspect PNG previews, and export
@@ -31,10 +31,10 @@ provides:
       description: Create and edit models, save selections, previews and exports.
   mcp_tools:
     - name: studio_capabilities
-      description: 'Discover the Go mesh command schemas, coordinate system, limits, and car example workflow.'
+      description: 'Discover the Go mesh command schemas, coordinate system, limits, and editable game example workflows.'
       requires: models.read
     - name: assets_create
-      description: 'Create an editable model and immutable initial revision. Templates: empty, box, car.'
+      description: 'Create an editable model and immutable initial revision. Templates: empty, box, car, warrior, landscape, sword.'
       requires: models.write
     - name: assets_list
       description: 'List up to 200 models in this project, newest first.'
@@ -105,7 +105,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: 3d-studio/v0.1.5
+    ref: 3d-studio/v0.2.0
     entry: mcp/3d-studio
   port: 8080
   health_check: /health

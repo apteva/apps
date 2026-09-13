@@ -37,8 +37,8 @@ type toolDef struct {
 }
 
 var definitions = []toolDef{
-	{"studio_capabilities", "Discover the Go mesh command schemas, coordinate system, limits, and car example workflow.", nil, nil, false},
-	{"assets_create", "Create an editable model and immutable initial revision. Templates: empty, box, car.", []string{"name", "template"}, []string{"name"}, true},
+	{"studio_capabilities", "Discover the Go mesh command schemas, coordinate system, limits, and editable game example workflows.", nil, nil, false},
+	{"assets_create", "Create an editable model and immutable initial revision. Templates: empty, box, car, warrior, landscape, sword.", []string{"name", "template"}, []string{"name"}, true},
 	{"assets_list", "List up to 200 models in this project, newest first.", nil, nil, false},
 	{"assets_get", "Read an asset revision with editable polygon geometry.", []string{"asset_id", "revision_id"}, []string{"asset_id"}, false},
 	{"revisions_list", "List the most recent 100 immutable revisions.", []string{"asset_id"}, []string{"asset_id"}, false},
@@ -118,7 +118,7 @@ func inputSchema(def toolDef) map[string]any {
 		p["mode"] = enumeration("preview", "commit")
 	}
 	if _, ok := p["template"]; ok {
-		p["template"] = enumeration("empty", "box", "car")
+		p["template"] = enumeration("empty", "box", "car", "warrior", "landscape", "sword")
 	}
 	if _, ok := p["format"]; ok {
 		p["format"] = enumeration("glb", "json")
@@ -229,6 +229,12 @@ func (a *App) call(ctx context.Context, project, name string, raw []byte) (any, 
 		case "", "empty":
 		case "car":
 			d, err = engine.ExampleCar()
+		case "warrior":
+			d, err = engine.ExampleWarrior()
+		case "landscape":
+			d, err = engine.ExampleLandscape()
+		case "sword":
+			d, err = engine.ExampleSword()
 		case "box":
 			var r engine.EditResult
 			r, err = engine.Evaluate(engine.EditRequest{Document: d, Commands: []engine.Command{{Op: "primitive.add", NodeID: "body", Shape: "box"}}})
@@ -532,5 +538,5 @@ func inspect(d engine.Document, in Input, sel *engine.Selection, report engine.R
 	return map[string]any{"report": report, "nodes": nodes}, nil
 }
 func capabilities() any {
-	return map[string]any{"engine": "native-go", "version": engine.Version, "schema": "apteva-3d/v1", "coordinates": "meters, right-handed, Y-up; rotation is Euler degrees X then Y then Z", "command_schema": commandSchema(), "limits": map[string]int{"vertices": engine.MaxVertices, "faces": engine.MaxFaces, "commands_per_batch": 64, "nodes": 256}, "selection_semantics": "Faces match by centroid and normal. Vertex selections match positions. Handles are immutable and revision-bound. Omitting selection transforms all vertices of node. Topology commands require explicit face selection. result_selection refers to new cap faces and is usable within the same batch.", "operation_notes": map[string]string{"transform": "Positive scale only. Default pivot is selection centroid. radius enables proportional influence; falloff smooth (default) or linear. connected_only limits influence to connected components.", "inset": "Individual faces; amount is a centroid interpolation fraction (0,1), not a physical width. Concave or distorted results may be rejected.", "mesh.mirror": "Creates a baked reflected copy in target_id across world axis at offset; reverses face winding. This is not a live modifier or seam welding.", "vertices.weld": "Greedy deterministic weld of <=2000 selected vertices, tolerance <=0.1m; invalid topology rolls back the batch.", "render": "Native Go orthographic PNG; SDK returns artifact URL in JSON. Vision clients fetch the authenticated PNG to inspect it.", "export": "GLB includes flat normals and solid-color PBR materials. Each node pivot is its bounds center. No UVs, textures, animation, collision or LOD metadata yet."}, "workflow": []string{"assets_create template=car or box", "mesh_select query={node_id:body,kind:face,normal:[0,1,0]}", "mesh_edit expected_revision_id=<current> selections={roof:<handle>} mode=preview commands=[{op:extrude,node_id:body,selection:roof,direction:[0,1,0],distance:0.2,result_selection:cap}]", "assets_render candidate_id=<preview> view=side", "mesh_edit_commit candidate_id=<preview> request_key=<unique>", "assets_export format=glb"}}
+	return map[string]any{"engine": "native-go", "version": engine.Version, "schema": "apteva-3d/v1", "coordinates": "meters, right-handed, Y-up; rotation is Euler degrees X then Y then Z", "command_schema": commandSchema(), "limits": map[string]int{"vertices": engine.MaxVertices, "faces": engine.MaxFaces, "commands_per_batch": 64, "nodes": 256}, "selection_semantics": "Faces match by centroid and normal. Vertex selections match positions. Handles are immutable and revision-bound. Omitting selection transforms all vertices of node. Topology commands require explicit face selection. result_selection refers to new cap faces and is usable within the same batch.", "operation_notes": map[string]string{"transform": "Positive scale only. Default pivot is selection centroid. radius enables proportional influence; falloff smooth (default) or linear. connected_only limits influence to connected components.", "inset": "Individual faces; amount is a centroid interpolation fraction (0,1), not a physical width. Concave or distorted results may be rejected.", "mesh.mirror": "Creates a baked reflected copy in target_id across world axis at offset; reverses face winding. This is not a live modifier or seam welding.", "vertices.weld": "Greedy deterministic weld of <=2000 selected vertices, tolerance <=0.1m; invalid topology rolls back the batch.", "render": "Native Go orthographic PNG; SDK returns artifact URL in JSON. Vision clients fetch the authenticated PNG to inspect it.", "export": "GLB includes flat normals and solid-color PBR materials. Each node pivot is its bounds center. No UVs, textures, animation, collision or LOD metadata yet."}, "templates": []string{"empty", "box", "car", "warrior", "landscape", "sword"}, "example_notes": "Warrior is an unrigged static character. Landscape parts include a closed terrain tile, river, pines, bridge and ruins. Every example is editable polygon geometry with named parts and solid materials.", "workflow": []string{"assets_create template=car (also warrior, landscape, sword, box)", "mesh_select query={node_id:body,kind:face,normal:[0,1,0]}", "mesh_edit expected_revision_id=<current> selections={roof:<handle>} mode=preview commands=[{op:extrude,node_id:body,selection:roof,direction:[0,1,0],distance:0.2,result_selection:cap}]", "assets_render candidate_id=<preview> view=side", "mesh_edit_commit candidate_id=<preview> request_key=<unique>", "assets_export format=glb"}}
 }

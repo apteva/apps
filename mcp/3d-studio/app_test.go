@@ -284,3 +284,33 @@ func TestMalformedVectorsAndRequiredIDs(t *testing.T) {
 		t.Fatal("retry lost or changed returned selection handles")
 	}
 }
+
+func TestGameTemplatesThroughTools(t *testing.T) {
+	a := testApp(t)
+	for _, template := range []string{"warrior", "landscape", "sword"} {
+		t.Run(template, func(t *testing.T) {
+			out := invoke(t, a, "assets_create", map[string]any{"name": "Example " + template, "template": template})
+			var revision Revision
+			if err := json.Unmarshal(out["revision"], &revision); err != nil {
+				t.Fatal(err)
+			}
+			loaded := invoke(t, a, "assets_get", map[string]any{"asset_id": revision.AssetID})
+			if !bytes.Equal(out["revision"], loaded["revision"]) {
+				t.Fatal("template was not persisted intact")
+			}
+			render := invoke(t, a, "assets_render", map[string]any{"asset_id": revision.AssetID, "view": "perspective"})
+			var png Artifact
+			json.Unmarshal(render["artifact"], &png)
+			data, format, err := a.store.artifactContent("alpha", png.ID)
+			if err != nil || format != "png" || len(data) == 0 {
+				t.Fatal("PNG export failed", err)
+			}
+			exported := invoke(t, a, "assets_export", map[string]any{"asset_id": revision.AssetID, "format": "glb"})
+			var glb Artifact
+			json.Unmarshal(exported["artifact"], &glb)
+			if _, _, err := a.store.artifactContent("beta", glb.ID); !errors.Is(err, errNotFound) {
+				t.Fatal("template artifact leaked between projects")
+			}
+		})
+	}
+}
