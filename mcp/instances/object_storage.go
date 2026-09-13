@@ -577,9 +577,6 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 		if accessKey == "" || secret == "" {
 			return nil, nil, errors.New("Vultr credential rotation did not return the new key pair")
 		}
-		if err := saveObjectStorageConnection(ctx, item, &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret}); err != nil {
-			return nil, nil, err
-		}
 		if err := dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"access_key_id": accessKey, "endpoint": endpoint, "error_message": ""}); err != nil {
 			return nil, nil, err
 		}
@@ -617,13 +614,6 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 	}
 	metadata.KeyExpiresAt = keyExpiresAt
 	metadata.PendingStep = ""
-	if err = saveObjectStorageConnection(ctx, item, &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret}); err != nil {
-		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO object_storage_key_cleanup(object_storage_id,connection_id,access_key_id,error) VALUES(?,?,?,?)`, item.ID, item.ProviderConnectionID, accessKey, "Vault update failed; revoke unused key")
-		metadata.PendingStep = ""
-		encoded, _ := json.Marshal(metadata)
-		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_metadata_json": string(encoded)})
-		return nil, nil, err
-	}
 	if err = commitObjectStorageRotation(ctx, item, accessKey, metadata); err != nil {
 		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO object_storage_key_cleanup(object_storage_id,connection_id,access_key_id,error) VALUES(?,?,?,?)`, item.ID, item.ProviderConnectionID, accessKey, "New key commit failed; revoke it")
 		return nil, nil, err
@@ -651,11 +641,6 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 	}
 
 	warnings := []string{}
-	if item.Setup != nil && item.Setup.ProbeKey != "" && item.Setup.ConnectionID > 0 {
-		if _, err := s3SetupCall(ctx, item, "delete_object", map[string]any{"key": item.Setup.ProbeKey}); err != nil && !s3Missing(err) {
-			return warnings, fmt.Errorf("remove setup verification object: %w", err)
-		}
-	}
 	if item.Provider == "vultr" {
 		_, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_delete", map[string]any{"object_storage_id": item.ProviderID})
 		if err != nil && !strings.Contains(err.Error(), "status=404") {
@@ -706,11 +691,6 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 		sort.Strings(warnings)
 		return warnings, fmt.Errorf("provider resource was deleted, but credential cleanup is incomplete: %s", strings.Join(warnings, "; "))
 	}
-	if item.Setup != nil && item.Setup.ConnectionID > 0 {
-		if err := sdk.RevokeManagedConnection(ctx.PlatformAPI(), item.Setup.ConnectionID); err != nil {
-			return warnings, fmt.Errorf("revoke S3 connection: %w", err)
-		}
-	}
 	if err := dbDeleteObjectStorage(ctx.AppDB(), item.ID); err != nil {
 		return warnings, err
 	}
@@ -719,7 +699,7 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 
 func (a *App) toolObjectStorageListProviders(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	providers := objectStorageProviders(ctx)
-	return map[string]any{"providers": providers, "count": len(providers), "setup": map[string]any{"protocol": "s3", "private": true, "public": false, "cors": true, "managed_connection": true, "integration": "s3-compatible", "verification": "Runtime checks; unsupported operations leave setup incomplete"}}, nil
+	return map[string]any{"providers": providers, "count": len(providers), "setup": map[string]any{"protocol": "s3", "private": true, "public": false, "cors": true, "credentials_returned": true, "verification": "Runtime checks; unsupported operations leave setup incomplete"}}, nil
 }
 
 func (a *App) toolObjectStorageListPlans(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -805,19 +785,6 @@ func (a *App) toolObjectStorageRotateCredentials(ctx *sdk.AppCtx, args map[strin
 		return nil, err
 	}
 	updated, _ := dbGetObjectStorage(ctx.AppDB(), item.ID)
-	if updated.Setup != nil {
-		if !updated.Setup.CreateConnection {
-			if err := sdk.RevokeManagedConnection(ctx.PlatformAPI(), updated.Setup.ConnectionID); err != nil {
-				return nil, err
-			}
-			updated.Setup.ConnectionID = 0
-			if err := persistObjectSetup(ctx, updated); err != nil {
-				return nil, err
-			}
-			return objectSetupResponse(updated, credentials), nil
-		}
-		return objectSetupResponse(updated, nil), nil
-	}
 	return map[string]any{
 		"object_storage": updated, "credentials": credentials, "warnings": warnings,
 		"warning": "The new secret is not stored by Instances and is shown only in this response. Copy it now.",
@@ -866,4 +833,11 @@ func refreshObjectStorageEndpoint(ctx *sdk.AppCtx, item *ObjectStorage) error {
 func objectStorageOwnsBucket(item *ObjectStorage) bool {
 	meta := parseObjectStorageMetadata(item)
 	return meta.BucketCreated || (item.Provider == "scaleway" && item.Bucket != "" && item.ProviderID == item.Bucket && item.AccessKeyID != "" && meta.ApplicationID != "" && meta.PendingStep == "")
+}
+
+func objectStorageSigningRegion(item *ObjectStorage) string {
+	if item.Provider == "vultr" || item.Region == "" {
+		return "us-east-1"
+	}
+	return item.Region
 }

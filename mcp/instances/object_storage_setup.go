@@ -15,50 +15,45 @@ import (
 )
 
 // Provider adapters provision accounts and credentials. Everything below uses
-// the same S3 protocol and the platform credential vault, regardless of provider.
+// the same direct S3 protocol, regardless of provider. Secrets remain in memory.
 type ObjectStorageSetup struct {
-	ProbeKey         string          `json:"probe_key,omitempty"`
-	Private          bool            `json:"private"`
-	CORSOrigins      []string        `json:"cors_origins"`
-	CreateConnection bool            `json:"create_connection"`
-	ConnectionID     int64           `json:"connection_id,omitempty"`
-	Stage            string          `json:"stage"`
-	Error            string          `json:"error,omitempty"`
-	BucketStarted    bool            `json:"bucket_started,omitempty"`
-	BucketCreated    bool            `json:"bucket_created,omitempty"`
-	Capabilities     map[string]bool `json:"capabilities"`
+	ProbeKey      string          `json:"probe_key,omitempty"`
+	Private       bool            `json:"private"`
+	CORSOrigins   []string        `json:"cors_origins"`
+	Stage         string          `json:"stage"`
+	Error         string          `json:"error,omitempty"`
+	BucketStarted bool            `json:"bucket_started,omitempty"`
+	BucketCreated bool            `json:"bucket_created,omitempty"`
+	Capabilities  map[string]bool `json:"capabilities"`
 }
 
 func objectStorageSetupSchema() map[string]any {
 	return schemaObject(map[string]any{
-		"private":           map[string]any{"type": "boolean", "enum": []bool{true}, "description": "Private access is required; public buckets are unsupported."},
-		"cors_origins":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact HTTP(S) browser origins; no wildcard. Empty disables CORS."},
-		"create_connection": map[string]any{"type": "boolean", "description": "Keep the platform-managed S3 connection (default true). False exports credentials once and revokes the temporary setup connection."},
+		"private":      map[string]any{"type": "boolean", "enum": []bool{true}, "description": "Private access is required; public buckets are unsupported."},
+		"cors_origins": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Exact HTTP(S) browser origins; no wildcard. Empty disables CORS."},
 	}, nil)
 }
 
 func parseObjectStorageSetup(args map[string]any) (*ObjectStorageSetup, error) {
-	out := &ObjectStorageSetup{Private: true, CreateConnection: true, CORSOrigins: []string{}, Stage: "provider", Capabilities: map[string]bool{}}
+	out := &ObjectStorageSetup{Private: true, CORSOrigins: []string{}, Stage: "provider", Capabilities: map[string]bool{}}
 	if raw, ok := args["setup"]; ok {
 		b, err := json.Marshal(raw)
 		if err != nil {
 			return nil, err
 		}
-		dec := json.NewDecoder(bytes.NewReader(b))
-		dec.DisallowUnknownFields()
-		// Decode only caller-owned desired state, never IDs or completed stages.
-		in := struct {
-			Private          bool     `json:"private"`
-			CORSOrigins      []string `json:"cors_origins"`
-			CreateConnection bool     `json:"create_connection"`
-		}{Private: true, CreateConnection: true}
 		if string(b) == "null" {
 			return nil, errors.New("setup must be an object")
 		}
+		in := struct {
+			Private     bool     `json:"private"`
+			CORSOrigins []string `json:"cors_origins"`
+		}{Private: true}
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
 		if err = dec.Decode(&in); err != nil {
 			return nil, err
 		}
-		out.Private, out.CORSOrigins, out.CreateConnection = in.Private, in.CORSOrigins, in.CreateConnection
+		out.Private, out.CORSOrigins = in.Private, in.CORSOrigins
 	}
 	if !out.Private {
 		return nil, errors.New("public buckets are unsupported; setup.private must be true")
@@ -92,39 +87,12 @@ func persistObjectSetup(ctx *sdk.AppCtx, item *ObjectStorage) error {
 	return dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"setup_json": string(b), "status": status, "error_message": item.ErrorMessage, "bucket": item.Bucket})
 }
 
-func saveObjectStorageConnection(ctx *sdk.AppCtx, item *ObjectStorage, creds *ObjectStorageCredentials) error {
-	if item.Setup == nil || creds == nil {
-		return nil
-	}
-	endpoint, err := url.Parse(creds.Endpoint)
-	if err != nil || endpoint.Scheme != "https" || endpoint.Host == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || (endpoint.Path != "" && endpoint.Path != "/") {
-		return errors.New("provider returned an invalid HTTPS S3 endpoint")
-	}
-	region := creds.Region
-	if region == "" {
-		region = "us-east-1"
-	}
-	conn, err := sdk.EnsureManagedConnection(ctx.PlatformAPI(), sdk.ManagedConnectionRequest{
-		Key: fmt.Sprintf("instances:object-storage:%d", item.ID), AppSlug: "s3-compatible", Name: item.Name + " S3", AuthType: "aws_sigv4",
-		Fields: map[string]string{"endpoint": strings.TrimRight(creds.Endpoint, "/"), "region": region, "bucket": item.Bucket, "access_key_id": creds.AccessKeyID, "secret_access_key": creds.SecretAccessKey, "force_path_style": "true"},
-	})
-	if err != nil {
-		return fmt.Errorf("save managed S3 connection: %w", err)
-	}
-	if conn == nil || conn.ID <= 0 {
-		return errors.New("managed S3 connection returned no ID")
-	}
-	item.Setup.ConnectionID = conn.ID
-	return persistObjectSetup(ctx, item)
-}
-
 func objectSetupResponse(item *ObjectStorage, credentials *ObjectStorageCredentials) map[string]any {
 	out := map[string]any{"object_storage": item, "credentials": credentials}
 	if item.Setup != nil {
 		out["setup"] = item.Setup
-		out["connection_id"] = item.Setup.ConnectionID
 		if item.Setup.Error != "" {
-			out["warning"] = "Setup incomplete. Resume object_storage_create with this resource's id; no new subscription will be purchased."
+			out["warning"] = "Setup incomplete. Resume object_storage_create with this resource's id and the returned credentials; no new subscription will be purchased."
 		}
 	} else if credentials != nil {
 		out["warning"] = "Credentials are returned once; store them securely."
@@ -136,13 +104,11 @@ func (a *App) ensureObjectStorage(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id := int64Arg(args, "id"); id > 0 {
 		return resumeObjectSetup(ctx, id, args)
 	}
-	// A durable caller key provides retry safety even when the create response is lost.
 	key := strings.TrimSpace(strArg(args, "request_key"))
 	if key != "" {
 		var id int64
-		err := ctx.AppDB().QueryRow(`SELECT id FROM object_storages WHERE request_key=?`, key).Scan(&id)
-		if err == nil {
-			return resumeObjectSetup(ctx, id, map[string]any{})
+		if ctx.AppDB().QueryRow(`SELECT id FROM object_storages WHERE request_key=?`, key).Scan(&id) == nil {
+			return resumeObjectSetup(ctx, id, args)
 		}
 	}
 	in := CreateObjectStorageInput{Name: strArg(args, "name"), Provider: strArg(args, "provider"), ProviderConnectionID: int64Arg(args, "provider_connection_id"), Region: strArg(args, "region"), Plan: strArg(args, "plan"), Bucket: strArg(args, "bucket"), RequestKey: key}
@@ -152,108 +118,67 @@ func (a *App) ensureObjectStorage(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := ctx.PlatformAPI().(sdk.ManagedConnectionClient); !ok {
-			return nil, errors.New("platform managed connections are required for S3 setup")
-		}
 		in.Bucket, err = validatedBucketName(in.Bucket, in.Name)
 		if err != nil {
 			return nil, err
 		}
 	}
-	item, credentials, err := createObjectStorage(ctx, in)
+	item, creds, err := createObjectStorage(ctx, in)
 	if err != nil {
-		// Provider adapters persist identity before subsequent steps. Surface that
-		// record on failure so callers can reconcile instead of repurchasing.
-		if key != "" {
-			var id int64
-			if ctx.AppDB().QueryRow(`SELECT id FROM object_storages WHERE request_key=?`, key).Scan(&id) == nil {
-				item, _ = dbGetObjectStorage(ctx.AppDB(), id)
-				if item != nil {
-					return objectSetupResponse(item, nil), nil
-				}
-			}
-		}
 		return nil, err
 	}
 	if item.Setup == nil {
-		return objectSetupResponse(item, credentials), nil
+		return objectSetupResponse(item, creds), nil
 	}
 	unlock, err := lockResource(ctx.AppDB(), "object_storage", item.ID)
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	if credentials == nil {
-		item.Setup.Stage = "provider"
-		item.Setup.Error = "Provider provisioning is pending; resume this resource by id."
+	if creds == nil {
+		item.Setup.Error = "Provider provisioning is pending; resume by id with credentials or rotate_credentials=true."
 		_ = persistObjectSetup(ctx, item)
 		return objectSetupResponse(item, nil), nil
 	}
-	if err = saveObjectStorageConnection(ctx, item, credentials); err == nil {
-		err = configureObjectStorage(ctx, item)
-	}
-	if err != nil {
+	if err = configureObjectStorage(ctx, item, creds); err != nil {
 		item.Setup.Error = err.Error()
 		_ = persistObjectSetup(ctx, item)
 	}
-	if item.Setup.CreateConnection {
-		credentials = nil
-	}
-	return objectSetupResponse(item, credentials), nil
+	return objectSetupResponse(item, creds), nil
 }
 
 func resumeObjectSetup(ctx *sdk.AppCtx, id int64, args map[string]any) (any, error) {
-	// Rotation owns its own resource lock. It is only needed if a one-time
-	// credential response was lost before reaching the credential vault.
 	item, err := dbGetObjectStorage(ctx.AppDB(), id)
 	if err != nil {
 		return nil, err
 	}
-	if item.Setup == nil {
-		if _, ok := args["setup"]; !ok {
-			return nil, errors.New("pass setup:{} to configure this existing resource")
-		}
-		desired, e := parseObjectStorageSetup(args)
-		if e != nil {
-			return nil, e
-		}
-		unlock, e := lockResource(ctx.AppDB(), "object_storage", id)
-		if e != nil {
-			return nil, e
-		}
-		item, e = dbGetObjectStorage(ctx.AppDB(), id)
-		if e == nil && item.Status == "deleting" {
-			e = errors.New("resource is deleting")
-		}
-		if e == nil && item.Setup == nil {
-			if item.Bucket == "" {
-				item.Bucket, e = validatedBucketName(strArg(args, "bucket"), item.Name)
-			}
-			if e == nil {
-				item.Setup = desired
-				e = persistObjectSetup(ctx, item)
-			}
-		}
-		unlock()
-		if e != nil {
-			return nil, e
-		}
-	}
-	if item.Setup.Stage == "ready" && args["setup"] == nil {
-		return objectSetupResponse(item, nil), nil
-	}
 	if item.Status == "deleting" || strings.HasPrefix(item.ProviderID, "pending:") {
 		return nil, errors.New("provider identity is unconfirmed or deleting; reconcile before setup")
 	}
-	var exported *ObjectStorageCredentials
-	if item.Setup.ConnectionID == 0 {
+	if item.Setup != nil && item.Setup.Stage == "ready" && args["setup"] == nil && args["credentials"] == nil && !boolArg(args, "rotate_credentials", false) {
+		return objectSetupResponse(item, nil), nil
+	}
+	var desired *ObjectStorageSetup
+	if args["setup"] != nil || item.Setup == nil {
+		desired, err = parseObjectStorageSetup(args)
+		if err != nil {
+			return nil, err
+		}
+	}
+	creds, err := objectSetupCredentials(item, args)
+	if err != nil {
+		return nil, err
+	}
+	if creds == nil {
+		if !boolArg(args, "rotate_credentials", false) {
+			return nil, errors.New("credentials are not stored: supply credentials.access_key_id and credentials.secret_access_key to resume, or explicitly set rotate_credentials=true to replace the existing keys")
+		}
 		if item.Endpoint == "" {
 			if err = refreshObjectStorageEndpoint(ctx, item); err != nil {
 				return nil, err
 			}
 		}
-
-		if exported, _, err = rotateObjectStorageCredentials(ctx, item); err != nil {
+		if creds, _, err = rotateObjectStorageCredentials(ctx, item); err != nil {
 			return nil, err
 		}
 	}
@@ -269,25 +194,49 @@ func resumeObjectSetup(ctx *sdk.AppCtx, id int64, args map[string]any) (any, err
 	if item.Status == "deleting" {
 		return nil, errors.New("resource is deleting")
 	}
-	if _, ok := args["setup"]; ok {
-		desired, e := parseObjectStorageSetup(args)
-		if e != nil {
-			return nil, e
+	if item.Setup == nil {
+		item.Setup = desired
+	}
+	if item.Bucket == "" {
+		item.Bucket, err = validatedBucketName(strArg(args, "bucket"), item.Name)
+		if err != nil {
+			return nil, err
 		}
-		if desired.CreateConnection != item.Setup.CreateConnection {
-			return nil, errors.New("create_connection cannot change after provisioning")
-		}
+	}
+	if desired != nil {
 		item.Setup.CORSOrigins = desired.CORSOrigins
 	}
+	creds.Bucket = item.Bucket
 	item.Setup.Error = ""
-	if err = configureObjectStorage(ctx, item); err != nil {
+	if err = configureObjectStorage(ctx, item, creds); err != nil {
 		item.Setup.Error = err.Error()
 		_ = persistObjectSetup(ctx, item)
 	}
-	if item.Setup.CreateConnection {
-		exported = nil
+	return objectSetupResponse(item, creds), nil
+}
+
+func objectSetupCredentials(item *ObjectStorage, args map[string]any) (*ObjectStorageCredentials, error) {
+	raw, ok := args["credentials"]
+	if !ok {
+		return nil, nil
 	}
-	return objectSetupResponse(item, exported), nil
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var fields struct {
+		AccessKeyID     string `json:"access_key_id"`
+		SecretAccessKey string `json:"secret_access_key"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err = dec.Decode(&fields); err != nil {
+		return nil, errors.New("credentials must contain only access_key_id and secret_access_key")
+	}
+	if fields.AccessKeyID == "" || fields.SecretAccessKey == "" {
+		return nil, errors.New("both access_key_id and secret_access_key are required")
+	}
+	return &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: objectStorageSigningRegion(item), Bucket: item.Bucket, AccessKeyID: fields.AccessKeyID, SecretAccessKey: fields.SecretAccessKey, ShownOnce: true}, nil
 }
 
 type s3SetupError struct {
@@ -298,46 +247,16 @@ type s3SetupError struct {
 func (e *s3SetupError) Error() string {
 	return fmt.Sprintf("S3 operation failed (status=%d code=%s); provider may not support this capability", e.Status, e.Code)
 }
-func s3SetupCall(ctx *sdk.AppCtx, item *ObjectStorage, tool string, args map[string]any) ([]byte, error) {
-	if args == nil {
-		args = map[string]any{}
-	}
-	args["bucket"] = item.Bucket
-	result, err := ctx.PlatformAPI().ExecuteIntegrationTool(item.Setup.ConnectionID, tool, args)
-	if err != nil {
-		return nil, fmt.Errorf("S3 %s: %w", tool, err)
-	}
-	if result == nil {
-		return nil, errors.New("empty S3 response")
-	}
-	data := []byte(result.Data)
-	var text string
-	if json.Unmarshal(data, &text) == nil {
-		data = []byte(text)
-	}
-	var binary struct {
-		Binary bool   `json:"_binary"`
-		Base64 string `json:"base64"`
-	}
-	if json.Unmarshal(result.Data, &binary) == nil && binary.Binary {
-		decoded, e := base64.StdEncoding.DecodeString(binary.Base64)
-		if e != nil {
-			return nil, e
-		}
-		data = decoded
-	}
-	if !result.Success || result.Status >= 400 {
-		var e struct {
-			Code string `xml:"Code"`
-		}
-		_ = xml.Unmarshal(data, &e)
-		return nil, &s3SetupError{Status: result.Status, Code: e.Code}
-	}
-	return data, nil
-}
 func s3Missing(err error) bool { var e *s3SetupError; return errors.As(err, &e) && e.Status == 404 }
 
-func configureObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) error {
+func configureObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage, creds *ObjectStorageCredentials) error {
+	client, err := newDirectS3Client(creds)
+	if err != nil {
+		return err
+	}
+	s3SetupCall := func(_ *sdk.AppCtx, _ *ObjectStorage, tool string, args map[string]any) ([]byte, error) {
+		return client.call(item.Bucket, tool, args)
+	}
 	stage := func(name string) error { item.Setup.Stage = name; return persistObjectSetup(ctx, item) }
 	item.Setup.Capabilities = map[string]bool{}
 	if err := stage("bucket"); err != nil {
@@ -464,13 +383,6 @@ func configureObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) error {
 	}
 	item.Setup.ProbeKey = ""
 	item.Setup.Capabilities["read_write_delete"] = true
-	if !item.Setup.CreateConnection {
-		if err = sdk.RevokeManagedConnection(ctx.PlatformAPI(), item.Setup.ConnectionID); err != nil {
-			return err
-		}
-		item.Setup.ConnectionID = 0
-	}
-	item.Setup.Capabilities["managed_connection"] = item.Setup.CreateConnection
 	return stage("ready")
 }
 

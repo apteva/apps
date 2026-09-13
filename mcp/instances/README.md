@@ -284,13 +284,11 @@ existing workload as a side effect of forgetting a host.
 
 ## Object storage
 
-`object_storage_create` provisions storage through a bound provider and runs the
-same S3 setup pipeline for every provider. Currently subscription provisioning
-supports Scaleway and Vultr. The generic `s3-compatible` integration supplies
-bucket and object operations; the platform stores credentials encrypted in an
-app-owned, non-exportable managed connection. No secret is saved in Instances.
-The server must support managed credentials and have the updated integration
-catalog containing `s3-compatible` (refresh the catalog after upgrading).
+Instances provisions storage through its existing bound cloud-provider connection,
+then configures the bucket directly using signed S3 HTTPS requests. It creates no
+S3 integration or platform connection and saves no secret credentials. The shared
+bucket setup pipeline works with both supported provisioning providers, Scaleway
+and Vultr.
 
 ```json
 {
@@ -301,42 +299,45 @@ catalog containing `s3-compatible` (refresh the catalog after upgrading).
   "bucket": "my-private-media-bucket",
   "setup": {
     "private": true,
-    "cors_origins": ["https://app.example.com"],
-    "create_connection": true
+    "cors_origins": ["https://app.example.com"]
   }
 }
 ```
 
-Use a region/cluster and plan from `object_storage_list_plans`. Keep the same
-`request_key` when retrying a creation request. To resume after an interrupted
-setup, pass `{"id": 123}` to `object_storage_create`; this never purchases another
-subscription. To configure an older subscription, pass `{"id":123,"bucket":
-"my-new-bucket","setup":{}}`. An existing Scaleway bucket created by Instances
-is reused; unrelated existing buckets are never adopted or changed.
+Pass this to `object_storage_create`. Use region/cluster and plan values from
+`object_storage_list_plans`. The response includes the resource, setup status,
+endpoint, signing region, bucket, access key, and secret key. Save the credentials:
+get/list never returns the secret again. Credentials are also returned when bucket
+setup fails, so the same credentials can be used to retry.
 
-Setup creates the bucket, sets an owner-only ACL, removes its bucket policy,
-configures and reads back CORS, and verifies an upload/download/delete roundtrip.
-Only then does the resource become `ready`. Empty origins disable CORS; origins
-must be exact HTTP(S) origins without wildcards or paths. Allowed methods are
-GET, HEAD, PUT, POST, DELETE; headers are unrestricted and ETag is exposed. CORS
-does not make a bucket public or grant unauthenticated object access. Public
-buckets are unsupported. Provider-specific unsupported operations remain visible
-as setup failures, rather than being silently skipped.
+Setup creates the bucket, verifies an owner-only ACL and absence of a public
+bucket policy, applies CORS and reads it back, then tests upload/download/delete.
+Only verified setup reaches `ready`. Origins must be exact HTTP(S) origins;
+empty origins disable CORS. Allowed methods are GET, HEAD, PUT, POST, DELETE;
+headers are unrestricted and ETag is exposed. CORS does not grant unauthenticated
+access. Public buckets are unsupported. Unsupported provider operations remain
+visible as setup failures.
 
-The result contains `object_storage`, `setup` (stage, error, verified capabilities),
-and `connection_id`. The connection supports S3 integration tools; binding it to a
-consuming app is separate and that app must accept `s3-compatible` connections.
-Credential rotation updates this same managed connection; destroy revokes it
-only after deleting the provider resource. Scaleway credentials are project-wide;
-use a dedicated provider project for isolation. Vultr credentials belong to the
-storage subscription. Unknown provider-create outcomes require reconciliation
-before retrying, rather than risking another paid resource.
+Resume with `{"id":123,"credentials":{"access_key_id":"...",
+"secret_access_key":"..."}}`. The original endpoint is taken from the tracked
+resource. To configure an older subscription, also pass `setup:{}` and optionally
+`bucket`. Existing buckets are reused only when Instances has recorded ownership.
+Reusing a `request_key` resumes the same resource instead of buying another one.
+If credentials were lost, explicitly pass `rotate_credentials:true` to replace
+provider keys; this invalidates previous keys. Retrying never rotates implicitly.
+The UI offers these same choices. To change CORS, include `setup.cors_origins` on
+the resume request. Setup progress and verification-object identity are durable;
+credentials stay in request memory only.
 
-`setup.create_connection=false` uses a temporary vault connection during setup,
-revokes it afterward, and returns credentials once. `provision_only=true` keeps
-the legacy subscription-only flow, returning credentials without S3 setup.
-Provider secrets remain absent from get/list responses. Retrying setup can use
-`setup` to change CORS origins; connection retention cannot change afterward.
+`provision_only:true` skips bucket configuration and returns provider credentials.
+`object_storage_rotate_credentials` returns replacement credentials once. Destroy
+uses the provider API; Scaleway buckets must be empty (retry an interrupted setup
+to remove its verification object first). Scaleway keys are project-wide, so use
+a dedicated provider project for isolation. Vultr keys belong to its subscription.
+
+Version 0.5.1 removes the S3 catalog and managed-connection dependency introduced
+in 0.5.0. No integration catalog refresh or new credential-management permission
+is needed for bucket setup.
 
 ## Diagnostics and reconciliation
 

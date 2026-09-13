@@ -1,8 +1,13 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -10,132 +15,180 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
-type managedS3Platform struct {
+type directSetupPlatform struct {
 	objectStoragePlatform
-	connection *sdk.ManagedConnectionRequest
-	calls      []string
-	bucket     bool
-	cors       string
-	fail       string
-	purchases  int
-	revoked    bool
+	purchases int
 }
 
-func (p *managedS3Platform) EnsureManagedConnection(req sdk.ManagedConnectionRequest) (*sdk.PlatformConnection, error) {
-	p.connection = &req
-	p.revoked = false
-	return &sdk.PlatformConnection{ID: 99, AppSlug: req.AppSlug}, nil
-}
-func (p *managedS3Platform) RotateManagedConnection(id int64, req sdk.ManagedConnectionRotation) (*sdk.PlatformConnection, error) {
-	p.connection.Fields = req.Fields
-	return &sdk.PlatformConnection{ID: id}, nil
-}
-func (p *managedS3Platform) RevokeManagedConnection(id int64) error {
-	if id != 99 {
-		return errors.New("wrong connection")
+func (p *directSetupPlatform) ExecuteIntegrationTool(id int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
+	if id != 7 {
+		return nil, fmt.Errorf("unexpected integration connection %d", id)
 	}
-	p.revoked = true
-	return nil
+	if tool == "object_storage_create" {
+		p.purchases++
+	}
+	return p.objectStoragePlatform.ExecuteIntegrationTool(id, tool, args)
 }
-func (p *managedS3Platform) ExecuteIntegrationTool(id int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
-	if id != 99 {
-		if tool == "object_storage_create" {
-			p.purchases++
+func (p *directSetupPlatform) EnsureManagedConnection(sdk.ManagedConnectionRequest) (*sdk.PlatformConnection, error) {
+	panic("Instances must not create connections")
+}
+func (p *directSetupPlatform) RotateManagedConnection(int64, sdk.ManagedConnectionRotation) (*sdk.PlatformConnection, error) {
+	panic("Instances must not manage connections")
+}
+func (p *directSetupPlatform) RevokeManagedConnection(int64) error {
+	panic("Instances must not manage connections")
+}
+
+type directFixture struct {
+	bucket bool
+	cors   string
+	fail   string
+	calls  []string
+}
+type s3FixtureTransport func(*http.Request) (*http.Response, error)
+
+func (f s3FixtureTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+func newDirectFixture(t *testing.T, existing bool) *directFixture {
+	t.Helper()
+	f := &directFixture{bucket: existing}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
+			t.Error("request not signed")
 		}
-		return p.objectStoragePlatform.ExecuteIntegrationTool(id, tool, args)
-	}
-	p.calls = append(p.calls, tool)
-	status := 200
-	body := ""
-	if p.fail == tool {
-		return &sdk.ExecuteResult{Status: 501, Success: false, Data: json.RawMessage(`"<Error><Code>NotImplemented</Code></Error>"`)}, nil
-	}
-	switch tool {
-	case "head_bucket":
-		if !p.bucket {
-			status = 404
+		op := r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		f.calls = append(f.calls, op)
+		if r.URL.Query().Has(f.fail) && f.fail != "" {
+			w.WriteHeader(501)
+			io.WriteString(w, `<Error><Code>NotImplemented</Code></Error>`)
+			return
 		}
-	case "create_bucket":
-		p.bucket = true
-	case "get_bucket_acl":
-		body = `<AccessControlPolicy><Owner><ID>owner</ID></Owner><AccessControlList><Grant><Grantee><ID>owner</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>`
-	case "get_bucket_policy":
-		status = 404
-	case "put_bucket_cors":
-		p.cors = args["body"].(string)
-	case "get_bucket_cors":
-		body = p.cors
-		if body == "" {
-			status = 404
+		w.Header().Set("Content-Type", "application/xml")
+		if r.URL.Query().Has("acl") {
+			if r.Method == "PUT" {
+				if r.Header.Get("x-amz-acl") != "private" {
+					t.Error("missing private ACL")
+				}
+				return
+			}
+			io.WriteString(w, `<AccessControlPolicy><Owner><ID>owner</ID></Owner><AccessControlList><Grant><Grantee><ID>owner</ID></Grantee><Permission>FULL_CONTROL</Permission></Grant></AccessControlList></AccessControlPolicy>`)
+			return
 		}
-	case "delete_bucket_cors":
-		p.cors = ""
-	case "get_object":
-		body = "Apteva S3 setup verification"
-	case "put_bucket_acl", "delete_bucket_policy", "put_object", "delete_object":
-	default:
-		return nil, errors.New("unknown S3 tool: " + tool)
-	}
-	data, _ := json.Marshal(body)
-	return &sdk.ExecuteResult{Status: status, Success: status < 400, Data: data}, nil
+		if r.URL.Query().Has("policy") {
+			if r.Method == "GET" {
+				w.WriteHeader(404)
+			}
+			return
+		}
+		if r.URL.Query().Has("cors") {
+			switch r.Method {
+			case "PUT":
+				b, _ := io.ReadAll(r.Body)
+				f.cors = string(b)
+				sum := md5.Sum(b)
+				if r.Header.Get("Content-MD5") != base64.StdEncoding.EncodeToString(sum[:]) {
+					t.Error("wrong CORS checksum")
+				}
+			case "DELETE":
+				f.cors = ""
+			case "GET":
+				if f.cors == "" {
+					w.WriteHeader(404)
+				} else {
+					io.WriteString(w, f.cors)
+				}
+			}
+			return
+		}
+		if strings.Contains(r.URL.Path, "/.apteva-setup-") {
+			if r.Method == "GET" {
+				w.Header().Set("Content-Type", "application/octet-stream")
+				io.WriteString(w, "Apteva S3 setup verification")
+			}
+			return
+		}
+		if r.Method == "HEAD" && !f.bucket {
+			w.WriteHeader(404)
+		}
+		if r.Method == "PUT" {
+			f.bucket = true
+		}
+	}))
+	t.Cleanup(server.Close)
+	original := directS3HTTPClient
+	// Route signed requests to TLS fixture while preserving their original Host.
+	transport := server.Client().Transport
+	directS3HTTPClient = &http.Client{CheckRedirect: original.CheckRedirect, Transport: s3FixtureTransport(func(r *http.Request) (*http.Response, error) {
+		copy := r.Clone(r.Context())
+		u := *r.URL
+		copy.Host = u.Host
+		u.Host = strings.TrimPrefix(server.URL, "https://")
+		copy.URL = &u
+		return transport.RoundTrip(copy)
+	})}
+	t.Cleanup(func() { directS3HTTPClient = original })
+	return f
 }
-func managedSetupArgs() map[string]any {
+func directSetupArgs() map[string]any {
 	return map[string]any{"name": "Media", "provider": "vultr", "provider_connection_id": int64(7), "region": "2", "bucket": "private-media-test", "request_key": "media-1", "setup": map[string]any{"cors_origins": []string{"https://app.example.com"}}}
 }
-
-func TestManagedObjectSetupRetryAndRotation(t *testing.T) {
-	p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, fail: "put_bucket_cors"}
+func retryCredentials(creds *ObjectStorageCredentials) map[string]any {
+	return map[string]any{"access_key_id": creds.AccessKeyID, "secret_access_key": creds.SecretAccessKey}
+}
+func TestDirectObjectSetupRetryReturnsCredentialsWithoutConnections(t *testing.T) {
+	f := newDirectFixture(t, false)
+	f.fail = "cors"
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
-	result, err := a.toolObjectStorageCreate(ctx, managedSetupArgs())
+	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := result.(map[string]any)["object_storage"].(*ObjectStorage)
-	if item.Status != "error" || item.Setup.Stage != "cors" || p.connection.AppSlug != "s3-compatible" {
-		t.Fatalf("item=%+v connection=%+v", item, p.connection)
+	item := r.(map[string]any)["object_storage"].(*ObjectStorage)
+	creds := r.(map[string]any)["credentials"].(*ObjectStorageCredentials)
+	if item.Status != "error" || item.Setup.Stage != "cors" || creds.SecretAccessKey != "vultr-secret" {
+		t.Fatalf("item=%+v", item)
 	}
-	if result.(map[string]any)["credentials"] != (*ObjectStorageCredentials)(nil) {
-		t.Fatal("managed setup leaked credentials")
+	f.fail = ""
+	if _, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID}); err == nil {
+		t.Fatal("resumed without credentials or consent to rotate")
 	}
-	if p.connection.Fields["region"] != "us-east-1" || p.connection.Fields["endpoint"] != "https://ewr1.vultrobjects.com" {
-		t.Fatal("wrong S3 endpoint/signing region")
+	if containsString(p.tools, "object_storage_rotate_credentials") {
+		t.Fatal("implicitly rotated credentials")
 	}
-	p.fail = ""
-	result, err = a.toolObjectStorageCreate(ctx, managedSetupArgs())
+	r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID, "credentials": retryCredentials(creds)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	item = result.(map[string]any)["object_storage"].(*ObjectStorage)
+	item = r.(map[string]any)["object_storage"].(*ObjectStorage)
 	if item.Status != "ready" || !item.Setup.Capabilities["private"] || !item.Setup.Capabilities["read_write_delete"] || p.purchases != 1 {
-		t.Fatalf("item=%+v purchases=%d", item, p.purchases)
+		t.Fatalf("setup=%+v", item.Setup)
 	}
 	var setup, metadata string
 	if err = ctx.AppDB().QueryRow(`SELECT setup_json,provider_metadata_json FROM object_storages WHERE id=?`, item.ID).Scan(&setup, &metadata); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(setup+metadata, "vultr-secret") {
-		t.Fatal("secret persisted in Instances")
+	if strings.Contains(setup+metadata, "vultr-secret") || strings.Contains(setup, "connection_id") {
+		t.Fatal("credentials/connection persisted")
 	}
-	if _, err = a.toolObjectStorageRotateCredentials(ctx, map[string]any{"id": item.ID}); err != nil {
+	r, err = a.toolObjectStorageRotateCredentials(ctx, map[string]any{"id": item.ID})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if p.connection.Fields["secret_access_key"] != "vultr-new-secret" {
-		t.Fatal("rotation did not update vault")
+	if r.(map[string]any)["credentials"].(*ObjectStorageCredentials).SecretAccessKey != "vultr-new-secret" {
+		t.Fatal("rotation did not return credentials")
 	}
 	if _, err = a.toolObjectStorageDestroy(ctx, map[string]any{"id": item.ID, "confirm": true}); err != nil {
 		t.Fatal(err)
 	}
-	if !p.revoked {
-		t.Fatal("managed connection not revoked")
-	}
 }
-func TestGenericObjectSetupAcrossProviders(t *testing.T) {
+func TestDirectObjectSetupAcrossProviders(t *testing.T) {
 	for _, provider := range []string{"scaleway", "vultr"} {
 		t.Run(provider, func(t *testing.T) {
-			p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: provider}, bucket: provider == "scaleway"}
+			newDirectFixture(t, provider == "scaleway")
+			p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: provider}}
 			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
-			args := managedSetupArgs()
+			args := directSetupArgs()
 			args["provider"] = provider
 			if provider == "scaleway" {
 				args["region"] = "fr-par"
@@ -148,19 +201,34 @@ func TestGenericObjectSetupAcrossProviders(t *testing.T) {
 			if item.Status != "ready" {
 				t.Fatalf("setup=%+v", item.Setup)
 			}
-			for _, tool := range []string{"put_bucket_acl", "put_bucket_cors", "put_object", "get_object", "delete_object"} {
-				if !containsString(p.calls, tool) {
-					t.Fatal("missing generic step " + tool)
-				}
+			encoded, _ := json.Marshal(item)
+			if strings.Contains(string(encoded), "secret") {
+				t.Fatal("secret on public resource")
 			}
 		})
 	}
 }
-func TestObjectSetupRejectsUnsafeInputBeforePurchase(t *testing.T) {
-	for _, setup := range []any{map[string]any{"private": false}, map[string]any{"cors_origins": []string{"*"}}, map[string]any{"connection_id": 7}, map[string]any{"cors_origins": []string{"https://app.example.com/path"}}, nil} {
-		p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
+func TestDirectObjectSetupExistingSubscription(t *testing.T) {
+	newDirectFixture(t, false)
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	item, creds, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "Existing", Provider: "vultr", ProviderConnectionID: 7, Region: "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := (&App{}).toolObjectStorageCreate(ctx, map[string]any{"id": item.ID, "bucket": "existing-private-bucket", "setup": map[string]any{}, "credentials": retryCredentials(creds)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.(map[string]any)["object_storage"].(*ObjectStorage).Status != "ready" || p.purchases != 1 {
+		t.Fatal("existing setup failed")
+	}
+}
+func TestDirectSetupRejectsUnsafeInputBeforePurchase(t *testing.T) {
+	for _, setup := range []any{map[string]any{"private": false}, map[string]any{"cors_origins": []string{"*"}}, map[string]any{"create_connection": true}, map[string]any{"connection_id": 99}, nil} {
+		p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
 		ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
-		args := managedSetupArgs()
+		args := directSetupArgs()
 		args["setup"] = setup
 		if _, err := (&App{}).toolObjectStorageCreate(ctx, args); err == nil {
 			t.Fatalf("accepted %+v", setup)
@@ -170,71 +238,42 @@ func TestObjectSetupRejectsUnsafeInputBeforePurchase(t *testing.T) {
 		}
 	}
 }
-func TestObjectSetupDoesNotAdoptExistingBucket(t *testing.T) {
-	p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, bucket: true}
+func TestDirectSetupDoesNotAdoptExistingBucket(t *testing.T) {
+	f := newDirectFixture(t, true)
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
-	r, err := (&App{}).toolObjectStorageCreate(ctx, managedSetupArgs())
+	r, err := (&App{}).toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.(map[string]any)["object_storage"].(*ObjectStorage).Status != "error" || containsString(p.calls, "put_bucket_acl") {
-		t.Fatal("changed unrelated bucket")
+	if r.(map[string]any)["object_storage"].(*ObjectStorage).Status != "error" {
+		t.Fatal("adopted bucket")
 	}
-}
-func TestObjectSetupTemporaryConnectionExport(t *testing.T) {
-	p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
-	args := managedSetupArgs()
-	args["setup"] = map[string]any{"create_connection": false}
-	r, err := (&App{}).toolObjectStorageCreate(ctx, args)
-	if err != nil {
-		t.Fatal(err)
-	}
-	item := r.(map[string]any)["object_storage"].(*ObjectStorage)
-	if item.Status != "ready" || item.Setup.ConnectionID != 0 || !p.revoked || r.(map[string]any)["credentials"].(*ObjectStorageCredentials).SecretAccessKey == "" {
-		t.Fatalf("unexpected export: %+v", item)
+	for _, call := range f.calls {
+		if strings.Contains(call, "acl") {
+			t.Fatal("changed unrelated bucket")
+		}
 	}
 }
 
-func TestConfigureExistingSubscriptionWithoutRepurchasing(t *testing.T) {
-	p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
+func TestDirectSetupExplicitRotationOnReadyResource(t *testing.T) {
+	newDirectFixture(t, false)
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
 	a := &App{}
-	item, _, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "Existing", Provider: "vultr", ProviderConnectionID: 7, Region: "2"})
+	result, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID, "bucket": "existing-private-bucket", "setup": map[string]any{}})
+	item := result.(map[string]any)["object_storage"].(*ObjectStorage)
+	result, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID, "rotate_credentials": true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated := r.(map[string]any)["object_storage"].(*ObjectStorage)
-	if updated.Status != "ready" || p.purchases != 1 || updated.Bucket != "existing-private-bucket" {
-		t.Fatalf("item=%+v purchases=%d", updated, p.purchases)
+	if result.(map[string]any)["credentials"].(*ObjectStorageCredentials).SecretAccessKey != "vultr-new-secret" {
+		t.Fatal("explicit credential recovery failed")
 	}
-}
-
-func TestConfigureOlderScalewayBucketWithRecordedIAMOwnership(t *testing.T) {
-	p := &managedS3Platform{objectStoragePlatform: objectStoragePlatform{provider: "scaleway"}, bucket: true}
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
-	item, _, err := createObjectStorage(ctx, CreateObjectStorageInput{Name: "Older", Provider: "scaleway", ProviderConnectionID: 7, Region: "fr-par", Bucket: "older-private-bucket"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta := parseObjectStorageMetadata(item)
-	meta.BucketCreated = false
-	b, _ := json.Marshal(meta)
-	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_metadata_json": string(b)}); err != nil {
-		t.Fatal(err)
-	}
-	r, err := (&App{}).toolObjectStorageCreate(ctx, map[string]any{"id": item.ID, "setup": map[string]any{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := r.(map[string]any)["object_storage"].(*ObjectStorage); got.Status != "ready" {
-		t.Fatalf("setup=%+v", got.Setup)
-	}
-	if containsString(p.calls, "create_bucket") {
-		t.Fatal("tried to recreate tracked bucket")
+	if p.purchases != 1 {
+		t.Fatal("repurchased subscription")
 	}
 }
