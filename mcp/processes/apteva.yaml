@@ -11,7 +11,7 @@ tags: [productivity, processes, agents, operations]
 scopes: [project, global]
 min_apteva_version: "0.50.4"
 requires:
-  permissions: [db.write.app, platform.apps.call, platform.instances.read, platform.instances.write, platform.threads.write]
+  permissions: [platform.events.subscribe, db.write.app, platform.apps.call, platform.instances.read, platform.instances.write, platform.threads.write]
   apps:
     - name: tasks
       optional: true
@@ -42,6 +42,17 @@ provides:
     - { name: step_get, description: Read a workflow step and its dependency outputs. }
     - { name: step_update, description: Report step output or an explicit approval decision as its assigned executor. }
     - { name: run_cancel, description: Stop future handoffs in a structured run as coordinator or operator. }
+    - { name: trigger_sources, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: triggers, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_get, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_create, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_update, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_activate, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_pause, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_preview, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_test_run, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_events, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_event_retry, description: "Retry a failed event against current trigger rules with a stable key." }
   ui_panels:
     - slot: project.page
       label: Processes

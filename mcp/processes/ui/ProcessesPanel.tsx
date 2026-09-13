@@ -51,6 +51,7 @@ type Entry = {
   version: number;
   record: {
     id: string;
+    trigger_event_id?: string;
     workflow?: boolean;
     steps?: StepRun[];
     title: string;
@@ -1175,6 +1176,7 @@ function Panel(props: Props) {
                       </p>
                     )}
                     <p className="muted small">
+                      {r.record.trigger_event_id && <span>App event · </span>}
                       {date(r.record.created_at)} ·{" "}
                       <button
                         style={{

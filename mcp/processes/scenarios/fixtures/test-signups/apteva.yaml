@@ -1,0 +1,16 @@
+schema: apteva-app/v1
+name: test-signups
+display_name: Signup test source
+version: 0.1.0
+scopes: [project]
+provides:
+  mcp_tools:
+    - {name: publish, description: Publish the fixed signup test event through the real app bus.}
+  publishes:
+    - name: customer.signed_up
+      description: Simulated customer signup for isolated tests only.
+      payload: {page: string, plan: string}
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: main, entry: mcp/processes/scenarios/fixtures/test-signups}
+  port: 8080

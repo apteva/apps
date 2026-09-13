@@ -267,6 +267,13 @@ func TestV02MigrationPreservesSchedulesAndRuns(t *testing.T) {
 	if _, e = db.Exec(string(next)); e != nil {
 		t.Fatal(e)
 	}
+	latest, e := os.ReadFile("migrations/005_event_triggers.sql")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = db.Exec(string(latest)); e != nil {
+		t.Fatal(e)
+	}
 	migrated := &App{ctx: a.ctx, db: db}
 	p, e := migrated.get("project-a", "p")
 	if e != nil {

@@ -298,7 +298,7 @@ func (a *App) checkAssignment(project string, x Assignment) error {
 	if e = a.validateRoles(project, d, x.AssignmentConfig); e != nil {
 		return e
 	}
-	if _, e = validateParameters(d.Parameters, x.Parameters, true); e != nil {
+	if e = a.assignmentParametersReady(d, x); e != nil {
 		return e
 	}
 	agent, e := a.ctx.GetAgent(x.OwnerAgentID)

@@ -328,6 +328,9 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 }
 
 func (a *App) EventHandlers() []sdk.EventHandler {
+	return append(a.lifecycleHandlers(), sdk.EventHandler{Event: sdk.AppBusDeliveryEvent, Handler: a.receiveTriggerEvent})
+}
+func (a *App) lifecycleHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{{Event: sdk.AgentEventLifecycleEvent, Handler: func(ctx *sdk.AppCtx, event sdk.Event) error {
 		lifecycle, err := sdk.DecodeAgentEventLifecycle(event)
 		if err != nil {

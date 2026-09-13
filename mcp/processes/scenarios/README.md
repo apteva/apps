@@ -11,6 +11,7 @@ No Tasks integration is installed and no external publishing service is used.
 | `02-assignment-parameters.yaml` | Two assignments reuse `day-1` independently and retain distinct page parameters and results. |
 | `03-human-approval-gate.yaml` | The agent finishes the draft; human review remains waiting and publication remains pending and undispatched. |
 | `04-multi-agent-workflow.yaml` | Three distinct agents complete five steps with parallel inputs, a dependency join, explicit agent approval, and a simulated receipt. |
+| `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
 
 Run from the Processes app directory:
 
@@ -68,3 +69,26 @@ The five-step, three-agent scenario also passed on 2026-09-12: 24 aggregate
 iterations, 341,939 reported tokens, approximately 92 seconds. Saved state and
 agent-attributed telemetry both passed verification. Publication was a local
 simulated receipt; no Tasks app or external publisher was installed.
+
+## Event-triggered collaboration
+
+`05-event-trigger-workflow.yaml` creates and previews a trigger, then publishes
+the same signup twice through a separate test app and the real platform bus.
+Exactly one run must complete across three Terra agents. Direct `start` and
+`trigger_test_run` calls are forbidden in this scenario. Post-run checks require
+one persisted bus receipt, event-mapped parameters, and a linked completed run,
+as well as the five-step role/approval audit and per-agent tool traces.
+
+Use the updated server and a CLI with topology dependency support. The wrapper
+copies Processes into the report directory and adds the isolated test publisher
+as a dependency only in that copy; the production app has no publisher or test
+MCP tool. Run it with:
+
+```sh
+bun run scenarios/run.ts scenarios/05-event-trigger-workflow.yaml
+```
+
+Recorded on 2026-09-13: the event-triggered scenario passed all YAML, saved-state,
+and agent-attribution checks with `openai-codex` / `gpt-5.6-terra`: 30 aggregate
+iterations, 484,305 reported tokens, approximately 144 seconds. Two publishes of
+the same signup produced one event record and one completed five-step run.

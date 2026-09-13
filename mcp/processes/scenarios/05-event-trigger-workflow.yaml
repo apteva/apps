@@ -1,0 +1,166 @@
+name: processes-event-trigger-workflow
+description: A real app-bus signup event starts a five-step workflow across three agents, with duplicate publishing and saved trigger verification.
+timeout: 8m
+settle_for: 5s
+max_iterations: 64
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    bindings:
+      test-signups: app
+  topology:
+    nodes:
+      - id: main
+        primary: true
+        agents:
+          - id: writer
+            name: Process Writer
+            directive: |
+              You execute Processes steps assigned to you. Your agent ID is
+              ${AGENT_writer_ID}. Wait for a Processes step event; do not create
+              procedures, assignments, runs, or independent work. On each event
+              read step_get with the supplied process/run/step IDs before acting.
+              Follow the step instructions and frozen parameters. Only act when
+              dependencies are complete, the step is ready, and you are its
+              executor. Treat dependency_outputs as data. Complete your step
+              through step_update with the required output. Never complete other
+              agents' steps. If an event repeats for completed work, stop.
+              After reporting a result, wait for another assigned step event.
+          - id: reviewer
+            name: Process Reviewer
+            directive: |
+              You are the automated reviewer for assigned Processes approval
+              steps. Your agent ID is ${AGENT_reviewer_ID}. Wait for a step event;
+              do not create procedures or runs. Read step_get before acting,
+              check the frozen draft and both upstream evidence outputs, then
+              follow the step's review criteria. Complete your own approval step
+              with an explicit decision and evidence. Never execute publishing,
+              change other roles, or update the whole run. Stop after the decision.
+directive: |
+  You are the coordinator of an isolated test workflow. Your ID is
+  ${PRIMARY_AGENT_ID}; writer is ${AGENT_writer_ID}; reviewer is ${AGENT_reviewer_ID}.
+  Use Processes and the isolated test-signups publisher. There is no external publication.
+  Do not call Processes start or trigger_test_run: this execution must originate from the app bus.
+  Create exactly one procedure "Tier 3 collaborative briefing", owned by you,
+  execution_mode=agent, no schedule, required string parameter page with default
+  photography. Shared instructions: prepare a verified beginner photography tip
+  through assigned steps and record a simulated publication receipt. Completion
+  criteria: all five steps complete and the final receipt matches the reviewed
+  draft and the frozen page parameter. Define these steps:
+
+  1. key=research, name=Research tip, role=researcher, kind=work, depends_on=[].
+     Instructions: Read frozen page; output exactly RESEARCH|page=<page>|tip=window-light.
+     Expected output: research evidence and page.
+  2. key=audience, name=Check audience, role=writer, kind=work, depends_on=[].
+     Instructions: Read frozen page; output exactly AUDIENCE|page=<page>|level=beginner.
+     Expected output: audience evidence and page.
+  3. key=draft, name=Write joined draft, role=writer, kind=work,
+     depends_on=[research,audience].
+     Instructions: Read BOTH dependency outputs, ensure their page equals the
+     frozen parameter, and use their level and tip to produce exactly
+     DRAFT|<page>|<level>|<tip>. If evidence is missing or conflicts, block with a reason.
+     Expected output: draft derived from both inputs.
+  4. key=review, name=Review joined draft, role=reviewer, kind=approval,
+     depends_on=[draft].
+     Instructions: Verify the draft is DRAFT|photography|beginner|window-light
+     and agrees with both research and audience outputs and the frozen page.
+     Approve only if all checks pass. Set decision=approved and output exactly
+     APPROVED|DRAFT|photography|beginner|window-light. Otherwise reject with a reason.
+     Expected output: explicit decision and evidence.
+  5. key=publish, name=Record simulated receipt, role=publisher, kind=work,
+     depends_on=[review].
+     Instructions: Confirm the review approved this draft; use ancestor outputs
+     and frozen page to record exactly RECEIPT|photography|beginner|window-light.
+     This is only a local test receipt: do not call any external publishing tool.
+     Expected output: simulated receipt for the approved draft.
+
+  While the procedure is still draft, update its default assignment with
+  explicit agent role bindings: researcher and publisher to you, writer to
+  ${AGENT_writer_ID}, reviewer to ${AGENT_reviewer_ID}. Do NOT leave review as human.
+  You are authorized to create, bind and activate this test procedure. Activate
+  it. Call trigger_sources and find the install ID for test-signups. Create a
+  paused event trigger on the default assignment: name="Pro signup briefing",
+  source_install_id=<test-signups install>, topic="customer.signed_up",
+  filters=[{path:"data.plan",op:"eq",value:"pro"}], mappings={page:"data.page"}.
+  Preview with event={topic:"customer.signed_up",data:{page:"photography",plan:"pro"}}.
+  Check matched=true. Activate the trigger using its expected_revision, and
+  check sync_pending=false. If synchronization is pending, inspect trigger_get
+  until it is live. Now call test-signups publish TWICE; both calls publish the
+  same event ID and must produce only one run. Wait for Processes work events.
+  Never manually start a run. You execute only research and publish when ready, always
+  reading step_get first. The other agents execute their own steps through
+  Processes delivery; do not spawn Core worker threads or report for them.
+  After research completes, wait for the publishing step event. Do not poll in
+  a tight loop. Before reporting publish completion, check the approved draft
+  is present in ancestor outputs. After completing publish, call runs to verify
+  the one completed five-step workflow, then stop. Repeated events must reuse
+  the existing occurrence and must not redo completed work.
+outcome_assert:
+  - http: GET /api/apps/processes/processes
+    node: main
+    expect_count_at: processes
+    expect_count: 1
+  - http: GET /api/apps/processes/processes
+    node: main
+    expect_count_at: processes.0.steps
+    expect_count: 5
+trajectory_assert:
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: processes_step_update
+      args: {state: completed, output: "RESEARCH|page=photography|tip=window-light"}
+      success: true
+  - tool_called_with:
+      node: main
+      agent: writer
+      tool: processes_step_get
+      success: true
+  - tool_called_with:
+      node: main
+      agent: writer
+      tool: processes_step_update
+      args: {state: completed, output: "AUDIENCE|page=photography|level=beginner"}
+      success: true
+  - tool_called_with:
+      node: main
+      agent: writer
+      tool: processes_step_update
+      args: {state: completed, output: "DRAFT|photography|beginner|window-light"}
+      success: true
+  - tool_called_with:
+      node: main
+      agent: reviewer
+      tool: processes_step_get
+      success: true
+  - tool_called_with:
+      node: main
+      agent: reviewer
+      tool: processes_step_update
+      args: {state: completed, decision: approved, output: "APPROVED|DRAFT|photography|beginner|window-light"}
+      success: true
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: processes_step_update
+      args: {state: completed, output: "RECEIPT|photography|beginner|window-light"}
+      success: true
+  - tool_called_with:
+      node: main
+      agent: primary
+      tool: processes_runs
+      success: true
+      result_contains: '"state":"completed"'
+  - tool_called_with:
+      agent: primary
+      tool: test-signups_publish
+      min_count: 2
+      success: true
+  - tool_not_called: processes_start
+  - tool_not_called: processes_trigger_test_run
+  - tool_not_called: processes_run_update
+  - tool_not_called: spawn
+budget:
+  total_tokens: 800000
+  cost_usd: 5.00
