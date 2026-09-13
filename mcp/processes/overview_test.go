@@ -154,3 +154,20 @@ func TestOverviewNativeSurface(t *testing.T) {
 		t.Fatal("native endpoint diverged")
 	}
 }
+
+func TestOverviewDoesNotLetBlockedRunsHideRunningWork(t *testing.T) {
+	a, _, p, r := workflowSetup(t)
+	for i := 0; i < 15; i++ {
+		_, e := a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,created_at,backend,state,assignment_id,assignment_json) VALUES(?,?,1,'manual',?,'2030-01-01T00:00:00Z','agent','blocked',?,?)`, fmt.Sprintf("blocked-%d", i), p.ID, fmt.Sprintf("blocked-%d", i), r.AssignmentID, jsonText(r.Binding))
+		if e != nil {
+			t.Fatal(e)
+		}
+	}
+	out, e := a.overview("project-a")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if len(out.Active) != 12 || out.Active[0].ID != r.ID {
+		t.Fatalf("live work hidden by blocked history: %+v", out.Active)
+	}
+}

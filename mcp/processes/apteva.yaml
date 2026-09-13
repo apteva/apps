@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.10.3
+version: 0.10.4
 description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and native one-off tasks.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -118,7 +118,7 @@ provides:
           show_active: {type: boolean, default: true}
           show_upcoming: {type: boolean, default: true}
           show_recent: {type: boolean, default: true}
-          recent_limit: {type: integer, default: 4, minimum: 1, maximum: 12}
+          row_limit: {type: integer, title: Visible rows, default: 4, minimum: 1, maximum: 6}
       native:
         schema: apteva-native-surface/v1
         entry: /ui/surfaces/process-overview.json
@@ -132,7 +132,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.10.3
+    ref: processes/v0.10.4
     entry: mcp/processes
   port: 8080
   health_check: /health

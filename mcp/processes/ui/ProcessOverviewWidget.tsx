@@ -18,7 +18,7 @@ type Step = {
   executor: { kind: string; agent_id?: number };
   warning?: string;
 };
-type Item = {
+export type Item = {
   id: string;
   process_id: string;
   process_name: string;
@@ -40,7 +40,7 @@ type Item = {
   steps_completed?: number;
   steps_total?: number;
 };
-type Data = {
+export type Data = {
   counts: {
     active: number;
     scheduled: number;
@@ -82,7 +82,63 @@ export function overviewLink(props: Props, x?: Item, assignment = false) {
   }
   return `/apps/${encodeURIComponent(app)}/page?${q}`;
 }
-const css = `.po-widget{font:12px/1.35 system-ui;color:var(--color-text,#eceef2);background:var(--color-bg-card,#181b21);border:1px solid var(--color-border,#30343e);border-radius:8px;padding:12px;box-sizing:border-box;height:100%;max-height:520px;min-width:0;overflow:auto}.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget h3,.po-widget p{margin:0}.po-widget h2{font-size:14px}.po-widget h3{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted,#969eac);margin:12px 0 4px}.po-widget header,.po-widget .po-line{display:flex;gap:6px;align-items:center;justify-content:space-between;flex-wrap:wrap}.po-widget .po-sub{font-size:10px;color:var(--color-text-muted,#969eac);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget a{color:var(--color-accent,#a6afff);text-decoration:none;font-size:10px}.po-widget button{font:inherit;font-size:10px;color:inherit;background:transparent;border:1px solid var(--color-border,#30343e);padding:3px 7px;border-radius:5px;cursor:pointer}.po-widget .po-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:9px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget .po-stats b{display:inline;font-size:18px;margin-right:4px}.po-widget .po-stats span{font-size:10px;color:var(--color-text-muted,#969eac)}.po-widget article{padding:6px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget article:last-child{border-bottom:0}.po-widget .po-badge{font-size:9px;border-radius:6px;background:#969eac18;padding:1px 5px;white-space:nowrap;text-transform:capitalize}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#9caaff}.po-widget .po-badge.completed{color:#64cba5}.po-widget .po-badge.waiting,.po-widget .po-badge.blocked,.po-widget .po-badge.failed,.po-widget .po-warning{color:#e3b86d}.po-widget .po-warning{font-size:10px;margin:3px 0}.po-widget progress{display:block;width:100%;height:3px;margin:4px 0}.po-widget summary{cursor:pointer;font-size:10px;padding:3px 0}.po-widget ol{padding:0;list-style:none;margin:2px 0}.po-widget li{padding:3px 0 3px 7px;border-left:2px solid var(--color-border,#30343e)}.po-widget .po-live{margin:2px 0}.po-widget footer{padding-top:7px}.po-widget .po-filters{display:flex;gap:4px;overflow-x:auto;padding:7px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget .po-filters button{border:0;color:var(--color-text-muted,#969eac);padding:3px 6px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#a6afff);background:#969eac18}@media(max-width:600px){.po-widget{padding:10px}}`;
+export type QueueEntry = {
+  item: Item;
+  assignment: boolean;
+  group: "running" | "scheduled" | "history";
+};
+export function overviewQueue(
+  data: Data,
+  settings?: Record<string, unknown>,
+): QueueEntry[] {
+  const working = (x: Item) =>
+    ["running", "ready", "queued", "pending"].includes(x.state);
+  const entries: QueueEntry[] = [
+    ...(settings?.show_active === false
+      ? []
+      : data.active.map((item) => ({
+          item,
+          assignment: false,
+          group: working(item) ? ("running" as const) : ("history" as const),
+        }))),
+    ...(settings?.show_upcoming === false
+      ? []
+      : data.upcoming.map((item) => ({
+          item,
+          assignment: true,
+          group: "scheduled" as const,
+        }))),
+    ...(settings?.show_recent === false
+      ? []
+      : data.recent.map((item) => ({
+          item,
+          assignment: false,
+          group: "history" as const,
+        }))),
+    ...(settings?.show_active === false
+      ? []
+      : data.attention.map((item) => ({
+          item,
+          assignment: true,
+          group: "history" as const,
+        }))),
+  ];
+  const rank = { running: 0, scheduled: 1, history: 2 };
+  const date = (x: QueueEntry) =>
+    Date.parse(x.item.next_run_at || x.item.created_at || "") || 0;
+  return entries.sort(
+    (a, b) =>
+      rank[a.group] - rank[b.group] ||
+      (a.group === "scheduled" ? date(a) - date(b) : date(b) - date(a)),
+  );
+}
+const css = `
+.po-widget{color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;overflow:hidden}
+.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget p{margin:0}.po-widget header{padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget h2{font-size:14px;font-weight:700}.po-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}.po-widget button,.po-widget a{font-family:inherit}.po-widget button{cursor:pointer}.po-widget :is(button,a):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}.po-widget .po-filters{display:flex;gap:5px;padding:8px 16px;border-bottom:1px solid var(--color-border,#303030);overflow-x:auto}.po-widget .po-filters button,.po-widget .po-close{background:transparent;color:var(--color-text-muted,#aaa);font-size:11px;font-weight:600;border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 9px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);background:color-mix(in srgb,var(--color-accent,#ff8c36) 10%,transparent)}
+.po-widget .po-row{display:grid;grid-template-columns:88px minmax(0,1fr) 70px;gap:12px;align-items:center;width:100%;height:80px;padding:12px 16px;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--color-border,#303030);text-align:left}.po-widget .po-row:hover,.po-widget .po-row[aria-expanded=true]{background:var(--color-bg-hover,#202020)}.po-widget .po-copy{min-width:0}.po-widget .po-title{display:block;font-size:13px;line-height:20px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-summary{display:block;margin-top:5px;font-size:11px;line-height:18px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget time{font-size:10px;color:var(--color-text-muted,#999);text-align:right;white-space:nowrap}.po-widget .po-badge{display:inline-block;justify-self:start;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa)}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-widget .po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-widget .po-badge.completed{color:#43c878;border-color:#43c87860}.po-widget .po-badge.blocked,.po-widget .po-badge.waiting,.po-widget .po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
+.po-widget .po-warning{font-size:11px;color:#e3b86d;padding:10px 16px;overflow-wrap:anywhere}.po-widget .po-empty{font-size:12px;color:var(--color-text-muted,#aaa);padding:24px 16px}.po-widget footer{display:flex;justify-content:space-between;gap:8px;padding:9px 16px;font-size:11px;color:var(--color-text-muted,#999)}.po-widget a{color:var(--color-accent,#ff8c36);text-decoration:none;font-size:11px}.po-widget .po-detail{padding:16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget .po-detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.po-widget .po-detail h3{font-size:13px;margin:0}.po-widget .po-detail p{font-size:12px;color:var(--color-text-muted,#aaa);margin:8px 0;overflow-wrap:anywhere}.po-widget .po-detail ol{padding:0;margin:10px 0;list-style:none;max-height:200px;overflow:auto}.po-widget .po-detail li{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;padding:10px 0;border-top:1px solid var(--color-border,#303030)}.po-widget .po-step-copy{min-width:0}.po-widget .po-step-copy small{display:block;color:var(--color-text-muted,#aaa);margin-top:4px}
+@media(max-width:480px){.po-widget .po-row{grid-template-columns:76px minmax(0,1fr) 52px;gap:8px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
+`;
 export default function ProcessOverviewWidget(props: Props) {
   return (
     <Overview
@@ -92,7 +148,8 @@ export default function ProcessOverviewWidget(props: Props) {
   );
 }
 function Overview(props: Props) {
-  const [view, setView] = useState("active"),
+  const [view, setView] = useState("all"),
+    [selected, setSelected] = useState<string | null>(null),
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [refresh, setRefresh] = useState(0),
@@ -160,211 +217,235 @@ function Overview(props: Props) {
       c.abort();
     };
   }, [props.projectId]);
-  const raw = Number(props.widgetSettings?.recent_limit ?? 4),
-    limit = Number.isFinite(raw)
-      ? Math.max(1, Math.min(12, Math.round(raw)))
-      : 4;
+  const raw = Number(
+    props.widgetSettings?.row_limit ?? props.widgetSettings?.recent_limit ?? 4,
+  );
+  const limit = Number.isFinite(raw)
+    ? Math.max(1, Math.min(6, Math.round(raw)))
+    : 4;
   const name = (id?: number) =>
     id ? names[id] || `Agent ${id}` : "Unassigned";
+  const key = (x: QueueEntry) =>
+    `${x.assignment ? "assignment" : "run"}:${x.item.process_id}:${x.item.id}`;
+  const queue = data ? overviewQueue(data, props.widgetSettings) : [];
+  const filtered = queue.filter((x) => view === "all" || x.group === view);
+  const shown = filtered.slice(0, limit);
+  const detail = queue.find((x) => key(x) === selected);
   const badge = (state: string) => (
-    <span className={`po-badge ${state}`}>{state.replaceAll("_", " ")}</span>
-  );
-  const row = (x: Item, assignment = false) => (
-    <article key={`${x.process_id}:${x.id}`}>
-      <div className="po-line">
-        <strong>{x.process_name}</strong>
-        {badge(x.state)}
-      </div>
-      <p className="po-sub">
-        {[x.assignment_name, x.target, name(x.agent_id)]
-          .filter(Boolean)
-          .join(" · ")}
-      </p>
-      {assignment ? (
-        <p className="po-sub">
-          {x.next_run_at
-            ? `Next ${when(x.next_run_at)}`
-            : x.schedule
-              ? "Next time unavailable"
-              : "Synchronization needs attention"}
-          {x.schedule?.kind === "interval"
-            ? ` · Every ${x.schedule.every}`
-            : x.schedule?.cron
-              ? ` · ${x.schedule.cron} (${x.schedule.timezone || "UTC"})`
-              : ""}
-        </p>
-      ) : (
-        <p className="po-sub">
-          Started {when(x.created_at)}
-          {x.version ? ` · v${x.version}` : ""}
-        </p>
-      )}
-      {x.warning && <p className="po-warning">{x.warning}</p>}
-      {!assignment && (
-        <>
-          {x.current_step && <p className="po-sub po-live">{x.current_step}</p>}
-          {(x.steps || [])
-            .filter((s) =>
-              ["ready", "running", "waiting", "blocked"].includes(s.state),
-            )
-            .map((s) => (
-              <p className="po-sub po-live" key={s.id}>
-                {badge(s.state)} {s.name} ·{" "}
-                {s.executor.kind === "human"
-                  ? "Human review"
-                  : name(s.executor.agent_id)}
-              </p>
-            ))}
-          {!terminal(x.state) && (
-            <progress
-              aria-label={`${x.process_name} progress`}
-              max={100}
-              value={x.progress || 0}
-            />
-          )}{" "}
-          {!!x.steps_total && (
-            <details>
-              <summary>
-                {x.steps_completed || 0}/{x.steps_total} steps complete · View
-                steps
-              </summary>
-              <ol>
-                {(x.steps || []).map((s) => (
-                  <li key={s.id}>
-                    <div className="po-line">
-                      <span>{s.name}</span>
-                      {badge(s.state)}
-                    </div>
-                    <p className="po-sub">
-                      {s.executor.kind === "human"
-                        ? "Human review"
-                        : name(s.executor.agent_id)}{" "}
-                      · {s.progress}%
-                      {s.origin === "attached" ? " · Added task" : ""}
-                    </p>
-                    {s.warning && <p className="po-warning">{s.warning}</p>}
-                  </li>
-                ))}
-              </ol>
-              {x.steps_total > (x.steps || []).length && (
-                <p className="po-sub">More steps in run details.</p>
-              )}
-            </details>
-          )}
-        </>
-      )}
-      <a href={overviewLink(props, x, assignment)}>
-        {assignment ? "Open assignment" : "Open run"} ↗
-      </a>
-    </article>
-  );
-  return (
-    <section
-      aria-label="Processes overview"
-      className="po-widget"
-      data-size={props.widgetSize || "half"}
+    <span
+      className={`po-badge ${state === "sync pending" ? "attention" : state}`}
     >
+      {state === "sync pending" ? "Attention" : state.replaceAll("_", " ")}
+    </span>
+  );
+  const summary = ({ item: x, assignment, group }: QueueEntry) => {
+    if (x.warning) return x.warning;
+    if (assignment)
+      return x.schedule?.kind === "interval"
+        ? `Every ${x.schedule.every} · ${x.assignment_name || name(x.agent_id)}`
+        : x.next_run_at
+          ? `Next ${when(x.next_run_at)}`
+          : "Assignment needs attention";
+    if (group === "running") {
+      const step =
+        x.steps?.find((s) => s.state === "running") ||
+        x.steps?.find((s) => s.state === "ready");
+      return [
+        step?.name || x.current_step || "Preparing run",
+        x.steps_total
+          ? `${x.steps_completed || 0}/${x.steps_total} steps`
+          : name(x.agent_id),
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    return [
+      x.assignment_name || name(x.agent_id),
+      terminal(x.state)
+        ? x.steps_total
+          ? `${x.steps_completed || 0}/${x.steps_total} steps`
+          : name(x.agent_id)
+        : x.current_step,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  };
+  const relative = (value?: string) => {
+    const time = Date.parse(value || "");
+    if (!Number.isFinite(time)) return "—";
+    const delta = time - Date.now(),
+      abs = Math.abs(delta);
+    if (abs < 60000) return delta > 0 ? "Soon" : "Just now";
+    const amount =
+      abs < 3600000
+        ? `${Math.floor(abs / 60000)}m`
+        : abs < 86400000
+          ? `${Math.floor(abs / 3600000)}h`
+          : `${Math.floor(abs / 86400000)}d`;
+    return delta > 0 ? `in ${amount}` : `${amount} ago`;
+  };
+  return (
+    <section aria-label="Processes overview" className="po-widget">
       <style>{css}</style>
       <header>
-        <div>
-          <h2>Processes</h2>
-          <p className="po-sub">Across this project</p>
-        </div>
-        <button onClick={() => setRefresh((v) => v + 1)}>Refresh</button>
+        <h2>Processes</h2>
+        <p>Running flows, upcoming schedules, and recent outcomes</p>
       </header>
+      <nav className="po-filters" aria-label="Filter processes">
+        {[
+          ["all", "All"],
+          ["running", "Running"],
+          ["scheduled", "Scheduled"],
+          ["history", "History"],
+        ].map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={view === value}
+            onClick={() => {
+              setView(value);
+              setSelected(null);
+            }}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
       {error && (
         <p role="alert" className="po-warning">
           {error}
-          {data ? " · Showing the last received snapshot." : ""}
+          {data ? " · Showing the last received snapshot." : ""}{" "}
+          <button className="po-close" onClick={() => setRefresh((v) => v + 1)}>
+            Retry
+          </button>
         </p>
       )}
       {!props.projectId ? (
-        <p className="po-sub">Select a project to see its processes.</p>
+        <p className="po-empty">Select a project to see its processes.</p>
       ) : !data ? (
-        <p role="status" className="po-sub">
-          {error ? "Retry using Refresh." : "Loading processes…"}
+        <p role="status" className="po-empty">
+          {error ? "Overview unavailable." : "Loading processes…"}
         </p>
       ) : (
         <>
-          <div className="po-stats">
-            {[
-              [data.counts.active, "Active"],
-              [data.counts.scheduled, "Scheduled"],
-              [data.counts.attention, "Attention"],
-            ].map(([n, t]) => (
-              <div key={t}>
-                <b>
-                  {data.partial ? "≥ " : ""}
-                  {n}
-                </b>
-                <span>{t}</span>
-              </div>
-            ))}
-          </div>
-          {data.warnings.map((w, i) => (
-            <p className="po-warning" key={i}>
-              {w}
-            </p>
-          ))}
-          <nav className="po-filters" aria-label="Filter processes">
-            {["active", "scheduled", "recent"].map((key) => (
-              <button
-                type="button"
-                key={key}
-                aria-pressed={view === key}
-                onClick={() => setView(key)}
-              >
-                {key[0].toUpperCase() + key.slice(1)}
-                {key === "active"
-                  ? ` · ${data.counts.active}`
-                  : key === "scheduled"
-                    ? ` · ${data.counts.scheduled}`
-                    : ` · ${data.counts.recent}`}
-              </button>
-            ))}
-          </nav>
-          <h3>
-            {view === "active"
-              ? "Running and attention"
-              : view === "scheduled"
-                ? "Upcoming schedules"
-                : "Recent outcomes"}
-          </h3>
-          {(view === "active"
-            ? [
-                ...data.active,
-                ...data.attention.map((x) => ({
-                  ...x,
-                  state: x.state || "attention",
-                })),
-              ]
-            : view === "scheduled"
-              ? data.upcoming
-              : data.recent
-          )
-            .slice(0, limit)
-            .map((x) =>
-              row(
-                x,
-                view === "scheduled" ||
-                  (view === "active" && x.state === "sync pending"),
-              ),
-            )}
-          {(view === "active"
-            ? data.active.length + data.attention.length
-            : view === "scheduled"
-              ? data.upcoming.length
-              : data.recent.length) === 0 && (
-            <p className="po-sub po-empty">
-              {view === "active"
-                ? "Nothing running or needing attention."
-                : view === "scheduled"
-                  ? "No upcoming schedules."
-                  : "No recent executions."}
-            </p>
+          {!!data.warnings.length && (
+            <p className="po-warning">{data.warnings.join(" ")}</p>
           )}
-          <footer className="po-line">
-            <span className="po-sub">Updated {when(data.generated_at)}</span>
+          <div className="po-queue" aria-label="Process executions">
+            {shown.map((entry) => {
+              const x = entry.item;
+              return (
+                <button
+                  type="button"
+                  className="po-row"
+                  data-state={x.state}
+                  key={key(entry)}
+                  aria-expanded={selected === key(entry)}
+                  aria-label={`${x.process_name} · ${x.state}`}
+                  onClick={() =>
+                    setSelected(selected === key(entry) ? null : key(entry))
+                  }
+                >
+                  {badge(x.state)}
+                  <span className="po-copy">
+                    <span className="po-title" title={x.process_name}>
+                      {x.process_name}
+                    </span>
+                    <span className="po-summary" title={summary(entry)}>
+                      {summary(entry)}
+                    </span>
+                  </span>
+                  <time
+                    dateTime={entry.assignment ? x.next_run_at : x.created_at}
+                    title={`${entry.assignment ? "Next" : "Started"}: ${when(entry.assignment ? x.next_run_at : x.created_at)}`}
+                  >
+                    {relative(entry.assignment ? x.next_run_at : x.created_at)}
+                  </time>
+                </button>
+              );
+            })}
+            {!shown.length && (
+              <p className="po-empty">
+                No{" "}
+                {view === "all"
+                  ? "process executions"
+                  : view === "history"
+                    ? "past or blocked runs"
+                    : view === "scheduled"
+                      ? "scheduled processes"
+                      : "running processes"}
+                .
+              </p>
+            )}
+          </div>
+          {detail && (
+            <section
+              className="po-detail"
+              aria-label="Selected process details"
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setSelected(null);
+              }}
+            >
+              <div className="po-detail-head">
+                <h3>{detail.item.process_name}</h3>
+                <button className="po-close" onClick={() => setSelected(null)}>
+                  Close details
+                </button>
+              </div>
+              <p>
+                {[
+                  detail.item.assignment_name,
+                  detail.item.target,
+                  name(detail.item.agent_id),
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+              <p>
+                {detail.assignment ? "Next" : "Started"}{" "}
+                {when(
+                  detail.assignment
+                    ? detail.item.next_run_at
+                    : detail.item.created_at,
+                )}
+                {detail.item.version ? ` · v${detail.item.version}` : ""}
+              </p>
+              {detail.item.warning && <p>{detail.item.warning}</p>}
+              {!!detail.item.steps_total && (
+                <>
+                  <p>
+                    {detail.item.steps_completed || 0}/{detail.item.steps_total}{" "}
+                    steps complete
+                  </p>
+                  <ol>
+                    {(detail.item.steps || []).map((s) => (
+                      <li key={s.id}>
+                        <span className="po-step-copy">
+                          {s.name}
+                          <small>
+                            {s.executor.kind === "human"
+                              ? "Human review"
+                              : name(s.executor.agent_id)}
+                            {s.warning ? ` · ${s.warning}` : ""}
+                          </small>
+                        </span>
+                        {badge(s.state)}
+                      </li>
+                    ))}
+                  </ol>
+                </>
+              )}
+              <a href={overviewLink(props, detail.item, detail.assignment)}>
+                {detail.assignment ? "Open assignment" : "Open run"} ↗
+              </a>
+            </section>
+          )}
+          <footer>
+            <span>
+              {filtered.length > limit
+                ? `Showing first ${limit}`
+                : `${shown.length} shown`}
+            </span>
             <a href={overviewLink(props)}>All processes ↗</a>
           </footer>
         </>

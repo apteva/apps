@@ -78,7 +78,7 @@ func (a *App) overview(project string) (*processOverview, error) {
 		return nil, e
 	}
 	for _, group := range []string{"active", "recent"} {
-		condition, order := active, attention+` DESC,r.created_at DESC,r.id DESC`
+		condition, order := active, `CASE WHEN r.state='running' THEN 0 WHEN r.state IN ('ready','queued','pending') THEN 1 ELSE 2 END,r.created_at DESC,r.id DESC`
 		if group == "recent" {
 			condition = `NOT (` + active + `)`
 			order = `r.created_at DESC,r.id DESC`
@@ -171,8 +171,17 @@ func (a *App) overview(project string) (*processOverview, error) {
 		return nil, e
 	}
 	sort.SliceStable(out.Active, func(i, j int) bool {
-		if out.Active[i].NeedsAttention != out.Active[j].NeedsAttention {
-			return out.Active[i].NeedsAttention
+		rank := func(state string) int {
+			if state == "running" {
+				return 0
+			}
+			if state == "ready" || state == "queued" || state == "pending" {
+				return 1
+			}
+			return 2
+		}
+		if rank(out.Active[i].State) != rank(out.Active[j].State) {
+			return rank(out.Active[i].State) < rank(out.Active[j].State)
 		}
 		return newer(out.Active[i].CreatedAt, out.Active[j].CreatedAt)
 	})
