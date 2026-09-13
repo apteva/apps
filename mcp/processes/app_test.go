@@ -92,7 +92,26 @@ func def() Definition {
 }
 func create(t *testing.T, a *App, d Definition) *Process {
 	t.Helper()
+	if d.ExecutionMode == "" {
+		d.ExecutionMode = "agent"
+	}
 	p, err := a.save("project-a", "", "operator", 0, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Existing execution tests use a pre-separation fixture. New creation tests
+	// call save directly and assert that it never creates an assignment.
+	c := AssignmentConfig{FollowLatest: true, Name: "Default assignment", OwnerAgentID: d.OwnerAgentID, ExecutionMode: d.ExecutionMode, Schedule: d.Schedule, ProcedureVersion: p.Version, Parameters: map[string]any{}}
+	if c.ExecutionMode == "" {
+		c.ExecutionMode = "agent"
+	}
+	if _, err = a.db.Exec(`INSERT INTO process_assignments(id,process_id,body_json,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, "assignment-"+p.ID, p.ID, jsonText(c), timestamp(), timestamp()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec(`UPDATE process_versions SET body_json=? WHERE process_id=?`, jsonText(d), p.ID); err != nil {
+		t.Fatal(err)
+	}
+	p, err = a.get(p.ProjectID, p.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,20 +272,20 @@ func TestProjectIsolationAndValidation(t *testing.T) {
 	}
 	d := def()
 	d.OwnerAgentID = 9
-	if _, err := a.save("project-a", "", "operator", 0, d); err == nil {
-		t.Fatal("foreign owner accepted")
+	if _, err := a.saveAssignment("project-a", p.ID, "", 0, AssignmentConfig{Name: "Foreign owner", OwnerAgentID: 9, ExecutionMode: "agent", FollowLatest: true}); err == nil {
+		t.Fatal("foreign assignment owner accepted")
 	}
 	d = def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "1s"}
-	if err := d.validate(); err == nil {
+	if err := validateExecution(AssignmentConfig{OwnerAgentID: 7, ExecutionMode: "agent", Schedule: d.Schedule}); err == nil {
 		t.Fatal("invalid interval")
 	}
 	d.Schedule = &Schedule{Kind: "cron", Cron: "0 9 * * 1", Timezone: "Europe/Madrid"}
-	if err := d.validate(); err != nil {
+	if err := validateExecution(AssignmentConfig{OwnerAgentID: 7, ExecutionMode: "agent", Schedule: d.Schedule}); err != nil {
 		t.Fatal(err)
 	}
 	d.Schedule.Timezone = "bad"
-	if err := d.validate(); err == nil {
+	if err := validateExecution(AssignmentConfig{OwnerAgentID: 7, ExecutionMode: "agent", Schedule: d.Schedule}); err == nil {
 		t.Fatal("invalid timezone")
 	}
 	for _, tool := range a.MCPTools() {

@@ -6,6 +6,12 @@ optional execution backend; direct agent runs do not need or create Tasks.
 Processes also owns native tasks: procedure step tasks, standalone work, and
 required or optional tasks added to an existing run. All share the Work view.
 
+Create defines only the procedure: steps, instructions, roles, and input schema.
+It requires no agent and creates no assignment. Keep owner_agent_id, schedule,
+execution_mode and parameter values in assignment_create/update. You can define
+a process before agents exist; it cannot execute until an assignment is configured
+and activated. Editing a procedure never changes an assignment’s agent or schedule.
+
 Discover the procedure with list/get, then inspect assignments. Several
 assignments may use the same procedure for different pages or clients. Never
 assume the process's legacy owner is the owner of every run: use the run's

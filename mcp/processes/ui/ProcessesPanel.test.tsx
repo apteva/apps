@@ -64,19 +64,33 @@ async function click(text: string) {
   expect(button).toBeTruthy();
   await act(async () => button!.click());
 }
-test("execution selector defaults to direct and allows optional Tasks", async () => {
+test("process creation is unassigned; execution configuration lives in Assignments", async () => {
   await mount({});
   await click("+ New process");
-  const select = document.querySelector<HTMLSelectElement>("#pc-mode")!;
+  expect(document.querySelector("#pc-owner")).toBeNull();
+  expect(document.querySelector("#pc-mode")).toBeNull();
+  expect(document.querySelector("#pc-cadence")).toBeNull();
+  expect(document.body.textContent).toContain("Saved as an unassigned draft");
+  await click("Cancel");
+  await click("Weekly review");
+  await click("Assignments");
+  await click("Add assignment");
+  const select = document.querySelector<HTMLSelectElement>("#assignment-mode")!;
   expect(select.value).toBe("agent");
+  expect(
+    document.querySelector<HTMLSelectElement>("#assignment-agent")!.value,
+  ).toBe("0");
   await act(async () => {
     select.value = "tasks";
     select.dispatchEvent(
       new window.Event("change", { bubbles: true }) as unknown as Event,
     );
   });
-  expect(document.body.textContent).toContain("Requires Tasks 3.6.0");
+  expect(
+    document.querySelector<HTMLSelectElement>("#assignment-mode")!.value,
+  ).toBe("tasks");
 });
+
 test("mixed history renders direct evidence and links only Tasks records", async () => {
   await mount({
     direct_runs: [

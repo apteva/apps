@@ -21,12 +21,14 @@ func textField(description string) map[string]any {
 	return map[string]any{"type": "string", "description": description}
 }
 func definitionSchema() map[string]any {
-	return object([]string{"name", "instructions", "completion_criteria", "owner_agent_id"}, map[string]any{
-		"steps": map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()}, "parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Default agent; tasks requires the optional Tasks integration"}, "name": textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Ordered steps or checklist in plain language"), "required_inputs": textField("Inputs or sources the owner must obtain"), "default_inputs": textField("Standing execution context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Explicit approval checkpoints; does not enforce a software gate"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}),
+	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
+		"steps":      map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
+		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
+		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval instructions; use approval steps for enforced gates"),
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create a draft company procedure only when authorized to define company policy.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure and its schedule. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active procedure on its owner agent. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
+	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create an unassigned draft procedure when authorized to define company policy. Configure agents, parameter values, execution mode, and schedules separately with assignment_create. No assignment is created automatically.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure for use by its assignments; an unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment of a procedure. Create and activate an assignment first. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
 	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
@@ -180,13 +182,6 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		}
 		if action == "create" {
 			id = ""
-		} else if d.ExecutionMode == "" {
-			// Older clients omit this field; editing must not switch backends.
-			current, e := a.get(project, id)
-			if e != nil {
-				return nil, e
-			}
-			d.ExecutionMode = current.ExecutionMode
 		}
 		return a.save(project, id, actor, number(args, "expected_version"), d)
 	case "activate":
@@ -217,6 +212,9 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		overrides, ok := args["parameters"].(map[string]any)
 		if args["parameters"] != nil && !ok {
 			return nil, errors.New("parameters must be an object")
+		}
+		if assignmentID == "" {
+			return nil, errors.New("create and activate an assignment before starting this process")
 		}
 		return a.startAssignment(project, id, assignmentID, str(args, "idempotency_key"), str(args, "inputs"), overrides)
 	case "assignments":
@@ -476,9 +474,8 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func assignmentSchema() map[string]any {
-	d := definitionSchema()["properties"].(map[string]any)
 	return object([]string{"name", "owner_agent_id", "execution_mode"}, map[string]any{
-		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": d["owner_agent_id"], "execution_mode": d["execution_mode"], "schedule": d["schedule"], "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Direct agent by default; tasks requires the optional Tasks integration"}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
 
 func executorSchema() map[string]any {

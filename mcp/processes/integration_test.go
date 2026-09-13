@@ -64,13 +64,21 @@ func TestSidecarsProcessToTasks(t *testing.T) {
 	tasks = tk.SpawnSidecar(t, "../tasks", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
 	processes := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
 	var p Process
-	resp := processes.POST("/processes?project_id=project-a", map[string]any{"definition": def()}, &p)
+	resp := processes.POST("/processes?project_id=project-a", map[string]any{"definition": def().procedureOnly()}, &p)
 	if resp.Status != 200 {
 		t.Fatalf("create %d %s", resp.Status, resp.Body)
 	}
+	if len(p.Assignments) != 0 || p.OwnerAgentID != 0 {
+		t.Fatal("process creation assigned an agent")
+	}
+	initial := sidecarAssignment(t, processes, p, AssignmentConfig{Name: "Primary", OwnerAgentID: 7, ExecutionMode: "tasks", FollowLatest: true})
 	resp = processes.POST("/processes/"+p.ID+"/activate?project_id=project-a", map[string]any{}, &p)
 	if resp.Status != 200 || p.SyncPending {
 		t.Fatalf("activate %d %s", resp.Status, resp.Body)
+	}
+	resp = processes.POST("/processes/"+p.ID+"/assignments/"+initial.ID+"/activate?project_id=project-a", map[string]any{}, nil)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
 	}
 	var started struct {
 		Task            map[string]any `json:"task"`
@@ -98,7 +106,7 @@ func TestSidecarsProcessToTasks(t *testing.T) {
 		} `json:"runs"`
 	}
 	resp = processes.GET("/processes/"+p.ID+"/runs?project_id=project-a", &history)
-	if resp.Status != 200 || len(history.Runs) != 1 || history.Runs[0].Task["state"] != "completed" || history.Runs[0].Version != 1 || history.Runs[0].AssignmentID != "assignment-"+p.ID {
+	if resp.Status != 200 || len(history.Runs) != 1 || history.Runs[0].Task["state"] != "completed" || history.Runs[0].Version != 1 || history.Runs[0].AssignmentID != initial.ID {
 		t.Fatalf("history %d %s", resp.Status, resp.Body)
 	}
 	// SDK must reject private tools when called through an agent connection.
@@ -135,13 +143,21 @@ func TestSidecarDirectWithoutTasks(t *testing.T) {
 	d := def()
 	d.ExecutionMode = "agent"
 	var p Process
-	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d}, &p)
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d.procedureOnly()}, &p)
 	if resp.Status != 200 {
 		t.Fatalf("create %s", resp.Body)
 	}
+	if len(p.Assignments) != 0 || p.OwnerAgentID != 0 {
+		t.Fatal("process creation assigned an agent")
+	}
+	initial := sidecarAssignment(t, app, p, AssignmentConfig{Name: "Primary", OwnerAgentID: 7, ExecutionMode: "agent", FollowLatest: true})
 	resp = app.POST("/processes/"+p.ID+"/activate?project_id=project-a", map[string]any{}, &p)
 	if resp.Status != 200 || p.SyncPending {
 		t.Fatalf("activate %s", resp.Body)
+	}
+	resp = app.POST("/processes/"+p.ID+"/assignments/"+initial.ID+"/activate?project_id=project-a", map[string]any{}, nil)
+	if resp.Status != 200 {
+		t.Fatal(string(resp.Body))
 	}
 	var started struct {
 		Run Run `json:"run"`
@@ -193,10 +209,11 @@ func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 	d.ExecutionMode = "agent"
 	d.Parameters = []Parameter{{Key: "page", Type: "string", Default: "default-page"}}
 	var p Process
-	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d}, &p)
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": d.procedureOnly()}, &p)
 	if resp.Status != 200 {
 		t.Fatal(string(resp.Body))
 	}
+	initial := sidecarAssignment(t, app, p, AssignmentConfig{Name: "Photography", OwnerAgentID: 7, ExecutionMode: "agent", FollowLatest: true})
 	base := "/processes/" + p.ID
 	var x Assignment
 	resp = app.POST(base+"/assignments?project_id=project-a", map[string]any{"assignment": AssignmentConfig{Name: "Cooking", OwnerAgentID: 8, ExecutionMode: "agent", FollowLatest: true, Parameters: map[string]any{"page": "cooking"}}}, &x)
@@ -207,16 +224,17 @@ func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 	if resp.Status != 200 {
 		t.Fatal(string(resp.Body))
 	}
+	app.MCPAs("assignment_activate", map[string]any{"process_id": p.ID, "assignment_id": initial.ID}, 7, "operator-thread", "project-a")
 	app.MCPAs("assignment_activate", map[string]any{"process_id": p.ID, "assignment_id": x.ID}, 7, "operator-thread", "project-a")
 	var started struct {
 		Run Run `json:"run"`
 	}
-	resp = app.POST(base+"/assignments/"+x.ID+"/start?project_id=project-a", map[string]any{"assignment_id": "assignment-" + p.ID, "idempotency_key": "today", "parameters": map[string]any{"page": "cooking-special"}}, &started)
+	resp = app.POST(base+"/assignments/"+x.ID+"/start?project_id=project-a", map[string]any{"assignment_id": initial.ID, "idempotency_key": "today", "parameters": map[string]any{"page": "cooking-special"}}, &started)
 	if resp.Status != 200 || started.Run.AssignmentID != x.ID || started.Run.Binding.OwnerAgentID != 8 || started.Run.Binding.Parameters["page"] != "cooking-special" {
 		t.Fatalf("route or snapshot isolation: %s", resp.Body)
 	}
 	app.MCPAs("run_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "state": "completed", "result": "Patreon post URL"}, 8, "owner-thread", "project-a")
-	app.MCPAs("start", map[string]any{"process_id": p.ID, "assignment_id": "assignment-" + p.ID, "idempotency_key": "today"}, 7, "owner-thread", "project-a")
+	app.MCPAs("start", map[string]any{"process_id": p.ID, "assignment_id": initial.ID, "idempotency_key": "today"}, 7, "owner-thread", "project-a")
 	var history struct {
 		Direct []Run `json:"direct_runs"`
 	}
@@ -255,7 +273,7 @@ func TestSidecarWorkflowAgentHandoffsAndHumanApproval(t *testing.T) {
 	defer gateway.Close()
 	app := tk.SpawnSidecar(t, ".", tk.WithProjectID("project-a"), tk.WithEnv("APTEVA_GATEWAY_URL", gateway.URL))
 	var p Process
-	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": workflowDefinition()}, &p)
+	resp := app.POST("/processes?project_id=project-a", map[string]any{"definition": workflowDefinition().procedureOnly()}, &p)
 	if resp.Status != 200 {
 		t.Fatal(string(resp.Body))
 	}
@@ -362,4 +380,14 @@ func TestSidecarNativeTaskMCPWithoutTasksApp(t *testing.T) {
 	if resp.Status != 200 || len(processes.Processes) != 0 {
 		t.Fatal("standalone work created a hidden procedure")
 	}
+}
+
+func sidecarAssignment(t *testing.T, app *tk.Sidecar, p Process, c AssignmentConfig) Assignment {
+	t.Helper()
+	var x Assignment
+	resp := app.POST("/processes/"+p.ID+"/assignments?project_id=project-a", map[string]any{"assignment": c}, &x)
+	if resp.Status != 200 || x.ID == "" || x.Status != "paused" {
+		t.Fatalf("create assignment: %s", resp.Body)
+	}
+	return x
 }

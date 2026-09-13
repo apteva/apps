@@ -214,9 +214,9 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 	if c.ExecutionMode == "" {
 		c.ExecutionMode = "agent"
 	}
-	d.OwnerAgentID = c.OwnerAgentID
-	d.ExecutionMode = c.ExecutionMode
-	d.Schedule = c.Schedule
+	if e = validateExecution(c); e != nil {
+		return nil, e
+	}
 	if e = d.validate(); e != nil {
 		return nil, e
 	}
@@ -291,6 +291,9 @@ func (a *App) assignmentStatus(project, process, id, status string) (*Assignment
 	return &x, e
 }
 func (a *App) checkAssignment(project string, x Assignment) error {
+	if e := validateExecution(x.AssignmentConfig); e != nil {
+		return e
+	}
 	d, e := a.definition(x.ProcessID, x.ProcedureVersion)
 	if e != nil {
 		return e

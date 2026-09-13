@@ -115,13 +115,19 @@ test("mobile editor fits the page and opens step details below the canvas", asyn
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/");
+  await page.goto("/?no_agents=1");
   await page
     .getByRole("button", { name: "+ New process", exact: true })
     .click();
   await page
     .getByRole("button", { name: "Add first step", exact: true })
     .click();
+  await page
+    .getByLabel("Process name", { exact: true })
+    .fill("Unassigned weather process");
+  await expect(
+    page.getByLabel("Responsible agent", { exact: true }),
+  ).toHaveCount(0);
   await page.getByLabel("Step name", { exact: true }).fill("Fetch weather");
   await page
     .getByLabel("Step instructions")
@@ -137,4 +143,37 @@ test("mobile editor fits the page and opens step details below the canvas", asyn
     path: testInfo.outputPath("flow-mobile.png"),
     fullPage: true,
   });
+  await page.getByRole("button", { name: "Save draft", exact: true }).click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Unassigned weather process",
+      exact: true,
+    }),
+  ).toBeVisible();
+  const submitted = await page.evaluate(() =>
+    JSON.parse(sessionStorage.getItem("submitted-definition")!),
+  );
+  expect(submitted.owner_agent_id).toBeUndefined();
+  expect(submitted.schedule).toBeUndefined();
+  expect(submitted.execution_mode).toBeUndefined();
+  expect(submitted.steps).toHaveLength(1);
+  await page.getByRole("button", { name: "Assignments", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "No assignments yet" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Add assignment", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Save assignment", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .getByRole("button", { name: "← All processes", exact: true })
+    .click();
+  const row = page
+    .getByRole("row")
+    .filter({ hasText: "Unassigned weather process" });
+  await expect(row.getByRole("cell").nth(1)).toHaveText("Unassigned");
+  await expect(row.getByRole("cell").nth(2)).toHaveText("0");
 });

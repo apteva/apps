@@ -2,15 +2,14 @@ name: processes-human-approval-gate
 description: A real LLM completes a work step and leaves review to the human operator.
 timeout: 4m
 settle_for: 5s
-max_iterations: 18
+max_iterations: 22
 setup:
   mode: autonomous
   app:
     path: ./
 directive: |
   Test a workflow in this isolated project. Your agent ID is ${APTEVA_TEST_AGENT_ID}.
-  Create exactly one procedure named "Tier 3 reviewed draft", owned by you,
-  execution_mode=agent, no schedule. Shared instructions: prepare a draft and
+  Create exactly one procedure named "Tier 3 reviewed draft", initially unassigned. Shared instructions: prepare a draft and
   wait for human approval before publishing. Completion criteria: an approved
   publication; this test stops earlier at human review. Define these three steps:
   - key=write, name=Write draft, role=writer, kind=work, depends_on=[],
@@ -22,8 +21,10 @@ directive: |
   - key=publish, name=Publish approved draft, role=publisher, kind=work,
     depends_on=[review], instructions="Publish only the approved draft.",
     expected_output="Publication evidence".
-  Keep default role bindings: work roles use you, approval role is human.
-  You are authorized to activate this test procedure and start one occurrence
+  Create an assignment named "Review", owned by you, execution_mode=agent,
+  follow_latest=true, no schedule. Keep default role bindings on this assignment:
+  work roles use you, approval role is human.
+  You are authorized to activate this test procedure and assignment, then start one occurrence
   with idempotency_key=review-day-1. Use run_get to discover the step IDs, then
   step_get before acting. Complete only the write step with output exactly
   "Window light makes softer portraits." using step_update. Do not call

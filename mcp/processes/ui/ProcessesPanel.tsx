@@ -24,7 +24,7 @@ type Schedule = {
 type Definition = {
   steps?: Step[];
   parameters?: Parameter[];
-  execution_mode: "agent" | "tasks";
+  execution_mode?: "agent" | "tasks";
   name: string;
   description: string;
   instructions: string;
@@ -32,7 +32,7 @@ type Definition = {
   default_inputs: string;
   completion_criteria: string;
   approval_requirements: string;
-  owner_agent_id: number;
+  owner_agent_id?: number;
   schedule?: Schedule;
 };
 type Process = Definition & {
@@ -72,8 +72,11 @@ type Entry = {
     created_at: string;
   };
 };
+function procedureOnly(d: Definition) {
+  const { owner_agent_id, execution_mode, schedule, ...definition } = d;
+  return definition;
+}
 const empty: Definition = {
-  execution_mode: "agent",
   name: "",
   description: "",
   instructions: "",
@@ -81,7 +84,6 @@ const empty: Definition = {
   default_inputs: "",
   completion_criteria: "",
   approval_requirements: "",
-  owner_agent_id: 0,
 };
 type History = {
   runs?: {
@@ -348,7 +350,7 @@ function Panel(props: Props) {
       ? detail?.versions.find((v) => v.version === version)?.definition
       : p;
   const ownerName = (id: number) =>
-    agents.find((a) => a.id === id)?.name || `Agent ${id}`;
+    id ? agents.find((a) => a.id === id)?.name || `Agent ${id}` : "Unassigned";
   const visible = items.filter(
     (p) =>
       (!filter || p.status === filter) &&
@@ -384,7 +386,7 @@ function Panel(props: Props) {
     detail?.versions.find((v) => v.version === runAssignment?.procedure_version)
       ?.definition.parameters || [];
   const newProcess = () => {
-    setDraft({ ...empty, owner_agent_id: agents[0]?.id || 0 });
+    setDraft({ ...empty });
     setCreating(true);
     setError("");
   };
@@ -478,7 +480,7 @@ function Panel(props: Props) {
                 creating ? "POST" : "PUT",
                 {
                   definition: {
-                    ...draft,
+                    ...procedureOnly(draft),
                     instructions:
                       draft.instructions ||
                       "Follow the connected steps in dependency order.",
@@ -493,7 +495,7 @@ function Panel(props: Props) {
               setEditing(false);
               setSelected(r.id);
               setVersion(0);
-              setTab(creating ? "assignments" : "procedure");
+              setTab("procedure");
               await load();
               await loadDetail(r.id);
             });
@@ -560,148 +562,6 @@ function Panel(props: Props) {
                 />
               </section>
               <aside>
-                {creating && (
-                  <section className="card">
-                    <h2>First assignment</h2>
-                    <p className="small muted">
-                      A default assignment will be created. Add more agents,
-                      pages, and schedules after saving.
-                    </p>
-                    <div className="field">
-                      <label htmlFor="pc-mode">Execution</label>
-                      <select
-                        id="pc-mode"
-                        value={draft.execution_mode}
-                        onChange={(e) =>
-                          setField(
-                            "execution_mode",
-                            e.target.value as "agent" | "tasks",
-                          )
-                        }
-                      >
-                        <option value="agent">Direct agent</option>
-                        <option value="tasks">Tasks</option>
-                      </select>
-                      <p className="small muted">
-                        {draft.execution_mode === "agent"
-                          ? "Runs and results are tracked here. No Tasks app needed."
-                          : "Requires Tasks 3.6.0 or later connected to Processes."}
-                      </p>
-                    </div>
-                    <div className="field">
-                      <label htmlFor="pc-owner">Responsible agent</label>
-                      <select
-                        id="pc-owner"
-                        required
-                        value={draft.owner_agent_id || ""}
-                        onChange={(e) =>
-                          setField("owner_agent_id", Number(e.target.value))
-                        }
-                      >
-                        <option value="" disabled>
-                          Choose an agent
-                        </option>
-                        {agents.map((a) => (
-                          <option key={a.id} value={a.id}>
-                            {a.name}
-                          </option>
-                        ))}
-                      </select>
-                      {!agents.length && (
-                        <p className="small muted">
-                          Create an agent in this project before saving a
-                          process.
-                        </p>
-                      )}
-                    </div>
-                    <div className="field">
-                      <label htmlFor="pc-cadence">Cadence</label>
-                      <select
-                        id="pc-cadence"
-                        value={draft.schedule?.kind || "manual"}
-                        onChange={(e) =>
-                          setField(
-                            "schedule",
-                            e.target.value === "manual"
-                              ? undefined
-                              : e.target.value === "interval"
-                                ? {
-                                    kind: "interval",
-                                    every: "24h",
-                                    timezone: "UTC",
-                                  }
-                                : {
-                                    kind: "cron",
-                                    cron: "0 9 * * 1",
-                                    timezone:
-                                      Intl.DateTimeFormat().resolvedOptions()
-                                        .timeZone,
-                                  },
-                          )
-                        }
-                      >
-                        <option value="manual">On demand</option>
-                        <option value="interval">Every interval</option>
-                        <option value="cron">Calendar schedule</option>
-                      </select>
-                    </div>
-                    {draft.schedule?.kind === "interval" && (
-                      <div className="field">
-                        <label htmlFor="pc-interval">Interval</label>
-                        <input
-                          id="pc-interval"
-                          required
-                          value={draft.schedule.every}
-                          onChange={(e) =>
-                            setField("schedule", {
-                              ...draft.schedule,
-                              every: e.target.value,
-                            })
-                          }
-                        />
-                        <p className="small muted">
-                          Examples: 1h, 24h, 168h. For fixed local times, use a
-                          calendar schedule.
-                        </p>
-                      </div>
-                    )}
-                    {draft.schedule?.kind === "cron" && (
-                      <>
-                        <div className="field">
-                          <label htmlFor="pc-cron">Calendar expression</label>
-                          <input
-                            id="pc-cron"
-                            required
-                            value={draft.schedule.cron}
-                            onChange={(e) =>
-                              setField("schedule", {
-                                ...draft.schedule,
-                                cron: e.target.value,
-                              })
-                            }
-                          />
-                          <p className="small muted">
-                            “0 9 * * 1” means Mondays at 09:00.
-                          </p>
-                        </div>
-                        <div className="field">
-                          <label htmlFor="pc-timezone">Timezone</label>
-                          <input
-                            id="pc-timezone"
-                            required
-                            value={draft.schedule.timezone}
-                            onChange={(e) =>
-                              setField("schedule", {
-                                ...draft.schedule,
-                                timezone: e.target.value,
-                              })
-                            }
-                          />
-                        </div>
-                      </>
-                    )}
-                  </section>
-                )}
                 <section className="card" style={{ marginTop: 20 }}>
                   <h2>Inputs & approvals</h2>
                   {fields
@@ -731,7 +591,7 @@ function Panel(props: Props) {
           <div className="row between toolbar">
             <span className="small muted">
               {creating
-                ? "Saved as a draft. Activate when ready."
+                ? "Saved as an unassigned draft. Configure execution later in Assignments."
                 : "Saving creates a new draft version. Existing runs keep their procedure."}
             </span>
             <div className="row">
@@ -742,7 +602,7 @@ function Panel(props: Props) {
               >
                 Cancel
               </button>
-              <button className="primary" disabled={busy || !agents.length}>
+              <button className="primary" disabled={busy}>
                 {busy ? "Saving…" : "Save draft"}
               </button>
             </div>
@@ -840,9 +700,9 @@ function Panel(props: Props) {
                               ownerName(x.owner_agent_id),
                             ),
                           ),
-                        ).join(", ") || ownerName(p.owner_agent_id)}
+                        ).join(", ") || ownerName(p.owner_agent_id || 0)}
                       </td>
-                      <td>{p.assignments?.length || 1}</td>
+                      <td>{p.assignments?.length || 0}</td>
                       <td>
                         <Pill state={p.status} />
                         {p.sync_pending && (

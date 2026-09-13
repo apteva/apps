@@ -35,11 +35,25 @@ let process = JSON.parse(sessionStorage.getItem("process") || "null") || {
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
   if (path === "/api/agents")
-    return Response.json([{ id: 7, name: "Weather agent" }]);
+    return Response.json(
+      location.search.includes("no_agents")
+        ? []
+        : [{ id: 7, name: "Weather agent" }],
+    );
   if (init?.method === "PUT" || init?.method === "POST") {
     const body = JSON.parse(String(init.body));
     if (!body.definition) throw new Error("Unexpected fixture write");
-    process = { ...process, ...body.definition, version: process.version + 1 };
+    sessionStorage.setItem(
+      "submitted-definition",
+      JSON.stringify(body.definition),
+    );
+    process = {
+      ...(init?.method === "POST"
+        ? { id: "weather", status: "draft", assignments: [] }
+        : process),
+      ...body.definition,
+      version: process.version + 1,
+    };
     sessionStorage.setItem("process", JSON.stringify(process));
     return Response.json(process);
   }

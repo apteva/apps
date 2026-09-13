@@ -110,9 +110,10 @@ func TestDirectRetryPinnedAndLifecycle(t *testing.T) {
 func TestDirectScheduleAndModeSwitch(t *testing.T) {
 	a, f, p := directSetup(t)
 	p = status(t, a, p.ID, "paused")
-	d := p.Definition
-	d.Schedule = &Schedule{Kind: "interval", Every: "1m"}
-	p, e := a.save("project-a", p.ID, "operator", p.Version, d)
+	x := p.Assignments[0]
+	c := x.AssignmentConfig
+	c.Schedule = &Schedule{Kind: "interval", Every: "1m"}
+	_, e := a.saveAssignment("project-a", p.ID, x.ID, x.Revision, c)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -145,8 +146,10 @@ func TestTasksToDirectAfterConfirmedPause(t *testing.T) {
 	p := create(t, a, d)
 	p = status(t, a, p.ID, "active")
 	p = status(t, a, p.ID, "paused")
-	d.ExecutionMode = "agent"
-	p, e := a.save("project-a", p.ID, "operator", p.Version, d)
+	x := p.Assignments[0]
+	c := x.AssignmentConfig
+	c.ExecutionMode = "agent"
+	_, e := a.saveAssignment("project-a", p.ID, x.ID, x.Revision, c)
 	if e != nil {
 		t.Fatal(e)
 	}

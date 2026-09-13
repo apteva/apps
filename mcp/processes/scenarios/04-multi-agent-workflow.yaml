@@ -39,8 +39,8 @@ directive: |
   You are the coordinator of an isolated test workflow. Your ID is
   ${PRIMARY_AGENT_ID}; writer is ${AGENT_writer_ID}; reviewer is ${AGENT_reviewer_ID}.
   Use only Processes. There is no external publication in this test.
-  Create exactly one procedure "Tier 3 collaborative briefing", owned by you,
-  execution_mode=agent, no schedule, required string parameter page with default
+  Create exactly one procedure "Tier 3 collaborative briefing", initially unassigned,
+  with required string parameter page with default
   photography. Shared instructions: prepare a verified beginner photography tip
   through assigned steps and record a simulated publication receipt. Completion
   criteria: all five steps complete and the final receipt matches the reviewed
@@ -72,11 +72,12 @@ directive: |
      This is only a local test receipt: do not call any external publishing tool.
      Expected output: simulated receipt for the approved draft.
 
-  While the procedure is still draft, update its default assignment with
-  explicit agent role bindings: researcher and publisher to you, writer to
+  While the procedure is still draft, create an assignment named "Team",
+  owned by you, execution_mode=agent, follow_latest=true, no schedule,
+  parameters={"page":"photography"}, with explicit agent role bindings: researcher and publisher to you, writer to
   ${AGENT_writer_ID}, reviewer to ${AGENT_reviewer_ID}. Do NOT leave review as human.
   You are authorized to create, bind and activate this test procedure. Activate
-  it and start one occurrence with idempotency_key=team-day-1. Never create a
+  it, activate the Team assignment, and start one occurrence with idempotency_key=team-day-1. Never create a
   second occurrence. You execute only research and publish when ready, always
   reading step_get first. The other agents execute their own steps through
   Processes delivery; do not spawn Core worker threads or report for them.
