@@ -136,14 +136,14 @@ func advanceRingRunTx(tx *sql.Tx, runID string, now time.Time) error {
 	if active > 0 {
 		return nil
 	}
-	rows, err := tx.Query(`SELECT id,timeout_sec,priority FROM call_offers WHERE run_id=? AND status='queued' ORDER BY position`, runID)
+	rows, err := tx.Query(`SELECT id,timeout_sec,priority,destination_id,config_json FROM call_offers WHERE run_id=? AND status='queued' ORDER BY position`, runID)
 	if err != nil {
 		return err
 	}
 	var offers []ringOffer
 	for rows.Next() {
 		var o ringOffer
-		if err := rows.Scan(&o.ID, &o.TimeoutSec, &o.Priority); err != nil {
+		if err := rows.Scan(&o.ID, &o.TimeoutSec, &o.Priority, &o.DestinationID, &o.ConfigJSON); err != nil {
 			rows.Close()
 			return err
 		}
@@ -158,8 +158,9 @@ func advanceRingRunTx(tx *sql.Tx, runID string, now time.Time) error {
 		_, err = tx.Exec(`UPDATE call_ring_runs SET status='exhausted' WHERE id=?`, runID)
 		return err
 	}
-	for i, o := range offers {
-		if (strategy == "sequential" || strategy == "round_robin") && i > 0 {
+	activated := 0
+	for _, o := range offers {
+		if (strategy == "sequential" || strategy == "round_robin") && activated > 0 {
 			break
 		}
 		if strategy == "priority" && o.Priority != offers[0].Priority {
@@ -169,9 +170,37 @@ func advanceRingRunTx(tx *sql.Tx, runID string, now time.Time) error {
 		if until.After(expired) {
 			until = expired
 		}
+		capacity, e := readDestinationCapacity(o.ConfigJSON)
+		if e != nil {
+			return e
+		}
+		if capacity.Limit > 0 {
+			var project string
+			if e = tx.QueryRow(`SELECT project_id FROM calls WHERE id=?`, callID).Scan(&project); e != nil {
+				return e
+			}
+			if e = reserveCapacityTx(tx, callID, project, o.DestinationID, capacity, ringTime(until)); e != nil {
+				if !errors.Is(e, errPhoneCapacity) {
+					return e
+				}
+				if _, e = tx.Exec(`UPDATE call_offers SET status='failed',last_error='capacity_unavailable' WHERE id=?`, o.ID); e != nil {
+					return e
+				}
+				continue
+			}
+		}
+		if capacity.Limit > 0 {
+			if _, err = tx.Exec(`UPDATE call_offers SET capacity_principal=? WHERE id=?`, capacity.Identity.key(), o.ID); err != nil {
+				return err
+			}
+		}
+		activated++
 		if _, err = tx.Exec(`UPDATE call_offers SET status='offered',offered_at=?,expires_at=?,next_attempt_at=? WHERE id=? AND status='queued'`, ringTime(now), ringTime(until), ringTime(now), o.ID); err != nil {
 			return err
 		}
+	}
+	if activated == 0 {
+		return advanceRingRunTx(tx, runID, now)
 	}
 	return nil
 }
@@ -199,6 +228,15 @@ func (c *callsDB) claimRingOffer(callID, project, destinationID, kind string, ag
 	if err != nil {
 		return true, false, err
 	}
+	if o.Kind == "browser" {
+		capacity, e := readDestinationCapacity(o.ConfigJSON)
+		if e != nil {
+			return true, false, e
+		}
+		if e = reserveCapacityTx(tx, callID, project, o.DestinationID, capacity, ""); e != nil {
+			return true, false, e
+		}
+	}
 	peer := peerKindRealtime
 	if o.Kind == "browser" {
 		peer = peerKindHuman
@@ -216,6 +254,9 @@ func (c *callsDB) claimRingOffer(callID, project, destinationID, kind string, ag
 		return true, false, err
 	}
 	if _, err = tx.Exec(`UPDATE call_offers SET status=CASE WHEN id=? THEN 'claimed' ELSE 'canceled' END,claimed_at=CASE WHEN id=? THEN ? ELSE '' END WHERE run_id=? AND status IN ('offered','queued')`, o.ID, o.ID, ringTime(now), runID); err != nil {
+		return true, false, err
+	}
+	if _, err = tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND destination_id<>? AND expires_at<>''`, callID, o.DestinationID); err != nil {
 		return true, false, err
 	}
 	if _, err = tx.Exec(`UPDATE call_ring_runs SET status='claimed' WHERE id=?`, runID); err != nil {
@@ -450,7 +491,7 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 	if err = json.Unmarshal([]byte(raw), &execution); err != nil {
 		return err
 	}
-	plan, err := a.resolveRoutingDefinition(&execution.Route, row.FromNumber, nil, &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}, execution.Definition, overflow)
+	plan, err := a.resolveRoutingDefinition(&execution.Route, row.FromNumber, execution.Digits, &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}, execution.Definition, overflow)
 	if err != nil {
 		return err
 	}

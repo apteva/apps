@@ -899,7 +899,7 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	if p != nil {
-		if e := a.setPhoneOwner(row, p, request.DestinationID); e != nil {
+		if e := a.setPhoneOwner(row, p, row.RoutingDestinationID); e != nil {
 			_ = a.db().releaseAnswerClaim(callID)
 			http.Error(w, "ownership unavailable", 500)
 			return

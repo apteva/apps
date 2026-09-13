@@ -212,8 +212,49 @@ func (a *App) phoneOwner(call string) (string, string, error) {
 	return owner, dest, err
 }
 func (a *App) setPhoneOwner(row *callRow, p *phonePrincipal, dest string) error {
-	_, err := a.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
-	return err
+	capacity, err := a.capacityForIdentity(row.ProjectID, p.Identity)
+	if err != nil {
+		return err
+	}
+	if dest != "" && !p.Supervisor && !a.destinationAllowsIdentity(row.ProjectID, dest, p.Identity) {
+		return errors.New("destination is assigned to another identity")
+	}
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err = reserveCapacityTx(tx, row.ID, row.ProjectID, dest, capacity, ""); err != nil {
+		return err
+	}
+	// A supervisor may take over, but the reserved personal destination remains
+	// occupied. The actor's own usage is also counted through call ownership.
+	resourcePrincipal := ""
+	if dest != "" {
+		var raw string
+		e := tx.QueryRow(`SELECT config_json FROM routing_destinations WHERE id=? AND project_id=?`, dest, row.ProjectID).Scan(&raw)
+		if e != nil {
+			return e
+		}
+		resource, e := readDestinationCapacity(raw)
+		if e != nil {
+			return e
+		}
+		if resource.Limit > 0 {
+			resourcePrincipal = resource.Identity.key()
+			if e = reserveCapacityTx(tx, row.ID, row.ProjectID, dest, resource, ""); e != nil {
+				return e
+			}
+		}
+	}
+	if _, err = tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND principal<>? AND principal<>?`, row.ID, p.Identity.key(), resourcePrincipal); err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET principal=excluded.principal,destination_id=excluded.destination_id`, row.ID, row.ProjectID, p.Identity.key(), dest)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) bool {
 	if p == nil {
@@ -249,11 +290,11 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 		return ""
 	}
 	for _, offer := range offers {
-		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && (requested == "" || requested == offer.DestinationID) {
+		if offer.Kind == "browser" && p.Destinations[offer.DestinationID] && a.destinationAllowsIdentity(row.ProjectID, offer.DestinationID, p.Identity) && (requested == "" || requested == offer.DestinationID) {
 			return offer.DestinationID
 		}
 	}
-	if len(offers) == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && (requested == "" || requested == row.RoutingDestinationID) {
+	if len(offers) == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
 		return row.RoutingDestinationID
 	}
 	return ""

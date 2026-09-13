@@ -459,7 +459,7 @@ func (a *App) publishLifecycleEvents(ctx *sdk.AppCtx, callID string) error {
 		// This is the SDK's documented app-event endpoint. Its fire-and-forget
 		// Emit method cannot acknowledge delivery; mark the durable outbox only
 		// after an HTTP success. Consumers deduplicate using event_id/revision.
-		body, err := json.Marshal(map[string]any{"topic": event.Topic, "project_id": event.ProjectID, "data": event.Payload})
+		body, err := json.Marshal(map[string]any{"event_id": event.EventID, "topic": event.Topic, "project_id": event.ProjectID, "data": event.Payload})
 		if err != nil {
 			return err
 		}
