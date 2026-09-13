@@ -769,7 +769,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 // appCtx recovers the mounted AppCtx for HTTP handlers. The SDK routes
 // carry it via closure at mount time in richer setups; keeping a single
 // accessor makes the seam explicit and testable.
-func (a *App) appCtx(r *http.Request) *sdk.AppCtx { return mountedCtx.WithUserSession(r) }
+func (a *App) appCtx(_ *http.Request) *sdk.AppCtx { return mountedCtx }
 
 var mountedCtx *sdk.AppCtx
 
