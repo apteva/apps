@@ -287,6 +287,7 @@ interface JournalEntry {
 }
 interface BrokerInfo {
   slug: string;
+  paper_supported?: boolean;
   asset_classes: string[];
   order_types: string[];
   tifs: string[];
@@ -468,6 +469,16 @@ interface BacktestRun {
     dataset_rows?: number;
     price_adjustment?: string;
     execution_model?: Record<string, unknown>;
+    engine_version?: string;
+    decision_mode?: string;
+    agent_replay_only?: boolean;
+    agent_waiting?: boolean;
+    processed_events?: number;
+    input_events?: number;
+    simulation_time?: string;
+    benchmark_symbol?: string;
+    result_sha256?: string;
+    reproduction_matches?: boolean;
   };
   error?: string;
   created_at: string;
@@ -1570,7 +1581,7 @@ function Stat({ label, value, sub, colorClass }: { label: string; value: string;
   );
 }
 
-function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
+export function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   onCreated: () => void;
   onCancel: () => void;
@@ -1609,6 +1620,11 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
   };
 
   const liveBrokers = brokers.filter((b) => b.bound);
+  const paperBrokers = liveBrokers.filter((b) => b.paper_supported);
+  const eligibleBrokers = executionEnvironment === "broker_paper" ? paperBrokers : liveBrokers;
+  useEffect(() => {
+    if (executionEnvironment === "broker_paper" && brokerSlug && !brokers.some((b) => b.slug === brokerSlug && b.bound && b.paper_supported)) setBrokerSlug("");
+  }, [executionEnvironment, brokerSlug, brokers]);
 
   return (
     <div className="p-4 mb-4 border border-border rounded bg-bg-card">
@@ -1618,10 +1634,10 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
           Simulation
         </label>
         <label className="text-sm flex items-center gap-2 cursor-pointer">
-          <input type="radio" checked={executionEnvironment === "broker_paper"} onChange={() => setExecutionEnvironment("broker_paper")} disabled={liveBrokers.length === 0} />
+          <input type="radio" checked={executionEnvironment === "broker_paper"} onChange={() => setExecutionEnvironment("broker_paper")} disabled={paperBrokers.length === 0} />
           Broker paper
-          {liveBrokers.length === 0 && (
-            <span className="text-xs text-text-dim">(no broker bound — see Brokers tab)</span>
+          {paperBrokers.length === 0 && (
+            <span className="text-xs text-text-dim">(connect Alpaca paper or OKX demo)</span>
           )}
         </label>
         <label className="text-sm flex items-center gap-2 cursor-pointer">
@@ -1645,7 +1661,7 @@ function CreatePortfolioForm({ api, onCreated, onCancel, setError }: {
             <FieldLabel>Broker</FieldLabel>
             <select value={brokerSlug} onChange={(e) => setBrokerSlug(e.target.value)} className={inputClass}>
               <option value="">— Pick —</option>
-              {liveBrokers.map((b) => (
+              {eligibleBrokers.map((b) => (
                 <option key={b.slug} value={b.slug}>{b.slug} ({b.asset_classes.join(", ")})</option>
               ))}
             </select>
@@ -3203,6 +3219,10 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [performance, setPerformance] = useState<BacktestPerformance | null>(null);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
+  const [agentDirective, setAgentDirective] = useState("");
+  const [agentTriggers, setAgentTriggers] = useState("market.quote,feature.*,news.*,execution.fill");
+  const [extraEvents, setExtraEvents] = useState("[]");
+  const [decisionBudget, setDecisionBudget] = useState("1000");
   const [symbolQuery, setSymbolQuery] = useState("");
   const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
   const [universe, setUniverse] = useState<Mark[]>([]);
@@ -3240,6 +3260,12 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     try {
       const r = await api<{ events: BacktestEvent[] }>("GET", `/backtests/${selectedRun.id}/events`, { limit: "80" });
       setEvents(r.events || []);
+      if (selectedRun.summary?.engine_version) {
+        setLiveEvents((r.events||[]).filter(ev=>ev.kind==="fill"||ev.kind==="strategy.decision"||ev.kind.startsWith("order.")).map((ev):BacktestLiveEvent=>{
+          const data=(ev.data||{}) as Record<string,any>;
+          return {id:`simulation:${ev.id}`,kind:ev.kind==="strategy.decision"?"thinking":"order",summary:ev.kind==="strategy.decision"?(data.decisions||[]).join("; "):`${ev.kind} · ${[data.side,data.qty,data.symbol].filter(x=>x!==undefined).join(" ")}${data.price?` @ ${formatUSD(data.price)}`:""}`,detail:ev.message.split(" · ")[0],time:ev.created_at};
+        }));
+      }
     } catch (e) { setError((e as Error).message); }
   }, [selectedRun?.id, api, setError]);
   const loadPerformance = useCallback(async () => {
@@ -3247,7 +3273,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       setPerformance(null);
       return;
     }
-    if (selectedRun.run_kind !== "strategy" && (!selectedRun.environment_id || !selectedRun.environment_portfolio_id)) {
+    if (!selectedRun.summary?.engine_version && selectedRun.run_kind !== "strategy" && (!selectedRun.environment_id || !selectedRun.environment_portfolio_id)) {
       setPerformance(null);
       return;
     }
@@ -3262,7 +3288,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   useEffect(() => { loadPerformance(); }, [loadPerformance]);
   useEffect(() => {
     if (selectedRun?.status !== "running") return;
-    const t = window.setInterval(loadPerformance, 5000);
+    const t = window.setInterval(() => { load(); loadEvents(); loadPerformance(); }, 2000);
     return () => window.clearInterval(t);
   }, [selectedRun?.status, loadPerformance]);
   useEffect(() => {
@@ -3297,8 +3323,11 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   }, [api]);
   useAppEvents("trading", projectId, (ev) => {
     if (ev.topic.startsWith("trading.backtest.")) {
+      const data = (ev.data || {}) as Record<string, any>;
+      if (data.backtest_id && data.backtest_id !== selectedRunId) return;
       load();
       loadEvents();
+      loadPerformance();
     }
   });
   useEnvironmentAgentTelemetryEvents(liveEnvironmentID, liveAgentID, (ev) => {
@@ -3324,6 +3353,8 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   useEffect(() => {
     if (!portfolio) return;
     setName(`${portfolio.name} replay`);
+    setAgentDirective(portfolio.mandate || "Evaluate the supplied events and manage the portfolio conservatively.");
+    setExtraEvents("[]");
     setSelectedSymbols(cleanSymbolList(portfolio.watchlist || []));
     setSymbolQuery("");
     setStartingCash(String(Math.round(portfolio.starting_cash || portfolio.cash || 100000)));
@@ -3339,6 +3370,8 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     setBusy(true);
     try {
       const body = {
+        agent_simulation: {directive:agentDirective,trigger_types:agentTriggers.split(",").map(s=>s.trim()).filter(Boolean),max_decisions:Number(decisionBudget)||1000},
+        inputs: JSON.parse(extraEvents),
         name,
         symbols: selectedSymbols,
         start_at: startAt,
@@ -3383,7 +3416,14 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
 
   return (
     <>
-      <Section title="New backtest">
+      <Section title="New agent event simulation">
+        <p className="text-xs text-text-dim mb-3">Uses the portfolio’s bound agent. Each decision runs against recorded events and portfolio state; simulated time pauses while the agent reasons.</p>
+        <div className="grid gap-3 mb-3">
+          <label><FieldLabel>Agent directive</FieldLabel><textarea className={inputClass} value={agentDirective} onChange={e=>setAgentDirective(e.target.value)} /></label>
+          <label><FieldLabel>Events that trigger decisions (comma separated)</FieldLabel><input className={inputClass} value={agentTriggers} onChange={e=>setAgentTriggers(e.target.value)} /></label>
+          <label><FieldLabel>Maximum agent decisions</FieldLabel><input type="number" min="1" max="10000" className={inputClass} value={decisionBudget} onChange={e=>setDecisionBudget(e.target.value)} /></label>
+          <label><FieldLabel>Additional events (JSON)</FieldLabel><textarea className={inputClass} rows={4} value={extraEvents} onChange={e=>setExtraEvents(e.target.value)} placeholder='[{"id":"news-1","type":"news.article","symbol":"AAPL","event_time":"2026-01-05T15:00:00Z","available_at":"2026-01-05T15:00:05Z","metadata":{"headline":"Example"}}]' /></label>
+        </div>
         <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
           <label className="text-xs">
             <FieldLabel>Name</FieldLabel>
@@ -3464,6 +3504,15 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       </Section>
 
       <Section title="Runs">
+        <label className="inline-flex mb-3 px-3 py-2 border border-border rounded cursor-pointer text-xs">
+          Import result bundle
+          <input className="hidden" type="file" accept="application/json,.json" onChange={async (ev) => {
+            const file=ev.currentTarget.files?.[0]; if (!file || !portfolio) return;
+            try { const artifact=JSON.parse(await file.text()); const r=await api<{backtest:BacktestRun}>("POST","/backtests/import",undefined,{portfolio_id:portfolio.id,artifact}); setSelectedRunId(r.backtest.id);await load();setError(null); }
+            catch(error){setError((error as Error).message);}
+            ev.target.value="";
+          }} />
+        </label>
         {runs.length === 0 ? (
           <EmptyState title="No backtests" hint="Create a run for this portfolio." />
         ) : (
@@ -3487,7 +3536,10 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             </div>
             <div>
               {selectedRun ? (
-                <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} performance={performance} busy={busy} onAction={action} />
+                <>
+                  {selectedRun.summary?.engine_version && !selectedRun.summary?.agent_replay_only && <SimulationControls run={selectedRun} api={api} onChange={load} setError={setError} />}
+                  <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} performance={performance} busy={busy} onAction={action} />
+                </>
               ) : (
                 <EmptyState title="Select a run" />
               )}
@@ -3499,7 +3551,33 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   );
 }
 
-function BacktestRunDetail({ run, events, liveEvents, performance, busy, onAction }: {
+export function SimulationControls({run, api, onChange, setError}: {
+  run: BacktestRun;
+  api: <T>(m:string,p:string,q?:Record<string,string>,b?:unknown)=>Promise<T>;
+  onChange:()=>Promise<void>;
+  setError:(error:string|null)=>void;
+}) {
+  const [config,setConfig]=useState<Record<string,any>>({});
+  const [inputs,setInputs]=useState("[]");
+  const [saving,setSaving]=useState(false);
+  useEffect(()=>{ if(run.status!=="queued")return; let active=true; api<{config:Record<string,any>;inputs:unknown[]}>("GET",`/backtests/${run.id}/simulation`).then(r=>{if(active){setConfig(r.config);setInputs(JSON.stringify(r.inputs||[],null,2))}}).catch(e=>setError(e.message));return()=>{active=false};},[run.id,run.status]);
+  const download=async()=>{try{const bundle=await api<unknown>("GET",`/backtests/${run.id}/artifact`);const url=URL.createObjectURL(new Blob([JSON.stringify(bundle,null,2)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download=`backtest-${run.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}catch(e){setError((e as Error).message)}};
+  return <div className="p-3 mb-3 border border-border rounded bg-bg-card space-y-3">
+    <div className="flex items-center justify-between"><span className="text-sm font-semibold">Event simulation</span><button className="text-xs border border-border px-2 py-1 rounded" onClick={download}>Download result bundle</button></div>
+    {run.summary?.result_sha256 && <div className="text-xs text-text-dim break-all">Result SHA-256: {run.summary.result_sha256}</div>}
+    {run.status==="queued" && <details><summary className="cursor-pointer text-xs">Execution settings and additional inputs</summary>
+      <div className="grid grid-cols-2 gap-2 mt-3">
+        {([["seed","Random seed"],["submission_latency_ms","Order latency (ms)"],["cancellation_latency_ms","Cancel latency (ms)"],["latency_jitter_ms","Latency jitter (ms)"],["max_fill_qty","Maximum fill per quote (0 = unlimited)"],["participation_rate","Volume participation (0–1; 0 = unlimited)"]] as const).map(([key,label])=><label key={key} className="text-xs">{label}<input type="number" min="0" step="any" value={config[key]??0} onChange={e=>setConfig({...config,[key]:Number(e.target.value)})} className="w-full mt-1 p-2 rounded border border-border bg-bg-input"/></label>)}
+        <label className="text-xs">Benchmark<select value={config.benchmark_symbol||run.symbols[0]} onChange={e=>setConfig({...config,benchmark_symbol:e.target.value})} className="w-full mt-1 p-2 rounded border border-border bg-bg-input">{run.symbols.map(symbol=><option key={symbol}>{symbol}</option>)}</select></label>
+      </div>
+      <p className="my-2 text-xs text-text-dim">Imported features become visible at their availability time. Strategies can reference indicators such as feature:sentiment.score. Bar replay estimates liquidity from the previous completed bar; fills wait for the next available quote after latency.</p>
+      <label className="text-xs">Additional input events (JSON array)<textarea rows={5} value={inputs} onChange={e=>setInputs(e.target.value)} className="block w-full my-2 p-2 rounded border border-border bg-bg-input font-mono text-xs" placeholder='[{"id":"sentiment-1","type":"feature.sentiment","symbol":"AAPL","event_time":"2026-01-05T10:00:00Z","available_at":"2026-01-05T10:05:00Z","data":{"score":0.8}}]' /></label>
+      <button disabled={saving} className="px-3 py-2 text-xs rounded bg-accent text-bg disabled:opacity-50" onClick={async()=>{setSaving(true);try{const extra=JSON.parse(inputs);if(!Array.isArray(extra))throw new Error("Inputs must be a JSON array");await api("PUT",`/backtests/${run.id}/inputs`,undefined,{simulation:config,inputs:extra});await onChange();setError(null);}catch(e){setError((e as Error).message)}finally{setSaving(false)}}}>Save simulation settings</button>
+    </details>}
+  </div>;
+}
+
+export function BacktestRunDetail({ run, events, liveEvents, performance, busy, onAction }: {
   run: BacktestRun;
   events: BacktestEvent[];
   liveEvents: BacktestLiveEvent[];
@@ -3507,14 +3585,19 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
   busy: boolean;
   onAction: (run: BacktestRun, op: "start" | "run" | "pause" | "step" | "cancel") => void;
 }) {
-  const pct = run.total_steps > 0 ? Math.min(100, Math.round((run.current_step / run.total_steps) * 100)) : 0;
+  const done = run.summary?.processed_events ?? run.current_step;
+  const total = run.summary?.input_events ?? run.total_steps;
+  const pct = run.status === "completed" ? 100 : total > 0 ? Math.min(99, Math.round(done / total * 100)) : 0;
   const prices = run.summary?.prices || [];
   return (
     <div className="space-y-3">
       <div className="p-3 border border-border rounded bg-bg-card">
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-sm">{run.name}</strong>
+          {run.summary?.engine_version && <span className="text-xs text-text-dim">{done}/{total} events · {run.summary.simulation_time || "Awaiting start"}</span>}
+          {run.summary?.reproduction_matches !== undefined && <span className={run.summary.reproduction_matches ? "text-green text-xs" : "text-red text-xs"}>{run.summary.reproduction_matches ? "Reproduction verified" : "Result differs from imported bundle"}</span>}
           <BacktestStatus status={run.status} />
+          {run.summary?.agent_waiting && <span className="text-xs text-text-dim">Agent deciding · simulated clock paused</span>}
           {run.run_kind === "strategy" ? (
             <span className="text-xs text-text-dim">strategy #{run.strategy_id}</span>
           ) : (
@@ -3525,7 +3608,7 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
           {run.status === "queued" || run.status === "failed" ? (
             <button disabled={busy} onClick={() => onAction(run, "start")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Start</button>
           ) : null}
-          {["queued", "failed", "running", "paused"].includes(run.status) && run.current_step < run.total_steps && (
+          {["queued", "failed", "running", "paused"].includes(run.status) && (run.summary?.engine_version || run.current_step < run.total_steps) && (
             <button disabled={busy} onClick={() => onAction(run, "run")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Run</button>
           )}
           {run.status === "running" && (
@@ -3608,7 +3691,7 @@ function BacktestPerformancePanel({ run, performance }: {
   run: BacktestRun;
   performance: BacktestPerformance | null;
 }) {
-  if (!run.environment_id && run.run_kind !== "strategy") {
+  if (!run.summary?.engine_version && !run.environment_id && run.run_kind !== "strategy") {
     return (
       <div className="border border-border rounded bg-bg-card overflow-hidden">
         <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
@@ -3648,6 +3731,12 @@ function BacktestPerformancePanel({ run, performance }: {
           <Metric label="Exposure" value={formatPct(metrics.exposure)} />
           <Metric label="Positions" value={String(positions.length)} />
           <Metric label="Orders" value={String(orders.length)} />
+          {run.summary?.engine_version && <>
+            <Metric label={`Benchmark · ${run.summary.benchmark_symbol || "buy & hold"}`} value={formatUSD(metrics.benchmark_equity)} sub={formatPct(metrics.benchmark_return_pct)} />
+            <Metric label="Excess return" value={formatPct(metrics.excess_return_pct)} />
+            <Metric label="Execution fees" value={formatUSD(metrics.fees)} />
+            <Metric label="Realized P&L" value={formatUSD(metrics.realized_pnl)} />
+          </>}
         </div>
         {run.summary?.market_source && (
           <div className="mt-3 px-3 py-2 rounded border border-border bg-bg-input text-xs text-text-dim mono">

@@ -567,12 +567,16 @@ func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
 	}
 }
 
-func mustCreateFixedStrategy(t *testing.T, ctx *sdk.AppCtx, name, symbol string, weight float64) int64 {
+func mustCreateFixedStrategy(t *testing.T, ctx *sdk.AppCtx, name, symbol string, weight float64, cadence ...string) int64 {
 	t.Helper()
+	interval := "1h"
+	if len(cadence) > 0 {
+		interval = cadence[0]
+	}
 	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
 		ProjectID: "test-proj", Name: name, Status: "active", Version: 1,
 		Definition: map[string]any{
-			"universe": []any{symbol}, "cadence": "1h",
+			"universe": []any{symbol}, "cadence": interval,
 			"rules": []any{map[string]any{
 				"name": "fixed allocation", "allocate": []any{map[string]any{"symbol": symbol, "weight": weight}},
 			}},
@@ -672,7 +676,7 @@ func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
 func TestStrategyBacktestUsesPinnedDefinitionAfterUpdate(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Pinned backtest", []string{"crypto"})
-	strategyID := mustCreateFixedStrategy(t, ctx, "Pinned replay", "BTC-USD", 0.5)
+	strategyID := mustCreateFixedStrategy(t, ctx, "Pinned replay", "BTC-USD", 0.5, "1d")
 	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
 		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
 		RunKind: "strategy", StrategyVersion: 1, Name: "Pinned replay", Status: "queued",
@@ -967,7 +971,7 @@ func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
 func TestStrategyBacktestExecutesPriorCloseSignalAtNextOpen(t *testing.T) {
 	ctx := newTestCtx(t)
 	portfolioID := mustCreatePortfolio(t, ctx, "Stock timing", []string{"equity"})
-	strategyID := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5)
+	strategyID := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5, "1d")
 	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
 		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
 		RunKind: "strategy", StrategyVersion: 1, Name: "next-open timing", Status: "queued",

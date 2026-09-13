@@ -52,10 +52,14 @@ func (coinbaseAdapter) HoldingsTool() string                   { return "" }
 func (coinbaseAdapter) ParseHoldings(_ json.RawMessage) (map[string]brokerBalance, error) {
 	return map[string]brokerBalance{}, nil
 }
-func (coinbaseAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (coinbaseAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
-func (coinbaseAdapter) ParseOrders(_ json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+func (coinbaseAdapter) OrdersHistoryTool() (string, map[string]any) {
+	return "list_orders", map[string]any{"product_type": "SPOT", "limit": 100}
+}
+func (coinbaseAdapter) OpenOrdersTool() (string, map[string]any) {
+	return "list_orders", map[string]any{"product_type": "SPOT", "order_status": []string{"OPEN"}, "limit": 100}
+}
+func (coinbaseAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	return cryptoHistory("coinbase", raw)
 }
 func (coinbaseAdapter) CancelArgs(_ *Order, brokerOrderID string) map[string]any {
 	return map[string]any{"order_ids": []string{brokerOrderID}}
@@ -223,10 +227,14 @@ func (okxAdapter) HoldingsTool() string                   { return "" }
 func (okxAdapter) ParseHoldings(_ json.RawMessage) (map[string]brokerBalance, error) {
 	return map[string]brokerBalance{}, nil
 }
-func (okxAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (okxAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
-func (okxAdapter) ParseOrders(_ json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+func (okxAdapter) OrdersHistoryTool() (string, map[string]any) {
+	return "list_order_history", map[string]any{"instType": "SPOT", "limit": 100}
+}
+func (okxAdapter) OpenOrdersTool() (string, map[string]any) {
+	return "list_open_orders", map[string]any{"instType": "SPOT", "limit": 100}
+}
+func (okxAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	return cryptoHistory("okx", raw)
 }
 func (okxAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
 	args := map[string]any{"instId": toUSDTDashed(o.Symbol)}
@@ -353,10 +361,14 @@ func (bybitAdapter) HoldingsTool() string                   { return "" }
 func (bybitAdapter) ParseHoldings(_ json.RawMessage) (map[string]brokerBalance, error) {
 	return map[string]brokerBalance{}, nil
 }
-func (bybitAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (bybitAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
-func (bybitAdapter) ParseOrders(_ json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+func (bybitAdapter) OrdersHistoryTool() (string, map[string]any) {
+	return "list_order_history", map[string]any{"category": "spot", "limit": 50}
+}
+func (bybitAdapter) OpenOrdersTool() (string, map[string]any) {
+	return "list_orders", map[string]any{"category": "spot", "openOnly": 0, "limit": 50}
+}
+func (bybitAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	return cryptoHistory("bybit", raw)
 }
 func (bybitAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
 	args := map[string]any{"category": "spot", "symbol": toUSDTCompact(o.Symbol)}
@@ -509,9 +521,9 @@ func (bitstampAdapter) ParseHoldings(_ json.RawMessage) (map[string]brokerBalanc
 	return map[string]brokerBalance{}, nil
 }
 func (bitstampAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (bitstampAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
-func (bitstampAdapter) ParseOrders(_ json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+func (bitstampAdapter) OpenOrdersTool() (string, map[string]any)    { return "open_orders", nil }
+func (bitstampAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
+	return cryptoHistory("bitstamp", raw)
 }
 func (bitstampAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
 	if brokerOrderID != "" {
@@ -717,7 +729,7 @@ func mapSimpleOrderStatus(status string) string {
 	switch strings.ToLower(status) {
 	case "filled", "done", "closed", "complete", "completed":
 		return "filled"
-	case "cancelled", "canceled", "expired", "cancelled_by_user":
+	case "cancelled", "canceled", "expired", "cancelled_by_user", "partiallyfilledcanceled", "partially_filled_cancelled":
 		return "cancelled"
 	case "rejected", "failed", "failure":
 		return "rejected"

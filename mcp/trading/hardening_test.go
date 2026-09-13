@@ -66,6 +66,9 @@ func TestLiveReconcilePreservesLockedCashAndReducesPositions(t *testing.T) {
 	platform := &hardeningPlatform{
 		connections: []sdk.PlatformConnection{{ID: 7, AppSlug: "binance-trading", Status: "active"}},
 		execute: func(_ int64, tool string, _ map[string]any) (*sdk.ExecuteResult, error) {
+			if tool == "get_open_orders" {
+				return &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`[]`)}, nil
+			}
 			if tool != "get_account" {
 				t.Fatalf("unexpected tool %q", tool)
 			}

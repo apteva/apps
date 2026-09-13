@@ -19,6 +19,7 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	sim "github.com/apteva/apps/mcp/trading/internal/backtest"
 )
 
 const (
@@ -48,6 +49,24 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/backtests")
 	rest = strings.TrimPrefix(rest, "/")
+	if rest == "import" && r.Method == http.MethodPost {
+		var body struct {
+			PortfolioID int64              `json:"portfolio_id"`
+			Name        string             `json:"name"`
+			Artifact    simulationArtifact `json:"artifact"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<20)).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		run, err := importSimulation(globalCtx.AppDB(), pid, body.PortfolioID, body.Name, &body.Artifact)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 201, map[string]any{"backtest": run})
+		return
+	}
 	if rest == "" {
 		if r.Method != http.MethodGet {
 			httpErr(w, 405, "GET only")
@@ -77,13 +96,42 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		action = parts[1]
 	}
 	switch {
+	case action == "artifact" && r.Method == http.MethodGet:
+		a.handleSimulationArtifact(w, r, run)
+	case action == "simulation" && r.Method == http.MethodGet:
+		record, err := loadSimulation(globalCtx.AppDB(), run.ID)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		extra := []sim.Input{}
+		for _, in := range record.Inputs {
+			if !strings.HasPrefix(in.Type, "market.") {
+				extra = append(extra, in)
+			}
+		}
+		httpJSON(w, 200, map[string]any{"config": record.Spec.Config, "inputs": extra, "input_sha256": record.InputHash, "state": record.State})
+	case action == "inputs" && r.Method == http.MethodPut:
+		var body struct {
+			Inputs     []sim.Input `json:"inputs"`
+			Simulation *sim.Config `json:"simulation"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		if err := updateSimulationInputs(globalCtx.AppDB(), run, body.Simulation, body.Inputs); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, map[string]any{"updated": true})
 	case action == "" && r.Method == http.MethodGet:
 		events, _ := dbListBacktestEvents(globalCtx.AppDB(), run.ID, 80)
 		httpJSON(w, 200, map[string]any{"backtest": run, "events": events})
 	case action == "start" && r.Method == http.MethodPost:
 		out, err := startBacktestRun(run)
 		if err != nil {
-			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
+			_, _ = globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='failed',error=? WHERE id=? AND status IN ('queued','running','failed')`, err.Error(), run.ID)
 			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
 			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
 			httpErr(w, 500, err.Error())
@@ -101,12 +149,16 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		var out map[string]any
 		var err error
 		if run.RunKind == "strategy" {
-			out, err = runStrategyBacktestToEndContext(r.Context(), run)
+			if eventBacktest(run) {
+				out, err = startEventSimulation(run, false)
+			} else {
+				out, err = startLegacyStrategyWorker(run)
+			}
 		} else {
 			out, err = runBacktestToEnd(run)
 		}
 		if err != nil {
-			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
+			_, _ = globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='failed',error=? WHERE id=? AND status IN ('queued','running','failed')`, err.Error(), run.ID)
 			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
 			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
 			httpErr(w, 500, err.Error())
@@ -121,11 +173,26 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, 200, out)
 	case action == "cancel" && r.Method == http.MethodPost:
+		if eventBacktest(run) {
+			_, err := globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='cancelled' WHERE id=? AND status IN ('queued','running','paused','failed')`, run.ID)
+			if err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+			waitSimulationWorker(run.ID)
+			fresh, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+			if err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+			httpJSON(w, 200, map[string]any{"backtest": fresh, "status": fresh.Status})
+			return
+		}
 		stopBacktestRunner(run.ID)
 		if run.EnvironmentID != "" && globalCtx.PlatformAPI() != nil {
 			_ = globalCtx.PlatformAPI().DestroyEnvironment(run.EnvironmentID)
 		}
-		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "cancelled", "")
+		_, _ = globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='cancelled' WHERE id=? AND status IN ('queued','running','paused','failed')`, run.ID)
 		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "cancelled", "Backtest cancelled", nil)
 		emitBacktest("trading.backtest.cancelled", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 		httpJSON(w, 200, map[string]any{"status": "cancelled"})
@@ -160,17 +227,20 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		httpJSON(w, 200, map[string]any{"backtests": runs})
 	case http.MethodPost:
 		var body struct {
-			Name           string   `json:"name"`
-			AgentID        int64    `json:"agent_id"`
-			StrategyID     int64    `json:"strategy_id"`
-			Symbols        []string `json:"symbols"`
-			StartAt        string   `json:"start_at"`
-			EndAt          string   `json:"end_at"`
-			Interval       string   `json:"interval"`
-			StartingCash   float64  `json:"starting_cash"`
-			FeeBps         float64  `json:"fee_bps"`
-			SlippageBps    float64  `json:"slippage_bps"`
-			AdjustmentMode string   `json:"adjustment_mode"`
+			Name            string                 `json:"name"`
+			AgentID         int64                  `json:"agent_id"`
+			StrategyID      int64                  `json:"strategy_id"`
+			Symbols         []string               `json:"symbols"`
+			StartAt         string                 `json:"start_at"`
+			EndAt           string                 `json:"end_at"`
+			Interval        string                 `json:"interval"`
+			StartingCash    float64                `json:"starting_cash"`
+			FeeBps          float64                `json:"fee_bps"`
+			SlippageBps     float64                `json:"slippage_bps"`
+			AdjustmentMode  string                 `json:"adjustment_mode"`
+			Simulation      *sim.Config            `json:"simulation"`
+			Inputs          []sim.Input            `json:"inputs"`
+			AgentSimulation *agentSimulationConfig `json:"agent_simulation"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httpErr(w, 400, err.Error())
@@ -225,6 +295,10 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			symbols = []string{"SPY"}
 		}
 		interval, err := normalizeBacktestInterval(body.Interval)
+		if strategy != nil {
+			def, _, _ := validateStrategyDefinition(strategy.Definition)
+			interval, err = normalizeStrategyReplayInterval(def, body.Interval)
+		}
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -238,6 +312,9 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
+		}
+		if body.Simulation != nil && body.Simulation.BenchmarkSymbol != "" {
+			symbols = cleanSymbols(append(symbols, body.Simulation.BenchmarkSymbol))
 		}
 		marketBars, steps, marketSource, err := captureBacktestMarketBarsAdjusted(r.Context(), symbols, interval, startAt, endAt, adjustmentMode)
 		if err != nil {
@@ -307,6 +384,27 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 500, err.Error())
 			return
 		}
+		if runKind == "strategy" {
+			if err := enableEventBacktest(globalCtx.AppDB(), projectID, id, body.Simulation, body.Inputs); err != nil {
+				_ = dbSetBacktestStatus(globalCtx.AppDB(), id, "failed", err.Error())
+				httpErr(w, 400, err.Error())
+				return
+			}
+		}
+		if runKind == "agent" {
+			config := body.AgentSimulation
+			if config == nil {
+				config = &agentSimulationConfig{Directive: pf.Mandate}
+			}
+			if strings.TrimSpace(config.Directive) == "" {
+				config.Directive = "Evaluate the supplied events and manage the portfolio conservatively. Explain each trading or no-trade decision."
+			}
+			if err := enableSimulation(globalCtx.AppDB(), projectID, id, body.Simulation, body.Inputs, config); err != nil {
+				_ = dbSetBacktestStatus(globalCtx.AppDB(), id, "failed", err.Error())
+				httpErr(w, 400, err.Error())
+				return
+			}
+		}
 		run, _ := dbGetBacktestRun(globalCtx.AppDB(), projectID, id)
 		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), id, "created", "Backtest created", map[string]any{"symbols": symbols, "run_kind": runKind, "strategy_id": body.StrategyID, "market_source": marketSource, "bars": len(marketBars)})
 		emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "agent_id": agentID, "strategy_id": body.StrategyID, "symbols": symbols, "run_kind": runKind})
@@ -317,6 +415,9 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 }
 
 func startBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		return startEventSimulation(run, true)
+	}
 	if run != nil && run.RunKind == "strategy" {
 		return startStrategyBacktestRun(run)
 	}
@@ -399,6 +500,9 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 }
 
 func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		return startEventSimulation(run, false)
+	}
 	if run != nil && run.RunKind == "strategy" {
 		return runStrategyBacktestToEnd(run)
 	}
@@ -448,15 +552,20 @@ func pauseBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return nil, errors.New("backtest run required")
 	}
 	stopBacktestRunner(run.ID)
-	if run.Status == "running" {
-		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "paused", ""); err != nil {
-			return nil, err
-		}
+	res, err := globalCtx.AppDB().Exec(`UPDATE backtest_runs SET status='paused',error='',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='running'`, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if changed, _ := res.RowsAffected(); changed > 0 {
 		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "paused", "Continuous run paused", nil)
 		emitBacktest("trading.backtest.paused", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 	}
-	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
-	return map[string]any{"backtest": next, "status": "paused"}, nil
+	waitSimulationWorker(run.ID)
+	next, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"backtest": next, "status": next.Status}, nil
 }
 
 func startBacktestRunner(run *BacktestRun, waitBeforeFirstStep bool, waitSince time.Time) bool {
@@ -700,6 +809,9 @@ func fetchBacktestTelemetry(ctx context.Context, agentID int64, since time.Time,
 }
 
 func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if eventBacktest(run) {
+		return startEventSimulation(run, true)
+	}
 	if run != nil && run.RunKind == "strategy" {
 		return stepStrategyBacktestRun(run)
 	}
@@ -784,7 +896,7 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 		Metrics:   map[string]float64{},
 	}
 
-	if run.EnvironmentID != "" && run.EnvironmentPortfolioID > 0 && globalCtx.PlatformAPI() != nil {
+	if !eventBacktest(run) && run.EnvironmentID != "" && run.EnvironmentPortfolioID > 0 && globalCtx.PlatformAPI() != nil {
 		current, portfolio, positions, orders, entries, err := fetchBacktestEnvironmentPerformance(run)
 		if err != nil {
 			perf.Error = err.Error()
@@ -830,6 +942,17 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 		perf.Entries = []*JournalEntry{}
 	}
 	perf.Metrics = backtestPerformanceMetricsWithOrders(run, perf.Series, perf.Current, perf.Orders)
+	if eventBacktest(run) {
+		record, err := loadSimulation(globalCtx.AppDB(), run.ID)
+		if err == nil && record.State != nil {
+			perf.Current = simulationSnapshot(run, &sim.Engine{Config: record.Spec.Config, State: record.State}, run.CurrentStep)
+			perf.Positions = perf.Current.Positions
+			perf.Orders = perf.Current.Orders
+			for k, v := range (&sim.Engine{Config: record.Spec.Config, State: record.State}).Metrics() {
+				perf.Metrics[k] = v
+			}
+		}
+	}
 	return perf, nil
 }
 

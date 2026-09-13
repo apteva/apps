@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -20,9 +21,10 @@ import (
 )
 
 var orderPlacementMu sync.Mutex
+var brokerHistoryMu sync.Mutex
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	definitions := []sdk.Tool{
 		// ─── Lifecycle ────────────────────────────────────────────
 		{Name: "portfolio_create", Description: "Create a portfolio. execution_environment is simulation, broker_paper, or broker_live. Legacy mode=paper|live remains accepted. Broker portfolios pull balances from the bound broker.",
 			InputSchema: schemaObject(map[string]any{
@@ -215,6 +217,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"qty":             map[string]any{"type": "number"},
 				"limit_price":     map[string]any{"type": "number"},
 				"stop_price":      map[string]any{"type": "number"},
+				"expires_at":      map[string]any{"type": "string", "description": "Explicit simulated expiry for day orders in event replay"},
 				"tif":             map[string]any{"type": "string"},
 				"rationale":       map[string]any{"type": "string"},
 			}, []string{"portfolio_id", "symbol", "side", "type", "qty", "rationale"}),
@@ -351,8 +354,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyAssign},
 
-		{Name: "strategy_backtest_create", Description: "Create a strategy backtest that reuses backtest_runs/events/snapshots with run_kind=strategy.",
+		{Name: "strategy_backtest_create", Description: "Create a deterministic event-driven strategy backtest with optional simulation settings and generic additional inputs.",
 			InputSchema: schemaObject(map[string]any{
+				"simulation":      map[string]any{"type": "object", "description": "Execution configuration: seed, submission_latency_ms, cancellation_latency_ms, latency_jitter_ms, max_fill_qty, participation_rate, benchmark_symbol, costs."},
+				"inputs":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "description": "Additional events with id, type, symbol, event_time, available_at and data. Sentiment uses feature.sentiment with data.score."},
 				"portfolio_id":    map[string]any{"type": "integer"},
 				"strategy_id":     map[string]any{"type": "integer"},
 				"name":            map[string]any{"type": "string"},
@@ -366,6 +371,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyBacktestCreate},
 
+		{Name: "backtest_control", Description: "Read, run, step, pause or cancel an event simulation. Running returns immediately; progress is persisted and streamed.", InputSchema: schemaObject(map[string]any{"backtest_id": map[string]any{"type": "integer"}, "action": map[string]any{"type": "string", "enum": []string{"status", "run", "step", "pause", "cancel"}}}, []string{"backtest_id", "action"}), Handler: a.toolBacktestControl},
+		{Name: "backtest_artifact", Description: "Export a portable reproducible result bundle by backtest_id, or import an artifact into portfolio_id as a fresh queued replay.", InputSchema: schemaObject(map[string]any{"backtest_id": map[string]any{"type": "integer"}, "portfolio_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "artifact": map[string]any{"type": "object"}}, nil), Handler: a.toolBacktestArtifact},
 		{Name: "strategy_validate_backtest", Description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id":    map[string]any{"type": "integer"},
@@ -406,6 +413,25 @@ func (a *App) MCPTools() []sdk.Tool {
 				"promotion_stage": map[string]any{"type": "string", "enum": []string{"research", "paper_candidate", "paper", "live_candidate", "live", "suspended"}},
 			}, []string{"portfolio_id", "strategy_id", "promotion_stage"}), Handler: a.toolStrategyPromotionUpdate},
 
+		{Name: "agent_backtest_create", Description: "Create an agent simulation from a complete timestamped event tape (quotes, sentiment, news and custom events). Uses the shared event engine; returns queued without running the model.", InputSchema: schemaObject(map[string]any{"portfolio_id": map[string]any{"type": "integer"}, "agent_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "starting_cash": map[string]any{"type": "number"}, "symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "inputs": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "agent_simulation": map[string]any{"type": "object", "description": "directive, trigger_types (optional wildcard suffix), max_decisions, timeout_seconds, history_limit"}, "simulation": map[string]any{"type": "object"}}, []string{"portfolio_id", "inputs", "agent_simulation"}), Handler: a.toolAgentBacktestCreate},
+
+		{Name: "backtest_observation", Description: "Read the current event replay observation, simulated portfolio, past events, and agent memory.", InputSchema: schemaObject(nil, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			return nil, errors.New("active agent replay required")
+		}},
+		{Name: "backtest_events", Description: "Read only events already observed in this replay turn, optionally filtered by symbol.", InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}}, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			return nil, errors.New("active agent replay required")
+		}},
+		{Name: "backtest_decision_finish", Description: "Seal this replay decision and checkpoint memory for the next event. Always call this even when making no trades.", InputSchema: schemaObject(map[string]any{"decision_id": map[string]any{"type": "string"}, "rationale": map[string]any{"type": "string"}, "memory": map[string]any{"type": "string"}}, []string{"decision_id", "rationale", "memory"}), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			return nil, errors.New("active agent replay required")
+		}},
+		{Name: "backtest_agent_exchange", Exposure: sdk.ToolExposureAppOnly, Description: "Internal event replay mailbox.", InputSchema: schemaObject(map[string]any{"operation": map[string]any{"type": "string"}, "turn": map[string]any{"type": "object"}, "decision_id": map[string]any{"type": "string"}}, []string{"operation"}), HandlerCtx: func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			caller := sdk.CallerFrom(call)
+			if caller == nil || caller.AgentID != 0 || caller.AppName != "trading" || caller.AppInstallID == 0 {
+				return nil, errors.New("authenticated trading runner required")
+			}
+			return a.toolAgentExchange(ctx, args)
+		}},
+
 		{Name: "backtest_market_step", Exposure: sdk.ToolExposureAppOnly, Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
@@ -422,6 +448,37 @@ func (a *App) MCPTools() []sdk.Tool {
 				return a.toolBacktestMarketStep(ctx, args)
 			}},
 	}
+	for i := range definitions {
+		original := definitions[i]
+		name := original.Name
+		if name == "backtest_agent_exchange" {
+			continue
+		}
+		definitions[i].Handler = nil
+		definitions[i].HandlerCtx = func(call context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+			cloned := map[string]any{}
+			for k, v := range args {
+				cloned[k] = v
+			}
+			if caller := sdk.CallerFrom(call); caller != nil {
+				if caller.ProjectID != "" {
+					cloned["_project_id"] = caller.ProjectID
+				}
+				if strArg(cloned, "idempotency_key") == "" && caller.ToolCallID != "" {
+					cloned["idempotency_key"] = "mcp:" + caller.ToolCallID
+				}
+			}
+			if out, handled, err := replayAgentTool(ctx, name, cloned); handled {
+				return out, err
+			}
+			if original.HandlerCtx != nil {
+				return original.HandlerCtx(call, ctx, args)
+			}
+			return original.Handler(ctx, args)
+		}
+	}
+	return definitions
+
 }
 
 // ─── Lifecycle handlers ───────────────────────────────────────────
@@ -509,13 +566,13 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			return rejectStruct("broker_unbound",
 				fmt.Sprintf("broker %s has no active connection bound; bind one in app settings", brokerSlug)), nil
 		}
-		if brokerSlug == "alpaca-trading" {
-			actual, verified := alpacaConnectionEnvironment(ctx, bb.ConnectionID)
+		{
+			actual, verified := brokerConnectionEnvironment(ctx, brokerSlug, bb.ConnectionID)
 			if !verified {
-				return rejectStruct("broker_environment_unverified", "Alpaca connection host is not exposed as public metadata; reconnect or upgrade the integration before broker execution"), nil
+				return rejectStruct("broker_environment_unverified", "Broker connection environment could not be verified; reconnect before broker execution"), nil
 			}
 			if explicitExecutionEnvironment && actual != executionEnvironment {
-				return rejectStruct("broker_environment_mismatch", fmt.Sprintf("portfolio requested %s but Alpaca connection is %s", executionEnvironment, actual)), nil
+				return rejectStruct("broker_environment_mismatch", fmt.Sprintf("portfolio requested %s but broker connection is %s", executionEnvironment, actual)), nil
 			}
 			if !explicitExecutionEnvironment {
 				executionEnvironment = actual
@@ -618,11 +675,8 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 				})
 			}
 		}
-		// Backfill order + fill history from the broker. Best-effort
-		// — failures here don't block portfolio creation; the next
-		// reconcile cycle will eventually fill the gap. Adapters that
-		// don't support history backfill (Binance, Polymarket today)
-		// return ("", nil) and we silently skip.
+		// Import available history and current orders. Failures are logged;
+		// periodic reconciliation retries open-order discovery.
 		backfilled, openSynced := backfillBrokerHistory(ctx, pid, id, bb)
 		if backfilled+openSynced > 0 {
 			body := fmt.Sprintf("Backfilled %d historical order(s) and %d open order(s) from %s.", backfilled, openSynced, brokerSlug)
@@ -740,25 +794,38 @@ func defaultBrokerSlug(ctx *sdk.AppCtx) (string, error) {
 
 // backfillBrokerHistory — best-effort sync of historical closed orders
 // + currently-open orders from the broker into the local DB. Called
-// once at portfolio_create. Returns (historicalCount, openCount) for
+// at portfolio creation (open-order discovery also runs during reconciliation). Returns (historicalCount, openCount) for
 // the audit journal line.
 //
-// Failures are swallowed — backfill is a quality-of-life surface, not
-// a correctness one. The next reconcile tick still picks up open
-// orders via their broker_order_id; missing history just means the
-// orders/fills tables start sparse.
+// Failed imports are logged as incomplete. Periodic reconciliation retries
+// open-order discovery; closed history is restricted to provider availability.
 func backfillBrokerHistory(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb *boundBroker) (int, int) {
 	historical := 0
 	open := 0
 
-	// ─── Historical (closed) orders ─────────────────────────────
-	if tool, args := bb.Adapter.OrdersHistoryTool(); tool != "" {
-		historical = importBrokerOrders(ctx, projectID, portfolioID, bb, tool, args, "backfill")
-	}
-
-	// ─── Currently-open broker orders ───────────────────────────
+	// Discover current orders first, including symbols no longer held.
 	if tool, args := bb.Adapter.OpenOrdersTool(); tool != "" {
 		open = importBrokerOrders(ctx, projectID, portfolioID, bb, tool, args, "open_sync")
+	}
+	if tool, args := bb.Adapter.OrdersHistoryTool(); tool != "" {
+		if bb.Adapter.Slug() == "binance-trading" {
+			rows, err := ctx.AppDB().Query(`SELECT symbol FROM positions WHERE portfolio_id=? UNION SELECT symbol FROM orders WHERE portfolio_id=? UNION SELECT symbol FROM watchlist WHERE portfolio_id=?`, portfolioID, portfolioID, portfolioID)
+			if err == nil {
+				var symbols []string
+				for rows.Next() {
+					var symbol string
+					if rows.Scan(&symbol) == nil {
+						symbols = append(symbols, symbol)
+					}
+				}
+				rows.Close()
+				for _, symbol := range symbols {
+					historical += importBrokerOrders(ctx, projectID, portfolioID, bb, tool, map[string]any{"symbol": bb.Adapter.ToBrokerSymbol(symbol), "limit": 1000, "orderId": 0}, "backfill")
+				}
+			}
+		} else {
+			historical = importBrokerOrders(ctx, projectID, portfolioID, bb, tool, args, "backfill")
+		}
 	}
 
 	return historical, open
@@ -774,12 +841,11 @@ func backfillBrokerHistory(ctx *sdk.AppCtx, projectID string, portfolioID int64,
 //	kind=backfill  → o-bf-<broker_id_short>, source=broker_backfill
 //	kind=open_sync → o-os-<broker_id_short>, source=broker_open_sync
 func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb *boundBroker, tool string, args map[string]any, kind string) int {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bb.ConnectionID, tool, args)
-	if err != nil || res == nil || !res.Success {
-		return 0
-	}
-	rows, err := bb.Adapter.ParseOrders(res.Data)
-	if err != nil || len(rows) == 0 {
+	brokerHistoryMu.Lock()
+	defer brokerHistoryMu.Unlock()
+	rows, err := fetchBrokerHistory(ctx, bb, tool, args)
+	if err != nil {
+		ctx.Logger().Warn("broker order import incomplete", "broker", bb.Adapter.Slug(), "tool", tool, "err", err)
 		return 0
 	}
 
@@ -795,7 +861,7 @@ func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb
 		// Idempotency: skip if we already imported this broker_order_id
 		// (re-runs of portfolio_create against the same connection
 		// shouldn't double-insert).
-		if existing, _ := dbOrderIDByBrokerID(ctx.AppDB(), r.BrokerOrderID); existing != "" {
+		if existing, _ := dbPortfolioOrderIDByBrokerID(ctx.AppDB(), portfolioID, r.BrokerOrderID); existing != "" {
 			continue
 		}
 		// Skip ClientOrderIDs that match our local format (orders
@@ -809,52 +875,20 @@ func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb
 			}
 		}
 
-		localID := prefix + safeBrokerIDShort(r.BrokerOrderID)
-		rationale := "Imported from broker on portfolio_create — no operator rationale captured. Trust the broker's record of intent."
+		localID := prefix + fmt.Sprintf("%x", sha256.Sum256([]byte(fmt.Sprintf("%d/%s/%s", portfolioID, bb.Adapter.Slug(), r.BrokerOrderID))))[:32]
+		rationale := "Imported from broker — no operator rationale captured. Broker account snapshots remain authoritative."
 
-		if err := dbInsertBackfilledOrder(
-			ctx.AppDB(), projectID, portfolioID, localID,
-			r.Symbol, r.AssetClass, r.Side, r.Type,
-			r.Qty, r.FilledQty, r.AvgFillPrice,
-			r.LimitPrice, r.StopPrice, r.TIF,
-			r.Status, rationale, source,
-			r.PlacedAt, r.ResolvedAt,
-		); err != nil {
-			ctx.Logger().Warn("backfill: insert order failed",
-				"broker_order_id", r.BrokerOrderID, "err", err)
+		if err := insertImportedBrokerOrder(ctx.AppDB(), projectID, portfolioID, localID, rationale, source, bb, r); err != nil {
+			ctx.Logger().Warn("broker order import failed", "broker", bb.Adapter.Slug(), "err", err)
 			continue
 		}
 
-		// Fill row for filled qty. Use the broker's resolved_at as the
-		// fill timestamp when available so equity curves line up.
-		if r.FilledQty > 0 && r.AvgFillPrice > 0 {
-			fillAt := r.ResolvedAt
-			if fillAt == "" {
-				fillAt = r.PlacedAt
-			}
-			_ = dbInsertBackfilledFill(ctx.AppDB(), projectID, localID, portfolioID,
-				r.FilledQty, r.AvgFillPrice, 0 /* fee unknown */, fillAt)
-		}
-
-		// Rationale journal row carrying the broker_order_id so the
-		// existing cancel + status-poll paths can resolve it. Without
-		// this row, dbBrokerOrderIDFor would return "" and live
-		// cancel against an open-sync'd order would fall to local-only.
-		_, _ = dbInsertJournal(ctx.AppDB(), projectID, portfolioID, "rationale", rationale, map[string]any{
-			"order_id":             localID,
-			"symbol":               r.Symbol,
-			"side":                 r.Side,
-			"qty":                  r.Qty,
-			"type":                 r.Type,
-			"broker_slug":          bb.Adapter.Slug(),
-			"broker_connection_id": bb.ConnectionID,
-			"broker_order_id":      r.BrokerOrderID,
-			"client_order_id":      r.ClientOrderID,
-			"source":               source,
-			"backfill_status":      r.BrokerStatus,
-		})
-
 		wrote++
+	}
+	if wrote > 0 {
+		if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
+			ctx.Logger().Warn("import accounting rebuild failed", "err", err)
+		}
 	}
 	return wrote
 }
@@ -897,14 +931,15 @@ func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	for _, ad := range allAdapters() {
 		caps := ad.Capabilities()
 		row := map[string]any{
-			"slug":          ad.Slug(),
-			"asset_classes": caps.AssetClasses,
-			"order_types":   caps.OrderTypes,
-			"tifs":          caps.TIFs,
-			"fractional":    caps.Fractional,
-			"quote":         caps.QuoteCurrency,
-			"connections":   []map[string]any{},
-			"runtime":       venueRuntimeSnapshot(ad.Slug()),
+			"slug":            ad.Slug(),
+			"asset_classes":   caps.AssetClasses,
+			"order_types":     caps.OrderTypes,
+			"tifs":            caps.TIFs,
+			"fractional":      caps.Fractional,
+			"quote":           caps.QuoteCurrency,
+			"connections":     []map[string]any{},
+			"paper_supported": ad.Slug() == "alpaca-trading" || ad.Slug() == "okx",
+			"runtime":         venueRuntimeSnapshot(ad.Slug()),
 		}
 		var venueProfiles []VenueExecutionProfile
 		for _, profile := range profiles {

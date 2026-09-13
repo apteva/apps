@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.9.1
+version: 0.10.0
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -205,6 +205,10 @@ provides:
       description: "Assign a saved strategy to a portfolio for strategy or hybrid control."
     - name: strategy_backtest_create
       description: "Create a deterministic strategy backtest using the existing backtest tables."
+    - name: backtest_control
+      description: "Run, step, pause, cancel or inspect an event simulation."
+    - name: backtest_artifact
+      description: "Export or import a portable reproducible backtest bundle."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
     - name: strategy_scorecard_get
@@ -215,6 +219,16 @@ provides:
       description: "Evaluate a completed strategy backtest against its scorecard."
     - name: strategy_promotion_update
       description: "Promote, demote, or suspend a strategy under its scorecard gate."
+    - name: agent_backtest_create
+      description: "Create an agent simulation from a complete event tape."
+    - name: backtest_observation
+      description: "Read current event replay observations."
+    - name: backtest_events
+      description: "Read observed replay events."
+    - name: backtest_decision_finish
+      description: "Seal an agent replay decision and memory."
+    - name: backtest_agent_exchange
+      description: "Internal agent replay mailbox."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's

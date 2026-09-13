@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.9.1
+version: 0.10.0
 description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
@@ -201,6 +201,10 @@ provides:
       description: "Assign a saved strategy to a portfolio."
     - name: strategy_backtest_create
       description: "Create a deterministic strategy backtest."
+    - name: backtest_control
+      description: "Run, step, pause, cancel or inspect an event simulation."
+    - name: backtest_artifact
+      description: "Export or import a portable reproducible backtest bundle."
     - name: strategy_validate_backtest
       description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
     - name: strategy_scorecard_get
@@ -211,6 +215,16 @@ provides:
       description: "Evaluate a completed strategy backtest against its scorecard."
     - name: strategy_promotion_update
       description: "Promote, demote, or suspend a strategy under its scorecard gate."
+    - name: agent_backtest_create
+      description: "Create an agent simulation from a complete event tape."
+    - name: backtest_observation
+      description: "Read current event replay observations."
+    - name: backtest_events
+      description: "Read observed replay events."
+    - name: backtest_decision_finish
+      description: "Seal an agent replay decision and memory."
+    - name: backtest_agent_exchange
+      description: "Internal agent replay mailbox."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   ui_panels:
@@ -260,6 +274,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// write through one queue. WAL still gives concurrent reads.
 	ctx.AppDB().SetMaxOpenConns(1)
 	globalCtx = ctx
+	if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused',error='Process restarted; resume from the saved event checkpoint' WHERE status='running' AND id IN (SELECT run_id FROM backtest_simulations)`); err != nil {
+		return err
+	}
 	if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
 		return fmt.Errorf("rebuild realized P&L: %w", err)
 	}
@@ -309,7 +326,24 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused' WHERE status='running' AND id IN (SELECT run_id FROM backtest_simulations)`); err != nil {
+		return err
+	}
+	simulationWorkers.Lock()
+	ids := []int64{}
+	for id := range simulationWorkers.running {
+		ids = append(ids, id)
+	}
+	simulationWorkers.Unlock()
+	for _, id := range ids {
+		if _, err := ctx.AppDB().Exec(`UPDATE backtest_runs SET status='paused' WHERE id=? AND status='running'`, id); err != nil {
+			return err
+		}
+		waitSimulationWorker(id)
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 

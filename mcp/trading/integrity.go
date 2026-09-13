@@ -29,8 +29,8 @@ func pinBroker(ctx *sdk.AppCtx, pf *Portfolio, connectionID int64) error {
 		return errors.New("legacy portfolio requires explicit broker account binding")
 	}
 	environment := normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug)
-	if pf.BrokerSlug == "alpaca-trading" {
-		actual, verified := alpacaConnectionEnvironment(ctx, connectionID)
+	{
+		actual, verified := brokerConnectionEnvironment(ctx, pf.BrokerSlug, connectionID)
 		if !verified || actual != environment {
 			return errors.New("broker environment is unverified or does not match portfolio")
 		}
@@ -85,7 +85,7 @@ func previousOrderRequest(db *sql.DB, pid string, portfolioID int64, key, hash s
 }
 
 func recoverableByClientID(slug string) bool {
-	return oneOfString(slug, "alpaca-trading", "binance-trading", "okx-trading", "bybit-trading", "bitstamp-trading")
+	return oneOfString(slug, "alpaca-trading", "binance-trading", "okx", "bybit", "bitstamp")
 }
 
 func workingPortfolioOrders(db *sql.DB, id int64) ([]*Order, error) {
@@ -395,8 +395,8 @@ func (a *App) toolPortfolioBrokerBind(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, errors.New("selected broker connection unavailable")
 	}
 	environment := normalizeExecutionEnvironment(pf.ExecutionEnvironment, pf.Mode, pf.BrokerSlug)
-	if pf.BrokerSlug == "alpaca-trading" {
-		actual, verified := alpacaConnectionEnvironment(ctx, connectionID)
+	{
+		actual, verified := brokerConnectionEnvironment(ctx, pf.BrokerSlug, connectionID)
 		if !verified || actual != environment {
 			return nil, errors.New("broker environment mismatch")
 		}

@@ -67,32 +67,26 @@ func (binanceAdapter) ParseHoldings(raw json.RawMessage) (map[string]brokerBalan
 	return map[string]brokerBalance{}, nil
 }
 
-// History backfill — Binance's all_orders / open_orders both require
-// a per-symbol query. The portfolio-create backfill path doesn't know
-// which symbols to iterate (we'd need to enumerate every pair the
-// account ever touched), so we skip backfill for Binance in v1.
-// Adopting this later means walking holdings + watchlist for symbols
-// and issuing one all_orders call per pair — doable but rate-limit
-// sensitive.
-func (binanceAdapter) OrdersHistoryTool() (string, map[string]any) { return "", nil }
-func (binanceAdapter) OpenOrdersTool() (string, map[string]any)    { return "", nil }
+// Binance history is symbol-scoped; the importer enumerates portfolio positions,
+// orders and watchlist pairs. Open-order discovery is account-wide.
+func (binanceAdapter) OrdersHistoryTool() (string, map[string]any) { return "get_all_orders", nil }
+func (binanceAdapter) OpenOrdersTool() (string, map[string]any)    { return "get_open_orders", nil }
 func (binanceAdapter) ParseOrders(raw json.RawMessage) ([]brokerHistoricOrder, error) {
-	return nil, nil
+	return cryptoHistory("binance-trading", raw)
 }
 
 func (binanceAdapter) CancelArgs(o *Order, brokerOrderID string) map[string]any {
-	// origClientOrderId is stable across orderId reuse — prefer it.
-	return map[string]any{
-		"symbol":            toBinanceSymbol(o.Symbol),
-		"origClientOrderId": o.ID,
+	args := map[string]any{"symbol": toBinanceSymbol(o.Symbol)}
+	if brokerOrderID != "" {
+		args["orderId"] = json.Number(brokerOrderID)
+	} else {
+		args["origClientOrderId"] = o.ID
 	}
+	return args
 }
 
 func (binanceAdapter) StatusArgs(o *Order, brokerOrderID string) map[string]any {
-	return map[string]any{
-		"symbol":            toBinanceSymbol(o.Symbol),
-		"origClientOrderId": o.ID,
-	}
+	return (binanceAdapter{}).CancelArgs(o, brokerOrderID)
 }
 
 func (binanceAdapter) IsUnknownOrderError(code, detail string) bool {
