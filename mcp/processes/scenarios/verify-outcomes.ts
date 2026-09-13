@@ -213,3 +213,18 @@ export function verifyMultiAgentTrajectory(calls: any[], run: any) {
     );
   }
 }
+
+/** Require actual isolated workers, not just a main-thread spawn attempt. */
+export function verifyStepWorkers(calls: any[], run: any) {
+  const workers = new Set<string>();
+  for (const step of run.steps) {
+    const done = calls.find(c => c.name === "processes_step_update" && c.ok && c.completed && c.args?.step_id === step.id && c.args?.state === "completed");
+    check(done?.thread_id && done.thread_id !== "main", `${step.key}: outcome was not recorded by a worker`);
+    const worker = `${done.agent}:${done.thread_id}`;
+    check(!workers.has(worker), `${step.key}: worker reused across steps`);
+    workers.add(worker);
+    const spawnIndex = calls.findIndex(c => c.name === "spawn" && c.ok && c.completed && c.thread_id === "main" && c.agent === done.agent && c.args?.id === done.thread_id);
+    const readIndex = calls.findIndex(c => c.name === "processes_step_get" && c.ok && c.completed && c.agent === done.agent && c.thread_id === done.thread_id && c.args?.step_id === step.id);
+    check(spawnIndex >= 0 && readIndex > spawnIndex && readIndex < calls.indexOf(done), `${step.key}: missing main spawn or authoritative worker read`);
+  }
+}

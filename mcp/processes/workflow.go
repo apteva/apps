@@ -259,7 +259,11 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 		return a.nativeTaskContext(p, r, s, all)
 	}
 	inputs := dependencyOutputs(s, all)
-	contract := fmt.Sprintf("Read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before any action. Only execute this step after it is ready. Stop if the run or step is terminal. Use step_update for progress and final output. Do not perform downstream steps or publish on behalf of another role.", p.ID, r.ID, s.ID)
+	contract := fmt.Sprintf("Worker: read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before domain action. Check readiness, assignment and terminal state. Use dependencies for ancestor IDs, states, outputs and approval decisions; this is authoritative evidence, with no separate run_get or parent confirmation needed when complete. Follow the frozen instructions. Use step_update for meaningful milestones and the terminal outcome, then report once to main. Do not execute downstream steps.", p.ID, r.ID, s.ID)
+	if !stepUsesTasks(r, s) {
+		contract = fmt.Sprintf("The agent main thread coordinates this assignment using platform spawn when separate execution is useful. Suggested worker ID: process-run-%s-step-%s. Pass the exact IDs and this worker contract, granting processes_step_get and processes_step_update plus required domain tools. Main may read the step to choose tools, but need not duplicate the worker's evidence checks or rewrite the procedure. Reuse known worker ownership on repeated events; inspect threads only if ownership is uncertain. Independent ready steps can be delegated together. Processes dispatches downstream steps to their assigned agent when dependencies finish; wait for those events rather than polling or forwarding them yourself. This app event requires no reply.\n", r.ID, s.Key) + contract
+	}
+
 	if stepUsesTasks(r, s) {
 		contract += " This work step uses Tasks: also read the linked task and use Tasks progress/complete to report the outcome. Processes will read its status and release dependencies; do not call step_update to complete it."
 	}
@@ -526,7 +530,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	if e != nil {
 		return nil, e
 	}
-	return map[string]any{"run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
+	return map[string]any{"run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "dependencies": dependencyEvidence(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
 }
 
 func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
@@ -550,13 +554,30 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	return e
 }
 
-func dependencyOutputs(s StepRun, all []StepRun) map[string]string {
+// DependencyEvidence is the frozen ancestor context needed to execute one step.
+// Keep it separate from full task records: downstream workers need evidence,
+// not predecessor instructions or delivery internals.
+type DependencyEvidence struct {
+	ID       string `json:"id"`
+	Key      string `json:"key"`
+	Kind     string `json:"kind"`
+	State    string `json:"state"`
+	Decision string `json:"decision"`
+	Output   string `json:"output"`
+	Direct   bool   `json:"direct"`
+}
+
+func dependencyEvidence(s StepRun, all []StepRun) map[string]DependencyEvidence {
 	byKey := map[string]StepRun{}
 	for _, item := range all {
 		byKey[item.Key] = item
 	}
-	out := map[string]string{}
-	seen := map[string]bool{}
+	direct := map[string]bool{}
+	for _, key := range s.Definition.DependsOn {
+		direct[key] = true
+	}
+	out := map[string]DependencyEvidence{}
+	seen := map[string]bool{s.Key: true}
 	var add func(string)
 	add = func(key string) {
 		if seen[key] {
@@ -564,9 +585,7 @@ func dependencyOutputs(s StepRun, all []StepRun) map[string]string {
 		}
 		seen[key] = true
 		if dep, ok := byKey[key]; ok {
-			if dep.State == "completed" {
-				out[key] = dep.Output
-			}
+			out[key] = DependencyEvidence{ID: dep.ID, Key: dep.Key, Kind: dep.Definition.Kind, State: dep.State, Decision: dep.Decision, Output: dep.Output, Direct: direct[key]}
 			for _, parent := range dep.Definition.DependsOn {
 				add(parent)
 			}
@@ -577,6 +596,17 @@ func dependencyOutputs(s StepRun, all []StepRun) map[string]string {
 	}
 	return out
 }
+
+func dependencyOutputs(s StepRun, all []StepRun) map[string]string {
+	out := map[string]string{}
+	for key, dep := range dependencyEvidence(s, all) {
+		if dep.State == "completed" {
+			out[key] = dep.Output
+		}
+	}
+	return out
+}
+
 func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, error) {
 	r, e := a.getRun(project, process, run)
 	if e != nil {

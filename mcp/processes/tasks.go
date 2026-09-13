@@ -303,6 +303,7 @@ func (a *App) taskDetails(project, actor, id string) (map[string]any, error) {
 		out["process_name"] = p.Name
 		out["parameters"] = r.Binding.Parameters
 		out["dependency_outputs"] = dependencyOutputs(s, all)
+		out["dependencies"] = dependencyEvidence(s, all)
 	}
 	out["can_update"] = executorIsActor(s.Executor, actor) && !terminal(s.State) && s.State != "pending" && !stepUsesTasks(r, s) && (!terminal(r.State) || s.Origin == "attached" && !s.Required && r.State == "completed")
 	out["can_manage"] = taskManager(s, r, actor) && !terminal(s.State)
