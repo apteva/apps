@@ -31,7 +31,9 @@ See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 The **Processes overview** dashboard widget shows active runs, approval/blocker
 attention, upcoming assignments, and recent outcomes across the current project.
 Its default All view orders running work before schedules and past/blocked runs.
-Four equal-height rows show a status, title, single summary, and relative time;
+Four equal-height rows show the process and assignment on the left and the
+current step, status, and completed-step count on the right. Schedules show their
+next run time and finished runs show their outcome;
 select a row for live steps, agent names, and links to run or assignment details.
 Visible rows can be configured from one to six. It is read-only and refreshes
 through host event revisions without creating a stream or invoking a model.

@@ -34,8 +34,24 @@ test("equal-height clear rows order running, scheduled, then history and reveal 
   await page
     .getByRole("region", { name: "Processes overview", exact: true })
     .screenshot({
-      path: "/private/tmp/processes-clear-desktop.png",
+      path: "/private/tmp/processes-status-desktop.png",
     });
+  await expect(rows.first().locator(".po-execution")).toContainText(
+    "Post conversation",
+  );
+  await expect(rows.first().locator(".po-execution")).toContainText("running");
+  await expect(rows.nth(2).locator(".po-execution .po-badge")).toHaveText(
+    "blocked",
+  );
+  expect(
+    await rows
+      .first()
+      .evaluate(
+        (row) =>
+          row.querySelector(".po-execution")!.getBoundingClientRect().left >
+          row.querySelector(".po-copy")!.getBoundingClientRect().right,
+      ),
+  ).toBe(true);
   await rows.first().click();
   await expect(
     page.getByRole("region", { name: "Selected process details" }),
@@ -44,10 +60,17 @@ test("equal-height clear rows order running, scheduled, then history and reveal 
     page.locator(".po-detail li").filter({ hasText: "Send notification" }),
   ).toBeVisible();
   data.active[1].steps_completed = 2;
+  data.active[1].steps[1].state = "completed";
   await page.locator("#host-revision").click();
   await expect(
     page.getByRole("region", { name: "Selected process details" }),
   ).toContainText("2/3 steps complete");
+  await expect(rows.first().locator(".po-current")).toHaveText(
+    "Send notification",
+  );
+  await expect(rows.first().locator(".po-execution .po-badge")).toHaveText(
+    "ready",
+  );
   await page.getByRole("button", { name: "Close details" }).click();
   await page.setViewportSize({ width: 375, height: 900 });
   expect(
@@ -63,7 +86,7 @@ test("equal-height clear rows order running, scheduled, then history and reveal 
   await page
     .getByRole("region", { name: "Processes overview", exact: true })
     .screenshot({
-      path: "/private/tmp/processes-clear-mobile.png",
+      path: "/private/tmp/processes-status-mobile.png",
     });
   await page.getByRole("button", { name: "Scheduled", exact: true }).click();
   await expect(rows).toHaveCount(1);

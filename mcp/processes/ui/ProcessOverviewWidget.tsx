@@ -132,12 +132,72 @@ export function overviewQueue(
       (a.group === "scheduled" ? date(a) - date(b) : date(b) - date(a)),
   );
 }
+export function executionStatus({ item: x, assignment }: QueueEntry) {
+  if (assignment)
+    return {
+      label: x.next_run_at ? "Next run" : "Assignment",
+      state: x.state,
+      current: false,
+      extra: 0,
+      hint: "",
+    };
+  if (terminal(x.state))
+    return {
+      label:
+        x.state === "completed"
+          ? "Finished"
+          : x.state === "cancelled"
+            ? "Stopped"
+            : "Run failed",
+      state: x.state,
+      current: false,
+      extra: 0,
+      hint: x.warning || "",
+    };
+  const steps = x.steps || [];
+  const current = steps.filter((s) =>
+    ["running", "blocked", "waiting", "ready"].includes(s.state),
+  );
+  const matching = current.find((s) => s.state === x.state);
+  if (["blocked", "waiting"].includes(x.state) && !matching)
+    return {
+      label:
+        x.current_step ||
+        (x.state === "blocked" ? "Run blocked" : "Waiting for input"),
+      state: x.state,
+      current: true,
+      extra: 0,
+      hint: x.warning || "",
+    };
+  const step =
+    matching ||
+    current.find((s) => s.state === "running") ||
+    current.find((s) => s.state === "blocked") ||
+    current.find((s) => s.state === "waiting") ||
+    current[0];
+  const same = current.filter((s) => s.state === step?.state);
+  return {
+    label: step?.name || x.current_step || "Preparing run",
+    state:
+      step?.kind === "approval" &&
+      step.executor.kind === "human" &&
+      ["ready", "running", "waiting"].includes(step.state)
+        ? "review"
+        : step?.state || x.state,
+    current: true,
+    extra: Math.max(0, same.length - 1),
+    hint:
+      current.map((s) => `${s.name} (${s.state})`).join(" · ") ||
+      x.warning ||
+      "",
+  };
+}
 const css = `
 .po-widget{color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;overflow:hidden}
 .po-widget *{box-sizing:border-box}.po-widget h2,.po-widget p{margin:0}.po-widget header{padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget h2{font-size:14px;font-weight:700}.po-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}.po-widget button,.po-widget a{font-family:inherit}.po-widget button{cursor:pointer}.po-widget :is(button,a):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}.po-widget .po-filters{display:flex;gap:5px;padding:8px 16px;border-bottom:1px solid var(--color-border,#303030);overflow-x:auto}.po-widget .po-filters button,.po-widget .po-close{background:transparent;color:var(--color-text-muted,#aaa);font-size:11px;font-weight:600;border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 9px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);background:color-mix(in srgb,var(--color-accent,#ff8c36) 10%,transparent)}
-.po-widget .po-row{display:grid;grid-template-columns:88px minmax(0,1fr) 70px;gap:12px;align-items:center;width:100%;height:80px;padding:12px 16px;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--color-border,#303030);text-align:left}.po-widget .po-row:hover,.po-widget .po-row[aria-expanded=true]{background:var(--color-bg-hover,#202020)}.po-widget .po-copy{min-width:0}.po-widget .po-title{display:block;font-size:13px;line-height:20px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-summary{display:block;margin-top:5px;font-size:11px;line-height:18px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget time{font-size:10px;color:var(--color-text-muted,#999);text-align:right;white-space:nowrap}.po-widget .po-badge{display:inline-block;justify-self:start;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa)}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-widget .po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-widget .po-badge.completed{color:#43c878;border-color:#43c87860}.po-widget .po-badge.blocked,.po-widget .po-badge.waiting,.po-widget .po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
+.po-widget .po-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(160px,35%);gap:12px;align-items:center;width:100%;height:80px;padding:12px 16px;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--color-border,#303030);text-align:left}.po-widget .po-row:hover,.po-widget .po-row[aria-expanded=true]{background:var(--color-bg-hover,#202020)}.po-widget .po-copy{min-width:0}.po-widget .po-execution{min-width:0;text-align:right}.po-widget .po-current{display:block;font-size:12px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.po-widget .po-execution-meta{display:flex;align-items:center;justify-content:flex-end;gap:7px;margin-top:5px;font-size:10px;line-height:18px;color:var(--color-text-muted,#aaa);white-space:nowrap}.po-widget .po-badge.review{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-title{display:block;font-size:13px;line-height:20px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-summary{display:block;margin-top:5px;font-size:11px;line-height:18px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget time{font-size:10px;color:var(--color-text-muted,#999);text-align:right;white-space:nowrap}.po-widget .po-badge{display:inline-block;justify-self:start;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa)}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-widget .po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-widget .po-badge.completed{color:#43c878;border-color:#43c87860}.po-widget .po-badge.blocked,.po-widget .po-badge.waiting,.po-widget .po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
 .po-widget .po-warning{font-size:11px;color:#e3b86d;padding:10px 16px;overflow-wrap:anywhere}.po-widget .po-empty{font-size:12px;color:var(--color-text-muted,#aaa);padding:24px 16px}.po-widget footer{display:flex;justify-content:space-between;gap:8px;padding:9px 16px;font-size:11px;color:var(--color-text-muted,#999)}.po-widget a{color:var(--color-accent,#ff8c36);text-decoration:none;font-size:11px}.po-widget .po-detail{padding:16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget .po-detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.po-widget .po-detail h3{font-size:13px;margin:0}.po-widget .po-detail p{font-size:12px;color:var(--color-text-muted,#aaa);margin:8px 0;overflow-wrap:anywhere}.po-widget .po-detail ol{padding:0;margin:10px 0;list-style:none;max-height:200px;overflow:auto}.po-widget .po-detail li{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;padding:10px 0;border-top:1px solid var(--color-border,#303030)}.po-widget .po-step-copy{min-width:0}.po-widget .po-step-copy small{display:block;color:var(--color-text-muted,#aaa);margin-top:4px}
-@media(max-width:480px){.po-widget .po-row{grid-template-columns:76px minmax(0,1fr) 52px;gap:8px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
+@media(max-width:480px){.po-widget .po-row{grid-template-columns:minmax(0,1fr) minmax(130px,46%);gap:8px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
 `;
 export default function ProcessOverviewWidget(props: Props) {
   return (
@@ -235,41 +295,13 @@ function Overview(props: Props) {
     <span
       className={`po-badge ${state === "sync pending" ? "attention" : state}`}
     >
-      {state === "sync pending" ? "Attention" : state.replaceAll("_", " ")}
+      {state === "sync pending"
+        ? "Attention"
+        : state === "review"
+          ? "Review"
+          : state.replaceAll("_", " ")}
     </span>
   );
-  const summary = ({ item: x, assignment, group }: QueueEntry) => {
-    if (x.warning) return x.warning;
-    if (assignment)
-      return x.schedule?.kind === "interval"
-        ? `Every ${x.schedule.every} · ${x.assignment_name || name(x.agent_id)}`
-        : x.next_run_at
-          ? `Next ${when(x.next_run_at)}`
-          : "Assignment needs attention";
-    if (group === "running") {
-      const step =
-        x.steps?.find((s) => s.state === "running") ||
-        x.steps?.find((s) => s.state === "ready");
-      return [
-        step?.name || x.current_step || "Preparing run",
-        x.steps_total
-          ? `${x.steps_completed || 0}/${x.steps_total} steps`
-          : name(x.agent_id),
-      ]
-        .filter(Boolean)
-        .join(" · ");
-    }
-    return [
-      x.assignment_name || name(x.agent_id),
-      terminal(x.state)
-        ? x.steps_total
-          ? `${x.steps_completed || 0}/${x.steps_total} steps`
-          : name(x.agent_id)
-        : x.current_step,
-    ]
-      .filter(Boolean)
-      .join(" · ");
-  };
   const relative = (value?: string) => {
     const time = Date.parse(value || "");
     if (!Number.isFinite(time)) return "—";
@@ -334,6 +366,17 @@ function Overview(props: Props) {
           <div className="po-queue" aria-label="Process executions">
             {shown.map((entry) => {
               const x = entry.item;
+              const status = executionStatus(entry);
+              const identity = [x.assignment_name || name(x.agent_id), x.target]
+                .filter(Boolean)
+                .join(" · ");
+              const progress = x.steps_total
+                ? `${x.steps_completed || 0}/${x.steps_total} done`
+                : "";
+              const statusLabel =
+                entry.assignment && x.next_run_at
+                  ? `Next ${relative(x.next_run_at)}`
+                  : status.label + (status.extra ? ` +${status.extra}` : "");
               return (
                 <button
                   type="button"
@@ -341,26 +384,38 @@ function Overview(props: Props) {
                   data-state={x.state}
                   key={key(entry)}
                   aria-expanded={selected === key(entry)}
-                  aria-label={`${x.process_name} · ${x.state}`}
+                  aria-label={`${x.process_name} · ${x.state} · ${statusLabel} · ${status.state}`}
                   onClick={() =>
                     setSelected(selected === key(entry) ? null : key(entry))
                   }
                 >
-                  {badge(x.state)}
                   <span className="po-copy">
                     <span className="po-title" title={x.process_name}>
                       {x.process_name}
                     </span>
-                    <span className="po-summary" title={summary(entry)}>
-                      {summary(entry)}
+                    <span className="po-summary" title={identity}>
+                      {identity}
                     </span>
                   </span>
-                  <time
-                    dateTime={entry.assignment ? x.next_run_at : x.created_at}
-                    title={`${entry.assignment ? "Next" : "Started"}: ${when(entry.assignment ? x.next_run_at : x.created_at)}`}
+                  <span
+                    className="po-execution"
+                    title={
+                      status.hint ||
+                      `${entry.assignment ? "Next" : "Started"}: ${when(entry.assignment ? x.next_run_at : x.created_at)}`
+                    }
                   >
-                    {relative(entry.assignment ? x.next_run_at : x.created_at)}
-                  </time>
+                    <span className="po-current">{statusLabel}</span>
+                    <span className="po-execution-meta">
+                      {badge(status.state)}
+                      {progress ? (
+                        <span>{progress}</span>
+                      ) : !entry.assignment && terminal(x.state) ? (
+                        <time dateTime={x.created_at}>
+                          {relative(x.created_at)}
+                        </time>
+                      ) : null}
+                    </span>
+                  </span>
                 </button>
               );
             })}
