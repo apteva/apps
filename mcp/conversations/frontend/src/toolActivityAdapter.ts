@@ -1,10 +1,24 @@
 import { useConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
+import { useConversationAPI } from "./context";
+import { useEffect, useState } from "react";
 import type { ToolActivity as StoredActivity } from "./types";
 import type { ToolActivity } from "./toolActivityModel";
 import { buildToolVisualRegistry } from "./toolVisuals";
 import { toolSources } from "./toolSources";
 
 export const toolVisualRegistry = buildToolVisualRegistry([...toolSources], [], []);
+export function useToolVisualRegistry() {
+  const { conversationsClient } = useConversationAPI();
+  const [registry, setRegistry] = useState(toolVisualRegistry);
+  useEffect(() => {
+    let active = true;
+    conversationsClient.toolVisuals().then(({ integrations }) => {
+      if (active && integrations?.length) setRegistry(buildToolVisualRegistry([...toolSources], integrations.map(i => ({app_slug:i.slug, app_name:i.name, logo:i.logo})), []));
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [conversationsClient]);
+  return registry;
+}
 export function useToolTranslation() {
   const localization=useConversationLocalization();
   return {t:(key:string,options?:Record<string,unknown>)=>localization.t(key as ConversationMessageKey,options as ConversationMessageParams)};

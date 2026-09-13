@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.23.6 — 2026-09-13
+
+- Restore integration logos in ChatToolActivity by loading project runtime catalog metadata, with static icons and generic glyphs as fallbacks.
+
+## 0.23.5 — 2026-09-13
+
+- Restore project integration logos in tool activity by loading runtime catalog integration metadata, with static app icons and generic glyphs as fallbacks.
+
 ## 0.23.4 — 2026-09-13
 
 - Make archiving and unarchiving responsive: mutation responses avoid an unnecessary platform agent lookup, and the UI removes the row immediately without waiting for a full unread/inbox refresh.

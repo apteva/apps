@@ -1,6 +1,6 @@
 {
   "name": "@apteva/conversations",
-  "version": "0.23.4",
+  "version": "0.23.6",
   "type": "module",
   "description": "App-owned Conversations client and shared React surfaces",
   "exports": {

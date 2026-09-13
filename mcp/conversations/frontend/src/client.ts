@@ -80,6 +80,7 @@ export class ConversationsClient {
   unread = (agentId?: number, init?: RequestInit) =>
     this.app.get<UnreadEntry[]>(query("/unread-summary", { agent_id: agentId }), init);
   activity = (id: string, init?: RequestInit) => this.app.get<ToolActivity[]>(query("/activity", { chat_id: id }), init);
+  toolVisuals = (init?: RequestInit) => this.app.get<{ integrations: Array<{slug:string;name:string;logo?:string}> }>("/tool-visuals", init);
   agents = (init?: RequestInit) => this.app.get<AgentInfo[]>("/agents", init);
   inbox = (options: { agent_id?: number; cursor?: string; limit?: number } = {}, init?: RequestInit) =>
     this.app.get<InboxPage>(query("/inbox", { page: 1, ...options }), init);

@@ -22,6 +22,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/chats", Handler: a.handleChats},
 		{Pattern: "/participants", Handler: a.handleParticipants},
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
+		{Method: "GET", Pattern: "/tool-visuals", Handler: a.handleToolVisuals},
 		{Pattern: "/messages", Handler: a.handleMessages},
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/changes", Handler: a.handleChanges},
@@ -47,6 +48,29 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		}
 	}
 	return routes
+}
+
+// handleToolVisuals exposes project-scoped integration logos for the shared
+// tool activity renderer. The static registry remains the client fallback.
+func (a *App) handleToolVisuals(w http.ResponseWriter, r *http.Request) {
+	projectID := requestProject(r)
+	ctx := a.appCtx(r)
+	if ctx == nil {
+		writeJSON(w, map[string]any{"integrations": []any{}})
+		return
+	}
+	apps := ctx.RuntimeAPI()
+	if apps == nil {
+		writeJSON(w, map[string]any{"integrations": []any{}})
+		return
+	}
+	integrations, err := apps.ListRuntimeCatalogIntegrations()
+	if err != nil {
+		writeJSON(w, map[string]any{"integrations": []any{}})
+		return
+	}
+	_ = projectID // catalog integrations are globally defined; access is scoped by the app handle.
+	writeJSON(w, map[string]any{"integrations": integrations})
 }
 
 // requestUser resolves the delegated platform user, when present. The
@@ -745,7 +769,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 // appCtx recovers the mounted AppCtx for HTTP handlers. The SDK routes
 // carry it via closure at mount time in richer setups; keeping a single
 // accessor makes the seam explicit and testable.
-func (a *App) appCtx(_ *http.Request) *sdk.AppCtx { return mountedCtx }
+func (a *App) appCtx(r *http.Request) *sdk.AppCtx { return mountedCtx.WithUserSession(r) }
 
 var mountedCtx *sdk.AppCtx
 

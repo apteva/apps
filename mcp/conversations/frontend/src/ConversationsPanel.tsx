@@ -2,7 +2,7 @@ import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline } from "./toolActivityModel";
-import { toChatToolActivity, toolVisualRegistry } from "./toolActivityAdapter";
+import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
 // ConversationsPanel — chat + inbox for the conversations app.
@@ -1321,6 +1321,7 @@ export function ConversationChat({
   onRemoved: () => void;
 }) {
   const { t } = useConversationLocalization();
+  const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   // Resolve display names only for a room or a transcript with multiple speakers.
