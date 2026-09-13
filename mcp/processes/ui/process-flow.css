@@ -422,3 +422,5 @@
     flex-wrap: wrap;
   }
 }
+
+.pf-execution{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px;font-size:12px}.pf-execution[data-state="running"]{color:var(--pc-accent)}

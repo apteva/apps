@@ -1,3 +1,4 @@
+import { useScopedRevision } from "./live-events";
 import { useEffect, useState } from "react";
 import type { StepRun, Executor } from "./Workflow";
 export type Task = StepRun & {
@@ -270,6 +271,12 @@ export function TaskDetail({
       active = false;
     };
   }, [id]);
+  const liveRevision = useScopedRevision(e => e.data?.task_id === id || (!!detail?.task.run_id && e.data?.run_id === detail.task.run_id));
+  useEffect(() => {
+    let active = true;
+    api(`/tasks/${id}`).then(d => { if (active) setDetail(d); }).catch(e => { if (active) setError(e.message); });
+    return () => { active = false; };
+  }, [id, liveRevision]);
   const save = async (body: Record<string, unknown>, cancel = false) => {
     setBusy(true);
     setError("");
@@ -583,6 +590,7 @@ export default function WorkPanel({
     [origin, setOrigin] = useState(""),
     [process, setProcess] = useState(""),
     [overdue, setOverdue] = useState(false);
+  const liveRevision = useScopedRevision(e => /^(task|run|delivery)\./.test(e.topic) && (!runID || e.data?.run_id === runID));
   const query = new URLSearchParams({
     search,
     assignee,
@@ -601,7 +609,6 @@ export default function WorkPanel({
   };
   useEffect(() => {
     let active = true;
-    setLoading(true);
     const refresh = () =>
       api(`/tasks?${query}`)
         .then((d) => {
@@ -614,12 +621,10 @@ export default function WorkPanel({
         .catch((e) => active && setError(e.message))
         .finally(() => active && setLoading(false));
     refresh();
-    const timer = setInterval(refresh, 5000);
     return () => {
       active = false;
-      clearInterval(timer);
     };
-  }, [query, eventRevision]);
+  }, [query, liveRevision]);
   const filter = (set: (v: string) => void, value: string) => {
     set(value);
     setOffset(0);

@@ -17,7 +17,7 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import flowStyles from "@xyflow/react/dist/style.css" with { type: "text" };
-import type { Step } from "./Workflow";
+import type { Step, StepRun } from "./Workflow";
 import {
   canConnect,
   connectSteps,
@@ -31,6 +31,7 @@ import styles from "./process-flow.css" with { type: "text" };
 
 type StepData = {
   step: Step;
+  execution?: StepRun;
   index: number;
   editable: boolean;
   problem: string;
@@ -79,6 +80,11 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
               : "Starts with run"}
         </span>
       </div>
+      {data.execution && <div className="pf-execution" data-state={data.execution.state}>
+        <span className={`pill ${data.execution.state}`}>{data.execution.decision || data.execution.state}</span>
+        <span>{data.execution.progress}% · {data.execution.executor.kind === "human" ? "Human" : `Agent ${data.execution.executor.agent_id}`}</span>
+        {data.execution.delivery_warning && <span>Delivery retry pending</span>}
+      </div>}
       {data.problem && <div className="pf-problem">{data.problem}</div>}
       <Handle
         type="source"
@@ -134,10 +140,12 @@ export function ProcessFlow({
   steps,
   onChange,
   examples,
+  executions,
 }: {
   steps: Step[];
   onChange?: (s: Step[]) => void;
   examples?: Step[];
+  executions?: StepRun[];
 }) {
   const editable = !!onChange,
     instanceID = useId();
@@ -169,6 +177,7 @@ export function ProcessFlow({
       style: { width: NODE_WIDTH },
       data: {
         step: s,
+        execution: executions?.find(e => e.key === s.key),
         index: i,
         editable,
         problem: editable ? stepProblem(s) : "",
@@ -194,7 +203,7 @@ export function ProcessFlow({
         data: { label: "Run complete", end: true },
       },
     ]);
-  }, [positioned, editable, selected]);
+  }, [positioned, editable, selected, executions]);
   const edges: Edge[] = useMemo(() => {
     const byKey = new Map(positioned.map((s) => [s.key, s]));
     const used = new Set(steps.flatMap((s) => s.depends_on));
