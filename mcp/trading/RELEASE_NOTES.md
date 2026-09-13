@@ -50,7 +50,14 @@ for formulas, examples and simulation semantics.
 
 ## Release verification
 
-Release checks cover the full Go short suite, targeted indicator/strategy/
-validation/agent race tests, all 13 UI tests, strict TypeScript checks, production
-panel/desk builds, and isolated stock/crypto simulation and validation smoke tests.
-No real broker orders or model inference are part of release validation.
+- Full Go short suite, targeted indicator/strategy/validation/agent race tests,
+  all 13 UI tests, strict TypeScript checks, and production panel/desk builds passed.
+- The release binary ran the experimental indicator template on hourly August
+  2026 AAPL/MSFT and BTC/ETH data in an isolated database.
+- All five validation methods passed for both markets: 10 suites, 316 child runs,
+  including 100 Monte Carlo samples plus a baseline for each market.
+- Exported Monte Carlo children from both markets replayed with identical result
+  hashes. The crypto suite also resumed successfully from its saved checkpoint
+  after the smoke harness's initial time limit stopped the process.
+- Research-tagged harnesses compile; their long searches remain opt-in. No real
+  broker orders or model inference were part of release validation.
