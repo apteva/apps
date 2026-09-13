@@ -1,8 +1,14 @@
 /* First-party Go engine compiled to WASM; no server-side JavaScript runtime. */
-importScripts("wasm_exec.js");
+// Carry the install/project routing scope through all worker asset requests.
+function assetURL(name) {
+  const url = new URL(name, self.location.href);
+  url.search = self.location.search;
+  return url.href;
+}
+importScripts(assetURL("wasm_exec.js"));
 const ready = (async () => {
   const go = new Go();
-  const response = await fetch("engine.wasm");
+  const response = await fetch(assetURL("engine.wasm"), { credentials: "same-origin" });
   if (!response.ok) throw new Error("Go preview engine is unavailable");
   const wasm = await WebAssembly.instantiate(
     await response.arrayBuffer(),
