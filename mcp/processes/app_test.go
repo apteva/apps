@@ -15,6 +15,7 @@ import (
 )
 
 type fakeTasks struct {
+	overviewHistory []any
 	tk.BasePlatformClient
 	tasks      map[string]map[string]any
 	keys       map[string]string
@@ -69,7 +70,7 @@ func (f *fakeTasks) CallAppResult(app, tool string, input map[string]any, out an
 			task["schedule_enabled"] = action == "resume"
 		}
 	case "list":
-		raw, _ := json.Marshal(map[string]any{"runs": []any{}, "has_more": false})
+		raw, _ := json.Marshal(map[string]any{"runs": f.overviewHistory, "has_more": false})
 		return json.Unmarshal(raw, out)
 	default:
 		return errors.New("unexpected action")

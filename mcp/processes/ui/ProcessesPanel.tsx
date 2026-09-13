@@ -167,7 +167,7 @@ function Panel(props: Props) {
   const [tab, setTab] = useState(
       new URLSearchParams(window.location.search).has("version")
         ? "procedure"
-        : "overview",
+        : new URLSearchParams(window.location.search).has("run_id") ? "runs" : new URLSearchParams(window.location.search).has("assignment_id") ? "assignments" : "overview",
     ),
     [version, setVersion] = useState(
       Number(new URLSearchParams(window.location.search).get("version")) || 0,
@@ -191,6 +191,10 @@ function Panel(props: Props) {
     [assignmentFilter, setAssignmentFilter] = useState(""),
     [runStateFilter, setRunStateFilter] = useState(""),
     [runOwnerFilter, setRunOwnerFilter] = useState(0);
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("run_id");
+    if (id && tab === "runs") document.getElementById(`run-${id}`)?.scrollIntoView?.({ block: "start" });
+  }, [tab, runs.length]);
   const [runModal, setRunModal] = useState(false),
     [runInput, setRunInput] = useState(""),
     [runKey, setRunKey] = useState("");
@@ -1061,7 +1065,7 @@ function Panel(props: Props) {
               )}
               {filteredExecutions.length ? (
                 filteredExecutions.map((r) => (
-                  <article className="card run" key={r.record.id}>
+                  <article id={`run-${r.record.id}`} className="card run" key={r.record.id}>
                     <div className="row between">
                       <div className="row">
                         <Pill state={r.record.state} />

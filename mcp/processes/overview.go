@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -49,6 +51,7 @@ type overviewCounts struct {
 	Recent    int `json:"recent"`
 }
 type processOverview struct {
+	Coverage    string         `json:"coverage"`
 	Counts      overviewCounts `json:"counts"`
 	Active      []overviewItem `json:"active"`
 	Upcoming    []overviewItem `json:"upcoming"`
@@ -175,6 +178,9 @@ func (a *App) overview(project string) (*processOverview, error) {
 	})
 	sort.SliceStable(out.Recent, func(i, j int) bool { return newer(out.Recent[i].CreatedAt, out.Recent[j].CreatedAt) })
 	sort.SliceStable(out.Upcoming, func(i, j int) bool { return newer(out.Upcoming[j].NextRunAt, out.Upcoming[i].NextRunAt) })
+	if out.Partial {
+		out.Coverage = "Partial overview: " + strings.Join(out.Warnings, " ")
+	}
 	out.Active = capOverview(out.Active)
 	out.Recent = capOverview(out.Recent)
 	out.Upcoming = capOverview(out.Upcoming)
@@ -289,9 +295,12 @@ func (a *App) overviewTasks(project string, out *processOverview) error {
 			var body string
 			var activeAssignment bool
 			e = a.db.QueryRow(`SELECT r.process_id,COALESCE(json_extract(v.body_json,'$.name'),''),r.assignment_id,r.assignment_json,(p.status='active' AND COALESCE(x.status,'')='active' AND COALESCE(x.sync_pending,1)=0) FROM process_runs r JOIN processes p ON p.id=r.process_id JOIN process_versions v ON v.process_id=r.process_id AND v.version=r.version LEFT JOIN process_assignments x ON x.id=r.assignment_id WHERE p.project_id=? AND r.process_id=? AND r.id=? AND r.workflow=0 AND r.backend='tasks'`, project, id, h.RunKey).Scan(&x.ProcessID, &x.ProcessName, &x.AssignmentID, &body, &activeAssignment)
-			if e != nil {
+			if errors.Is(e, sql.ErrNoRows) {
 				continue
 			} // A stale/foreign link is never admitted into this project.
+			if e != nil {
+				return e
+			}
 			var b AssignmentConfig
 			if e = json.Unmarshal([]byte(body), &b); e != nil {
 				return e
