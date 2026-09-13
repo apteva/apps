@@ -492,6 +492,21 @@ func (e *Engine) costs(symbol string) Costs {
 	return e.Config.Costs
 }
 
+// Decimal lot sizes rarely divide exactly in binary floats. Account for a few
+// ULPs and a tiny fraction of a lot at the original order/position scale,
+// including accumulated position error and cancellation error when
+// subtracting prior fills. A fixed epsilon in lot units loses real lots on large
+// orders and can leave an unfillable remainder blocking subsequent rebalances.
+func floorFillQuantity(qty, step, scale float64) float64 {
+	scale = math.Max(math.Abs(qty), math.Abs(scale))
+	epsilon := math.Min(math.Max(16*(math.Nextafter(scale, math.Inf(1))-scale), step*1e-8), step*1e-6)
+	nearest := math.Round(qty/step) * step
+	if math.Abs(nearest-qty) <= epsilon {
+		return nearest
+	}
+	return math.Floor(qty/step) * step
+}
+
 func (e *Engine) fill(fresh map[string]bool) {
 	s := e.State
 	orders := append([]*Order(nil), s.Orders...)
@@ -554,7 +569,7 @@ func (e *Engine) fill(fresh map[string]bool) {
 			qty = math.Min(qty, s.Positions[o.Symbol].Qty)
 		}
 		if p.QtyStep > 0 {
-			qty = math.Floor(qty/p.QtyStep+1e-9) * p.QtyStep
+			qty = floorFillQuantity(qty, p.QtyStep, math.Max(o.Qty, s.Positions[o.Symbol].Qty))
 		}
 		if q.Volume > 0 {
 			impact = p.ImpactBps * math.Min(1, qty/q.Volume)

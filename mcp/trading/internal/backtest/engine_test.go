@@ -2,6 +2,8 @@ package backtest
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 )
@@ -220,6 +222,55 @@ func TestHourlyOpenQuoteLatencyResolution(t *testing.T) {
 		}
 		if !seen {
 			t.Fatal("missing fill")
+		}
+	}
+}
+
+func TestDecimalQuantityDoesNotLeavePhantomPartialFill(t *testing.T) {
+	for _, qty := range []float64{8205.622, 4872.6725, 82.95229999999992, 73.61159999999992, 110.90219999999992} {
+		for _, side := range []string{"buy", "sell"} {
+			for _, capacity := range []float64{0, 1000} {
+				config := Config{StartingCash: 100000, MaxFillQty: capacity, Costs: Costs{QtyStep: .0001, MinNotional: 5, FeeBps: 10, SlippageBps: 5}}
+				tape := []Input{}
+				for i := 0; i < 12; i++ {
+					tape = append(tape, quote(fmt.Sprintf("q%d", i), i, .2753, 100000))
+				}
+				e, err := New(config, tape, nil, func(s *State, in Input) ([]Command, error) {
+					if in.ID == "q0" {
+						return []Command{{Order: &Order{Symbol: "XYZ", Side: side, Qty: qty}}}, nil
+					}
+					return nil, nil
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if side == "sell" {
+					e.State.Positions["XYZ"] = Position{Qty: qty, AvgCost: .2}
+				}
+				finish(t, e)
+				o := e.State.Orders[0]
+				if o.Status != "filled" || math.Abs(o.Qty-o.FilledQty) > 1e-9 {
+					t.Fatalf("%s qty %.8f capacity %.0f: phantom remainder %.12f status %s", side, qty, capacity, o.Qty-o.FilledQty, o.Status)
+				}
+				if e.State.Cash < 0 {
+					t.Fatal("negative cash")
+				}
+			}
+		}
+	}
+}
+
+func TestQuantityRoundingStillFloorsMeaningfulFractionalLots(t *testing.T) {
+	for _, tc := range []struct{ qty, step, scale, want float64 }{
+		{8205.622, .0001, 8205.622, 8205.622},
+		{8205.62204, .0001, 8205.62204, 8205.622},
+		{205.6219999999994, .0001, 8205.622, 205.622},
+		{205.62195, .0001, 8205.622, 205.6219},
+		{.999, 1, 1, 0},
+		{.75, 1, 1e16, 0},
+	} {
+		if got := floorFillQuantity(tc.qty, tc.step, tc.scale); math.Abs(got-tc.want) > 1e-10 {
+			t.Fatalf("%+v: got %.12f", tc, got)
 		}
 	}
 }

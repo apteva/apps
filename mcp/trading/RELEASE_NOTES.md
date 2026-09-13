@@ -1,3 +1,13 @@
+# Trading v0.13.0
+
+Strategies can now size eligible assets by inverse volatility, allowing the fixed SMA300 crypto strategy to run in virtual portfolios with the same weights used in research.
+
+- Add explicit inverse-volatility weights, validated lookback and volatility floor, required warmup, and position caps that preserve excess cash.
+- Fix decimal-lot rounding in event simulations so floating-point residue cannot leave a whole permitted lot unfilled and block later rebalancing.
+- Cover inverse-volatility ratios, flat-series floors, caps, invalid parameters, warmup, and decimal buys/sells/partial fills.
+
+No database migrations or new permissions. Existing strategies retain their definitions. Historical artifacts still require their original engine fingerprint; create fresh backtests on this release. The adaptive research controller remains outside this production release.
+
 # Trading v0.12.0
 
 Trading now provides explicit technical indicators, composable strategy conditions,

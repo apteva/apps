@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.12.0
+version: 0.13.0
 description: |
-  v0.11 adds out-of-sample, walk-forward, robustness, stress, and seeded
-  Monte Carlo execution validation, with live suite progress and replay artifacts.
+  v0.13 adds inverse-volatility strategy sizing and corrects decimal-lot
+  simulation fills, with fixed-parameter virtual portfolios and replay artifacts.
 
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
