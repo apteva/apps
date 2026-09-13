@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -772,33 +774,30 @@ func TestSoftphoneMediaURLUsesInstallScopedSameOriginPath(t *testing.T) {
 	}
 }
 
-func TestSoftphoneUsesSameOriginWorkletAsset(t *testing.T) {
-	audioSource, err := os.ReadFile("ui/softphone-audio.ts")
-	if err != nil {
-		t.Fatal(err)
-	}
+func TestSoftphoneAudioAssetsMatchPackagedSources(t *testing.T) {
 	panelSource, err := os.ReadFile("ui/CallsPanel.tsx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	audioText := string(audioSource)
 	panelText := string(panelSource)
 	if !strings.Contains(panelText, `/api/apps/telephony/_install/${encodeURIComponent(String(installId))}/ui/softphone-worklet.js`) {
 		t.Fatal("softphone worklet URL is not pinned to the active install")
 	}
-	if !strings.Contains(audioText, `audioWorklet.addModule(workletURL)`) {
-		t.Fatal("softphone does not load the explicit install-scoped worklet URL")
-	}
-	for _, forbidden := range []string{"createObjectURL", "new Blob([WORKLET_SOURCE]", "import.meta.url"} {
-		if strings.Contains(audioText, forbidden) {
-			t.Fatalf("softphone still uses CSP-sensitive blob worklet code %q", forbidden)
-		}
-	}
 	if strings.Contains(panelText, "setStatus(`${list.length} calls`)") {
 		t.Fatal("routine polling still overwrites actionable browser audio errors")
 	}
-	if info, err := os.Stat("ui/softphone-worklet.js"); err != nil || info.Size() == 0 {
-		t.Fatalf("softphone worklet asset is missing or empty: %v", err)
+	// The browser must be able to load the exact modules embedded in its
+	// client from the public, content-addressed installation asset routes.
+	for _, kind := range []string{"worklet", "worker"} {
+		source, err := os.ReadFile("ui/softphone-" + kind + ".js")
+		if err != nil || len(source) == 0 {
+			t.Fatalf("missing %s source: %v", kind, err)
+		}
+		path := fmt.Sprintf("ui/frontend/%s-%x.js", kind, sha256.Sum256(source))
+		asset, err := os.ReadFile(path)
+		if err != nil || string(asset) != string(source) {
+			t.Fatalf("packaged %s asset does not match the client source: %v", kind, err)
+		}
 	}
 }
 

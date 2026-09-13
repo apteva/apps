@@ -64,8 +64,14 @@ The snippet illustrates independent controls, not a recommended automatic callin
 sequence. `src/index.ts` exports the TypeScript contracts and local
 `telephonyExtension` for hosts building against this source. The default browser
 runtime requires HTTPS or localhost, microphone permission, and a user gesture
-for audio. The host must permit SDK blob modules, blob workers/worklets and the
-Telephony gateway's HTTPS/WSS connections in its CSP.
+for audio. Same-origin hosts (including the dashboard) load Telephony's audio
+worklet and worker from content-addressed installation URLs compatible with
+`script-src 'self'` and `worker-src 'self'`. This selection is automatic for both
+call audio and `createMicrophonePreview()`; no host-specific options are needed.
+External origins retain embedded blob workers/worklets and must permit those
+in their CSP, as well as the gateway's HTTPS/WSS connections. The Web SDK's
+`apps.load()` loader also requires permission for its blob module imports;
+this Telephony change does not alter the SDK's own module-loading policy.
 
 ## Lifecycle and recovery
 
@@ -98,9 +104,14 @@ Telephony gateway's HTTPS/WSS connections in its CSP.
   Pass `pollIntervalMs: 0` and feed `observeCall()` if the host already watches
   calls. `watchCalls()` is an optional cancellable watcher for incoming calls.
 
-Worker and worklet source are embedded in the hashed client bundle. Blob URLs
-are created for each audio session and revoked on cleanup. They contain no
-credentials. Media URLs resolve against the SDK's gateway and must match the
+Worker and worklet source are embedded in the hashed client bundle. Same-origin
+audio assets are fetched through the original authenticated app handle and
+checked against those embedded bytes before use. Native module requests use
+the public `/ui/frontend/` routes with explicit project/installation scope and
+no credential in the URL. Deploy the hashed audio files together with the
+client and panel; retain old hashed audio files for already-loaded clients.
+For external origins, blob URLs are created for each audio session and revoked
+on cleanup. They contain no credentials. Media URLs resolve against the SDK's gateway and must match the
 selected installation and call; they are never pinned to the external host's
 origin. Media session URLs/tokens are credentials: keep them in memory.
 

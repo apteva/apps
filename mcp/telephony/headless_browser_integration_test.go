@@ -153,11 +153,12 @@ func runHeadlessBrowser(t *testing.T, surface string) {
 			return
 		}
 		media := strings.HasPrefix(path, "/_install/42/softphone/media/")
+		audioAsset := strings.HasPrefix(path, "/_install/42/ui/frontend/worklet-") || strings.HasPrefix(path, "/_install/42/ui/frontend/worker-")
 		if !media && (r.Header.Get("Authorization") != "Bearer "+browserToken || r.URL.Query().Get("project_id") != tier2Project || r.URL.Query().Get("install_id") != "42") {
 			http.Error(w, "invalid fixture auth/scope", 403)
 			return
 		}
-		if media {
+		if media || audioAsset {
 			path = strings.TrimPrefix(path, "/_install/42")
 		}
 		if surface == "application-user" && !media && !strings.HasPrefix(path, "/user/") && !strings.HasPrefix(path, "/ui/frontend") {

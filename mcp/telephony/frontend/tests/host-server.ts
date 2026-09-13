@@ -11,7 +11,9 @@ Bun.serve({
     const url = new URL(request.url), path = url.pathname;
     if (path === "/host.js") return new Response(source, { headers: { "Content-Type": "text/javascript" } });
     if (path === "/panel.js") return new Response(panelSource, { headers: { "Content-Type": "text/javascript" } });
-    if (path === "/panel") return new Response('<!doctype html><title>Calls panel integration</title><style>html,body,#root{height:100%;margin:0}button{min-height:32px} [aria-label="Active call controls"]{border:1px solid #ddd;padding:8px} .hidden{display:none}</style><div id="root"></div><script type="module" src="/panel.js"></script>', { headers: { "Content-Type": "text/html" } });
+    // Match the dashboard's execution policy. In particular blob AudioWorklets
+    // are blocked by script-src even though worker-src permits blob workers.
+    if (path === "/panel") return new Response('<!doctype html><title>Calls panel integration</title><style>html,body,#root{height:100%;margin:0}button{min-height:32px} [aria-label="Active call controls"]{border:1px solid #ddd;padding:8px} .hidden{display:none}</style><div id="root"></div><script type="module" src="/panel.js"></script>', { headers: { "Content-Type": "text/html", "Content-Security-Policy": "default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; media-src 'self' blob:; object-src 'none'" } });
     // Dashboard cookie transport -> controlled operator gateway. Also relay media
     // because the panel correctly resolves its WebSocket against this host.
     if (path.startsWith("/api/apps/telephony/")) {
