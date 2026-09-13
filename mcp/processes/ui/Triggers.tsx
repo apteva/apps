@@ -331,7 +331,7 @@ export default function Triggers({
               <p className="small muted">All conditions must match.</p>
               {(config.filters || []).map((f, i) => (
                 <div className="row" key={i} style={{ marginBottom: 10 }}>
-                  <label style={{ flex: 1 }}>
+                  <label style={{ flex: "1 1 160px", minWidth: 0 }}>
                     Event field
                     <input
                       required
@@ -444,7 +444,7 @@ export default function Triggers({
                     </label>
                   ) : (
                     f.op !== "exists" && (
-                      <label style={{ flex: 1 }}>
+                      <label style={{ flex: "1 1 160px", minWidth: 0 }}>
                         Value
                         <input
                           type={typeof f.value === "number" ? "number" : "text"}
