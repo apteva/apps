@@ -257,6 +257,10 @@ publication. Direct history is currently returned without pagination.
 GOWORK=off go test -race -tags integration ./...
 ```
 
+The panel declares its host ReactDOM imports in `package.json` under
+`apteva.panelExternals`; the shared panel builder keeps other apps’ import
+contracts unchanged.
+
 From the apps repository root:
 
 ```sh
