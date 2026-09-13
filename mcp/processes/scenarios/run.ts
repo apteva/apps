@@ -7,6 +7,7 @@ import {
   check,
   verifyHistory,
   verifyMultiAgentTrajectory,
+  verifyStepWorkers,
 } from "./verify-outcomes";
 const appDir = resolve(import.meta.dir, "..");
 const outputRoot = resolve(
@@ -56,7 +57,7 @@ const child = Bun.spawn(
     "--provider",
     "openai-codex",
     "--model",
-    "gpt-5.6-terra",
+    process.env.APTEVA_TEST_MODEL || "gpt-5.6-terra",
     "--max-budget-usd",
     "7.50",
     "--app-dir",
@@ -64,6 +65,7 @@ const child = Bun.spawn(
     "--artifacts-dir",
     outputDir,
     "--json",
+    ...(process.env.APTEVA_TEST_SERVER ? ["--server", process.env.APTEVA_TEST_SERVER] : []),
     scenarioDir,
   ],
   {
@@ -129,6 +131,7 @@ for (const scenario of report.results) {
       ].includes(scenario.scenario)
     )
       verifyMultiAgentTrajectory(scenario.tool_calls, runs[0]);
+    if (scenario.scenario === "processes-multi-agent-workflow") verifyStepWorkers(scenario.tool_calls, runs[0]);
     if (scenario.scenario === "processes-event-trigger-workflow") {
       const events = db
         .query("SELECT * FROM process_trigger_events")
@@ -166,5 +169,5 @@ await Bun.write(
   JSON.stringify(observed, null, 2),
 );
 console.log(
-  `Codex / gpt-5.6-terra · ${report.results.length} scenarios passed · reports: ${outputDir}`,
+  `Codex / ${process.env.APTEVA_TEST_MODEL || "gpt-5.6-terra"} · ${report.results.length} scenarios passed · reports: ${outputDir}`,
 );

@@ -1,7 +1,7 @@
 # Processes Tier 3 tests
 
 These tests run real Apteva Core agents with the `openai-codex` provider and
-`gpt-5.6-terra`. The Processes sidecar is built from this checkout. Each scenario
+`gpt-5.6-terra` by default (`APTEVA_TEST_MODEL=gpt-6-astra` selects Astra). The Processes sidecar is built from this checkout. Each scenario
 gets fresh app storage; the runner creates and removes a disposable server.
 No Tasks integration is installed and no external publishing service is used.
 
@@ -49,10 +49,15 @@ The fourth scenario uses `setup.topology.nodes` with a primary coordinator and
 two responder agents (writer and reviewer). Use a topology-capable CLI build
 through `APTEVA_TEST_CLI`. Generated `${PRIMARY_AGENT_ID}`, `${AGENT_writer_ID}`,
 and `${AGENT_reviewer_ID}` values bind workflow roles to the actual instances.
-Every agent uses the selected Terra model. Research and audience steps become
+Every agent uses the selected model. The CLI must persist its model override
+for connection-backed provider configuration, otherwise server defaults can replace it. Research and audience steps become
 ready together; drafting waits for both; review gates simulated publication.
 The verifier checks audit ordering, frozen roles, distinct executor IDs, and
 successful read/completion calls attributed to the assigned agent.
+The fourth fixture enables `setup.app.spawnable` so workers can access Processes,
+and requires successful main-thread spawns plus an authoritative read and
+completion from a distinct worker for every step. Main coordinates; focused
+workers read and complete the assigned steps.
 
 This is a starter suite. It does not yet cover operator approval/rejection,
 Tasks-backed execution, scheduled dispatch, or delivery fault injection. Those
@@ -92,3 +97,19 @@ Recorded on 2026-09-13: the event-triggered scenario passed all YAML, saved-stat
 and agent-attribution checks with `openai-codex` / `gpt-5.6-terra`: 30 aggregate
 iterations, 484,305 reported tokens, approximately 144 seconds. Two publishes of
 the same signup produced one event record and one completed five-step run.
+
+Workers receive approval evidence directly in `step_get.dependencies`: ancestor
+IDs, kinds, states, decisions, outputs, and direct-dependency flags. They should
+not need `run_get` or parent confirmation to verify complete approval evidence.
+The worker verifier rejects completion on main and missing worker reads/spawns.
+
+## Isolated workers smoke run
+
+On 2026-09-13, the updated five-step scenario passed with `gpt-6-astra`:
+203 seconds, 40 iterations, 480,809 reported tokens. All five steps completed
+in distinct workers spawned from each assigned agent's main thread; persisted
+state, dependency ordering, approval and worker-read assertions passed. The
+publication worker used dependency evidence without tool discovery or a parent
+clarification. The preceding run stopped at 48 iterations after 242 seconds
+with only four steps complete. These are individual smoke runs, not a latency
+benchmark or reliability estimate.

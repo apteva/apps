@@ -139,3 +139,17 @@ test("requires a successful read and completion by each assigned real agent", ()
   const failed = teamCalls(run).map(c => c.agent === "reviewer" ? { ...c, ok: false } : c);
   expect(() => verifyMultiAgentTrajectory(failed, run)).toThrow("no successful real-agent completion trace");
 });
+
+test("worker verification rejects main completion, wrong agent, and missing worker read", async () => {
+  const { verifyStepWorkers } = await import("./verify-outcomes");
+  const run = { steps: [{ id: "s1", key: "publish" }] };
+  const calls = [
+    { name: "spawn", agent: "primary", thread_id: "main", ok: true, completed: true, args: { id: "worker" } },
+    { name: "processes_step_get", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1" } },
+    { name: "processes_step_update", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1", state: "completed" } },
+  ];
+  expect(() => verifyStepWorkers(calls, run)).not.toThrow();
+  expect(() => verifyStepWorkers([calls[0], calls[2]], run)).toThrow("authoritative worker read");
+  expect(() => verifyStepWorkers([calls[0], calls[1], { ...calls[2], thread_id: "main" }], run)).toThrow("not recorded by a worker");
+  expect(() => verifyStepWorkers([{ ...calls[0], agent: "other" }, calls[1], calls[2]], run)).toThrow("missing main spawn");
+});
