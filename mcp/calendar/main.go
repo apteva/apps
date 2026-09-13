@@ -119,9 +119,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "calendars_create",
 			Description: "Create a new calendar. Args: name (required), color? (#hex), kind? (personal|work|holidays|blocked|custom; default 'custom'). Returns the calendar row including its `id` — use that id as `calendar_id` in subsequent events_create calls.",
 			InputSchema: schemaObject(map[string]any{
-				"name":  map[string]any{"type": "string"},
-				"color": map[string]any{"type": "string"},
-				"kind":  map[string]any{"type": "string", "enum": []string{"personal", "work", "holidays", "blocked", "custom"}},
+				"enabled": map[string]any{"type": "boolean"},
+				"name":    map[string]any{"type": "string"},
+				"color":   map[string]any{"type": "string"},
+				"kind":    map[string]any{"type": "string", "enum": []string{"personal", "work", "holidays", "blocked", "custom"}},
 			}, []string{"name"}),
 			Handler: a.toolCalendarsCreate},
 		{Name: "calendars_update",

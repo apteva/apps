@@ -262,3 +262,19 @@ func TestLegacySplitRuleKeepsItsActualEnd(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+func TestDisabledCalendarCreationAndRecovery(t *testing.T) {
+	ctx := newCtx(t)
+	a := &App{}
+	out, err := a.toolCalendarsCreate(ctx, map[string]any{"name": "Hidden", "enabled": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := out.(Calendar)
+	if c.Enabled {
+		t.Fatal("enabled=false was ignored")
+	}
+	out, err = a.toolCalendarsUpdate(ctx, map[string]any{"id": c.ID, "enabled": true})
+	if err != nil || !out.(Calendar).Enabled {
+		t.Fatal(out, err)
+	}
+}

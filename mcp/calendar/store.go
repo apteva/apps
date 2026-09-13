@@ -127,12 +127,20 @@ func (a *App) toolCalendarsCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	name := strings.TrimSpace(strArg(args, "name", ""))
 	color := strArg(args, "color", "#3b82f6")
 	kind := strArg(args, "kind", "custom")
+	enabled := true
+	if raw, ok := args["enabled"]; ok {
+		var valid bool
+		enabled, valid = raw.(bool)
+		if !valid {
+			return nil, errors.New("enabled must be boolean")
+		}
+	}
 	if err := validateCalendar(name, color, kind); err != nil {
 		return nil, err
 	}
 	mutationMu.Lock()
 	defer mutationMu.Unlock()
-	res, err := ctx.AppDB().Exec(`INSERT INTO calendars(project_id,name,color,kind) VALUES(?,?,?,?)`, p, name, color, kind)
+	res, err := ctx.AppDB().Exec(`INSERT INTO calendars(project_id,name,color,kind,enabled) VALUES(?,?,?,?,?)`, p, name, color, kind, boolToInt(enabled))
 	if err != nil {
 		return nil, err
 	}
