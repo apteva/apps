@@ -167,6 +167,9 @@ func (a *App) directRun(project, actor, process, id, action string, args map[str
 			return nil, errors.New("run update exceeds 64 KB")
 		}
 		if state == "completed" {
+			if e := a.requiredTasksComplete(r.ID); e != nil {
+				return nil, e
+			}
 			if result == "" {
 				return nil, errors.New("completion requires a result with evidence")
 			}
@@ -324,6 +327,7 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 			}
 		}
 	}
+	failures = append(failures, a.tickNativeTasksLocked(ctx))
 	return errors.Join(failures...)
 }
 

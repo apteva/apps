@@ -23,7 +23,17 @@ type Executor struct {
 	Kind    string `json:"kind"` // agent or human (authorized project operator)
 	AgentID int64  `json:"agent_id,omitempty"`
 }
-type StepRun struct {
+type StepRun = Task
+
+// Task is the shared execution record for procedure steps and ad hoc work.
+type Task struct {
+	ProjectID         string   `json:"project_id"`
+	Origin            string   `json:"origin"`
+	Required          bool     `json:"required"`
+	DueAt             string   `json:"due_at"`
+	CreatedAt         string   `json:"created_at"`
+	CreatedBy         string   `json:"created_by"`
+	Revision          int      `json:"revision"`
 	ID                string   `json:"id"`
 	RunID             string   `json:"run_id"`
 	Key               string   `json:"key"`
@@ -165,12 +175,12 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 	return nil
 }
 
-const stepColumns = `id,run_id,step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state`
+const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,executor_json,state,progress,output,error,decision,updated_by,updated_at,task_id,delivered_at,target_thread_id,execution_id,delivery_warning,delivery_attempts,next_attempt_at,lifecycle_sequence,execution_state,project_id,origin,required,due_at,created_at,created_by,revision`
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
 	var def, executor string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &s.Decision, &s.UpdatedBy, &s.UpdatedAt, &s.TaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState)
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &s.Decision, &s.UpdatedBy, &s.UpdatedAt, &s.TaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
@@ -196,13 +206,17 @@ func (a *App) steps(run string) ([]StepRun, error) {
 	return out, rows.Err()
 }
 func (a *App) initWorkflow(r *Run, d Definition) error {
+	var project string
+	if e := a.db.QueryRow(`SELECT p.project_id FROM processes p JOIN process_runs r ON r.process_id=p.id WHERE r.id=?`, r.ID).Scan(&project); e != nil {
+		return e
+	}
 	tx, e := a.db.Begin()
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
 	for i, s := range d.Steps {
-		_, e = tx.Exec(`INSERT INTO process_step_runs(id,run_id,step_key,position,definition_json,executor_json,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(run_id,step_key) DO NOTHING`, newID("step-"), r.ID, s.Key, i, jsonText(s), jsonText(r.Binding.Roles[s.Role]), timestamp())
+		_, e = tx.Exec(`INSERT INTO process_step_runs(id,run_id,step_key,position,definition_json,executor_json,updated_at,project_id,created_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(run_id,step_key) DO NOTHING`, newID("step-"), r.ID, s.Key, i, jsonText(s), jsonText(r.Binding.Roles[s.Role]), timestamp(), project, timestamp())
 		if e != nil {
 			return e
 		}
@@ -228,9 +242,12 @@ func dependenciesReady(s StepRun, all []StepRun) bool {
 	return true
 }
 func stepUsesTasks(r Run, s StepRun) bool {
-	return r.Backend == "tasks" && s.Executor.Kind == "agent" && s.Definition.Kind == "work"
+	return s.Origin == "process_step" && r.Backend == "tasks" && s.Executor.Kind == "agent" && s.Definition.Kind == "work"
 }
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
+	if s.Origin != "process_step" {
+		return a.nativeTaskContext(p, r, s, all)
+	}
 	inputs := dependencyOutputs(s, all)
 	contract := fmt.Sprintf("Read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before any action. Only execute this step after it is ready. Stop if the run or step is terminal. Use step_update for progress and final output. Do not perform downstream steps or publish on behalf of another role.", p.ID, r.ID, s.ID)
 	if stepUsesTasks(r, s) {
@@ -279,7 +296,7 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 		if e != nil {
 			return e
 		}
-		if agent.ProjectID != p.ProjectID || agent.DefaultThreadID == "" {
+		if agent.ProjectID != s.ProjectID || agent.DefaultThreadID == "" {
 			return errors.New("step agent needs a default thread in this project")
 		}
 		s.ThreadID = agent.DefaultThreadID
@@ -287,7 +304,7 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 			return err
 		}
 	}
-	api := a.ctx.WithProject(p.ProjectID).AgentEventsAPI()
+	api := a.ctx.WithProject(s.ProjectID).AgentEventsAPI()
 	if api == nil {
 		return errors.New("tracked delivery unavailable")
 	}
@@ -308,7 +325,7 @@ func (a *App) writeStep(s StepRun, state string, progress int, output, reason, d
 	}
 	defer tx.Rollback()
 	now := timestamp()
-	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision=?,updated_by=?,updated_at=? WHERE id=?`, state, progress, output, reason, decision, actor, now, s.ID)
+	_, e = tx.Exec(`UPDATE process_step_runs SET state=?,progress=?,output=?,error=?,decision=?,updated_by=?,updated_at=?,revision=revision+1 WHERE id=?`, state, progress, output, reason, decision, actor, now, s.ID)
 	if e != nil {
 		return e
 	}
@@ -380,7 +397,7 @@ func (a *App) reconcileWorkflow(p *Process, r *Run) error {
 		return e
 	}
 	for _, s := range all {
-		if s.State == "failed" || s.State == "cancelled" || s.Decision == "rejected" {
+		if s.Required && (s.State == "failed" || s.State == "cancelled" || s.Decision == "rejected") {
 			_, e = a.db.Exec(`UPDATE process_runs SET state='failed',error=?,current_step=? WHERE id=?`, s.Definition.Name+": "+s.Output+" "+s.Error, s.Definition.Name, r.ID)
 			if e == nil {
 				fresh, readErr := a.getRun(p.ProjectID, p.ID, r.ID)
@@ -413,11 +430,15 @@ func (a *App) reconcileWorkflow(p *Process, r *Run) error {
 	if e != nil {
 		return e
 	}
-	done := 0
+	done, total := 0, 0
 	state := "running"
 	names := []string{}
 	outputs := map[string]string{}
 	for _, s := range all {
+		if !s.Required {
+			continue
+		}
+		total++
 		if s.State == "completed" {
 			done++
 			outputs[s.Key] = s.Output
@@ -431,7 +452,7 @@ func (a *App) reconcileWorkflow(p *Process, r *Run) error {
 		}
 	}
 	result := ""
-	if done == len(all) {
+	if done == total {
 		state = "completed"
 		result = jsonText(outputs)
 	}
@@ -439,7 +460,7 @@ func (a *App) reconcileWorkflow(p *Process, r *Run) error {
 	if len(failures) > 0 {
 		warning = errors.Join(failures...).Error()
 	}
-	_, e = a.db.Exec(`UPDATE process_runs SET state=?,progress=?,current_step=?,result=?,delivery_warning=? WHERE id=?`, state, done*100/len(all), strings.Join(names, ", "), result, warning, r.ID)
+	_, e = a.db.Exec(`UPDATE process_runs SET state=?,progress=?,current_step=?,result=?,delivery_warning=? WHERE id=?`, state, done*100/total, strings.Join(names, ", "), result, warning, r.ID)
 	if e != nil {
 		return e
 	}
@@ -473,69 +494,8 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		return nil, errNotFound
 	}
 	if action == "step_update" {
-		allowed := s.Executor.Kind == "human" && actor == "operator" || s.Executor.Kind == "agent" && strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", s.Executor.AgentID))
-		if !allowed {
-			return nil, errors.New("only this step's assigned executor can update it")
-		}
-		if stepUsesTasks(r, s) {
-			return nil, errors.New("update the linked Tasks record for this work step")
-		}
-		if s.State == "pending" || !dependenciesReady(s, all) {
-			return nil, errors.New("step dependencies are not complete")
-		}
-		state := str(args, "state")
-		switch state {
-		case "running", "waiting", "blocked", "completed", "failed", "cancelled":
-		default:
-			return nil, errors.New("invalid step state")
-		}
-		output, reason, decision := s.Output, s.Error, s.Decision
-		if _, ok := args["output"]; ok {
-			output = str(args, "output")
-		}
-		if _, ok := args["error"]; ok {
-			reason = str(args, "error")
-		}
-		if _, ok := args["decision"]; ok {
-			decision = str(args, "decision")
-		}
-		progress := s.Progress
-		if v, ok := args["progress"]; ok {
-			n, valid := v.(float64)
-			if !valid || n < 0 || n > 100 || n != float64(int(n)) {
-				return nil, errors.New("progress must be 0–100")
-			}
-			progress = int(n)
-		}
-		if len(output)+len(reason) > 16000 {
-			return nil, errors.New("step output and error exceed 16 KB")
-		}
-		if state == "completed" {
-			if strings.TrimSpace(output) == "" {
-				return nil, errors.New("completion needs output evidence")
-			}
-			progress = 100
-			if s.Definition.Kind == "approval" && decision != "approved" && decision != "rejected" {
-				return nil, errors.New("approval completion needs approved or rejected decision")
-			}
-		}
-		if decision != "" && (s.Definition.Kind != "approval" || state != "completed") {
-			return nil, errors.New("decisions apply only to completed approval steps")
-		}
-		if (state == "waiting" || state == "blocked" || state == "failed" || state == "cancelled") && strings.TrimSpace(reason) == "" {
-			return nil, errors.New("record a reason")
-		}
-		if terminal(s.State) {
-			if state != s.State || progress != s.Progress || output != s.Output || reason != s.Error || decision != s.Decision {
-				return nil, errors.New("completed step outputs and decisions are immutable")
-			}
-		} else {
-			if terminal(r.State) {
-				return nil, errors.New("run is terminal")
-			}
-			if e = a.writeStep(s, state, progress, output, reason, decision, actor); e != nil {
-				return nil, e
-			}
+		if e = a.updateTaskState(s, r, all, actor, args); e != nil {
+			return nil, e
 		}
 		p, e := a.get(project, process)
 		if e != nil {
@@ -567,12 +527,8 @@ func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {
 	if e != nil {
 		return nil
 	}
-	var process string
-	if e = a.db.QueryRow(`SELECT process_id FROM process_runs WHERE id=?`, s.RunID).Scan(&process); e != nil {
-		return e
-	}
-	if _, e = a.getRun(event.ProjectID, process, s.RunID); e != nil {
-		return e
+	if event.ProjectID != s.ProjectID {
+		return errors.New("task lifecycle project mismatch")
 	}
 	if event.SourceApp != "apteva-server" || event.InstanceID != s.Executor.AgentID || s.Executor.Kind != "agent" {
 		return errors.New("step lifecycle source mismatch")
@@ -653,4 +609,72 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 		return nil, e
 	}
 	return a.getRun(project, process, run)
+}
+
+func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[string]any) error {
+	allowed := s.Executor.Kind == "human" && actor == "operator" || s.Executor.Kind == "agent" && strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", s.Executor.AgentID))
+	if !allowed {
+		return errors.New("only this step's assigned executor can update it")
+	}
+	if stepUsesTasks(r, s) {
+		return errors.New("update the linked Tasks record for this work step")
+	}
+	if s.State == "pending" || !dependenciesReady(s, all) {
+		return errors.New("step dependencies are not complete")
+	}
+	state := str(args, "state")
+	switch state {
+	case "running", "waiting", "blocked", "completed", "failed", "cancelled":
+	default:
+		return errors.New("invalid step state")
+	}
+	output, reason, decision := s.Output, s.Error, s.Decision
+	if _, ok := args["output"]; ok {
+		output = str(args, "output")
+	}
+	if _, ok := args["error"]; ok {
+		reason = str(args, "error")
+	}
+	if _, ok := args["decision"]; ok {
+		decision = str(args, "decision")
+	}
+	progress := s.Progress
+	if v, ok := args["progress"]; ok {
+		n, valid := v.(float64)
+		if !valid || n < 0 || n > 100 || n != float64(int(n)) {
+			return errors.New("progress must be 0–100")
+		}
+		progress = int(n)
+	}
+	if len(output)+len(reason) > 16000 {
+		return errors.New("step output and error exceed 16 KB")
+	}
+	if state == "completed" {
+		if strings.TrimSpace(output) == "" {
+			return errors.New("completion needs output evidence")
+		}
+		progress = 100
+		if s.Definition.Kind == "approval" && decision != "approved" && decision != "rejected" {
+			return errors.New("approval completion needs approved or rejected decision")
+		}
+	}
+	if decision != "" && (s.Definition.Kind != "approval" || state != "completed") {
+		return errors.New("decisions apply only to completed approval steps")
+	}
+	if (state == "waiting" || state == "blocked" || state == "failed" || state == "cancelled") && strings.TrimSpace(reason) == "" {
+		return errors.New("record a reason")
+	}
+	if terminal(s.State) {
+		if state != s.State || progress != s.Progress || output != s.Output || reason != s.Error || decision != s.Decision {
+			return errors.New("completed step outputs and decisions are immutable")
+		}
+	} else {
+		if terminal(r.State) && !(s.Origin == "attached" && !s.Required && r.State == "completed") {
+			return errors.New("run is terminal")
+		}
+		if e := a.writeStep(s, state, progress, output, reason, decision, actor); e != nil {
+			return e
+		}
+	}
+	return nil
 }

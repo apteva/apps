@@ -114,11 +114,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			return a.execute(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
-	return append(out, a.triggerTools()...)
+	return append(append(out, a.triggerTools()...), a.taskTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if action == "tasks" || strings.HasPrefix(action, "task_") {
+		return a.executeTask(project, actor, action, args)
+	}
 	if strings.HasPrefix(action, "trigger_") || action == "triggers" {
 		return a.executeTrigger(project, action, args)
 	}
@@ -389,6 +392,43 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if parts[0] == "tasks" || path == "task-runs" {
+		args = map[string]any{}
+		action = ""
+		if path == "task-runs" && r.Method == "GET" {
+			action = "task_runs"
+		}
+		if path == "tasks" {
+			if r.Method == "POST" {
+				action = "task_create"
+			}
+			if r.Method == "GET" {
+				action = "tasks"
+				for _, k := range []string{"assignee", "state", "origin", "run_id", "process_id", "search"} {
+					args[k] = r.URL.Query().Get(k)
+				}
+				args["overdue"] = r.URL.Query().Get("overdue") == "true"
+				for _, k := range []string{"limit", "offset"} {
+					v, _ := strconv.Atoi(r.URL.Query().Get(k))
+					args[k] = float64(v)
+				}
+			}
+		}
+		if len(parts) == 2 && parts[0] == "tasks" {
+			args["task_id"] = parts[1]
+			if r.Method == "GET" {
+				action = "task_get"
+			}
+			if r.Method == "PUT" {
+				action = "task_update"
+			}
+		}
+		if len(parts) == 3 && parts[0] == "tasks" && parts[2] == "cancel" && r.Method == "POST" {
+			args["task_id"] = parts[1]
+			action = "task_cancel"
+		}
+	}
+
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -402,7 +442,11 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && k != "trigger_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
+			if k == "run_id" && action == "task_create" {
+				args[k] = v
+				continue
+			}
+			if k != "task_id" && k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && k != "trigger_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
 				args[k] = v
 			}
 		}

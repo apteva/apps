@@ -2,7 +2,7 @@ schema: apteva-app/v1
 name: processes
 display_name: Processes
 version: 0.5.0
-description: Event-driven company procedures with reusable assignments, multi-agent steps, approval gates, recurring runs, and optional Tasks execution.
+description: Company procedures and one-off tasks with multi-agent execution, approval gates, recurring runs, event triggers, and optional Tasks integration.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
 icon: /ui/icon.svg
@@ -53,6 +53,12 @@ provides:
     - { name: trigger_test_run, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_events, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_event_retry, description: "Retry a failed event against current trigger rules with a stable key." }
+    - { name: tasks, description: "Find assigned or project work across procedure tasks, standalone tasks, and added run tasks." }
+    - { name: task_runs, description: "List active runs that accept additional native tasks." }
+    - { name: task_create, description: "Create one-off work or add a required or optional task to a run." }
+    - { name: task_get, description: "Read task instructions, revision, execution context, and history." }
+    - { name: task_update, description: "Update assigned task progress or permitted settings using the current revision." }
+    - { name: task_cancel, description: "Cancel a task with a reason and its current revision." }
   ui_panels:
     - slot: project.page
       label: Processes
