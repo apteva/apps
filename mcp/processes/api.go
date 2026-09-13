@@ -114,11 +114,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			return a.execute(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
-	return out
+	return append(out, a.triggerTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if strings.HasPrefix(action, "trigger_") || action == "triggers" {
+		return a.executeTrigger(project, action, args)
+	}
 	id := str(args, "process_id")
 	switch action {
 	case "list":
@@ -350,6 +353,42 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if (path == "trigger-sources" || (len(parts) == 2 && parts[1] == "trigger-sources")) && r.Method == "GET" {
+		action = "trigger_sources"
+	}
+	if len(parts) == 4 && parts[1] == "assignments" && parts[3] == "triggers" {
+		args["process_id"] = parts[0]
+		args["assignment_id"] = parts[2]
+		if r.Method == "GET" {
+			action = "triggers"
+		}
+		if r.Method == "POST" {
+			action = "trigger_create"
+		}
+	}
+	if len(parts) >= 3 && parts[1] == "triggers" {
+		args["process_id"] = parts[0]
+		args["trigger_id"] = parts[2]
+		if len(parts) == 3 {
+			if r.Method == "GET" {
+				action = "trigger_get"
+			}
+			if r.Method == "PUT" {
+				action = "trigger_update"
+			}
+		}
+		if len(parts) == 4 {
+			if r.Method == "GET" && parts[3] == "events" {
+				action = "trigger_events"
+			}
+			if r.Method == "POST" {
+				switch parts[3] {
+				case "activate", "pause", "preview", "test_run", "event_retry":
+					action = "trigger_" + parts[3]
+				}
+			}
+		}
+	}
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -363,7 +402,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for k, v := range body {
-			if k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
+			if k != "process_id" && k != "project_id" && k != "_project_id" && k != "run_id" && k != "step_id" && k != "trigger_id" && (k != "assignment_id" || args["assignment_id"] == nil) {
 				args[k] = v
 			}
 		}

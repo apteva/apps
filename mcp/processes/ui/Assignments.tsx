@@ -1,3 +1,4 @@
+import Triggers from "./Triggers";
 import { useState } from "react";
 import { RolesEditor, type Step, type Executor } from "./Workflow";
 export type Parameter = {
@@ -689,6 +690,15 @@ export default function Assignments({
                 </>
               )}
             </div>
+            <Triggers
+              assignment={x}
+              parameters={
+                versions.find((v) => v.version === x.procedure_version)
+                  ?.definition.parameters || []
+              }
+              api={api}
+              processStatus={processStatus}
+            />
           </article>
         ))
       )}

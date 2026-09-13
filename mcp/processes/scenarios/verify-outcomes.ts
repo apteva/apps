@@ -59,7 +59,12 @@ export function verifyHistory(scenario: string, history: any) {
         !byKey.publish.task_id,
       "Publisher was released before approval",
     );
-  } else if (scenario === "processes-multi-agent-workflow") {
+  } else if (
+    [
+      "processes-multi-agent-workflow",
+      "processes-event-trigger-workflow",
+    ].includes(scenario)
+  ) {
     check(
       runs.length === 1 && runs[0].workflow && runs[0].state === "completed",
       "Expected one completed team workflow",
