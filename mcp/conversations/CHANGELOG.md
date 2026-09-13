@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.10 — 2026-09-13
+
+- Authorize delegated `GET /tool-visuals` requests with the explicit `tool_visuals.read` action. Requests without that permission remain forbidden, and the frontend keeps static icon fallbacks.
+- Add registered-route regression coverage for authorized and unauthorized delegated users.
+
+
 ## 0.23.9 — 2026-09-13
 
 - Map `GET /tool-visuals` to the explicit delegated action `tool_visuals.read`, allowing authorized external users to load integration-logo metadata instead of receiving an unconditional 403.
