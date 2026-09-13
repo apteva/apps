@@ -1,4 +1,4 @@
-# 3D Studio 0.1.1
+# 3D Studio 0.1.2
 
 First-party polygon modeling for game assets, implemented with Apteva's Go
 app-sdk **v0.81.0**. No Blender, CAD kernel, Three.js, or JavaScript server runtime.
