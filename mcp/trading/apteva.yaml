@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.10.0
+version: 0.11.0
 description: |
+  v0.11 adds out-of-sample, walk-forward, robustness, stress, and seeded
+  Monte Carlo execution validation, with live suite progress and replay artifacts.
+
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
   one of two modes:
@@ -219,6 +222,14 @@ provides:
       description: "Evaluate a completed strategy backtest against its scorecard."
     - name: strategy_promotion_update
       description: "Promote, demote, or suspend a strategy under its scorecard gate."
+    - name: validation_create
+      description: "Plan validation windows and scenario batches from captured backtests."
+    - name: validation_list
+      description: "List validation suites."
+    - name: validation_control
+      description: "Run, pause, cancel or inspect a validation suite."
+    - name: validation_report
+      description: "Read validation distributions and export reproducible suite artifacts."
     - name: agent_backtest_create
       description: "Create an agent simulation from a complete event tape."
     - name: backtest_observation

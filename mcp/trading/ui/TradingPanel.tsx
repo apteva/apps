@@ -1,3 +1,4 @@
+import { ValidationControls } from "./ValidationControls";
 // TradingPanel — native React panel for the trading app. Styled with
 // the dashboard's Tailwind theme tokens (bg-bg, text-text, border-border,
 // text-accent, …) so it matches CRM / Messaging / Storage / Finance.
@@ -473,6 +474,7 @@ interface BacktestRun {
     decision_mode?: string;
     agent_replay_only?: boolean;
     agent_waiting?: boolean;
+    validation_suite_id?: number;
     processed_events?: number;
     input_events?: number;
     simulation_time?: string;
@@ -3537,8 +3539,9 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             <div>
               {selectedRun ? (
                 <>
-                  {selectedRun.summary?.engine_version && !selectedRun.summary?.agent_replay_only && <SimulationControls run={selectedRun} api={api} onChange={load} setError={setError} />}
+                  {selectedRun.summary?.engine_version && !selectedRun.summary?.agent_replay_only && !selectedRun.summary?.validation_suite_id && <SimulationControls run={selectedRun} api={api} onChange={load} setError={setError} />}
                   <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} performance={performance} busy={busy} onAction={action} />
+ {selectedRun.summary?.engine_version && !selectedRun.summary?.agent_replay_only && <ValidationControls key={selectedRun.id} sourceId={selectedRun.id} agent={selectedRun.run_kind === "agent"} api={api} setError={setError} />}
                 </>
               ) : (
                 <EmptyState title="Select a run" />
@@ -3597,6 +3600,7 @@ export function BacktestRunDetail({ run, events, liveEvents, performance, busy, 
           {run.summary?.engine_version && <span className="text-xs text-text-dim">{done}/{total} events · {run.summary.simulation_time || "Awaiting start"}</span>}
           {run.summary?.reproduction_matches !== undefined && <span className={run.summary.reproduction_matches ? "text-green text-xs" : "text-red text-xs"}>{run.summary.reproduction_matches ? "Reproduction verified" : "Result differs from imported bundle"}</span>}
           <BacktestStatus status={run.status} />
+          {run.summary?.validation_suite_id && <span className="text-xs text-text-dim">Managed by validation suite #{run.summary.validation_suite_id}</span>}
           {run.summary?.agent_waiting && <span className="text-xs text-text-dim">Agent deciding · simulated clock paused</span>}
           {run.run_kind === "strategy" ? (
             <span className="text-xs text-text-dim">strategy #{run.strategy_id}</span>
@@ -3605,20 +3609,20 @@ export function BacktestRunDetail({ run, events, liveEvents, performance, busy, 
           )}
           {run.environment_id && <span className="text-xs text-text-dim">env {run.environment_id}</span>}
           <span className="flex-1" />
-          {run.status === "queued" || run.status === "failed" ? (
+          {!run.summary?.validation_suite_id && (run.status === "queued" || run.status === "failed") ? (
             <button disabled={busy} onClick={() => onAction(run, "start")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Start</button>
           ) : null}
-          {["queued", "failed", "running", "paused"].includes(run.status) && (run.summary?.engine_version || run.current_step < run.total_steps) && (
+          {!run.summary?.validation_suite_id && ["queued", "failed", "running", "paused"].includes(run.status) && (run.summary?.engine_version || run.current_step < run.total_steps) && (
             <button disabled={busy} onClick={() => onAction(run, "run")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Run</button>
           )}
-          {run.status === "running" && (
+          {!run.summary?.validation_suite_id && run.status === "running" && (
             <>
               <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Step</button>
               <button disabled={busy} onClick={() => onAction(run, "pause")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Pause</button>
               <button disabled={busy} onClick={() => onAction(run, "cancel")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Cancel</button>
             </>
           )}
-          {run.status === "paused" && (
+          {!run.summary?.validation_suite_id && run.status === "paused" && (
             <>
               <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Step</button>
               <button disabled={busy} onClick={() => onAction(run, "cancel")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Cancel</button>

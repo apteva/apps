@@ -19,11 +19,15 @@ Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
 sidecar serving MCP tools + REST routes, with two UI surfaces under
 `ui/` — a small dashboard panel and a rich trader-terminal SPA.
 
+Version 0.11 adds out-of-sample and walk-forward selection, robustness grids,
+stress scenarios, and seeded Monte Carlo execution uncertainty with persisted
+progress, isolated runs, and replayable artifacts. See [Validation suites](VALIDATION.md).
+
 ## Layout
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 50 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 62 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -266,6 +270,11 @@ metrics, and portable result bundles. Agents receive past-only observations,
 stage trading commands, and explicitly checkpoint decisions and memory. Recorded
 agent decisions replay without model calls. See [Event backtesting](EVENT_BACKTESTING.md) for configuration,
 API/MCP usage, feed adapters, reproduction, and execution-model assumptions.
+
+Validation suites run chronological holdouts, rolling/expanding walk-forward windows,
+strategy parameter grids, stress scenarios, and seeded execution Monte Carlo batches
+for strategies and agents. See [Validation suites](VALIDATION.md) for the UI,
+API/MCP, statistical assumptions, budgets, and reproducible reports.
 
 ## Approvals — by design, not in the sidecar
 

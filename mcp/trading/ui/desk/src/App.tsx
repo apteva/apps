@@ -251,7 +251,7 @@ export function App() {
                     <span className="text-[10px] t-tertiary mono">{t.count}</span>
                   </button>
                 ))}
-                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.10.0 · event driven</span>
+                <span className="ml-auto pr-2 text-[10px] t-tertiary mono">v0.11.0 · event driven</span>
               </div>
 
               <div className="flex-1 min-h-0 mt-1.5">

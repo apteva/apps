@@ -225,6 +225,13 @@ not an order-book reconstruction: latency fills wait until the next available
 quote, limit/stop triggers use quotes rather than inferred intrabar paths, and
 volume impact is an estimate. Import finer quote data for finer execution timing.
 
+## Validation suites
+
+Use a captured event run as the source of out-of-sample, walk-forward, robustness,
+stress, or execution Monte Carlo validation. Strategies and agents use the same
+engine, with warmup separated from financial results and training-only candidate
+selection. See [Validation suites](VALIDATION.md) for configuration and limits.
+
 ## Reproduction and result artifacts
 
 State and each timestamp's event outputs commit in one database transaction

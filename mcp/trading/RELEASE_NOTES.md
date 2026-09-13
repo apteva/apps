@@ -1,57 +1,55 @@
-# Trading v0.10.0
+# Trading v0.11.0
 
-Trading now runs rule-based strategies and agents through the same event-driven
-historical simulation engine. Agents can react to prices, delayed sentiment,
-news, custom events, and fill notifications while the UI shows replay progress.
+Trading adds validation suites to the shared strategy and agent event simulator.
+A captured backtest can now be evaluated across held-out windows, parameter
+candidates, and execution scenarios, with persisted progress in the dashboard.
 
 ## Changes
 
-- Deterministic event ordering, configurable order/cancel latency, partial fills,
-  transaction costs, portfolio risk checks, benchmark metrics, and durable
-  checkpoints.
-- Generic inputs with separate event and availability timestamps, preventing
-  historical feeds from exposing information before it arrived.
-- Agent simulation with isolated observations and staged orders, explicit
-  decision completion and memory, bounded history and decision budgets, and
-  pause/resume/cancel controls.
-- Portable artifacts with input and result hashes, engine provenance, and
-  recorded agent observations, commands, memory, and accepted tool calls.
-  Recorded agent runs replay without model calls and reject missing or changed
-  decisions.
-- Broker account/environment verification, Alpaca paper routing and client-ID
-  recovery, crypto historical data and ambiguous-submission recovery fixes.
-- Corrected strategy candle timing, realized P&L, execution-policy capture,
-  simulation controls, and SDK dependency pin (v0.77.0).
+- Out-of-sample validation selects candidates on a chronological training window
+  and reports performance separately on its held-out test window.
+- Rolling or expanding walk-forward validation repeats training-only selection
+  across disjoint test windows, with past-only indicator warmup.
+- Robustness tests compare strategy parameter grids and execution scenarios.
+- Stress tests exercise higher costs, delayed execution and features, reduced
+  liquidity, and market-price shocks.
+- Seeded Monte Carlo samples execution costs and latency on the captured market
+  path, reporting percentiles, drawdowns, and threshold frequencies.
+- Validation UI and four MCP tools expose creation, progress, pause/resume/cancel,
+  reports, and downloadable suite artifacts with replayable child runs.
+- Each case has isolated capital, portfolio state and agent memory. Durable
+  checkpoints, inference budgets, restart recovery, and project scope apply.
 
-## Upgrade and execution notes
+This release includes v0.10's event-driven strategy/agent simulations, generic
+prices/news/sentiment inputs, recorded agent replay, order latency and partial
+fills, transaction costs, portfolio risk, benchmarks, and broker hardening.
 
-Migrations 019 and 020 add simulation checkpoints, output ledgers, and agent
-decision storage. Existing runs retain their original execution model; create
-new runs to use the event simulator. Saved simulation artifacts require the
-matching engine source fingerprint.
+## Upgrade notes and limits
 
-Fresh agent simulations inherit source runtime model settings and can differ.
-Deterministic reproduction uses recorded decisions. Inference freezes the
-simulation clock; model wall-clock time is not added to execution latency.
-The source agent must have access to the replay observation and completion tools.
+Migration 021 adds validation suite storage. Create fresh source backtests after
+upgrading: simulation artifacts require their matching engine source fingerprint.
+The dashboard includes **Validation** under Backtests. Existing running installs
+must be upgraded separately after this release is published.
 
-News and sentiment feeds are supplied as timestamped inputs; this release does
-not add provider subscriptions. Alpaca recovery requires the companion
-integrations catalog update exposing `get_order_by_client_order_id` and the
-credential-selected paper/live host. Publishing these sources does not upgrade
-the integrations catalog embedded in an existing server.
+Monte Carlo models execution uncertainty, not generated future market paths.
+Walk-forward links independent test-window returns, not a continuously held
+portfolio. Stress news remains captured content, not a coherent market/news
+scenario generator. Agent suites can incur model costs; exact reproduction uses
+recorded decisions. Broker and inference transports are covered by mocked tests;
+no real broker order or model inference is part of release validation.
 
-The execution model is cash-funded and long-only. Bar-derived quotes are an
-approximation of liquidity, not an order-book reconstruction. Model training
-knowledge can still bias historical agent evaluations.
+See [Validation suites](VALIDATION.md) for configurations, window semantics,
+limits, and API examples, and [Event backtesting](EVENT_BACKTESTING.md) for the
+shared strategy/agent simulator.
 
-## Validation
+## Release verification
 
-Release checks cover Go tests and race detection, simulator/agent replay,
-interrupted decisions and recovery, UI interaction tests, TypeScript checks,
-production UI builds, and the companion Alpaca catalog regression tests.
-Runtime lifecycle and broker tests use mocks; no real model session or broker
-order was executed. Publishing this release does not update running installs.
-
-See [Event backtesting](EVENT_BACKTESTING.md) for API/MCP examples and the agent
-prices, sentiment, and news workflow.
+- Full Go short suite, targeted validation/agent race tests, all 11 UI tests,
+  strict TypeScript checks, and both production UI builds passed.
+- The release binary captured August 2026 AAPL prices from Yahoo Finance and
+  BTC/USDT prices from Binance in an isolated local database.
+- All five validation methods completed for both assets: 10 suites and 264 child
+  runs, including 100 Monte Carlo samples per asset plus baseline cases.
+- An exported Monte Carlo child from each asset replayed with an identical
+  result hash. These checks used deterministic fixed-allocation strategies,
+  not model inference or broker orders.
