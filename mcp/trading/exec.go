@@ -680,10 +680,11 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 	}
 
 	type plan struct {
-		symbol string
-		side   string
-		qty    float64
-		price  float64
+		symbol  string
+		side    string
+		qty     float64
+		price   float64
+		qtyStep float64
 	}
 	sells := []plan{}
 	buys := []plan{}
@@ -698,6 +699,7 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 		if err != nil || mark == nil || mark.Price <= 0 {
 			return nil, false, fmt.Errorf("executable mark unavailable for %s", symbol)
 		}
+		profile := resolveVenueProfile(e.db, pf, symbol, inferAssetClass(symbol))
 		curValue := currentQty[symbol] * mark.Price
 		targetValue := equity * targets[symbol]
 		diff := targetValue - curValue
@@ -705,15 +707,15 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 			continue
 		}
 		if diff > 0 {
-			qty := floor4(diff / mark.Price)
+			qty := floorStrategyOrderQuantity(diff/mark.Price, profile.QtyStep)
 			if qty > 0 {
-				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price})
+				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 			}
 			continue
 		}
-		qty := floor4(math.Min(currentQty[symbol], -diff/mark.Price))
+		qty := floorStrategyOrderQuantity(math.Min(currentQty[symbol], -diff/mark.Price), profile.QtyStep)
 		if qty > 0 {
-			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price})
+			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price, qtyStep: profile.QtyStep})
 		}
 	}
 	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
@@ -733,7 +735,7 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 	if desiredBuyCost > budget && desiredBuyCost > 0 {
 		scale := math.Max(0, budget/desiredBuyCost)
 		for i := range buys {
-			buys[i].qty = floor4(buys[i].qty * scale)
+			buys[i].qty = floorStrategyOrderQuantity(buys[i].qty*scale, buys[i].qtyStep)
 		}
 	}
 	if err := persistRebalance(e.db, pf, strategy, assignment, eval); err != nil {
@@ -779,6 +781,15 @@ func placeStrategyPaperOrders(e *engine, app *sdk.AppCtx, pf *Portfolio, strateg
 		return created, false, err
 	}
 	return created, false, nil
+}
+
+// Strategy orders use the same quantity grid as the venue pre-trade check.
+// Reapply the grid after cash scaling, which can otherwise create off-lot buys.
+func floorStrategyOrderQuantity(qty, step float64) float64 {
+	if step <= 0 {
+		return floor4(qty)
+	}
+	return math.Floor(qty/step+1e-9) * step
 }
 
 func floor4(v float64) float64 {
