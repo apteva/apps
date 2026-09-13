@@ -51,7 +51,7 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     return Response.json(
       location.search.includes("no_agents")
         ? []
-        : missingAgent ? [{ id: 1105, name: "My Test Agent First" }] : [{ id: 7, name: "Weather agent" }],
+        : missingAgent ? [{ id: 1105, name: "My Test Agent First" }] : [{ id: 7, name: location.search.includes("long_agent") ? "Barcelona weather operations coordinator" : "Weather agent" }],
     );
   if (init?.method === "PUT" || init?.method === "POST") {
     const body = JSON.parse(String(init.body));
