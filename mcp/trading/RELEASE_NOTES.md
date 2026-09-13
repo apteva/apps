@@ -1,3 +1,10 @@
+# Trading v0.13.1
+
+- Quantize automated strategy buys and sells to each symbol's effective venue lot size, including after cash-budget scaling. This prevents valid allocations such as BNB from repeatedly failing the execution quantity check.
+- Regression coverage exercises accepted and filled buys, sells, and cash-constrained orders through the virtual execution pipeline.
+
+No migrations or new permissions. Fixed strategy definitions are unchanged.
+
 # Trading v0.13.0
 
 Strategies can now size eligible assets by inverse volatility, allowing the fixed SMA300 crypto strategy to run in virtual portfolios with the same weights used in research.

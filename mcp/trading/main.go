@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.13.0
+version: 0.13.1
 description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg

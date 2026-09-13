@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.13.0
+version: 0.13.1
 description: |
   v0.13 adds inverse-volatility strategy sizing and corrects decimal-lot
   simulation fills, with fixed-parameter virtual portfolios and replay artifacts.
