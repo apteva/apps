@@ -116,7 +116,7 @@ export function pick(
   return result;
 }
 export function renderer(canvas: HTMLCanvasElement) {
-  const gl = canvas.getContext("webgl", { antialias: true, alpha: false });
+  const gl = canvas.getContext("webgl", { antialias: true, alpha: true });
   if (!gl) throw new Error("This browser does not support WebGL.");
   const shader = (type: number, source: string) => {
     const s = gl.createShader(type)!;
@@ -136,6 +136,23 @@ export function renderer(canvas: HTMLCanvasElement) {
   gl.deleteShader(fs);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS))
     throw new Error("Could not link viewport shaders");
+  // Resolve CSS colors using the browser, including color-mix/oklch themes.
+  // Convert sRGB to the linear input expected by our shader.
+  const swatch = document.createElement("canvas");
+  swatch.width = swatch.height = 1;
+  const context = swatch.getContext("2d", { willReadFrequently: true })!;
+  const themeColors = new Map<string, number[]>();
+  const linearColor = (css: string) => {
+    let value = themeColors.get(css);
+    if (!value) {
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = css;
+      context.fillRect(0, 0, 1, 1);
+      value = Array.from(context.getImageData(0, 0, 1, 1).data).slice(0, 3).map(c => Math.pow(c / 255, 2.2));
+      themeColors.set(css, value);
+    }
+    return value;
+  };
   const buffer = gl.createBuffer()!;
   const draw = (data: number[], mode: number, pointSize: number) => {
     if (!data.length) return;
@@ -169,7 +186,7 @@ export function renderer(canvas: HTMLCanvasElement) {
       }
       const { center, size } = frame(model);
       gl.viewport(0, 0, width, height);
-      gl.clearColor(0.055, 0.071, 0.093, 1);
+      gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
       gl.enable(gl.DEPTH_TEST);
       gl.depthFunc(gl.LEQUAL);
@@ -185,11 +202,14 @@ export function renderer(canvas: HTMLCanvasElement) {
         (1.6 * camera.zoom) / size,
       );
       gl.uniform1f(gl.getUniformLocation(program, "aspect"), width / height);
+      const theme = getComputedStyle(canvas);
+      const gridColor = linearColor(theme.color);
+      const axisColor = linearColor(theme.borderTopColor);
       const grid: number[] = [];
       const step = Math.pow(10, Math.floor(Math.log10(size / 5))),
         extent = step * 15;
       for (let i = -15; i <= 15; i++) {
-        const col = i === 0 ? [0.15, 0.23, 0.29] : [0.065, 0.085, 0.11];
+        const col = i === 0 ? axisColor : gridColor;
         grid.push(
           -extent,
           0,
