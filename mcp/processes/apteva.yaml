@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.9.3
+version: 0.10.0
 description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and native one-off tasks.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -101,6 +101,21 @@ provides:
       icon: clipboard-list
       entry: /ui/ProcessesPanel.mjs
       suggested: true
+  ui_components:
+    - name: process-overview
+      label: Processes
+      description: Running, scheduled, and recent procedure executions.
+      entry: /ui/ProcessOverviewWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [process.updated, process.state_changed, assignment.updated, assignment.state_changed, run.created, run.updated, run.state_changed, task.updated, task.state_changed, task.approval_requested, task.approval_resolved]
+      settings_schema:
+        type: object
+        properties:
+          recent_limit: {type: integer, default: 5, minimum: 1, maximum: 12}
   skills:
     - name: how-to-use-processes
       body_file: skills/how-to-use-processes.md
@@ -111,7 +126,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.9.3
+    ref: processes/v0.10.0
     entry: mcp/processes
   port: 8080
   health_check: /health
