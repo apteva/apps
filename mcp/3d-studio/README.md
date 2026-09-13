@@ -1,4 +1,4 @@
-# 3D Studio 0.1
+# 3D Studio 0.1.1
 
 First-party polygon modeling for game assets, implemented with Apteva's Go
 app-sdk **v0.81.0**. No Blender, CAD kernel, Three.js, or JavaScript server runtime.
@@ -48,6 +48,10 @@ cd apps/mcp/3d-studio
 GOWORK=off go test -race ./...
 ./scripts/build.sh
 ```
+
+The panel build explicitly selects production JSX and rejects development-runtime imports.
+The preview loads the shipped panel bundle against the dashboard vendor import map,
+so it exercises the same React module boundary as installed apps.
 
 The build creates `ui/engine.wasm`, its matching Go `wasm_exec.js`, the panel
 bundle, and `/tmp/apteva-3d-studio`. Built UI files ship with the source app so
