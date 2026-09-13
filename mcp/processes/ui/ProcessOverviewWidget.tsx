@@ -82,7 +82,7 @@ export function overviewLink(props: Props, x?: Item, assignment = false) {
   }
   return `/apps/${encodeURIComponent(app)}/page?${q}`;
 }
-const css = `.po-widget{font:13px/1.45 system-ui;color:var(--color-text,#eceef2);background:var(--color-bg-card,#181b21);border:1px solid var(--color-border,#30343e);border-radius:12px;padding:16px;box-sizing:border-box;height:100%;max-height:760px;min-width:0;overflow:auto}.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget h3,.po-widget p{margin:0}.po-widget h2{font-size:15px}.po-widget h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted,#969eac);margin:18px 0 7px}.po-widget header,.po-widget .po-line{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.po-widget .po-sub{font-size:11px;color:var(--color-text-muted,#969eac);overflow-wrap:anywhere}.po-widget a{color:var(--color-accent,#a6afff);text-decoration:none;font-size:11px}.po-widget button{font:inherit;font-size:11px;color:inherit;background:transparent;border:1px solid var(--color-border,#30343e);padding:5px 9px;border-radius:6px;cursor:pointer}.po-widget :is(a,button,summary):focus-visible{outline:2px solid var(--color-accent,#a6afff);outline-offset:3px}.po-widget .po-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;padding:13px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget .po-stats b{display:block;font-size:22px;font-weight:650}.po-widget .po-stats span{font-size:11px;color:var(--color-text-muted,#969eac)}.po-widget article{padding:10px 0;border-bottom:1px solid var(--color-border,#30343e);overflow-wrap:anywhere}.po-widget .po-badge{font-size:10px;border-radius:8px;background:#969eac18;padding:2px 7px;white-space:nowrap;text-transform:capitalize}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#9caaff}.po-widget .po-badge.completed{color:#64cba5}.po-widget .po-badge.waiting,.po-widget .po-badge.blocked,.po-widget .po-badge.failed,.po-widget .po-warning{color:#e3b86d}.po-widget .po-warning{font-size:11px;margin:6px 0}.po-widget progress{display:block;width:100%;height:4px;margin:7px 0;accent-color:var(--color-accent,#a6afff)}.po-widget summary{cursor:pointer;font-size:11px;padding:6px 0}.po-widget ol{padding:0;list-style:none;margin:3px 0}.po-widget li{padding:5px 0 5px 10px;border-left:2px solid var(--color-border,#30343e)}.po-widget .po-live{margin:4px 0}.po-widget .po-empty{padding:5px 0}.po-widget footer{padding-top:12px}.po-widget[data-size=full] .po-columns{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:22px}@media(max-width:600px){.po-widget[data-size=full] .po-columns{display:block}.po-widget{padding:12px}}`;
+const css = `.po-widget{font:12px/1.35 system-ui;color:var(--color-text,#eceef2);background:var(--color-bg-card,#181b21);border:1px solid var(--color-border,#30343e);border-radius:8px;padding:12px;box-sizing:border-box;height:100%;max-height:520px;min-width:0;overflow:auto}.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget h3,.po-widget p{margin:0}.po-widget h2{font-size:14px}.po-widget h3{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted,#969eac);margin:12px 0 4px}.po-widget header,.po-widget .po-line{display:flex;gap:6px;align-items:center;justify-content:space-between;flex-wrap:wrap}.po-widget .po-sub{font-size:10px;color:var(--color-text-muted,#969eac);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget a{color:var(--color-accent,#a6afff);text-decoration:none;font-size:10px}.po-widget button{font:inherit;font-size:10px;color:inherit;background:transparent;border:1px solid var(--color-border,#30343e);padding:3px 7px;border-radius:5px;cursor:pointer}.po-widget .po-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:9px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget .po-stats b{display:inline;font-size:18px;margin-right:4px}.po-widget .po-stats span{font-size:10px;color:var(--color-text-muted,#969eac)}.po-widget article{padding:6px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget article:last-child{border-bottom:0}.po-widget .po-badge{font-size:9px;border-radius:6px;background:#969eac18;padding:1px 5px;white-space:nowrap;text-transform:capitalize}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#9caaff}.po-widget .po-badge.completed{color:#64cba5}.po-widget .po-badge.waiting,.po-widget .po-badge.blocked,.po-widget .po-badge.failed,.po-widget .po-warning{color:#e3b86d}.po-widget .po-warning{font-size:10px;margin:3px 0}.po-widget progress{display:block;width:100%;height:3px;margin:4px 0}.po-widget summary{cursor:pointer;font-size:10px;padding:3px 0}.po-widget ol{padding:0;list-style:none;margin:2px 0}.po-widget li{padding:3px 0 3px 7px;border-left:2px solid var(--color-border,#30343e)}.po-widget .po-live{margin:2px 0}.po-widget footer{padding-top:7px}.po-widget .po-filters{display:flex;gap:4px;overflow-x:auto;padding:7px 0;border-bottom:1px solid var(--color-border,#30343e)}.po-widget .po-filters button{border:0;color:var(--color-text-muted,#969eac);padding:3px 6px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#a6afff);background:#969eac18}@media(max-width:600px){.po-widget{padding:10px}}`;
 export default function ProcessOverviewWidget(props: Props) {
   return (
     <Overview
@@ -92,7 +92,8 @@ export default function ProcessOverviewWidget(props: Props) {
   );
 }
 function Overview(props: Props) {
-  const [data, setData] = useState<Data | null>(null),
+  const [view, setView] = useState("active"),
+    [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [refresh, setRefresh] = useState(0),
     [names, setNames] = useState<Record<number, string>>({});
@@ -305,53 +306,63 @@ function Overview(props: Props) {
               {w}
             </p>
           ))}
-          <div className="po-columns">
-            <div>
-              {props.widgetSettings?.show_active !== false && (
-                <>
-                  <h3>Running and attention</h3>
-                  {data.active.map((x) => row(x))}
-                  {data.attention.map((x) => row(x, true))}
-                  {!data.active.length && !data.attention.length && (
-                    <p className="po-sub po-empty">
-                      Nothing running or needing attention.
-                    </p>
-                  )}
-                  {data.counts.active > data.active.length && (
-                    <p className="po-sub">
-                      Showing {data.active.length} of {data.counts.active}{" "}
-                      active runs.
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-            <div>
-              {props.widgetSettings?.show_upcoming !== false && (
-                <>
-                  <h3>Upcoming schedules</h3>
-                  {data.upcoming.slice(0, 4).map((x) => row(x, true))}
-                  {!data.upcoming.length && (
-                    <p className="po-sub po-empty">No upcoming schedules.</p>
-                  )}
-                  {data.counts.scheduled > 4 && (
-                    <p className="po-sub">
-                      Showing the next 4 of {data.counts.scheduled} schedules.
-                    </p>
-                  )}
-                </>
-              )}
-              {props.widgetSettings?.show_recent !== false && (
-                <>
-                  <h3>Recent outcomes</h3>
-                  {data.recent.slice(0, limit).map((x) => row(x))}
-                  {!data.recent.length && (
-                    <p className="po-sub po-empty">No past executions.</p>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
+          <nav className="po-filters" aria-label="Filter processes">
+            {["active", "scheduled", "recent"].map((key) => (
+              <button
+                type="button"
+                key={key}
+                aria-pressed={view === key}
+                onClick={() => setView(key)}
+              >
+                {key[0].toUpperCase() + key.slice(1)}
+                {key === "active"
+                  ? ` · ${data.counts.active}`
+                  : key === "scheduled"
+                    ? ` · ${data.counts.scheduled}`
+                    : ` · ${data.counts.recent}`}
+              </button>
+            ))}
+          </nav>
+          <h3>
+            {view === "active"
+              ? "Running and attention"
+              : view === "scheduled"
+                ? "Upcoming schedules"
+                : "Recent outcomes"}
+          </h3>
+          {(view === "active"
+            ? [
+                ...data.active,
+                ...data.attention.map((x) => ({
+                  ...x,
+                  state: x.state || "attention",
+                })),
+              ]
+            : view === "scheduled"
+              ? data.upcoming
+              : data.recent
+          )
+            .slice(0, limit)
+            .map((x) =>
+              row(
+                x,
+                view === "scheduled" ||
+                  (view === "active" && x.state === "sync pending"),
+              ),
+            )}
+          {(view === "active"
+            ? data.active.length + data.attention.length
+            : view === "scheduled"
+              ? data.upcoming.length
+              : data.recent.length) === 0 && (
+            <p className="po-sub po-empty">
+              {view === "active"
+                ? "Nothing running or needing attention."
+                : view === "scheduled"
+                  ? "No upcoming schedules."
+                  : "No recent executions."}
+            </p>
+          )}
           <footer className="po-line">
             <span className="po-sub">Updated {when(data.generated_at)}</span>
             <a href={overviewLink(props)}>All processes ↗</a>
