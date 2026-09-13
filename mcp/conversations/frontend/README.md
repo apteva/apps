@@ -137,7 +137,14 @@ explicit `agent_ids`, and only the required actions:
 - Chat: `chat.read`, `chat.create`, `message.read`, `message.send`, `stream.read`,
   `chat.seen`, `delivery.read`.
 - Optional owner operations: `chat.update`, `chat.delete`, `delivery.retry`.
+- Optional integration logos: `tool_visuals.read` for `GET /tool-visuals`.
 - Own inbox and cards: `inbox.read`, `inbox.dismiss`, `approval.act`.
+
+Integration-logo metadata requires the exact `tool_visuals.read` action in the
+issuer policy, alongside the usual explicit `agent_ids`. Chat/message read
+permissions do not imply this action. Requests without it remain forbidden;
+the frontend retains its static icon registry if metadata is unavailable.
+This action grants visual metadata only, not chat access or tool execution.
 
 External subjects are isolated by project, issuer app/install, organization and
 subject type/ID. Migration 010 creates the app-local identity map; negative local
@@ -215,7 +222,7 @@ Images are delivered as actual Core `image_url` content parts in the existing co
 ## Pinning the shared UI in a TypeScript host
 
 ```sh
-bun add @apteva/conversations@0.23.8
+bun add @apteva/conversations@0.23.9
 ```
 
 ```tsx

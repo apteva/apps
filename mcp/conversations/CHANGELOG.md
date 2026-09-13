@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.9 — 2026-09-13
+
+- Map `GET /tool-visuals` to the explicit delegated action `tool_visuals.read`, allowing authorized external users to load integration-logo metadata instead of receiving an unconditional 403.
+- Document the exact issuer-policy permission and cover the registered route with allowed/denied tests. Metadata access does not grant conversation access; fallback icons remain available without the permission.
+
 ## 0.23.8 — 2026-09-13
 
 - Add typed `composer={{ layout: "single-line" }}` with a fixed one-row textarea and inline attachment/send controls, preserving multiline drafts, images, screenshots, French labels and pause behavior. Existing compact/auto modes still grow with text.

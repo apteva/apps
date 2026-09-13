@@ -145,6 +145,8 @@ func delegatedAction(method, path string) string {
 		return "chat.read"
 	case "GET /agents":
 		return "chat.read"
+	case "GET /tool-visuals":
+		return "tool_visuals.read"
 	case "GET /inbox":
 		return "inbox.read"
 	case "POST /message-action":
