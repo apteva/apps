@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.12 — 2026-09-13
+
+- Hide integration logos in narrow chat tool rows (up to 640px) so tool text and status controls remain aligned and readable. Roomy chats keep the existing icons.
+
 ## 0.23.11 — 2026-09-13
 
 - Preserve both direct Core vision content and the bound Storage `file_id` for image attachments. Downstream tools can now attach the original image after the agent receives it.

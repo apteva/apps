@@ -216,6 +216,18 @@
   }
 }
 
+/* Integration logos are useful in roomy transcripts but crowd narrow chat
+ * rows. Keep the status text and controls readable in compact embeds. */
+@media (max-width: 640px) {
+  .apteva-conversations .chat-tool-icon,
+  .apteva-conversations .chat-tool-icon-stack-running {
+    display: none;
+  }
+  .apteva-conversations .chat-tool-activity {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}
+
 }
 
 /* One type and spacing scale for the input and both composer controls. */

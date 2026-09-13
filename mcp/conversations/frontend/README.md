@@ -222,7 +222,7 @@ Images are delivered as actual Core `image_url` content parts in the existing co
 ## Pinning the shared UI in a TypeScript host
 
 ```sh
-bun add @apteva/conversations@0.23.11
+bun add @apteva/conversations@0.23.12
 ```
 
 ```tsx
