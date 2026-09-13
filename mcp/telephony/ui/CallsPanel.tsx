@@ -2797,7 +2797,7 @@ interface RoutingSimulation { valid: boolean; errors?: string[]; trace?: Array<{
 interface RoutingBulkValidation { valid: boolean; errors?: string[]; numbers: Array<{ route_id: string; phone_number?: string; carrier?: string; valid: boolean; errors?: string[] }> }
 
 const NODE_LABELS: Record<string, string> = {
-  announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
+  decision: "Routing decision", announcement: "Announcement", schedule: "Business hours", caller_match: "Caller rule",
   dtmf_menu: "Keypad menu", destination: "Destination", ring_group: "Ring group",
   voicemail: "Voicemail", reject: "Reject", hangup: "Hang up",
 };
@@ -3085,6 +3085,12 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
   const [busy, setBusy] = useState(false);
   const [simulation, setSimulation] = useState<RoutingSimulation | null>(null);
   const [caller, setCaller] = useState("+33600000000");
+  const [mockDecisions, setMockDecisions] = useState("{}");
+  const [traceCallId, setTraceCallId] = useState("");
+  const [decisionTrace, setDecisionTrace] = useState<unknown>(null);
+  const [personal, setPersonal] = useState(false);
+  const [capacityIdentity, setCapacityIdentity] = useState({issuer_app:"auth", issuer_install_id:"", subject_type:"user", subject_id:"", organization_id:""});
+  const [capacityLimit, setCapacityLimit] = useState(1);
   const [routeIds, setRouteIds] = useState<string[]>([]);
   const [destinationForm, setDestinationForm] = useState({ name: "Browser operator", kind: "browser", target: "", directive: "" });
   const [groupForm, setGroupForm] = useState({ name: "Team", strategy: "simultaneous", timeout_sec: 20, members: [] as string[] });
@@ -3141,7 +3147,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
   const simulate = async () => {
     setBusy(true);
     try {
-      const result = await postJSON<RoutingSimulation>(api("/routing/flows/simulate"), { id: selectedId, draft, context: { caller } });
+      const result = await postJSON<RoutingSimulation>(api("/routing/flows/simulate"), { id: selectedId, draft, context: { caller, decisions: JSON.parse(mockDecisions) } });
       setSimulation(result); setStatus(result.valid ? "Simulation completed" : (result.errors || []).join(" · "));
     } catch (error) { setStatus((error as Error).message || "Simulation failed"); } finally { setBusy(false); }
   };
@@ -3160,6 +3166,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
     const node: RoutingNode = { id, type, label: NODE_LABELS[type] || type, config: {} };
     if (type === "destination" && snapshot.destinations[0]) node.config = { destination_id: snapshot.destinations[0].id };
     if (type === "ring_group" && snapshot.ring_groups[0]) node.config = { ring_group_id: snapshot.ring_groups[0].id };
+    if (type === "decision") { node.config = { function_id: 0, timeout_ms: 2000, ring_timeout_seconds: 20, destination_ids: [] }; node.branches = { fallback: "" }; }
     if (type === "announcement") node.config = { text: "Welcome. Please wait while we connect you." };
     if (type === "schedule") { node.config = { timezone: "Europe/Paris", days: ["mon", "tue", "wed", "thu", "fri"], start: "09:00", end: "18:00" }; node.branches = { open: "", closed: "" }; }
     if (type === "dtmf_menu") { node.config = { prompt: "Press 1 for sales, or 2 for support." }; node.branches = { "1": "", "2": "", default: "" }; }
@@ -3172,6 +3179,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
     const kind = destinationForm.kind;
     let config: Record<string, unknown> = {};
     if (kind === "agent" || kind === "ai") config = { agent_id: Number(destinationForm.target), directive: destinationForm.directive };
+    if (kind === "browser" && personal) config = {capacity: {identity:capacityIdentity, concurrent_call_limit:capacityLimit}};
     if (kind === "pstn") config = { phone_number: destinationForm.target };
     if (kind === "sip") config = { uri: destinationForm.target };
     setBusy(true);
@@ -3245,6 +3253,10 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
         <section className="rounded border border-border p-3">
           <h3 className="text-sm font-semibold">Test and assign</h3>
           <Field label="Simulated caller" value={caller} onChange={setCaller} />
+          {draft.nodes.some(n=>n.type==="decision") ? <label className="block mt-2"><span className="text-xs text-text-muted">Mock decisions by node ID (JSON)</span><textarea aria-label="Mock decisions" className="w-full rounded border border-border bg-bg p-2 text-xs font-mono" rows={4} value={mockDecisions} onChange={e=>setMockDecisions(e.target.value)}/><span className="text-xs text-text-dim">No function runs during simulation. An omitted decision follows its fallback.</span></label> : null}
+          <Field label="Call ID for decision trace" value={traceCallId} onChange={setTraceCallId}/>
+          <button className="h-9 border border-border rounded px-2 text-xs" disabled={!traceCallId || busy} onClick={async()=>{try{const response=await fetch(api("/routing/decisions")+(projectId?"&":"?")+"call_id="+encodeURIComponent(traceCallId),{credentials:"same-origin"});if(!response.ok)throw new Error(await response.text());setDecisionTrace(await response.json());}catch(e){setStatus((e as Error).message);}}}>Load decision trace</button>
+          {decisionTrace ? <pre className="max-h-64 overflow-auto text-xs whitespace-pre-wrap">{JSON.stringify(decisionTrace,null,2)}</pre> : null}
           <div className="mt-2"><div className="mb-1 flex items-center justify-between"><span className="text-xs text-text-muted">Inbound numbers</span><button type="button" onClick={() => setRouteIds(snapshot.routes.map((route) => route.id))} className="text-xs text-accent">Select all</button></div><div className="max-h-48 space-y-1 overflow-auto rounded border border-border p-2">{snapshot.routes.map((route) => <label key={route.id} className="flex cursor-pointer items-center gap-2 text-xs"><input type="checkbox" checked={routeIds.includes(route.id)} onChange={(event) => setRouteIds(event.target.checked ? [...routeIds, route.id] : routeIds.filter((id) => id !== route.id))} /><span className="font-mono">{route.phone_number}</span>{route.flow_id === selectedId ? <span className="ml-auto text-success">assigned</span> : null}</label>)}</div></div>
           <button type="button" onClick={assign} disabled={busy || !selected?.published_version_id || !routeIds.length} className="mt-2 h-9 w-full rounded border border-border text-sm disabled:opacity-50">Assign to {routeIds.length || 0} selected</button>
         </section>
@@ -3253,6 +3265,7 @@ function AdvancedRoutingEditor({ projectId }: Pick<NativePanelProps,"projectId">
           <h3 className="text-sm font-semibold">New destination</h3>
           <Field label="Name" value={destinationForm.name} onChange={(name) => setDestinationForm({ ...destinationForm, name })} />
           <label className="block"><span className="mb-1 block text-xs text-text-muted">Type</span><select value={destinationForm.kind} onChange={(event) => setDestinationForm({ ...destinationForm, kind: event.target.value })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm"><option value="browser">Browser user</option><option value="ai">AI agent</option><option value="agent">Agent offer</option><option value="pstn">External number</option><option value="sip">SIP endpoint</option><option value="voicemail">Voicemail</option></select></label>
+          {destinationForm.kind === "browser" ? <div className="space-y-2"><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={personal} onChange={e=>setPersonal(e.target.checked)}/>Assign to one user with a call limit</label>{personal ? <><Field label="Identity provider app" value={capacityIdentity.issuer_app} onChange={issuer_app=>setCapacityIdentity(v=>({...v,issuer_app}))}/><Field label="Identity provider installation ID" value={capacityIdentity.issuer_install_id} onChange={issuer_install_id=>setCapacityIdentity(v=>({...v,issuer_install_id}))}/><Field label="User ID" value={capacityIdentity.subject_id} onChange={subject_id=>setCapacityIdentity(v=>({...v,subject_id}))}/><Field label="Organization ID (if applicable)" value={capacityIdentity.organization_id} onChange={organization_id=>setCapacityIdentity(v=>({...v,organization_id}))}/><Field label="Concurrent calls (1–10)" type="number" value={String(capacityLimit)} onChange={v=>setCapacityLimit(Number(v))}/><p className="text-xs text-text-muted">Grant this identity access to the destination before publishing a decision flow.</p></> : <p className="text-xs text-text-muted">Shared operator pool. Routing decisions require an individually assigned destination.</p>}</div> : null}
           {destinationForm.kind === "agent" || destinationForm.kind === "ai" ? <Field label="Agent ID" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} type="number" /> : null}
           {destinationForm.kind === "pstn" ? <Field label="Telephone (E.164)" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
           {destinationForm.kind === "sip" ? <Field label="SIP URI" value={destinationForm.target} onChange={(target) => setDestinationForm({ ...destinationForm, target })} /> : null}
@@ -3284,6 +3297,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
   const NextSelect = ({ label = "Then", value = node.next || "", onChange = (next: string) => update({ next }) }: { label?: string; value?: string; onChange?: (value: string) => void }) => <label className="block"><span className="mb-1 block text-xs text-text-muted">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select next step</option>{options.map((item) => <option key={item.id} value={item.id}>{item.label || item.id}</option>)}</select></label>;
   return (
     <div className="mt-3 grid gap-3 md:grid-cols-2">
+      {node.type === "decision" ? <><Field label="Function ID (bound Functions app, active version)" type="number" value={String(node.config?.function_id || "")} onChange={v=>setConfig("function_id",Number(v))}/><Field label="Decision deadline (100–5000 ms)" type="number" value={String(node.config?.timeout_ms ?? 2000)} onChange={v=>setConfig("timeout_ms",Number(v))}/><Field label="Maximum ring time (5–60 seconds)" type="number" value={String(node.config?.ring_timeout_seconds ?? 20)} onChange={v=>setConfig("ring_timeout_seconds",Number(v))}/><NextSelect label="Fallback on error, unavailable or no answer" value={node.branches?.fallback || ""} onChange={v=>setBranch("fallback",v)}/><label className="block md:col-span-2"><span className="text-xs text-text-muted">Variables sent to the function (JSON object)</span><textarea key={node.id} defaultValue={JSON.stringify(node.config?.variables || {},null,2)} rows={3} className="w-full rounded border border-border bg-bg p-2 text-xs font-mono" onBlur={e=>{try{const value=JSON.parse(e.target.value);if(!value||Array.isArray(value)||typeof value!=="object")throw new Error("Enter a JSON object");setConfig("variables",value);e.target.setCustomValidity("");}catch{e.target.setCustomValidity("Enter a valid JSON object");e.target.reportValidity();}}}/></label><div className="md:col-span-2"><span className="text-xs text-text-muted">Permitted individual destinations</span>{destinations.filter(d=>d.enabled && d.kind==="browser" && d.config.capacity).map(d=><label key={d.id} className="flex items-center gap-2 text-xs py-1"><input type="checkbox" checked={((node.config?.destination_ids || []) as string[]).includes(d.id)} onChange={e=>{const ids=(node.config?.destination_ids || []) as string[];setConfig("destination_ids",e.target.checked?[...ids,d.id]:ids.filter(id=>id!==d.id));}}/>{d.name}</label>)}</div></> : null}
       {node.type === "announcement" ? <label className="block md:col-span-2"><span className="mb-1 block text-xs text-text-muted">Message</span><textarea rows={2} value={String(node.config?.text || "")} onChange={(event) => setConfig("text", event.target.value)} className="w-full rounded border border-border bg-bg px-2 py-1 text-sm" /></label> : null}
       {node.type === "destination" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Destination</span><select value={String(node.config?.destination_id || "")} onChange={(event) => setConfig("destination_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select destination</option>{destinations.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.kind}</option>)}</select></label> : null}
       {node.type === "ring_group" ? <label className="block"><span className="mb-1 block text-xs text-text-muted">Ring group</span><select value={String(node.config?.ring_group_id || "")} onChange={(event) => setConfig("ring_group_id", event.target.value)} className="h-8 w-full rounded border border-border bg-bg px-2 text-xs"><option value="">Select group</option>{groups.map((item) => <option value={item.id} key={item.id}>{item.name} · {item.strategy}</option>)}</select></label> : null}
@@ -3292,7 +3306,7 @@ function NodeConfiguration({ node, nodes, destinations, groups, update }: { node
       {node.type === "caller_match" ? <><Field label="Caller prefixes (comma separated)" value={Array.isArray(node.config?.prefixes) ? (node.config?.prefixes as string[]).join(", ") : ""} onChange={(value) => setConfig("prefixes", value.split(",").map((item) => item.trim()).filter(Boolean))} /><span /><NextSelect label="Match" value={node.branches?.match || ""} onChange={(value) => setBranch("match", value)} /><NextSelect label="Otherwise" value={node.branches?.default || ""} onChange={(value) => setBranch("default", value)} /></> : null}
       {node.type === "ring_group" || (node.type === "destination" && ["pstn","sip"].includes(destinations.find(d=>d.id===node.config?.destination_id)?.kind||"")) ? <NextSelect label="If no one answers (empty ends the call)" value={node.branches?.no_answer || node.next || ""} onChange={value=>setBranch("no_answer",value)} /> : null}
       {node.type === "announcement" ? <NextSelect /> : null}
-      {!(["announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
+      {!(["decision", "announcement", "schedule", "caller_match", "dtmf_menu", "destination", "ring_group", "voicemail", "reject", "hangup"].includes(node.type)) ? <NextSelect /> : null}
     </div>
   );
 }

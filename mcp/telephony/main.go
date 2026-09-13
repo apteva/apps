@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.4.5
+version: 0.5.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -63,6 +63,9 @@ requires:
     - platform.instances.read
     - platform.realtime.spawn
   apps:
+    - name: functions
+      optional: true
+      reason: executes configured routing decisions using the active function version
     - name: storage
       version: ">=0.8.1"
       optional: true
@@ -127,6 +130,7 @@ provides:
     - { name: telephony_active_calls, description: "List ongoing calls." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
     - { name: telephony_call_get, description: "Get one call by Telephony or provider call id." }
+    - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
@@ -153,6 +157,25 @@ provides:
     - { name: telephony_compliance_profile_evaluate, description: "Evaluate compliance-profile completeness." }
     - { name: telephony_compliance_profile_submit, description: "Submit a complete compliance profile for review." }
   publishes:
+    - { name: telephony.routing.requested, description: "Durable correlated routing outcome: requested.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.accepted, description: "Durable correlated routing outcome: accepted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.rejected, description: "Durable correlated routing outcome: rejected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.timed_out, description: "Durable correlated routing outcome: timed_out.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.fallback, description: "Durable correlated routing outcome: fallback.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.canceled, description: "Durable correlated routing outcome: canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.offered, description: "Durable correlated routing outcome: offer.offered.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.claimed, description: "Durable correlated routing outcome: offer.claimed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.answerer, description: "Durable correlated routing outcome: offer.answerer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.failed, description: "Durable correlated routing outcome: offer.failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.expired, description: "Durable correlated routing outcome: offer.expired.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.canceled, description: "Durable correlated routing outcome: offer.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.destination.connected, description: "Durable correlated routing outcome: destination.connected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.destination.connection_failed, description: "Durable correlated routing outcome: destination.connection_failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.completed, description: "Durable correlated routing outcome: call.completed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.failed, description: "Durable correlated routing outcome: call.failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.busy, description: "Durable correlated routing outcome: call.busy.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.no-answer, description: "Durable correlated routing outcome: call.no-answer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.call.canceled, description: "Durable correlated routing outcome: call.canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: call.routing.started, description: "A call began a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, occurred_at: string } }
     - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
     - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
@@ -339,6 +362,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
 		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
 		{Name: "ring-legs", Schedule: "@every 1s", Run: a.runRingLegTick},
 		{
@@ -589,6 +613,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, nil),
 			HandlerCtx: a.toolCallGet,
 		},
+		{Name: "telephony_decisions_list", Description: "List project-scoped routing decision requests, results, deadlines and fallback reasons for a call.", InputSchema: schemaObject(map[string]any{"call_id": map[string]any{"type": "string"}}, []string{"call_id"}), HandlerCtx: a.toolDecisionsList},
 		{
 			Name:        "telephony_call_events_list",
 			Description: "List durable normalized lifecycle events for a project call. Args: call_id, cursor?, limit?.",
@@ -3748,7 +3773,12 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 	if grouped, claimed, err := c.claimRingOffer(id, project, destination, "browser", 0); grouped || err != nil {
 		return claimed, err
 	}
-	res, err := c.db.Exec(`UPDATE calls SET status = 'answering'
+	tx, err := c.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE calls SET status = 'answering'
         WHERE id = ? AND direction = 'inbound' AND status = 'pending'
           AND project_id = ? AND peer_kind = 'human' AND (routing_flow_version_id='' OR routing_destination_id<>'') AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
 		id, project)
@@ -3756,7 +3786,24 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 		return false, err
 	}
 	n, err := res.RowsAffected()
-	return n == 1, err
+	if err != nil || n == 0 {
+		return false, err
+	}
+	var raw, dest string
+	err = tx.QueryRow(`SELECT d.config_json,d.id FROM routing_destinations d JOIN calls c ON c.routing_destination_id=d.id AND c.project_id=d.project_id WHERE c.id=?`, id).Scan(&raw, &dest)
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if err == nil {
+		capacity, e := readDestinationCapacity(raw)
+		if e != nil {
+			return false, e
+		}
+		if e = reserveCapacityTx(tx, id, project, dest, capacity, ""); e != nil {
+			return false, e
+		}
+	}
+	return true, tx.Commit()
 }
 
 func (c *callsDB) settleHumanOffers(id, project string) error {
