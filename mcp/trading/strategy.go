@@ -50,14 +50,16 @@ type StrategyAllocation struct {
 }
 
 type StrategyRank struct {
-	Where     *StrategyCondition `json:"where,omitempty"`
-	Direction string             `json:"direction,omitempty"`
-	Budget    float64            `json:"budget,omitempty"`
-	Symbols   []string           `json:"symbols"`
-	By        string             `json:"by"`
-	Top       int                `json:"top"`
-	Weight    string             `json:"weight,omitempty"`
-	Min       float64            `json:"min,omitempty"`
+	VolatilityPeriod int                `json:"volatility_period,omitempty"`
+	VolatilityFloor  float64            `json:"volatility_floor,omitempty"`
+	Where            *StrategyCondition `json:"where,omitempty"`
+	Direction        string             `json:"direction,omitempty"`
+	Budget           float64            `json:"budget,omitempty"`
+	Symbols          []string           `json:"symbols"`
+	By               string             `json:"by"`
+	Top              int                `json:"top"`
+	Weight           string             `json:"weight,omitempty"`
+	Min              float64            `json:"min,omitempty"`
 }
 
 type StrategyRisk struct {
@@ -200,8 +202,15 @@ func validateStrategyDefinition(raw map[string]any) (*StrategyDefinition, []stri
 			if rule.Rank.Budget < 0 || rule.Rank.Budget > 1 {
 				return nil, nil, errors.New("rank budget must be between 0 and 1")
 			}
-			if rule.Rank.Weight != "" && rule.Rank.Weight != "equal_weight" {
-				return nil, nil, errors.New("rank supports equal_weight only")
+			if rule.Rank.Weight != "" && rule.Rank.Weight != "equal_weight" && rule.Rank.Weight != "inverse_volatility" {
+				return nil, nil, errors.New("rank weight must be equal_weight or inverse_volatility")
+			}
+			if rule.Rank.Weight == "inverse_volatility" {
+				if rule.Rank.VolatilityPeriod < 2 || rule.Rank.VolatilityPeriod > 999 || !finite(rule.Rank.VolatilityFloor) || rule.Rank.VolatilityFloor < 1e-8 || rule.Rank.VolatilityFloor > 1 {
+					return nil, nil, errors.New("inverse_volatility requires volatility_period from 2 to 999 and volatility_floor in [1e-8,1] per-bar log-return units")
+				}
+			} else if rule.Rank.VolatilityPeriod != 0 || rule.Rank.VolatilityFloor != 0 {
+				return nil, nil, errors.New("volatility sizing fields require inverse_volatility weight")
 			}
 			for _, symbol := range rule.Rank.Symbols {
 				if !universe[symbol] {
@@ -393,10 +402,23 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 	if budget == 0 {
 		budget = 1
 	}
-	weight := budget / float64(top)
+	scores := make([]float64, top)
+	total := 0.0
+	for i, r := range rows[:top] {
+		scores[i] = 1
+		if rank.Weight == "inverse_volatility" {
+			vol, err := strategyMetric(r.symbol, fmt.Sprintf("volatility_%d", rank.VolatilityPeriod), market)
+			if err != nil {
+				return nil, "", fmt.Errorf("volatility sizing unavailable for %s: %w", r.symbol, err)
+			}
+			scores[i] = 1 / math.Max(vol, rank.VolatilityFloor)
+		}
+		total += scores[i]
+	}
 	out := make([]StrategyAllocation, 0, top)
 	picked := []string{}
-	for _, r := range rows[:top] {
+	for i, r := range rows[:top] {
+		weight := budget * scores[i] / total
 		out = append(out, StrategyAllocation{Symbol: r.symbol, Weight: weight})
 		picked = append(picked, fmt.Sprintf("%s %.4f", r.symbol, r.value))
 	}
@@ -823,6 +845,9 @@ func strategyRequiredBars(def *StrategyDefinition) int {
 			}
 			if rule.Rank != nil {
 				maxBars = max(maxBars, indicatorRequiredBars(rule.Rank.By), conditionRequiredBars(rule.Rank.Where))
+				if rule.Rank.Weight == "inverse_volatility" {
+					maxBars = max(maxBars, rule.Rank.VolatilityPeriod+1)
+				}
 			}
 		}
 	}
