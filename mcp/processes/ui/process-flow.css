@@ -1,0 +1,424 @@
+.ap-processes .pf-shell {
+  --pf-edge: #6d7394;
+  --pf-dot: #3a3e51;
+  --pf-canvas: color-mix(in srgb, var(--pc-bg) 95%, var(--pc-accent));
+  border: 1px solid var(--pc-line);
+  border-radius: 14px;
+  overflow: hidden;
+  margin: 16px 0 24px;
+  background: var(--pc-bg);
+}
+.ap-processes .pf-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 20px;
+  background: var(--pc-panel);
+  border-bottom: 1px solid var(--pc-line);
+}
+.ap-processes .pf-toolbar h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.ap-processes .pf-toolbar h2 span {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--pc-muted);
+  margin-left: 8px;
+  border: 1px solid var(--pc-line);
+  border-radius: 20px;
+  padding: 3px 8px;
+}
+.ap-processes .pf-toolbar p {
+  font-size: 12px;
+  color: var(--pc-muted);
+  margin: 5px 0 0;
+}
+.ap-processes .pf-actions {
+  display: flex;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+.ap-processes .pf-actions button {
+  padding: 7px 11px;
+  align-items: center;
+  font-size: 12px;
+}
+.ap-processes .pf-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+.ap-processes .pf-workspace.has-inspector {
+  grid-template-columns: minmax(0, 1fr) 330px;
+}
+.ap-processes .pf-canvas {
+  height: 480px;
+  position: relative;
+  background: var(--pf-canvas);
+  min-width: 0;
+}
+.ap-processes .pf-shell.editable .pf-canvas {
+  height: 560px;
+}
+.ap-processes .pf-canvas-caption {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 10px 15px;
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  background: var(--pc-bg);
+  border-top: 1px solid var(--pc-line);
+  font-size: 10px;
+  color: var(--pc-muted);
+  pointer-events: none;
+}
+.ap-processes .pf-canvas-caption span {
+  opacity: 0.7;
+}
+.ap-processes .pf-canvas .react-flow {
+  --xy-background-color: transparent;
+  --xy-controls-button-background-color: var(--pc-panel);
+  --xy-controls-button-background-color-hover: var(--pc-line);
+  --xy-controls-button-color: var(--pc-text);
+  --xy-controls-button-border-color: var(--pc-line);
+  --xy-attribution-background-color: var(--pc-panel);
+}
+.ap-processes .pf-canvas .react-flow__controls {
+  bottom: 38px;
+  box-shadow: 0 3px 14px #0003;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.ap-processes .pf-canvas .react-flow__controls button {
+  display: flex;
+  padding: 6px;
+  border-radius: 0;
+  width: 28px;
+  height: 28px;
+  background: var(--pc-panel);
+  color: var(--pc-text);
+}
+.ap-processes .pf-canvas .react-flow__attribution {
+  bottom: 34px;
+  font-size: 9px;
+}
+.ap-processes .pf-step {
+  width: 236px;
+  min-height: 134px;
+  border: 1px solid var(--pc-line);
+  border-radius: 12px;
+  background: var(--pc-panel);
+  box-shadow: 0 7px 20px #0002;
+  padding: 15px 17px;
+  cursor: pointer;
+  position: relative;
+  color: var(--pc-text);
+  outline: none;
+}
+.ap-processes .pf-step:hover,
+.ap-processes .pf-step:focus-visible {
+  border-color: var(--pc-accent);
+}
+.ap-processes .pf-step.is-selected {
+  border-color: var(--pc-accent);
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--pc-accent) 22%, transparent),
+    0 7px 20px #0002;
+}
+.ap-processes .pf-step.approval {
+  border-top: 3px solid #d6ad64;
+  padding-top: 13px;
+}
+.ap-processes .pf-step-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 11px;
+}
+.ap-processes .pf-step-number {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-kind {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--pc-accent);
+  background: color-mix(in srgb, var(--pc-accent) 10%, transparent);
+  padding: 3px 7px;
+  border-radius: 5px;
+}
+.ap-processes .pf-step.approval .pf-kind {
+  color: #d6ad64;
+  background: #d6ad6415;
+}
+.ap-processes .pf-step-title {
+  font-size: 14px;
+  line-height: 1.4;
+  display: block;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ap-processes .pf-step-bottom {
+  margin-top: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-role {
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ap-processes .pf-problem {
+  font-size: 10px;
+  color: #d6ad64;
+  margin-top: 9px;
+}
+.ap-processes .pf-step .react-flow__handle {
+  width: 12px;
+  height: 12px;
+  border: 3px solid var(--pc-panel);
+  background: var(--pc-accent);
+  min-width: 12px;
+  min-height: 12px;
+}
+.ap-processes .pf-step .react-flow__handle-left {
+  left: -6px;
+}
+.ap-processes .pf-step .react-flow__handle-right {
+  right: -6px;
+}
+.ap-processes .pf-shell.readonly .react-flow__handle {
+  background: var(--pf-edge);
+}
+.ap-processes .pf-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--pc-line);
+  border-radius: 24px;
+  padding: 10px 14px;
+  font-size: 10px;
+  color: var(--pc-muted);
+  background: var(--pc-bg);
+  white-space: nowrap;
+}
+.ap-processes .pf-endpoint span {
+  color: var(--pc-accent);
+}
+.ap-processes .pf-endpoint.end span {
+  color: #62ccaa;
+}
+.ap-processes .pf-endpoint .react-flow__handle {
+  opacity: 0;
+}
+.ap-processes .pf-inspector {
+  border-left: 1px solid var(--pc-line);
+  padding: 20px;
+  background: var(--pc-panel);
+  max-height: 560px;
+  overflow: auto;
+  min-width: 0;
+}
+.ap-processes .pf-inspector-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 18px;
+  gap: 14px;
+}
+.ap-processes .pf-inspector-head h3 {
+  font-size: 16px;
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.ap-processes .pf-inspector-head button {
+  padding: 2px 9px;
+  font-size: 20px;
+  background: none;
+}
+.ap-processes .pf-eyebrow {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-inspector label {
+  margin-top: 12px;
+  margin-bottom: 5px;
+}
+.ap-processes .pf-inspector input,
+.ap-processes .pf-inspector textarea,
+.ap-processes .pf-inspector select {
+  font-size: 12px;
+}
+.ap-processes .pf-two {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ap-processes .pf-hint {
+  font-size: 11px;
+  color: var(--pc-muted);
+  line-height: 1.5;
+}
+.ap-processes .pf-inspector fieldset {
+  border: 1px solid var(--pc-line);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 18px 0;
+}
+.ap-processes .pf-inspector legend {
+  font-size: 11px;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-inspector .pf-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  margin: 7px 0;
+}
+.ap-processes .pf-check input {
+  width: auto;
+}
+.ap-processes .pf-delete {
+  color: #e59898;
+  font-size: 12px;
+}
+.ap-processes .pf-inspector h4 {
+  margin: 20px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-inspector .prose,
+.ap-processes .pf-inspector p {
+  font-size: 12px;
+}
+.ap-processes .pf-read-meta {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--pc-muted);
+}
+.ap-processes .pf-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 35px;
+  text-align: center;
+}
+.ap-processes .pf-empty h3 {
+  font-size: 18px;
+  margin: 20px 0 4px;
+}
+.ap-processes .pf-empty p {
+  color: var(--pc-muted);
+  font-size: 13px;
+  max-width: 400px;
+  margin-bottom: 20px;
+}
+.ap-processes .pf-empty-diagram {
+  display: flex;
+  align-items: center;
+  opacity: 0.8;
+}
+.ap-processes .pf-empty-diagram span {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  background: var(--pc-panel);
+  border: 1px solid var(--pc-line);
+  border-radius: 12px;
+  color: var(--pc-accent);
+  font-size: 20px;
+}
+.ap-processes .pf-empty-diagram i {
+  width: 40px;
+  border-top: 1px dashed var(--pf-edge);
+}
+.ap-processes .pf-connection {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  right: 14px;
+  z-index: 5;
+  background: var(--pc-panel);
+  border: 1px solid var(--pc-accent);
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  font-size: 11px;
+}
+.ap-processes .pf-connection button {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+.ap-processes .pf-notice {
+  padding: 8px 20px;
+  color: #d6ad64;
+  font-size: 12px;
+}
+@media (max-width: 1100px) {
+  .ap-processes .pf-workspace.has-inspector {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ap-processes .pf-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--pc-line);
+    max-height: none;
+  }
+  .ap-processes .pf-shell.editable .pf-canvas {
+    height: 450px;
+  }
+}
+@media (max-width: 600px) {
+  .ap-processes .pf-toolbar {
+    padding: 14px;
+  }
+  .ap-processes .pf-canvas {
+    height: 350px;
+  }
+  .ap-processes .pf-shell.editable .pf-canvas {
+    height: 380px;
+  }
+  .ap-processes .pf-canvas-caption span {
+    display: none;
+  }
+  .ap-processes .pf-canvas-caption {
+    font-size: 9px;
+  }
+  .ap-processes .pf-empty {
+    padding: 24px;
+  }
+  .ap-processes .pf-empty .pf-actions {
+    justify-content: center;
+  }
+  .ap-processes .pf-connection {
+    flex-wrap: wrap;
+  }
+}

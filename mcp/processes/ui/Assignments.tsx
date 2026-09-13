@@ -252,7 +252,7 @@ export default function Assignments({
             revision: 0,
             name: "",
             target: "",
-            owner_agent_id: agents[0]?.id || 0,
+            owner_agent_id: 0,
             execution_mode: "agent",
             procedure_version: current,
             follow_latest: true,
@@ -313,6 +313,15 @@ export default function Assignments({
       {error && (
         <div role="alert" className="notice">
           {error}
+        </div>
+      )}
+      {!draft && !items.length && (
+        <div className="empty">
+          <h3>No assignments yet</h3>
+          <p>
+            This process is ready to configure. Add an assignment to choose its
+            agent, parameter values, and schedule.
+          </p>
         </div>
       )}
       {draft ? (

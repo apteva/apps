@@ -28,7 +28,8 @@ approvals across the project, with filters, creation, settings, and history.
 Run workspaces also support adding required or optional tasks to an active run.
 See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 
-- Create a procedure and its convenience default assignment in one form.
+- Create an unassigned procedure with no agent or schedule, even in a project with no agents.
+- Configure execution later in Assignments; saving a procedure never creates an assignment.
 - Define text, number, and yes/no parameters, required fields, and defaults.
 - Add and edit assignments with independent agents, schedules, and parameters.
 - Start, pause, activate, or archive one assignment without changing the others.
@@ -117,6 +118,10 @@ Tasks-backed runs use Tasks tools for progress and completion.
 Records include assignment identity and the original assignment snapshot.
 `tasks_error` reports unavailable Tasks history; `has_more` indicates that Tasks
 has older records beyond its 200-record response limit.
+
+## Visual process editor
+
+Overview and Procedure show work steps and approval gates as connected cards. In the editor, add steps, select a card to edit its instructions, role and required output, and drag between its ports to set dependencies. Connections mean every predecessor must finish; cycles are rejected. Select a connection to remove it, or use the inspector’s dependency checklist. Drag cards to arrange them, use Auto layout to restore dependency order, and Fit flow to reset zoom. Layout positions are stored with each immutable procedure version. General instructions and execution settings are below the canvas.
 
 ## Collaborative workflows
 
@@ -209,7 +214,9 @@ operations return HTTP 202 when schedule synchronization is pending.
 SQLite stores `processes`, immutable `process_versions`, `process_assignments`,
 and `process_runs`. Run snapshots preserve resolved parameter values, agent,
 backend, target, schedule, and assignment revision. Legacy procedure owner/mode/
-schedule fields remain as API compatibility defaults for the first assignment.
+schedule fields remain readable in historical definitions. New versions omit
+them, and round-tripping those fields cannot change an assignment. Creating a
+procedure never creates a default assignment.
 
 Migration 003 creates one default assignment per existing process and links old
 runs to it. It preserves deadlines, pending synchronization, task IDs, original
@@ -250,10 +257,15 @@ publication. Direct history is currently returned without pagination.
 GOWORK=off go test -race -tags integration ./...
 ```
 
+The panel declares its host ReactDOM imports in `package.json` under
+`apteva.panelExternals`; the shared panel builder keeps other apps’ import
+contracts unchanged.
+
 From the apps repository root:
 
 ```sh
-bun test mcp/processes/ui/ProcessesPanel.test.tsx
+bun test mcp/processes/ui/ProcessesPanel.test.tsx mcp/processes/ui/flow-model.test.ts
+bunx playwright test --config mcp/processes/playwright.config.ts
 bun test mcp/processes/ui/Work.test.tsx
 bun run scripts/build-panels.ts --app processes
 ```

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ProcessFlow } from "./ProcessFlow";
 export type Step = {
   key: string;
   name: string;
@@ -7,6 +8,7 @@ export type Step = {
   instructions: string;
   expected_output: string;
   depends_on: string[];
+  position?: { x: number; y: number };
 };
 export type Executor = { kind: "agent" | "human"; agent_id?: number };
 export type StepRun = {
@@ -73,183 +75,7 @@ export function StepEditor({
   steps: Step[];
   onChange: (s: Step[]) => void;
 }) {
-  const update = (i: number, patch: Partial<Step>) =>
-    onChange(steps.map((s, j) => (i === j ? { ...s, ...patch } : s)));
-  return (
-    <section className="card" style={{ marginTop: 20 }}>
-      <div className="row between">
-        <h2>Steps & roles</h2>
-        <button
-          type="button"
-          onClick={() =>
-            onChange([
-              ...steps,
-              {
-                key: `step_${steps.length + 1}`,
-                name: "",
-                role: "worker",
-                kind: "work",
-                instructions: "",
-                expected_output: "",
-                depends_on: steps.length ? [steps[steps.length - 1].key] : [],
-              },
-            ])
-          }
-        >
-          Add step
-        </button>
-      </div>
-      {!steps.length ? (
-        <>
-          <p className="small muted">
-            Without steps, the responsible agent executes the whole run. Add
-            steps to assign roles and enforce handoffs.
-          </p>
-          <button
-            type="button"
-            onClick={() => onChange(structuredClone(examples))}
-          >
-            Use research → write → review → publish
-          </button>
-        </>
-      ) : (
-        <p className="small muted">
-          Steps without dependencies run in parallel. Approval steps release
-          dependent work only after an explicit approval.
-        </p>
-      )}
-      {steps.map((s, i) => (
-        <div className="card" style={{ marginTop: 14 }} key={i}>
-          <div className="row between">
-            <strong>Step {i + 1}</strong>
-            <button
-              type="button"
-              onClick={() =>
-                onChange(
-                  steps
-                    .filter((_, j) => i !== j)
-                    .map((item) => ({
-                      ...item,
-                      depends_on: (item.depends_on || []).filter(
-                        (key) => key !== s.key,
-                      ),
-                    })),
-                )
-              }
-            >
-              Remove step
-            </button>
-          </div>
-          <div className="row" style={{ marginTop: 12 }}>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`step-key-${i}`}>Key</label>
-              <input
-                id={`step-key-${i}`}
-                required
-                value={s.key}
-                pattern="[a-zA-Z][a-zA-Z0-9_]*"
-                onChange={(e) => {
-                  const key = e.target.value;
-                  onChange(
-                    steps.map((item, j) => ({
-                      ...item,
-                      ...(j === i ? { key } : {}),
-                      depends_on: (item.depends_on || []).map((dep) =>
-                        dep === s.key ? key : dep,
-                      ),
-                    })),
-                  );
-                }}
-              />
-            </div>
-            <div className="field" style={{ flex: 2 }}>
-              <label htmlFor={`step-name-${i}`}>Name</label>
-              <input
-                id={`step-name-${i}`}
-                required
-                value={s.name}
-                onChange={(e) => update(i, { name: e.target.value })}
-              />
-            </div>
-          </div>
-          <div className="row">
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`step-role-${i}`}>Role</label>
-              <input
-                id={`step-role-${i}`}
-                required
-                pattern="[a-zA-Z][a-zA-Z0-9_]*"
-                value={s.role}
-                onChange={(e) => update(i, { role: e.target.value })}
-              />
-            </div>
-            <div className="field" style={{ flex: 1 }}>
-              <label htmlFor={`step-kind-${i}`}>Step type</label>
-              <select
-                id={`step-kind-${i}`}
-                value={s.kind}
-                onChange={(e) =>
-                  update(i, { kind: e.target.value as Step["kind"] })
-                }
-              >
-                <option value="work">Work</option>
-                <option value="approval">Approval gate</option>
-              </select>
-            </div>
-          </div>
-          <div className="field">
-            <label htmlFor={`step-instructions-${i}`}>Instructions</label>
-            <textarea
-              id={`step-instructions-${i}`}
-              required
-              rows={3}
-              value={s.instructions}
-              onChange={(e) => update(i, { instructions: e.target.value })}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor={`step-output-${i}`}>Required output</label>
-            <input
-              id={`step-output-${i}`}
-              required
-              value={s.expected_output}
-              onChange={(e) => update(i, { expected_output: e.target.value })}
-            />
-          </div>
-          <fieldset
-            style={{ border: "1px solid var(--pc-line)", borderRadius: 8 }}
-          >
-            <legend className="small muted">Wait for these steps</legend>
-            {steps
-              .filter((_, j) => i !== j)
-              .map((dep) => (
-                <label
-                  key={dep.key}
-                  style={{ display: "flex", alignItems: "center", gap: 8 }}
-                >
-                  <input
-                    style={{ width: "auto" }}
-                    type="checkbox"
-                    checked={(s.depends_on || []).includes(dep.key)}
-                    onChange={(e) =>
-                      update(i, {
-                        depends_on: e.target.checked
-                          ? [...(s.depends_on || []), dep.key]
-                          : (s.depends_on || []).filter((k) => k !== dep.key),
-                      })
-                    }
-                  />
-                  {dep.name || dep.key}
-                </label>
-              ))}
-            {steps.length === 1 && (
-              <span className="small muted">Starts when the run begins.</span>
-            )}
-          </fieldset>
-        </div>
-      ))}
-    </section>
-  );
+  return <ProcessFlow steps={steps} onChange={onChange} examples={examples} />;
 }
 export function RolesEditor({
   steps,

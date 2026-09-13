@@ -42,8 +42,8 @@ directive: |
   ${PRIMARY_AGENT_ID}; writer is ${AGENT_writer_ID}; reviewer is ${AGENT_reviewer_ID}.
   Use Processes and the isolated test-signups publisher. There is no external publication.
   Do not call Processes start or trigger_test_run: this execution must originate from the app bus.
-  Create exactly one procedure "Tier 3 collaborative briefing", owned by you,
-  execution_mode=agent, no schedule, required string parameter page with default
+  Create exactly one procedure "Tier 3 collaborative briefing", initially unassigned,
+  with required string parameter page with default
   photography. Shared instructions: prepare a verified beginner photography tip
   through assigned steps and record a simulated publication receipt. Completion
   criteria: all five steps complete and the final receipt matches the reviewed
@@ -75,12 +75,13 @@ directive: |
      This is only a local test receipt: do not call any external publishing tool.
      Expected output: simulated receipt for the approved draft.
 
-  While the procedure is still draft, update its default assignment with
-  explicit agent role bindings: researcher and publisher to you, writer to
+  While the procedure is still draft, create an assignment named "Team",
+  owned by you, execution_mode=agent, follow_latest=true, no schedule,
+  parameters={"page":"photography"}, with explicit agent role bindings: researcher and publisher to you, writer to
   ${AGENT_writer_ID}, reviewer to ${AGENT_reviewer_ID}. Do NOT leave review as human.
   You are authorized to create, bind and activate this test procedure. Activate
-  it. Call trigger_sources and find the install ID for test-signups. Create a
-  paused event trigger on the default assignment: name="Pro signup briefing",
+  it, then activate the Team assignment. Call trigger_sources and find the install ID for test-signups. Create a
+  paused event trigger on the Team assignment: name="Pro signup briefing",
   source_install_id=<test-signups install>, topic="customer.signed_up",
   filters=[{path:"data.plan",op:"eq",value:"pro"}], mappings={page:"data.page"}.
   Preview with event={topic:"customer.signed_up",data:{page:"photography",plan:"pro"}}.

@@ -5,19 +5,26 @@ import (
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"math"
 	"regexp"
 	"strings"
 	"time"
 )
 
+type StepPosition struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+
 type Step struct {
-	Key            string   `json:"key"`
-	Name           string   `json:"name"`
-	Role           string   `json:"role"`
-	Kind           string   `json:"kind"` // work or approval
-	Instructions   string   `json:"instructions"`
-	ExpectedOutput string   `json:"expected_output"`
-	DependsOn      []string `json:"depends_on"`
+	Position       *StepPosition `json:"position,omitempty"`
+	Key            string        `json:"key"`
+	Name           string        `json:"name"`
+	Role           string        `json:"role"`
+	Kind           string        `json:"kind"` // work or approval
+	Instructions   string        `json:"instructions"`
+	ExpectedOutput string        `json:"expected_output"`
+	DependsOn      []string      `json:"depends_on"`
 }
 type Executor struct {
 	Kind    string `json:"kind"` // agent or human (authorized project operator)
@@ -70,6 +77,9 @@ func validateSteps(steps []Step) error {
 	known := map[string]Step{}
 	identifier := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,63}$`)
 	for _, s := range steps {
+		if p := s.Position; p != nil && (math.IsNaN(p.X) || math.IsNaN(p.Y) || math.IsInf(p.X, 0) || math.IsInf(p.Y, 0) || math.Abs(p.X) > 100000 || math.Abs(p.Y) > 100000) {
+			return errors.New("step positions must be finite and within the canvas bounds")
+		}
 		if !identifier.MatchString(s.Key) || !identifier.MatchString(s.Role) {
 			return errors.New("step keys and roles must be identifiers starting with a letter")
 		}
