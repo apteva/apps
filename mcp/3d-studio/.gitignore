@@ -1,0 +1,6 @@
+ui/preview.html
+ui/preview.mjs
+*.db
+*.db-shm
+*.db-wal
+/3d-studio
