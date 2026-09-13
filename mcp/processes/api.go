@@ -120,6 +120,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	return append(append(out, a.triggerTools()...), a.taskTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
+	if action == "overview" {
+		return a.overview(project)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if action == "tasks" || strings.HasPrefix(action, "task_") {
@@ -130,30 +133,6 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	}
 	id := str(args, "process_id")
 	switch action {
-	case "overview":
-		items, err := a.list(project)
-		if err != nil {
-			return nil, err
-		}
-		out := map[string]any{"running": []any{}, "upcoming": []any{}, "recent": []any{}, "processes": len(items)}
-		for _, p := range items {
-			records, e := a.dispatches(p.ID)
-			if e != nil {
-				return nil, e
-			}
-			for _, r := range records {
-				entry := map[string]any{"id": r.ID, "process_id": p.ID, "process_name": p.Name, "assignment_id": r.AssignmentID, "state": r.State, "progress": r.Progress, "current_step": r.CurrentStep, "backend": r.Backend, "created_at": r.CreatedAt, "scheduled_for": r.ScheduledFor, "error": r.Error, "delivery_warning": r.DeliveryWarning}
-				if r.State == "running" || r.State == "waiting" || r.State == "blocked" || r.State == "pending" {
-					out["running"] = append(out["running"].([]any), entry)
-				} else {
-					out["recent"] = append(out["recent"].([]any), entry)
-				}
-				if r.ScheduledFor != "" && r.State == "scheduled" {
-					out["upcoming"] = append(out["upcoming"].([]any), entry)
-				}
-			}
-		}
-		return out, nil
 	case "list":
 		items, err := a.list(project)
 		if err != nil {
@@ -283,7 +262,7 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	}
 }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/processes", Handler: a.handleHTTP}, {Pattern: "/processes/", Handler: a.handleHTTP}}
+	return []sdk.Route{{Pattern: "/overview", Handler: a.handleHTTP}, {Pattern: "/processes", Handler: a.handleHTTP}, {Pattern: "/processes/", Handler: a.handleHTTP}}
 }
 func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
@@ -310,7 +289,7 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.Method == "POST" {
 			action = "create"
 		}
-	} else if path == "overview" && r.Method == "GET" {
+	} else if (path == "overview" || path == "mobile/overview") && r.Method == "GET" {
 		action = "overview"
 	} else if len(parts) == 1 {
 		args["process_id"] = parts[0]
