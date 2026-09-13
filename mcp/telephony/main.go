@@ -37,6 +37,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -46,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.5.0
+version: 0.5.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -281,10 +282,16 @@ upgrade_policy: auto-patch
 var globalCtx *sdk.AppCtx
 
 type App struct {
-	installID    int64
-	sip          sipRuntimeHolder
-	softphones   softphoneRegistry
-	preparations realtimePreparations
+	decisionWG       sync.WaitGroup
+	decisionStopping bool
+	dispatchMu       sync.Mutex
+	dispatcher       *routingDispatcher
+	callChanges      callChangeHub
+	installID        int64
+	sip              sipRuntimeHolder
+	softphones       softphoneRegistry
+	preparations     realtimePreparations
+	eventDispatcher  *routingDispatcher
 }
 
 const (
@@ -351,11 +358,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := a.startSIPGateway(ctx); err != nil {
 		return fmt.Errorf("start direct SIP gateway: %w", err)
 	}
+	a.startRoutingDispatcher(ctx)
 	ctx.Logger().Info("telephony mounted")
 	return nil
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.stopRoutingDispatcher()
 	a.stopSIPGateway()
 	return nil
 }
@@ -409,6 +418,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/ivr/", Handler: a.handleIVRCallback, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
+		{Pattern: "/calls/events", Handler: a.handleCallNotifications},
 		// Panel action endpoint.
 		{Pattern: "/calls/", Handler: a.handleCallAction},
 		{Pattern: "/recordings/", Handler: a.handleRecordings},
@@ -2964,7 +2974,8 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) db() *callsDB {
 	return &callsDB{
-		db: globalCtx.AppDB(),
+		afterCommit: a.routingCommitted,
+		db:          globalCtx.AppDB(),
 		afterTransition: func(callID string) {
 			if err := a.publishLifecycleEvents(globalCtx, callID); err != nil {
 				globalCtx.Logger().Warn("publish call lifecycle event", "call", callID, "err", err)
@@ -3584,6 +3595,7 @@ type routeRow struct {
 }
 
 type callsDB struct {
+	afterCommit     func(string)
 	db              *sql.DB
 	afterTransition func(callID string)
 }
@@ -3668,6 +3680,7 @@ func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
 	if n, _ := result.RowsAffected(); n != 1 {
 		return errors.New("outbound call rate limit reached")
 	}
+	c.committed(r.ProjectID)
 	return nil
 }
 
@@ -3803,7 +3816,7 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 			return false, e
 		}
 	}
-	return true, tx.Commit()
+	return true, c.commitCall(tx, id)
 }
 
 func (c *callsDB) settleHumanOffers(id, project string) error {

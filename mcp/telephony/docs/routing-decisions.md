@@ -1,4 +1,4 @@
-# Generic routing decisions (Telephony 0.5.0)
+# Generic routing decisions (Telephony 0.5.1)
 
 Telephony owns offers, capacity, answering and audio. A bound Functions app owns
 business selection, such as availability, quotas, customer priority and repeat
@@ -104,8 +104,10 @@ Only explicitly configured `variables` are sent; no CRM data is fetched implicit
 
 Use `decision_id` as the business reservation idempotency key. Respect
 `deadline_at` and give reservations an expiry. The deadline includes scheduling
-and dependency time, defaults to 2 seconds, and is capped at 5 seconds. Work is
-checked every second; an expired result is never accepted. A timed-out/canceled
+and dependency time, defaults to 2 seconds, and is capped at 5 seconds. New decisions wake a bounded dispatcher immediately after their transaction
+commits. Results and chained fallback decisions also wake it immediately; deadline
+timers enforce expiry without waiting for the recovery scan. The one-second scan
+remains for restarts, retries and queue saturation. An expired result is never accepted. A timed-out/canceled
 platform invocation may still finish inside Functions because its SDK transport
 does not support per-invocation cancellation. Telephony ignores its result and
 caps outstanding invocations at 32. Do not rely on cancellation to undo business
@@ -137,7 +139,9 @@ external webhooks and new voicemail support are outside this release.
 
 `GET /routing/decisions?call_id=...&project_id=...` and
 `telephony_decisions_list({call_id})` expose project-scoped decision requests,
-results, status, reason, deadline and duration. The panel has a call-ID trace
+results, status, reason, deadline, `started_at`, `dispatch_delay_ms` (commit creation
+to invocation claim) and `duration_ms` (creation to completion). An empty
+`started_at` means no invocation was admitted; its dispatch delay is zero. The panel has a call-ID trace
 viewer. Existing `telephony_call_events_list` provides durable event reconciliation.
 
 New topics start with `telephony.routing.`:
@@ -164,3 +168,24 @@ Simulation accepts `context.decisions`, keyed by node ID, for example
 mock decisions take their fallback. Simulation never invokes Functions or creates
 business reservations. Browser microphone processing, playback, codecs and the
 shared `createSoftphone()` API are unchanged.
+
+## Browser call notifications (0.5.1)
+
+The shared client's `watchCalls()` and the native Calls panel use authenticated
+push hints by default. A hint triggers the usual permission-filtered call-list
+request; it never includes call data or other users' identifiers. Reconnects
+reconcile a fresh snapshot. Recovery polling remains configurable (default 2000 ms;
+500 ms is supported), and `push: false` selects polling only. Older installations
+without the endpoint fall back to polling. See the [client options](../frontend/README.md#incoming-call-notifications).
+
+`GET /calls/events` uses trusted operator or scoped delegated `call.read` access.
+Online application sessions use `/user/calls/events?auth_provider=...`. Project and
+installation scoping follow the existing call APIs. Streams are bounded and
+coalesced, with five-second heartbeats and a twenty-second lease. Online sessions
+and Telephony permissions are checked on each wake/heartbeat; delegated issuer
+sessions are revalidated by the gateway on lease reconnect. No credentials enter
+stream URLs. Access revocation closes the stream and prompts an authorized list
+refresh; recreate the watcher after logging in again to restore push.
+
+This reduces scheduling and detection waits; it does not change microphone,
+playback or carrier audio latency. Browser presence is still a separate feature.

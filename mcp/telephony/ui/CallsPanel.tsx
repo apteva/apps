@@ -12,7 +12,7 @@ import {
 } from "./audio-settings";
 
 import { usePanelSoftphone } from "./use-panel-softphone";
-import { isIncomingBrowserCall } from "../frontend/src/client";
+import { isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
 const API = "/api/apps/telephony";
 
@@ -1074,24 +1074,27 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     if (dialerOpen) void loadOutboundNumbers();
   }, [dialerOpen, loadOutboundNumbers]);
 
+  const receiveCalls = useCallback((raw: TelephonyCall[]) => {
+    const list = raw.map(call => normalizeCall(call as RawCall));
+    setCalls(list);
+    setSelectedId(current => current && list.some(c => c.id === current) ? current : list[0]?.id ?? "");
+    setLoading(false);
+  }, []);
+
   const loadCalls = useCallback(async () => {
     if (callsRequest.current) return;
     const request = new AbortController(); callsRequest.current = request;
     setLoading(true);
     try {
-      const list = (await telephony.listCalls(request.signal)).map(call => normalizeCall(call as RawCall));
-      if (request.signal.aborted) return;
-      setCalls(list);
-      setSelectedId((current) => current && list.some((c) => c.id === current)
-        ? current
-        : list[0]?.id ?? "");
+      const list = await telephony.listCalls(request.signal);
+      if (!request.signal.aborted) receiveCalls(list);
     } catch (e) {
       if (!request.signal.aborted) setStatus((e as Error).message || "Load failed");
     } finally {
       if (callsRequest.current === request) callsRequest.current = null;
       setLoading(false);
     }
-  }, [telephony]);
+  }, [telephony, receiveCalls]);
 
   const loadRecordingSettings = useCallback(async () => {
     try {
@@ -1125,7 +1128,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
   }, [withProject]);
 
   useEffect(() => {
-    void Promise.all([loadCalls(), loadRecordingSettings()]);
+    void loadRecordingSettings();
     return () => { callsRequest.current?.abort(); callsRequest.current = null; recordingsRequest.current?.abort(); };
   }, [loadCalls, loadRecordingSettings]);
 
@@ -1134,18 +1137,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     return () => window.clearInterval(timer);
   }, []);
 
-  // A ringing softphone call is only answerable while the carrier holds the
-  // caller, so poll fast whenever anything is live and fall back to the idle
-  // cadence otherwise.
-  const hasUrgentCall = useMemo(
-    () => calls.some((call) => call.status === "pending" || LIVE_STATUSES.has(call.status)),
-    [calls],
-  );
-
   useEffect(() => {
-    const timer = window.setInterval(loadCalls, 2000);
-    return () => window.clearInterval(timer);
-  }, [loadCalls, hasUrgentCall]);
+    const watcher = telephony.watchCalls(receiveCalls, {
+      onError: error => { setLoading(false); setStatus((error as Error).message || "Load failed"); },
+    });
+    return () => watcher.close();
+  }, [telephony, receiveCalls]);
 
   const selected = useMemo(
     () => calls.find((call) => call.id === selectedId) ?? calls[0] ?? null,

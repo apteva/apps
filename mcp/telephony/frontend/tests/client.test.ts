@@ -195,10 +195,10 @@ describe("Telephony extension", () => {
     let delivered = 0;
     const watch = f.client.watchCalls(() => { delivered++; }, { intervalMs: 100 });
     await Bun.sleep(150);
-    expect(f.requests).toHaveLength(1);
+    expect(f.requests.filter(r=>r.url.pathname.endsWith("/calls"))).toHaveLength(1);
     watch.close(); gate.resolve();
     await Bun.sleep(150);
-    expect(f.requests).toHaveLength(1);
+    expect(f.requests.filter(r=>r.url.pathname.endsWith("/calls"))).toHaveLength(1);
     expect(delivered).toBe(0);
   });
   test("active monitoring consumes durable completion and then stops", async () => {

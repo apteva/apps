@@ -32,7 +32,12 @@ export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | 
     (call.peer_kind === "human" || Boolean(call.ring_offers?.some(offer => offer.kind === "browser")));
 }
 export interface WatchCallsOptions {
+  /** Recovery polling interval; 500 ms is supported as an interim tuning option. */
   intervalMs?: number;
+  /** Live, permission-filtered hints with polling recovery. Default true. */
+  push?: boolean;
+  /** Local request timing, without assumptions about server/client clock skew. */
+  onTiming?: (sample: { trigger: "poll" | "push"; fetchMs: number }) => void;
   signal?: AbortSignal;
   onError?: (error: unknown) => void;
 }
@@ -82,29 +87,64 @@ export class TelephonyClient {
     return calls.filter(isIncomingBrowserCall);
   }
 
-  /** One request at a time; closure/abort suppresses late delivery and retries. */
+  /** Push is a hint to refetch through the same authorized handle. Coalesce
+   * bursts, never overlap requests, and retain periodic/reconnect recovery. */
   watchCalls(onCalls: (calls: Call[]) => void, options: WatchCallsOptions = {}): { close(): void } {
     const interval = options.intervalMs ?? 2000;
     if (!Number.isFinite(interval) || interval < 100) throw new Error("Call watch interval must be at least 100 ms");
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const close = () => { clearTimeout(timer); controller.abort(); options.signal?.removeEventListener("abort", close); };
+    let stream: { close(): void } | undefined;
+    let running = false;
+    let queued = false;
+    const close = () => {
+      clearTimeout(timer); controller.abort(); stream?.close();
+      options.signal?.removeEventListener("abort", close);
+    };
+    const report = (error: unknown) => { try { options.onError?.(error); } catch { close(); } };
     options.signal?.addEventListener("abort", close, { once: true });
     if (options.signal?.aborted) close();
-    const poll = async () => {
+    const refresh = async (trigger: "poll" | "push") => {
       if (controller.signal.aborted) return;
+      if (running) { queued = true; return; }
+      clearTimeout(timer); running = true;
+      const started = performance.now();
       try {
         const calls = await this.listCalls(controller.signal);
-        if (!controller.signal.aborted) onCalls(calls);
-      } catch (error) {
         if (!controller.signal.aborted) {
-          try { options.onError?.(error); } catch { close(); }
+          onCalls(calls);
+          // Diagnostic observers cannot interrupt call detection.
+          try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
         }
+      } catch (error) {
+        if (!controller.signal.aborted) report(error);
       } finally {
-        if (!controller.signal.aborted) timer = setTimeout(poll, interval);
+        running = false;
+        if (!controller.signal.aborted) {
+          if (queued) { queued = false; void refresh("push"); }
+          else timer = setTimeout(() => void refresh("poll"), interval);
+        }
       }
     };
-    void poll();
+    void refresh("poll");
+    if (!controller.signal.aborted && options.push !== false && typeof this.app.subscribe === "function") {
+      try {
+        stream = this.app.subscribe<{ type?: string }>(this.path("/calls/events"), event => {
+          if (event.type === "calls.changed") void refresh("push");
+          else if (event.type === "access.revoked") { stream?.close(); void refresh("push"); }
+        }, {
+          transport: "fetch", signal: controller.signal, reconnectDelayMs: 250,
+          // Every new stream starts with a fresh hint. No cursor can bypass
+          // permission filtering or replay another user's events.
+          onError: error => {
+            const status = (error as { status?: number })?.status;
+            if (status === 404 || status === 405 || status === 501) stream?.close();
+            // Streaming is optional; the normal authenticated poll reports
+            // actionable authentication errors and keeps old servers working.
+          },
+        });
+      } catch { /* Older hosts can continue using polling. */ }
+    }
     return { close };
   }
 

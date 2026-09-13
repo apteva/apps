@@ -30,34 +30,41 @@ type decisionResponse struct {
 	RingTimeout   int    `json:"ring_timeout_seconds,omitempty"`
 }
 type decisionRecord struct {
-	ID          string          `json:"decision_id"`
-	CallID      string          `json:"call_id"`
-	ProjectID   string          `json:"project_id"`
-	VersionID   string          `json:"flow_version_id"`
-	NodeID      string          `json:"node_id"`
-	Status      string          `json:"status"`
-	Request     json.RawMessage `json:"request"`
-	Result      json.RawMessage `json:"result"`
-	Reason      string          `json:"reason"`
-	CreatedAt   string          `json:"created_at"`
-	DeadlineAt  string          `json:"deadline_at"`
-	CompletedAt string          `json:"completed_at"`
-	Applied     bool            `json:"applied"`
-	PlanJSON    string          `json:"-"`
-	DurationMS  int64           `json:"duration_ms"`
+	ID              string          `json:"decision_id"`
+	CallID          string          `json:"call_id"`
+	ProjectID       string          `json:"project_id"`
+	VersionID       string          `json:"flow_version_id"`
+	NodeID          string          `json:"node_id"`
+	Status          string          `json:"status"`
+	Request         json.RawMessage `json:"request"`
+	Result          json.RawMessage `json:"result"`
+	Reason          string          `json:"reason"`
+	CreatedAt       string          `json:"created_at"`
+	DeadlineAt      string          `json:"deadline_at"`
+	CompletedAt     string          `json:"completed_at"`
+	Applied         bool            `json:"applied"`
+	PlanJSON        string          `json:"-"`
+	StartedAt       string          `json:"started_at"`
+	DispatchDelayMS int64           `json:"dispatch_delay_ms"`
+	DurationMS      int64           `json:"duration_ms"`
 }
 
-const decisionColumns = `id,call_id,project_id,flow_version_id,node_id,status,request_json,result_json,reason,created_at,deadline_at,completed_at,applied,plan_json`
+const decisionColumns = `id,call_id,project_id,flow_version_id,node_id,status,request_json,result_json,reason,created_at,deadline_at,completed_at,applied,plan_json,started_at`
 
 func scanDecision(s interface{ Scan(...any) error }) (decisionRecord, error) {
 	var d decisionRecord
 	var req, res string
-	err := s.Scan(&d.ID, &d.CallID, &d.ProjectID, &d.VersionID, &d.NodeID, &d.Status, &req, &res, &d.Reason, &d.CreatedAt, &d.DeadlineAt, &d.CompletedAt, &d.Applied, &d.PlanJSON)
+	err := s.Scan(&d.ID, &d.CallID, &d.ProjectID, &d.VersionID, &d.NodeID, &d.Status, &req, &res, &d.Reason, &d.CreatedAt, &d.DeadlineAt, &d.CompletedAt, &d.Applied, &d.PlanJSON, &d.StartedAt)
 	d.Request = json.RawMessage(req)
 	d.Result = json.RawMessage(res)
 	if start, e := time.Parse(time.RFC3339Nano, d.CreatedAt); e == nil {
 		if end, e := time.Parse(time.RFC3339Nano, d.CompletedAt); e == nil {
 			d.DurationMS = max(0, end.Sub(start).Milliseconds())
+		}
+	}
+	if start, e := time.Parse(time.RFC3339Nano, d.CreatedAt); e == nil {
+		if dispatched, e := time.Parse(time.RFC3339Nano, d.StartedAt); e == nil {
+			d.DispatchDelayMS = max(0, dispatched.Sub(start).Milliseconds())
 		}
 	}
 	return d, err
@@ -300,31 +307,47 @@ func (a *App) runDecisionTick(_ context.Context, ctx *sdk.AppCtx) error {
 		if d.Status == "running" {
 			continue
 		}
-		select {
-		case decisionSlots <- struct{}{}:
-		default:
-			continue
-		}
-		res, err := ctx.AppDB().Exec(`UPDATE routing_decisions SET status='running' WHERE id=? AND status='pending'`, d.ID)
-		if err != nil {
-			<-decisionSlots
+		if err := a.dispatchDecision(ctx, d); err != nil {
 			return err
 		}
-		n, _ := res.RowsAffected()
-		if n == 0 {
-			<-decisionSlots
-			continue
-		}
-		go func(d decisionRecord) {
-			defer func() { <-decisionSlots }()
-			response, reason := a.invokeDecision(ctx, d)
-			if err := a.completeDecision(d, response, reason); err != nil {
-				ctx.Logger().Warn("routing decision completion", "decision", d.ID, "err", err)
-			}
-		}(d)
 	}
 	return a.flushDecisionMarks(project)
 }
+
+// Serialize admission with shutdown so the final Wait cannot race a new Add.
+func (a *App) dispatchDecision(ctx *sdk.AppCtx, d decisionRecord) error {
+	a.dispatchMu.Lock()
+	defer a.dispatchMu.Unlock()
+	if a.decisionStopping {
+		return nil
+	}
+	select {
+	case decisionSlots <- struct{}{}:
+	default:
+		return nil
+	}
+	res, err := ctx.AppDB().Exec(`UPDATE routing_decisions SET status='running',started_at=? WHERE id=? AND status='pending'`, ringTime(time.Now()), d.ID)
+	if err != nil {
+		<-decisionSlots
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		<-decisionSlots
+		return nil
+	}
+	a.decisionWG.Add(1)
+	go func(d decisionRecord) {
+		defer a.decisionWG.Done()
+		defer func() { <-decisionSlots; a.wakeRouting(d.ProjectID); a.routingCapacityReleased() }()
+		response, reason := a.invokeDecision(ctx, d)
+		if err := a.completeDecision(d, response, reason); err != nil {
+			ctx.Logger().Warn("routing decision completion", "decision", d.ID, "err", err)
+		}
+	}(d)
+	return nil
+}
+
 func (a *App) invokeDecision(ctx *sdk.AppCtx, d decisionRecord) (decisionResponse, string) {
 	var raw string
 	if e := ctx.AppDB().QueryRow(`SELECT context_json FROM call_route_executions WHERE call_id=?`, d.CallID).Scan(&raw); e != nil {
@@ -461,7 +484,7 @@ func (a *App) completeDecision(d decisionRecord, response decisionResponse, reas
 			return a.rejectDecision(d, response, "capacity_unavailable")
 		}
 	}
-	return finishDecisionTx(tx, d, response, status, reason, plan)
+	return a.finishDecisionTx(tx, d, response, status, reason, plan)
 }
 
 // Capacity failures take the same durable fallback path. No recursive call-lock.
@@ -492,15 +515,15 @@ func (a *App) rejectDecision(d decisionRecord, response decisionResponse, reason
 		return e
 	}
 	if status != "pending" || current != d.NodeID {
-		return finishDecisionTx(tx, d, response, "canceled", "call_progressed", nil)
+		return a.finishDecisionTx(tx, d, response, "canceled", "call_progressed", nil)
 	}
 	status = "rejected"
 	if reason == "timed_out" {
 		status = "timed_out"
 	}
-	return finishDecisionTx(tx, d, response, status, reason, plan)
+	return a.finishDecisionTx(tx, d, response, status, reason, plan)
 }
-func finishDecisionTx(tx *sql.Tx, d decisionRecord, response decisionResponse, status, reason string, plan *inboundRoutingPlan) error {
+func (a *App) finishDecisionTx(tx *sql.Tx, d decisionRecord, response decisionResponse, status, reason string, plan *inboundRoutingPlan) error {
 	result, _ := json.Marshal(response)
 	raw, _ := json.Marshal(plan)
 	now := ringTime(time.Now())
@@ -516,7 +539,11 @@ func finishDecisionTx(tx *sql.Tx, d decisionRecord, response decisionResponse, s
 			return e
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	a.routingCommitted(d.ProjectID)
+	return nil
 }
 func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	defer lockRoutingCall(d.CallID)()

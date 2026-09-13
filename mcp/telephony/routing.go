@@ -1472,6 +1472,7 @@ func (a *App) persistRoutingExecution(callID, project string, plan *inboundRouti
 	if err := tx.Commit(); err != nil {
 		return err
 	}
+	a.routingCommitted(project)
 	a.emitRoutingTrace(project, callID, plan, true)
 	return nil
 }
@@ -1615,6 +1616,7 @@ func (a *App) persistRoutingProgress(callID, project string, plan *inboundRoutin
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	a.routingCommitted(project)
 	a.emitRoutingTrace(project, callID, plan, false)
 	return nil
 }

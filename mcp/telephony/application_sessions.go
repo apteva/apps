@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -39,15 +40,33 @@ func identityScalar(v any) string {
 // /user/ is explicitly public at the gateway, but this handler authenticates
 // every data request. It never falls back to trusted-operator access.
 func (a *App) handleApplicationSession(w http.ResponseWriter, r *http.Request) {
+	clone, status, err := a.authenticateApplicationSession(r)
+	if err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
+	switch {
+	case clone.URL.Path == "/calls/events":
+		clone = clone.WithContext(context.WithValue(clone.Context(), phoneStreamRequestKey{}, r))
+		a.handleCallNotifications(w, clone)
+	case clone.URL.Path == "/calls":
+		a.handleListCalls(w, clone)
+	case strings.HasPrefix(clone.URL.Path, "/calls/"):
+		a.handleCallAction(w, clone)
+	case strings.HasPrefix(clone.URL.Path, "/softphone/"):
+		a.handleSoftphoneAction(w, clone)
+	default:
+		http.NotFound(w, clone)
+	}
+}
+func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, int, error) {
 	project, e := a.panelProject(r)
 	if e != nil {
-		http.Error(w, "project not allowed", 403)
-		return
+		return nil, 403, errors.New("project not allowed")
 	}
 	policy, e := a.phonePolicy(project)
 	if e != nil {
-		http.Error(w, "access unavailable", 503)
-		return
+		return nil, 503, errors.New("access unavailable")
 	}
 	var provider *phoneAuthProvider
 	for i := range policy.Providers {
@@ -57,13 +76,11 @@ func (a *App) handleApplicationSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if provider == nil || !validPhoneProvider(*provider) {
-		http.Error(w, "unknown authentication provider", 401)
-		return
+		return nil, 401, errors.New("unknown authentication provider")
 	}
 	bearer := r.Header.Get("Authorization")
 	if !strings.HasPrefix(bearer, "Bearer ") || len(bearer) < 16 || len(bearer) > 16384 {
-		http.Error(w, "user session required", 401)
-		return
+		return nil, 401, errors.New("user session required")
 	}
 	// Authorize the route before contacting the provider. Admin/MCP/media routes
 	// cannot be reached by adding /user/ to their path.
@@ -79,15 +96,13 @@ func (a *App) handleApplicationSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !allowed {
-		http.Error(w, "application-user action not allowed", 403)
-		return
+		return nil, 403, errors.New("application-user action not allowed")
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	req, e := http.NewRequestWithContext(ctx, "GET", provider.URL, nil)
 	if e != nil {
-		http.Error(w, "identity provider unavailable", 503)
-		return
+		return nil, 503, errors.New("identity provider unavailable")
 	}
 	req.Header.Set("Authorization", bearer)
 	req.Header.Set("Accept", "application/json")
@@ -99,27 +114,23 @@ func (a *App) handleApplicationSession(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, e := client.Do(req)
 	if e != nil {
-		http.Error(w, "identity provider unavailable", 503)
-		return
+		return nil, 503, errors.New("identity provider unavailable")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		http.Error(w, "user session invalid or revoked", 401)
-		return
+		return nil, 401, errors.New("user session invalid or revoked")
 	}
 	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
 	dec.UseNumber()
 	var data map[string]any
 	if dec.Decode(&data) != nil {
-		http.Error(w, "invalid identity response", 401)
-		return
+		return nil, 401, errors.New("invalid identity response")
 	}
 	identity := phoneIdentity{IssuerApp: provider.IssuerApp, IssuerInstallID: provider.IssuerInstallID, SubjectType: "user"}
 	if provider.Format == "apteva-auth" {
 		user, ok := data["user"].(map[string]any)
 		if !ok || identityScalar(user["project_id"]) != project {
-			http.Error(w, "identity project mismatch", 403)
-			return
+			return nil, 403, errors.New("identity project mismatch")
 		}
 		identity.SubjectID = identityScalar(user["id"])
 		identity.OrganizationID = identityScalar(user["organization_id"])
@@ -128,27 +139,15 @@ func (a *App) handleApplicationSession(w http.ResponseWriter, r *http.Request) {
 		identity.OrganizationID = identityScalar(data["organization_id"])
 	}
 	if !identity.valid() {
-		http.Error(w, "verified user identity required", 401)
-		return
+		return nil, 401, errors.New("verified user identity required")
 	}
 	p, e := a.phonePrincipal(project, identity)
 	if e != nil || p.Revision != policy.Revision {
-		http.Error(w, "Telephony access denied", 403)
-		return
+		return nil, 403, errors.New("Telephony access denied")
 	}
 	if action == "call.takeover" && !p.Supervisor {
-		http.Error(w, "supervisor permission required", 403)
-		return
+		return nil, 403, errors.New("supervisor permission required")
 	}
 	clone = clone.WithContext(context.WithValue(clone.Context(), phonePrincipalKey{}, p))
-	switch {
-	case clone.URL.Path == "/calls":
-		a.handleListCalls(w, clone)
-	case strings.HasPrefix(clone.URL.Path, "/calls/"):
-		a.handleCallAction(w, clone)
-	case strings.HasPrefix(clone.URL.Path, "/softphone/"):
-		a.handleSoftphoneAction(w, clone)
-	default:
-		http.NotFound(w, clone)
-	}
+	return clone, 0, nil
 }

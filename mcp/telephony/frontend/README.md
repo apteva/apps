@@ -196,3 +196,33 @@ AudioContext and worklet URLs are released on stop or startup failure. The meter
 returns to zero on stop. `phone.configureAudio({inputDeviceId})` selects the device
 for future calls; `phone.reconnect({inputDeviceId})` applies it to an active call.
 The 0.4.3 gain/playback options remain available.
+
+## Incoming call notifications
+
+From Telephony 0.5.1, `watchCalls()` uses authenticated fetch/SSE hints by default
+and retains polling for recovery. The native Calls panel uses this same watcher.
+Existing integrations benefit after reloading the updated installed client.
+
+```ts
+const watcher = telephony.watchCalls(renderCalls, {
+  push: true,          // default; false uses polling only
+  intervalMs: 2000,    // recovery; use 500 for faster polling when push is unavailable
+  onTiming: ({trigger, fetchMs}) => recordCallListTiming(trigger, fetchMs),
+  onError: reportCallListError,
+});
+// On logout or a change of project, installation, or authenticated user:
+watcher.close();
+```
+
+One list request runs at a time; bursts coalesce into one follow-up refresh.
+Reconnects use the current SDK credentials and refetch authorized state. No token
+is placed in a stream URL. Missing streaming support in older servers or host SDK
+handles leaves polling active. Hints contain no call data and reveal changes only
+to visible calls/offers. `fetchMs` measures the list request locally, not total
+caller-to-ringtone latency. Routing traces expose separate `dispatch_delay_ms`.
+
+Online sessions and Telephony grants are rechecked on each hint/heartbeat;
+gateway-delegated issuer sessions are revalidated on the twenty-second stream
+lease reconnect. A revocation closes push and triggers an authorized refresh;
+recreate the watcher after renewed login to restore push. `close()` or abort stops
+subscriptions, timers and late callback delivery.

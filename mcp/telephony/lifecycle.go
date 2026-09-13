@@ -86,6 +86,7 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
+	c.committed(call.ProjectID)
 	return stored, true, nil
 }
 
