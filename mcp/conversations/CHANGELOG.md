@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.11 — 2026-09-13
+
+- Preserve both direct Core vision content and the bound Storage `file_id` for image attachments. Downstream tools can now attach the original image after the agent receives it.
+- Add Tier 2 coverage and an opt-in Tier 3 real-Codex scenario that creates a Tickets record and verifies `storage_file_id` on its attachment.
+
+
 ## 0.23.10 — 2026-09-13
 
 - Authorize delegated `GET /tool-visuals` requests with the explicit `tool_visuals.read` action. Requests without that permission remain forbidden, and the frontend keeps static icon fallbacks.

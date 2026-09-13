@@ -883,6 +883,9 @@ func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64,
 		if attachment.Type == "image" && attachment.DataURL != "" {
 			parts = append(parts, map[string]any{"type": "text", "text": "The following image is included directly in this message for visual analysis. Inspect it now. For a simple image question, reply directly with conversations_send phase=final; do not send a preliminary acknowledgement or call an attachment-reading tool. Do not infer visibility or quality from the filename or byte count."})
 			parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]any{"url": attachment.DataURL}})
+			if attachment.FileID > 0 {
+				parts = append(parts, map[string]any{"type": "text", "text": fmt.Sprintf("Storage binding=%s file_id=%d. Use this stable Storage file ID when a downstream tool needs to attach the original image; the image above remains available for vision.", attachment.StorageApp, attachment.FileID)})
+			}
 			continue
 		}
 		if attachment.ID != "" {

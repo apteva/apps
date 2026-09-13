@@ -30,6 +30,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -361,6 +362,71 @@ func TestLive_CodexSoftBreak(t *testing.T) {
 		time.Sleep(3 * time.Second)
 	}
 	t.Fatal("Codex did not acknowledge the soft-break event within 150s")
+}
+
+// TestLive_CodexImageStorageTicket is a Tier 3 end-to-end attachment check.
+// It is opt-in because it uses a real LLM and creates a temporary ticket.
+// The Conversations install must have a Storage binding with
+// attachment_storage enabled, and the agent must have the Tickets tools.
+// Required: APTEVA_LIVE_TICKETS_AGENT_ID (or APTEVA_LIVE_AGENT_ID),
+// APTEVA_LIVE_PROJECT_ID, APTEVA_LIVE_STORAGE_ENABLED=true.
+func TestLive_CodexImageStorageTicket(t *testing.T) {
+	if os.Getenv("APTEVA_LIVE_STORAGE_ENABLED") != "true" {
+		t.Skip("APTEVA_LIVE_STORAGE_ENABLED=true required for Tier 3 Storage attachment test")
+	}
+	c := newLiveClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+	var conv struct {
+		ID string `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agentID, "title": "Live image Storage ticket"}, &conv); status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+	image := base64.StdEncoding.EncodeToString(onePixelPNG())
+	var uploaded Attachment
+	if status := c.do("POST", "/api/apps/conversations/attachments?chat_id="+conv.ID, map[string]any{"id": "tier3-image-storage-1234", "name": "tier3.png", "content_base64": image}, &uploaded); status != http.StatusOK || uploaded.ID == "" {
+		t.Fatalf("upload image: status=%d attachment=%+v", status, uploaded)
+	}
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content":           "Use the attached image to create a Tickets ticket titled TIER3_IMAGE_STORAGE_TEST. After creating it, attach this same image using the Storage file ID exposed with the image. Reply exactly TIER3_IMAGE_STORAGE_DONE only after tickets_add_attachment succeeds.",
+		"client_message_id": "tier3-image-storage-message",
+		"attachments":       []Attachment{{ID: uploaded.ID, Type: uploaded.Type}},
+	}, nil); status != http.StatusOK {
+		t.Fatalf("send image: status=%d", status)
+	}
+	deadline := time.Now().Add(180 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		for _, m := range transcript {
+			if m.Role == "agent" && strings.Contains(m.Content, "TIER3_IMAGE_STORAGE_DONE") {
+				var list struct {
+					Tickets []struct {
+						ID int64 `json:"id"`
+					} `json:"tickets"`
+				}
+				path := "/api/apps/tickets/tickets?q=TIER3_IMAGE_STORAGE_TEST&project_id=" + url.QueryEscape(os.Getenv("APTEVA_LIVE_PROJECT_ID"))
+				if status := c.do("GET", path, nil, &list); status != http.StatusOK || len(list.Tickets) == 0 {
+					t.Fatalf("agent reported success but ticket was not found: status=%d tickets=%+v", status, list.Tickets)
+				}
+				var detail struct {
+					Attachments []struct {
+						StorageFileID string `json:"storage_file_id"`
+					} `json:"attachments"`
+				}
+				status := c.do("GET", fmt.Sprintf("/api/apps/tickets/tickets/%d?project_id=%s", list.Tickets[0].ID, url.QueryEscape(os.Getenv("APTEVA_LIVE_PROJECT_ID"))), nil, &detail)
+				if status != http.StatusOK || len(detail.Attachments) == 0 || detail.Attachments[0].StorageFileID == "" {
+					t.Fatalf("ticket has no Storage attachment: status=%d detail=%+v", status, detail)
+				}
+				t.Logf("Tier 3 image reached Core vision and Tickets attachment with storage_file_id=%s", detail.Attachments[0].StorageFileID)
+				return
+			}
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("real agent did not complete the image-to-ticket Storage flow within 180s")
 }
 
 // TestLive_CodexTwoConversationIsolation proves that one agent can hold two
