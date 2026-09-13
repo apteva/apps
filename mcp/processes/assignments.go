@@ -222,7 +222,7 @@ func (a *App) saveAssignment(project, process, id string, expected int, c Assign
 	}
 	agent, e := a.ctx.GetAgent(c.OwnerAgentID)
 	if e != nil {
-		return nil, e
+		return nil, fmt.Errorf("responsible agent %d is unavailable; choose an accessible agent in this project: %w", c.OwnerAgentID, e)
 	}
 	if agent.ProjectID != project {
 		return nil, errors.New("owner is outside this project")

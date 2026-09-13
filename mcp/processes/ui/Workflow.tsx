@@ -122,6 +122,11 @@ export function RolesEditor({
                 })
               }
             >
+              {x.kind === "agent" && !agents.some((a) => a.id === x.agent_id) && (
+                <option value={String(x.agent_id)} disabled>
+                  {x.agent_id ? `Agent ${x.agent_id} unavailable · choose a replacement` : "Choose an agent"}
+                </option>
+              )}
               <option value="human">Human · project operator</option>
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>

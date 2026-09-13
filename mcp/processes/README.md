@@ -32,6 +32,8 @@ See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 - Configure execution later in Assignments; saving a procedure never creates an assignment.
 - Define text, number, and yes/no parameters, required fields, and defaults.
 - Add and edit assignments with independent agents, schedules, and parameters.
+- Unavailable coordinators and role agents are shown explicitly. Select replacements
+  before saving; roles without an explicit agent follow the new coordinator.
 - Start, pause, activate, or archive one assignment without changing the others.
 - Override parameters for one manual run without modifying the assignment.
 - Filter run history by assignment, agent, or outcome. Only Tasks records link

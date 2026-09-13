@@ -172,7 +172,7 @@ func (a *App) validateRoles(project string, d Definition, c AssignmentConfig) er
 			}
 			agent, e := a.ctx.GetAgent(x.AgentID)
 			if e != nil {
-				return e
+				return fmt.Errorf("role %s agent %d is unavailable; choose an accessible agent in this project: %w", role, x.AgentID, e)
 			}
 			if agent.ProjectID != project || agent.DefaultThreadID == "" {
 				return fmt.Errorf("role %s needs an agent with a default thread in this project", role)

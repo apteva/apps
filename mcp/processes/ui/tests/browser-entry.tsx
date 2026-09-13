@@ -32,6 +32,18 @@ let process = JSON.parse(sessionStorage.getItem("process") || "null") || {
   ],
   assignments: [],
 };
+const missingAgent = location.search.includes("missing_agent");
+if (missingAgent) {
+  process.assignments = [{
+    id: "barcelona", process_id: "weather", revision: 4,
+    name: "Barcelona weather", target: "Barcelona, Spain",
+    owner_agent_id: 1104, execution_mode: "agent", procedure_version: 1,
+    follow_latest: true, parameters: { city: "Barcelona" },
+    schedule: { kind: "cron", cron: "0 * * * *", timezone: "Europe/Madrid" },
+    status: "paused", sync_pending: false,
+    ...(location.search.includes("pinned_role") ? { roles: { weather_agent: { kind: "agent", agent_id: 1104 } } } : {}),
+  }];
+}
 const originalFetch = window.fetch.bind(window);
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
@@ -39,10 +51,17 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     return Response.json(
       location.search.includes("no_agents")
         ? []
-        : [{ id: 7, name: "Weather agent" }],
+        : missingAgent ? [{ id: 1105, name: "My Test Agent First" }] : [{ id: 7, name: "Weather agent" }],
     );
   if (init?.method === "PUT" || init?.method === "POST") {
     const body = JSON.parse(String(init.body));
+    if (path.endsWith("/assignments/barcelona") && body.assignment) {
+      if (body.assignment.owner_agent_id !== 1105 || Object.values(body.assignment.roles || {}).some((x: any) => x.kind === "agent" && x.agent_id !== 1105))
+        return new Response("agent not found or not owned by this user", { status: 403 });
+      sessionStorage.setItem("submitted-assignment", JSON.stringify(body));
+      process.assignments = [{ ...body.assignment, revision: body.expected_revision + 1 }];
+      return Response.json(process.assignments[0]);
+    }
     if (!body.definition) throw new Error("Unexpected fixture write");
     sessionStorage.setItem(
       "submitted-definition",
@@ -60,7 +79,7 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
   }
   if (path.endsWith("/runs"))
     return location.search.includes("live") ? originalFetch("/fixture/runs") : Response.json({ direct_runs: [], runs: [] });
-  if (path.endsWith("/assignments")) return Response.json({ assignments: [] });
+  if (path.endsWith("/assignments")) return Response.json({ assignments: process.assignments });
   if (path.endsWith("/weather"))
     return Response.json({
       process,
