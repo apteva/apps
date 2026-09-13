@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.23.7 — 2026-09-13
+
+- Rebuild the release against the pinned SDK-compatible HTTP context path so source installs can upgrade without requiring an unpublished SDK method.
+
 ## 0.23.6 — 2026-09-13
 
 - Restore integration logos in ChatToolActivity by loading project runtime catalog metadata, with static icons and generic glyphs as fallbacks.
