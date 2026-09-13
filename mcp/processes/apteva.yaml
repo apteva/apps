@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.7.0
+version: 0.8.0
 description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and native one-off tasks.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -18,6 +18,41 @@ requires:
       version: ">=3.6.0"
       reason: Optional Tasks-backed execution and scheduling when selected for an assignment.
 provides:
+  publishes:
+    - name: process.created
+      description: A procedure was created.
+    - name: process.updated
+      description: A procedure or its synchronization status changed.
+    - name: process.state_changed
+      description: A procedure was activated, paused, or archived.
+    - name: assignment.created
+      description: An execution assignment was created.
+    - name: assignment.updated
+      description: Assignment configuration or schedule changed.
+    - name: assignment.state_changed
+      description: Assignment status changed.
+    - name: run.created
+      description: A run was created.
+    - name: run.updated
+      description: Run progress or execution details changed.
+    - name: run.state_changed
+      description: Run state changed; filter to_state for completion or failure.
+    - name: task.created
+      description: A process step or native task was created.
+    - name: task.updated
+      description: Task progress, executor, or details changed.
+    - name: task.state_changed
+      description: Task state changed.
+    - name: task.approval_requested
+      description: An approval became actionable.
+    - name: task.approval_resolved
+      description: An approval received a decision.
+    - name: trigger.updated
+      description: A trigger or its synchronization status changed.
+    - name: trigger.event_processed
+      description: An incoming trigger event was processed.
+    - name: delivery.state_changed
+      description: Agent dispatch entered retrying or recovered.
   http_routes:
     - prefix: /
   mcp_tools:
@@ -75,7 +110,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.7.0
+    ref: processes/v0.8.0
     entry: mcp/processes
   port: 8080
   health_check: /health

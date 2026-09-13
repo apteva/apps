@@ -177,6 +177,7 @@ export function RunSteps({
   };
   return (
     <div style={{ marginTop: 18 }}>
+      <ProcessFlow steps={steps.map(s => s.definition)} executions={steps} />
       <div className="row between">
         <h2>Step execution</h2>
         {!isTerminal && (

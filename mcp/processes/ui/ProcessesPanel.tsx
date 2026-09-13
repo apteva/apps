@@ -1,3 +1,4 @@
+import { LiveContext, useProcessEvents, useScopedRevision, type AppEvent } from "./live-events";
 import { useEffect, useState } from "react";
 import WorkPanel, { RunWork } from "./Work";
 import { ProcessFlow } from "./ProcessFlow";
@@ -14,6 +15,8 @@ type Props = {
   projectId?: string;
   installId?: number;
   eventRevision?: number;
+  appEvents?: AppEvent[];
+  eventStreamManaged?: boolean;
 };
 type Schedule = {
   kind: string;
@@ -209,6 +212,15 @@ function Panel(props: Props) {
       throw new Error((await r.text()) || `Request failed (${r.status})`);
     return r.json();
   };
+  const liveEvents = useProcessEvents(props);
+  const listRevision = useScopedRevision(e => /^(process|assignment)\./.test(e.topic), liveEvents);
+  const detailRevision = useScopedRevision(e => e.data?.process_id === selected, liveEvents);
+  useEffect(() => {
+    if (!props.projectId) return;
+    let active = true;
+    api().then(r => { if (active) setItems(r.processes || []); }).catch(e => { if (active) setError(e.message); });
+    return () => { active = false; };
+  }, [listRevision, props.projectId, props.installId]);
   const load = async () => {
     const r = await api();
     setItems(r.processes || []);
@@ -285,14 +297,10 @@ function Panel(props: Props) {
         })
         .catch((e) => live && setError(e.message));
     refresh();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") refresh();
-    }, 15000);
     return () => {
       live = false;
-      clearInterval(timer);
     };
-  }, [selected, detail?.process.version, props.projectId, props.installId]);
+  }, [selected, detail?.process.version, props.projectId, props.installId, detailRevision]);
   useEffect(() => {
     if (!detail?.process.sync_pending || !selected) return;
     let live = true;
@@ -391,7 +399,7 @@ function Panel(props: Props) {
     setError("");
   };
   return (
-    <div className="ap-processes">
+    <LiveContext.Provider value={liveEvents}><div className="ap-processes">
       <style>{css}</style>
       {(selected || creating) && (
         <button className="crumb" disabled={busy} onClick={back}>
@@ -461,7 +469,7 @@ function Panel(props: Props) {
           api={api}
           agents={agents}
           processes={items}
-          eventRevision={props.eventRevision}
+          eventRevision={liveEvents.eventRevision}
         />
       ) : creating || editing ? (
         <form
@@ -1238,6 +1246,6 @@ function Panel(props: Props) {
           </section>
         </div>
       )}
-    </div>
+    </div></LiveContext.Provider>
   );
 }

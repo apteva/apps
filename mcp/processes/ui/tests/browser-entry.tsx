@@ -32,6 +32,7 @@ let process = JSON.parse(sessionStorage.getItem("process") || "null") || {
   ],
   assignments: [],
 };
+const originalFetch = window.fetch.bind(window);
 window.fetch = (async (url: unknown, init?: RequestInit) => {
   const path = String(url).split("?")[0];
   if (path === "/api/agents")
@@ -58,7 +59,7 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     return Response.json(process);
   }
   if (path.endsWith("/runs"))
-    return Response.json({ direct_runs: [], runs: [] });
+    return location.search.includes("live") ? originalFetch("/fixture/runs") : Response.json({ direct_runs: [], runs: [] });
   if (path.endsWith("/assignments")) return Response.json({ assignments: [] });
   if (path.endsWith("/weather"))
     return Response.json({
@@ -67,4 +68,4 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     });
   return Response.json({ processes: [process] });
 }) as typeof fetch;
-createRoot(document.getElementById("root")!).render(<Panel projectId="test" />);
+createRoot(document.getElementById("root")!).render(<Panel projectId="test" installId={77} />);
