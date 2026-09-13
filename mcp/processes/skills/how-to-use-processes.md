@@ -63,6 +63,19 @@ Inspect sync_pending, sync_error, and delivery warnings; never claim an unfinish
 activation/pause succeeded. Previously requested work may continue after pause.
 
 
+For collaborative runs, the agent main thread is the coordinator. Processes records
+the durable run and sends a compact run or step event to main; Processes does not
+create hidden worker threads. Main reads run_get or step_get, then uses the
+platform spawn capability to create focused workers for executable steps. Give
+each worker the step identifier, a self-contained directive, and only the MCP
+scopes needed for that step. Workers must read step_get before domain actions and
+report progress and output with step_update to main. Independent ready steps may
+be spawned concurrently; main waits for dependency completion before spawning a
+join step. A worker must never spawn downstream work or execute another role.
+For retries, reuse the same run and step identifiers and preserve the durable
+assignment state. If a step belongs to another agent, main sends that agent's
+main thread a compact assignment; that main performs its own spawn.
+
 For collaborative runs, the procedure defines steps with key, name, role, kind
 (work or approval), instructions, expected_output, and depends_on. Assignments
 bind roles to agents or human project operators. Work roles default to the

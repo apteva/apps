@@ -259,7 +259,7 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 		return a.nativeTaskContext(p, r, s, all)
 	}
 	inputs := dependencyOutputs(s, all)
-	contract := fmt.Sprintf("Read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before any action. Only execute this step after it is ready. Stop if the run or step is terminal. Use step_update for progress and final output. Do not perform downstream steps or publish on behalf of another role.", p.ID, r.ID, s.ID)
+	contract := fmt.Sprintf("You are receiving this assignment on the agent main thread, which is the process coordinator. Read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before any action. Then use the platform spawn capability to create a focused worker for this step, with a self-contained directive and only the MCP scopes it needs. Use a deterministic worker name process-run-%s-step-%s. The worker must read step_get before domain actions and use step_update for progress and final output. Main waits for dependencies and coordinates downstream steps; do not execute business work in main when delegation is available, perform downstream steps, or publish on behalf of another role.", p.ID, r.ID, s.ID, r.ID, s.Key)
 	if stepUsesTasks(r, s) {
 		contract += " This work step uses Tasks: also read the linked task and use Tasks progress/complete to report the outcome. Processes will read its status and release dependencies; do not call step_update to complete it."
 	}
