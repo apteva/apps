@@ -2,7 +2,11 @@ import { afterEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import Widget, { overviewLink, overviewQueue } from "./ProcessOverviewWidget";
+import Widget, {
+  overviewLink,
+  overviewQueue,
+  executionStatus,
+} from "./ProcessOverviewWidget";
 import { overviewFixture } from "./tests/overview-fixture";
 const originalFetch = globalThis.fetch;
 const window = new Window({ url: "http://localhost" });
@@ -147,4 +151,36 @@ test("All orders running then schedules then blocked/outcomes, preserves setting
     ),
   );
   expect(el.querySelectorAll(".po-row").length).toBe(6);
+});
+
+test("right column uses live step state and accounts for parallel work, review and terminal outcomes", () => {
+  const run = structuredClone(overviewFixture.active[0]);
+  const entry = { item: run, assignment: false, group: "running" as const };
+  expect(executionStatus(entry)).toMatchObject({
+    label: "Post conversation",
+    state: "running",
+    extra: 0,
+  });
+  run.steps[2].state = "running";
+  expect(executionStatus(entry)).toMatchObject({ state: "running", extra: 1 });
+  run.state = "blocked";
+  expect(executionStatus(entry).state).toBe("blocked");
+  run.state = "completed";
+  expect(executionStatus(entry)).toMatchObject({
+    label: "Finished",
+    state: "completed",
+    extra: 0,
+  });
+  run.state = "running";
+  run.steps = run.steps.slice(0, 2);
+  run.steps[1].kind = "approval";
+  run.steps[1].executor = { kind: "human", agent_id: 0 };
+  run.steps[1].state = "ready";
+  expect(executionStatus(entry)).toMatchObject({
+    label: "Post conversation",
+    state: "review",
+  });
+  run.state = "blocked";
+  run.steps[1].state = "blocked";
+  expect(executionStatus(entry).state).toBe("blocked");
 });
