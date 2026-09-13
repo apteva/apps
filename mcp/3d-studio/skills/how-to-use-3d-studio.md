@@ -4,7 +4,7 @@ Use this app for editable low-poly game meshes. The engine and server are Go.
 Call `studio_capabilities` first for current operations and limits. Unsupported
 operations (bevel, loop cut, UV unwrap, rigging) must not be presented as available.
 
-1. Create a model with `assets_create` (template `empty`, `box`, or `car`).
+1. Create a model with `assets_create` (template `empty`, `box`, `car`, `warrior`, `landscape`, or `sword`).
 2. Inspect node summaries with `mesh_inspect`. `include_mesh: true` reads up to
    500 elements; narrow larger meshes using `mesh_select` first.
 3. Select `face` or `vertex` elements with `mesh_select`. Face bounds filter face
@@ -40,3 +40,7 @@ separate centered object pivots. It does not provide UVs, textures, collision,
 LODs, animation, or a guarantee that a visually plausible mesh avoids every
 self-intersection. Open boundaries are reported as warnings. Inspect geometry
 and renders before declaring a game asset ready.
+
+## Game examples
+
+Use `warrior` for layered armor, helmet, cloak, shield, and a sword; `landscape` for editable terrain, river, pines, rocks, bridge, and tower ruins; or `sword` for a diamond-section blade, guard, wrapped grip, and pommel. Inspect node IDs with `assets_get` before selecting geometry. The warrior is static and unrigged, with no animation or UV textures.

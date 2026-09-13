@@ -19,3 +19,13 @@ The validator was installed in a temporary verification directory, not added as
 an app dependency. No production instance was modified. Godot/Unity/Unreal import
 acceptance remains a separate integration check; this release exports standard
 GLB without engine-specific collision or LOD metadata.
+
+## v0.2.0 examples
+
+- Warrior, landscape, and sword: deterministic generation, closed manifold
+  topology, outward winding, vertex/face budgets, selection edits, PNG and GLB.
+- Tool integration: create and reload intact documents; render/export through
+  the app; exported artifacts remain project scoped.
+- Browser: all three gallery actions create and render editable models with
+  the dashboard React modules, theme, and Go/WebAssembly engine ready.
+- Go race tests, vet, full build, and worker asset-routing regression pass.

@@ -1,4 +1,4 @@
-# 3D Studio 0.1.5
+# 3D Studio 0.2.0
 
 First-party polygon modeling for game assets, implemented with Apteva's Go
 app-sdk **v0.81.0**. No Blender, CAD kernel, Three.js, or JavaScript server runtime.
@@ -27,7 +27,9 @@ as WebAssembly in a worker. Bun only builds the frontend and test tooling.
   overlays. No headless browser is needed to produce these images.
 - GLB export with separate named nodes, centered pivots, flat normals, and
   solid-color metallic/roughness PBR materials. Editable source JSON export.
-- A small car example built by exactly the same engine commands as agent edits.
+- Editable car, armored warrior, river landscape, and detailed sword examples.
+  Named parts use the same polygon documents, selections, edits, and GLB export.
+  The warrior is a static, unrigged model; materials are solid colors.
 
 ## Layout
 
@@ -178,3 +180,16 @@ Validation includes kernel topology tests, export structure, PNG rendering,
 atomicity, retries, project isolation, preview expiry, HTTP/MCP agreement, and
 concurrent-edit races. Game-engine-specific import behavior still needs target
 engine acceptance testing.
+
+## Editable examples
+
+| Template | Parts | Triangles | Contents |
+| --- | ---: | ---: | --- |
+| `warrior` | 67 | 2,300 | Armor, helmet, cloak, shield, and sword |
+| `landscape` | 110 | 3,428 | Terrain, river, pines, rocks, bridge, and ruins |
+| `sword` | 19 | 580 | Diamond-section blade, swept guard, wrapped grip, and pommel |
+
+Choose an example in the panel gallery or call `assets_create` with its template
+name. Each click creates a new editable asset; the source examples stay reusable.
+Run `GOWORK=off go run ./cmd/examples` to regenerate gallery PNGs from the actual
+mesh documents. The full build does this automatically.
