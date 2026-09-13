@@ -81,7 +81,7 @@ async function main() {
       minify: true,
       sourcemap: "external",
       splitting: split,
-      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "@apteva/ui-kit"],
+      external: ["react", "react/jsx-runtime", "react/jsx-dev-runtime", "react-dom", "react-dom/client", "@apteva/ui-kit"],
       define: {
         "process.env.NODE_ENV": '"production"',
       },

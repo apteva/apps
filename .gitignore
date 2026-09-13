@@ -81,3 +81,5 @@ mcp/*/scripts/.env.local
 mcp/*/scripts/.env
 
 .code-test-results/
+
+.processes-test-results/

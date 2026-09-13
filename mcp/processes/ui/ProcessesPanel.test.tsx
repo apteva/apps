@@ -9,6 +9,10 @@ Object.assign(globalThis, {
   window,
   document: window.document,
   HTMLElement: window.HTMLElement,
+  SVGElement: window.SVGElement,
+  ResizeObserver: window.ResizeObserver,
+  requestAnimationFrame: window.requestAnimationFrame.bind(window),
+  cancelAnimationFrame: window.cancelAnimationFrame.bind(window),
   IS_REACT_ACT_ENVIRONMENT: true,
 });
 let root: Root;
@@ -300,13 +304,28 @@ test("workflow template creates editable dependencies and approval gate", async 
   await mount({});
   await click("+ New process");
   await click("Use research → write → review → publish");
-  expect(document.querySelector<HTMLInputElement>("#step-role-2")?.value).toBe(
-    "reviewer",
-  );
-  expect(document.querySelector<HTMLSelectElement>("#step-kind-2")?.value).toBe(
+  expect(document.querySelectorAll(".pf-step").length).toBe(4);
+  const review = document.querySelector<HTMLElement>(
+    '[aria-label="Step 3: Review"]',
+  )!;
+  expect(review).toBeTruthy();
+  await act(async () => review.click());
+  const inspector = document.querySelector(".pf-inspector")!;
+  expect(inspector.querySelector<HTMLSelectElement>("select")?.value).toBe(
     "approval",
   );
-  expect(document.querySelectorAll("fieldset input:checked").length).toBe(3);
+  expect(
+    inspector.querySelector<HTMLInputElement>('input[id$="-role"]')?.value,
+  ).toBe("reviewer");
+  expect(
+    inspector.querySelectorAll('input[type="checkbox"]:checked').length,
+  ).toBe(1);
+  expect(
+    inspector.querySelectorAll('input[type="checkbox"]:disabled').length,
+  ).toBe(1);
+  await click("Remove step");
+  expect(document.querySelectorAll(".pf-step").length).toBe(3);
+  expect(document.querySelector('[aria-label="Step 3: Publish"]')).toBeTruthy();
 });
 test("assignment saves agent role bindings and defaults approval to human", async () => {
   await mount(
@@ -339,14 +358,12 @@ test("assignment saves agent role bindings and defaults approval to human", asyn
     return read(url as string, init);
   }) as typeof fetch;
   await act(async () =>
-    document
-      .querySelector("form")!
-      .dispatchEvent(
-        new window.Event("submit", {
-          bubbles: true,
-          cancelable: true,
-        }) as unknown as Event,
-      ),
+    document.querySelector("form")!.dispatchEvent(
+      new window.Event("submit", {
+        bubbles: true,
+        cancelable: true,
+      }) as unknown as Event,
+    ),
   );
   expect(payload.assignment.roles.writer).toEqual({
     kind: "agent",

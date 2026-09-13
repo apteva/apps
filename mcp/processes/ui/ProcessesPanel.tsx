@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import WorkPanel, { RunWork } from "./Work";
+import { ProcessFlow } from "./ProcessFlow";
+import { stepProblem } from "./flow-model";
 import { StepEditor, RunSteps, type Step, type StepRun } from "./Workflow";
 import Assignments, {
   ParameterEditor,
@@ -131,7 +133,7 @@ const date = (s?: string) =>
       })
     : "—";
 const fields = [
-  ["instructions", "Steps to follow"],
+  ["instructions", "General instructions"],
   ["required_inputs", "Required inputs / sources"],
   ["default_inputs", "Standing context"],
   ["approval_requirements", "Approval checkpoints"],
@@ -139,7 +141,7 @@ const fields = [
 ] as const;
 const css = `
 .ap-processes{--pc-bg:var(--color-bg,#101216);--pc-panel:var(--color-bg-card,#181b21);--pc-line:var(--color-border,#30343e);--pc-text:var(--color-text,#eceef2);--pc-muted:var(--color-text-muted,#969eac);--pc-accent:var(--color-accent,#9ea8ff);color:var(--pc-text);background:var(--pc-bg);font-size:14px;line-height:1.55;min-height:100%;height:100%;overflow:auto;padding:28px;box-sizing:border-box}
-.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
+.ap-processes .pf-basics{display:grid;grid-template-columns:1fr 1fr;gap:20px}.ap-processes .pf-settings{margin:18px 0}.ap-processes .pf-settings>summary{cursor:pointer;color:var(--pc-muted);padding:10px 0 18px}.ap-processes .pf-basics .field{margin-bottom:0}@media(max-width:760px){.ap-processes .pf-basics{grid-template-columns:1fr}}.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
 `;
 const Pill = ({ state }: { state: string }) => (
   <span className={`pill ${state}`}>{state}</span>
@@ -463,12 +465,27 @@ function Panel(props: Props) {
         <form
           onSubmit={(e) => {
             e.preventDefault();
+            const incomplete = draft.steps?.find((s) => stepProblem(s));
+            if (incomplete) {
+              setError(
+                `${incomplete.name || "Untitled step"}: ${stepProblem(incomplete)}.`,
+              );
+              return;
+            }
             work(async () => {
               const r = await api(
                 creating ? "" : `/${selected}`,
                 creating ? "POST" : "PUT",
                 {
-                  definition: draft,
+                  definition: {
+                    ...draft,
+                    instructions:
+                      draft.instructions ||
+                      "Follow the connected steps in dependency order.",
+                    completion_criteria:
+                      draft.completion_criteria ||
+                      "All required steps complete with their required output evidence.",
+                  },
                   ...(!creating ? { expected_version: p?.version } : {}),
                 },
               );
@@ -482,227 +499,235 @@ function Panel(props: Props) {
             });
           }}
         >
-          <div className="grid">
-            <section className="card">
-              <h2>Procedure</h2>
-              <div className="field">
-                <label htmlFor="pc-name">Process name</label>
-                <input
-                  id="pc-name"
-                  required
-                  maxLength={160}
-                  value={draft.name}
-                  onChange={(e) => setField("name", e.target.value)}
-                  placeholder="Monthly financial close"
-                />
-              </div>
-              <div className="field">
-                <label htmlFor="pc-purpose">Purpose</label>
-                <textarea
-                  id="pc-purpose"
-                  rows={3}
-                  value={draft.description}
-                  onChange={(e) => setField("description", e.target.value)}
-                  placeholder="What does this process achieve?"
-                />
-              </div>
-              {fields
-                .filter(([key]) =>
-                  ["instructions", "completion_criteria"].includes(key),
-                )
-                .map(([key, label]) => (
-                  <div className="field" key={key}>
-                    <label htmlFor={`pc-${key}`}>{label}</label>
-                    <textarea
-                      id={`pc-${key}`}
-                      required
-                      rows={key === "instructions" ? 10 : 4}
-                      value={draft[key]}
-                      onChange={(e) => setField(key, e.target.value)}
-                      placeholder={
-                        key === "instructions"
-                          ? "1. Collect the required records.\n2. Review and investigate discrepancies.\n3. Prepare the result and request approval."
-                          : "What must be true, and what evidence should the agent provide?"
-                      }
-                    />
-                  </div>
-                ))}
-              <StepEditor
-                steps={draft.steps || []}
-                onChange={(steps) => setField("steps", steps)}
+          <section className="card pf-basics">
+            {" "}
+            <div className="field">
+              <label htmlFor="pc-name">Process name</label>
+              <input
+                id="pc-name"
+                required
+                maxLength={160}
+                value={draft.name}
+                onChange={(e) => setField("name", e.target.value)}
+                placeholder="Monthly financial close"
               />
-              <ParameterEditor
-                fields={draft.parameters || []}
-                onChange={(v) => setField("parameters", v)}
+            </div>
+            <div className="field">
+              <label htmlFor="pc-purpose">Purpose</label>
+              <textarea
+                id="pc-purpose"
+                rows={3}
+                value={draft.description}
+                onChange={(e) => setField("description", e.target.value)}
+                placeholder="What does this process achieve?"
               />
-            </section>
-            <aside>
-              {creating && (
-                <section className="card">
-                  <h2>First assignment</h2>
-                  <p className="small muted">
-                    A default assignment will be created. Add more agents,
-                    pages, and schedules after saving.
-                  </p>
-                  <div className="field">
-                    <label htmlFor="pc-mode">Execution</label>
-                    <select
-                      id="pc-mode"
-                      value={draft.execution_mode}
-                      onChange={(e) =>
-                        setField(
-                          "execution_mode",
-                          e.target.value as "agent" | "tasks",
-                        )
-                      }
-                    >
-                      <option value="agent">Direct agent</option>
-                      <option value="tasks">Tasks</option>
-                    </select>
-                    <p className="small muted">
-                      {draft.execution_mode === "agent"
-                        ? "Runs and results are tracked here. No Tasks app needed."
-                        : "Requires Tasks 3.6.0 or later connected to Processes."}
-                    </p>
-                  </div>
-                  <div className="field">
-                    <label htmlFor="pc-owner">Responsible agent</label>
-                    <select
-                      id="pc-owner"
-                      required
-                      value={draft.owner_agent_id || ""}
-                      onChange={(e) =>
-                        setField("owner_agent_id", Number(e.target.value))
-                      }
-                    >
-                      <option value="" disabled>
-                        Choose an agent
-                      </option>
-                      {agents.map((a) => (
-                        <option key={a.id} value={a.id}>
-                          {a.name}
-                        </option>
-                      ))}
-                    </select>
-                    {!agents.length && (
-                      <p className="small muted">
-                        Create an agent in this project before saving a process.
-                      </p>
-                    )}
-                  </div>
-                  <div className="field">
-                    <label htmlFor="pc-cadence">Cadence</label>
-                    <select
-                      id="pc-cadence"
-                      value={draft.schedule?.kind || "manual"}
-                      onChange={(e) =>
-                        setField(
-                          "schedule",
-                          e.target.value === "manual"
-                            ? undefined
-                            : e.target.value === "interval"
-                              ? {
-                                  kind: "interval",
-                                  every: "24h",
-                                  timezone: "UTC",
-                                }
-                              : {
-                                  kind: "cron",
-                                  cron: "0 9 * * 1",
-                                  timezone:
-                                    Intl.DateTimeFormat().resolvedOptions()
-                                      .timeZone,
-                                },
-                        )
-                      }
-                    >
-                      <option value="manual">On demand</option>
-                      <option value="interval">Every interval</option>
-                      <option value="cron">Calendar schedule</option>
-                    </select>
-                  </div>
-                  {draft.schedule?.kind === "interval" && (
-                    <div className="field">
-                      <label htmlFor="pc-interval">Interval</label>
-                      <input
-                        id="pc-interval"
-                        required
-                        value={draft.schedule.every}
-                        onChange={(e) =>
-                          setField("schedule", {
-                            ...draft.schedule,
-                            every: e.target.value,
-                          })
-                        }
-                      />
-                      <p className="small muted">
-                        Examples: 1h, 24h, 168h. For fixed local times, use a
-                        calendar schedule.
-                      </p>
-                    </div>
-                  )}
-                  {draft.schedule?.kind === "cron" && (
-                    <>
-                      <div className="field">
-                        <label htmlFor="pc-cron">Calendar expression</label>
-                        <input
-                          id="pc-cron"
-                          required
-                          value={draft.schedule.cron}
-                          onChange={(e) =>
-                            setField("schedule", {
-                              ...draft.schedule,
-                              cron: e.target.value,
-                            })
-                          }
-                        />
-                        <p className="small muted">
-                          “0 9 * * 1” means Mondays at 09:00.
-                        </p>
-                      </div>
-                      <div className="field">
-                        <label htmlFor="pc-timezone">Timezone</label>
-                        <input
-                          id="pc-timezone"
-                          required
-                          value={draft.schedule.timezone}
-                          onChange={(e) =>
-                            setField("schedule", {
-                              ...draft.schedule,
-                              timezone: e.target.value,
-                            })
-                          }
-                        />
-                      </div>
-                    </>
-                  )}
-                </section>
-              )}
-              <section className="card" style={{ marginTop: 20 }}>
-                <h2>Inputs & approvals</h2>
+            </div>
+          </section>
+          <StepEditor
+            steps={draft.steps || []}
+            onChange={(steps) => setField("steps", steps)}
+          />
+          <details className="pf-settings" open={!draft.steps?.length}>
+            <summary>General instructions & settings</summary>
+            <div className="grid">
+              <section className="card">
+                <h2>Process context</h2>
                 {fields
-                  .filter(
-                    ([key]) =>
-                      !["instructions", "completion_criteria"].includes(key),
+                  .filter(([key]) =>
+                    ["instructions", "completion_criteria"].includes(key),
                   )
                   .map(([key, label]) => (
                     <div className="field" key={key}>
                       <label htmlFor={`pc-${key}`}>{label}</label>
                       <textarea
                         id={`pc-${key}`}
+                        required={!draft.steps?.length}
                         rows={3}
                         value={draft[key]}
                         onChange={(e) => setField(key, e.target.value)}
+                        placeholder={
+                          key === "instructions"
+                            ? "Shared context for every step. Leave empty to follow the flow."
+                            : "What must be true, and what evidence should the agent provide?"
+                        }
                       />
                     </div>
                   ))}
-                <p className="small muted">
-                  Agents must obtain the approvals described here before
-                  proceeding.
-                </p>
+
+                <ParameterEditor
+                  fields={draft.parameters || []}
+                  onChange={(v) => setField("parameters", v)}
+                />
               </section>
-            </aside>
-          </div>
+              <aside>
+                {creating && (
+                  <section className="card">
+                    <h2>First assignment</h2>
+                    <p className="small muted">
+                      A default assignment will be created. Add more agents,
+                      pages, and schedules after saving.
+                    </p>
+                    <div className="field">
+                      <label htmlFor="pc-mode">Execution</label>
+                      <select
+                        id="pc-mode"
+                        value={draft.execution_mode}
+                        onChange={(e) =>
+                          setField(
+                            "execution_mode",
+                            e.target.value as "agent" | "tasks",
+                          )
+                        }
+                      >
+                        <option value="agent">Direct agent</option>
+                        <option value="tasks">Tasks</option>
+                      </select>
+                      <p className="small muted">
+                        {draft.execution_mode === "agent"
+                          ? "Runs and results are tracked here. No Tasks app needed."
+                          : "Requires Tasks 3.6.0 or later connected to Processes."}
+                      </p>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="pc-owner">Responsible agent</label>
+                      <select
+                        id="pc-owner"
+                        required
+                        value={draft.owner_agent_id || ""}
+                        onChange={(e) =>
+                          setField("owner_agent_id", Number(e.target.value))
+                        }
+                      >
+                        <option value="" disabled>
+                          Choose an agent
+                        </option>
+                        {agents.map((a) => (
+                          <option key={a.id} value={a.id}>
+                            {a.name}
+                          </option>
+                        ))}
+                      </select>
+                      {!agents.length && (
+                        <p className="small muted">
+                          Create an agent in this project before saving a
+                          process.
+                        </p>
+                      )}
+                    </div>
+                    <div className="field">
+                      <label htmlFor="pc-cadence">Cadence</label>
+                      <select
+                        id="pc-cadence"
+                        value={draft.schedule?.kind || "manual"}
+                        onChange={(e) =>
+                          setField(
+                            "schedule",
+                            e.target.value === "manual"
+                              ? undefined
+                              : e.target.value === "interval"
+                                ? {
+                                    kind: "interval",
+                                    every: "24h",
+                                    timezone: "UTC",
+                                  }
+                                : {
+                                    kind: "cron",
+                                    cron: "0 9 * * 1",
+                                    timezone:
+                                      Intl.DateTimeFormat().resolvedOptions()
+                                        .timeZone,
+                                  },
+                          )
+                        }
+                      >
+                        <option value="manual">On demand</option>
+                        <option value="interval">Every interval</option>
+                        <option value="cron">Calendar schedule</option>
+                      </select>
+                    </div>
+                    {draft.schedule?.kind === "interval" && (
+                      <div className="field">
+                        <label htmlFor="pc-interval">Interval</label>
+                        <input
+                          id="pc-interval"
+                          required
+                          value={draft.schedule.every}
+                          onChange={(e) =>
+                            setField("schedule", {
+                              ...draft.schedule,
+                              every: e.target.value,
+                            })
+                          }
+                        />
+                        <p className="small muted">
+                          Examples: 1h, 24h, 168h. For fixed local times, use a
+                          calendar schedule.
+                        </p>
+                      </div>
+                    )}
+                    {draft.schedule?.kind === "cron" && (
+                      <>
+                        <div className="field">
+                          <label htmlFor="pc-cron">Calendar expression</label>
+                          <input
+                            id="pc-cron"
+                            required
+                            value={draft.schedule.cron}
+                            onChange={(e) =>
+                              setField("schedule", {
+                                ...draft.schedule,
+                                cron: e.target.value,
+                              })
+                            }
+                          />
+                          <p className="small muted">
+                            “0 9 * * 1” means Mondays at 09:00.
+                          </p>
+                        </div>
+                        <div className="field">
+                          <label htmlFor="pc-timezone">Timezone</label>
+                          <input
+                            id="pc-timezone"
+                            required
+                            value={draft.schedule.timezone}
+                            onChange={(e) =>
+                              setField("schedule", {
+                                ...draft.schedule,
+                                timezone: e.target.value,
+                              })
+                            }
+                          />
+                        </div>
+                      </>
+                    )}
+                  </section>
+                )}
+                <section className="card" style={{ marginTop: 20 }}>
+                  <h2>Inputs & approvals</h2>
+                  {fields
+                    .filter(
+                      ([key]) =>
+                        !["instructions", "completion_criteria"].includes(key),
+                    )
+                    .map(([key, label]) => (
+                      <div className="field" key={key}>
+                        <label htmlFor={`pc-${key}`}>{label}</label>
+                        <textarea
+                          id={`pc-${key}`}
+                          rows={3}
+                          value={draft[key]}
+                          onChange={(e) => setField(key, e.target.value)}
+                        />
+                      </div>
+                    ))}
+                  <p className="small muted">
+                    Agents must obtain the approvals described here before
+                    proceeding.
+                  </p>
+                </section>
+              </aside>
+            </div>
+          </details>
           <div className="row between toolbar">
             <span className="small muted">
               {creating
@@ -887,137 +912,142 @@ function Panel(props: Props) {
             ))}
           </nav>
           {tab === "overview" ? (
-            <div className="grid">
-              <section className="card">
-                <div className="block">
-                  <h2>Purpose</h2>
-                  <p className="prose">{p.description || p.name}</p>
-                </div>
-                <div className="block">
-                  <h2>Successful completion</h2>
-                  <div className="prose">{p.completion_criteria}</div>
-                </div>
-                <div className="block">
-                  <h2>Latest execution</h2>
-                  {executions[0] ? (
-                    <>
-                      <div className="row">
-                        <Pill state={executions[0].record.state} />
-                        <span className="muted small">
-                          {date(executions[0].record.created_at)}
-                        </span>
-                      </div>
-                      <p className="prose">
-                        {executions[0].record.result ||
-                          executions[0].record.error ||
-                          executions[0].record.current_step ||
-                          "Waiting for the owner to begin."}
-                      </p>
+            <>
+              <ProcessFlow steps={p.steps || []} />
+              <div className="grid">
+                <section className="card">
+                  <div className="block">
+                    <h2>Purpose</h2>
+                    <p className="prose">{p.description || p.name}</p>
+                  </div>
+                  <div className="block">
+                    <h2>Successful completion</h2>
+                    <div className="prose">{p.completion_criteria}</div>
+                  </div>
+                  <div className="block">
+                    <h2>Latest execution</h2>
+                    {executions[0] ? (
+                      <>
+                        <div className="row">
+                          <Pill state={executions[0].record.state} />
+                          <span className="muted small">
+                            {date(executions[0].record.created_at)}
+                          </span>
+                        </div>
+                        <p className="prose">
+                          {executions[0].record.result ||
+                            executions[0].record.error ||
+                            executions[0].record.current_step ||
+                            "Waiting for the owner to begin."}
+                        </p>
+                        <button
+                          style={{ marginTop: 12 }}
+                          onClick={() => setTab("runs")}
+                        >
+                          View runs →
+                        </button>
+                      </>
+                    ) : (
+                      <p className="muted">No executions yet.</p>
+                    )}
+                  </div>
+                </section>
+                <aside className="card">
+                  <h2>Operations</h2>
+                  <p>
+                    {
+                      (p.assignments || []).filter((x) => x.status === "active")
+                        .length
+                    }{" "}
+                    enabled assignments · {(p.assignments || []).length} total
+                  </p>
+                  <p className="small muted">
+                    Pause this process to stop future runs for all its
+                    assignments. Use Assignments to control one page or agent.
+                  </p>
+                  <button onClick={() => setTab("assignments")}>
+                    Manage assignments
+                  </button>
+                  <p className="small muted">
+                    Recent runs needing attention:{" "}
+                    {
+                      executions.filter(
+                        (r) =>
+                          ["blocked", "failed", "waiting"].includes(
+                            r.record.state,
+                          ) || r.record.delivery_warning,
+                      ).length
+                    }
+                  </p>
+                  <div className="row" style={{ marginTop: 25 }}>
+                    {p.status === "active" ? (
+                      <>
+                        <button
+                          className="primary"
+                          disabled={busy || p.sync_pending}
+                          onClick={() => {
+                            const active = (p.assignments || []).filter(
+                              (x) => x.status === "active" && !x.sync_pending,
+                            );
+                            if (active.length === 1) prepareRun(active[0]);
+                            else setTab("assignments");
+                          }}
+                        >
+                          Run now
+                        </button>
+                        <button disabled={busy} onClick={() => mutate("pause")}>
+                          Pause
+                        </button>
+                      </>
+                    ) : (
+                      p.status !== "archived" && (
+                        <button
+                          className="primary"
+                          disabled={busy}
+                          onClick={() => mutate("activate")}
+                        >
+                          Activate
+                        </button>
+                      )
+                    )}
+                    {p.status !== "archived" && (
                       <button
-                        style={{ marginTop: 12 }}
-                        onClick={() => setTab("runs")}
-                      >
-                        View runs →
-                      </button>
-                    </>
-                  ) : (
-                    <p className="muted">No executions yet.</p>
-                  )}
-                </div>
-              </section>
-              <aside className="card">
-                <h2>Operations</h2>
-                <p>
-                  {
-                    (p.assignments || []).filter((x) => x.status === "active")
-                      .length
-                  }{" "}
-                  enabled assignments · {(p.assignments || []).length} total
-                </p>
-                <p className="small muted">
-                  Pause this process to stop future runs for all its
-                  assignments. Use Assignments to control one page or agent.
-                </p>
-                <button onClick={() => setTab("assignments")}>
-                  Manage assignments
-                </button>
-                <p className="small muted">
-                  Recent runs needing attention:{" "}
-                  {
-                    executions.filter(
-                      (r) =>
-                        ["blocked", "failed", "waiting"].includes(
-                          r.record.state,
-                        ) || r.record.delivery_warning,
-                    ).length
-                  }
-                </p>
-                <div className="row" style={{ marginTop: 25 }}>
-                  {p.status === "active" ? (
-                    <>
-                      <button
-                        className="primary"
-                        disabled={busy || p.sync_pending}
+                        disabled={
+                          busy || p.status === "active" || p.sync_pending
+                        }
                         onClick={() => {
-                          const active = (p.assignments || []).filter(
-                            (x) => x.status === "active" && !x.sync_pending,
-                          );
-                          if (active.length === 1) prepareRun(active[0]);
-                          else setTab("assignments");
+                          setDraft({ ...p });
+                          setEditing(true);
                         }}
                       >
-                        Run now
+                        Edit procedure
                       </button>
-                      <button disabled={busy} onClick={() => mutate("pause")}>
-                        Pause
-                      </button>
-                    </>
-                  ) : (
-                    p.status !== "archived" && (
-                      <button
-                        className="primary"
-                        disabled={busy}
-                        onClick={() => mutate("activate")}
-                      >
-                        Activate
-                      </button>
-                    )
+                    )}
+                  </div>
+                  {p.status === "active" && (
+                    <p className="small muted" style={{ marginTop: 14 }}>
+                      Pause the process before editing its procedure.
+                    </p>
                   )}
                   {p.status !== "archived" && (
                     <button
-                      disabled={busy || p.status === "active" || p.sync_pending}
+                      style={{ marginTop: 25 }}
+                      disabled={busy}
                       onClick={() => {
-                        setDraft({ ...p });
-                        setEditing(true);
+                        if (
+                          window.confirm(
+                            "Archive this process? Future scheduled runs will stop. Existing runs will continue.",
+                          )
+                        )
+                          mutate("archive");
                       }}
                     >
-                      Edit procedure
+                      Archive process
                     </button>
                   )}
-                </div>
-                {p.status === "active" && (
-                  <p className="small muted" style={{ marginTop: 14 }}>
-                    Pause the process before editing its procedure.
-                  </p>
-                )}
-                {p.status !== "archived" && (
-                  <button
-                    style={{ marginTop: 25 }}
-                    disabled={busy}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          "Archive this process? Future scheduled runs will stop. Existing runs will continue.",
-                        )
-                      )
-                        mutate("archive");
-                    }}
-                  >
-                    Archive process
-                  </button>
-                )}
-              </aside>
-            </div>
+                </aside>
+              </div>
+            </>
           ) : tab === "assignments" ? (
             <Assignments
               items={(p.assignments || []).map((x) => ({
@@ -1064,26 +1094,7 @@ function Panel(props: Props) {
                   .
                 </div>
               )}
-              {!!chosen?.steps?.length && (
-                <div className="block">
-                  <h2>Steps & roles</h2>
-                  {chosen.steps.map((s) => (
-                    <div className="block" key={s.key}>
-                      <strong>{s.name}</strong>
-                      <p className="small muted">
-                        {s.role} · {s.kind}
-                        {(s.depends_on || []).length
-                          ? ` · after ${(s.depends_on || []).join(", ")}`
-                          : " · starts with run"}
-                      </p>
-                      <div className="prose">{s.instructions}</div>
-                      <p className="small muted">
-                        Expected output: {s.expected_output}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
+              <ProcessFlow steps={chosen?.steps || []} />
               {!!chosen?.parameters?.length && (
                 <div className="block">
                   <h2>Parameters</h2>

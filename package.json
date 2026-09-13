@@ -11,6 +11,7 @@
     "test:a2a-ui": "bun test mcp/a2a/ui/A2APanel.test.tsx"
   },
   "dependencies": {
+    "@xyflow/react": "^12.10.2",
     "dompurify": "^3.4.13",
     "highlight.js": "^11.12.0",
     "hls.js": "1.7.2",
