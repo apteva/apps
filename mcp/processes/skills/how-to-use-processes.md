@@ -63,7 +63,7 @@ Inspect sync_pending, sync_error, and delivery warnings; never claim an unfinish
 activation/pause succeeded. Previously requested work may continue after pause.
 
 
-The agent's main thread coordinates delegation, like Tasks. Processes stores work
+For parallel and multi-agent workflows, the agent's main thread coordinates delegation, like Tasks. Processes stores work
 and delivers ready steps to the assigned agent; it does not create threads.
 Main uses platform spawn when isolation or parallel execution is useful. Pass
 exact process/run/step IDs and a short execution directive, granting step_get,
@@ -165,3 +165,18 @@ reason and current revision. Read cancellation state before external actions;
 already dispatched work cannot be revoked. Existing `step_get`/`step_update`
 remain valid for procedure steps. Linked Tasks-backed work must still report
 outcomes through the Tasks integration.
+
+## Sequential same-agent runs
+
+When delivery identifies a sequential same-agent run, main spawns one worker for
+the whole run, with `step_claim`, `step_update`, and all domain tools needed by
+its frozen steps. Pass the IDs and app contract without rewriting the procedure.
+The worker calls `step_claim` before executing each ready step. This binds its
+thread as the run worker and marks ready work running. Later ready steps are
+sent directly to that worker with short notices. Each claim returns authoritative
+instructions and dependency evidence. Do not call `done` after an intermediate
+step: use the `worker.done` flag and remain available for events, including human
+approvals. Report once when the run is terminal. Do not poll or ask main to
+forward subsequent steps. Other workflows retain independent workers for branches
+and different agents. Main can execute with `step_get`/`step_update` if workers
+cannot access Processes.

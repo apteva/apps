@@ -258,6 +258,14 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 	if s.Origin != "process_step" {
 		return a.nativeTaskContext(p, r, s, all)
 	}
+	if sequentialAgent(r, all) != 0 && s.Executor.Kind == "agent" {
+		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
+		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
+		if worker != "" {
+			return "Next sequential step ready: " + ids + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies and approvals remain enforced. Keep this worker alive between steps. After step_update, call done only when worker.done is true; otherwise wait for the next Processes event without polling."
+		}
+		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting processes_step_claim, processes_step_update and domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while worker.done=false, including while awaiting human approval. Call done once after worker.done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, ids, p.Name, jsonText(p.Definition))
+	}
 	inputs := dependencyOutputs(s, all)
 	contract := fmt.Sprintf("Worker: read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before domain action. Check readiness, assignment and terminal state. Use dependencies for ancestor IDs, states, outputs and approval decisions; this is authoritative evidence, with no separate run_get or parent confirmation needed when complete. Follow the frozen instructions. Use step_update for meaningful milestones and the terminal outcome, then report once to main. Do not execute downstream steps.", p.ID, r.ID, s.ID)
 	if !stepUsesTasks(r, s) {
@@ -304,6 +312,18 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 		}
 		_, err = a.db.Exec(`UPDATE process_step_runs SET task_id=?,delivered_at=?,delivery_warning=?,next_attempt_at='' WHERE id=?`, id, timestamp(), result.DeliveryWarning, s.ID)
 		return err
+	}
+	if s.ThreadID == "" && sequentialAgent(r, all) != 0 {
+		worker, e := a.runWorker(r.ID, s.Executor.AgentID)
+		if e != nil {
+			return e
+		}
+		if worker != "" {
+			s.ThreadID = worker
+			if _, err = a.db.Exec(`UPDATE process_step_runs SET target_thread_id=? WHERE id=?`, worker, s.ID); err != nil {
+				return err
+			}
+		}
 	}
 	if s.ThreadID == "" {
 		agent, e := a.ctx.GetAgent(s.Executor.AgentID)
@@ -507,6 +527,20 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	if !found {
 		return nil, errNotFound
 	}
+	if action == "step_claim" {
+		if e = a.claimStep(r, s, all, actor); e != nil {
+			return nil, e
+		}
+		all, e = a.steps(run)
+		if e != nil {
+			return nil, e
+		}
+		for _, item := range all {
+			if item.ID == id {
+				s = item
+			}
+		}
+	}
 	if action == "step_update" {
 		if e = a.updateTaskState(s, r, all, actor, args); e != nil {
 			return nil, e
@@ -529,6 +563,23 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 	d, e := a.runDefinition(r)
 	if e != nil {
 		return nil, e
+	}
+	worker, e := a.runWorker(r.ID, s.Executor.AgentID)
+	if e != nil {
+		return nil, e
+	}
+	if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
+		result := map[string]any{"run": map[string]any{"id": r.ID, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": terminal(r.State)}}
+		if action == "step_claim" {
+			result["instructions"] = d.Instructions
+			result["required_inputs"] = d.RequiredInputs
+			result["default_inputs"] = d.DefaultInputs
+			result["completion_criteria"] = d.CompletionCriteria
+			result["approval_requirements"] = d.ApprovalRequirements
+			result["inputs"] = r.Inputs
+			result["assignment"] = r.Binding
+		}
+		return result, nil
 	}
 	return map[string]any{"run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "dependencies": dependencyEvidence(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
 }

@@ -70,6 +70,15 @@ export function verifyHistory(scenario: string, history: any) {
       "Expected one completed team workflow",
     );
     verifyMultiAgentRun(runs[0]);
+  } else if (scenario === "processes-sequential-worker") {
+    check(runs.length === 1 && runs[0].state === "completed", "Expected one completed sequential run");
+    const expected = ["WEATHER|Barcelona|22C", "CONVERSATION|Barcelona|22C", "PUSH|Barcelona|22C"];
+    check(runs[0].steps.length === 3, "Expected three sequential steps");
+    runs[0].steps.forEach((s: any, i: number) => {
+      check(s.state === "completed" && s.output === expected[i], "Sequential output mismatch");
+      check(s.executor.agent_id === runs[0].assignment.owner_agent_id, "Wrong executor");
+      if (i) check(s.delivered_at >= runs[0].steps[i - 1].updated_at, "Dependency released early");
+    });
   } else throw new Error(`No outcome verifier for ${scenario}`);
 }
 
@@ -227,4 +236,28 @@ export function verifyStepWorkers(calls: any[], run: any) {
     const readIndex = calls.findIndex(c => c.name === "processes_step_get" && c.ok && c.completed && c.agent === done.agent && c.thread_id === done.thread_id && c.args?.step_id === step.id);
     check(spawnIndex >= 0 && readIndex > spawnIndex && readIndex < calls.indexOf(done), `${step.key}: missing main spawn or authoritative worker read`);
   }
+}
+
+/** Check the optimization itself, using both persisted ownership and real calls. */
+export function verifySequentialWorker(calls: any[], run: any, workers: any[]) {
+  check(workers.length === 1 && workers[0].agent_id === run.assignment.owner_agent_id, "Expected one persisted run worker");
+  const thread = workers[0].thread_id;
+  check(thread && thread !== "main", "Run worker must be isolated");
+  const spawns = calls.filter(c => c.name === "spawn" && c.ok && c.completed);
+  check(spawns.length === 1 && spawns[0].thread_id === "main" && spawns[0].args?.id === thread, "Expected exactly one main-thread spawn");
+  let previous = calls.indexOf(spawns[0]);
+  let previousEvent = -1;
+  for (const step of run.steps) {
+    check(step.updated_by === `agent:${workers[0].agent_id}:${thread}`, `${step.key}: persisted executor changed`);
+    const ready = step.events.find((e: any) => e.state === "ready");
+    const completions = step.events.filter((e: any) => e.state === "completed");
+    check(ready && completions.length === 1 && ready.id > previousEvent && completions[0].id > ready.id, `${step.key}: dependency audit ordering failed`);
+    previousEvent = completions[0].id;
+    const claimIndex = calls.findIndex(c => c.name === "processes_step_claim" && c.ok && c.completed && c.agent === spawns[0].agent && c.thread_id === thread && c.args?.step_id === step.id);
+    const doneIndex = calls.findIndex(c => c.name === "processes_step_update" && c.ok && c.completed && c.agent === spawns[0].agent && c.thread_id === thread && c.args?.step_id === step.id && c.args?.state === "completed");
+    check(claimIndex > previous && doneIndex > claimIndex, `${step.key}: missing ordered claim/completion in the run worker`);
+    previous = doneIndex;
+  }
+  const done = calls.filter(c => c.name === "done" && c.thread_id === thread && c.agent === spawns[0].agent && c.ok && c.completed);
+  check(done.length === 1 && calls.indexOf(done[0]) > previous, "Worker must finish once after the final step");
 }
