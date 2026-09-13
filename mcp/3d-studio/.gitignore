@@ -4,3 +4,4 @@ ui/preview.mjs
 *.db-shm
 *.db-wal
 /3d-studio
+ui/preview-vendor/
