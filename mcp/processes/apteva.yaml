@@ -34,7 +34,7 @@ provides:
     - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
     - { name: assignments, description: List saved process assignments. }
     - { name: assignment_get, description: Read assignment settings. }
-    - { name: assignment_create, description: Configure a new assignment with agents, parameter values, and schedule. }
+    - { name: assignment_create, description: "Configure a new assignment with agents, parameter values, and schedule." }
     - { name: assignment_update, description: Revise a paused assignment. }
     - { name: assignment_activate, description: Enable an assignment. }
     - { name: assignment_pause, description: Pause one assignment. }
