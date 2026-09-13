@@ -46,28 +46,33 @@ directive: |
   draft and the frozen page parameter. Define these steps:
 
   1. key=research, name=Research tip, role=researcher, kind=work, depends_on=[].
-     Instructions: Read frozen page; output exactly RESEARCH|page=<page>|tip=window-light.
+     Instructions: Read frozen page; output exactly `RESEARCH|page=<page>|tip=window-light`
+     without backticks or trailing punctuation.
      Expected output: research evidence and page.
   2. key=audience, name=Check audience, role=writer, kind=work, depends_on=[].
-     Instructions: Read frozen page; output exactly AUDIENCE|page=<page>|level=beginner.
+     Instructions: Read frozen page; output exactly `AUDIENCE|page=<page>|level=beginner`
+     without backticks or trailing punctuation.
      Expected output: audience evidence and page.
   3. key=draft, name=Write joined draft, role=writer, kind=work,
      depends_on=[research,audience].
      Instructions: Read BOTH dependency outputs, ensure their page equals the
      frozen parameter, and use their level and tip to produce exactly
-     DRAFT|<page>|<level>|<tip>. If evidence is missing or conflicts, block with a reason.
+     `DRAFT|<page>|<level>|<tip>` without backticks or trailing punctuation.
+     If evidence is missing or conflicts, block with a reason.
      Expected output: draft derived from both inputs.
   4. key=review, name=Review joined draft, role=reviewer, kind=approval,
      depends_on=[draft].
      Instructions: Verify the draft is DRAFT|photography|beginner|window-light
      and agrees with both research and audience outputs and the frozen page.
      Approve only if all checks pass. Set decision=approved and output exactly
-     APPROVED|DRAFT|photography|beginner|window-light. Otherwise reject with a reason.
+     `APPROVED|DRAFT|photography|beginner|window-light` without backticks or trailing
+     punctuation. Otherwise reject with a reason.
      Expected output: explicit decision and evidence.
   5. key=publish, name=Record simulated receipt, role=publisher, kind=work,
      depends_on=[review].
      Instructions: Confirm the review approved this draft; use ancestor outputs
-     and frozen page to record exactly RECEIPT|photography|beginner|window-light.
+     and frozen page to record exactly `RECEIPT|photography|beginner|window-light`
+     without backticks or trailing punctuation.
      This is only a local test receipt: do not call any external publishing tool.
      Expected output: simulated receipt for the approved draft.
 

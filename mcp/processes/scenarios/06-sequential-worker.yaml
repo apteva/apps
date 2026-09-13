@@ -1,0 +1,43 @@
+name: processes-sequential-worker
+description: Three simple dependent steps on one agent, with simulated weather and delivery receipts.
+timeout: 6m
+settle_for: 5s
+max_iterations: 40
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    spawnable: true
+directive: |
+  You are testing a simple sequential process in an isolated project. Your ID is
+  ${APTEVA_TEST_AGENT_ID}. Use only Processes and Core thread tools; all data and
+  receipts in this fixture are simulated. No external calls or real messages.
+  Create exactly one unassigned procedure named "Sequential weather benchmark"
+  with three work steps, all using role weather_agent:
+  1. key=weather, name=Prepare weather, depends_on=[]. Instructions: output exactly
+     WEATHER|Barcelona|22C using these supplied fixture facts. Expected output: weather text.
+  2. key=conversation, name=Record conversation receipt, depends_on=[weather].
+     Instructions: verify the weather dependency is WEATHER|Barcelona|22C and
+     output exactly CONVERSATION|Barcelona|22C. Expected output: simulated receipt.
+  3. key=push, name=Record push receipt, depends_on=[conversation]. Instructions:
+     verify the conversation dependency is CONVERSATION|Barcelona|22C and output
+     exactly PUSH|Barcelona|22C. Expected output: simulated receipt.
+  Shared instructions: perform only the assigned ready steps and use the Processes
+  delivery contract for execution and worker lifetime. Completion criteria: all
+  three steps complete in dependency order with the exact outputs above.
+  Create one assignment named Barcelona, owner yourself, execution_mode=agent,
+  follow_latest=true, no schedule. Activate the procedure and assignment and
+  start once with idempotency_key=benchmark-1. You are authorized to do this.
+  Follow the app's execution contract. Do not manually forward downstream steps,
+  poll for readiness, or repeat completed actions. After the final result, read
+  runs once to verify completion and stop. Never create another occurrence.
+assert:
+  - tool_called: processes_runs
+  - tool_called_with:
+      tool: processes_step_update
+      args: {state: completed, output: "PUSH|Barcelona|22C"}
+      success: true
+  - tool_not_called: processes_run_update
+budget:
+  total_tokens: 600000
+  cost_usd: 5.00

@@ -8,6 +8,7 @@ import {
   verifyHistory,
   verifyMultiAgentTrajectory,
   verifyStepWorkers,
+  verifySequentialWorker,
 } from "./verify-outcomes";
 const appDir = resolve(import.meta.dir, "..");
 const outputRoot = resolve(
@@ -124,6 +125,10 @@ for (const scenario of report.results) {
       runs: runs.filter((r) => r.backend === "tasks"),
     };
     verifyHistory(scenario.scenario, history);
+    if (scenario.scenario === "processes-sequential-worker") {
+      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
+      verifySequentialWorker(scenario.tool_calls, runs[0], workers);
+    }
     if (
       [
         "processes-multi-agent-workflow",

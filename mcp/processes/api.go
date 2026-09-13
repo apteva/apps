@@ -35,10 +35,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
+	descriptions["step_claim"] = "Claim and read a ready step as the persistent worker for a sequential same-agent run. Marks ready work running. Reuse this worker for later steps; finish only when worker.done is true."
 	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
 	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_update", "run_cancel"} {
+	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
@@ -75,7 +76,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["run_id"] = textField("Run ID")
 			props["reason"] = textField("Cancellation reason")
 			required = append(required, "run_id", "reason")
-		case "step_get", "step_update":
+		case "step_get", "step_claim", "step_update":
 			props["run_id"] = textField("Run ID")
 			props["step_id"] = textField("Step execution ID")
 			required = append(required, "run_id", "step_id")
@@ -247,7 +248,7 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.assignmentStatus(project, id, str(args, "assignment_id"), "archived")
 	case "run_cancel":
 		return a.cancelWorkflow(project, actor, id, str(args, "run_id"), str(args, "reason"))
-	case "step_get", "step_update":
+	case "step_get", "step_claim", "step_update":
 		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
 	case "runs":
 		return a.runs(project, id)
