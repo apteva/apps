@@ -1,7 +1,8 @@
 # Processes
 
 Reusable company procedures, configured assignments, and independent execution
-runs. Agents can execute directly, or use the optional Tasks app for tracking.
+runs, with native tasks for both recurring and one-off work. Agents can execute
+directly, or use the optional Tasks app for procedure execution.
 
 ## Model
 
@@ -11,9 +12,9 @@ runs. Agents can execute directly, or use the optional Tasks app for tracking.
   schedule, execution mode, and procedure version policy.
 - **Run:** one occurrence with a snapshot of the assignment, resolved parameters,
   original owner, procedure version, delivery identity, and outcome.
-- **Task:** optional Tasks-backed work linked to a run. Direct runs need no Tasks
-  installation. A Tasks schedule creates its occurrences in Tasks; Processes
-  reads their results live and associates them with their assignment.
+- **Task:** an executable procedure step, standalone work item, or extra work
+  attached to a run. Native tasks reuse step execution and need no Tasks app.
+  The optional Tasks execution backend remains available for procedure work.
 
 For example, one “Publish a Patreon post” procedure can have Photography and
 Cooking assignments with different page IDs, languages, agents, and daily times.
@@ -21,7 +22,11 @@ The same idempotency key can be used independently on each assignment.
 
 ## Panel
 
-The project-page panel has Overview, Procedure, Assignments, and Runs tabs.
+The project-page panel has **Processes** and **Work** areas. Each process has
+Overview, Procedure, Assignments, and Runs tabs. Work combines native tasks and
+approvals across the project, with filters, creation, settings, and history.
+Run workspaces also support adding required or optional tasks to an active run.
+See [native tasks](docs-native-tasks.md) for the shared model and permissions.
 
 - Create a procedure and its convenience default assignment in one form.
 - Define text, number, and yes/no parameters, required fields, and defaults.
@@ -46,13 +51,19 @@ must be configured before activation. Runs already created never change.
 ## Agent API
 
 MCP requires trusted agent/project context. Tools are scoped to a process in
-that project. The host namespaces these local tool names:
+that project, or to project-level native work. The host namespaces these local tool names:
 
 - `list`, `get`, `create`, `update`, `activate`, `pause`, `archive`
 - `assignments`, `assignment_get`, `assignment_create`, `assignment_update`,
   `assignment_activate`, `assignment_pause`, `assignment_archive`
 - `start`, `runs`, `run_get`, `run_update`, `run_cancel`
 - `step_get`, `step_update`
+- `tasks`, `task_runs`, `task_create`, `task_get`, `task_update`, `task_cancel`
+
+Native task updates use the current `expected_revision`; creation uses a stable
+`idempotency_key`. Standalone tasks create no hidden procedure or run.
+[Event triggers](docs-event-triggers.md) provide assignment event configuration,
+preview, activation, and event history tools.
 
 Procedure definitions accept a `parameters` array:
 
@@ -219,8 +230,10 @@ fallback between execution backends.
 
 ## Installation and limits
 
-Apteva >=0.50.4; app-sdk v0.79.0. Tasks >=3.6.0 is optional. Source manifest pins
-`processes/v0.4.0`. This release changes Processes only.
+Apteva >=0.51.3; app-sdk v0.80.0. Tasks >=3.6.0 is optional. Source manifest pins
+`processes/v0.6.0`. Event triggers retain the durable app subscription requirement
+introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
+Native tasks require no additional server changes. This release changes Processes only.
 
 Structured approval steps enforce downstream handoffs. Free-text approval
 requirements remain guidance. These gates do not revoke an agent’s general
@@ -241,6 +254,7 @@ From the apps repository root:
 
 ```sh
 bun test mcp/processes/ui/ProcessesPanel.test.tsx
+bun test mcp/processes/ui/Work.test.tsx
 bun run scripts/build-panels.ts --app processes
 ```
 
