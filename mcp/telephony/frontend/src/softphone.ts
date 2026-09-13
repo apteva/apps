@@ -1,5 +1,5 @@
 import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
-import { browserAudio, type AudioConnection, type AudioRuntime } from "./audio";
+import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
 import { isTerminalCall, type AnswerRequest, type Call, type CallSession, type DialRequest, type TelephonyClient } from "./client";
 
 export interface SoftphoneSnapshot {
@@ -43,7 +43,7 @@ export class HeadlessSoftphone {
   private readonly interval: number;
 
   constructor(readonly client: TelephonyClient, private readonly options: SoftphoneOptions = {}) {
-    this.runtime = options.audioRuntime ?? browserAudio;
+    this.runtime = options.audioRuntime ?? createBrowserAudio(client.app);
     this.audioOptions = { ...DEFAULT_SOFTPHONE_AUDIO_OPTIONS, ...options.audio };
     playbackBufferOptions(this.audioOptions);
     this.interval = options.pollIntervalMs ?? 2000;

@@ -52,7 +52,7 @@ export interface TelephonyClientOptions {
 /** Human-call API. Does not invoke the AI-call MCP tools or open a microphone. */
 export class TelephonyClient {
   listMicrophones = listMicrophones;
-  createMicrophonePreview = createMicrophonePreview;
+  createMicrophonePreview = (onLevel?: (level: number) => void) => createMicrophonePreview(onLevel, this.app);
   constructor(readonly app: AppHandle, private readonly options: TelephonyClientOptions = {}) {
     if (app.name !== "telephony" || !app.projectId || !app.installId) {
       throw new Error("Telephony requires an explicit project and installation");

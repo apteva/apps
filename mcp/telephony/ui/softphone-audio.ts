@@ -13,6 +13,13 @@ const SAMPLE_RATE = 24_000;
 const JITTER_TARGET_MS = 60;
 const MAX_RECONNECT_MS = 30_000;
 
+async function loadAudioWorklet(context: AudioContext, url: string): Promise<void> {
+  try { await context.audioWorklet.addModule(url); }
+  catch (cause) {
+    throw new Error("Telephony audio processor could not load. Check the site's Content Security Policy and reload after any Telephony update.", { cause });
+  }
+}
+
 function floatToPCM16(input: Float32Array): ArrayBuffer {
   const out = new Int16Array(input.length);
   for (let i = 0; i < input.length; i++) {
@@ -245,7 +252,7 @@ export class MicrophoneTestSession {
       catch { this.ctx = new AudioContext({ latencyHint: "interactive" }); }
       if (this.ctx.state === "suspended") await this.ctx.resume();
       this.ensureOpen();
-      await this.ctx.audioWorklet.addModule(workletURL);
+      await loadAudioWorklet(this.ctx, workletURL);
       this.ensureOpen();
       const contextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);
@@ -390,7 +397,7 @@ export class SoftphoneSession {
       if (this.ctx.state === "suspended") await this.ctx.resume();
       this.ensureOpen();
       if (options.outputDeviceId && "setSinkId" in this.ctx) { await (this.ctx as AudioContext & {setSinkId(id:string):Promise<void>}).setSinkId(options.outputDeviceId); this.ensureOpen(); }
-      await this.ctx.audioWorklet.addModule(workletURL);
+      await loadAudioWorklet(this.ctx, workletURL);
       this.ensureOpen();
       this.diagnostics.audioContextRate = this.ctx.sampleRate;
       const source = this.ctx.createMediaStreamSource(this.stream);

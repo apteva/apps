@@ -2,7 +2,13 @@ import { test, expect } from "@playwright/test";
 test("Calls panel uses shared controller and preserves a call across navigation", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
+  const cspErrors: string[] = [];
+  page.on("console", message => { if (/Content Security Policy|Content-Security-Policy|worklet module/i.test(message.text())) cspErrors.push(message.text()); });
   await page.goto("/panel");
+  await page.getByRole("button", { name: "Test shared microphone" }).click();
+  await expect(page.getByLabel("Shared microphone status")).toHaveText("signal detected");
+  await page.getByRole("button", { name: "Stop shared microphone" }).click();
+  await expect(page.getByLabel("Shared microphone status")).toHaveText("stopped");
   await page.getByRole("button", { name: "Answer", exact: true }).first().click();
   const controls = page.getByLabel("Active call controls");
   await expect(controls).toBeVisible();
@@ -20,4 +26,5 @@ test("Calls panel uses shared controller and preserves a call across navigation"
   await controls.getByRole("button", { name: "Hang up", exact: true }).click();
   await expect(controls).toHaveCount(0);
   expect(errors).toEqual([]);
+  expect(cspErrors).toEqual([]);
 });

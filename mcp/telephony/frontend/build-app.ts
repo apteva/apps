@@ -3,6 +3,11 @@ import { mkdir, readdir, unlink } from "node:fs/promises";
 const root = import.meta.dir;
 const out = join(root, "../ui/frontend");
 await mkdir(out, { recursive: true });
+for (const kind of ["worklet", "worker"]) {
+  const audio = await Bun.file(join(root, `../ui/softphone-${kind}.js`)).text();
+  const hash = new Bun.CryptoHasher("sha256").update(audio).digest("hex");
+  await Bun.write(join(out, `${kind}-${hash}.js`), audio);
+}
 const result = await Bun.build({ entrypoints: [join(root, "client-entry.ts")], target: "browser", format: "esm", minify: true });
 if (!result.success) throw new AggregateError(result.logs, "Telephony client build failed");
 const source = await result.outputs[0].text();
