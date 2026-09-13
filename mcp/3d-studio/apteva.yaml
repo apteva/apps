@@ -1,0 +1,130 @@
+schema: apteva-app/v1
+name: 3d-studio
+display_name: 3D Studio
+version: 0.1.0
+description: >-
+  Native Go polygon modeling for game assets. Select vertices and faces, transform
+  with proportional falloff, extrude, inset, mirror, inspect PNG previews, and export
+  GLB. The editor and MCP tools share one mesh engine and immutable revision history.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/3d-studio
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [3d, modeling, games, meshes, assets]
+scopes: [project]
+min_apteva_version: "0.51.3"
+requires:
+  permissions: [db.write.app]
+provides:
+  http_routes:
+    - prefix: /
+  resources:
+    - name: asset
+      label: 3D asset
+      matcher: exact
+  permissions:
+    - name: models.read
+      resource: asset
+      description: Read models, revisions, selections and exports.
+    - name: models.write
+      resource: asset
+      description: Create and edit models, save selections, previews and exports.
+  mcp_tools:
+    - name: studio_capabilities
+      description: 'Discover the Go mesh command schemas, coordinate system, limits, and car example workflow.'
+      requires: models.read
+    - name: assets_create
+      description: 'Create an editable model and immutable initial revision. Templates: empty, box, car.'
+      requires: models.write
+    - name: assets_list
+      description: 'List up to 200 models in this project, newest first.'
+      requires: models.read
+    - name: assets_get
+      description: 'Read an asset revision with editable polygon geometry.'
+      requires: models.read
+      resource_from: "asset/{arg.asset_id}"
+    - name: revisions_list
+      description: 'List the most recent 100 immutable revisions.'
+      requires: models.read
+      resource_from: "asset/{arg.asset_id}"
+    - name: revisions_restore
+      description: 'Restore earlier geometry as a new revision, with optimistic concurrency and retry protection.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: mesh_inspect
+      description: 'Inspect node counts and bounds. include_mesh returns up to 500 selected elements; use mesh_select to narrow large meshes.'
+      requires: models.read
+      resource_from: "asset/{arg.asset_id}"
+    - name: mesh_select
+      description: 'Select faces by centroid/normal or vertices by position/IDs, and save a revision-bound handle.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: selection_expand
+      description: 'Grow a saved selection by shared-vertex adjacency. The handle stays bound to its source revision.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: mesh_edit
+      description: 'Atomically edit meshes. Bind selection names to saved selection IDs; result_selection names can be used later in the same batch. Preview returns a candidate; commit requires request_key.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: mesh_edit_commit
+      description: 'Commit a preview if its base is still current. request_key makes retries safe.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: mesh_edit_discard
+      description: 'Discard an uncommitted preview candidate.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: assets_validate
+      description: 'Check polygon topology, triangulation, counts, open boundaries, and coordinate validity.'
+      requires: models.read
+      resource_from: "asset/{arg.asset_id}"
+    - name: assets_render
+      description: 'Render a 640px PNG in native Go. Returns an authenticated artifact URL for visual inspection; optional selection overlay.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: assets_export
+      description: 'Export GLB with flat normals, node materials and centered pivots, or editable source JSON.'
+      requires: models.write
+      resource_from: "asset/{arg.asset_id}"
+    - name: artifacts_list
+      description: 'List up to 100 saved exports and preview images.'
+      requires: models.read
+      resource_from: "asset/{arg.asset_id}"
+  ui_panels:
+    - slot: project.page
+      label: 3D Studio
+      icon: box
+      entry: /ui/StudioPanel.mjs
+  skills:
+    - name: how-to-use-3d-studio
+      command: /3d-studio
+      body_file: skills/how-to-use-3d-studio.md
+      description: Model game assets with selection-based polygon editing and visual feedback.
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: 3d-studio/v0.1.0
+    entry: mcp/3d-studio
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.1
+    memory: 128
+    cpu_limit: 2
+    memory_limit: 512
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN: { from: platform }
+    APTEVA_INSTALL_ID: { from: platform }
+    APTEVA_PROJECT_ID: { from: platform }
+    APTEVA_APP_CONFIG: { from: platform }
+db:
+  driver: sqlite
+  path: /data/3d-studio.db
+  migrations: migrations/
+upgrade_policy: auto-patch
