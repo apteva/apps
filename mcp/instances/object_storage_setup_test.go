@@ -17,7 +17,12 @@ import (
 
 type directSetupPlatform struct {
 	objectStoragePlatform
-	purchases int
+	purchases       int
+	refreshes       int
+	pendingCreate   bool
+	pendingGet      bool
+	omitCredentials bool
+	hostname        string
 }
 
 func (p *directSetupPlatform) ExecuteIntegrationTool(id int64, tool string, args map[string]any) (*sdk.ExecuteResult, error) {
@@ -26,6 +31,30 @@ func (p *directSetupPlatform) ExecuteIntegrationTool(id int64, tool string, args
 	}
 	if tool == "object_storage_create" {
 		p.purchases++
+		if p.pendingCreate {
+			return &sdk.ExecuteResult{Success: true, Status: 202, Data: json.RawMessage(`{"object_storage":{"id":"vultr-store-1","status":"pending","cluster_id":6}}`)}, nil
+		}
+	}
+	if tool == "object_storage_get" {
+		p.refreshes++
+		if args["object_storage_id"] != "vultr-store-1" {
+			return nil, fmt.Errorf("wrong subscription ID: %v", args)
+		}
+		host := p.hostname
+		if host == "" {
+			host = "ams1.vultrobjects.com"
+		}
+		obj := map[string]any{"id": "vultr-store-1", "status": "active", "s3_hostname": host, "region": "ams", "cluster_id": 6}
+		if p.pendingGet {
+			obj["status"] = "pending"
+			delete(obj, "s3_hostname")
+		}
+		if !p.omitCredentials {
+			obj["s3_access_key"] = "VULTRACCESS"
+			obj["s3_secret_key"] = "vultr-secret"
+		}
+		data, _ := json.Marshal(map[string]any{"object_storage": obj})
+		return &sdk.ExecuteResult{Success: true, Status: 202, Data: data}, nil
 	}
 	return p.objectStoragePlatform.ExecuteIntegrationTool(id, tool, args)
 }
@@ -54,6 +83,14 @@ func newDirectFixture(t *testing.T, existing bool) *directFixture {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
 			t.Error("request not signed")
+		}
+		if strings.Contains(r.Header.Get("Authorization"), "invalid-key") {
+			w.WriteHeader(403)
+			io.WriteString(w, `<Error><Code>InvalidAccessKeyId</Code></Error>`)
+			return
+		}
+		if !strings.Contains(r.Header.Get("Authorization"), "/us-east-1/s3/") && strings.Contains(r.Host, "vultrobjects.com") {
+			t.Error("cluster ID used for S3 signing")
 		}
 		op := r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
 		f.calls = append(f.calls, op)
@@ -150,9 +187,15 @@ func TestDirectObjectSetupRetryReturnsCredentialsWithoutConnections(t *testing.T
 		t.Fatalf("item=%+v", item)
 	}
 	f.fail = ""
-	if _, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID}); err == nil {
-		t.Fatal("resumed without credentials or consent to rotate")
+	p.omitCredentials = true
+	missing, err := a.toolObjectStorageCreate(ctx, map[string]any{"id": item.ID})
+	if err != nil {
+		t.Fatal(err)
 	}
+	if missing.(map[string]any)["object_storage"].(*ObjectStorage).Setup.Stage != "credentials" {
+		t.Fatal("missing recovery guidance")
+	}
+	p.omitCredentials = false
 	if containsString(p.tools, "object_storage_rotate_credentials") {
 		t.Fatal("implicitly rotated credentials")
 	}
@@ -275,5 +318,130 @@ func TestDirectSetupExplicitRotationOnReadyResource(t *testing.T) {
 	}
 	if p.purchases != 1 {
 		t.Fatal("repurchased subscription")
+	}
+}
+
+func TestVultrPendingCreateRefreshesBeforeSuppliedCredentials(t *testing.T) {
+	for _, hostname := range []string{"ams1.vultrobjects.com", "https://ams1.vultrobjects.com"} {
+		t.Run(hostname, func(t *testing.T) {
+			f := newDirectFixture(t, false)
+			p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true, pendingGet: true, hostname: hostname}
+			ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+			a := &App{}
+			args := directSetupArgs()
+			args["region"] = "6"
+			r, err := a.toolObjectStorageCreate(ctx, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := r.(map[string]any)["object_storage"].(*ObjectStorage)
+			id := item.ID
+			if item.Status != "provisioning" || item.ErrorMessage != "" || item.Endpoint != "" || item.Region != "us-east-1" || item.ClusterID != 6 {
+				t.Fatalf("initial=%+v", item)
+			}
+			r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": id})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.(map[string]any)["pending"] != true || len(f.calls) != 0 {
+				t.Fatal("pending provisioning was treated as failed or ready")
+			}
+			p.pendingGet = false
+			credentials := map[string]any{"access_key_id": "VULTRACCESS", "secret_access_key": "vultr-secret"}
+			r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": id, "credentials": credentials})
+			if err != nil {
+				t.Fatal(err)
+			}
+			item = r.(map[string]any)["object_storage"].(*ObjectStorage)
+			if item.Status != "ready" || item.Endpoint != "https://ams1.vultrobjects.com" || item.ID != id || item.RequestKey != "media-1" || item.ClusterID != 6 {
+				t.Fatalf("resumed=%+v", item)
+			}
+			before := p.refreshes
+			// Reusing a request key also refreshes details and never buys again.
+			r, err = a.toolObjectStorageCreate(ctx, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.purchases != 1 || p.refreshes != before+1 {
+				t.Fatal("retry created another subscription or skipped refresh")
+			}
+			creates := 0
+			for _, call := range f.calls {
+				if call == "PUT /private-media-test?" {
+					creates++
+				}
+			}
+			if creates != 1 {
+				t.Fatalf("bucket created %d times", creates)
+			}
+		})
+	}
+}
+func TestVultrPartialBucketSetupReusesBucketAndRecoversProviderCredentials(t *testing.T) {
+	f := newDirectFixture(t, false)
+	f.fail = "cors"
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	a := &App{}
+	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := r.(map[string]any)["object_storage"].(*ObjectStorage).ID
+	r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.(map[string]any)["object_storage"].(*ObjectStorage).Status != "error" {
+		t.Fatal("CORS failure was marked ready")
+	}
+	f.fail = ""
+	r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.(map[string]any)["object_storage"].(*ObjectStorage).Status != "ready" {
+		t.Fatal("resume failed")
+	}
+	creates := 0
+	for _, call := range f.calls {
+		if call == "PUT /private-media-test?" {
+			creates++
+		}
+	}
+	if creates != 1 || p.purchases != 1 {
+		t.Fatal("duplicate resource creation")
+	}
+	if containsString(p.tools, "object_storage_rotate_credentials") {
+		t.Fatal("provider credential recovery rotated keys")
+	}
+}
+func TestVultrInvalidSuppliedCredentialsAreActionableWithoutRotation(t *testing.T) {
+	newDirectFixture(t, false)
+	p := &directSetupPlatform{objectStoragePlatform: objectStoragePlatform{provider: "vultr"}, pendingCreate: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(p))
+	a := &App{}
+	r, err := a.toolObjectStorageCreate(ctx, directSetupArgs())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := r.(map[string]any)["object_storage"].(*ObjectStorage).ID
+	r, err = a.toolObjectStorageCreate(ctx, map[string]any{"id": id, "credentials": map[string]any{"access_key_id": "invalid-key", "secret_access_key": "invalid-secret"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := r.(map[string]any)["object_storage"].(*ObjectStorage)
+	if item.Status != "error" || !strings.Contains(item.ErrorMessage, "S3 rejected the credentials") {
+		t.Fatalf("error=%s", item.ErrorMessage)
+	}
+	if containsString(p.tools, "object_storage_rotate_credentials") {
+		t.Fatal("implicitly rotated invalid credentials")
+	}
+}
+func TestNormalizeVultrEndpointRejectsUnsafeValues(t *testing.T) {
+	for _, raw := range []string{"http://ams1.vultrobjects.com", "https://user@ams1.vultrobjects.com", "https://ams1.vultrobjects.com/path", "https://ams1.vultrobjects.com?query=1", "https://ams1.vultrobjects.com#fragment", "https://ams1.vultrobjects.com:443", "https://127.0.0.1", "https://evil.example", "ams1.vultrobjects.com/", "//ams1.vultrobjects.com"} {
+		if _, err := normalizeVultrObjectEndpoint(raw); err == nil {
+			t.Errorf("accepted %q", raw)
+		}
 	}
 }

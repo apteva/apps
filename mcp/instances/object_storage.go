@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -22,6 +23,7 @@ var (
 )
 
 type ObjectStorage struct {
+	ClusterID            int                 `json:"cluster_id,omitempty"`
 	ID                   int64               `json:"id"`
 	Setup                *ObjectStorageSetup `json:"setup,omitempty"`
 	RequestKey           string              `json:"request_key,omitempty"`
@@ -64,6 +66,8 @@ type CreateObjectStorageInput struct {
 }
 
 type objectStorageMetadata struct {
+	ProviderStatus string `json:"provider_status,omitempty"`
+	ProviderRegion string `json:"provider_region,omitempty"`
 	ProjectID      string `json:"project_id,omitempty"`
 	OrganizationID string `json:"organization_id,omitempty"`
 	ApplicationID  string `json:"application_id,omitempty"`
@@ -83,6 +87,7 @@ func scanObjectStorage(s rowScanner) (*ObjectStorage, error) {
 	if setupJSON != "{}" {
 		_ = json.Unmarshal([]byte(setupJSON), &item.Setup)
 	}
+	item.ClusterID = parseObjectStorageMetadata(&item).ClusterID
 	if item.Setup != nil && (item.Status == "ready" || item.Status == "active") && item.Setup.Stage != "ready" {
 		item.Status = "configuring"
 	}
@@ -494,6 +499,7 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 		}
 		args["tier_id"] = tierID
 	}
+	in.Region = "us-east-1" // Cluster is a purchase location, never the S3 signing region.
 	metaBytes, _ := json.Marshal(objectStorageMetadata{ClusterID: clusterID, PendingStep: "provider create"})
 	item, err := dbCreateObjectStorage(ctx.AppDB(), in, "pending:"+newRequestID(), "provisioning", "", "", string(metaBytes))
 	if err != nil {
@@ -509,8 +515,6 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 		obj = nested
 	}
 	providerID := mapString(obj, "id")
-	endpoint := mapString(obj, "s3_hostname")
-	accessKey, secret := mapString(obj, "s3_access_key"), mapString(obj, "s3_secret_key")
 	if providerID == "" {
 		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": "Provider create outcome unknown; reconcile before retrying"})
 		return nil, nil, errors.New("Vultr create returned no identity; pending record retained")
@@ -518,30 +522,12 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_id": providerID}); err != nil {
 		return nil, nil, err
 	}
-	if endpoint == "" || accessKey == "" || secret == "" {
-		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": "Provisioning pending; refresh provider state, then rotate credentials when ready"})
-		item, _ = dbGetObjectStorage(ctx.AppDB(), item.ID)
-		return item, nil, nil
-	}
-	if !strings.HasPrefix(endpoint, "http://") && !strings.HasPrefix(endpoint, "https://") {
-		endpoint = "https://" + endpoint
-	}
-	if region := mapString(obj, "region"); region != "" {
-		in.Region = region
-	}
-	metaBytes, _ = json.Marshal(objectStorageMetadata{ClusterID: clusterID})
-	status := strings.ToLower(mapString(obj, "status"))
-	if status == "" {
-		status = "ready"
-	}
-	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": status, "endpoint": endpoint, "region": in.Region, "access_key_id": accessKey, "provider_metadata_json": string(metaBytes)}); err != nil {
-		return nil, nil, err
-	}
-	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
+	item.ProviderID = providerID
+	credentials, _, err := applyVultrObjectDetails(ctx, item, data)
 	if err != nil {
 		return nil, nil, err
 	}
-	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: in.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, nil
+	return item, credentials, nil
 }
 
 func parseObjectStorageMetadata(item *ObjectStorage) objectStorageMetadata {
@@ -556,7 +542,11 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 		return nil, nil, err
 	}
 	defer unlock()
-	item, err = dbGetObjectStorage(ctx.AppDB(), item.ID)
+	return rotateObjectStorageCredentialsLocked(ctx, item)
+}
+
+func rotateObjectStorageCredentialsLocked(ctx *sdk.AppCtx, item *ObjectStorage) (*ObjectStorageCredentials, []string, error) {
+	item, err := dbGetObjectStorage(ctx.AppDB(), item.ID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -571,8 +561,10 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 		endpoint := findJSONScalar(data, "s3_hostname")
 		if endpoint == "" {
 			endpoint = item.Endpoint
-		} else if !strings.HasPrefix(endpoint, "http") {
-			endpoint = "https://" + endpoint
+		}
+		endpoint, err = normalizeVultrObjectEndpoint(endpoint)
+		if err != nil {
+			return nil, nil, err
 		}
 		if accessKey == "" || secret == "" {
 			return nil, nil, errors.New("Vultr credential rotation did not return the new key pair")
@@ -808,23 +800,106 @@ func (a *App) toolObjectStorageDestroy(ctx *sdk.AppCtx, args map[string]any) (an
 	return map[string]any{"destroyed": true, "id": item.ID, "warnings": warnings}, nil
 }
 
-// Provider-specific recovery stays alongside provisioning, outside S3 setup.
-func refreshObjectStorageEndpoint(ctx *sdk.AppCtx, item *ObjectStorage) error {
+// Vultr can return a bare hostname while its subscription becomes active.
+// This function is shared by create, read-only refresh, and explicit rotation.
+func normalizeVultrObjectEndpoint(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", nil
+	}
+	if !strings.Contains(value, "://") {
+		if strings.ContainsAny(value, "/@?#:\\") {
+			return "", errors.New("Vultr returned an unsafe S3 hostname")
+		}
+		value = "https://" + value
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || (u.Path != "" && u.Path != "/") || u.Port() != "" {
+		return "", errors.New("Vultr returned an unsafe HTTPS S3 endpoint")
+	}
+	host := strings.ToLower(u.Hostname())
+	if !strings.HasSuffix(host, ".vultrobjects.com") || !regexp.MustCompile(`^[a-z0-9]+(?:[a-z0-9.-]*[a-z0-9])?$`).MatchString(host) || strings.Contains(host, "..") {
+		return "", errors.New("Vultr returned an unexpected S3 hostname")
+	}
+	return "https://" + host, nil
+}
+
+func refreshObjectStorageDetails(ctx *sdk.AppCtx, item *ObjectStorage) (*ObjectStorageCredentials, bool, error) {
 	if item.Provider != "vultr" {
-		return errors.New("provider endpoint is unavailable; reconcile provisioning")
+		return nil, false, nil
 	}
 	data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_get", map[string]any{"object_storage_id": item.ProviderID})
 	if err != nil {
-		return err
+		return nil, false, fmt.Errorf("refresh Vultr subscription %s: %w", item.ProviderID, err)
 	}
-	host := findJSONScalar(data, "s3_hostname")
-	if host == "" {
-		return errors.New("provider provisioning is still pending; retry the same resource")
+	return applyVultrObjectDetails(ctx, item, data)
+}
+
+func applyVultrObjectDetails(ctx *sdk.AppCtx, item *ObjectStorage, data json.RawMessage) (*ObjectStorageCredentials, bool, error) {
+	root, err := decodeJSONObject(data)
+	if err != nil {
+		return nil, false, err
 	}
-	if !strings.HasPrefix(host, "https://") {
-		host = "https://" + host
+	obj := root
+	if nested, ok := root["object_storage"].(map[string]any); ok {
+		obj = nested
 	}
-	return dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"endpoint": host})
+	if id := mapString(obj, "id"); id != "" && id != item.ProviderID {
+		return nil, false, errors.New("Vultr returned a different subscription identity")
+	}
+	endpoint, err := normalizeVultrObjectEndpoint(mapString(obj, "s3_hostname"))
+	if err != nil {
+		return nil, false, err
+	}
+	state := strings.ToLower(strings.TrimSpace(mapString(obj, "status")))
+	meta := parseObjectStorageMetadata(item)
+	if meta.ClusterID == 0 {
+		meta.ClusterID, _ = strconv.Atoi(item.Region)
+	}
+	if cluster, ok := obj["cluster_id"]; ok {
+		n, _ := strconv.Atoi(fmt.Sprint(cluster))
+		if n > 0 {
+			meta.ClusterID = n
+		}
+	}
+	meta.ProviderStatus = state
+	meta.ProviderRegion = mapString(obj, "region")
+	meta.PendingStep = ""
+	encoded, _ := json.Marshal(meta)
+	pending := endpoint == "" || (state != "active" && state != "ready")
+	status := "provisioning"
+	if !pending {
+		status = "configuring"
+		if item.Setup == nil || item.Setup.Stage == "ready" {
+			status = "ready"
+		}
+	}
+	fields := map[string]any{"endpoint": endpoint, "region": "us-east-1", "provider_metadata_json": string(encoded), "status": status, "error_message": ""}
+	access, secret := mapString(obj, "s3_access_key"), mapString(obj, "s3_secret_key")
+	if access != "" {
+		fields["access_key_id"] = access
+	}
+	if item.Setup != nil {
+		item.Setup.Error = ""
+		if pending {
+			item.Setup.Stage = "provider"
+			item.Setup.Capabilities = map[string]bool{}
+		}
+		setup, _ := json.Marshal(item.Setup)
+		fields["setup_json"] = string(setup)
+	}
+	if err = dbUpdateObjectStorage(ctx.AppDB(), item.ID, fields); err != nil {
+		return nil, false, err
+	}
+	updated, err := dbGetObjectStorage(ctx.AppDB(), item.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	*item = *updated
+	if access == "" || secret == "" || endpoint == "" {
+		return nil, pending, nil
+	}
+	return &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: item.Bucket, AccessKeyID: access, SecretAccessKey: secret, ShownOnce: true}, pending, nil
 }
 
 // Older Scaleway rows predate the explicit BucketCreated flag. Their provider

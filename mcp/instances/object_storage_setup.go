@@ -76,6 +76,9 @@ func persistObjectSetup(ctx *sdk.AppCtx, item *ObjectStorage) error {
 		return err
 	}
 	status := "configuring"
+	if item.Setup.Stage == "provider" {
+		status = "provisioning"
+	}
 	if item.Setup.Stage == "ready" {
 		status = "ready"
 	}
@@ -89,6 +92,10 @@ func persistObjectSetup(ctx *sdk.AppCtx, item *ObjectStorage) error {
 
 func objectSetupResponse(item *ObjectStorage, credentials *ObjectStorageCredentials) map[string]any {
 	out := map[string]any{"object_storage": item, "credentials": credentials}
+	if item.Status == "provisioning" {
+		out["pending"] = true
+		out["message"] = "Provider provisioning is pending; resume the same resource by id."
+	}
 	if item.Setup != nil {
 		out["setup"] = item.Setup
 		if item.Setup.Error != "" {
@@ -135,8 +142,15 @@ func (a *App) ensureObjectStorage(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	defer unlock()
+	if item.Status == "provisioning" {
+		item.Setup.Stage = "provider"
+		item.Setup.Error = ""
+		_ = persistObjectSetup(ctx, item)
+		return objectSetupResponse(item, creds), nil
+	}
 	if creds == nil {
-		item.Setup.Error = "Provider provisioning is pending; resume by id with credentials or rotate_credentials=true."
+		item.Setup.Stage = "credentials"
+		item.Setup.Error = "Credentials unavailable; supply credentials or explicitly set rotate_credentials=true."
 		_ = persistObjectSetup(ctx, item)
 		return objectSetupResponse(item, nil), nil
 	}
@@ -148,15 +162,17 @@ func (a *App) ensureObjectStorage(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func resumeObjectSetup(ctx *sdk.AppCtx, id int64, args map[string]any) (any, error) {
+	unlock, err := lockResource(ctx.AppDB(), "object_storage", id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	item, err := dbGetObjectStorage(ctx.AppDB(), id)
 	if err != nil {
 		return nil, err
 	}
 	if item.Status == "deleting" || strings.HasPrefix(item.ProviderID, "pending:") {
 		return nil, errors.New("provider identity is unconfirmed or deleting; reconcile before setup")
-	}
-	if item.Setup != nil && item.Setup.Stage == "ready" && args["setup"] == nil && args["credentials"] == nil && !boolArg(args, "rotate_credentials", false) {
-		return objectSetupResponse(item, nil), nil
 	}
 	var desired *ObjectStorageSetup
 	if args["setup"] != nil || item.Setup == nil {
@@ -165,34 +181,28 @@ func resumeObjectSetup(ctx *sdk.AppCtx, id int64, args map[string]any) (any, err
 			return nil, err
 		}
 	}
+	// Refresh first, including when credentials were supplied or inventory says ready.
+	// The helper persists metadata AND updates item before constructing credentials.
+	providerCreds, pending, err := refreshObjectStorageDetails(ctx, item)
+	if err != nil {
+		return nil, err
+	}
+	if pending {
+		return objectSetupResponse(item, nil), nil
+	}
+	if item.Setup != nil && item.Setup.Stage == "ready" && args["setup"] == nil && args["credentials"] == nil && !boolArg(args, "rotate_credentials", false) {
+		return objectSetupResponse(item, nil), nil
+	}
 	creds, err := objectSetupCredentials(item, args)
 	if err != nil {
 		return nil, err
 	}
-	if creds == nil {
-		if !boolArg(args, "rotate_credentials", false) {
-			return nil, errors.New("credentials are not stored: supply credentials.access_key_id and credentials.secret_access_key to resume, or explicitly set rotate_credentials=true to replace the existing keys")
-		}
-		if item.Endpoint == "" {
-			if err = refreshObjectStorageEndpoint(ctx, item); err != nil {
-				return nil, err
-			}
-		}
-		if creds, _, err = rotateObjectStorageCredentials(ctx, item); err != nil {
+	if boolArg(args, "rotate_credentials", false) {
+		if creds, _, err = rotateObjectStorageCredentialsLocked(ctx, item); err != nil {
 			return nil, err
 		}
-	}
-	unlock, err := lockResource(ctx.AppDB(), "object_storage", id)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	item, err = dbGetObjectStorage(ctx.AppDB(), id)
-	if err != nil {
-		return nil, err
-	}
-	if item.Status == "deleting" {
-		return nil, errors.New("resource is deleting")
+	} else if creds == nil {
+		creds = providerCreds
 	}
 	if item.Setup == nil {
 		item.Setup = desired
@@ -205,6 +215,14 @@ func resumeObjectSetup(ctx *sdk.AppCtx, id int64, args map[string]any) (any, err
 	}
 	if desired != nil {
 		item.Setup.CORSOrigins = desired.CORSOrigins
+	}
+	if creds == nil {
+		item.Setup.Stage = "credentials"
+		item.Setup.Error = "Credentials unavailable from provider. Supply credentials.access_key_id and credentials.secret_access_key, or explicitly set rotate_credentials=true if the keys were lost; no keys were rotated."
+		if err = persistObjectSetup(ctx, item); err != nil {
+			return nil, err
+		}
+		return objectSetupResponse(item, nil), nil
 	}
 	creds.Bucket = item.Bucket
 	item.Setup.Error = ""
@@ -245,6 +263,9 @@ type s3SetupError struct {
 }
 
 func (e *s3SetupError) Error() string {
+	if e.Status == 401 || e.Status == 403 {
+		return "S3 rejected the credentials or bucket permissions; supply valid credentials or explicitly request rotation if keys were lost. No keys were automatically rotated."
+	}
 	return fmt.Sprintf("S3 operation failed (status=%d code=%s); provider may not support this capability", e.Status, e.Code)
 }
 func s3Missing(err error) bool { var e *s3SetupError; return errors.As(err, &e) && e.Status == 404 }

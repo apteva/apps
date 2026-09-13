@@ -318,6 +318,12 @@ headers are unrestricted and ETag is exposed. CORS does not grant unauthenticate
 access. Public buckets are unsupported. Unsupported provider operations remain
 visible as setup failures.
 
+Every Vultr resume first refreshes the existing subscription, normalizes its
+HTTPS endpoint, and keeps the provisioning cluster separate from S3 signing
+region `us-east-1`. Provisioning delays remain pending. When Vultr returns its
+current credentials, Instances can resume by id alone without rotating keys.
+Caller-supplied credentials take precedence and are checked against S3.
+
 Resume with `{"id":123,"credentials":{"access_key_id":"...",
 "secret_access_key":"..."}}`. The original endpoint is taken from the tracked
 resource. To configure an older subscription, also pass `setup:{}` and optionally

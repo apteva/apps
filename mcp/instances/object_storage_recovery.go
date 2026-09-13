@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"strings"
 )
@@ -86,19 +85,8 @@ func reconcileObjectStorage(ctx *sdk.AppCtx) {
 			}
 		}
 		if item.Provider == "vultr" && item.Status == "provisioning" && !strings.HasPrefix(item.ProviderID, "pending:") {
-			data, e := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_get", map[string]any{"object_storage_id": item.ProviderID})
-			if e == nil {
-				endpoint := findJSONScalar(data, "s3_hostname")
-				state := findJSONScalar(data, "status")
-				if endpoint != "" && (state == "active" || state == "ready") {
-					if !strings.HasPrefix(endpoint, "http") {
-						endpoint = "https://" + endpoint
-					}
-					e = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"status": "ready", "endpoint": endpoint, "error_message": "Ready; rotate credentials to obtain a new one-time secret"})
-				}
-			}
-			if e != nil {
-				_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": fmt.Sprint(e)})
+			if _, _, err := refreshObjectStorageDetails(ctx, item); err != nil {
+				_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"error_message": err.Error()})
 			}
 		}
 		unlock()
