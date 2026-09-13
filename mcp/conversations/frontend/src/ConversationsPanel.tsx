@@ -676,6 +676,7 @@ function DetailsDialog({
   onClose,
   onChanged,
   onRemoved,
+  emptyMessage,
 }: {
   open: boolean;
   conversation: Conversation;
@@ -683,6 +684,7 @@ function DetailsDialog({
   onClose: () => void;
   onChanged: () => void;
   onRemoved: () => void;
+  emptyMessage?: string;
 }) {
   const { t } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -1304,6 +1306,7 @@ export function MoreConversations({path,projectId,rows,onRows}: {path:string;pro
 export function ConversationChat({
   conversation,
   archived,
+  emptyMessage,
   onOpenDetails,
   headerActions,
   onActed,
@@ -1311,6 +1314,7 @@ export function ConversationChat({
 }: {
   conversation: Conversation;
   archived: boolean;
+  emptyMessage?: string;
   onOpenDetails?: () => void;
   headerActions?: ReactNode;
   onActed: () => void;
@@ -1516,6 +1520,7 @@ export function ConversationChat({
       </>}
       hasMessages={timeline.length > 0}
       streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
+      emptyMessage={emptyMessage}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
@@ -2177,7 +2182,6 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               onRemoved={() => {
                 setConversations(current=>current.filter(c=>c.id!==selectedId));
                 setSelectedId("");
-                loadConversations();
               }}
             />
           ) : (
@@ -2229,7 +2233,6 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
           onRemoved={() => {
             setConversations(current=>current.filter(c=>c.id!==selectedId));
             setSelectedId("");
-            loadConversations();
           }}
         />
       )}

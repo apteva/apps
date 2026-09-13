@@ -247,6 +247,7 @@ function ConversationBrowser({
             setSelectedId("");
             void load();
           }}
+          emptyMessage={widgetSettings?.empty_message}
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
@@ -426,6 +427,7 @@ function SingleConversation({
         <ConversationChat key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={false}
+          emptyMessage={widgetSettings?.empty_message}
           headerActions={(
             <>
               {showCreate && (

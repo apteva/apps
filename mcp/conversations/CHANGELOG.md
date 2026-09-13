@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.4 — 2026-09-13
+
+- Make archiving and unarchiving responsive: mutation responses avoid an unnecessary platform agent lookup, and the UI removes the row immediately without waiting for a full unread/inbox refresh.
+- Preserve configurable empty transcript text for agent conversation widgets and complete its shared chat prop wiring.
+
 ## 0.23.3 — 2026-09-12
 
 - Render compact user image thumbnails above the message text, aligned right, in the shared dashboard and exported chat. Keep enlargement, image metadata and original downloads in the image dialog.

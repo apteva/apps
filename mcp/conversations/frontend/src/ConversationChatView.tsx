@@ -12,6 +12,7 @@ export interface ConversationChatViewProps {
   messageNodes: ReactNode;
   hasMessages: boolean;
   streamNode: ReactNode;
+  emptyMessage?: string;
   headerActions?: ReactNode;
   bottomRef: RefObject<HTMLDivElement | null>;
   inputRef: RefObject<HTMLTextAreaElement | null>;
@@ -124,7 +125,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <span className="text-text-dim">
               <Glyph d={GLYPH_CHAT} size={32} />
             </span>
-            <p className="text-sm text-center">{t("chat.empty")}</p>
+            <p className="text-sm text-center">{props.emptyMessage || t("chat.empty")}</p>
           </div>
         ) : (
           <>

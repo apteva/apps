@@ -4,6 +4,8 @@ export interface AgentConversationWidgetSettings {
   composer_layout?: "auto" | "compact" | "expanded";
   display_mode?: ConversationDisplayMode;
   show_new_conversation?: boolean;
+  /** Presentation-only empty transcript text; never persisted as a message. */
+  empty_message?: string;
 }
 
 export function appendAgentScope(path: string, instanceId: number): string {

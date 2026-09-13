@@ -467,6 +467,13 @@ func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "title, archived, or directive field required", http.StatusBadRequest)
 		return
 	}
+	// Archive/unarchive callers already have the conversation identity and do
+	// not need a decorated list entry. Avoid a synchronous platform lookup on
+	// this latency-sensitive mutation path.
+	if body.Archived != nil && body.Title == nil && body.Directive == nil {
+		writeJSON(w, map[string]any{"id": conv.ID, "archived": *body.Archived})
+		return
+	}
 	writeJSON(w, chatListEntry{Conversation: *conv, LeadAgentName: a.agentName(a.appCtx(r), conv.LeadAgentID)})
 }
 
