@@ -2,7 +2,7 @@ import {afterEach, beforeAll, expect, test} from "bun:test";
 import {Window} from "happy-dom";
 import React, {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
-import {CreateDialog, InstanceCard, HostOnboardingDialog} from "./InstancesPanel";
+import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
 const win = new Window({url:"http://localhost"});
@@ -72,4 +72,21 @@ test("setup retry uses wait-ready and sends the selected capabilities", async ()
  const retry=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Retry setup')!;
  await act(async()=>{retry.click();});
  expect(sent).toEqual({async:true,retry:true,setup});
+});
+
+
+test("object storage retry keeps its resource identity and accepts managed connection results", async () => {
+ const item={id:12,name:"Media",provider:"vultr",provider_id:"subscription-1",status:"error",setup:{stage:"cors",connection_id:99,error:"Unsupported operation"}};
+ const posts:any[]=[];
+ globalThis.fetch=(async(_input:any,init:any)=>{
+  if(init?.method==="POST"){posts.push(JSON.parse(init.body));return response({object_storage:{...item,status:"ready",setup:{stage:"ready",connection_id:99}},credentials:null});}
+  return response({object_storages:[item]});
+ }) as unknown as typeof fetch;
+ await render(<ObjectStorageSection withParams={params} setError={()=>{}} refresh={0}/>);
+ const retry=Array.from(container.querySelectorAll("button")).find(button=>button.textContent==="Retry setup")!;
+ await act(async()=>retry.click());
+ expect(posts).toEqual([{id:12}]);
+ expect(container.textContent).toContain("S3 connection 99");
+ expect(container.textContent).toContain("Storage setup: ready");
+ expect(container.textContent).not.toContain("Save these credentials now");
 });

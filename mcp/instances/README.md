@@ -284,22 +284,59 @@ existing workload as a side effect of forgetting a host.
 
 ## Object storage
 
-Object storage is a provider resource, not a filesystem volume. Instances can
-provision it through a bound Scaleway or Vultr connection and return the S3
-endpoint, region, bucket where applicable, access key, and secret key. It does
-not create another Apteva Connection and does not mount or consume the storage.
+`object_storage_create` provisions storage through a bound provider and runs the
+same S3 setup pipeline for every provider. Currently subscription provisioning
+supports Scaleway and Vultr. The generic `s3-compatible` integration supplies
+bucket and object operations; the platform stores credentials encrypted in an
+app-owned, non-exportable managed connection. No secret is saved in Instances.
+The server must support managed credentials and have the updated integration
+catalog containing `s3-compatible` (refresh the catalog after upgrading).
 
-Secrets are deliberately never written to the Instances database. They are
-shown only in the create or rotate response and in the UI's one-time credential
-dialog. Scaleway resources use a dedicated project-scoped IAM application and
-policy; Vultr credentials are owned by its Object Storage subscription. Destroy
-verifies that the provider bucket is gone, then revokes the managed credentials. A partial IAM
-cleanup keeps the local record in an error state so the operation can be safely
-retried.
+```json
+{
+  "request_key": "media-production-storage",
+  "name": "Media",
+  "provider": "vultr",
+  "region": "2",
+  "bucket": "my-private-media-bucket",
+  "setup": {
+    "private": true,
+    "cors_origins": ["https://app.example.com"],
+    "create_connection": true
+  }
+}
+```
 
-`object_storage_preflight` performs read-only project, IAM-policy, region, and
-optional bucket-availability checks. Provider and S3 secrets remain write-only;
-the S3 secret is returned once and is never persisted by Instances.
+Use a region/cluster and plan from `object_storage_list_plans`. Keep the same
+`request_key` when retrying a creation request. To resume after an interrupted
+setup, pass `{"id": 123}` to `object_storage_create`; this never purchases another
+subscription. To configure an older subscription, pass `{"id":123,"bucket":
+"my-new-bucket","setup":{}}`. An existing Scaleway bucket created by Instances
+is reused; unrelated existing buckets are never adopted or changed.
+
+Setup creates the bucket, sets an owner-only ACL, removes its bucket policy,
+configures and reads back CORS, and verifies an upload/download/delete roundtrip.
+Only then does the resource become `ready`. Empty origins disable CORS; origins
+must be exact HTTP(S) origins without wildcards or paths. Allowed methods are
+GET, HEAD, PUT, POST, DELETE; headers are unrestricted and ETag is exposed. CORS
+does not make a bucket public or grant unauthenticated object access. Public
+buckets are unsupported. Provider-specific unsupported operations remain visible
+as setup failures, rather than being silently skipped.
+
+The result contains `object_storage`, `setup` (stage, error, verified capabilities),
+and `connection_id`. The connection supports S3 integration tools; binding it to a
+consuming app is separate and that app must accept `s3-compatible` connections.
+Credential rotation updates this same managed connection; destroy revokes it
+only after deleting the provider resource. Scaleway credentials are project-wide;
+use a dedicated provider project for isolation. Vultr credentials belong to the
+storage subscription. Unknown provider-create outcomes require reconciliation
+before retrying, rather than risking another paid resource.
+
+`setup.create_connection=false` uses a temporary vault connection during setup,
+revokes it afterward, and returns credentials once. `provision_only=true` keeps
+the legacy subscription-only flow, returning credentials without S3 setup.
+Provider secrets remain absent from get/list responses. Retrying setup can use
+`setup` to change CORS origins; connection retention cannot change afterward.
 
 ## Diagnostics and reconciliation
 

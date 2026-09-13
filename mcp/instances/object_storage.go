@@ -22,21 +22,23 @@ var (
 )
 
 type ObjectStorage struct {
-	ID                   int64  `json:"id"`
-	Name                 string `json:"name"`
-	Provider             string `json:"provider"`
-	ProviderConnectionID int64  `json:"provider_connection_id"`
-	ProviderID           string `json:"provider_id"`
-	Status               string `json:"status"`
-	Region               string `json:"region,omitempty"`
-	Plan                 string `json:"plan,omitempty"`
-	Endpoint             string `json:"endpoint,omitempty"`
-	Bucket               string `json:"bucket,omitempty"`
-	AccessKeyID          string `json:"access_key_id,omitempty"`
-	ProviderMetadataJSON string `json:"-"`
-	ErrorMessage         string `json:"error,omitempty"`
-	CreatedAt            string `json:"created_at,omitempty"`
-	UpdatedAt            string `json:"updated_at,omitempty"`
+	ID                   int64               `json:"id"`
+	Setup                *ObjectStorageSetup `json:"setup,omitempty"`
+	RequestKey           string              `json:"request_key,omitempty"`
+	Name                 string              `json:"name"`
+	Provider             string              `json:"provider"`
+	ProviderConnectionID int64               `json:"provider_connection_id"`
+	ProviderID           string              `json:"provider_id"`
+	Status               string              `json:"status"`
+	Region               string              `json:"region,omitempty"`
+	Plan                 string              `json:"plan,omitempty"`
+	Endpoint             string              `json:"endpoint,omitempty"`
+	Bucket               string              `json:"bucket,omitempty"`
+	AccessKeyID          string              `json:"access_key_id,omitempty"`
+	ProviderMetadataJSON string              `json:"-"`
+	ErrorMessage         string              `json:"error,omitempty"`
+	CreatedAt            string              `json:"created_at,omitempty"`
+	UpdatedAt            string              `json:"updated_at,omitempty"`
 }
 
 type ObjectStorageCredentials struct {
@@ -51,6 +53,8 @@ type ObjectStorageCredentials struct {
 }
 
 type CreateObjectStorageInput struct {
+	Setup                *ObjectStorageSetup
+	RequestKey           string
 	Name                 string
 	Provider             string
 	ProviderConnectionID int64
@@ -72,22 +76,34 @@ type objectStorageMetadata struct {
 
 func scanObjectStorage(s rowScanner) (*ObjectStorage, error) {
 	var item ObjectStorage
+	var setupJSON string
 	err := s.Scan(&item.ID, &item.Name, &item.Provider, &item.ProviderConnectionID, &item.ProviderID,
 		&item.Status, &item.Region, &item.Plan, &item.Endpoint, &item.Bucket, &item.AccessKeyID,
-		&item.ProviderMetadataJSON, &item.ErrorMessage, &item.CreatedAt, &item.UpdatedAt)
+		&item.ProviderMetadataJSON, &item.ErrorMessage, &item.CreatedAt, &item.UpdatedAt, &setupJSON, &item.RequestKey)
+	if setupJSON != "{}" {
+		_ = json.Unmarshal([]byte(setupJSON), &item.Setup)
+	}
+	if item.Setup != nil && (item.Status == "ready" || item.Status == "active") && item.Setup.Stage != "ready" {
+		item.Status = "configuring"
+	}
 	return &item, err
 }
 
 const objectStorageCols = `id, name, provider, provider_connection_id, provider_id, status,
 	region, plan, endpoint, bucket, access_key_id, provider_metadata_json, error_message,
-	COALESCE(created_at,''), COALESCE(updated_at,'')`
+	COALESCE(created_at,''), COALESCE(updated_at,''), setup_json, COALESCE(request_key,'')`
 
 func dbCreateObjectStorage(db *sql.DB, in CreateObjectStorageInput, providerID, status, endpoint, accessKeyID, metadata string) (*ObjectStorage, error) {
+	setupJSON, _ := json.Marshal(in.Setup)
+	var requestKey any
+	if in.RequestKey != "" {
+		requestKey = in.RequestKey
+	}
 	result, err := db.Exec(`INSERT INTO object_storages
-		(name, provider, provider_connection_id, provider_id, status, region, plan, endpoint, bucket, access_key_id, provider_metadata_json, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(name, provider, provider_connection_id, provider_id, status, region, plan, endpoint, bucket, access_key_id, provider_metadata_json, created_at, updated_at, setup_json, request_key)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.Name, in.Provider, in.ProviderConnectionID, providerID, status, in.Region, in.Plan,
-		endpoint, in.Bucket, accessKeyID, nullStr(metadata, "{}"), nowUTC(), nowUTC())
+		endpoint, in.Bucket, accessKeyID, nullStr(metadata, "{}"), nowUTC(), nowUTC(), string(setupJSON), requestKey)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +148,7 @@ func dbListObjectStorages(db *sql.DB, provider string) ([]*ObjectStorage, error)
 
 func dbUpdateObjectStorage(db *sql.DB, id int64, fields map[string]any) error {
 	columns, args := []string{}, []any{}
-	for _, key := range []string{"provider_id", "region", "status", "endpoint", "access_key_id", "provider_metadata_json", "error_message"} {
+	for _, key := range []string{"provider_id", "region", "status", "endpoint", "bucket", "access_key_id", "provider_metadata_json", "error_message", "setup_json"} {
 		if value, ok := fields[key]; ok {
 			columns = append(columns, key+"=?")
 			args = append(args, value)
@@ -525,7 +541,7 @@ func createVultrObjectStorage(ctx *sdk.AppCtx, in CreateObjectStorageInput) (*Ob
 	if err != nil {
 		return nil, nil, err
 	}
-	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: in.Region, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, nil
+	return item, &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: in.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, nil
 }
 
 func parseObjectStorageMetadata(item *ObjectStorage) objectStorageMetadata {
@@ -561,10 +577,13 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 		if accessKey == "" || secret == "" {
 			return nil, nil, errors.New("Vultr credential rotation did not return the new key pair")
 		}
+		if err := saveObjectStorageConnection(ctx, item, &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret}); err != nil {
+			return nil, nil, err
+		}
 		if err := dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"access_key_id": accessKey, "endpoint": endpoint, "error_message": ""}); err != nil {
 			return nil, nil, err
 		}
-		return &ObjectStorageCredentials{Endpoint: endpoint, Region: item.Region, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, warnings, nil
+		return &ObjectStorageCredentials{Endpoint: endpoint, Region: "us-east-1", Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret, ShownOnce: true}, warnings, nil
 	}
 	metadata := parseObjectStorageMetadata(item)
 	if metadata.ApplicationID == "" || metadata.ProjectID == "" {
@@ -598,6 +617,13 @@ func rotateObjectStorageCredentials(ctx *sdk.AppCtx, item *ObjectStorage) (*Obje
 	}
 	metadata.KeyExpiresAt = keyExpiresAt
 	metadata.PendingStep = ""
+	if err = saveObjectStorageConnection(ctx, item, &ObjectStorageCredentials{Endpoint: item.Endpoint, Region: item.Region, Bucket: item.Bucket, AccessKeyID: accessKey, SecretAccessKey: secret}); err != nil {
+		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO object_storage_key_cleanup(object_storage_id,connection_id,access_key_id,error) VALUES(?,?,?,?)`, item.ID, item.ProviderConnectionID, accessKey, "Vault update failed; revoke unused key")
+		metadata.PendingStep = ""
+		encoded, _ := json.Marshal(metadata)
+		_ = dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"provider_metadata_json": string(encoded)})
+		return nil, nil, err
+	}
 	if err = commitObjectStorageRotation(ctx, item, accessKey, metadata); err != nil {
 		_, _ = ctx.AppDB().Exec(`INSERT OR IGNORE INTO object_storage_key_cleanup(object_storage_id,connection_id,access_key_id,error) VALUES(?,?,?,?)`, item.ID, item.ProviderConnectionID, accessKey, "New key commit failed; revoke it")
 		return nil, nil, err
@@ -625,6 +651,11 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 	}
 
 	warnings := []string{}
+	if item.Setup != nil && item.Setup.ProbeKey != "" && item.Setup.ConnectionID > 0 {
+		if _, err := s3SetupCall(ctx, item, "delete_object", map[string]any{"key": item.Setup.ProbeKey}); err != nil && !s3Missing(err) {
+			return warnings, fmt.Errorf("remove setup verification object: %w", err)
+		}
+	}
 	if item.Provider == "vultr" {
 		_, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_delete", map[string]any{"object_storage_id": item.ProviderID})
 		if err != nil && !strings.Contains(err.Error(), "status=404") {
@@ -675,6 +706,11 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 		sort.Strings(warnings)
 		return warnings, fmt.Errorf("provider resource was deleted, but credential cleanup is incomplete: %s", strings.Join(warnings, "; "))
 	}
+	if item.Setup != nil && item.Setup.ConnectionID > 0 {
+		if err := sdk.RevokeManagedConnection(ctx.PlatformAPI(), item.Setup.ConnectionID); err != nil {
+			return warnings, fmt.Errorf("revoke S3 connection: %w", err)
+		}
+	}
 	if err := dbDeleteObjectStorage(ctx.AppDB(), item.ID); err != nil {
 		return warnings, err
 	}
@@ -683,7 +719,7 @@ func destroyObjectStorage(ctx *sdk.AppCtx, item *ObjectStorage) ([]string, error
 
 func (a *App) toolObjectStorageListProviders(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	providers := objectStorageProviders(ctx)
-	return map[string]any{"providers": providers, "count": len(providers)}, nil
+	return map[string]any{"providers": providers, "count": len(providers), "setup": map[string]any{"protocol": "s3", "private": true, "public": false, "cors": true, "managed_connection": true, "integration": "s3-compatible", "verification": "Runtime checks; unsupported operations leave setup incomplete"}}, nil
 }
 
 func (a *App) toolObjectStorageListPlans(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -740,17 +776,7 @@ func (a *App) toolObjectStoragePreflight(ctx *sdk.AppCtx, args map[string]any) (
 }
 
 func (a *App) toolObjectStorageCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	item, credentials, err := createObjectStorage(ctx, CreateObjectStorageInput{
-		Name: strArg(args, "name"), Provider: strArg(args, "provider"), ProviderConnectionID: int64Arg(args, "provider_connection_id"),
-		Region: strArg(args, "region"), Plan: strArg(args, "plan"), Bucket: strArg(args, "bucket"),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{
-		"object_storage": item, "credentials": credentials,
-		"warning": "The secret is not stored by Instances and is shown only in this response. Copy it now.",
-	}, nil
+	return a.ensureObjectStorage(ctx, args)
 }
 
 func (a *App) toolObjectStorageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -779,6 +805,19 @@ func (a *App) toolObjectStorageRotateCredentials(ctx *sdk.AppCtx, args map[strin
 		return nil, err
 	}
 	updated, _ := dbGetObjectStorage(ctx.AppDB(), item.ID)
+	if updated.Setup != nil {
+		if !updated.Setup.CreateConnection {
+			if err := sdk.RevokeManagedConnection(ctx.PlatformAPI(), updated.Setup.ConnectionID); err != nil {
+				return nil, err
+			}
+			updated.Setup.ConnectionID = 0
+			if err := persistObjectSetup(ctx, updated); err != nil {
+				return nil, err
+			}
+			return objectSetupResponse(updated, credentials), nil
+		}
+		return objectSetupResponse(updated, nil), nil
+	}
 	return map[string]any{
 		"object_storage": updated, "credentials": credentials, "warnings": warnings,
 		"warning": "The new secret is not stored by Instances and is shown only in this response. Copy it now.",
@@ -800,4 +839,31 @@ func (a *App) toolObjectStorageDestroy(ctx *sdk.AppCtx, args map[string]any) (an
 	}
 	sort.Strings(warnings)
 	return map[string]any{"destroyed": true, "id": item.ID, "warnings": warnings}, nil
+}
+
+// Provider-specific recovery stays alongside provisioning, outside S3 setup.
+func refreshObjectStorageEndpoint(ctx *sdk.AppCtx, item *ObjectStorage) error {
+	if item.Provider != "vultr" {
+		return errors.New("provider endpoint is unavailable; reconcile provisioning")
+	}
+	data, err := executeObjectStorageTool(ctx, item.ProviderConnectionID, item.Provider, "object_storage_get", map[string]any{"object_storage_id": item.ProviderID})
+	if err != nil {
+		return err
+	}
+	host := findJSONScalar(data, "s3_hostname")
+	if host == "" {
+		return errors.New("provider provisioning is still pending; retry the same resource")
+	}
+	if !strings.HasPrefix(host, "https://") {
+		host = "https://" + host
+	}
+	return dbUpdateObjectStorage(ctx.AppDB(), item.ID, map[string]any{"endpoint": host})
+}
+
+// Older Scaleway rows predate the explicit BucketCreated flag. Their provider
+// identity is the bucket name and their managed IAM key proves provisioning
+// progressed beyond creation. Vultr subscription identity proves no bucket.
+func objectStorageOwnsBucket(item *ObjectStorage) bool {
+	meta := parseObjectStorageMetadata(item)
+	return meta.BucketCreated || (item.Provider == "scaleway" && item.Bucket != "" && item.ProviderID == item.Bucket && item.AccessKeyID != "" && meta.ApplicationID != "" && meta.PendingStep == "")
 }
