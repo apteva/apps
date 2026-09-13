@@ -1,6 +1,6 @@
 {
   "name": "@apteva/conversations",
-  "version": "0.23.7",
+  "version": "0.23.8",
   "type": "module",
   "description": "App-owned Conversations client and shared React surfaces",
   "exports": {
@@ -22,7 +22,7 @@
     "README.md"
   ],
   "peerDependencies": {
-    "@apteva/web-sdk": "^0.7.0",
+    "@apteva/web-sdk": ">=0.7.0 <0.11.0",
     "react": ">=19"
   },
   "dependencies": {
@@ -31,12 +31,16 @@
   },
   "scripts": {
     "build": "bun run build.ts",
-    "build:app": "bun run build-app.ts"
+    "build:app": "bun run build-app.ts",
+    "prepublishOnly": "bun run build && bun run typecheck:consumer",
+    "typecheck:consumer": "tsc --ignoreConfig --noEmit --strict --skipLibCheck --moduleResolution bundler --module esnext --jsx react-jsx --target es2022 tests/composer-types.ts"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/apteva/apps.git",
     "directory": "mcp/conversations/frontend"
   },
-  "private": true
+  "publishConfig": {
+    "access": "public"
+  }
 }

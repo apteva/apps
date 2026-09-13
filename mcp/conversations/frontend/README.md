@@ -44,10 +44,9 @@ Run `bun run scripts/build-panels.ts --app conversations` from the apps reposito
 Native dashboard panels embed the same generated, scoped CSS that the Web SDK loader mounts for external hosts. They do not depend on a dashboard Tailwind source scan or a separate dashboard release. Host theme tokens (for example `--font-base`, `--bg`, `--text`, and `--accent`) are inherited; unthemed hosts get local defaults.
 
 It builds dashboard bundles and `/ui/frontend.json` plus content-addressed client,
-UI and style assets. The normal app release includes these files. No npm app
-publication or platform upgrade is needed. The old npm package 0.20.0 remains
-available for existing consumers; this directory is now private and future normal
-app releases use the platform-served frontend.
+UI and style assets. The normal app release includes these files. Hosts may use
+the platform-served frontend above or pin the same UI through the npm package
+`@apteva/conversations`. A platform upgrade is not required.
 
 The SDK requires HTTPS or localhost and a host CSP allowing `script-src blob:`
 and inline styles. It checks asset integrity and uses authenticated fetches with
@@ -179,6 +178,8 @@ The main composer action pauses an active reply or tool when the input is empty,
 
 Every chat surface uses the same attachment composer and message renderer. Its `+` menu includes files/photos and screenshot capture; paste and drag/drop work too. Attachments can be sent with or without text while an agent is active. Completed uploads remain in the per-conversation session draft; a pending send retains its original idempotency key. Unsaved uploads interrupted by a reload must be selected again.
 
+For a fixed one-row textarea, use `composer={{ layout: "single-line" }}`. The attachment button, input and send/pause button stay on one row at every width. Image/file previews remain above the controls; long or multiline drafts scroll inside the textarea. Enter sends, Shift+Enter inserts a newline. French locale strings and screenshot/file handling are unchanged. Unknown layout values throw a descriptive error, including for JavaScript hosts.
+
 The composer defaults to `layout: "auto"`: a single row (`+`, text, send/pause) when its chat container is 480px wide or narrower, and the expanded layout otherwise. Set `composer={{ layout: "compact" }}` to always use one row, or `composer={{ layout: "expanded" }}` to always keep the larger composer. Long text grows vertically and attachment previews appear above the row. Switching layouts preserves the draft and attachments. The dashboard widget exposes the same choice under **Composer layout** (`composer_layout`).
 
 Configure `composer` on `ConversationChat`, `ConversationThread`, `AgentConversations`, `ConversationsPanel`, or `ConversationsProvider` (and the native dashboard wrappers):
@@ -210,3 +211,26 @@ To also retain files in Storage, bind a Storage app (v0.12.3+) and enable **Copy
 User image thumbnails are capped at 180px and aligned right above the text in both dashboard and exported chat. Click to enlarge, view metadata or download the original. This display limit does not reduce the image sent to the agent.
 
 Images are delivered as actual Core `image_url` content parts in the existing conversation event. Conversations instructs the agent to inspect current images directly and answer simple image questions without a preliminary acknowledgement or attachment-reading call. File IDs and retrieval instructions accompany non-image files; a file ID alone never substitutes for vision data. This is an app-level routing and instruction change; Core image retention is unchanged. Agents can use `conversations_read_attachment` for bounded text (64 KB), image data, or binary chunks (48 KiB, `offset`/`next_offset`). PDF/Office content is not automatically extracted: the agent must use document tools, optionally against the Storage file ID. File contents remain user-provided data.
+
+## Pinning the shared UI in a TypeScript host
+
+```sh
+bun add @apteva/conversations@0.23.8
+```
+
+```tsx
+import { ConversationChat, type ChatProps, type ComposerOptions } from "@apteva/conversations/react";
+import type { ConversationsClient } from "@apteva/conversations";
+import "@apteva/conversations/styles.css";
+
+// Load only the app client: omit React so the loader does not mount another UI or stylesheet.
+const loaded = await client.apps.load<ConversationsClient>("conversations", {
+  projectId, installId, clientOptions: { storageKey: signedInUserId },
+});
+const composer = { layout: "single-line" } satisfies ComposerOptions;
+<ConversationChat conversations={loaded.client} agentId={agentId} locale="fr-FR" composer={composer} />;
+```
+
+The named React export checks all props without an `any` component cast. The
+package and dashboard use the same `ConversationChatView` and scoped stylesheet.
+Keep the installed Conversations backend current for attachment/tool APIs.

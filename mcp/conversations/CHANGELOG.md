@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.8 — 2026-09-13
+
+- Add typed `composer={{ layout: "single-line" }}` with a fixed one-row textarea and inline attachment/send controls, preserving multiline drafts, images, screenshots, French labels and pause behavior. Existing compact/auto modes still grow with text.
+- Publish the shared UI as `@apteva/conversations@0.23.8` for hosts that pin their frontend dependency. Dashboard and app-served bundles use the same implementation.
+- Namespace the shared base CSS layer so npm consumers using Tailwind v3 (including Flexylead) can import the compiled stylesheet.
+- Reject unsupported runtime layout values instead of silently rendering a default.
+
 ## 0.23.7 — 2026-09-13
 
 - Rebuild the release against the pinned SDK-compatible HTTP context path so source installs can upgrade without requiring an unpublished SDK method.

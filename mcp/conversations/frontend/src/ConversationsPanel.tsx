@@ -1533,11 +1533,7 @@ export function ConversationChat({
       sendError={unconfirmedSendError ? t("chat.sendUnconfirmed", { error: unconfirmedSendError }) : sendError || (historyError ? t("chat.historyFailed", { error: historyError }) : "")}
       archiveBusy={archiveBusy}
       confirmDelete={confirmDelete}
-      onDraftChange={(value, element) => {
-        setDraft(value);
-        element.style.height = "auto";
-        element.style.height = Math.min(element.scrollHeight, 144) + "px";
-      }}
+      onDraftChange={setDraft}
       onComposerKeyDown={(event) => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();

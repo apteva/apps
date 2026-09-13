@@ -70,10 +70,14 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
 export default function ConversationChatView(props: ConversationChatViewProps) {
   const { t } = useConversationLocalization();
   const layout = props.attachments.options.layout ?? "auto";
+  if (!["auto", "compact", "expanded", "single-line"].includes(layout)) {
+    throw new Error(`Unsupported Conversations composer layout: ${layout}`);
+  }
   // Reflow long/restored drafts when the container or selected layout changes.
   useLayoutEffect(() => {
     const input = props.inputRef.current;
     if (!input) return;
+    if (layout === "single-line") { input.style.height = ""; return; }
     const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 144) + "px"; };
     resize();
     if (typeof ResizeObserver === "undefined") return;

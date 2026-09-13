@@ -44,7 +44,8 @@
 @import "tailwindcss/utilities.css" source(none);
 }
 @source "./src";
-@layer base {
+/* A library-owned layer avoids Tailwind v3 treating this as an uncompiled directive. */
+@layer apteva-conversations-base {
 .apteva-conversations {
  color:var(--text, #e8e8e8); background:var(--bg, #0a0a0a); font-family:var(--font-base, system-ui, sans-serif); line-height:1.5;
 }
@@ -286,13 +287,18 @@
 
 /* Compact follows the chat width, including narrow embeds on wide screens. */
 .apteva-conversations .chat-composer-safe {container-type:inline-size;container-name:apteva-composer}
-.apteva-conversations .chat-composer-box[data-layout="compact"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-toolbar {display:contents}
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-menu {order:1;flex:0 0 auto}
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-send {order:3;margin-left:0}
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-tray,
-.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-toolbar {display:contents}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-composer-send {order:3;margin-left:0}
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-attachment-tray,
+.apteva-conversations .chat-composer-box:is([data-layout="compact"], [data-layout="single-line"]) .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+/* Keep one visible text row; long drafts and Shift+Enter remain editable by scrolling. */
+.apteva-conversations .chat-composer-box[data-layout="single-line"] {align-items:center}
+.apteva-conversations .chat-composer-box[data-layout="single-line"] .chat-composer-input {
+ height:24px;min-height:24px;max-height:24px;padding:0 4px;field-sizing:fixed;overflow-y:auto;
+}
 @container apteva-composer (max-width:480px) {
 .apteva-conversations .chat-composer-box[data-layout="auto"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
 .apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-toolbar {display:contents}

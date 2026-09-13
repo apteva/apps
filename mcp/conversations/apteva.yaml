@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.23.7
+version: 0.23.8
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -107,7 +107,7 @@ provides:
           composer_layout:
             type: string
             title: Composer layout
-            enum: [auto, compact, expanded]
+            enum: [auto, compact, expanded, single-line]
             default: auto
           show_new_conversation:
             type: boolean

@@ -291,3 +291,44 @@ for (const host of ["dashboard", "external"]) {
   }
  });
 }
+
+for (const host of ["dashboard", "external", "package"]) {
+ test(`${host}: single-line stays fixed with French, multiline drafts and image sends`, async ({page,request}) => {
+  await request.post("/reset");
+  await page.addInitScript(() => { (window as any).COMPOSER_OPTIONS = {layout:"single-line"}; });
+  await page.goto(`/?host=${host}&locale=fr-FR&theme=clean`);
+  const input=page.getByRole("textbox");
+  await expect(input).toHaveAttribute("placeholder","Écrivez à l’agent…");
+  const geometry=()=>page.locator(".chat-composer-box").evaluate(el=>{
+   const rect=(selector:string)=>el.querySelector(selector)!.getBoundingClientRect().toJSON();
+   return {input:rect("textarea"),add:rect(".chat-composer-add"),send:rect(".chat-composer-send")};
+  });
+  for(const width of [1280,390,320]) {
+   await page.setViewportSize({width,height:800});
+   await input.fill("Bonjour, pouvez-vous examiner cette image ? ".repeat(20)+"\nDeuxième ligne");
+   const box=await geometry();
+   expect(box.input.height).toBe(24);
+   expect(Math.abs(box.input.y+12-box.add.y-box.add.height/2)).toBeLessThan(2);
+   expect(Math.abs(box.input.y+12-box.send.y-box.send.height/2)).toBeLessThan(2);
+   expect(box.add.right).toBeLessThanOrEqual(box.input.x);
+   expect(box.input.right).toBeLessThanOrEqual(box.send.x);
+   expect(await input.evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  }
+  await input.fill("Première ligne");await input.press("End");await input.press("Shift+Enter");await input.pressSequentially("Deuxième ligne");
+  await expect(input).toHaveValue("Première ligne\nDeuxième ligne");
+  await page.locator('input[type="file"]').setInputFiles({name:"chaton.png",mimeType:"image/png",buffer:Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6ZRkAAAAASUVORK5CYII=","base64")});
+  await expect(page.locator(".chat-attachment-chip img")).toBeVisible();
+  expect((await geometry()).input.height).toBe(24);
+  await page.screenshot({path:test.info().outputPath("single-line-french-image.png")});
+  const sendRequest=page.waitForRequest(req=>req.method()==="POST"&&new URL(req.url()).pathname.endsWith("/messages"));
+  await input.press("Enter");
+  const body=(await sendRequest).postDataJSON();
+  expect(body.content).toBe("Première ligne\nDeuxième ligne");expect(body.attachments).toHaveLength(1);
+  await expect(page.locator(".chat-message-photo img")).toBeVisible();
+  await expect(input).toHaveValue("");
+  await page.reload();
+  await expect(page.locator(".chat-message-photo img")).toBeVisible();
+  expect((await geometry()).input.height).toBe(24);
+ });
+}
