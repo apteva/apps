@@ -1,9 +1,12 @@
 module github.com/apteva/apps/mcp/calendar
 
-go 1.25.0
+go 1.25.1
+
+toolchain go1.26.8
 
 require (
-	github.com/apteva/app-sdk v0.43.0
+	github.com/apteva/app-sdk v0.79.0
+	github.com/teambition/rrule-go v1.8.2
 	modernc.org/sqlite v1.50.0
 )
 

@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@source "../ui/CalendarPanel.tsx";
+@theme { --color-bg:#10151d; --color-bg-card:#19212c; --color-bg-input:#222d3b; --color-border:#334155; --color-text:#e2e8f0; --color-text-muted:#a6b5c9; --color-text-dim:#8898ad; --color-accent:#60a5fa; --color-error:#fb7185; }
+html,body,#root {height:100%;margin:0;color:#e2e8f0;background:#10151d;font-family:system-ui,sans-serif;}
+button {cursor:pointer;} input,select,textarea {color:inherit;} :focus-visible{outline:2px solid #60a5fa;outline-offset:2px;}

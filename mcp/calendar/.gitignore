@@ -1,0 +1,6 @@
+node_modules/
+browser/dist/
+browser/results/
+test-results/
+playwright-report/
+calendar
