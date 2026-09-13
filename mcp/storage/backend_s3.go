@@ -7,7 +7,7 @@ package main
 //
 // v0.9 model: credentials come from a bound integration, NOT
 // config_schema. The operator picks an aws-s3 / cloudflare-r2 /
-// backblaze-b2 / hetzner-object-storage / scaleway-object-storage
+// backblaze-b2 / hetzner-object-storage / scaleway-object-storage / vultr-object-storage
 // connection at install time; this file reads
 // connection.Fields via PlatformAPI().GetConnectionCredentials and
 // resolves slug-specific endpoint construction.
@@ -157,6 +157,30 @@ func resolveS3Connection(creds *sdk.ConnectionCredentials) (*s3ResolvedConnectio
 		out.endpoint = acct + ".r2.cloudflarestorage.com"
 		if out.region == "" {
 			out.region = "auto"
+		}
+	case "vultr-object-storage":
+		host := strings.TrimSpace(creds.Fields["s3_hostname"])
+		if host == "" {
+			return nil, fmt.Errorf("s3 backend: vultr-object-storage connection %d has no s3_hostname", creds.ConnectionID)
+		}
+		// The catalog accepts a hostname only, not a URL or bucket path.
+		for _, label := range strings.Split(host, ".") {
+			if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+				return nil, fmt.Errorf("s3 backend: vultr-object-storage connection %d has an invalid s3_hostname", creds.ConnectionID)
+			}
+			for _, c := range label {
+				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+					return nil, fmt.Errorf("s3 backend: vultr-object-storage connection %d has an invalid s3_hostname", creds.ConnectionID)
+				}
+			}
+		}
+		if len(host) > 253 {
+			return nil, fmt.Errorf("s3 backend: vultr-object-storage connection %d has an invalid s3_hostname", creds.ConnectionID)
+		}
+		out.endpoint = host
+		out.forcePathStyle = true
+		if out.region == "" {
+			out.region = "us-east-1"
 		}
 	case "aws-s3":
 		if out.region == "" {

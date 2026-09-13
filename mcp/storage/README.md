@@ -1,9 +1,16 @@
-# Storage 0.12.3
+# Storage 0.12.4
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.4: Vultr Object Storage
+
+Storage now accepts `vultr-object-storage` backend connections. It uses the
+subscription S3 hostname and credentials for HTTPS path-style bucket access,
+with `us-east-1` as the default signing region. Invalid hostnames and incomplete
+credentials are rejected before connecting.
 
 ## Version 0.12.3: stable controls during live updates
 
@@ -151,7 +158,13 @@ when the sidecar unmounts.
 ## Backend selection and migration
 
 Supported backend bindings are `aws-s3`, `cloudflare-r2`, `backblaze-b2`,
-`hetzner-object-storage`, and `scaleway-object-storage`.
+`hetzner-object-storage`, `scaleway-object-storage`, and `vultr-object-storage`.
+
+For Vultr, bind **Vultr Object Storage** using the subscription's `s3_hostname`,
+`access_key_id`, and `secret_access_key`, then set `s3_bucket`. The hostname must
+contain only the assigned host (for example `ewr1.vultrobjects.com`). Storage uses
+HTTPS, path-style bucket URLs, and SigV4 with `us-east-1` as the default signing
+region. The general `vultr` management API token is not an S3 credential.
 
 For Scaleway, connect the **Scaleway Object Storage** integration with
 `access_key_id`, `secret_access_key`, and the bucket's `region`. Bind that
