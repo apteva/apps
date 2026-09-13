@@ -7,6 +7,8 @@ test("SSE refreshes graphical multi-agent progress, batches events and preserves
  await page.getByRole('button',{name:'Hourly weather alerts',exact:true}).click();
  await page.getByRole('button',{name:'Runs',exact:true}).click();
  await expect(page.locator('.pf-execution[data-state="running"]')).toHaveCount(1);
+ await expect(page.getByRole('button',{name:'Step 1: Fetch current weather',exact:true})).toContainText('Weather agent');
+ await expect(page.getByRole('button',{name:'Step 2: Post alert in Conversations',exact:true})).toContainText('Agent 8');
  await page.getByRole('button',{name:'Step 2: Post alert in Conversations',exact:true}).click();
  await page.waitForTimeout(350);
  const before=(await (await request.get('/fixture/stats')).json()).reads;
@@ -40,4 +42,19 @@ test("procedure edits survive background events",async({page,request})=>{
  await page.getByLabel('Step name',{exact:true}).fill('Unsaved Barcelona edit');
  await request.post('/fixture/events',{data:{app:'processes',project_id:'test',install_id:77,seq:100,topic:'process.updated',data:{process_id:'weather'}}});
  await page.waitForTimeout(400);await expect(page.getByLabel('Step name',{exact:true})).toHaveValue('Unsaved Barcelona edit');
+});
+
+test("flow labels keep human executors distinct and wrap long agent names", async ({ page, request }) => {
+ const data = run();
+ data.steps[1].executor = { kind: "human" } as any;
+ await request.post('/fixture/runs', { data: [data] });
+ await page.goto('/?live&long_agent');
+ await page.getByRole('button', { name: 'Hourly weather alerts', exact: true }).click();
+ await page.getByRole('button', { name: 'Runs', exact: true }).click();
+ const first = page.getByRole('button', { name: 'Step 1: Fetch current weather', exact: true });
+ await expect(first).toContainText('Barcelona weather operations coordinator');
+ await expect(page.getByRole('button', { name: 'Step 2: Post alert in Conversations', exact: true }).locator('.pf-executor')).toHaveText('0% · Human');
+ await expect(page.getByRole('button', { name: 'Step 3: Send Pushover notification', exact: true })).toContainText('Agent 9');
+ const fits = await first.locator('.pf-executor').evaluate(el => el.scrollWidth <= el.clientWidth);
+ expect(fits).toBe(true);
 });

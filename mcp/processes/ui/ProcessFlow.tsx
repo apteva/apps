@@ -32,6 +32,7 @@ import styles from "./process-flow.css" with { type: "text" };
 type StepData = {
   step: Step;
   execution?: StepRun;
+  executorName?: string;
   index: number;
   editable: boolean;
   problem: string;
@@ -82,7 +83,7 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
       </div>
       {data.execution && <div className="pf-execution" data-state={data.execution.state}>
         <span className={`pill ${data.execution.state}`}>{data.execution.decision || data.execution.state}</span>
-        <span>{data.execution.progress}% · {data.execution.executor.kind === "human" ? "Human" : `Agent ${data.execution.executor.agent_id}`}</span>
+        <span className="pf-executor">{data.execution.progress}% · {data.executorName}</span>
         {data.execution.delivery_warning && <span>Delivery retry pending</span>}
       </div>}
       {data.problem && <div className="pf-problem">{data.problem}</div>}
@@ -141,11 +142,13 @@ export function ProcessFlow({
   onChange,
   examples,
   executions,
+  agents,
 }: {
   steps: Step[];
   onChange?: (s: Step[]) => void;
   examples?: Step[];
   executions?: StepRun[];
+  agents?: { id: number; name: string }[];
 }) {
   const editable = !!onChange,
     instanceID = useId();
@@ -169,21 +172,32 @@ export function ProcessFlow({
   const minY = Math.min(100, ...positioned.map((s) => s.position.y)),
     maxY = Math.max(100, ...positioned.map((s) => s.position.y));
   useEffect(() => {
-    const stepNodes: Node[] = positioned.map((s, i) => ({
-      id: s.key,
-      type: "step",
-      position: s.position,
-      selected: selected === s.key,
-      style: { width: NODE_WIDTH },
-      data: {
-        step: s,
-        execution: executions?.find(e => e.key === s.key),
-        index: i,
-        editable,
-        problem: editable ? stepProblem(s) : "",
-        select: () => setSelected(s.key),
-      },
-    }));
+    const stepNodes: Node[] = positioned.map((s, i) => {
+      const execution = executions?.find((e) => e.key === s.key);
+      const executor = execution?.executor;
+      const executorName = !executor
+        ? ""
+        : executor.kind === "human"
+          ? "Human"
+          : agents?.find((a) => a.id === executor.agent_id)?.name ||
+            `Agent ${executor.agent_id}`;
+      return {
+        id: s.key,
+        type: "step",
+        position: s.position,
+        selected: selected === s.key,
+        style: { width: NODE_WIDTH },
+        data: {
+          step: s,
+          execution,
+          executorName,
+          index: i,
+          editable,
+          problem: editable ? stepProblem(s) : "",
+          select: () => setSelected(s.key),
+        },
+      };
+    });
     setNodes([
       {
         id: "__start",
@@ -203,7 +217,7 @@ export function ProcessFlow({
         data: { label: "Run complete", end: true },
       },
     ]);
-  }, [positioned, editable, selected, executions]);
+  }, [positioned, editable, selected, executions, agents]);
   const edges: Edge[] = useMemo(() => {
     const byKey = new Map(positioned.map((s) => [s.key, s]));
     const used = new Set(steps.flatMap((s) => s.depends_on));
