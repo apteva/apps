@@ -1,9 +1,78 @@
-# Storage 0.11.3
+# Storage 0.12.3
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
-sidecar uses app-sdk v0.73.0; the build requires Go 1.26.8 or newer. The React
+sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.3: stable controls during live updates
+
+File events refresh the listing in the background without disabling or dimming
+Upload, New Folder, or pagination controls. Foreground navigation and actions
+retain their loading state. Browser regression coverage verifies that repeated
+file events update the listing without toggling button disabled states.
+
+## Version 0.12.2: dashboard CSP registration
+
+Storage now declares `platform.dashboard.connect` and uses the SDK's
+`DashboardConnectAPI()` to reconcile the `storage-backend` registration. The
+origin is derived from an actual presigned upload target, so bucket virtual
+hosting and path-style endpoints are handled without guessing. Paths, object
+keys, signing credentials, and query parameters never enter the registration.
+
+Startup and backend restarts reconcile the origin; disk storage clears the same
+key. Successful registration is cached for five minutes, failures for one minute,
+and reconciliation is retried on new uploads and by the maintenance loop.
+Unsupported SDK clients, unavailable registration endpoints, denied permission,
+and registration errors retain streaming relay uploads. Existing installations need administrator
+approval for the new permission. Registration changes require a full dashboard
+reload; already open pages still have their previous CSP and can use the relay.
+Bucket CORS, file authorization, and public sharing remain independent.
+
+The SDK dependency is pinned to v0.79.0, which includes this API. Independently
+built sidecars do not need a local workspace override. Upgrade Apteva separately before installing this Storage release: servers whose
+SDK does not recognize `platform.dashboard.connect` reject the manifest during
+installation. Once the server recognizes the permission, an unavailable or
+denied registration API retains relay uploads. Full direct-upload support also
+requires the server's dashboard CSP implementation and a page reload.
+
+## Version 0.12.1: automatic bucket CORS and streaming fallback
+
+Large browser uploads start after the limits check, without a whole-file read
+or SHA-256 preparation phase. With S3 connected, `POST /uploads` with
+`direct: true` returns `mode: s3_multipart`. `GET /uploads/{id}/parts/{n}`
+returns a short-lived, size-constrained signed UploadPart URL. The browser sends
+parts directly to the bucket (16 MiB and four workers by default, configurable
+with `s3_part_size_mb` and `s3_upload_concurrency`). Completion lists and verifies
+part sizes and ETags with the provider, completes the object there, checks its
+size, and publishes metadata. No video download, staging, or second upload is
+needed. Cancellation and expiry abort the provider multipart session.
+
+Storage checks the bucket's upload CORS policy and automatically adds a rule
+for the dashboard origin from the platform's configured public URL. It preserves
+existing bucket rules; it never trusts arbitrary request origins. This requires
+`GetBucketCORS` and `PutBucketCORS` permissions unless the existing policy already
+allows uploads. Setup is bounded to five seconds and cached (ten minutes on
+success, one minute on failure).
+
+If CORS cannot be configured or verified, init returns `mode: s3_relay`.
+The browser sends parallel parts to `PUT /uploads/{id}/parts/{n}` on Apteva;
+Storage streams each part directly into the same S3 multipart session without
+temporary files or a whole-file hash pass. A direct transfer failure also
+switches to this route when the server advertises `relay_supported: true`.
+Completed parts remain valid, retries remain bounded, and completion and
+cancellation use the same events and project scope. Relay traffic uses Apteva's
+bandwidth, so direct transfer remains preferred when CORS works.
+
+Signing and completion credentials stay on the server. The browser does not
+need ETag response headers because completion reads authoritative ETags from S3.
+A completed multipart upload ID cannot overwrite the published object.
+
+Direct multipart files have an empty `sha256` field; whole-file digest deduplication
+is skipped for these files. S3 part ETags and sizes validate the submitted
+multipart assembly. Callers requiring whole-file SHA verification can continue
+using the existing proxy upload protocol with a supplied SHA. Disk uploads
+continue to use parallel app chunks and compute their digest at completion.
 
 Version 0.11.3 fixes large uploads being refused by a smaller default pending
 allowance. The automatic allowance is at least the configured maximum file size
@@ -60,14 +129,15 @@ different parts transfer concurrently, while completion freezes the session.
 Completion receipts remain for seven days, so retrying a completed request
 returns the original file. Replacing committed parts is refused.
 
-The browser hashes large files incrementally and saves only session metadata
-in localStorage. Selecting the same file in the same project/install resumes
-verified parts after a transient failure. Cancel deletes the session; closing
-an interrupted browser leaves it available until the idle TTL expires.
+The browser retains session metadata in memory for the same immutable File
+object; retries can reuse provider-confirmed parts. A new selection or reload
+starts a fresh session rather than trusting name/size/timestamp as a content
+identity. The panel aborts failed attempts when releasing the File; Cancel also
+aborts the session. Interrupted pages are reclaimed by the idle sweeper.
 
 The install defaults to 64 pending sessions and an automatic combined declared
 size allowance of max(1024 MiB, configured file limit)
-(`max_upload_sessions`, `max_pending_upload_mb=auto`). Direct uploads retain
+(`max_upload_sessions`, `max_pending_upload_mb=auto`). Legacy single-PUT direct uploads retain
 reservations until their PUT URL expires. Aborting a session releases its
 reservation. Four full-file transfers run concurrently per process.
 
@@ -158,3 +228,22 @@ The profile verifies actual signed PUTs, checksum validation, immutable
 publication, completion retries, ranged reads, revocation, and deletion.
 Provider-specific connection/endpoint behavior also has unit fixtures. MinIO
 coverage does not certify live AWS, R2, B2, Hetzner, or Scaleway accounts.
+
+### Local multipart browser validation
+
+Go unit tests include the CORS API, streaming relay, ownership, cancellation,
+and completion events. To also exercise actual 2 GiB Chrome transfers through
+the Go handlers and a temporary local S3 server, run in two terminals:
+
+```sh
+STORAGE_BROWSER_TEST_SERVER=1 go test -run '^TestBrowserMultipartServer$' -timeout 10m -v
+STORAGE_TEST_BACKEND=http://127.0.0.1:19182 bun run test
+```
+
+The browser suite covers automatic CORS setup, missing CORS permissions,
+browser-only CORS failures, unapproved CSP registration, and an older open
+dashboard CSP. The fixture uses HTTPS with a test certificate and derives its
+connect-src policy from the registered origins; certificate bypass is confined
+to browser tests when STORAGE_TEST_BACKEND is set. Stop the fixture with
+`curl -X POST http://127.0.0.1:19182/__stop`. It uses loopback endpoints, dummy
+credentials, sparse temporary video files, and temporary Storage data only.

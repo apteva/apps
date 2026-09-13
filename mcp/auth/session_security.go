@@ -56,15 +56,15 @@ func mintSession(ctx *sdk.AppCtx, pid string, org *Organization, user *User, cli
 func mintSessionTx(ctx *sdk.AppCtx, tx *sql.Tx, pid string, oid, uid int64, cid string, r *http.Request, family string, absolute time.Time, stableRefresh string) (tokenPair, error) {
 	org, err := dbGetOrgByID(tx, pid, oid)
 	if err != nil {
-		return tokenPair{}, err
+		return tokenPair{}, sessionLookupError(err)
 	}
 	user, err := dbGetUserByID(tx, pid, oid, uid)
 	if err != nil {
-		return tokenPair{}, err
+		return tokenPair{}, sessionLookupError(err)
 	}
 	client, err := dbGetClientByClientID(tx, pid, cid)
 	if err != nil {
-		return tokenPair{}, err
+		return tokenPair{}, sessionLookupError(err)
 	}
 	if err = sessionEligibility(ctx, org, user, client); err != nil {
 		return tokenPair{}, err
@@ -149,14 +149,17 @@ func mintSessionTx(ctx *sdk.AppCtx, tx *sql.Tx, pid string, oid, uid int64, cid 
 	if err != nil {
 		return tokenPair{}, err
 	}
-	return tokenPair{access: access, refresh: refresh, expiresIn: int(accessExpiry.Sub(now).Seconds()), authorization: authorization}, nil
+	return tokenPair{request: r, access: access, refresh: refresh, expiresIn: int(accessExpiry.Sub(now).Seconds()), authorization: authorization}, nil
 }
 
 func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r *http.Request) (tokenPair, *Organization, *User, error) {
 	// Lookup only routes to the tenant; all authorization happens again in tx.
 	var oid int64
 	if err := ctx.AppDB().QueryRow(`SELECT organization_id FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(raw)).Scan(&oid); err != nil {
-		return tokenPair{}, nil, nil, errors.New("invalid_grant")
+		if errors.Is(err, sql.ErrNoRows) {
+			return tokenPair{}, nil, nil, errors.New("invalid_grant")
+		}
+		return tokenPair{}, nil, nil, err
 	}
 	tx, err := beginAuthTx(ctx.AppDB(), pid, oid)
 	if err != nil {
@@ -167,19 +170,25 @@ func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r 
 	var cid, family, expiry string
 	var revoked sql.NullString
 	err = tx.QueryRow(`SELECT id,user_id,client_id,IFNULL(family_id,''),expires_at,revoked_at FROM sessions WHERE project_id=? AND organization_id=? AND refresh_token_hash=?`, pid, oid, hashToken(raw)).Scan(&id, &uid, &cid, &family, &expiry, &revoked)
-	if err != nil || cid != c.ClientID || family == "" {
+	if err != nil {
+		return tokenPair{}, nil, nil, sessionLookupError(err)
+	}
+	if cid != c.ClientID || family == "" {
 		return tokenPair{}, nil, nil, errors.New("invalid_grant")
 	}
 	org, err := dbGetOrgByID(tx, pid, oid)
 	if err != nil {
-		return tokenPair{}, nil, nil, err
+		return tokenPair{}, nil, nil, sessionLookupError(err)
 	}
 	if hint != "" && hint != org.Slug {
 		return tokenPair{}, nil, nil, errors.New("invalid_grant")
 	}
 	var active int
 	err = tx.QueryRow(`SELECT COUNT(*) FROM auth_session_families WHERE id=? AND revoked_at IS NULL AND expires_at>?`, family, rfc3339(time.Now())).Scan(&active)
-	if err != nil || active != 1 {
+	if err != nil {
+		return tokenPair{}, nil, nil, err
+	}
+	if active != 1 {
 		return tokenPair{}, nil, nil, errors.New("invalid_grant")
 	}
 	if revoked.Valid {
@@ -187,13 +196,13 @@ func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r 
 			return tokenPair{}, nil, nil, err
 		}
 		if err := tx.Commit(); err != nil {
-			return tokenPair{}, nil, nil, err
+			return tokenPair{}, nil, nil, errRefreshUncertain
 		}
 		return tokenPair{}, nil, nil, errors.New("refresh_token_reuse: session revoked")
 	}
 	currentClient, err := dbGetClientByClientID(tx, pid, cid)
 	if err != nil {
-		return tokenPair{}, nil, nil, err
+		return tokenPair{}, nil, nil, sessionLookupError(err)
 	}
 	if !hasGrant(currentClient, "refresh_token") {
 		return tokenPair{}, nil, nil, errors.New("client_not_allowed")
@@ -208,7 +217,10 @@ func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r 
 		if err != nil {
 			return tokenPair{}, nil, nil, err
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return tokenPair{}, nil, nil, err
+		}
 		if n != 1 {
 			return tokenPair{}, nil, nil, errors.New("invalid_grant")
 		}
@@ -224,10 +236,10 @@ func refreshSession(ctx *sdk.AppCtx, pid string, c *Client, raw, hint string, r 
 	}
 	user, err := dbGetUserByID(tx, pid, oid, uid)
 	if err != nil {
-		return tokenPair{}, nil, nil, err
+		return tokenPair{}, nil, nil, sessionLookupError(err)
 	}
 	if err = tx.Commit(); err != nil {
-		return tokenPair{}, nil, nil, err
+		return tokenPair{}, nil, nil, errRefreshUncertain
 	}
 	return pair, org, user, nil
 }

@@ -36,17 +36,18 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
-	AfterMessageID int64     `json:"after_message_id,omitempty"`
-	Type           string    `json:"type"` // always "stream"
-	ConversationID string    `json:"chat_id"`
-	AgentID        int64     `json:"agent_id,omitempty"`
-	ThreadID       string    `json:"thread_id"`
-	CallID         string    `json:"call_id"`
-	RunID          string    `json:"run_id,omitempty"`
-	Text           string    `json:"text"`
-	Phase          string    `json:"phase,omitempty"`
-	Done           bool      `json:"done"`
-	CreatedAt      time.Time `json:"created_at"`
+	Activity       *ToolActivity `json:"tool_activity,omitempty"`
+	AfterMessageID int64         `json:"after_message_id,omitempty"`
+	Type           string        `json:"type"` // always "stream"
+	ConversationID string        `json:"chat_id"`
+	AgentID        int64         `json:"agent_id,omitempty"`
+	ThreadID       string        `json:"thread_id"`
+	CallID         string        `json:"call_id"`
+	RunID          string        `json:"run_id,omitempty"`
+	Text           string        `json:"text"`
+	Phase          string        `json:"phase,omitempty"`
+	Done           bool          `json:"done"`
+	CreatedAt      time.Time     `json:"created_at"`
 }
 
 type streamState struct {
@@ -392,8 +393,12 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	go func() {
 		for ev := range ch {
+			if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+				ctx.Logger().Error("tool activity persistence failed", "err", err)
+			}
 			a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 		}
+		_ = a.store.interruptToolActivities()
 		ctx.Logger().Info("telemetry feed ended")
 	}()
 	return true

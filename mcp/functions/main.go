@@ -1,4 +1,4 @@
-// Functions v1.9.0 — Lambda-style serverless functions.
+// Functions v1.14.1 — Lambda-style serverless functions.
 //
 // A function is an immutable, built version (functions_deploy) served
 // by a pool of warm worker processes (pool.go / worker.go). The
@@ -121,6 +121,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		authenticatedInvocationTool(a),
 		{Name: "functions_capacity", Description: "Live per-call and per-function memory, worker reservations, queues, limits, and rejection reasons. Project scoped details.", InputSchema: schemaObject(map[string]any{}, nil), Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			pid, err := resolveProjectFromArgs(args)
 			if err != nil {
@@ -137,18 +138,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "functions_create",
 			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?.",
 			InputSchema: schemaObject(map[string]any{
-				"limits":        map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
-				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
-				"name":          map[string]any{"type": "string"},
-				"runtime":       map[string]any{"type": "string", "enum": []any{"node", "go"}},
-				"source_kind":   map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
-				"source":        map[string]any{"type": "string", "description": "Inline handler module body (when source_kind=inline)."},
-				"repo_id":       map[string]any{"type": "integer", "description": "Code app repo id (when source_kind=repo)."},
-				"repo_path":     map[string]any{"type": "string", "description": "Entry file path within the repo."},
-				"package_json":  map[string]any{"type": "string", "description": "Optional package.json — dependencies installed once at deploy."},
-				"env":           map[string]any{"type": "object", "description": "String map merged into the worker env."},
-				"timeout_ms":    map[string]any{"type": "integer", "description": "Hard timeout per invocation. Default 30000, max 300000."},
-				"max_memory_mb": map[string]any{"type": "integer", "description": "Memory cap (MB). Default 256."},
+				"limits":            map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
+				"invocation_policy": invocationPolicySchema(),
+				"access":            map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
+				"name":              map[string]any{"type": "string"},
+				"runtime":           map[string]any{"type": "string", "enum": []any{"node", "go"}},
+				"source_kind":       map[string]any{"type": "string", "enum": []any{"inline", "repo"}},
+				"source":            map[string]any{"type": "string", "description": "Inline handler module body (when source_kind=inline)."},
+				"repo_id":           map[string]any{"type": "integer", "description": "Code app repo id (when source_kind=repo)."},
+				"repo_path":         map[string]any{"type": "string", "description": "Entry file path within the repo."},
+				"package_json":      map[string]any{"type": "string", "description": "Optional package.json — dependencies installed once at deploy."},
+				"env":               map[string]any{"type": "object", "description": "String map merged into the worker env."},
+				"timeout_ms":        map[string]any{"type": "integer", "description": "Hard timeout per invocation. Default 30000, max 300000."},
+				"max_memory_mb":     map[string]any{"type": "integer", "description": "Memory cap (MB). Default 256."},
 				"function_url": map[string]any{
 					"type":        "object",
 					"description": "Optional public URL config: enabled, allowed_methods, cors, rotate_token/token.",
@@ -160,15 +162,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "functions_update",
 			Description: "Update a function's metadata: env, timeout_ms, max_memory_mb, status, function_url. Source / runtime changes go through functions_deploy. Args: id (or name) + the fields to change.",
 			InputSchema: schemaObject(map[string]any{
-				"id":            map[string]any{"type": "integer"},
-				"name":          map[string]any{"type": "string"},
-				"env":           map[string]any{"type": "object"},
-				"timeout_ms":    map[string]any{"type": "integer"},
-				"max_memory_mb": map[string]any{"type": "integer"},
-				"status":        map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
-				"function_url":  map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
-				"limits":        map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
-				"access":        map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
+				"id":                map[string]any{"type": "integer"},
+				"name":              map[string]any{"type": "string"},
+				"env":               map[string]any{"type": "object"},
+				"timeout_ms":        map[string]any{"type": "integer"},
+				"max_memory_mb":     map[string]any{"type": "integer"},
+				"status":            map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
+				"function_url":      map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
+				"limits":            map[string]any{"type": "object", "description": "Runtime policy: class (interactive/background), concurrency, max_idle_workers, idle_timeout_ms, queue_timeout_ms, app_timeout_ms, integration_timeout_ms. Zero durations inherit defaults."},
+				"invocation_policy": invocationPolicySchema(),
+				"access":            map[string]any{"type": "object", "description": "Optional apps and integrations arrays of app.tool or app.* rules. Empty arrays deny calls."},
 			}, nil),
 			Handler: a.toolUpdate,
 		},

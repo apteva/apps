@@ -71,6 +71,10 @@ func reconcileObjectStorage(ctx *sdk.AppCtx) {
 			}
 			continue
 		}
+		// Managed setup owns status and errors; explicit id/request_key retries resume it.
+		if item.Setup != nil {
+			continue
+		}
 		unlock, err := lockResource(ctx.AppDB(), "object_storage", item.ID)
 		if err != nil {
 			continue

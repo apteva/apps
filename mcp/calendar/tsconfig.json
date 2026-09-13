@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "ui/**/*.ts",
+    "ui/**/*.tsx",
+    "browser/**/*.ts",
+    "browser/**/*.tsx",
+    "playwright.config.ts"
+  ],
+  "exclude": ["ui/browser"]
+}

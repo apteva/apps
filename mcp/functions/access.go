@@ -55,6 +55,11 @@ func checkFunctionAccessInPool(p *pool, ctx *sdk.AppCtx, id int64, msg wireRespo
 }
 
 func validateFunctionArgs(args map[string]any, create bool) error {
+	if raw, has := args["invocation_policy"]; has {
+		if _, err := parseInvocationPolicy(raw); err != nil {
+			return err
+		}
+	}
 	if raw, ok := args["limits"]; ok {
 		var policy RuntimePolicy
 		b, err := json.Marshal(raw)

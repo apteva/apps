@@ -1,3 +1,8 @@
+import { useComposerAttachments, type ComposerOptions } from "./composer";
+import type { SendMessage } from "./client";
+import { ChatToolActivity } from "./ToolActivity";
+import { buildChatTimeline } from "./toolActivityModel";
+import { toChatToolActivity, toolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
 // ConversationsPanel — chat + inbox for the conversations app.
@@ -68,13 +73,14 @@ function closeOpenMarkdown(s: string): string {
 // ─── types (mirror the app's wire shapes) ────────────────────────────
 
 export interface NativePanelProps extends ConversationLocalization {
+ composer?:ComposerOptions;
   appName: string;
   installId: number;
   projectId: string;
   instanceId?: number;
 }
 
-import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery } from "./types";
+import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
 export type { Conversation, Message } from "./types";
 
 // Pickers only offer agents that hold this app's MCP — an unattached
@@ -1051,11 +1057,14 @@ function ContextColumn({
 //   user   — right-aligned accent-tinted bubble, plain text
 //   agent  — full-width markdown (chat-md, the dashboard's own styles)
 //   system — centered status line
-function MessageRow(props: {message:Message;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
-  const { t } = useConversationLocalization();
- return <div className="min-w-0 shrink-0 flex flex-col gap-2">
- {props.message.agent_id ? <p className="text-xs text-text-muted">{t("common.agent")} {props.message.agent_id}</p> : null}
- <MessageBody {...props}/><AttachmentContent attachments={props.message.attachments}/><GenericComponents components={props.message.components}/>
+function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
+ const user=props.message.role==="user";
+ const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/>;
+ return <div className={`min-w-0 shrink-0 flex flex-col gap-2 ${user?"chat-message-user":""}`}>
+ {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
+ {user&&attachments}
+ {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
+ {!user&&attachments}<GenericComponents components={props.message.components}/>
  </div>;
 }
 function MessageBody({
@@ -1146,6 +1155,15 @@ function normalizeStreamText(value: string): string {
 function useConversationTransport(conversationID: string, projectId: string) {
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [activities, setActivities] = useState<ToolActivity[]>([]);
+  const mergeActivities = (incoming: ToolActivity[]) => setActivities(current => {
+    const map = new Map(current.map(item => [item.id,item]));
+    let changed = false;
+    for (const item of incoming) if (item.chat_id === conversationID && (!map.has(item.id) || item.revision > map.get(item.id)!.revision)) {
+      map.set(item.id,item); changed = true;
+    }
+    return changed ? [...map.values()] : current;
+  });
   const [bubbles, setBubbles] = useState<StreamBubbleState[]>([]);
   const [connected, setConnected] = useState(false);
   const [historyError, setHistoryError] = useState("");
@@ -1191,10 +1209,11 @@ function useConversationTransport(conversationID: string, projectId: string) {
   useEffect(() => {
     generationRef.current++;
     let cancelled = false, loading = false, initialized = false, cursor = 0;
-    setMessages([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
+    setMessages([]); setActivities([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
     streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
     const applyFrame = (frame: StreamFrame) => {
       if (cancelled || frame.chat_id !== conversationID) return;
+      if (frame.tool_activity) { mergeActivities([frame.tool_activity]); return; }
       const key = `${frame.agent_id ?? 0}:${frame.thread_id ?? ""}:${frame.call_id}:${frame.run_id ?? ""}`;
       if (frame.done) {
         for (const [k,v] of streamRef.current) if ((frame.run_id ? k === key : v.callId === frame.call_id) && (!frame.agent_id || v.agentId === frame.agent_id)) {
@@ -1224,6 +1243,9 @@ function useConversationTransport(conversationID: string, projectId: string) {
           mergeMessages(page.messages); cursor=page.cursor;
           if (!page.has_more) break;
         }
+        const activity = await conversationsClient.activity(conversationID);
+        if (!Array.isArray(activity)) throw new Error("Invalid tool activity response");
+        if (!cancelled) mergeActivities(activity);
         setHistoryError("");
       } catch (err) { if (!cancelled) setHistoryError(String(err)); }
       finally { loading=false; }
@@ -1244,7 +1266,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }, 5000);
     return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
@@ -1296,7 +1318,30 @@ export function ConversationChat({
 }) {
   const { t } = useConversationLocalization();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const { messages, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const { messages, activities, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  // Resolve display names only for a room or a transcript with multiple speakers.
+  const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
+  const showAgentNames = conversation.kind === "room" || speakerIds.size > 1;
+  const [agentNames, setAgentNames] = useState<Record<number, string>>({});
+  useEffect(() => {
+    setAgentNames({});
+    if (!showAgentNames) return;
+    const abort = new AbortController();
+    void conversationsClient.agents({ signal: abort.signal }).then(agents => {
+      if (!abort.signal.aborted) setAgentNames(Object.fromEntries(agents.map(a => [a.id, a.name])));
+    }).catch(() => {});
+    return () => abort.abort();
+  }, [conversationsClient, conversation.id, showAgentNames]);
+  const agentName = (id?: number) => showAgentNames && id
+    ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
+    : undefined;
+  const runningActivity = activities.find(item => item.status === "running");
+  const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : null);
+  const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
+  const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
+  const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
+    const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
+  });
   const storageKey = `conversations:draft:${conversationsClient.storageKey}:${conversation.id}`;
   const [draft, setDraft] = useState(() => { try {
     if (legacyDrafts) for (const suffix of ["", ":pending"]) {
@@ -1308,7 +1353,8 @@ export function ConversationChat({
     }
     return sessionStorage.getItem(storageKey) ?? "";
   } catch { return ""; } });
-  const pendingSendRef = useRef<{ content:string; client_message_id:string } | null>(null);
+  const attachments = useComposerAttachments(conversation.id,storageKey);
+  const pendingSendRef = useRef<SendMessage | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => { mountedRef.current=true; return () => {mountedRef.current=false;}; }, []);
   useEffect(() => {try {sessionStorage.setItem(storageKey,draft);} catch {}},[storageKey,draft]);
@@ -1336,11 +1382,11 @@ export function ConversationChat({
   }, [conversation.id]);
 
   useEffect(() => {
-    if (bubble) return;
+    if (activeResponse) return;
     breakRequestRef.current = null;
     setBreakBusy(false);
     setBreakRequested(false);
-  }, [bubble]);
+  }, [activeResponse]);
 
   const setArchived = async (next: boolean) => {
     if (archiveBusy) return;
@@ -1370,6 +1416,9 @@ export function ConversationChat({
 
   const nearBottomRef = useRef(true);
   useEffect(() => {
+    if (nearBottomRef.current) bottomRef.current?.scrollIntoView({block:"end"});
+  }, [activities]);
+  useEffect(() => {
     const bottom=bottomRef.current, scroller=bottom?.parentElement;
     if (!bottom || !scroller) return;
     let lastMarked=0;
@@ -1387,16 +1436,17 @@ export function ConversationChat({
   },[messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content=draft.trim(); if (!content || sending) return;
+    const content=draft.trim(); if ((!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
-    if (!request) request={content,client_message_id:newClientMessageId()};
+    if (!request) request={content,client_message_id:newClientMessageId(),...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
     setSending(true);setSendError(""); setUnconfirmedSendError("");
     try {
       const row=await conversationsClient.send(conversation.id, request);
       pendingSendRef.current=null;try {sessionStorage.removeItem(storageKey+":pending"); if ((sessionStorage.getItem(storageKey) ?? "").trim() === request.content) sessionStorage.removeItem(storageKey);} catch {}
+      attachments.clearSent(request.attachments??[]);
       if (!mountedRef.current) return;
       mergeMessages([row]);setDraft(current => current.trim()===request!.content ? "" : current);
       inputRef.current?.focus();
@@ -1405,14 +1455,14 @@ export function ConversationChat({
   };
 
   const requestSoftBreak = async () => {
-    if (!bubble || breakBusy || breakRequested) return;
+    if (!activeResponse || breakBusy || breakRequested) return;
     // Keep the complete first request stable across a lost HTTP response.
     // The visible stream may move from the synthetic ack id to a provider
     // call id while the retry is pending; changing the idempotency key or
     // target_call_id at that point could queue a duplicate break.
     const request = breakRequestRef.current ?? {
-      callId: bubble.callId,
-      agentId: bubble.agentId,
+      callId: activeResponse.callId,
+      agentId: activeResponse.agentId,
       clientId: newClientMessageId(),
     };
     breakRequestRef.current = request;
@@ -1443,6 +1493,7 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
+      attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
       publicAudience={conversation.audience === "public"}
@@ -1450,18 +1501,27 @@ export function ConversationChat({
       archived={archived}
       messageNodes={<>
         {hasOlder && <button type="button" className="text-sm text-accent" onClick={loadOlder}>{t("chat.loadEarlierMessages")}</button>}
-        {messages.map(message => <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} onAction={onAction}/></fieldset>
- {deliveries.filter(d=>d.message_id===message.id).map(d=><div key={d.id} role="status" className="mt-1 text-xs text-text-muted">{d.status === "processing" ? t("chat.sending") : d.status === "pending" ? (d.attempts ? t("chat.retrying") : t("chat.queued")) : d.status} · {d.target.split(":")[0]} {d.last_error && <span>{d.last_error}</span>}{["failed","ambiguous"].includes(d.status) && <button type="button" className="ml-2 text-accent" onClick={()=>retryDelivery(d)}>{d.status==="ambiguous"?t("chat.retryDuplicate"):t("chat.retryDelivery")}</button>}</div>)}
+        {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
+          key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
+          parallel={item.kind === "toolGroup" && item.parallel}
+          continuing={item === timeline.at(-1) && Boolean(bubble && !bubble.text)}
+          expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
+          registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
+        /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
+ {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
+   <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
+   <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
  </div>)}
+ </div>;})())}
       </>}
-      hasMessages={messages.length > 0}
-      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}><p className="text-xs text-text-muted">{t("common.agent")} {b.agentId}</p>{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
+      hasMessages={timeline.length > 0}
+      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
       draft={draft}
       sending={sending}
-      responseActive={Boolean(bubble)}
+      responseActive={Boolean(activeResponse)}
       breakBusy={breakBusy}
       breakRequested={breakRequested}
       sendError={unconfirmedSendError ? t("chat.sendUnconfirmed", { error: unconfirmedSendError }) : sendError || (historyError ? t("chat.historyFailed", { error: historyError }) : "")}
@@ -1473,7 +1533,7 @@ export function ConversationChat({
         element.style.height = Math.min(element.scrollHeight, 144) + "px";
       }}
       onComposerKeyDown={(event) => {
-        if (event.key === "Enter" && !event.shiftKey) {
+        if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           send();
         }

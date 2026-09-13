@@ -234,6 +234,7 @@ async function main() {
       await writeStream(`${text}\n\n`);
     }
     const context = {
+      invocation: req.identity ?? null,
       functionName: process.env.APTEVA_FUNCTION_NAME || "",
       functionId: process.env.APTEVA_FUNCTION_ID || "",
       runtime: process.env.APTEVA_FUNCTION_RUNTIME || "",

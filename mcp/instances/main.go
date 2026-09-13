@@ -42,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.48
+version: 0.5.1
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -101,7 +101,7 @@ provides:
     - { name: object_storage_list_providers, description: "List bound providers capable of provisioning object storage." }
     - { name: object_storage_list_plans, description: "List object-storage regions/clusters and plans/tiers." }
     - { name: object_storage_preflight, description: "Read-only credential, project, IAM, region, and optional bucket-name availability checks before object-storage creation." }
-    - { name: object_storage_create, description: "Provision object storage and return its S3 credentials once without creating a Connection." }
+    - { name: object_storage_create, description: "Provision and configure private S3 storage directly; return credentials. Resume with id and credentials." }
     - { name: object_storage_get, description: "Fetch one object-storage resource without its secret." }
     - { name: object_storage_list, description: "List object-storage resources tracked by Instances." }
     - { name: object_storage_rotate_credentials, description: "Rotate credentials and return the new secret once." }
@@ -193,7 +193,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.48
+    ref: instances/v0.5.1
     entry: mcp/instances
   port: 8080
   health_check: /health

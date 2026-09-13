@@ -126,23 +126,22 @@ func configuredSweepInterval(ctx *sdk.AppCtx) time.Duration {
 }
 
 type uploadMeta struct {
-	UserID         int64    `json:"user_id"`
-	ProjectID      string   `json:"project_id"`
-	Filename       string   `json:"filename"`
-	ContentType    string   `json:"content_type,omitempty"`
-	Folder         string   `json:"folder,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Visibility     string   `json:"visibility,omitempty"`
-	Source         string   `json:"source,omitempty"`
-	DeclaredSize   int64    `json:"declared_size"`
-	DeclaredSHA256 string   `json:"declared_sha256,omitempty"`
-	CreatedAt      string   `json:"created_at"`
+	Direct         *directMultipart `json:"direct,omitempty"`
+	UserID         int64            `json:"user_id"`
+	ProjectID      string           `json:"project_id"`
+	Filename       string           `json:"filename"`
+	ContentType    string           `json:"content_type,omitempty"`
+	Folder         string           `json:"folder,omitempty"`
+	Tags           []string         `json:"tags,omitempty"`
+	Visibility     string           `json:"visibility,omitempty"`
+	Source         string           `json:"source,omitempty"`
+	DeclaredSize   int64            `json:"declared_size"`
+	DeclaredSHA256 string           `json:"declared_sha256,omitempty"`
+	CreatedAt      string           `json:"created_at"`
 }
 
-// completeMu serializes the complete() critical section per session
-// (concat + hash + insert + cleanup must run once even if the
-// client retries complete twice). PUT /parts/N has no shared lock —
-// each part writes to its own file.
+// Session locks allow concurrent part transfers while completion and abort
+// run exclusively. completeMu protects the lifecycle lock registry.
 type uploadLock struct {
 	sync.RWMutex
 	budget  sync.Mutex
@@ -151,6 +150,7 @@ type uploadLock struct {
 	total   int64
 	refs    int
 	retired bool
+	relayed bool
 }
 
 var completeMu sync.Mutex
@@ -279,13 +279,17 @@ func (a *App) handleUploadsItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "part number required")
 			return
 		}
-		if r.Method != http.MethodPut {
-			httpErr(w, http.StatusMethodNotAllowed, "PUT only")
+		if r.Method != http.MethodPut && r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "GET or PUT only")
 			return
 		}
 		n, err := strconv.Atoi(parts[2])
 		if err != nil || n < 1 || n > maxPartNumber {
 			httpErr(w, http.StatusBadRequest, "invalid part number")
+			return
+		}
+		if r.Method == http.MethodGet {
+			a.handleUploadPartURL(w, r, id, n)
 			return
 		}
 		a.handleUploadPart(w, r, id, n)
@@ -306,6 +310,7 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
 
 	var body struct {
+		Direct      bool     `json:"direct"`
 		Filename    string   `json:"filename"`
 		Size        int64    `json:"size"`
 		ContentType string   `json:"content_type"`
@@ -410,7 +415,26 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, ok := backend().(multipartBackend); ok && body.Direct && body.SHA256 == "" {
+		if err = beginDirectMultipart(r.Context(), ctx, id, &meta); err != nil {
+			_ = os.RemoveAll(dir)
+			ctx.Logger().Warn("multipart upload init failed", "upload_id", id, "project_id", pid, "err", err)
+			httpErr(w, 502, "cannot initialize direct multipart upload")
+			return
+		}
+	}
 	reserved = false
+	ctx.Logger().Info("upload initialized", "upload_id", id, "project_id", pid, "filename", meta.Filename, "bytes", meta.DeclaredSize, "direct", meta.Direct != nil)
+	if meta.Direct != nil {
+		mode := "s3_relay"
+		if prepareBrowserUpload(r.Context(), ctx, r.Header.Get("Origin")) {
+			mode = "s3_multipart"
+		}
+		_, relaySupported := backend().(multipartRelayBackend)
+		ctx.Logger().Info("multipart transport selected", "upload_id", id, "mode", mode)
+		httpJSON(w, map[string]any{"upload_id": id, "mode": mode, "relay_supported": relaySupported, "part_size": meta.Direct.PartSize, "max_parallel": configIntClamped(ctx.Config().Get("s3_upload_concurrency"), 4, 1, 8), "max_parts": maxPartNumber})
+		return
+	}
 	httpJSON(w, map[string]any{
 		"upload_id":    id,
 		"part_size":    defaultPartSize,
@@ -456,6 +480,9 @@ func listParts(ctx *sdk.AppCtx, id string) ([]partInfo, error) {
 
 func (a *App) handleUploadStatus(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := globalCtx
+	mu := sessionLock(id)
+	mu.RLock()
+	defer func() { mu.RUnlock(); releaseSessionLock(id) }()
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
 	if err != nil {
@@ -466,7 +493,16 @@ func (a *App) handleUploadStatus(w http.ResponseWriter, r *http.Request, id stri
 		httpErr(w, http.StatusForbidden, "not your upload")
 		return
 	}
-	parts, err := listParts(ctx, id)
+	var parts []partInfo
+	if meta.Direct != nil {
+		var remote []remotePart
+		remote, err = directParts(r.Context(), meta)
+		for _, p := range remote {
+			parts = append(parts, partInfo{N: p.Number, Size: p.Size})
+		}
+	} else {
+		parts, err = listParts(ctx, id)
+	}
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "list parts: "+err.Error())
 		return
@@ -530,6 +566,7 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	c := context.WithValue(r.Context(), actorContextKey{}, requestActor(r))
 	out, err := completeUploadSessionForTool(globalCtx, c, id, body.SHA256)
 	if err != nil {
+		globalCtx.Logger().Warn("upload completion failed", "upload_id", id, "project_id", pid, "err", err)
 		httpErr(w, 400, err.Error())
 		return
 	}
@@ -626,6 +663,27 @@ func abortUploadSession(ctx *sdk.AppCtx, id string, requestingUser int64, reason
 			return 0, nil
 		}
 	}
+	if meta.Direct != nil {
+		// Never delete a published object when cancellation races completion.
+		var completed int
+		if err = ctx.AppDB().QueryRow(`SELECT count(*) FROM completed_uploads WHERE upload_id=?`, id).Scan(&completed); err != nil {
+			return 0, err
+		}
+		if completed == 0 {
+			be, ok := backend().(multipartBackend)
+			if !ok {
+				return 0, errors.New("multipart backend unavailable")
+			}
+			c, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			key := objectKey("", meta.Direct.StorageKey)
+			if err = be.AbortMultipart(c, key, meta.Direct.ID); err != nil {
+				return 0, err
+			}
+			cleanupBlobNow(ctx, key)
+		}
+	}
+	ctx.Logger().Info("upload aborted", "upload_id", id, "project_id", meta.ProjectID, "reason", reason)
 	bytes := dirSize(dir)
 	if err = os.RemoveAll(dir); err != nil {
 		return 0, err

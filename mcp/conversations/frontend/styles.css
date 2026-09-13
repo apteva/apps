@@ -1,44 +1,44 @@
 @import "tailwindcss/theme.css";
 @theme inline {
-  --color-bg: var(--bg);
-  --color-bg-card: var(--bg-card);
-  --color-bg-subtle: var(--bg-subtle);
-  --color-bg-hover: var(--bg-hover);
-  --color-bg-input: var(--bg-input);
-  --color-bg-overlay: var(--bg-overlay);
+  --color-bg: var(--bg, #0a0a0a);
+  --color-bg-card: var(--bg-card, #141414);
+  --color-bg-subtle: var(--bg-subtle, #101010);
+  --color-bg-hover: var(--bg-hover, #1c1c1c);
+  --color-bg-input: var(--bg-input, #111111);
+  --color-bg-overlay: var(--bg-overlay, #0009);
 
-  --color-text: var(--text);
-  --color-text-muted: var(--text-muted);
-  --color-text-dim: var(--text-dim);
+  --color-text: var(--text, #e8e8e8);
+  --color-text-muted: var(--text-muted, #aaaaaa);
+  --color-text-dim: var(--text-dim, #888888);
 
-  --color-border: var(--border);
-  --color-border-subtle: var(--border-subtle);
-  --color-border-strong: var(--border-strong);
+  --color-border: var(--border, #2a2a2a);
+  --color-border-subtle: var(--border-subtle, #333333);
+  --color-border-strong: var(--border-strong, #444444);
 
-  --color-accent: var(--accent);
-  --color-accent-hover: var(--accent-hover);
-  --color-accent-muted: var(--accent-muted);
+  --color-accent: var(--accent, #f97316);
+  --color-accent-hover: var(--accent-hover, #fb923c);
+  --color-accent-muted: var(--accent-muted, #f9731626);
 
-  --color-success: var(--success);
-  --color-warn: var(--warn);
-  --color-error: var(--error);
-  --color-info: var(--info);
-  --color-recurring: var(--recurring);
+  --color-success: var(--success, #22c55e);
+  --color-warn: var(--warn, #eab308);
+  --color-error: var(--error, #ef4444);
+  --color-info: var(--info, #3b82f6);
+  --color-recurring: var(--recurring, #a78bfa);
 
   /* Back-compat aliases — the codebase has ~40 sites using the old
    * names (text-red, bg-green, text-yellow, text-blue). They map onto
    * the same semantic tokens so they recolor across themes too. */
-  --color-red: var(--error);
-  --color-green: var(--success);
-  --color-yellow: var(--warn);
-  --color-blue: var(--info);
+  --color-red: var(--error, #ef4444);
+  --color-green: var(--success, #22c55e);
+  --color-yellow: var(--warn, #eab308);
+  --color-blue: var(--info, #3b82f6);
 
-  --font-sans: var(--font-base);
-  --font-mono: var(--font-mono-fixed);
+  --font-sans: var(--font-base, system-ui, sans-serif);
+  --font-mono: var(--font-mono-fixed, ui-monospace, monospace);
 
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
+  --radius-sm: var(--radius-sm, 4px);
+  --radius-md: var(--radius-md, 8px);
+  --radius-lg: var(--radius-lg, 12px);
 }
 .apteva-conversations {
 @import "tailwindcss/utilities.css" source(none);
@@ -46,11 +46,7 @@
 @source "./src";
 @layer base {
 .apteva-conversations {
- --bg:#0a0a0a; --bg-card:#141414; --bg-input:#111111; --bg-subtle:#101010; --bg-hover:#1c1c1c;
- --text:#e8e8e8; --text-muted:#aaaaaa; --text-dim:#888888; --border:#2a2a2a; --border-subtle:#333333;
- --accent:#f97316; --accent-hover:#fb923c; --success:#22c55e; --warn:#eab308; --error:#ef4444; --info:#3b82f6;
- --font-base:system-ui,sans-serif; --font-mono-fixed:ui-monospace,monospace;
- color:var(--text); background:var(--bg); font-family:var(--font-base); line-height:1.5;
+ color:var(--text, #e8e8e8); background:var(--bg, #0a0a0a); font-family:var(--font-base, system-ui, sans-serif); line-height:1.5;
 }
 .apteva-conversations, .apteva-conversations * { box-sizing:border-box; border-width:0; border-style:solid; }
 .apteva-conversations :where(button,input,textarea,select) {font:inherit;color:inherit;}
@@ -62,6 +58,7 @@
 }
 
 .apteva-conversations {
+.chat-md { min-width: 0; overflow-wrap: anywhere; }
 .chat-md > *:first-child { margin-top: 0; }
 .chat-md > *:last-child { margin-bottom: 0; }
 .chat-md p { margin: 0 0 0.5rem 0; }
@@ -69,7 +66,7 @@
   font-weight: 600;
   line-height: 1.35;
   margin: 1rem 0 0.7rem 0;
-  color: var(--text);
+  color: var(--text, #e8e8e8);
 }
 .chat-md h1 { font-size: 1.05rem; }
 .chat-md h2 { font-size: 0.95rem; }
@@ -82,16 +79,16 @@
 .chat-md li > p { margin: 0; }
 .chat-md :is(ul, ol) + :is(p, h1, h2, h3, h4) { margin-top: 1rem; }
 .chat-md code {
-  font-family: var(--font-mono-fixed);
+  font-family: var(--font-mono-fixed, ui-monospace, monospace);
   font-size: 0.9em;
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-card, #141414);
+  border: 1px solid var(--border-subtle, #333333);
   border-radius: 3px;
   padding: 0.05rem 0.3rem;
 }
 .chat-md pre {
-  background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-card, #141414);
+  border: 1px solid var(--border-subtle, #333333);
   border-radius: 6px;
   padding: 0.5rem 0.75rem;
   margin: 0.5rem 0;
@@ -105,20 +102,20 @@
   font-size: 0.85em;
 }
 .chat-md a {
-  color: var(--accent);
+  color: var(--accent, #f97316);
   text-decoration: underline;
   text-underline-offset: 2px;
   word-break: break-all;
 }
 .chat-md blockquote {
-  border-left: 2px solid var(--border);
+  border-left: 2px solid var(--border, #2a2a2a);
   padding-left: 0.6rem;
-  color: var(--text-muted);
+  color: var(--text-muted, #aaaaaa);
   margin: 0.4rem 0;
 }
-.chat-md strong { font-weight: 600; color: var(--text); }
+.chat-md strong { font-weight: 600; color: var(--text, #e8e8e8); }
 .chat-md em { font-style: italic; }
-.chat-md hr { border: none; border-top: 1px solid var(--border-subtle); margin: 0.75rem 0; }
+.chat-md hr { border: none; border-top: 1px solid var(--border-subtle, #333333); margin: 0.75rem 0; }
 .chat-md table {
   border-collapse: collapse;
   margin: 0.5rem 0;
@@ -128,8 +125,189 @@
   max-width: 100%;
 }
 .chat-md th, .chat-md td {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-subtle, #333333);
   padding: 0.25rem 0.5rem;
 }
-.chat-md th { background: var(--bg-card); font-weight: 600; }
+.chat-md th { background: var(--bg-card, #141414); font-weight: 600; }
 }
+
+
+@keyframes chat-tool-breathe {
+  0%, 100% { transform: scale(0.99); opacity: 0.82; filter: brightness(1); }
+  50% { transform: scale(1); opacity: 1; filter: brightness(1.12); }
+}
+@keyframes chat-tool-copy-breathe {
+  0%, 100% { color: var(--text-muted, #aaaaaa); opacity: 0.78; }
+  50% { color: var(--chat-tool-running, #f97316); opacity: 1; }
+}
+@keyframes chat-thinking-dot {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 0.9; transform: translateY(-1px); }
+}
+/* Original dashboard tool activity presentation. */
+.apteva-conversations {
+
+
+
+
+.chat-tool-running-text {
+  color: var(--chat-tool-running, #f97316);
+}
+
+.chat-tool-failed-text {
+  color: var(--chat-tool-failed, #ff3d24);
+}
+
+.chat-tool-copy {
+  color: var(--text-muted, #aaaaaa);
+}
+
+.chat-tool-copy-running {
+  animation: chat-tool-copy-breathe 1.9s ease-in-out infinite;
+  will-change: color, opacity;
+}
+
+.chat-tool-icon-running {
+  animation: chat-tool-breathe 1.9s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform, opacity, filter;
+}
+
+.chat-tool-icon-stack-running {
+  animation: chat-tool-breathe 1.9s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform, opacity, filter;
+}
+
+.chat-tool-icon {
+  transition: transform 180ms ease, opacity 180ms ease, filter 180ms ease;
+}
+
+
+
+.chat-thinking-dots > span {
+  width: 0.22rem;
+  height: 0.22rem;
+  border-radius: 999px;
+  background: currentColor;
+  animation: chat-thinking-dot 1.35s ease-in-out infinite;
+}
+
+.chat-thinking-dots > span:nth-child(2) { animation-delay: 120ms; }
+.chat-thinking-dots > span:nth-child(3) { animation-delay: 240ms; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-tool-icon-running,
+  .chat-tool-icon-stack-running {
+    animation: none;
+    opacity: 1;
+  }
+
+  .chat-tool-copy-running {
+    animation: none;
+    color: var(--chat-tool-running, #f97316);
+    opacity: 1;
+  }
+
+  .chat-thinking-dots > span {
+    animation: none;
+    opacity: 0.65;
+  }
+}
+
+}
+
+/* One type and spacing scale for the input and both composer controls. */
+.apteva-conversations .chat-composer-box {
+ position:relative; display:flex; flex-direction:column; gap:8px;
+ border:1px solid var(--color-border,#373737); border-radius:20px;
+ background:var(--color-bg-input,#171717); padding:12px 12px 10px;
+ transition:border-color 150ms ease;
+}
+.apteva-conversations .chat-composer-box:focus-within {
+ border-color:color-mix(in srgb,var(--color-text,#eee) 28%,var(--color-border,#373737));
+}
+.apteva-conversations .chat-composer-box .chat-composer-input {
+ display:block; width:100%; min-width:0; min-height:44px; max-height:144px;
+ box-sizing:border-box; resize:none; margin:0; padding:4px 8px;
+ border:0; border-radius:0; outline:none; box-shadow:none; background:transparent;
+ font-family:inherit; font-size:16px; font-weight:400; line-height:24px;
+ letter-spacing:normal; color:var(--color-text,#eee);
+}
+.apteva-conversations .chat-composer-input::placeholder {color:var(--color-text-muted,#999);opacity:1}
+.apteva-conversations .chat-composer-toolbar {
+ display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:36px;
+}
+.apteva-conversations .chat-composer-menu {position:relative;display:flex;align-items:center}
+.apteva-conversations .chat-composer-add,
+.apteva-conversations .chat-composer-send {
+ position:relative; display:inline-flex; flex:0 0 36px; align-items:center; justify-content:center;
+ width:36px; height:36px; min-width:36px; min-height:36px; padding:0; margin:0; border:0;
+ border-radius:50%; line-height:1; cursor:pointer; transition:background-color 150ms ease,opacity 150ms ease;
+}
+.apteva-conversations .chat-composer-add {background:transparent;color:var(--color-text-muted,#aaa)}
+.apteva-conversations .chat-composer-add:hover,
+.apteva-conversations .chat-composer-add[aria-expanded="true"] {background:color-mix(in srgb,var(--color-text,#eee) 8%,transparent);color:var(--color-text,#eee)}
+.apteva-conversations .chat-composer-toolbar > .chat-composer-send {margin-left:auto;background:var(--color-accent,#f97316);color:var(--color-bg,#0a0a0a)}
+.apteva-conversations .chat-composer-send:enabled:hover {background:var(--color-accent-hover,var(--color-accent,#f97316))}
+.apteva-conversations .chat-composer-send:disabled {opacity:.3;cursor:default}
+.apteva-conversations .chat-composer-add:disabled {opacity:.4;cursor:default}
+.apteva-conversations .chat-composer-add svg,
+.apteva-conversations .chat-composer-send svg {display:block;flex-shrink:0;width:20px;height:20px}
+.apteva-conversations .chat-composer-add:focus-visible,
+.apteva-conversations .chat-composer-send:focus-visible {outline:2px solid var(--color-accent,#f97316);outline-offset:3px}
+@media (pointer:coarse) {
+ .apteva-conversations .chat-composer-add::after,
+ .apteva-conversations .chat-composer-send::after {content:"";position:absolute;inset:-4px;border-radius:50%}
+}
+.apteva-conversations .chat-composer-popover {position:absolute;bottom:calc(100% + 10px);left:0;z-index:40;min-width:240px;max-width:calc(100vw - 50px);padding:6px;border:1px solid var(--color-border,#444);border-radius:14px;background:var(--color-bg-input,#222);box-shadow:0 8px 32px #0005}
+.apteva-conversations .chat-composer-popover button {display:flex;gap:10px;align-items:center;text-align:left;width:100%;min-height:40px;padding:9px 10px;border-radius:8px;font-family:inherit;font-size:14px;font-weight:400;line-height:22px}
+.apteva-conversations .chat-composer-popover button:hover {background:var(--color-bg,#333)}
+.apteva-conversations .chat-composer-popover button:disabled {opacity:.4;cursor:not-allowed}
+.apteva-conversations .chat-attachment-tray {display:flex;gap:8px;flex-wrap:wrap}
+.apteva-conversations .chat-attachment-chip {display:flex;position:relative;align-items:center;gap:6px;max-width:220px;padding:6px;border:1px solid var(--color-border,#444);border-radius:10px;font-size:12px}
+.apteva-conversations .chat-attachment-chip img {width:56px;height:56px;object-fit:cover;border-radius:6px}
+.apteva-conversations .chat-attachment-chip > span:first-of-type {overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:110px}
+.apteva-conversations .chat-attachment-chip button {min-width:24px;min-height:28px}
+.apteva-conversations .chat-attachment-error {font-size:12px;color:var(--color-error,#e75b5b)}
+.apteva-conversations .chat-message-attachment {display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-top:8px;padding:10px;max-width:420px;border:1px solid var(--color-border,#444);border-radius:12px}
+.apteva-conversations .chat-image-preview {display:block;width:100%;border-radius:8px;overflow:hidden}
+.apteva-conversations .chat-image-preview img {max-width:100%;max-height:260px;object-fit:contain;margin:auto}
+.apteva-conversations .chat-file-info {display:flex;flex:1;min-width:0;flex-direction:column;overflow-wrap:anywhere;font-size:13px}
+.apteva-conversations .chat-file-info small {color:var(--color-text-muted,#aaa);font-size:11px}
+.apteva-conversations .chat-message-attachment > button:last-child {font-size:12px;color:var(--color-accent,#c78a4f)}
+.apteva-conversations .chat-image-dialog {margin:auto;border:1px solid var(--color-border,#444);border-radius:14px;background:var(--color-bg-input,#222);color:var(--color-text,#eee);padding:16px;max-width:94vw;max-height:94vh}
+.apteva-conversations .chat-image-dialog::backdrop {background:#000b}
+.apteva-conversations .chat-image-dialog img {max-width:85vw;max-height:75vh;object-fit:contain}
+.apteva-conversations .chat-image-dialog button {display:block;margin-left:auto;padding:8px}
+
+.apteva-conversations .chat-composer-popover svg {display:block;flex:0 0 18px}
+.apteva-conversations .chat-attachment-tray {padding:2px 6px}
+
+/* Compact follows the chat width, including narrow embeds on wide screens. */
+.apteva-conversations .chat-composer-safe {container-type:inline-size;container-name:apteva-composer}
+.apteva-conversations .chat-composer-box[data-layout="compact"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-toolbar {display:contents}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-composer-send {order:3;margin-left:0}
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-tray,
+.apteva-conversations .chat-composer-box[data-layout="compact"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+@container apteva-composer (max-width:480px) {
+.apteva-conversations .chat-composer-box[data-layout="auto"] {flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:8px;padding:8px;border-radius:24px}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-toolbar {display:contents}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-menu {order:1;flex:0 0 auto}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-input {order:2;flex:1 1 0;width:auto;min-height:36px;padding:6px 4px}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-composer-send {order:3;margin-left:0}
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-tray,
+.apteva-conversations .chat-composer-box[data-layout="auto"] .chat-attachment-error {order:0;flex:1 0 100%;box-sizing:border-box;min-width:0}
+}
+
+/* User attachments belong above their text, on the same side of the chat. */
+.apteva-conversations .chat-message-attachments {display:flex;flex-wrap:wrap;gap:8px;max-width:100%;align-items:flex-end}
+.apteva-conversations .chat-message-user > .chat-message-attachments {align-self:flex-end;justify-content:flex-end}
+.apteva-conversations .chat-message-attachment.chat-message-photo {margin:0;padding:0;border:0;max-width:180px;overflow:hidden;border-radius:12px}
+.apteva-conversations .chat-message-photo .chat-image-preview {padding:0;border:0;width:auto;max-width:180px;line-height:0;border-radius:12px}
+.apteva-conversations .chat-message-photo img {display:block;width:auto;height:auto;max-width:180px;max-height:180px;object-fit:contain}
+.apteva-conversations .chat-image-caption {font-size:13px;overflow-wrap:anywhere;margin:10px 0 0}
+.apteva-conversations .chat-image-caption small {display:block;color:var(--color-text-muted,#aaa);font-size:11px}

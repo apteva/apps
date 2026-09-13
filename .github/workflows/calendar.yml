@@ -1,0 +1,47 @@
+name: Calendar validation
+on:
+  pull_request:
+    paths: ['mcp/calendar/**', 'scripts/build-panels.ts', '.github/workflows/calendar.yml']
+  push:
+    paths: ['mcp/calendar/**', 'scripts/build-panels.ts', '.github/workflows/calendar.yml']
+permissions:
+  contents: read
+jobs:
+  calendar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOWORK: 'off'
+      TZ: Europe/Madrid
+    defaults:
+      run:
+        working-directory: mcp/calendar
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: mcp/calendar/go.mod
+          cache-dependency-path: mcp/calendar/go.sum
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.13'
+      - run: go test -race -tags integration -cover ./...
+      - run: go vet ./...
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun test ui
+      - run: bun run ../../scripts/build-panels.ts --app calendar
+      - run: git diff --exit-code -- ui/CalendarPanel.mjs ui/CalendarPanel.mjs.map
+      - run: bunx --no-install playwright install --with-deps chromium
+      - run: bun run test:browser
+      - run: go build -o /tmp/calendar .
+        env:
+          CGO_ENABLED: '0'
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: calendar-browser-results
+          path: |
+            mcp/calendar/browser/results
+            mcp/calendar/test-results

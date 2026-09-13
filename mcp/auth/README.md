@@ -1,13 +1,17 @@
-# Auth v0.11.0
+# Auth v0.12.1
 
 First-party authentication for Apteva SaaS applications. Each project install
 contains separate organizations, users, clients, signing keys, roles and
-permissions. This release fixes the v0.10.0 security and correctness audit.
+permissions. v0.12.1 distinguishes retryable refresh failures from uncertain
+rotation outcomes for persistent SDK sessions. v0.12.0 added opt-in role-bound
+platform credentials and a renewal
+endpoint for unified Web SDK sessions. Upgrading from v0.11.x adds no database
+migration and preserves existing Auth sessions. Configure explicit role bindings
+and platform policies before enabling delegated access.
 
-## Upgrade contract
+## Upgrading from versions before v0.11.0
 
-This is a **minor release with intentional compatibility changes**, not an
-automatic patch. Migration `006_security.sql` invalidates existing sessions
+The v0.11.0 security release introduced intentional compatibility changes. Migration `006_security.sql` invalidates existing sessions
 and recovery links, increments authorization versions, and removes recovery
 URLs from historical audit events. Users must sign in again. Back up the
 application database before an operator deploys this release.
@@ -26,10 +30,10 @@ application database before an operator deploys this release.
 - Guest upgrade revokes guest sessions, invalidates recovery links, and removes
   linked identities. An old device starts a new guest rather than entering the
   upgraded account. Pending verification applies to every account login path.
-- Auth no longer issues independent `apteva_access_token` credentials. The
-  platform mint callback has no Auth-session binding/revocation contract. Tokens
-  previously issued by the platform remain subject to the platform's own
-  expiry and revocation policy; this database migration cannot revoke them.
+- v0.11.x disabled independent `apteva_access_token` issuance. v0.12.0 restores
+  it only through the explicit role bindings and short-lived policies documented
+  below. Previously issued platform tokens retain their own expiry/revocation
+  policy; the v0.11.0 database migration cannot revoke those credentials.
 - Empty `allowed_origins` denies browser requests carrying an Origin header.
   Server/native calls without an Origin header are still subject to client and
   credential checks. The built-in recovery page is allowed from the canonical
@@ -183,3 +187,93 @@ bun test
 # From repository root; rebuilds AuthPanel.mjs and its source map
 bun run scripts/build-panels.ts --app auth
 ```
+
+## Unified SDK sessions (v0.12.0)
+
+Auth can issue a platform credential alongside the normal Auth session on login,
+refresh, and other successful session-creation flows. Configure the Web SDK's
+`auth: { clientId, installId?, organizationSlug?, profile? }` with `projectId`;
+Web SDK v0.8.0 manages both credentials through `client.auth`.
+
+Minting is **disabled by default**. Set the Auth install's
+`delegated_token_bindings` JSON configuration to trusted mappings, for example:
+
+```json
+[{
+  "project_id": "YOUR_PROJECT",
+  "organization_slug": "default",
+  "client_id": "YOUR_AUTH_CLIENT",
+  "profile": "commercial",
+  "policy_client_id": "flexylead-commercial",
+  "roles": ["commercial"],
+  "permissions": ["assistant:use"]
+}]
+```
+
+All listed roles AND permissions must be present in the live authorization
+snapshot. At least one requirement is mandatory. Selection is scoped by project,
+organization and the actual session client. With `?delegated_profile=commercial`,
+only that authorized profile can be selected; without a profile exactly one
+binding must qualify. Unknown, unauthorized or ambiguous profiles deny minting.
+The profile is not an authorization claim and never accepts arbitrary scopes.
+
+For the Auth install, configure matching entries using the existing platform
+`GET/PUT /api/apps/installs/:id/delegated-access-policies` API. The policy's
+`oauth_client_id` is the binding's `policy_client_id` (a trusted policy selector,
+not a browser login client). Use explicit apps/actions/agent IDs and
+`token_ttl_seconds: 60`. Policies must accurately represent the corresponding
+role requirements. Auth cannot inspect or narrow their scopes: the platform
+owns and enforces them. Preserve unrelated entries when PUT replaces the full
+policy set; replacement also revokes existing delegated keys for that install.
+Do not use the compatibility mint path that omits `oauth_client_id`.
+
+Responses add `apteva_access_token`, `apteva_expires_in` (remaining whole seconds)
+and `apteva_expires_at` (absolute UTC expiry). Auth checks the platform's actual
+returned identity, project, policy and expiry; requesting 60 seconds alone is
+insufficient because platform policy overrides the request. Credentials with
+lifetimes over 60 seconds or beyond the Auth session's absolute expiry are never
+returned. Keep normal Auth access and refresh credentials separate from the
+platform token; they serve different audiences.
+
+`POST /delegated-token` accepts the Auth access token in `Authorization: Bearer`,
+uses the same routing/project context, and returns only those three platform
+fields. It revalidates the signed Auth token, session, active organization/user,
+client, origin and current authorization version. A stale/invalid session returns
+401 (normal refresh can obtain current authorization); missing permission or
+configuration returns 403; gateway/configuration/lifetime failures return 503.
+The normal login/refresh still succeeds when platform minting fails, preserving
+the Auth credentials needed for recovery. It never falls back to a broader key.
+
+Minting holds the same SQLite writer reservation as session/RBAC state changes,
+with a five-second gateway timeout and twelve successful mints per session per
+minute. A revocation committed before validation prevents issuance. Tokens issued
+before logout/disablement/role changes remain independently valid until expiry;
+this is bounded credential issuance, not immediate platform token revocation.
+Already-open streams and in-flight work can outlive admission unless their target
+app enforces expiry. Do not promise immediate stream termination from this feature.
+There is no session schema migration and existing Auth sessions remain valid.
+
+### Refresh failures and persistent browser sessions (v0.12.1)
+
+Refresh clients must distinguish rejection from a failed or uncertain rotation:
+
+- `401 {"error":"invalid_grant"}`: invalid/revoked session or an account/client
+  that is no longer eligible. Discard the saved session. Reusing a previously
+  rotated credential still revokes its entire session family.
+- `503 {"error":"refresh_unavailable"}`: failure before rotation committed,
+  including a rolled-back database operation. `Retry-After` is supplied; the
+  same saved credential can be retried explicitly.
+- `503 {"error":"refresh_uncertain"}`: commit outcome cannot be confirmed. Do not
+  replay the old credential. Require login if no replacement was safely saved.
+
+A generic proxy 5xx or lost response also leaves rotation uncertain. Browser
+clients should serialize refreshes, re-read the saved credential under a cross-tab
+lock, and save an in-progress marker before sending the credential. Persist the
+replacement before releasing the lock. Platform mint denial still permits a
+successful normal Auth refresh. Logout database lookup failures report an error
+instead of falsely confirming revocation.
+
+The opt-in `TestWebSDKPersistentBrowserIntegration` exercises the generic Web SDK
+in real Chromium tabs against these handlers, including reload restoration,
+rotation, logout and recovery after a rolled-back database failure. Set
+`AUTH_WEB_SDK_TEST_DIR` to a checkout with Playwright Chromium installed to run it.

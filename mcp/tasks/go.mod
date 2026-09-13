@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/tasks
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.77.1
+	github.com/apteva/app-sdk v0.79.0
 	modernc.org/sqlite v1.50.0
 )
 

@@ -41,6 +41,8 @@ storage. A parent must supply a usable height. Styles are loaded automatically,
 scoped under `.apteva-conversations`, and removed after the final consumer disposes.
 
 Run `bun run scripts/build-panels.ts --app conversations` from the apps repository.
+Native dashboard panels embed the same generated, scoped CSS that the Web SDK loader mounts for external hosts. They do not depend on a dashboard Tailwind source scan or a separate dashboard release. Host theme tokens (for example `--font-base`, `--bg`, `--text`, and `--accent`) are inherited; unthemed hosts get local defaults.
+
 It builds dashboard bundles and `/ui/frontend.json` plus content-addressed client,
 UI and style assets. The normal app release includes these files. No npm app
 publication or platform upgrade is needed. The old npm package 0.20.0 remains
@@ -160,7 +162,51 @@ bun run scripts/build-panels.ts --app conversations
 bunx --no-install playwright test -c mcp/conversations/frontend/playwright.config.ts
 ```
 
-The browser fixture tests both hosts at desktop/mobile widths and exercises
+The browser fixture deliberately supplies no app stylesheet to the dashboard: its panel must carry its own. It compares computed typography and layout with SDK-loaded chat, checks theme inheritance and isolation, and renders real Markdown replies, multiple speakers, delivery failures and streaming text. It tests both hosts at desktop/mobile widths and exercises
 report/approval UI over a controlled HTTP/SSE service. Real platform/token and
 real-Codex evidence is recorded separately; a fixture token does not establish
 backend isolation.
+
+### Tool activity
+
+Dashboard panels and exported chat use the same port of the original `ChatToolActivity` renderer, grouping rules and scoped styles, including stacked icons, animated activity text, expandable groups, parallel calls, failure indicators and timing. Data and translations are adapted to Conversations. First-party app icons are bundled from public app metadata; custom sources use the original fallback resolver when no matching metadata is available.
+
+The shared transcript displays conversation-bound tool starts and results. Activity is stored separately from messages and replayed through `/activity` on load, reconnect and periodic reconciliation. Live updates travel in `stream` frames under `tool_activity`, with stable IDs and revisions. The endpoint uses the same conversation and delegated `message.read` access checks as history. It carries display metadata only, never tool arguments or raw results, and does not create unread messages or outbound deliveries. Activity collected after this feature is installed survives refreshes; older platform telemetry is not imported automatically.
+
+The main composer action pauses an active reply or tool when the input is empty, and switches to send as soon as a draft is entered. Pausing remains an advisory request.
+
+### Composer attachments
+
+Every chat surface uses the same attachment composer and message renderer. Its `+` menu includes files/photos and screenshot capture; paste and drag/drop work too. Attachments can be sent with or without text while an agent is active. Completed uploads remain in the per-conversation session draft; a pending send retains its original idempotency key. Unsaved uploads interrupted by a reload must be selected again.
+
+The composer defaults to `layout: "auto"`: a single row (`+`, text, send/pause) when its chat container is 480px wide or narrower, and the expanded layout otherwise. Set `composer={{ layout: "compact" }}` to always use one row, or `composer={{ layout: "expanded" }}` to always keep the larger composer. Long text grows vertically and attachment previews appear above the row. Switching layouts preserves the draft and attachments. The dashboard widget exposes the same choice under **Composer layout** (`composer_layout`).
+
+Configure `composer` on `ConversationChat`, `ConversationThread`, `AgentConversations`, `ConversationsPanel`, or `ConversationsProvider` (and the native dashboard wrappers):
+
+```tsx
+<ConversationChat conversations={conversations} agentId={agentId}
+  composer={{
+    layout: "auto",
+    files: true,
+    screenshot: true,
+    accept: "image/*,.txt,.pdf",
+    maxFiles: 5,
+    maxFileBytes: 10 * 1024 * 1024,
+    // Optional native capture bridge; return null when canceled.
+    captureScreenshot: async () => nativeHost.captureScreenshot(),
+    actions: [{ id: "notes", label: "Attach notes", run: async () =>
+      new File(["My notes"], "notes.txt", { type: "text/plain" }) }],
+  }} />
+```
+
+Browser screen capture uses the browser's screen/window/tab picker in a secure context, captures one frame and stops the media tracks immediately. Unsupported browsers can still paste or upload a screenshot. Native callbacks are trusted host code; serialized message content cannot register actions.
+
+The headless client offers `upload(chatId, uploadId, filename, contentBase64)` and `attachment(chatId, attachmentId)`. Upload IDs must be 16–80 characters and reused on retries. Send references as `attachments: [{id, type}]`; the server resolves canonical metadata and rejects cross-conversation or cross-sender references. Reads require `message.read`; uploads and sends require `message.send`. Exported hosts use the same delegated Conversations permissions, without granting visitors Storage access.
+
+Uploads are limited server-side to 10 MiB each, ten attachments per message, and 100 MiB of pending originals per conversation. PNG/JPEG/WebP/GIF images are decoded with a 40-megapixel limit and resized to a bounded JPEG for preview and Core vision. Originals remain available for authenticated downloads. Messages persist previews and attachment IDs; originals live in the app database and follow its backup/restore and conversation deletion. Unsent local uploads older than one day are reclaimed on the next upload.
+
+To also retain files in Storage, bind a Storage app (v0.12.3+) and enable **Copy attachments to Storage** (`attachment_storage=true`) in Conversations settings. Sending then creates private copies and includes `storage_app: "storage"` and `file_id` on the returned message attachments. This is optional and uses the binding's selected install. Conversations retains originals for reliable authorized history; Storage copies have independent retention. Storage failure prevents sending and allows retry with the same IDs.
+
+User image thumbnails are capped at 180px and aligned right above the text in both dashboard and exported chat. Click to enlarge, view metadata or download the original. This display limit does not reduce the image sent to the agent.
+
+Images are delivered as actual Core `image_url` content parts in the existing conversation event. Conversations instructs the agent to inspect current images directly and answer simple image questions without a preliminary acknowledgement or attachment-reading call. File IDs and retrieval instructions accompany non-image files; a file ID alone never substitutes for vision data. This is an app-level routing and instruction change; Core image retention is unchanged. Agents can use `conversations_read_attachment` for bounded text (64 KB), image data, or binary chunks (48 KiB, `offset`/`next_offset`). PDF/Office content is not automatically extracted: the agent must use document tools, optionally against the Storage file ID. File contents remain user-provided data.

@@ -1,4 +1,3 @@
-import { sha256 as createSHA256 } from "@noble/hashes/sha2.js";
 // Resumable parallel-chunk uploader for the storage app's /uploads
 // HTTP routes. Mirrors the S3 multipart-upload pattern omnikit uses:
 // each part is an independent PUT, parts run concurrently up to a
@@ -12,8 +11,9 @@ import { sha256 as createSHA256 } from "@noble/hashes/sha2.js";
 //     (max 5). Other parts continue uninflueced — that's the
 //     point of parts vs offset.
 //
-// Large files are hashed incrementally for safe resume and deduplication.
-// Check hard limits before reading bytes and surface preparation progress.
+// Start transferring immediately. S3 parts go directly to the bucket; disk
+// parts use the app endpoint. If direct transfer fails, stream S3 parts through
+// the same-origin app endpoint. Never read the whole file before uploading.
 
 const STORAGE_API = "/api/apps/storage";
 const simpleUploadCap = 25 * 1024 * 1024;
@@ -39,11 +39,9 @@ export interface UploadResumableOptions {
   /** Pre-computed SHA-256 hex string. If supplied AND the server
    *  already holds matching bytes, the upload is skipped entirely. */
   sha256?: string;
-  /** Fired with cumulative bytes uploaded (sum across in-flight
-   *  parts). The total includes parts not yet started. */
+  /** Fired with cumulative bytes confirmed by the upload endpoint. */
   onProgress?: (bytesUploaded: number, total: number) => void;
-  onPhase?: (phase: "checking" | "preparing" | "uploading" | "finalizing") => void;
-  onPreparationProgress?: (bytesRead: number, total: number) => void;
+  onPhase?: (phase: "checking" | "uploading" | "finalizing") => void;
   /** Override the parallelism. Default 4. */
   parallel?: number;
   signal?: AbortSignal;
@@ -121,10 +119,16 @@ interface InitResponse {
   max_parallel?: number;
   max_parts?: number;
   expires_at?: string;
+  mode?: "s3_multipart" | "s3_relay";
+  relay_supported?: boolean;
   // Pre-dedup short-circuit shape:
   file?: UploadedFile;
   was_existing?: boolean;
 }
+
+// Only reuse sessions for the same immutable File object. Name/size/mtime
+// alone cannot prove identical bytes after a reload or another file selection.
+const fileSessions = new WeakMap<File, Map<string, InitResponse>>();
 
 async function uploadChunked(
   file: File,
@@ -139,15 +143,13 @@ async function uploadChunked(
     if (file.size > limits.max_file_bytes) throw new Error(`File exceeds Storage's file limit (${Math.floor(limits.max_file_bytes / 1048576)} MiB). Adjust max_upload_size_mb in Storage settings.`);
     if (file.size > limits.max_pending_bytes) throw new Error(`File exceeds Storage's pending-upload allowance (${Math.floor(limits.max_pending_bytes / 1048576)} MiB). Adjust max_pending_upload_mb in Storage settings.`);
   }
-  opts.onPhase?.("preparing");
-  const sha256 = opts.sha256 || await hashFile(file, opts.signal, opts.onPreparationProgress);
-  opts.signal?.throwIfAborted();
-  opts.onPhase?.("checking");
-  const resumeKey = "storage-upload:" + JSON.stringify([opts.projectId, opts.installId, opts.folder || "/", file.name, file.size, file.type, sha256, opts.visibility, opts.tags]);
+  const sha256 = opts.sha256;
+  const resumeKey = JSON.stringify([opts.projectId, opts.installId, opts.folder || "/", opts.visibility, opts.tags, sha256]);
+  let sessions = fileSessions.get(file);
+  if (!sessions) { sessions = new Map(); fileSessions.set(file, sessions); }
   let init: InitResponse | undefined;
   let confirmed: { n: number; size: number }[] = [];
-  let saved: InitResponse | null = null;
-  try { saved = JSON.parse(localStorage.getItem(resumeKey) || "null"); } catch {}
+  const saved = sessions.get(resumeKey);
   if (saved?.upload_id) {
     const response = await fetch(`${STORAGE_API}/uploads/${saved.upload_id}${scopeQS(opts)}`, { credentials: "same-origin", signal: opts.signal });
     if (response.ok) {
@@ -167,16 +169,17 @@ async function uploadChunked(
       tags: opts.tags,
       visibility: opts.visibility,
       sha256,
+      direct: !sha256,
     },
     signal: opts.signal,
   })).body;
 
-    try { localStorage.setItem(resumeKey, JSON.stringify(init)); } catch {}
+    sessions.set(resumeKey, init);
   }
 
   if (init.was_existing && init.file) {
     opts.onProgress?.(file.size, file.size);
-    try { localStorage.removeItem(resumeKey); } catch {}
+    sessions.delete(resumeKey);
     return init.file;
   }
   if (!init.upload_id) {
@@ -221,6 +224,7 @@ async function uploadChunked(
   // overall upload aborts.
   let firstErr: Error | null = null;
   let nextPart = 0;
+  let useRelay = init.mode === "s3_relay";
   const work = async () => {
     while (nextPart < queue.length) {
       if (opts.signal?.aborted) return;
@@ -229,29 +233,49 @@ async function uploadChunked(
       if (!part) return;
       let attempt = 0;
       while (attempt < maxRetriesPerPart) {
+        let directAttempt = false;
         try {
+          const timeout = AbortSignal.timeout(5 * 60 * 1000);
+          const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
           const blob = file.slice(part.start, part.end);
-          const res = await fetch(`${STORAGE_API}/uploads/${id}/parts/${part.n}${scopeQS(opts)}`, {
+          const partURL = `${STORAGE_API}/uploads/${id}/parts/${part.n}${scopeQS(opts)}`;
+          let target = partURL;
+          let headers: Record<string, string> = { "Content-Type": "application/octet-stream" };
+          if (init.mode === "s3_multipart" && !useRelay) {
+            const signed = (await jsonFetch<{ url: string; headers: Record<string, string> }>("GET", partURL, { signal })).body;
+            target = signed.url;
+            headers = signed.headers;
+            directAttempt = true;
+          }
+          const res = await fetch(target, {
             method: "PUT",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/octet-stream" },
+            credentials: directAttempt ? "omit" : "same-origin",
+            headers,
             body: blob,
-            signal: opts.signal,
+            signal,
           });
           if (!res.ok) {
+            // Do not include presigned URLs (credentials) in errors.
             throw new Error(`PUT part ${part.n} → ${res.status}: ${await res.text()}`);
           }
-          const j = (await res.json()) as { size: number };
+          const j = directAttempt ? { size: blob.size } : (await res.json()) as { size: number };
           confirmedBytes += j.size - (partBytes.get(part.n) || 0);
           partBytes.set(part.n, j.size);
           reportProgress();
           break;
         } catch (e) {
-          if ((e as DOMException).name === "AbortError") return;
+          if (opts.signal?.aborted) return;
+          if (directAttempt && init.relay_supported) {
+            // Keep the same upload ID and confirmed parts. New work uses the
+            // same-origin streaming route; in-flight direct parts may finish.
+            useRelay = true;
+            init.mode = "s3_relay";
+            continue;
+          }
           attempt += 1;
           if (attempt >= maxRetriesPerPart) {
             firstErr = new Error(
-              `part ${part.n} failed after ${maxRetriesPerPart} retries: ${(e as Error).message}`,
+              `part ${part.n} failed after ${maxRetriesPerPart} attempts: ${(e as Error).message}${init.mode === "s3_multipart" && e instanceof TypeError ? ". Check the connection and bucket CORS: allow this dashboard origin to PUT objects." : ""}`,
             );
             return;
           }
@@ -277,15 +301,13 @@ async function uploadChunked(
       `${STORAGE_API}/uploads/${id}/complete${scopeQS(opts)}`,
       { body: {}, signal: opts.signal },
     )).body;
-    try { localStorage.removeItem(resumeKey); } catch {}
+    sessions.delete(resumeKey);
     return completion.file;
   } catch (e) {
-    // User cancel OR per-part retry exhaustion both leak partial
-    // bytes on disk if we don't wipe the session. Fire-and-forget
-    // DELETE — server is idempotent on missing sessions, so a
-    // race with the sweeper is harmless.
+    // Explicit cancellation aborts the provider session. Other errors allow
+    // callers retaining this File object to resume verified parts.
     if (opts.signal?.aborted || (e as DOMException).name === "AbortError") {
-      try { localStorage.removeItem(resumeKey); } catch {}
+      sessions.delete(resumeKey);
       await abortServerSession(id, opts);
     }
     throw e;
@@ -312,8 +334,9 @@ async function abortServerSession(
     await fetch(`${STORAGE_API}/uploads/${id}${scopeQS(opts)}`, {
       method: "DELETE",
       credentials: "same-origin",
-      // Deliberately no AbortSignal here: the user's AbortController
-      // is what got us here. Using it would short-circuit the cleanup.
+      signal: AbortSignal.timeout(30_000),
+      // Use an independent deadline: the user's already-aborted signal
+      // would short-circuit cleanup.
     });
   } catch {
     // Network failure during cleanup is logged-and-forgotten —
@@ -344,23 +367,4 @@ async function jsonFetch<T>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-async function hashFile(file: File, signal?: AbortSignal, progress?: (read: number, total: number) => void): Promise<string> {
- const hash = createSHA256.create(); const reader = file.stream().getReader();
- let read = 0, updated = performance.now();
- progress?.(0, file.size);
- try { while (true) {
-   signal?.throwIfAborted(); const {done,value} = await reader.read(); if (done) break;
-   hash.update(value); read += value.length;
-   if (performance.now() - updated >= 50) {
-     progress?.(read, file.size);
-     await sleep(0); // Let progress paint and Cancel run during large hashes.
-     updated = performance.now();
-   }
- } }
- finally { await reader.cancel(); reader.releaseLock(); }
- signal?.throwIfAborted();
- progress?.(read, file.size);
- return Array.from(hash.digest(), b => b.toString(16).padStart(2,"0")).join("");
 }

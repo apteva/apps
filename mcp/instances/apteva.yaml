@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.48
+version: 0.5.1
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -99,13 +99,13 @@ provides:
     - name: object_storage_preflight
       description: Read-only credential, project, IAM, region, and optional bucket-name availability checks before creation.
     - name: object_storage_create
-      description: Provision object storage and return its S3 credentials once without creating a Connection or persisting the secret.
+      description: Provision and configure a private bucket directly over S3, apply optional CORS, and return credentials. Resume with id and credentials.
     - name: object_storage_get
       description: Fetch one provisioned object-storage resource without its secret.
     - name: object_storage_list
       description: List object-storage resources tracked by Instances.
     - name: object_storage_rotate_credentials
-      description: Rotate object-storage credentials and return the new secret once.
+      description: Rotate object-storage credentials and return the new credentials once.
     - name: object_storage_destroy
       description: Permanently delete a managed object-storage resource with explicit confirmation.
     - name: instance_register
@@ -228,7 +228,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: instances/v0.4.48
+    ref: instances/v0.5.1
     entry: mcp/instances
   port: 8080
   health_check: /health

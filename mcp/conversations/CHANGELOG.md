@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.23.3 — 2026-09-12
+
+- Render compact user image thumbnails above the message text, aligned right, in the shared dashboard and exported chat. Keep enlargement, image metadata and original downloads in the image dialog.
+- Deliver current images directly as visual content without file-retrieval instructions. Update Conversations-owned thread instructions and skill to answer simple image questions directly, without a preliminary acknowledgement or attachment-reading call. Core and SDK behavior are unchanged.
+- Verify original image payload preservation, mixed image/file routing, thumbnail geometry, history and downloads in both chat hosts.
+
+## 0.23.2 — 2026-09-12
+
+- Add composer.layout (auto, compact, expanded). Auto is the default and uses a single row in chat containers up to 480px wide. Explicit modes override responsive selection.
+- Expose Composer layout in dashboard widget settings. Preserve drafts, attachment previews, multiline growth and send/pause behavior in both modes and both hosts.
+- Verify responsive container sizing, explicit overrides and draft preservation alongside the full 29-browser-test and 31-unit/UI-test suites.
+
+## 0.23.1 — 2026-09-12
+
+- Refine the shared composer with explicit inherited sans-serif typography, aligned text/icon insets, matching 36px controls and 20px SVG icons, a lighter send arrow and a subtle focus border. Preserve enlarged touch hit areas and keyboard focus indicators.
+- Align attachment-menu labels and icons; verified identical geometry in dashboard and exported chat, with desktop/mobile visual review and all 25 browser checks passing.
+
+## 0.23.0 — 2026-09-12
+
+- Add the shared configurable + composer menu for files/photos, pasted or dropped attachments, and one-frame screenshots, with native capture and custom action callbacks.
+- Persist image previews and downloadable file cards in messages and history. Support attachment-only sends, upload retry, per-chat drafts, and sending while an agent is active.
+- Store bounded originals with conversation-scoped access. Send real image content through Core thread events; expose bounded text and binary reads through conversations_read_attachment.
+- Optionally copy sent files privately into a bound Storage app and return file IDs, without exposing Storage permissions to chat visitors.
+
+## 0.22.2 — 2026-09-12
+
+- Restore the original `ChatToolActivity` renderer and scoped styles in the shared dashboard/exported UI: stacked app icons, animated activity text, expandable groups, parallel calls, failure indicators and elapsed times.
+- Restore live tool activity in the common dashboard/exported transcript, with persisted status, elapsed time, conversation-scoped access, revision-safe refresh recovery and no raw arguments/results in the client feed. Previously recorded platform telemetry is not imported.
+- Integrate advisory pause into the composer action while a reply or tool is active; typing switches back to send without waiting for the agent.
+
+## 0.22.1 — 2026-09-10
+
+- Ship the same scoped stylesheet in native dashboard panels and exported chat, including Tailwind utilities, Markdown and mobile layout. Preserve host theme tokens and contain defaults within Conversations.
+- Restore uncluttered transcripts: hide successful delivery diagnostics and single-agent identity labels, resolve display names for multiple speakers, and restore message spacing. Keep localized failed/unconfirmed delivery notices and retry actions.
+- Pin the app’s Go SDK to v0.77.0, the latest tagged ancestor of SDK HEAD.
+- Verify real Markdown replies, long links, mobile widths, live streams, retries, theme inheritance and computed layout parity in both hosts.
+
 ## 0.22.0 — 2026-09-10
 
 - Add per-surface `locale`, `timeZone`, and `messages` props to the app-served React components and dashboard wrappers, with English, French, and Spanish UI dictionaries and locale-aware dates, relative times, numbers, and plurals.

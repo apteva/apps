@@ -8,9 +8,16 @@
 // Live updates via useAppEvents("calendar") — when calendars/events
 // change (from another tab or an agent), the UI refreshes.
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-
-const API = "/api/apps/calendar";
+import {
+  createContext,
+  useId,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 interface NativePanelProps {
   appName: string;
@@ -28,7 +35,9 @@ interface Calendar {
   created_at: string;
 }
 
-interface Occurrence {
+export interface Occurrence {
+  timezone: string;
+  rrule: string;
   id: number;
   event_id: number;
   calendar_id: number;
@@ -71,15 +80,17 @@ function useAppEvents<T = unknown>(
     // (app, project) instead of opening its own. Without this, a few
     // panels mounted in the agent detail page burn the browser's
     // per-origin HTTP/1.1 connection budget and stuck POSTs follow.
-    const bridge = (window as unknown as {
-      __aptevaAppEvents?: {
-        subscribe(
-          app: string,
-          projectId: string,
-          fn: (ev: AppEventEnvelope<T>) => void,
-        ): () => void;
-      };
-    }).__aptevaAppEvents;
+    const bridge = (
+      window as unknown as {
+        __aptevaAppEvents?: {
+          subscribe(
+            app: string,
+            projectId: string,
+            fn: (ev: AppEventEnvelope<T>) => void,
+          ): () => void;
+        };
+      }
+    ).__aptevaAppEvents;
     if (bridge) {
       return bridge.subscribe(app, projectId, handler);
     }
@@ -166,7 +177,11 @@ function rfc3339(d: Date): string {
 }
 
 function fmtDay(d: Date): string {
-  return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" });
+  return d.toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 function fmtMonthYear(d: Date): string {
@@ -174,7 +189,10 @@ function fmtMonthYear(d: Date): string {
 }
 
 function fmtTime(d: Date): string {
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 // --- Confirm dialog (replaces window.confirm) ------------------------
@@ -189,7 +207,9 @@ interface ConfirmOpts {
   confirmLabel?: string;
   danger?: boolean;
 }
-const ConfirmCtx = createContext<((opts: ConfirmOpts) => Promise<boolean>) | null>(null);
+const ConfirmCtx = createContext<
+  ((opts: ConfirmOpts) => Promise<boolean>) | null
+>(null);
 function useConfirm() {
   const c = useContext(ConfirmCtx);
   if (!c) throw new Error("useConfirm must be used inside <ConfirmProvider>");
@@ -213,56 +233,81 @@ function ConfirmProvider({ children }: { children: React.ReactNode }) {
   return (
     <ConfirmCtx.Provider value={confirm}>
       {children}
-      {opts && <ConfirmModal {...opts} onConfirm={() => close(true)} onCancel={() => close(false)} />}
+      {opts && (
+        <ConfirmModal
+          {...opts}
+          onConfirm={() => close(true)}
+          onCancel={() => close(false)}
+        />
+      )}
     </ConfirmCtx.Provider>
   );
 }
 
-function ConfirmModal({ title, message, confirmLabel = "Delete", danger = true, onConfirm, onCancel }: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") { e.preventDefault(); onCancel(); }
-      if (e.key === "Enter") { e.preventDefault(); onConfirm(); }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onConfirm, onCancel]);
+function ConfirmModal({
+  title,
+  message,
+  confirmLabel = "Delete",
+  danger = true,
+  onConfirm,
+  onCancel,
+}: ConfirmOpts & { onConfirm: () => void; onCancel: () => void }) {
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50">
-      <div className="bg-bg-card border border-border rounded p-5 w-full max-w-sm">
-        <h3 className="text-text text-base font-medium">{title}</h3>
-        {message && <p className="text-text-muted text-sm mt-2">{message}</p>}
-        <div className="flex justify-end gap-2 mt-4">
-          <button
-            onClick={onCancel}
-            className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-input"
-          >Cancel</button>
-          <button
-            onClick={onConfirm}
-            autoFocus
-            className={`px-3 py-1 text-sm rounded ${
-              danger
-                ? "bg-error text-bg hover:opacity-90"
-                : "bg-accent text-bg hover:opacity-90"
-            }`}
-          >{confirmLabel}</button>
-        </div>
+    <Dialog onClose={onCancel} title={title}>
+      {message && <p className="text-text-muted text-sm">{message}</p>}
+      <div className="flex justify-end gap-2">
+        <button autoFocus onClick={onCancel}>
+          Cancel
+        </button>
+        <button
+          className={danger ? "text-error" : "text-accent"}
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
 // --- Panel -----------------------------------------------------------
 
+type CalendarAPI = (path: string, init?: RequestInit) => Promise<Response>;
+const ApiContext = createContext<CalendarAPI>(async () => {
+  throw new Error("Calendar API unavailable");
+});
+function useCalendarApi() {
+  return useContext(ApiContext);
+}
 export default function CalendarPanel(props: NativePanelProps) {
+  const api = useMemo<CalendarAPI>(
+    () => (path, init) => {
+      const url = new URL(
+        `/api/apps/calendar/_install/${props.installId}${path}`,
+        window.location.origin,
+      );
+      url.searchParams.set("project_id", props.projectId);
+      return fetch(url, { credentials: "same-origin", ...init });
+    },
+    [props.projectId, props.installId],
+  );
   return (
-    <ConfirmProvider>
-      <CalendarPanelInner {...props} />
-    </ConfirmProvider>
+    <ApiContext.Provider value={api}>
+      <ConfirmProvider>
+        <CalendarPanelInner
+          key={`${props.projectId}:${props.installId}`}
+          {...props}
+        />
+      </ConfirmProvider>
+    </ApiContext.Provider>
   );
 }
 
 function CalendarPanelInner({ projectId }: NativePanelProps) {
+  const api = useCalendarApi();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const calendarsRequest = useRef<AbortController | null>(null);
+  const eventsRequest = useRef<AbortController | null>(null);
   const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [events, setEvents] = useState<Occurrence[]>([]);
   const [view, setView] = useState<ViewMode>("week");
@@ -271,7 +316,10 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [addingCalendar, setAddingCalendar] = useState(false);
   const [editingCalendar, setEditingCalendar] = useState<Calendar | null>(null);
-  const [creatingEvent, setCreatingEvent] = useState<{ start: Date; calendarId?: number } | null>(null);
+  const [creatingEvent, setCreatingEvent] = useState<{
+    start: Date;
+    calendarId?: number;
+  } | null>(null);
   const [editingEvent, setEditingEvent] = useState<Occurrence | null>(null);
 
   const windowStart = useMemo(() => {
@@ -288,48 +336,81 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
     if (view === "week") return addDays(windowStart, 7);
     if (view === "day") return addDays(windowStart, 1);
     if (view === "month") return addDays(windowStart, 42); // 6 weeks
-    if (view === "year") return addDays(windowStart, 366); // covers leap years
+    if (view === "year") return new Date(windowStart.getFullYear() + 1, 0, 1); // covers leap years
     return addDays(windowStart, 30); // agenda: 30 days
   }, [view, windowStart]);
 
   const loadCalendars = useCallback(async () => {
+    calendarsRequest.current?.abort();
+    const controller = new AbortController();
+    calendarsRequest.current = controller;
     try {
-      const res = await fetch(`${API}/calendars`, { credentials: "same-origin" });
+      const res = await api(`/calendars`, { signal: controller.signal });
+      if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      setCalendars(data.calendars || []);
+      if (!controller.signal.aborted) setCalendars(data.calendars || []);
     } catch (e) {
-      setStatus("Load calendars: " + (e as Error).message);
+      if (!controller.signal.aborted)
+        setStatus("Load calendars: " + (e as Error).message);
     }
-  }, []);
+  }, [api]);
 
   const loadEvents = useCallback(async () => {
+    eventsRequest.current?.abort();
+    const controller = new AbortController();
+    eventsRequest.current = controller;
     try {
-      const res = await fetch(
-        `${API}/items?from=${encodeURIComponent(rfc3339(windowStart))}&to=${encodeURIComponent(rfc3339(windowEnd))}`,
-        { credentials: "same-origin" },
+      const res = await api(
+        `/items?from=${encodeURIComponent(rfc3339(windowStart))}&to=${encodeURIComponent(rfc3339(windowEnd))}`,
+        { signal: controller.signal },
       );
       if (!res.ok) {
         setStatus(`Load events: ${res.status}`);
         return;
       }
       const data = await res.json();
-      setEvents(data.events || []);
+      if (!controller.signal.aborted) {
+        setEvents(data.events || []);
+        setStatus("");
+      }
     } catch (e) {
-      setStatus("Load events: " + (e as Error).message);
+      if (!controller.signal.aborted)
+        setStatus("Load events: " + (e as Error).message);
     }
-  }, [windowStart, windowEnd]);
+  }, [windowStart, windowEnd, api]);
 
-  useEffect(() => { loadCalendars(); }, [loadCalendars]);
-  useEffect(() => { loadEvents(); }, [loadEvents]);
+  useEffect(() => {
+    loadCalendars();
+    return () => calendarsRequest.current?.abort();
+  }, [loadCalendars]);
+  useEffect(() => {
+    loadEvents();
+    return () => eventsRequest.current?.abort();
+  }, [loadEvents, api]);
 
-  useAppEvents("calendar", projectId, (ev) => {
-    if (ev.topic.startsWith("calendar.")) loadCalendars();
-    if (ev.topic.startsWith("event.")) loadEvents();
+  const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+  useAppEvents("calendar", projectId, () => {
+    if (refreshTimer.current) clearTimeout(refreshTimer.current);
+    refreshTimer.current = setTimeout(() => {
+      loadCalendars();
+      loadEvents();
+    }, 100);
   });
 
   const visibleEvents = useMemo(
-    () => events.filter((e) => !hidden.has(e.calendar_id)),
-    [events, hidden],
+    () =>
+      events.filter(
+        (e) =>
+          !hidden.has(e.calendar_id) &&
+          calendars.some((c) => c.id === e.calendar_id && c.enabled),
+      ),
+    [events, hidden, calendars],
   );
 
   const calendarById = useMemo(() => {
@@ -340,74 +421,96 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
 
   const goPrev = () => {
     if (view === "month") setAnchor(addMonths(anchor, -1));
-    else if (view === "year") setAnchor(new Date(anchor.getFullYear() - 1, 0, 1));
-    else setAnchor(addDays(anchor, view === "week" ? -7 : view === "day" ? -1 : -30));
+    else if (view === "year")
+      setAnchor(new Date(anchor.getFullYear() - 1, 0, 1));
+    else
+      setAnchor(
+        addDays(anchor, view === "week" ? -7 : view === "day" ? -1 : -30),
+      );
   };
   const goNext = () => {
     if (view === "month") setAnchor(addMonths(anchor, 1));
-    else if (view === "year") setAnchor(new Date(anchor.getFullYear() + 1, 0, 1));
-    else setAnchor(addDays(anchor, view === "week" ? 7 : view === "day" ? 1 : 30));
+    else if (view === "year")
+      setAnchor(new Date(anchor.getFullYear() + 1, 0, 1));
+    else
+      setAnchor(addDays(anchor, view === "week" ? 7 : view === "day" ? 1 : 30));
   };
   const goToday = () => setAnchor(new Date());
 
   // Used by the new month/year views to dive into a clicked day.
-  const jumpToDay = (d: Date) => { setAnchor(d); setView("day"); };
-  const jumpToMonth = (d: Date) => { setAnchor(d); setView("month"); };
+  const jumpToDay = (d: Date) => {
+    setAnchor(d);
+    setView("day");
+  };
+  const jumpToMonth = (d: Date) => {
+    setAnchor(d);
+    setView("month");
+  };
 
   // commitEventTimes is the drag/resize commit path. Updates local
   // state optimistically, PATCHes /items/{event_id} with the new
   // window, and refetches on success to pick up any server-side
   // restructuring (notably the child-row creation for recurring
   // events under scope=this).
-  const commitEventTimes = useCallback(async (ev: Occurrence, newStart: Date, newEnd: Date) => {
-    const key = ev.id + "|" + ev.occurrence_start_at;
-    const newStartISO = newStart.toISOString();
-    const newEndISO = newEnd.toISOString();
-    setEvents((prev) =>
-      prev.map((e) =>
-        e.id + "|" + e.occurrence_start_at === key
-          ? { ...e, start_at: newStartISO, end_at: newEndISO }
-          : e,
-      ),
-    );
-    try {
-      const body: Record<string, unknown> = { start_at: newStartISO, end_at: newEndISO };
-      if (ev.is_recurring) {
-        // scope=this creates a child row at the new time + adds the
-        // original date to the master's exdate.
-        body.scope = "this";
-        body.occurrence_start_at = ev.occurrence_start_at;
-      } else {
-        body.scope = "all";
+  const commitEventTimes = useCallback(
+    async (ev: Occurrence, newStart: Date, newEnd: Date) => {
+      const key = ev.id + "|" + ev.occurrence_start_at;
+      const newStartISO = newStart.toISOString();
+      const newEndISO = newEnd.toISOString();
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id + "|" + e.occurrence_start_at === key
+            ? { ...e, start_at: newStartISO, end_at: newEndISO }
+            : e,
+        ),
+      );
+      try {
+        const body: Record<string, unknown> = {
+          start_at: newStartISO,
+          end_at: newEndISO,
+        };
+        if (ev.is_recurring) {
+          // scope=this creates a child row at the new time + adds the
+          // original date to the master's exdate.
+          body.scope = "this";
+          body.occurrence_start_at = ev.occurrence_start_at;
+        } else {
+          body.scope = "all";
+        }
+        const res = await api(`/items/${ev.event_id}`, {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+        // Refetch — server may have created a child row (recurring) or
+        // applied other side effects we'd miss with a local-only update.
+        loadEvents();
+      } catch (e) {
+        setStatus("Move failed: " + (e as Error).message);
+        // Revert the optimistic edit.
+        loadEvents();
       }
-      const res = await fetch(`${API}/items/${ev.event_id}`, {
-        method: "PATCH",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
-      // Refetch — server may have created a child row (recurring) or
-      // applied other side effects we'd miss with a local-only update.
-      loadEvents();
-    } catch (e) {
-      setStatus("Move failed: " + (e as Error).message);
-      // Revert the optimistic edit.
-      loadEvents();
-    }
-  }, [loadEvents]);
+    },
+    [loadEvents, api],
+  );
 
   return (
-    <div className="h-full flex">
+    <div className="h-full flex relative">
       {/* Sidebar */}
-      <aside className="w-64 border-r border-border flex flex-col">
+      <aside
+        className={`${sidebarOpen ? "flex absolute inset-y-0 left-0 z-20 bg-bg" : "hidden"} md:flex w-56 shrink-0 border-r border-border flex-col`}
+      >
         <div className="p-3 border-b border-border flex items-center gap-2">
           <span className="text-text font-medium flex-1">Calendars</span>
           <button
             onClick={() => setAddingCalendar(true)}
             className="text-text-muted hover:text-text text-sm"
             title="Add calendar"
-          >+</button>
+          >
+            +
+          </button>
         </div>
         <div className="flex-1 overflow-auto p-2 flex flex-col gap-1">
           {calendars.length === 0 ? (
@@ -421,6 +524,20 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
                 cal={c}
                 hidden={hidden.has(c.id) || !c.enabled}
                 onToggle={() => {
+                  if (!c.enabled) {
+                    api(`/calendars/${c.id}`, {
+                      method: "PATCH",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ enabled: true }),
+                    })
+                      .then(async (res) => {
+                        if (!res.ok) throw new Error(await res.text());
+                        loadCalendars();
+                        loadEvents();
+                      })
+                      .catch((e) => setStatus(e.message));
+                    return;
+                  }
                   setHidden((s) => {
                     const n = new Set(s);
                     if (n.has(c.id)) n.delete(c.id);
@@ -433,15 +550,51 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
             ))
           )}
         </div>
-        <div className="p-2 border-t border-border text-text-dim text-[10px]">{status}</div>
+        <button className="md:hidden p-2" onClick={() => setSidebarOpen(false)}>
+          Close calendars
+        </button>
       </aside>
 
       {/* Main */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex items-center gap-2 px-4 py-2 border-b border-border">
-          <button onClick={goToday} className="px-3 py-1 text-sm border border-border rounded hover:border-accent">Today</button>
-          <button onClick={goPrev} className="px-2 py-1 text-sm text-text-muted hover:text-text">‹</button>
-          <button onClick={goNext} className="px-2 py-1 text-sm text-text-muted hover:text-text">›</button>
+        <header className="flex flex-wrap items-center gap-2 px-3 py-2 border-b border-border">
+          <button
+            className="md:hidden"
+            aria-label="Toggle calendars"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+          >
+            Calendars
+          </button>
+          <button
+            className="px-3 py-1 text-sm bg-accent text-bg rounded"
+            onClick={() => {
+              const c = calendars.find((c) => c.enabled);
+              if (c) setCreatingEvent({ start: new Date(), calendarId: c.id });
+              else setStatus("Create or enable a calendar first.");
+            }}
+          >
+            New event
+          </button>
+          <button
+            onClick={goToday}
+            className="px-3 py-1 text-sm border border-border rounded hover:border-accent"
+          >
+            Today
+          </button>
+          <button
+            aria-label="Previous date range"
+            onClick={goPrev}
+            className="px-2 py-1 text-sm text-text-muted hover:text-text"
+          >
+            ‹
+          </button>
+          <button
+            aria-label="Next date range"
+            onClick={goNext}
+            className="px-2 py-1 text-sm text-text-muted hover:text-text"
+          >
+            ›
+          </button>
           <span className="text-text font-medium ml-2">
             {view === "week"
               ? `${fmtDay(windowStart)} – ${fmtDay(addDays(windowEnd, -1))}`
@@ -454,21 +607,40 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
                     : `${fmtDay(windowStart)} → 30 days`}
           </span>
           <div className="ml-auto flex items-center gap-1">
-            {(["day", "week", "month", "year", "agenda"] as ViewMode[]).map((v) => (
-              <button
-                key={v}
-                onClick={() => setView(v)}
-                className={
-                  "px-3 py-1 text-sm rounded " +
-                  (view === v ? "bg-bg-card text-text" : "text-text-muted hover:text-text")
-                }
-              >
-                {v.charAt(0).toUpperCase() + v.slice(1)}
-              </button>
-            ))}
+            {(["day", "week", "month", "year", "agenda"] as ViewMode[]).map(
+              (v) => (
+                <button
+                  key={v}
+                  onClick={() => setView(v)}
+                  className={
+                    "px-3 py-1 text-sm rounded " +
+                    (view === v
+                      ? "bg-bg-card text-text"
+                      : "text-text-muted hover:text-text")
+                  }
+                >
+                  {v.charAt(0).toUpperCase() + v.slice(1)}
+                </button>
+              ),
+            )}
           </div>
         </header>
 
+        <div aria-live="polite">
+          {status && (
+            <div role="alert" className="px-3 py-2 text-error text-sm">
+              {status}{" "}
+              <button
+                onClick={() => {
+                  loadCalendars();
+                  loadEvents();
+                }}
+              >
+                Retry
+              </button>
+            </div>
+          )}
+        </div>
         <div className="flex-1 overflow-auto">
           {view === "week" || view === "day" ? (
             <Grid
@@ -498,13 +670,20 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
               events={visibleEvents}
               calendarById={calendarById}
               onEmptyClick={(d) => {
-                if (calendars.length === 0) { setStatus("Create a calendar first."); return; }
+                if (calendars.length === 0) {
+                  setStatus("Create a calendar first.");
+                  return;
+                }
                 const firstEnabled = calendars.find((c) => c.enabled);
-                if (!firstEnabled) { setStatus("Enable at least one calendar."); return; }
+                if (!firstEnabled) {
+                  setStatus("Enable at least one calendar.");
+                  return;
+                }
                 // Default new events created from month cells to noon
                 // so they're not stuck at 00:00 if the user just wants
                 // a slot to type into.
-                const slot = new Date(d); slot.setHours(12, 0, 0, 0);
+                const slot = new Date(d);
+                slot.setHours(12, 0, 0, 0);
                 setCreatingEvent({ start: slot, calendarId: firstEnabled.id });
               }}
               onDayClick={jumpToDay}
@@ -532,7 +711,10 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
       {addingCalendar && (
         <CalendarDialog
           onClose={() => setAddingCalendar(false)}
-          onSaved={() => { setAddingCalendar(false); loadCalendars(); }}
+          onSaved={() => {
+            setAddingCalendar(false);
+            loadCalendars();
+          }}
           setStatus={setStatus}
         />
       )}
@@ -540,7 +722,11 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
         <CalendarDialog
           existing={editingCalendar}
           onClose={() => setEditingCalendar(null)}
-          onSaved={() => { setEditingCalendar(null); loadCalendars(); loadEvents(); }}
+          onSaved={() => {
+            setEditingCalendar(null);
+            loadCalendars();
+            loadEvents();
+          }}
           setStatus={setStatus}
         />
       )}
@@ -549,7 +735,10 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
           calendars={calendars}
           defaults={creatingEvent}
           onClose={() => setCreatingEvent(null)}
-          onSaved={() => { setCreatingEvent(null); loadEvents(); }}
+          onSaved={() => {
+            setCreatingEvent(null);
+            loadEvents();
+          }}
           setStatus={setStatus}
         />
       )}
@@ -558,7 +747,10 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
           calendars={calendars}
           existing={editingEvent}
           onClose={() => setEditingEvent(null)}
-          onSaved={() => { setEditingEvent(null); loadEvents(); }}
+          onSaved={() => {
+            setEditingEvent(null);
+            loadEvents();
+          }}
           setStatus={setStatus}
         />
       )}
@@ -569,8 +761,16 @@ function CalendarPanelInner({ projectId }: NativePanelProps) {
 // --- Sidebar chip ----------------------------------------------------
 
 function CalendarChip({
-  cal, hidden, onToggle, onEdit,
-}: { cal: Calendar; hidden: boolean; onToggle: () => void; onEdit: () => void }) {
+  cal,
+  hidden,
+  onToggle,
+  onEdit,
+}: {
+  cal: Calendar;
+  hidden: boolean;
+  onToggle: () => void;
+  onEdit: () => void;
+}) {
   return (
     <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-bg-card rounded group">
       <button
@@ -581,7 +781,10 @@ function CalendarChip({
       />
       <button
         onClick={onEdit}
-        className={"flex-1 text-left text-sm truncate " + (hidden ? "text-text-dim" : "text-text")}
+        className={
+          "flex-1 text-left text-sm truncate " +
+          (hidden ? "text-text-dim" : "text-text")
+        }
       >
         {cal.name}
       </button>
@@ -597,7 +800,13 @@ function CalendarChip({
 const HOUR_HEIGHT = 48; // px per hour
 
 function Grid({
-  start, days, events, calendarById, onEmptyClick, onEventClick, onEventCommit,
+  start,
+  days,
+  events,
+  calendarById,
+  onEmptyClick,
+  onEventClick,
+  onEventCommit,
 }: {
   start: Date;
   days: number;
@@ -607,6 +816,7 @@ function Grid({
   onEventClick: (e: Occurrence) => void;
   onEventCommit: (e: Occurrence, newStart: Date, newEnd: Date) => void;
 }) {
+  const [drag, setDrag] = useState<DragState | null>(null);
   const dayDates = Array.from({ length: days }, (_, i) => addDays(start, i));
   const hours = Array.from({ length: 24 }, (_, i) => i);
 
@@ -614,7 +824,10 @@ function Grid({
   // is a timed block in its day column. This is what stops a 23-day
   // trip from rendering as a giant "02:00 – 01:59" block.
   const allDayEvents = useMemo(
-    () => events.filter(isMultiDay).sort((a, b) => a.start_at.localeCompare(b.start_at) || a.id - b.id),
+    () =>
+      events
+        .filter(isMultiDay)
+        .sort((a, b) => a.start_at.localeCompare(b.start_at) || a.id - b.id),
     [events],
   );
 
@@ -635,7 +848,12 @@ function Grid({
         <div className="w-12 flex-shrink-0">
           <div className="h-8" />
           {hours.map((h) => (
-            <div key={h} style={{ height: HOUR_HEIGHT }} className="text-text-dim text-[10px] text-right pr-2 -mt-2">
+            <div
+              key={h}
+              data-hour-label={h}
+              style={{ height: HOUR_HEIGHT }}
+              className="text-text-dim text-[10px] text-right pr-2"
+            >
               {h.toString().padStart(2, "0")}:00
             </div>
           ))}
@@ -645,7 +863,11 @@ function Grid({
           <DayColumn
             key={d.toISOString()}
             date={d}
-            events={events.filter((e) => !isMultiDay(e) && sameDay(new Date(e.start_at), d))}
+            drag={drag}
+            setDrag={setDrag}
+            events={events.filter(
+              (e) => !isMultiDay(e) && sameDay(new Date(e.start_at), d),
+            )}
             calendarById={calendarById}
             onEmptyClick={onEmptyClick}
             onEventClick={onEventClick}
@@ -664,7 +886,11 @@ function Grid({
 // are clamped to the visible window with arrow affordances when the
 // span continues off-screen.
 function AllDayStrip({
-  start, days, events, calendarById, onEventClick,
+  start,
+  days,
+  events,
+  calendarById,
+  onEventClick,
 }: {
   start: Date;
   days: number;
@@ -711,7 +937,10 @@ function AllDayStrip({
             }
           }
           if (firstCol === -1) return null;
-          const continuesLeft = !sameDay(new Date(ev.start_at), addDays(start, firstCol));
+          const continuesLeft = !sameDay(
+            eventDate(ev.start_at, ev.all_day),
+            addDays(start, firstCol),
+          );
           const endsHere = !occCoversDay(ev, addDays(start, lastCol + 1));
           const continuesRight = !endsHere && lastCol === days - 1;
           return (
@@ -778,16 +1007,25 @@ interface DragState {
 }
 
 function DayColumn({
-  date, events, calendarById, onEmptyClick, onEventClick, onEventCommit,
+  date,
+  events,
+  calendarById,
+  onEmptyClick,
+  onEventClick,
+  onEventCommit,
+  drag,
+  setDrag,
 }: {
   date: Date;
+  drag: DragState | null;
+  setDrag: React.Dispatch<React.SetStateAction<DragState | null>>;
   events: Occurrence[];
   calendarById: Map<number, Calendar>;
   onEmptyClick: (start: Date) => void;
   onEventClick: (e: Occurrence) => void;
   onEventCommit: (e: Occurrence, newStart: Date, newEnd: Date) => void;
 }) {
-  const [drag, setDrag] = useState<DragState | null>(null);
+  const layout = useMemo(() => layoutTimedEvents(events), [events]);
   // After a pointerup on an event block (whether it was a click, a
   // drag, or a resize), the browser still synthesizes a `click` event
   // that bubbles up to the column's onClick — and that handler treats
@@ -796,17 +1034,23 @@ function DayColumn({
   // fires, so the `if (drag) return` guard is already stale. This ref
   // bridges the one-tick gap between pointerup and the click.
   const suppressNextClickRef = useRef(false);
+  const dragRef = useRef(drag);
+  dragRef.current = drag;
+  const sourceDragging = !!drag && sameDay(drag.origStart, date);
 
   // Document-level pointer listeners while dragging — events that
   // start in an event block continue tracking even when the pointer
   // crosses into another column or off the grid entirely.
   useEffect(() => {
-    if (!drag) return;
+    if (!sourceDragging) return;
     const onMove = (e: PointerEvent) => {
+      const drag = dragRef.current;
+      if (!drag) return;
       const dx = e.clientX - drag.anchorClientX;
       const dy = e.clientY - drag.anchorClientY;
       const moved = drag.moved || Math.hypot(dx, dy) > DRAG_THRESHOLD_PX;
-      const deltaMin = Math.round((dy / HOUR_HEIGHT) * 60 / SNAP_MIN) * SNAP_MIN;
+      const deltaMin =
+        Math.round(((dy / HOUR_HEIGHT) * 60) / SNAP_MIN) * SNAP_MIN;
 
       if (drag.kind === "resize") {
         // Resize only moves end_at. Clamp to a minimum 15-min window
@@ -821,7 +1065,10 @@ function DayColumn({
       // Move: cross-column detection via elementFromPoint → data-day-date.
       // Falls back to the original date if the pointer is outside the grid.
       let targetDate = drag.origStart;
-      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const el = document.elementFromPoint(
+        e.clientX,
+        e.clientY,
+      ) as HTMLElement | null;
       const dayEl = el?.closest("[data-day-date]") as HTMLElement | null;
       if (dayEl?.dataset.dayDate) {
         targetDate = new Date(dayEl.dataset.dayDate);
@@ -830,42 +1077,54 @@ function DayColumn({
       newStart.setHours(
         drag.origStart.getHours(),
         drag.origStart.getMinutes() + deltaMin,
-        0, 0,
+        0,
+        0,
       );
       const dur = drag.origEnd.getTime() - drag.origStart.getTime();
       const newEnd = new Date(newStart.getTime() + dur);
       setDrag({ ...drag, currentStart: newStart, currentEnd: newEnd, moved });
     };
     const onUp = () => {
-      const d = drag;
+      const d = dragRef.current;
+      if (!d) return;
       setDrag(null);
       // Always set the suppress flag — fires for both click-on-event
       // and drag-released-on-column-background. Cleared on the next
       // task tick, well after the synthesized click bubbles.
       suppressNextClickRef.current = true;
-      setTimeout(() => { suppressNextClickRef.current = false; }, 0);
+      setTimeout(() => {
+        suppressNextClickRef.current = false;
+      }, 0);
       // If the pointer barely moved, treat this as a click.
       if (!d.moved) {
         onEventClick(d.ev);
         return;
       }
-      const sameStart = d.kind === "resize" || d.currentStart.getTime() === d.origStart.getTime();
+      const sameStart =
+        d.kind === "resize" ||
+        d.currentStart.getTime() === d.origStart.getTime();
       const sameEnd = d.currentEnd.getTime() === d.origEnd.getTime();
       if (sameStart && sameEnd) return;
       onEventCommit(d.ev, d.currentStart, d.currentEnd);
     };
+    const onCancel = () => setDrag(null);
+    document.addEventListener("pointercancel", onCancel);
     document.addEventListener("pointermove", onMove);
     document.addEventListener("pointerup", onUp);
     return () => {
+      document.removeEventListener("pointercancel", onCancel);
       document.removeEventListener("pointermove", onMove);
       document.removeEventListener("pointerup", onUp);
     };
-  }, [drag, onEventClick, onEventCommit]);
+  }, [sourceDragging, setDrag, onEventClick, onEventCommit]);
 
   return (
     <div className="flex-1 min-w-0 border-l border-border">
       <div className="h-8 px-2 py-1 text-text text-xs font-medium border-b border-border">
-        {date.toLocaleDateString(undefined, { weekday: "short", day: "numeric" })}
+        {date.toLocaleDateString(undefined, {
+          weekday: "short",
+          day: "numeric",
+        })}
       </div>
       <div
         data-day-date={date.toISOString()}
@@ -877,10 +1136,15 @@ function DayColumn({
           // see suppressNextClickRef above for why the drag state is
           // already null by the time we get here.
           if (drag || suppressNextClickRef.current) return;
-          const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+          const rect = (
+            e.currentTarget as HTMLDivElement
+          ).getBoundingClientRect();
           const y = e.clientY - rect.top;
           const hour = Math.floor(y / HOUR_HEIGHT);
-          const minute = Math.floor((y - hour * HOUR_HEIGHT) / HOUR_HEIGHT * 60 / SNAP_MIN) * SNAP_MIN;
+          const minute =
+            Math.floor(
+              (((y - hour * HOUR_HEIGHT) / HOUR_HEIGHT) * 60) / SNAP_MIN,
+            ) * SNAP_MIN;
           const slot = new Date(date);
           slot.setHours(hour, minute, 0, 0);
           onEmptyClick(slot);
@@ -888,8 +1152,11 @@ function DayColumn({
       >
         {/* Hour grid lines */}
         {Array.from({ length: 24 }, (_, h) => (
-          <div key={h} style={{ top: h * HOUR_HEIGHT, height: HOUR_HEIGHT }}
-               className="absolute left-0 right-0 border-t border-border/50" />
+          <div
+            key={h}
+            style={{ top: h * HOUR_HEIGHT, height: HOUR_HEIGHT }}
+            className="absolute left-0 right-0 border-t border-border/50"
+          />
         ))}
         {/* Events */}
         {events.map((ev) => {
@@ -900,26 +1167,53 @@ function DayColumn({
             drag != null &&
             drag.ev.id === ev.id &&
             drag.ev.occurrence_start_at === ev.occurrence_start_at;
-          const start = isDragging && drag ? drag.currentStart : new Date(ev.start_at);
-          const end = isDragging && drag ? drag.currentEnd : new Date(ev.end_at);
+          const start =
+            isDragging && drag ? drag.currentStart : new Date(ev.start_at);
+          const end =
+            isDragging && drag ? drag.currentEnd : new Date(ev.end_at);
           // While dragging across days, hide the original-day block —
           // it's now rendered on the destination column via its own
           // data-day-date match.
-          if (isDragging && drag && drag.kind === "move" && !sameDay(start, date)) {
+          if (
+            isDragging &&
+            drag &&
+            drag.kind === "move" &&
+            !sameDay(start, date)
+          ) {
             return null;
           }
-          const top = (start.getHours() * 60 + start.getMinutes()) / 60 * HOUR_HEIGHT;
-          const height = Math.max(20, ((end.getTime() - start.getTime()) / 1000 / 60) / 60 * HOUR_HEIGHT);
+          const top =
+            ((start.getHours() * 60 + start.getMinutes()) / 60) * HOUR_HEIGHT;
+          const height = Math.max(
+            20,
+            ((end.getTime() - start.getTime()) / 1000 / 60 / 60) * HOUR_HEIGHT,
+          );
           const draggable = !ev.all_day; // all-day events fall back to dialog-only edits
           return (
             <div
               key={ev.id + "-" + ev.occurrence_start_at}
+              role="button"
+              tabIndex={0}
+              aria-label={`${ev.title}, ${fmtTime(start)} to ${fmtTime(end)}`}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onEventClick(ev);
+                }
+              }}
               className="absolute left-1 right-1 rounded px-1.5 py-0.5 text-left overflow-hidden text-bg hover:opacity-90 transition-opacity"
               style={{
                 top,
                 height,
+                left: `calc(${((layout.get(eventKey(ev))?.column ?? 0) * 100) / (layout.get(eventKey(ev))?.columns ?? 1)}% + 2px)`,
+                right: "auto",
+                width: `calc(${100 / (layout.get(eventKey(ev))?.columns ?? 1)}% - 4px)`,
                 backgroundColor: cal?.color || "#3b82f6",
-                cursor: !draggable ? "pointer" : isDragging ? "grabbing" : "grab",
+                cursor: !draggable
+                  ? "pointer"
+                  : isDragging
+                    ? "grabbing"
+                    : "grab",
                 opacity: isDragging ? 0.85 : 1,
                 userSelect: "none",
                 touchAction: "none",
@@ -927,12 +1221,20 @@ function DayColumn({
               }}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
-                if (!draggable) { onEventClick(ev); return; }
+                if (!draggable) {
+                  onEventClick(ev);
+                  return;
+                }
                 // Resize zone: bottom strip.
-                const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
+                const rect = (
+                  e.currentTarget as HTMLDivElement
+                ).getBoundingClientRect();
                 const offsetFromBottom = rect.bottom - e.clientY;
-                const kind: "move" | "resize" = offsetFromBottom <= RESIZE_HANDLE_PX ? "resize" : "move";
-                (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+                const kind: "move" | "resize" =
+                  offsetFromBottom <= RESIZE_HANDLE_PX ? "resize" : "move";
+                (e.currentTarget as HTMLDivElement).setPointerCapture(
+                  e.pointerId,
+                );
                 e.stopPropagation();
                 setDrag({
                   kind,
@@ -948,7 +1250,9 @@ function DayColumn({
               }}
             >
               <div className="text-[11px] font-medium truncate">{ev.title}</div>
-              <div className="text-[10px] opacity-80">{fmtTime(start)} – {fmtTime(end)}</div>
+              <div className="text-[10px] opacity-80">
+                {fmtTime(start)} – {fmtTime(end)}
+              </div>
               {draggable && (
                 <div
                   className="absolute left-0 right-0 bottom-0"
@@ -963,8 +1267,15 @@ function DayColumn({
             a ghost block so the user sees the destination slot before
             committing. The "isDragging" branch above hides the source-
             column copy, so this preview is the only one visible. */}
-        {drag && drag.kind === "move" && sameDay(drag.currentStart, date) &&
-          !events.some(e => e.id === drag.ev.id && e.occurrence_start_at === drag.ev.occurrence_start_at && sameDay(new Date(e.start_at), date)) && (
+        {drag &&
+          drag.kind === "move" &&
+          sameDay(drag.currentStart, date) &&
+          !events.some(
+            (e) =>
+              e.id === drag.ev.id &&
+              e.occurrence_start_at === drag.ev.occurrence_start_at &&
+              sameDay(new Date(e.start_at), date),
+          ) && (
             <DragGhost
               start={drag.currentStart}
               end={drag.currentEnd}
@@ -977,22 +1288,42 @@ function DayColumn({
   );
 }
 
-function DragGhost({ start, end, color, title }: { start: Date; end: Date; color: string; title: string }) {
-  const top = (start.getHours() * 60 + start.getMinutes()) / 60 * HOUR_HEIGHT;
-  const height = Math.max(20, ((end.getTime() - start.getTime()) / 1000 / 60) / 60 * HOUR_HEIGHT);
+function DragGhost({
+  start,
+  end,
+  color,
+  title,
+}: {
+  start: Date;
+  end: Date;
+  color: string;
+  title: string;
+}) {
+  const top = ((start.getHours() * 60 + start.getMinutes()) / 60) * HOUR_HEIGHT;
+  const height = Math.max(
+    20,
+    ((end.getTime() - start.getTime()) / 1000 / 60 / 60) * HOUR_HEIGHT,
+  );
   return (
     <div
+      data-testid="drag-preview"
       className="absolute left-1 right-1 rounded px-1.5 py-0.5 text-left overflow-hidden text-bg pointer-events-none"
       style={{ top, height, backgroundColor: color, opacity: 0.85, zIndex: 10 }}
     >
       <div className="text-[11px] font-medium truncate">{title}</div>
-      <div className="text-[10px] opacity-80">{fmtTime(start)} – {fmtTime(end)}</div>
+      <div className="text-[10px] opacity-80">
+        {fmtTime(start)} – {fmtTime(end)}
+      </div>
     </div>
   );
 }
 
-function sameDay(a: Date, b: Date): boolean {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+export function sameDay(a: Date, b: Date): boolean {
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
 }
 
 function ymdKey(d: Date): string {
@@ -1000,7 +1331,7 @@ function ymdKey(d: Date): string {
 }
 
 // Local midnight for a date (strips time-of-day).
-function startOfDay(d: Date): Date {
+export function startOfDay(d: Date): Date {
   const out = new Date(d);
   out.setHours(0, 0, 0, 0);
   return out;
@@ -1022,11 +1353,11 @@ function isMultiDay(ev: Occurrence): boolean {
 
 // occCoversDay — true if the occurrence overlaps the calendar day `d`
 // (inclusive of the start day, exclusive of a midnight-exact end).
-function occCoversDay(ev: Occurrence, d: Date): boolean {
+export function occCoversDay(ev: Occurrence, d: Date): boolean {
   const dayStart = startOfDay(d).getTime();
-  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-  const s = new Date(ev.start_at).getTime();
-  const eRaw = new Date(ev.end_at).getTime();
+  const dayEnd = addDays(startOfDay(d), 1).getTime();
+  const s = eventDate(ev.start_at, ev.all_day).getTime();
+  const eRaw = eventDate(ev.end_at, ev.all_day).getTime();
   const e = Math.max(eRaw - 1, s); // half-open end; never before start
   return s < dayEnd && e >= dayStart;
 }
@@ -1046,20 +1377,25 @@ const MONTH_MAX_CHIPS = 3;
 // Vertical layout of a month cell: date-number row, then N lanes of
 // multi-day spanning bars, then single-day chips below them.
 const MONTH_DATE_ROW_H = 24; // px reserved at the top of each cell
-const MONTH_LANE_H = 20;     // px per multi-day bar lane (incl. gap)
+const MONTH_LANE_H = 20; // px per multi-day bar lane (incl. gap)
 
 interface WeekSeg {
   ev: Occurrence;
-  startCol: number;        // 0-6 within the week
-  endCol: number;          // 0-6 within the week
+  startCol: number; // 0-6 within the week
+  endCol: number; // 0-6 within the week
   lane: number;
-  continuesLeft: boolean;  // span began before this week
+  continuesLeft: boolean; // span began before this week
   continuesRight: boolean; // span continues past this week
 }
 
 function MonthView({
-  monthAnchor, gridStart, events, calendarById,
-  onEmptyClick, onDayClick, onEventClick,
+  monthAnchor,
+  gridStart,
+  events,
+  calendarById,
+  onEmptyClick,
+  onDayClick,
+  onEventClick,
 }: {
   monthAnchor: Date;
   gridStart: Date;
@@ -1081,7 +1417,8 @@ function MonthView({
       if (!single.has(key)) single.set(key, []);
       single.get(key)!.push(e);
     }
-    for (const arr of single.values()) arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
+    for (const arr of single.values())
+      arr.sort((a, b) => a.start_at.localeCompare(b.start_at));
     return single;
   }, [events]);
 
@@ -1118,17 +1455,19 @@ function MonthView({
         .filter((s): s is WeekSeg => s !== null)
         // Longest spans first, then earliest, then id — keeps lane
         // assignment stable so a bar doesn't jump lanes across weeks.
-        .sort((a, b) =>
-          (b.endCol - b.startCol) - (a.endCol - a.startCol) ||
-          a.startCol - b.startCol ||
-          a.ev.id - b.ev.id,
+        .sort(
+          (a, b) =>
+            b.endCol - b.startCol - (a.endCol - a.startCol) ||
+            a.startCol - b.startCol ||
+            a.ev.id - b.ev.id,
         );
       // Greedy lane packing: first lane whose last-used column is left
       // of this segment's start.
       const laneLastCol: number[] = [];
       for (const seg of raw) {
         let lane = 0;
-        while (lane < laneLastCol.length && laneLastCol[lane] >= seg.startCol) lane++;
+        while (lane < laneLastCol.length && laneLastCol[lane] >= seg.startCol)
+          lane++;
         laneLastCol[lane] = seg.endCol;
         seg.lane = lane;
       }
@@ -1143,91 +1482,121 @@ function MonthView({
     <div className="h-full flex flex-col">
       <div
         className="border-b border-border"
-        style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+        }}
       >
         {weekdays.map((w) => (
-          <div key={w} className="px-2 py-1 text-text-dim text-xs uppercase">{w}</div>
+          <div key={w} className="px-2 py-1 text-text-dim text-xs uppercase">
+            {w}
+          </div>
         ))}
       </div>
       <div className="flex-1 min-h-0 flex flex-col">
         {weeks.map((week, wi) => (
           <div
             key={wi}
-            className="relative flex-1 min-h-0"
-            style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+            className="relative flex-1"
+            style={{
+              minHeight: MONTH_DATE_ROW_H + week.laneCount * MONTH_LANE_H + 96,
+              display: "grid",
+              gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+            }}
           >
             {week.days.map((d) => {
-          const inMonth = d.getMonth() === month;
-          const isToday = sameDay(d, today);
-          const single = singleByDay.get(ymdKey(d)) || [];
-          const visibleSingle = single.slice(0, MONTH_MAX_CHIPS);
-          const extra = single.length - visibleSingle.length;
-          return (
-            <div
-              key={d.toISOString()}
-              onClick={() => onEmptyClick(d)}
-              className={
-                "border-r border-b border-border overflow-hidden min-h-0 cursor-pointer " +
-                (inMonth ? "bg-bg hover:bg-bg-card" : "bg-bg-card hover:bg-bg-input")
-              }
-              style={{ paddingLeft: "4px", paddingRight: "4px" }}
-            >
-              <div className="flex items-center justify-between" style={{ height: MONTH_DATE_ROW_H }}>
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); onDayClick(d); }}
+              const inMonth = d.getMonth() === month;
+              const isToday = sameDay(d, today);
+              const single = singleByDay.get(ymdKey(d)) || [];
+              const visibleSingle = single.slice(0, MONTH_MAX_CHIPS);
+              const extra = single.length - visibleSingle.length;
+              return (
+                <div
+                  key={d.toISOString()}
+                  onClick={() => onEmptyClick(d)}
                   className={
-                    "text-xs leading-none rounded-full w-6 h-6 inline-flex items-center justify-center transition-colors " +
-                    (isToday
-                      ? "bg-accent text-bg font-medium"
-                      : inMonth
-                        ? "text-text hover:bg-bg-input"
-                        : "text-text-dim hover:bg-bg-input")
+                    "border-r border-b border-border overflow-hidden min-h-0 cursor-pointer " +
+                    (inMonth
+                      ? "bg-bg hover:bg-bg-card"
+                      : "bg-bg-card hover:bg-bg-input")
                   }
-                  title={d.toLocaleDateString()}
+                  style={{ paddingLeft: "4px", paddingRight: "4px" }}
                 >
-                  {d.getDate()}
-                </button>
-              </div>
-              {/* Reserve room for the multi-day lanes above the chips. */}
-              <div style={{ height: week.laneCount * MONTH_LANE_H }} />
-              <div className="flex flex-col overflow-hidden" style={{ gap: "2px" }}>
-                {visibleSingle.map((ev) => {
-                  const cal = calendarById.get(ev.calendar_id);
-                  return (
-                    <button
-                      key={ev.id + "-" + ev.occurrence_start_at}
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); onEventClick(ev); }}
-                      className="flex items-center gap-1 px-1 rounded text-xs text-left hover:bg-bg-input min-w-0"
-                      style={{ paddingTop: "2px", paddingBottom: "2px" }}
-                      title={ev.title}
-                    >
-                      <span
-                        className="rounded-full flex-shrink-0"
-                        style={{ width: "6px", height: "6px", backgroundColor: cal?.color || "#3b82f6" }}
-                      />
-                      {!ev.all_day && (
-                        <span className="text-text-dim flex-shrink-0">
-                          {fmtTime(new Date(ev.start_at))}
-                        </span>
-                      )}
-                      <span className="text-text truncate">{ev.title}</span>
-                    </button>
-                  );
-                })}
-                {extra > 0 && (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); onDayClick(d); }}
-                    className="text-xs text-text-muted hover:text-text text-left px-1"
+                  <div
+                    className="flex items-center justify-between"
+                    style={{ height: MONTH_DATE_ROW_H }}
                   >
-                    +{extra} more
-                  </button>
-                )}
-              </div>
-            </div>
-          );
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDayClick(d);
+                      }}
+                      className={
+                        "text-xs leading-none rounded-full w-6 h-6 inline-flex items-center justify-center transition-colors " +
+                        (isToday
+                          ? "bg-accent text-bg font-medium"
+                          : inMonth
+                            ? "text-text hover:bg-bg-input"
+                            : "text-text-dim hover:bg-bg-input")
+                      }
+                      title={d.toLocaleDateString()}
+                    >
+                      {d.getDate()}
+                    </button>
+                  </div>
+                  {/* Reserve room for the multi-day lanes above the chips. */}
+                  <div style={{ height: week.laneCount * MONTH_LANE_H }} />
+                  <div
+                    className="flex flex-col overflow-hidden"
+                    style={{ gap: "2px" }}
+                  >
+                    {visibleSingle.map((ev) => {
+                      const cal = calendarById.get(ev.calendar_id);
+                      return (
+                        <button
+                          key={ev.id + "-" + ev.occurrence_start_at}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onEventClick(ev);
+                          }}
+                          className="flex items-center gap-1 px-1 rounded text-xs text-left hover:bg-bg-input min-w-0"
+                          style={{ paddingTop: "2px", paddingBottom: "2px" }}
+                          title={ev.title}
+                        >
+                          <span
+                            className="rounded-full flex-shrink-0"
+                            style={{
+                              width: "6px",
+                              height: "6px",
+                              backgroundColor: cal?.color || "#3b82f6",
+                            }}
+                          />
+                          {!ev.all_day && (
+                            <span className="text-text-dim flex-shrink-0">
+                              {fmtTime(new Date(ev.start_at))}
+                            </span>
+                          )}
+                          <span className="text-text truncate">{ev.title}</span>
+                        </button>
+                      );
+                    })}
+                    {extra > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDayClick(d);
+                        }}
+                        className="text-xs text-text-muted hover:text-text text-left px-1"
+                      >
+                        +{extra} more
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
             })}
             {/* Spanning bars: absolute overlay so each event is one
                 element across its column range (truly continuous). */}
@@ -1240,7 +1609,10 @@ function MonthView({
                   <button
                     key={seg.ev.id + "-" + seg.ev.occurrence_start_at}
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); onEventClick(seg.ev); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onEventClick(seg.ev);
+                    }}
                     className="absolute text-xs text-left text-bg truncate hover:opacity-90 transition-opacity"
                     title={seg.ev.title}
                     style={{
@@ -1263,7 +1635,8 @@ function MonthView({
                       borderBottomRightRadius: seg.continuesRight ? "0" : "4px",
                     }}
                   >
-                    {seg.continuesLeft ? "< " : ""}{seg.ev.title}
+                    {seg.continuesLeft ? "< " : ""}
+                    {seg.ev.title}
                   </button>
                 );
               })}
@@ -1278,7 +1651,11 @@ function MonthView({
 // --- Year view ------------------------------------------------------
 
 function YearView({
-  year, events, calendarById, onDayClick, onMonthClick,
+  year,
+  events,
+  calendarById,
+  onDayClick,
+  onMonthClick,
 }: {
   year: number;
   events: Occurrence[];
@@ -1293,12 +1670,16 @@ function YearView({
   // a long trip is invisible at mini scale).
   const dayMark = useMemo(() => {
     const map = new Map<string, { color: string; span: boolean }>();
-    const sorted = [...events].sort((a, b) => a.start_at.localeCompare(b.start_at));
+    const sorted = [...events].sort((a, b) =>
+      a.start_at.localeCompare(b.start_at),
+    );
     for (const e of sorted) {
       const cal = calendarById.get(e.calendar_id);
       const color = cal?.color || "#3b82f6";
       if (isMultiDay(e)) {
-        const s = startOfDay(new Date(e.start_at));
+        const original = startOfDay(eventDate(e.start_at, e.all_day));
+        const s =
+          original < new Date(year, 0, 1) ? new Date(year, 0, 1) : original;
         // Cap the walk so a pathological end date can't spin forever.
         for (let i = 0; i < 366; i++) {
           const d = addDays(s, i);
@@ -1314,7 +1695,7 @@ function YearView({
       }
     }
     return map;
-  }, [events, calendarById]);
+  }, [events, calendarById, year]);
 
   const months = Array.from({ length: 12 }, (_, i) => new Date(year, i, 1));
   return (
@@ -1325,7 +1706,7 @@ function YearView({
         gap: "1.25rem",
         // Larger min so we land at ~3-4 mini calendars per row instead
         // of cramming 5-6 tiny ones in.
-        gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+        gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 280px), 1fr))",
       }}
     >
       {months.map((m) => (
@@ -1343,7 +1724,11 @@ function YearView({
 }
 
 function MiniMonth({
-  month, today, dayMark, onDayClick, onMonthClick,
+  month,
+  today,
+  dayMark,
+  onDayClick,
+  onMonthClick,
 }: {
   month: Date;
   today: Date;
@@ -1365,9 +1750,20 @@ function MiniMonth({
       >
         {month.toLocaleDateString(undefined, { month: "long" })}
       </button>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(7, minmax(0, 1fr))",
+        }}
+      >
         {weekdays.map((w, i) => (
-          <div key={i} className="text-center text-text-dim text-xs" style={{ paddingTop: "2px", paddingBottom: "2px" }}>{w}</div>
+          <div
+            key={i}
+            className="text-center text-text-dim text-xs"
+            style={{ paddingTop: "2px", paddingBottom: "2px" }}
+          >
+            {w}
+          </div>
         ))}
         {cells.map((d) => {
           const inMonth = d.getMonth() === m;
@@ -1379,7 +1775,11 @@ function MiniMonth({
               type="button"
               onClick={() => onDayClick(d)}
               className="relative flex flex-col items-center transition-colors"
-              style={{ paddingTop: "3px", paddingBottom: "11px", minHeight: "2.5rem" }}
+              style={{
+                paddingTop: "3px",
+                paddingBottom: "11px",
+                minHeight: "2.5rem",
+              }}
               title={d.toLocaleDateString()}
             >
               <span
@@ -1394,8 +1794,9 @@ function MiniMonth({
               >
                 {d.getDate()}
               </span>
-              {mark && !isToday && (
-                mark.span ? (
+              {mark &&
+                !isToday &&
+                (mark.span ? (
                   // Connected bottom bar: spans the full cell width so
                   // adjacent covered days touch edge-to-edge and a
                   // multi-day span reads as one band.
@@ -1421,8 +1822,7 @@ function MiniMonth({
                       backgroundColor: mark.color,
                     }}
                   />
-                )
-              )}
+                ))}
             </button>
           );
         })}
@@ -1434,7 +1834,9 @@ function MiniMonth({
 // --- Agenda view ----------------------------------------------------
 
 function Agenda({
-  events, calendarById, onEventClick,
+  events,
+  calendarById,
+  onEventClick,
 }: {
   events: Occurrence[];
   calendarById: Map<number, Calendar>;
@@ -1444,7 +1846,7 @@ function Agenda({
     const byDay = new Map<string, Occurrence[]>();
     for (const e of events) {
       const d = new Date(e.start_at);
-      const key = d.toISOString().slice(0, 10);
+      const key = e.all_day ? e.start_at.slice(0, 10) : ymdKey(d);
       if (!byDay.has(key)) byDay.set(key, []);
       byDay.get(key)!.push(e);
     }
@@ -1481,12 +1883,16 @@ function Agenda({
                   <div className="flex-1 min-w-0">
                     <div className="text-text text-sm truncate">{ev.title}</div>
                     <div className="text-text-dim text-xs">
-                      {fmtTime(new Date(ev.start_at))} – {fmtTime(new Date(ev.end_at))}
+                      {ev.all_day
+                        ? "All day"
+                        : `${fmtTime(new Date(ev.start_at))} – ${fmtTime(new Date(ev.end_at))}`}
                       {ev.location && <span> · {ev.location}</span>}
                     </div>
                   </div>
                   {ev.is_recurring && (
-                    <span className="text-text-dim text-[10px] uppercase">recurs</span>
+                    <span className="text-text-dim text-[10px] uppercase">
+                      recurs
+                    </span>
                   )}
                 </button>
               );
@@ -1500,10 +1906,21 @@ function Agenda({
 
 // --- Calendar create/edit dialog -----------------------------------
 
-const PRESET_COLORS = ["#3b82f6", "#22c55e", "#f59e0b", "#ec4899", "#8b5cf6", "#94a3b8", "#ef4444"];
+const PRESET_COLORS = [
+  "#3b82f6",
+  "#22c55e",
+  "#f59e0b",
+  "#ec4899",
+  "#8b5cf6",
+  "#94a3b8",
+  "#ef4444",
+];
 
 function CalendarDialog({
-  existing, onClose, onSaved, setStatus,
+  existing,
+  onClose,
+  onSaved,
+  setStatus,
 }: {
   existing?: Calendar;
   onClose: () => void;
@@ -1511,6 +1928,9 @@ function CalendarDialog({
   setStatus: (s: string) => void;
 }) {
   const confirm = useConfirm();
+  const api = useCalendarApi();
+  const [error, setError] = useState("");
+  const [enabled, setEnabled] = useState(existing?.enabled ?? true);
   const [name, setName] = useState(existing?.name || "");
   const [color, setColor] = useState(existing?.color || PRESET_COLORS[0]);
   const [kind, setKind] = useState(existing?.kind || "custom");
@@ -1521,25 +1941,31 @@ function CalendarDialog({
     setBusy(true);
     try {
       if (existing) {
-        const res = await fetch(`${API}/calendars/${existing.id}`, {
+        const res = await api(`/calendars/${existing.id}`, {
           method: "PATCH",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, color, kind }),
+          body: JSON.stringify({ name, color, kind, enabled }),
         });
-        if (!res.ok) { setStatus("Update: " + (await res.text())); return; }
+        if (!res.ok) {
+          setError("Update: " + (await res.text()));
+          return;
+        }
       } else {
-        const res = await fetch(`${API}/calendars`, {
+        const res = await api(`/calendars`, {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name, color, kind }),
+          body: JSON.stringify({ name, color, kind, enabled }),
         });
-        if (!res.ok) { setStatus("Create: " + (await res.text())); return; }
+        if (!res.ok) {
+          setError("Create: " + (await res.text()));
+          return;
+        }
       }
       onSaved();
     } catch (e) {
-      setStatus((e as Error).message);
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -1547,30 +1973,55 @@ function CalendarDialog({
 
   const remove = async () => {
     if (!existing) return;
-    if (!await confirm({
-      title: `Delete "${existing.name}"?`,
-      message: "All its events go with it. This can't be undone.",
-      confirmLabel: "Delete calendar",
-    })) return;
+    if (
+      !(await confirm({
+        title: `Delete "${existing.name}"?`,
+        message: "All its events go with it. This can't be undone.",
+        confirmLabel: "Delete calendar",
+      }))
+    )
+      return;
     try {
-      await fetch(`${API}/calendars/${existing.id}`, { method: "DELETE", credentials: "same-origin" });
+      setBusy(true);
+      const res = await api(`/calendars/${existing.id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(await res.text());
       onSaved();
     } catch (e) {
-      setStatus("Delete: " + (e as Error).message);
+      setError("Delete: " + (e as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
-    <Dialog onClose={onClose} title={existing ? "Edit calendar" : "New calendar"}>
+    <Dialog
+      onClose={onClose}
+      title={existing ? "Edit calendar" : "New calendar"}
+    >
+      {error && (
+        <p role="alert" className="text-error">
+          {error}
+        </p>
+      )}
+      <label>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+        />{" "}
+        Enabled
+      </label>
       <input
         type="text"
         value={name}
         onChange={(e) => setName(e.target.value)}
+        aria-label="Calendar name"
         placeholder="Name"
         autoFocus
         className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
       />
       <select
+        aria-label="Calendar kind"
         value={kind}
         onChange={(e) => setKind(e.target.value)}
         className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
@@ -1585,19 +2036,31 @@ function CalendarDialog({
         {PRESET_COLORS.map((c) => (
           <button
             key={c}
+            aria-label={`Color ${c}`}
             onClick={() => setColor(c)}
-            className={"w-7 h-7 rounded-full border-2 " + (color === c ? "border-text" : "border-transparent")}
+            className={
+              "w-7 h-7 rounded-full border-2 " +
+              (color === c ? "border-text" : "border-transparent")
+            }
             style={{ backgroundColor: c }}
           />
         ))}
       </div>
       <div className="flex gap-2 justify-end items-center">
         {existing && (
-          <button onClick={remove} className="px-3 py-1.5 text-sm text-error hover:text-error mr-auto">
+          <button
+            onClick={remove}
+            className="px-3 py-1.5 text-sm text-error hover:text-error mr-auto"
+          >
             Delete
           </button>
         )}
-        <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+        <button
+          onClick={onClose}
+          className="px-3 py-1.5 text-sm text-text-muted"
+        >
+          Cancel
+        </button>
         <button
           onClick={save}
           disabled={!name.trim() || busy}
@@ -1613,7 +2076,11 @@ function CalendarDialog({
 // --- Event create/edit dialog --------------------------------------
 
 function EventDialog({
-  existing, defaults, calendars, onClose, onSaved, setStatus,
+  existing,
+  defaults,
+  calendars,
+  onClose,
+  onSaved,
 }: {
   existing?: Occurrence;
   defaults?: { start: Date; calendarId?: number };
@@ -1622,164 +2089,518 @@ function EventDialog({
   onSaved: () => void;
   setStatus: (s: string) => void;
 }) {
-  const initialStart = existing ? new Date(existing.start_at) : defaults!.start;
-  const initialEnd = existing ? new Date(existing.end_at) : new Date(initialStart.getTime() + 30 * 60 * 1000);
-
+  const api = useCalendarApi();
   const confirm = useConfirm();
-  const [calendarId, setCalendarId] = useState<number>(
-    existing?.calendar_id ?? defaults?.calendarId ?? calendars[0]?.id ?? 0,
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const [timezone, setTimezone] = useState(existing?.timezone || browserZone);
+  const [allDay, setAllDay] = useState(existing?.all_day ?? false);
+  const [scope, setScope] = useState<"this" | "this_and_following" | "all">(
+    existing?.is_recurring ? "this" : "all",
   );
-  const [title, setTitle] = useState(existing?.title || "");
-  const [description, setDescription] = useState(existing?.description || "");
-  const [location, setLocation] = useState(existing?.location || "");
-  const [startStr, setStartStr] = useState(toLocalInput(initialStart));
-  const [endStr, setEndStr] = useState(toLocalInput(initialEnd));
+  const [master, setMaster] = useState<{
+    start_at: string;
+    end_at: string;
+  } | null>(null);
+  const initialStart = existing?.start_at ?? defaults!.start.toISOString();
+  const initialEnd =
+    existing?.end_at ??
+    new Date(defaults!.start.getTime() + 30 * 60_000).toISOString();
+  const inputTime = (value: string, day = allDay, zone = timezone) =>
+    day ? value.slice(0, 10) : toZonedInput(new Date(value), zone);
+  const [startStr, setStartStr] = useState(() => inputTime(initialStart));
+  const [endStr, setEndStr] = useState(() => inputTime(initialEnd));
+  const [calendarId, setCalendarId] = useState(
+    existing?.calendar_id ??
+      defaults?.calendarId ??
+      calendars.find((c) => c.enabled)?.id ??
+      0,
+  );
+  const [title, setTitle] = useState(existing?.title ?? "");
+  const [description, setDescription] = useState(existing?.description ?? "");
+  const [location, setLocation] = useState(existing?.location ?? "");
+  const [status, setEventStatus] = useState(existing?.status ?? "confirmed");
+  const [rule, setRule] = useState(existing?.rrule ?? "");
   const [busy, setBusy] = useState(false);
-
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!existing?.is_recurring) return;
+    const controller = new AbortController();
+    api(`/items/${existing.event_id}`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(await res.text());
+        const value = await res.json();
+        if (!controller.signal.aborted) setMaster(value);
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) setError(e.message);
+      });
+    return () => controller.abort();
+  }, [api, existing?.event_id]);
+  const changeScope = (next: typeof scope) => {
+    setScope(next);
+    setStartStr(
+      inputTime(next === "all" && master ? master.start_at : initialStart),
+    );
+    setEndStr(inputTime(next === "all" && master ? master.end_at : initialEnd));
+  };
+  const toggleAllDay = (next: boolean) => {
+    setAllDay(next);
+    if (next) {
+      const start = startStr.slice(0, 10);
+      const end = endStr.slice(0, 10);
+      setStartStr(start);
+      setEndStr(
+        end > start ? end : ymdKey(addDays(new Date(start + "T12:00:00"), 1)),
+      );
+    } else {
+      setStartStr(startStr.slice(0, 10) + "T09:00");
+      setEndStr(startStr.slice(0, 10) + "T09:30");
+    }
+  };
   const save = async () => {
-    if (!title.trim() || !calendarId) return;
     setBusy(true);
+    setError("");
     try {
-      const startISO = new Date(startStr).toISOString();
-      const endISO = new Date(endStr).toISOString();
+      const start = allDay
+        ? new Date(startStr + "T00:00:00Z").toISOString()
+        : fromZonedInput(startStr, timezone).toISOString();
+      const end = allDay
+        ? new Date(endStr + "T00:00:00Z").toISOString()
+        : fromZonedInput(endStr, timezone).toISOString();
+      if (end <= start) throw new Error("End must be after start.");
+      if (existing?.is_recurring && scope === "all" && !master)
+        throw new Error("Wait for the original series to load.");
+      const body: Record<string, unknown> = {
+        title,
+        description,
+        location,
+        calendar_id: calendarId,
+        all_day: allDay,
+        timezone,
+        status,
+      };
+      if (!existing || (scope !== "this" && rule !== existing.rrule))
+        body.rrule = rule;
       if (existing) {
-        const res = await fetch(`${API}/items/${existing.event_id}`, {
-          method: "PATCH",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scope: "all",
-            title, description, location,
-            start_at: startISO, end_at: endISO,
-          }),
-        });
-        if (!res.ok) { setStatus("Update: " + (await res.text())); return; }
+        Object.assign(
+          body,
+          eventEditTimes(existing, scope, start, end, master),
+        );
       } else {
-        const res = await fetch(`${API}/items`, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            calendar_id: calendarId,
-            title, description, location,
-            start_at: startISO, end_at: endISO,
-          }),
-        });
-        if (!res.ok) { setStatus("Create: " + (await res.text())); return; }
+        body.start_at = start;
+        body.end_at = end;
       }
+      const res = await api(
+        existing ? `/items/${existing.event_id}` : "/items",
+        {
+          method: existing ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      if (!res.ok) throw new Error(await res.text());
       onSaved();
     } catch (e) {
-      setStatus((e as Error).message);
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
-
   const remove = async () => {
     if (!existing) return;
-    if (!await confirm({
-      title: `Delete "${existing.title}"?`,
-      message: existing.is_recurring ? "All occurrences of this recurring event will be removed." : undefined,
-      confirmLabel: "Delete event",
-    })) return;
+    const affected = existing.is_recurring
+      ? scope === "all"
+        ? "the entire series"
+        : scope === "this_and_following"
+          ? "this occurrence and all following occurrences"
+          : "this occurrence"
+      : "this event";
+    if (
+      !(await confirm({
+        title: `Delete ${affected}?`,
+        message: existing.title,
+        confirmLabel: "Delete",
+      }))
+    )
+      return;
+    setBusy(true);
+    setError("");
     try {
-      await fetch(`${API}/items/${existing.event_id}`, {
+      const res = await api(`/items/${existing.event_id}`, {
         method: "DELETE",
-        credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope: "all" }),
+        body: JSON.stringify({
+          scope,
+          occurrence_start_at: existing.occurrence_start_at,
+        }),
       });
+      if (!res.ok) throw new Error(await res.text());
       onSaved();
     } catch (e) {
-      setStatus("Delete: " + (e as Error).message);
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
-
+  const inputClass =
+    "w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm";
   return (
     <Dialog onClose={onClose} title={existing ? "Edit event" : "New event"}>
-      <input
-        type="text"
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        placeholder="Title"
-        autoFocus
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-      />
-      <select
-        value={calendarId}
-        onChange={(e) => setCalendarId(Number(e.target.value))}
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+      <form
+        className="flex flex-col gap-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          save();
+        }}
       >
-        {calendars.map((c) => (
-          <option key={c.id} value={c.id}>{c.name}</option>
-        ))}
-      </select>
-      <div className="flex gap-2">
-        <input
-          type="datetime-local"
-          value={startStr}
-          onChange={(e) => setStartStr(e.target.value)}
-          className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-        />
-        <input
-          type="datetime-local"
-          value={endStr}
-          onChange={(e) => setEndStr(e.target.value)}
-          className="flex-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-        />
-      </div>
-      <input
-        type="text"
-        value={location}
-        onChange={(e) => setLocation(e.target.value)}
-        placeholder="Location (optional)"
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-      />
-      <textarea
-        value={description}
-        onChange={(e) => setDescription(e.target.value)}
-        placeholder="Description (optional)"
-        className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm min-h-[60px]"
-      />
-      <div className="flex gap-2 justify-end items-center">
-        {existing && (
-          <button onClick={remove} className="px-3 py-1.5 text-sm text-error hover:text-error mr-auto">
-            Delete
-          </button>
+        {error && (
+          <p role="alert" className="text-error text-sm">
+            {error}
+          </p>
         )}
-        <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
-        <button
-          onClick={save}
-          disabled={!title.trim() || !calendarId || busy}
-          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        >
-          {existing ? "Save" : "Create"}
-        </button>
-      </div>
+        {existing?.is_recurring && (
+          <label className="text-sm">
+            Apply changes to
+            <select
+              aria-label="Apply changes to"
+              className={inputClass}
+              value={scope}
+              onChange={(e) => changeScope(e.target.value as typeof scope)}
+            >
+              <option value="this">This occurrence</option>
+              <option value="this_and_following">This and following</option>
+              <option value="all" disabled={!master}>
+                Entire series
+              </option>
+            </select>
+          </label>
+        )}
+        <label className="text-sm">
+          Title
+          <input
+            autoFocus
+            required
+            maxLength={500}
+            className={inputClass}
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+          />
+        </label>
+        <label className="text-sm">
+          Calendar
+          <select
+            className={inputClass}
+            value={calendarId}
+            onChange={(e) => setCalendarId(Number(e.target.value))}
+          >
+            {calendars.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+                {!c.enabled ? " (disabled)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <input
+            type="checkbox"
+            checked={allDay}
+            onChange={(e) => toggleAllDay(e.target.checked)}
+          />{" "}
+          All day
+        </label>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          <label className="text-sm">
+            Start
+            <input
+              required
+              className={inputClass}
+              type={allDay ? "date" : "datetime-local"}
+              value={startStr}
+              onChange={(e) => setStartStr(e.target.value)}
+            />
+          </label>
+          <label className="text-sm">
+            {allDay ? "End (exclusive)" : "End"}
+            <input
+              required
+              className={inputClass}
+              type={allDay ? "date" : "datetime-local"}
+              value={endStr}
+              onChange={(e) => setEndStr(e.target.value)}
+            />
+          </label>
+        </div>
+        {!allDay && (
+          <label className="text-sm">
+            Timezone
+            <input
+              className={inputClass}
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              placeholder="Europe/Madrid"
+            />
+            <span className="text-text-muted text-xs">
+              Times above use this timezone. Recurrence keeps local wall time.
+            </span>
+          </label>
+        )}
+        {(!existing?.is_recurring || scope !== "this") && (
+          <label className="text-sm">
+            Repeat
+            <select
+              aria-label="Repeat preset"
+              className={inputClass}
+              value={
+                [
+                  "",
+                  "FREQ=DAILY",
+                  "FREQ=WEEKLY",
+                  "FREQ=MONTHLY",
+                  "FREQ=YEARLY",
+                ].includes(rule)
+                  ? rule
+                  : "custom"
+              }
+              onChange={(e) =>
+                setRule(
+                  e.target.value === "custom"
+                    ? "FREQ=WEEKLY;BYDAY=MO,WE"
+                    : e.target.value,
+                )
+              }
+            >
+              <option value="">Does not repeat</option>
+              <option value="FREQ=DAILY">Daily</option>
+              <option value="FREQ=WEEKLY">Weekly</option>
+              <option value="FREQ=MONTHLY">Monthly</option>
+              <option value="FREQ=YEARLY">Yearly</option>
+              <option value="custom">Custom rule</option>
+            </select>
+            {rule && (
+              <input
+                aria-label="Recurrence rule"
+                className={inputClass}
+                value={rule}
+                onChange={(e) => setRule(e.target.value)}
+              />
+            )}
+          </label>
+        )}
+        <label className="text-sm">
+          Status
+          <select
+            className={inputClass}
+            value={status}
+            onChange={(e) => setEventStatus(e.target.value)}
+          >
+            <option value="confirmed">Confirmed</option>
+            <option value="tentative">Tentative</option>
+            <option value="cancelled">
+              Cancelled (does not block availability)
+            </option>
+          </select>
+        </label>
+        <label className="text-sm">
+          Location
+          <input
+            className={inputClass}
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+          />
+        </label>
+        <label className="text-sm">
+          Description
+          <textarea
+            className={inputClass}
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+          />
+        </label>
+        <div className="flex gap-2 justify-end">
+          {existing && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={remove}
+              className="text-error mr-auto"
+            >
+              Delete
+            </button>
+          )}
+          <button type="button" disabled={busy} onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            disabled={busy || !title.trim() || !calendarId}
+            className="bg-accent text-bg rounded px-3 py-1.5"
+          >
+            {busy ? "Saving…" : existing ? "Save" : "Create"}
+          </button>
+        </div>
+      </form>
     </Dialog>
   );
 }
 
-function toLocalInput(d: Date): string {
-  // datetime-local wants "YYYY-MM-DDTHH:MM" in local time (no Z).
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+export function eventEditTimes(
+  existing: Occurrence,
+  scope: string,
+  start: string,
+  end: string,
+  master: { start_at: string; end_at: string } | null,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { scope };
+  if (existing.is_recurring && scope !== "all")
+    body.occurrence_start_at = existing.occurrence_start_at;
+  const base = existing.is_recurring && scope === "all" ? master : existing;
+  if (!base) throw new Error("Series must load before editing");
+  if (new Date(start).getTime() !== new Date(base.start_at).getTime())
+    body.start_at = start;
+  if (new Date(end).getTime() !== new Date(base.end_at).getTime())
+    body.end_at = end;
+  return body;
+}
+export function eventDate(value: string, allDay: boolean): Date {
+  return new Date(allDay ? value.slice(0, 10) + "T00:00:00" : value);
+}
+export function eventKey(e: Occurrence) {
+  return e.id + "|" + e.occurrence_start_at;
+}
+export function layoutTimedEvents(
+  events: Occurrence[],
+): Map<string, { column: number; columns: number }> {
+  const result = new Map<string, { column: number; columns: number }>();
+  const sorted = [...events].sort(
+    (a, b) =>
+      Date.parse(a.start_at) - Date.parse(b.start_at) ||
+      Date.parse(b.end_at) - Date.parse(a.end_at),
+  );
+  let group: Occurrence[] = [];
+  let end = 0;
+  const pack = () => {
+    const ends: number[] = [];
+    for (const e of group) {
+      const start = Date.parse(e.start_at);
+      let column = ends.findIndex((t) => t <= start);
+      if (column < 0) column = ends.length;
+      ends[column] = Math.max(Date.parse(e.end_at), start + 25 * 60_000);
+      result.set(eventKey(e), { column, columns: 0 });
+    }
+    for (const e of group) result.get(eventKey(e))!.columns = ends.length;
+    group = [];
+  };
+  for (const e of sorted) {
+    if (group.length && Date.parse(e.start_at) >= end) pack();
+    group.push(e);
+    end = Math.max(
+      group.length === 1 ? 0 : end,
+      Date.parse(e.end_at),
+      Date.parse(e.start_at) + 25 * 60_000,
+    );
+  }
+  pack();
+  return result;
+}
+export function toZonedInput(date: Date, timezone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+export function fromZonedInput(value: string, timezone: string): Date {
+  const wall = Date.parse(value + "Z");
+  if (!Number.isFinite(wall))
+    throw new Error("Enter valid start and end dates.");
+  let instant = wall;
+  for (let i = 0; i < 3; i++) {
+    const actual = Date.parse(toZonedInput(new Date(instant), timezone) + "Z");
+    instant += wall - actual;
+  }
+  if (toZonedInput(new Date(instant), timezone) !== value)
+    throw new Error(
+      "This local time does not exist during the daylight-saving transition.",
+    );
+  return new Date(instant);
 }
 
-// --- Dialog shell ---------------------------------------------------
-
-function Dialog({ children, onClose, title }: {
-  children: React.ReactNode; onClose: () => void; title: string;
+function Dialog({
+  children,
+  onClose,
+  title,
+}: {
+  children: React.ReactNode;
+  onClose: () => void;
+  title: string;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const root = ref.current;
+    const focused =
+      root?.querySelector<HTMLElement>("input, select, textarea") ??
+      root?.querySelector<HTMLElement>("button");
+    focused?.focus();
+    const key = (e: KeyboardEvent) => {
+      if (!root || !root.contains(document.activeElement)) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        closeRef.current();
+      }
+      if (e.key === "Tab") {
+        const items = Array.from(
+          root.querySelectorAll<HTMLElement>(
+            'button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]',
+          ),
+        );
+        const first = items[0],
+          last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        }
+      }
+    };
+    document.addEventListener("keydown", key);
+    return () => {
+      document.removeEventListener("keydown", key);
+      previous?.focus();
+    };
+  }, []);
   return (
-    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/60 grid place-items-center z-50"
+      onClick={onClose}
+    >
       <div
-        className="bg-bg-card border border-border rounded p-4 w-[480px] max-w-[90vw] flex flex-col gap-3"
+        ref={ref}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="bg-bg-card border border-border rounded p-4 w-[480px] max-w-[94vw] max-h-[90vh] overflow-auto flex flex-col gap-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <div className="text-text font-medium">{title}</div>
-          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+          <h2 id={titleId} className="text-text font-medium">
+            {title}
+          </h2>
+          <button aria-label="Close dialog" onClick={onClose}>
+            ×
+          </button>
         </div>
         {children}
       </div>

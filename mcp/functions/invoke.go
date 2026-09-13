@@ -54,6 +54,17 @@ func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event
 }
 
 func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Function, event any, triggerKind string, stream invocationStream) (res *invokeResult, retErr error) {
+	if ctx.CurrentProject() != fn.ProjectID {
+		ctx = ctx.WithProject(fn.ProjectID)
+	}
+	parent, security, err := invocationAdmission(parent, fn, triggerKind)
+	if err != nil {
+		return nil, err
+	}
+	event, err = trustedEvent(event, security)
+	if err != nil {
+		return nil, err
+	}
 	p := currentPool()
 	if p == nil {
 		return nil, errors.New("function worker pool not initialised")
@@ -86,11 +97,20 @@ func invokeFunctionWithStream(ctx *sdk.AppCtx, parent context.Context, fn *Funct
 		return nil, errors.New("event exceeds 8 MiB")
 	}
 	eventLog := string(eventBytes)
+	if security.Principal != nil {
+		// Audit identity separately; do not persist opaque claims or request bodies.
+		eventLog = "[authenticated event omitted]"
+	}
 	if triggerKind == "function_url" && fn.FunctionURL != nil {
 		eventLog = strings.ReplaceAll(eventLog, fn.FunctionURL.Token, "[redacted]")
 	}
 	eventLog = redactSecrets(eventLog, fn.Env)
 	inv := &Invocation{FunctionID: fn.ID, VersionID: fn.ActiveVersionID, ConfigHash: configHash(fn), StartedAt: started.Format(time.RFC3339Nano), Status: "running", TriggerKind: triggerKind, EventJSON: truncate(eventLog, eventJSONCap), Truncated: len(eventLog) > eventJSONCap}
+	identityJSON, err := json.Marshal(security.Identity)
+	if err != nil {
+		return nil, err
+	}
+	inv.Identity = identityJSON
 	id, err := dbInsertInvocation(ctx.AppDB(), fn.ProjectID, inv, p.owner.id)
 	if err != nil {
 		return nil, fmt.Errorf("record invocation: %w", err)

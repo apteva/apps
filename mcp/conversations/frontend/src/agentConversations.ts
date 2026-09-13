@@ -1,6 +1,7 @@
 export type ConversationDisplayMode = "browser" | "single";
 
 export interface AgentConversationWidgetSettings {
+  composer_layout?: "auto" | "compact" | "expanded";
   display_mode?: ConversationDisplayMode;
   show_new_conversation?: boolean;
 }

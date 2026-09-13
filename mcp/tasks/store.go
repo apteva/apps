@@ -216,6 +216,9 @@ func (s *taskStore) createTx(tx *sql.Tx, input CreateTaskInput, now time.Time, e
 		scheduleKind, expression, timezone = normalized.Kind, normalized.Expression, normalized.Timezone
 		overlap, catchup, enabled = normalized.OverlapPolicy, normalized.CatchupPolicy, 1
 		nextRun = normalized.NextRunAt.Format(timeFormat)
+		if input.ScheduleInitiallyPaused {
+			enabled = 0
+		}
 	}
 	var scheduledFor any
 	if input.ScheduledFor != nil {

@@ -106,6 +106,10 @@ func dispatchPlatformFrame(parent context.Context, ctx *sdk.AppCtx, msg wireResp
 		}
 	}
 	var err error
+	if msg.Type == "call" && msg.App == "functions" && msg.Tool == "functions_invoke_authenticated" {
+		ans.Error = "nested calls must use functions_invoke; identity is inherited internally"
+		return ans
+	}
 	if msg.Type == "call" && msg.App == "functions" && msg.Tool == "functions_invoke" {
 		ans = dispatchNested(parent, ctx, input)
 		ans.CallID = msg.CallID

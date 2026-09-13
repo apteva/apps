@@ -1,7 +1,9 @@
+import { ComposerAttachments, ComposerMenu, type ComposerController } from "./composer";
 import { useConversationLocalization } from "./i18n";
-import type { KeyboardEvent, ReactNode, RefObject } from "react";
+import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
 export interface ConversationChatViewProps {
+  attachments:ComposerController;
   title: string;
   subtitle: string;
   publicAudience: boolean;
@@ -66,6 +68,22 @@ const GLYPH_PAUSE = "M9 5v14 M15 5v14";
  */
 export default function ConversationChatView(props: ConversationChatViewProps) {
   const { t } = useConversationLocalization();
+  const layout = props.attachments.options.layout ?? "auto";
+  // Reflow long/restored drafts when the container or selected layout changes.
+  useLayoutEffect(() => {
+    const input = props.inputRef.current;
+    if (!input) return;
+    const resize = () => { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 144) + "px"; };
+    resize();
+    if (typeof ResizeObserver === "undefined") return;
+    let width = input.getBoundingClientRect().width;
+    const observer = new ResizeObserver(() => { const next = input.getBoundingClientRect().width; if (next !== width) { width = next; resize(); } });
+    observer.observe(input);
+    return () => observer.disconnect();
+  }, [props.draft, layout, props.archived]);
+  const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
+  const showBreak = props.responseActive && !hasDraft;
+  const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
     <section className="min-h-0 flex-1 flex flex-col">
       <div className="shrink-0 border-b border-border px-4 py-3 flex flex-wrap items-center gap-3">
@@ -77,16 +95,16 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
                 {t("chat.public")}
               </span>
             )}
+        <span
+          className={`shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
+          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
+        />
           </div>
           <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
         </div>
         {props.headerActions && (
           <div className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
         )}
-        <span
-          className={`${props.headerActions ? "" : "ml-auto"} shrink-0 w-2 h-2 rounded-full ${props.connected ? "bg-success" : "bg-border"}`}
-          title={props.connected ? t("chat.live") : t("chat.reconnectingHistory")}
-        />
         {!props.archived && props.onOpenDetails && (
           <button
             type="button"
@@ -100,7 +118,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
+      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4">
         {!props.hasMessages && !props.streamNode ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
             <span className="text-text-dim">
@@ -165,62 +183,54 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
       ) : (
         <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
-          {props.responseActive && (
-            <div className="mb-2 flex justify-center">
-              <button
-                type="button"
-                onClick={props.onSoftBreak}
-                disabled={props.breakBusy || props.breakRequested}
-                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-bg-card px-3 py-1.5 text-xs text-text-muted transition-colors enabled:hover:border-accent/50 enabled:hover:text-text disabled:cursor-default disabled:opacity-60"
-                aria-label={t("chat.breakLabel")}
-                title={t("chat.breakHint")}
-              >
-                <Glyph d={GLYPH_PAUSE} size={13} />
-                {props.breakRequested ? t("chat.breakRequested") : props.breakBusy ? t("chat.breakRequesting") : t("chat.break")}
-              </button>
-            </div>
-          )}
           <form
+            onDragOver={event=>{if(props.attachments.options.files!==false)event.preventDefault()}}
+            onDrop={event=>{if(props.attachments.options.files!==false){event.preventDefault();void props.attachments.add(Array.from(event.dataTransfer.files));}}}
+            onPaste={event=>{if(props.attachments.options.files!==false&&event.clipboardData.files.length){event.preventDefault();void props.attachments.add(Array.from(event.clipboardData.files));}}}
             onSubmit={(event) => {
               event.preventDefault();
-              props.onSend();
+              if (hasDraft && !props.sending) props.onSend();
             }}
-            className="flex min-h-[54px] items-center gap-1.5 rounded-lg border border-border bg-bg-card/95 px-2 py-1.5 shadow-lg backdrop-blur-sm transition-colors focus-within:border-accent/60 sm:min-h-[58px] sm:gap-3 sm:px-4 sm:py-2"
+            className="chat-composer-box"
+            data-layout={layout}
           >
+            <ComposerAttachments controller={props.attachments}/>
             <textarea
               ref={props.inputRef}
               value={props.draft}
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
               onKeyDown={props.onComposerKeyDown}
               rows={1}
-              style={{ lineHeight: "20px", minHeight: "36px" }}
               placeholder={props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
-              className="block min-w-0 flex-1 resize-none bg-transparent py-2 text-base text-text placeholder:text-text-dim focus:outline-none sm:text-sm"
+              className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
                 window.matchMedia("(hover: hover) and (pointer: fine)").matches
               }
             />
+            <div className="chat-composer-toolbar"><ComposerMenu controller={props.attachments}/>
             <button
-              type="submit"
-              disabled={props.sending || !props.draft.trim()}
-              className="touch-target flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-accent text-bg transition-all disabled:cursor-not-allowed disabled:opacity-20 enabled:hover:bg-accent-hover enabled:active:scale-95 sm:h-9 sm:w-9"
-              aria-label={t("chat.send")}
-              title={t("chat.sendHint")}
+              type={showBreak ? "button" : "submit"}
+              onClick={showBreak ? props.onSoftBreak : undefined}
+              disabled={showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error)}
+              className="chat-composer-send"
+              aria-label={showBreak ? breakLabel : t("chat.send")}
+              aria-busy={showBreak && props.breakBusy ? true : undefined}
+              title={showBreak ? (props.breakBusy || props.breakRequested ? breakLabel : t("chat.breakHint")) : t("chat.sendHint")}
             >
-              <svg
-                viewBox="0 0 20 20"
-                className="w-4 h-4"
+              {showBreak ? <Glyph d={GLYPH_PAUSE} size={20} /> : <svg
+                viewBox="0 0 24 24"
+                width="20" height="20" aria-hidden="true"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth="2.5"
+                strokeWidth="1.8"
                 strokeLinecap="round"
                 strokeLinejoin="round"
               >
-                <path d="M10 17V3" />
-                <path d="M5 8l5-5 5 5" />
-              </svg>
+                <path d="M12 19V5 M5 12l7-7 7 7" />
+              </svg>}
             </button>
+            </div>
           </form>
         </footer>
       )}

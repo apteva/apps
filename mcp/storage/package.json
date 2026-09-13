@@ -1,15 +1,5 @@
 {
   "name": "@apteva/storage-ui",
-  "private": true,
-  "scripts": {
-    "build": "bun scripts/build-ui.ts && bun run verify:bundles",
-    "verify:bundles": "bun tests/verify-bundles.ts",
-    "test": "bun run verify:bundles && bunx playwright test",
-    "typecheck": "bunx tsc --noEmit"
-  },
-  "dependencies": {
-    "@noble/hashes": "2.0.1"
-  },
   "devDependencies": {
     "@playwright/test": "1.58.2",
     "@types/bun": "^1.4.1",
@@ -18,5 +8,12 @@
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "typescript": "^7.0.2"
+  },
+  "private": true,
+  "scripts": {
+    "build": "bun scripts/build-ui.ts && bun run verify:bundles",
+    "verify:bundles": "bun tests/verify-bundles.ts",
+    "test": "bun run verify:bundles && bunx playwright test",
+    "typecheck": "bunx tsc --noEmit"
   }
 }

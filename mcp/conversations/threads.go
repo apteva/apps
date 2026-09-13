@@ -101,6 +101,9 @@ func conversationThreadDirective(conv *Conversation) string {
 		" Execute authenticated visitor work here, including identity checks and user-scoped CRM calls;" +
 		" do not forward ordinary visitor requests to main or delegate identity-dependent work to workers." +
 		" Workers do not inherit the visitor identity. An active-external-conversation-required error is a context blocker, not a reason to copy user IDs or rewrite routing." +
+		" Images attached to a user message are supplied directly as visual input; inspect them in that request." +
+		" For a simple image question, send the answer directly with phase=final, without an acknowledgement or attachment-reading tool." +
+		" Acknowledge only work that actually needs noticeable additional steps. Read-attachment tools are for file contents or older references, not images already supplied." +
 		" Reply in this same conversation using conversations_send" +
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +

@@ -34,3 +34,21 @@ test("failed detail loading remains an error rather than an empty list", async (
   const fake = (() => Promise.resolve(new Response("not authorized", { status: 403 }))) as typeof fetch;
   await expect(fetchPanelRows(fake, "https://test/rows", "routes", new AbortController().signal)).rejects.toThrow("403");
 });
+
+test("changing providers clears stale routing and preserves allowed claims", async () => {
+  const { updatedAuth } = await import("./policy");
+  const prior = { provider: "app", app: "identity", path: "/authorize", issuer: "example", tenant_id: "tenant-a", claims: ["roles", "permissions", ""] };
+  expect(updatedAuth("authorizer", prior)).toEqual({ kind: "authorizer", ...prior, claims: ["roles", "permissions"] });
+  expect(updatedAuth("auth_jwt", prior)).toEqual({ kind: "auth_jwt", tenant_id: "tenant-a", claims: ["roles", "permissions"] });
+  expect(updatedAuth("public", prior)).toEqual({ kind: "public" });
+  expect(updatedAuth("default", prior)).toEqual({});
+});
+
+test("Function scope editing preserves exact IDs and clears scope on public routes", async () => {
+  const { updatedAuth } = await import("./policy");
+  const settings = { provider: "auth", function_ids: ["12", "34", ""] };
+  expect(updatedAuth("authorizer", settings)).toMatchObject({ function_ids: [12, 34] });
+  expect(updatedAuth("api_key", settings)).toEqual({ kind: "api_key", function_ids: [12, 34] });
+  expect(updatedAuth("public", settings)).toEqual({ kind: "public" });
+  expect(updatedAuth("authorizer", { function_ids: ["9007199254740993"] })).toMatchObject({ function_ids: ["9007199254740993"] });
+});

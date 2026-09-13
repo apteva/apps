@@ -102,11 +102,12 @@ type fnPool struct {
 
 func configHash(fn *Function) string {
 	b, _ := json.Marshal(struct {
-		Env    map[string]string
-		Memory int
-		Access *FunctionAccess
-		Limits RuntimePolicy
-	}{fn.Env, fn.MaxMemoryMB, fn.Access, fn.Limits})
+		Env              map[string]string
+		Memory           int
+		Access           *FunctionAccess
+		Limits           RuntimePolicy
+		InvocationPolicy *InvocationPolicy
+	}{fn.Env, fn.MaxMemoryMB, fn.Access, fn.Limits, fn.InvocationPolicy})
 	return hashSource(b)
 }
 func newPool(ctx *sdk.AppCtx) (*pool, error) {
@@ -382,7 +383,10 @@ func (p *pool) invoke(ctx *sdk.AppCtx, parent context.Context, fn *Function, v *
 		res.Error = "Worker exceeded its cgroup memory limit"
 	}
 
-	if err == nil && w.alive() {
+	// An authenticated handler can retain arbitrary globals or background tasks.
+	// Retire its process even on success so identity data cannot survive reuse.
+	security := securityFrom(parent)
+	if err == nil && w.alive() && (security == nil || security.Principal == nil) {
 		p.put(fn, fp, w)
 		p.markBootValidated(fn, t.cold)
 	} else {

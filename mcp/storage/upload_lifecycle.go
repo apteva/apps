@@ -84,6 +84,9 @@ func writeUploadPart(c context.Context, app *sdk.AppCtx, id string, n int, r io.
 	if committed > 0 {
 		return 0, errors.New("upload already completed")
 	}
+	if meta.Direct != nil {
+		return relayUploadPart(c, app, id, n, meta, mu, r, length)
+	}
 	mu.budget.Lock()
 	if mu.sizes == nil {
 		parts, e := listParts(app, id)

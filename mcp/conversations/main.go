@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -34,6 +35,7 @@ import (
 var manifestYAML string
 
 type App struct {
+	attachmentMu     sync.Mutex
 	asyncDelivery    bool
 	deliveryWorker   *deliveryWorker
 	store            *store
@@ -60,6 +62,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("conversations requires a db block")
 	}
 	a.store = newStore(ctx.AppDB())
+	if err := a.store.interruptToolActivities(); err != nil {
+		return err
+	}
 	a.hub = newHub()
 	a.adapters = newAdapterRegistry(a, a.hub)
 	a.streamer = newStreamer(a.hub)
@@ -144,6 +149,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "read_attachment", Description: "Read an attachment in this conversation. Text is bounded; images include vision data; binary files return metadata and optional Storage file_id for document tools.", InputSchema: schemaObject(map[string]any{"conversation_id": map[string]any{"type": "string"}, "attachment_id": map[string]any{"type": "string"}, "offset": map[string]any{"type": "integer", "minimum": 0}}, []string{"conversation_id", "attachment_id"}), HandlerCtx: a.toolReadAttachment},
 		{Name: "resolve_thread_identity", Description: "Internal trusted backend identity resolution; never accepts a user identity from an agent.", InputSchema: schemaObject(map[string]any{"agent_id": map[string]any{"type": "integer"}, "thread_id": map[string]any{"type": "string"}}, []string{"agent_id", "thread_id"}), HandlerCtx: a.toolResolveThreadIdentity},
 		{
 			Name: "send",

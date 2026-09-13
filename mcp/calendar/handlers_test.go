@@ -476,7 +476,7 @@ func TestMCP_AllToolsHaveValidShape(t *testing.T) {
 		if tool.Description == "" {
 			t.Errorf("%s: description empty", tool.Name)
 		}
-		if tool.Handler == nil {
+		if tool.Handler == nil && tool.HandlerCtx == nil {
 			t.Errorf("%s: handler nil", tool.Name)
 		}
 		if tool.InputSchema["type"] != "object" {

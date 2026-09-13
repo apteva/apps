@@ -45,16 +45,62 @@ const imports = {
   '@apteva/ui-kit': '/vendor/ui-kit.mjs',
 };
 const html = `<div id="root"></div><script type="importmap">${JSON.stringify({ imports })}</script><script type="module" src="/test.js"></script>`;
+let goBackend=false;
 Bun.serve({
-  port: 19180, hostname: '127.0.0.1',
-  fetch(req) {
+  port: 19180, hostname: '127.0.0.1', maxRequestBodySize:128*1024**2,
+  async fetch(req) {
     const path = new URL(req.url).pathname;
+    if(path==='/__go'){
+      goBackend=new URL(req.url).searchParams.get('enabled')==='true';
+      return Response.json({ok:true});
+    }
+    if(goBackend && path.startsWith('/api/apps/storage/') && !path.includes('/ui/')){
+      const target=new URL(req.url);const base=new URL(process.env.STORAGE_TEST_BACKEND!);target.host=base.host;
+      return fetch(target,{method:req.method,headers:req.headers,body:req.body,signal:req.signal});
+    }
+    // For the real large-body test, serve the control API here so Playwright
+    // never intercepts/buffers the 2 GiB of browser-to-backend traffic.
+    if(path.startsWith('/api/apps/storage/') && !path.includes('/ui/')){
+      if(req.method==='PUT')return new Response('Unexpected proxy upload',{status:400});
+      const body=req.method==='POST'?await req.text():'';apiReceived+=body.length;
+      if(path.endsWith('/uploads'))return Response.json(req.method==='GET'?{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}:{upload_id:'STREAMREAL2G',mode:'s3_multipart',part_size:16*1024**2,max_parallel:4,max_parts:10000});
+      if(path.includes('/parts/'))return Response.json({url:'http://127.0.0.1:19181/STREAMREAL2G/'+path.split('/').at(-1),headers:{}});
+      if(path.endsWith('/complete'))return Response.json({file:{id:10,name:'real-2g.mp4',size_bytes:2*1024**3,folder:'/',content_type:'video/mp4',visibility:'private'}});
+      return Response.json(path.endsWith('/folders')?{folders:[]}:{files:[]});
+    }
     // Serve exact release artifacts without rebuilding their TSX sources.
     if (['/api/apps/storage/ui/StoragePanel.mjs', '/api/apps/storage/ui/FileCard.mjs'].includes(path)) {
       return new Response(Bun.file(resolve(import.meta.dir, '../../ui', path.split('/').at(-1)!)), { headers: { 'Content-Type': 'text/javascript' } });
     }
     const asset = assets.get(path);
     if (asset) return new Response(asset, { headers: { 'Content-Type': 'text/javascript' } });
+    if(path==='/' && goBackend){
+      const response=await fetch(process.env.STORAGE_TEST_BACKEND!+'/__csp');const {policy}=await response.json() as {policy:string};
+      return new Response(`<meta http-equiv="Content-Security-Policy" content="${policy}">`+html,{headers:{'Content-Type':'text/html','Cache-Control':'no-store'}});
+    }
     return path === '/' ? new Response(html, { headers: { 'Content-Type': 'text/html' } }) : new Response('Not found', { status: 404 });
   },
+});
+
+// Real cross-origin streaming sink for the large-transfer regression. It counts
+// bytes without retaining parts, so a 2 GiB test stays bounded in memory.
+let apiReceived=0;
+const transfers = new Map<string, { bytes: number; parts: number; active: number; peak: number }>();
+Bun.serve({
+ port:19181, hostname:'127.0.0.1', maxRequestBodySize:128*1024**2,
+ async fetch(req){
+  const u=new URL(req.url),id=u.pathname.split('/')[1];
+  const headers={'Access-Control-Allow-Origin':'http://127.0.0.1:19180','Access-Control-Allow-Methods':'PUT, GET, OPTIONS','Access-Control-Allow-Headers':'content-type','Content-Type':'application/json'};
+  if(req.method==='OPTIONS')return new Response(null,{status:204,headers});
+  let stats=transfers.get(id);if(!stats){stats={bytes:0,parts:0,active:0,peak:0};transfers.set(id,stats)}
+  if(req.method==='GET')return Response.json({...stats,apiBytes:apiReceived},{headers});
+  if(req.method!=='PUT')return new Response(null,{status:405,headers});
+  stats.active++;stats.peak=Math.max(stats.peak,stats.active);
+  try{
+   const reader=req.body!.getReader();let size=0;
+   while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength}
+   stats.bytes+=size;stats.parts++;
+   return new Response(null,{status:200,headers});
+  }finally{stats.active--}
+ }
 });

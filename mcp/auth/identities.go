@@ -409,7 +409,7 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	if err = db.Commit(); err != nil {
 		return nil, err
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, tokens)
 	if err != nil {
 		ctx.Logger().Warn("delegated mint failed", "err", err)
 		aptevaToken = nil
@@ -429,6 +429,7 @@ func (a *App) toolPublicLoginIdentity(ctx *sdk.AppCtx, args map[string]any) (any
 	if aptevaToken != nil {
 		out["apteva_access_token"] = aptevaToken.AccessToken
 		out["apteva_expires_in"] = aptevaToken.ExpiresIn
+		out["apteva_expires_at"] = aptevaToken.ExpiresAt
 	}
 	return out, nil
 }

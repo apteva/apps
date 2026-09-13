@@ -165,8 +165,7 @@ interface UploadJob {
   name: string;
   total: number;
   loaded: number;
-  prepared?: number;
-  phase?: "checking" | "preparing" | "uploading" | "finalizing";
+  phase?: "checking" | "uploading" | "finalizing";
   status: "uploading" | "done" | "error" | "cancelled";
   error?: string;
   // Set when the user clicks the row's Cancel button. The
@@ -224,12 +223,14 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
 
   const listingScope = `${folder}:${offset}:${projectId}:${installId}`;
   const currentListingScope = useRef(listingScope); currentListingScope.current = listingScope;
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
     if (currentListingScope.current !== listingScope) return;
     const generation = ++loadGeneration.current;
     loadAbort.current?.abort();
     const controller = new AbortController(); loadAbort.current = controller;
-    setLoading(true);
+    // Live updates keep the current listing interactive. Only foreground
+    // loads (navigation and actions) should dim/disable the controls.
+    if (!background) setLoading(true);
     try {
       const [foldersResp, filesResp] = await Promise.all([
         api<FoldersResp>("GET", "/folders", { parent: folder }, undefined, controller.signal),
@@ -251,7 +252,7 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
     if (ev.install_id && ev.install_id !== installId) return;
     if (["file.added", "file.deleted", "file.updated"].includes(ev.topic)) {
       if (refreshTimer.current) clearTimeout(refreshTimer.current);
-      refreshTimer.current = setTimeout(() => { void load(); }, 100);
+      refreshTimer.current = setTimeout(() => { void load(true); }, 100);
     }
   });
 
@@ -289,8 +290,8 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
             installId,
             signal: job.controller!.signal,
             onPhase: (phase) => updateJob(job.id, { phase }),
-            onPreparationProgress: (prepared) => updateJob(job.id, { prepared }),
             onUploadIdAssigned: (sid) => {
+              job.serverUploadId = sid;
               updateJob(job.id, { serverUploadId: sid });
             },
             onProgress: (bytes, total) => {
@@ -314,6 +315,9 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
             // the rest of a multi-file selection.
             continue;
           }
+          // The panel releases the File after this attempt; reclaim its
+          // session so selecting it again cannot exhaust the pending quota.
+          if (job.serverUploadId) await abortUploadServer(job.serverUploadId, { projectId, installId });
           setStatus("Upload failed: " + (e as Error).message);
           continue;
         }
@@ -1020,7 +1024,7 @@ function UploadProgressRow({
   onDismiss: () => void;
   onCancel: () => void;
 }) {
-  const shownBytes = job.phase === "preparing" ? (job.prepared || 0) : job.loaded;
+  const shownBytes = job.loaded;
   const pct = job.total > 0 ? Math.min(100, Math.floor((shownBytes / job.total) * 100)) : 0;
   const isError = job.status === "error";
   const isDone = job.status === "done";
@@ -1043,8 +1047,6 @@ function UploadProgressRow({
     ? "cancelled"
     : job.phase === "checking"
     ? "Checking upload…"
-    : job.phase === "preparing"
-    ? `Preparing file · ${pct}%`
     : job.phase === "finalizing"
     ? "Finishing upload…"
     : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`;

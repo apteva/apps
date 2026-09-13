@@ -149,7 +149,7 @@ func TestGatewayAppEventsRequiresAuthentication(t *testing.T) {
 			"topics": []any{"row.*"},
 			"output": map[string]any{"type": "invalidate", "resource": "ventes"},
 		},
-	}); err == nil || !strings.Contains(err.Error(), "require api_key or auth_jwt") {
+	}); err == nil || !strings.Contains(err.Error(), "require api_key, auth_jwt, or authorizer") {
 		t.Fatalf("unsafe stream configuration accepted: %v", err)
 	}
 
@@ -161,7 +161,7 @@ func TestGatewayAppEventsRequiresAuthentication(t *testing.T) {
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/gw/public-events/changes?project_id="+testProject, nil)
 	app.handleGateway(rr, req)
-	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "require api_key or auth_jwt") {
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "require api_key, auth_jwt, or authorizer") {
 		t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
 	}
 }

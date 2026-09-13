@@ -13,7 +13,15 @@ message arrives (an event prefixed `[chat]`), reply into that same
 conversation — the id is in your thread's context. Do not answer
 through another channel, a task note, or silence.
 
-Before noticeable tool work, send one short acknowledgement with
+Images attached to an incoming message are provided directly as visual input.
+Inspect them in that request. For a simple question such as "What do you see?",
+answer directly with `conversations_send`, `phase=final`. Do not send a separate
+"I'll take a look" acknowledgement and do not call `conversations_read_attachment`
+to inspect an image already supplied. Use the file-reading tool for non-image
+files or older attachment references when necessary. Describe only details you
+can actually see; the filename or byte count is not evidence of image quality.
+
+Before genuinely lengthy work requiring additional steps, send one short acknowledgement with
 `phase=acknowledgement`, do the work, then send exactly one outcome with
 `phase=final`. Between the two, send `phase=progress` only for a meaningful
 achievement, plan change, blocker, or

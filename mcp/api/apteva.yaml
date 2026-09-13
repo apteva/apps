@@ -2,8 +2,17 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.6.4
+version: 0.8.1
 description: |
+  v0.8.1 Allows independent repair of legacy authenticated Function routes while
+  preserving edited-route validation, shared CORS checks, and fail-closed calls.
+
+  v0.8.0 Authenticated Function routes use functions_invoke_authenticated with
+  verified principals, explicit permitted Function IDs, and original deadlines.
+
+  v0.7.0 Configurable Auth or installed-app authorizers produce normalized principals
+  for authenticated Function invocations, with explicitly allowed claims.
+
   v0.6.4 Concurrent gateway read pools with immediate shared route-cache invalidation; preserves streaming, browser cancellation, and correlated upstream budgets.
 
   v0.6.2 Uses the configured route timeout for upstream response headers, including queueing and execution, preserves browser cancellation, classifies deadline failures, and propagates request correlation IDs.
@@ -54,10 +63,16 @@ requires:
       required: false
       label: HTTP upstream app
       hint: Bind an installed app before creating routes that target its HTTP endpoints.
+    - role: authorizer
+      kind: app
+      required: false
+      label: Authentication provider app
+      hint: Bind an app implementing the API authorizer contract before selecting provider=app.
   apps:
     - name: functions
+      version: ">=1.14.1"
       optional: true
-      reason: Used when an API route targets a serverless function.
+      reason: Authenticated Function routes use trusted MCP admission with configured Function IDs.
     - name: domains
       optional: true
       reason: Used to write DNS records when attaching a public hostname.
@@ -105,7 +120,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.6.4
+    ref: api/v0.8.1
     entry: mcp/api
   port: 8080
   health_check: /health

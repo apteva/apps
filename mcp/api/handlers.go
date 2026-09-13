@@ -307,6 +307,11 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w = corsWriter
+	if route.TargetKind != "app_events" {
+		ctx, cancel := context.WithTimeoutCause(r.Context(), time.Duration(route.TimeoutMS)*time.Millisecond, errGatewayDeadline)
+		defer cancel()
+		r = r.WithContext(ctx)
+	}
 	authCtx, err := a.authorizeRequest(r, api, route)
 	logRow.AuthKind = authCtx.Kind
 	logRow.Subject = authCtx.Subject
@@ -386,19 +391,21 @@ func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, s
 }
 
 type authContext struct {
-	Kind      string    `json:"kind"`
-	Subject   string    `json:"subject"`
-	KeyID     int64     `json:"-"`
-	ExpiresAt time.Time `json:"-"`
+	Kind      string     `json:"kind"`
+	Principal *Principal `json:"-"`
+	Subject   string     `json:"subject"`
+	KeyID     int64      `json:"-"`
+	ExpiresAt time.Time  `json:"-"`
 }
 
 func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (authContext, error) {
-	kind, err := effectiveAuthKind(api.AuthJSON, route.AuthJSON)
+	policy, err := effectiveAuthPolicy(api.AuthJSON, route.AuthJSON)
+	kind := policy.Kind
 	if err != nil {
 		return authContext{}, authFailure(500, "invalid authentication configuration", err)
 	}
 	if route.TargetKind == "app_events" && (kind == "" || kind == "public") {
-		return authContext{Kind: "public"}, authFailure(401, "app_events routes require api_key or auth_jwt authentication", nil)
+		return authContext{Kind: "public"}, authFailure(401, "app_events routes require api_key, auth_jwt, or authorizer authentication", nil)
 	}
 	switch kind {
 	case "", "public":
@@ -422,72 +429,25 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 		if !ok {
 			return authContext{Kind: "api_key"}, authFailure(401, "invalid api key", nil)
 		}
-		return authContext{Kind: "api_key", Subject: "api_key", KeyID: keyID}, nil
-	case "auth_jwt":
-		subject, err := a.verifyAuthJWT(r, api.ProjectID)
-		return authContext{Kind: "auth_jwt", Subject: subject, ExpiresAt: bearerExpiry(r)}, err
+		return authContext{Kind: "api_key", Subject: "api_key", KeyID: keyID, Principal: &Principal{Issuer: "apteva:api", Subject: "api_key:" + strconv.FormatInt(keyID, 10), ProjectID: api.ProjectID}}, nil
+	case "auth_jwt", "authorizer":
+		principal, expiry, err := a.authenticatePrincipal(r, api.ProjectID, policy)
+		result := authContext{Kind: kind, Principal: principal, ExpiresAt: expiry}
+		if principal != nil {
+			result.Subject = principal.Subject
+		}
+		return result, err
 	default:
 		return authContext{Kind: kind}, errors.New("unknown auth policy")
 	}
 }
 
 func (a *App) verifyAuthJWT(r *http.Request, projectID string) (string, error) {
-	r, cancel := withAuthDeadline(r)
-	defer cancel()
-	token := bearerToken(r.Header.Get("Authorization"))
-	if token == "" {
-		return "", authFailure(401, "missing bearer token", nil)
-	}
-	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
-	if base == "" {
-		return "", authFailure(503, "authentication service unavailable", nil)
-	}
-	u := base + "/api/apps/auth/me?project_id=" + url.QueryEscape(projectID)
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u, nil)
+	principal, _, err := a.authenticatePrincipal(r, projectID, authorizerPolicy{Kind: "auth_jwt", Provider: "auth"})
 	if err != nil {
-		return "", authBackendFailure(err)
+		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := a.performRequest(req)
-	if err != nil {
-		return "", authBackendFailure(err)
-	}
-	defer resp.Body.Close()
-	switch resp.StatusCode {
-	case http.StatusUnauthorized:
-		return "", authFailure(401, "invalid or expired bearer token", nil)
-	case http.StatusForbidden:
-		return "", authFailure(403, "access forbidden", nil)
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
-		return "", authFailure(503, "authentication service unavailable", nil)
-	case http.StatusGatewayTimeout, http.StatusRequestTimeout:
-		return "", authFailure(504, "authentication service timed out", nil)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", authFailure(502, "authentication service failed", nil)
-	}
-	body, readErr := readBounded(resp.Body, 1<<20)
-	if readErr != nil {
-		return "", authBackendFailure(readErr)
-	}
-	var out map[string]any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if decoder.Decode(&out) != nil {
-		return "", authFailure(502, "invalid authentication service response", nil)
-	}
-	if user, _ := out["user"].(map[string]any); user != nil {
-		if s, _ := user["id"].(string); s != "" {
-			return s, nil
-		}
-		if n, ok := user["id"].(json.Number); ok {
-			if id, err := n.Int64(); err == nil && id > 0 {
-				return strconv.FormatInt(id, 10), nil
-			}
-		}
-
-	}
-	return "", authFailure(502, "invalid authentication service response", nil)
+	return principal.Subject, nil
 }
 
 func (a *App) dispatchRoute(w http.ResponseWriter, r *http.Request, api *API, route *APIRoute, publicPath string, params map[string]string, auth authContext) (int, error) {
@@ -527,15 +487,25 @@ func (a *App) dispatchFunction(w http.ResponseWriter, r *http.Request, api *API,
 		"query":       queryMap(sanitizedQuery(r.URL.Query())),
 		"params":      params,
 		"raw_body":    string(raw),
+		"body":        nil,
 		"auth":        auth,
+		"principal":   auth.Principal,
 		"received_at": time.Now().UTC().Format(time.RFC3339),
 		"request_id":  gatewayRequestID(r.Context()),
+	}
+	if deadline, ok := r.Context().Deadline(); ok {
+		event["deadline"] = deadline.UTC().Format(time.RFC3339Nano)
 	}
 	if len(raw) > 0 {
 		var body any
 		if err := json.Unmarshal(raw, &body); err == nil {
 			event["body"] = body
+		} else {
+			event["body"] = string(raw)
 		}
+	}
+	if auth.Principal != nil || (auth.Kind != "" && auth.Kind != "public") {
+		return a.dispatchAuthenticatedFunction(w, r, api, route, event, auth)
 	}
 	eventJSON, err := json.Marshal(event)
 	if err != nil {

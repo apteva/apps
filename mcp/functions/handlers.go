@@ -506,10 +506,13 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 // returns 500 with the error message — callers reading from jobs
 // see the non-2xx and retry on schedule.
 func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, trigger string) {
-	r = withCorrelation(r, w)
+	r = withCorrelation(invocationIdentityFromRequest(r), w)
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, trigger, stream)
 	if err != nil {
+		if !stream.started && writeInvocationDenied(w, err) {
+			return
+		}
 		if !stream.started && writeAutomaticOverload(w, err) {
 			return
 		}
@@ -567,10 +570,13 @@ func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *htt
 }
 
 func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
-	r = withCorrelation(r, w)
+	r = withCorrelation(invocationIdentityFromRequest(r), w)
 	stream := &httpInvocationStream{w: w}
 	res, err := invokeFunctionWithStream(ctx, r.Context(), fn, event, "function_url", stream)
 	if err != nil {
+		if !stream.started && writeInvocationDenied(w, err) {
+			return
+		}
 		if !stream.started && writeAutomaticOverload(w, err) {
 			return
 		}
@@ -1150,6 +1156,7 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("invocation not found")
 	}
 	return map[string]any{
+		"identity":      inv.Identity,
 		"invocation_id": inv.ID,
 		"function_id":   inv.FunctionID,
 		"stdout":        inv.ResponseBody,
@@ -1186,6 +1193,13 @@ func buildAndCreateFunctionContext(parent context.Context, ctx *sdk.AppCtx, pid 
 		RepoPath:    strArg(args, "repo_path"),
 		TimeoutMS:   intArg(args, "timeout_ms", defaultTimeout),
 		MaxMemoryMB: intArg(args, "max_memory_mb", defaultMemoryMB),
+	}
+	if raw, ok := args["invocation_policy"]; ok {
+		var err error
+		fn.InvocationPolicy, err = parseInvocationPolicy(raw)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if raw, ok := args["limits"]; ok {
 		b, _ := json.Marshal(raw)

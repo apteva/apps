@@ -1,3 +1,6 @@
+import type { ComposerOptions } from "./composer";
+export type { ComposerOptions } from "./composer";
+type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions};
 import { ConversationLocalizationProvider, ConversationLocaleRegion, type ConversationLocalization } from "./i18n";
 export { ConversationLocalizationProvider } from "./i18n";
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";
@@ -8,13 +11,13 @@ import { ConversationsProvider } from "./context";
 import type { ConversationsClient } from "./client";
 export { ConversationsProvider } from "./context";
 
-export interface ChatProps extends ConversationLocalization {
+export interface ChatProps extends ChatConfiguration {
   conversations: ConversationsClient;
   agentId: number;
   showNewConversation?: boolean;
   className?: string;
 }
-function Surface({ conversations, children, className, ...localization }: ConversationLocalization & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
+function Surface({ conversations, children, className, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
   return <ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
     <ConversationLocaleRegion className={className}>{children}</ConversationLocaleRegion>
   </ConversationsProvider>;
@@ -31,7 +34,7 @@ export function AgentConversations({ conversations, agentId, showNewConversation
     instanceId={agentId} widgetSettings={{display_mode:"browser",show_new_conversation:showNewConversation}}
   /></Surface>;
 }
-export function ConversationThread({ conversations, conversation, onChanged = () => {}, ...localization }: ConversationLocalization & {
+export function ConversationThread({ conversations, conversation, onChanged = () => {}, ...localization }: ChatConfiguration & {
   conversations: ConversationsClient; conversation: Conversation; onChanged?: () => void;
 }) {
   if (conversation.project_id !== conversations.projectId) throw new Error("Conversation project does not match the host scope");
@@ -43,17 +46,17 @@ import { useEffect, useState } from "react";
 import InboxWidget from "./InboxWidget";
 import Panel, { ApprovalCard as ApprovalView, ReportCard as ReportView, AlertCard as AlertView } from "./ConversationsPanel";
 import type { Message } from "./types";
-export function Inbox({ conversations, agentId, conversationsHref, eventRevision, size = "full", ...localization }: ConversationLocalization & {
+export function Inbox({ conversations, agentId, conversationsHref, eventRevision, size = "full", ...localization }: ChatConfiguration & {
   conversations: ConversationsClient; agentId?: number; conversationsHref?: string; eventRevision?: number; size?: "half" | "full";
 }) {
   return <Surface conversations={conversations} {...localization}><InboxWidget key={agentId} agentId={agentId} projectId={conversations.projectId} installId={conversations.installId}
     conversationsHref={conversationsHref} eventRevision={eventRevision} widgetSize={size}/></Surface>;
 }
-export function ConversationsPanel({ conversations, agentId, ...localization }: ConversationLocalization & { conversations: ConversationsClient; agentId?: number }) {
+export function ConversationsPanel({ conversations, agentId, ...localization }: ChatConfiguration & { conversations: ConversationsClient; agentId?: number }) {
   return <Surface conversations={conversations} {...localization}><Panel appName="conversations" projectId={conversations.projectId}
     installId={conversations.installId ?? 0} instanceId={agentId}/></Surface>;
 }
-export function ApprovalCard({ conversations, message, onChanged, ...localization }: ConversationLocalization & { conversations: ConversationsClient; message: Message; onChanged?: (message: Message) => void }) {
+export function ApprovalCard({ conversations, message, onChanged, ...localization }: ChatConfiguration & { conversations: ConversationsClient; message: Message; onChanged?: (message: Message) => void }) {
   const [current,setCurrent]=useState(message);
   useEffect(()=>setCurrent(message),[message]);
   return <Surface conversations={conversations} {...localization}><ApprovalView message={current} onAction={async(id,action,note)=>{

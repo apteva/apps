@@ -163,6 +163,7 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 	if res.AptevaAccessToken != "" {
 		resp["apteva_access_token"] = res.AptevaAccessToken
 		resp["apteva_expires_in"] = res.AptevaExpiresIn
+		resp["apteva_expires_at"] = res.AptevaExpiresAt
 	}
 	if res.Authorization != nil {
 		resp["authorization"] = res.Authorization
@@ -202,6 +203,7 @@ type signupResult struct {
 	RefreshToken         string                `json:"refresh_token,omitempty"`
 	ExpiresIn            int                   `json:"expires_in,omitempty"`
 	AptevaAccessToken    string                `json:"apteva_access_token,omitempty"`
+	AptevaExpiresAt      string                `json:"apteva_expires_at,omitempty"`
 	AptevaExpiresIn      int                   `json:"apteva_expires_in,omitempty"`
 	VerificationRequired bool                  `json:"verification_required,omitempty"`
 	DeliveryError        string                `json:"delivery_error,omitempty"`
@@ -323,16 +325,18 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err = tx.Commit(); err != nil {
 		return nil, 500, err
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, tokens)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
 	}
 	aptevaAccessToken := ""
 	aptevaExpiresIn := 0
+	aptevaExpiresAt := ""
 	if aptevaToken != nil {
 		aptevaAccessToken = aptevaToken.AccessToken
 		aptevaExpiresIn = aptevaToken.ExpiresIn
+		aptevaExpiresAt = aptevaToken.ExpiresAt
 	}
 	return &signupResult{
 		User:              user,
@@ -342,6 +346,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 		ExpiresIn:         tokens.expiresIn,
 		AptevaAccessToken: aptevaAccessToken,
 		AptevaExpiresIn:   aptevaExpiresIn,
+		AptevaExpiresAt:   aptevaExpiresAt,
 	}, http.StatusCreated, nil
 }
 
@@ -472,7 +477,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, tokens)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
@@ -492,6 +497,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if aptevaToken != nil {
 		resp["apteva_access_token"] = aptevaToken.AccessToken
 		resp["apteva_expires_in"] = aptevaToken.ExpiresIn
+		resp["apteva_expires_at"] = aptevaToken.ExpiresAt
 	}
 	httpJSON(w, resp)
 }
@@ -525,7 +531,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
-		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		writeRefreshError(w, clientErr)
 		return
 	}
 	if err := requireAllowedOrigin(client, r.Header.Get("Origin")); err != nil {
@@ -534,15 +540,15 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := authenticateClient(ctx, pid, client, r, body.ClientSecret); err != nil {
-		httpErr(w, 401, err.Error())
+		writeRefreshError(w, err)
 		return
 	}
 	tokens, org, user, err := refreshSession(ctx, pid, client, body.RefreshToken, strings.ToLower(strings.TrimSpace(body.OrganizationSlug)), r)
 	if err != nil {
-		httpErr(w, 401, err.Error())
+		writeRefreshError(w, err)
 		return
 	}
-	aptevaToken, err := mintAptevaDelegatedToken(pid, org, user, client)
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, tokens)
 	if err != nil {
 		ctx.Logger().Warn("delegated user token mint failed", "err", err)
 		aptevaToken = nil
@@ -560,6 +566,7 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if aptevaToken != nil {
 		resp["apteva_access_token"] = aptevaToken.AccessToken
 		resp["apteva_expires_in"] = aptevaToken.ExpiresIn
+		resp["apteva_expires_at"] = aptevaToken.ExpiresAt
 	}
 	httpJSON(w, resp)
 }
@@ -586,7 +593,12 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.RefreshToken != "" {
 		var family string
-		if err := ctx.AppDB().QueryRow(`SELECT IFNULL(family_id,'') FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(body.RefreshToken)).Scan(&family); err == nil && family != "" {
+		err := ctx.AppDB().QueryRow(`SELECT IFNULL(family_id,'') FROM sessions WHERE project_id=? AND refresh_token_hash=?`, pid, hashToken(body.RefreshToken)).Scan(&family)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			httpErr(w, 503, "logout unavailable")
+			return
+		}
+		if err == nil && family != "" {
 			if err := revokeFamily(ctx.AppDB(), pid, family); err != nil {
 				httpErr(w, 500, "logout unavailable")
 				return
@@ -779,6 +791,7 @@ func (a *App) handleOrgPublic(w http.ResponseWriter, r *http.Request) {
 // ─── helpers used only by handlers ────────────────────────────────────
 
 type tokenPair struct {
+	request       *http.Request
 	access        string
 	refresh       string
 	expiresIn     int

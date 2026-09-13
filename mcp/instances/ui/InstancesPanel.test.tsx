@@ -2,7 +2,7 @@ import {afterEach, beforeAll, expect, test} from "bun:test";
 import {Window} from "happy-dom";
 import React, {act} from "react";
 import {createRoot, type Root} from "react-dom/client";
-import {CreateDialog, InstanceCard, HostOnboardingDialog} from "./InstancesPanel";
+import {CreateDialog, InstanceCard, HostOnboardingDialog, ObjectStorageSection} from "./InstancesPanel";
 import {normalizeArchitecture} from "./catalog-state";
 
 const win = new Window({url:"http://localhost"});
@@ -72,4 +72,26 @@ test("setup retry uses wait-ready and sends the selected capabilities", async ()
  const retry=Array.from(container.querySelectorAll('button')).find(b=>b.textContent==='Retry setup')!;
  await act(async()=>{retry.click();});
  expect(sent).toEqual({async:true,retry:true,setup});
+});
+
+
+test("bucket setup asks for credentials and rotates only with explicit selection", async () => {
+ const item={id:12,name:"Media",provider:"vultr",provider_id:"subscription-1",status:"error",setup:{stage:"cors",error:"Unsupported operation"}};
+ const posts:any[]=[];
+ globalThis.fetch=(async(_input:any,init:any)=>{
+  if(init?.method==="POST"){posts.push(JSON.parse(init.body));return response({object_storage:{...item,status:"ready",setup:{stage:"ready"}},credentials:{endpoint:"https://storage.example.com",access_key_id:"new-key",secret_access_key:"returned-secret"}});}
+  return response({object_storages:[item]});
+ }) as unknown as typeof fetch;
+ await render(<ObjectStorageSection withParams={params} setError={()=>{}} refresh={0}/>);
+ const retry=Array.from(container.querySelectorAll("button")).find(button=>button.textContent==="Retry setup")!;
+ await act(async()=>retry.click());
+ expect(posts).toEqual([]);
+ expect(container.querySelector('input[type="password"]')).not.toBeNull();
+ const checkbox=container.querySelector('input[type="checkbox"]') as HTMLInputElement;
+ await act(async()=>checkbox.click());
+ const submit=Array.from(container.querySelectorAll("button")).find(button=>button.textContent==="Run bucket setup")!;
+ await act(async()=>submit.click());
+ expect(posts).toEqual([{id:12,setup:{cors_origins:[]},rotate_credentials:true}]);
+ expect(container.textContent).toContain("returned-secret");
+ expect(container.textContent).not.toContain("S3 connection");
 });

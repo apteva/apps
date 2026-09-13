@@ -44,3 +44,23 @@ export async function fetchPanelRows(fetcher: typeof fetch, url: string, field: 
   if (data[field] != null && !Array.isArray(data[field])) throw new Error(`Invalid ${field} response`);
   return data[field] || [];
 }
+
+export function updatedAuth(kind: string, settings: Record<string, unknown>) {
+  if (kind === "default") return {};
+  if (kind !== "authorizer" && kind !== "auth_jwt" && kind !== "api_key") return { kind };
+  const ids = Array.isArray(settings.function_ids) ? settings.function_ids.filter(v => String(v).trim() !== "").map(v => {
+    const id = Number(v);
+    return /^\d+$/.test(String(v).trim()) && Number.isSafeInteger(id) && id > 0 ? id : v;
+  }) : [];
+  const scope = ids.length ? { function_ids: ids } : {};
+  if (kind === "api_key") return { kind, ...scope };
+  const provider = kind === "auth_jwt" ? "auth" : settings.provider === "app" ? "app" : "auth";
+  return {
+    kind,
+    ...scope,
+    ...(kind === "authorizer" ? { provider } : {}),
+    ...(provider === "app" ? { app: settings.app || "", path: settings.path || "/authorize", issuer: settings.issuer || "" } : {}),
+    ...(settings.tenant_id ? { tenant_id: settings.tenant_id } : {}),
+    claims: Array.isArray(settings.claims) ? settings.claims.filter((v): v is string => typeof v === "string" && !!v.trim()).map(v => v.trim()) : [],
+  };
+}

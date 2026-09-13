@@ -3,13 +3,15 @@ module github.com/apteva/apps/mcp/instances
 go 1.27.1
 
 require (
-	github.com/apteva/app-sdk v0.77.0
+	github.com/apteva/app-sdk v0.79.0
+	github.com/aws/aws-sdk-go-v2 v1.47.0
 	github.com/shirou/gopsutil/v4 v4.26.4
 	golang.org/x/crypto v0.56.0
 	modernc.org/sqlite v1.50.0
 )
 
 require (
+	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect

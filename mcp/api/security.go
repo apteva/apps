@@ -92,34 +92,28 @@ func policyObject(raw string) (map[string]any, error) {
 	return obj, nil
 }
 func validateAuthPolicy(raw string) error {
-	obj, err := policyObject(raw)
+	_, err := parseAuthPolicy(raw)
+	return err
+}
+func effectiveAuthPolicy(base, override string) (authorizerPolicy, error) {
+	if _, err := parseAuthPolicy(base); err != nil {
+		return authorizerPolicy{}, err
+	}
+	policy, err := parseAuthPolicy(override)
 	if err != nil {
-		return err
+		return policy, err
 	}
-	for key, value := range obj {
-		if key != "kind" {
-			return errors.New("unsupported auth field: " + key)
-		}
-		kind, ok := value.(string)
-		if !ok {
-			return errors.New("auth.kind must be a string")
-		}
-		switch kind {
-		case "public", "api_key", "auth_jwt":
-		default:
-			return errors.New("auth.kind must be public, api_key, or auth_jwt")
-		}
+	obj, _ := policyObject(override)
+	// A route replaces the whole policy, preventing provider/claim inheritance
+	// when switching authorizers. An empty object inherits the API policy.
+	if len(obj) == 0 {
+		return parseAuthPolicy(base)
 	}
-	return nil
+	return policy, nil
 }
 func effectiveAuthKind(base, override string) (string, error) {
-	if err := validateAuthPolicy(base); err != nil {
-		return "", err
-	}
-	if err := validateAuthPolicy(override); err != nil {
-		return "", err
-	}
-	return stringFromMap(effectiveJSON(base, override), "kind", "public"), nil
+	policy, err := effectiveAuthPolicy(base, override)
+	return policy.Kind, err
 }
 func normalizedAuthArg(args map[string]any, key, def string) (string, error) {
 	if v, ok := args[key]; ok && v == nil {
@@ -151,8 +145,8 @@ func sanitizedHeaders(src http.Header) http.Header {
 	stripHopHeaders(out)
 	for key := range out {
 		low := strings.ToLower(key)
-		if low == "authorization" || low == "cookie" || low == "x-api-key" || low == "host" || low == "forwarded" || strings.HasPrefix(low, "x-apteva-") || strings.HasPrefix(low, "x-forwarded-") || low == "x-user-id" {
-			out.Del(key)
+		if low == "authorization" || low == "cookie" || low == "x-api-key" || low == "host" || low == "forwarded" || strings.HasPrefix(low, "x-apteva-") || strings.HasPrefix(low, "x-forwarded-") || low == "x-user-id" || low == "x-principal" || low == "x-authenticated-user" || low == "x-auth-request-user" {
+			delete(out, key)
 		}
 	}
 	return out

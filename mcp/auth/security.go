@@ -305,7 +305,13 @@ func authenticateClient(ctx *sdk.AppCtx, pid string, c *Client, r *http.Request,
 		}
 	}
 	ok, err := dbVerifyClientSecret(ctx.AppDB(), pid, c.ClientID, secret)
-	if err != nil || !ok {
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("invalid_client")
+		}
+		return err
+	}
+	if !ok {
 		return errors.New("invalid_client")
 	}
 	return nil

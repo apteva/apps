@@ -108,6 +108,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.sweepDone = make(chan struct{})
 	go func() {
 		defer close(a.sweepDone)
+		prepareBrowserUpload(sweepCtx, ctx, "")
 		sweepBlobCleanup(ctx)
 		sweepStaleUploads(ctx)
 		sweepStalePendingUploads(ctx)
@@ -124,6 +125,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 				return
 			case <-t.C:
 			}
+			prepareBrowserUpload(sweepCtx, ctx, "")
 			sweepBlobCleanup(ctx)
 			sweepStaleUploads(ctx)
 			sweepStalePendingUploads(ctx)
@@ -2088,6 +2090,11 @@ func saveBytes(ctx *sdk.AppCtx, pid string, in uploadInput, body []byte) (*File,
 // in tests, holding a Rows cursor open while issuing a nested
 // QueryRow deadlocks.
 func dbFindExact(db *sql.DB, pid, hash, folder, name string) (*File, error) {
+	// Direct multipart uploads have no whole-file digest. Unknown hashes
+	// must never deduplicate unrelated files.
+	if hash == "" {
+		return nil, nil
+	}
 	var id int64
 	err := db.QueryRow(
 		`SELECT id FROM files WHERE project_id = ? AND sha256 = ? AND folder = ? AND name = ?
@@ -2103,6 +2110,9 @@ func dbFindExact(db *sql.DB, pid, hash, folder, name string) (*File, error) {
 }
 
 func dbFindBySHA(db *sql.DB, pid, hash string) (*File, error) {
+	if hash == "" {
+		return nil, nil
+	}
 	var id int64
 	err := db.QueryRow(
 		`SELECT id FROM files WHERE project_id = ? AND sha256 = ? AND deleted_at IS NULL

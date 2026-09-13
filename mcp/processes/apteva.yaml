@@ -1,0 +1,90 @@
+schema: apteva-app/v1
+name: processes
+display_name: Processes
+version: 0.5.0
+description: Event-driven company procedures with reusable assignments, multi-agent steps, approval gates, recurring runs, and optional Tasks execution.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/processes
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [productivity, processes, agents, operations]
+scopes: [project, global]
+min_apteva_version: "0.51.3"
+requires:
+  permissions: [platform.events.subscribe, db.write.app, platform.apps.call, platform.instances.read, platform.instances.write, platform.threads.write]
+  apps:
+    - name: tasks
+      optional: true
+      version: ">=3.6.0"
+      reason: Optional Tasks-backed execution and scheduling when selected for a process.
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: list, description: Find company procedures. }
+    - { name: get, description: Read a procedure and its version history. }
+    - { name: create, description: Create a draft company procedure. }
+    - { name: update, description: Create an immutable procedure revision while paused or draft. }
+    - { name: activate, description: Activate a procedure and its schedule. }
+    - { name: pause, description: Stop future scheduled runs without interrupting current work. }
+    - { name: archive, description: Retire a procedure and stop future scheduled runs. }
+    - { name: start, description: Start one execution of an active procedure. }
+    - { name: runs, description: Inspect direct and Tasks-backed execution history. }
+    - { name: run_get, description: "Read a run, its immutable instructions, and workflow steps before acting." }
+    - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
+    - { name: assignments, description: List saved process assignments. }
+    - { name: assignment_get, description: Read assignment settings. }
+    - { name: assignment_create, description: Configure a new assignment with agent and parameters. }
+    - { name: assignment_update, description: Revise a paused assignment. }
+    - { name: assignment_activate, description: Enable an assignment. }
+    - { name: assignment_pause, description: Pause one assignment. }
+    - { name: assignment_archive, description: Archive one assignment. }
+    - { name: step_get, description: Read a workflow step and its dependency outputs. }
+    - { name: step_update, description: Report step output or an explicit approval decision as its assigned executor. }
+    - { name: run_cancel, description: Stop future handoffs in a structured run as coordinator or operator. }
+    - { name: trigger_sources, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: triggers, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_get, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_create, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_update, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_activate, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_pause, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_preview, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_test_run, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_events, description: "Configure, preview and inspect assignment event triggers." }
+    - { name: trigger_event_retry, description: "Retry a failed event against current trigger rules with a stable key." }
+  ui_panels:
+    - slot: project.page
+      label: Processes
+      icon: clipboard-list
+      entry: /ui/ProcessesPanel.mjs
+      suggested: true
+  skills:
+    - name: how-to-use-processes
+      body_file: skills/how-to-use-processes.md
+      description: Discover, maintain, and execute company procedures with direct or Tasks-backed execution.
+      metadata:
+        category: productivity
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: processes/v0.5.0
+    entry: mcp/processes
+  port: 8080
+  health_check: /health
+  resources: { cpu: 0.1, memory: 128, cpu_limit: 1, memory_limit: 256 }
+  storage:
+    - { name: data, mount_path: /data }
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN: { from: platform }
+    APTEVA_INSTALL_ID: { from: platform }
+    APTEVA_PROJECT_ID: { from: platform }
+    APTEVA_APP_CONFIG: { from: platform }
+db:
+  driver: sqlite
+  path: /data/processes.db
+  migrations: migrations/
+config_schema: []
+upgrade_policy: auto-patch

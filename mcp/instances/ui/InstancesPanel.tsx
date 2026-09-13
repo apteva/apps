@@ -84,6 +84,7 @@ interface InstanceVolumeWire {
 }
 
 interface ObjectStorageWire {
+ setup?: { stage: string; error?: string; cors_origins?: string[] };
   id: number;
   name: string;
   provider: string;
@@ -625,7 +626,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   );
 }
 
-function ObjectStorageSection({ withParams, setError, refresh }: {
+export function ObjectStorageSection({ withParams, setError, refresh }: {
   withParams: () => string;
   setError: (value: string) => void;
   refresh: number;
@@ -635,7 +636,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
   const [showCreate, setShowCreate] = useState(false);
   const [credentialResult, setCredentialResult] = useState<{
     object_storage: ObjectStorageWire;
-    credentials: ObjectStorageCredentialsWire;
+    credentials: ObjectStorageCredentialsWire | null;
     warning?: string;
     warnings?: string[];
   } | null>(null);
@@ -671,6 +672,20 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
     }
   };
 
+  const [setupTarget, setSetupTarget] = useState<ObjectStorageWire | null>(null);
+  const [setupAccess, setSetupAccess] = useState("");
+  const [setupSecret, setSetupSecret] = useState("");
+  const [setupRotate, setSetupRotate] = useState(false);
+  const retrySetup = (item: ObjectStorageWire) => {setSetupAccess("");setSetupSecret("");setSetupRotate(false);setSetupTarget(item)};
+  const submitSetup = async (event: React.FormEvent) => {
+    event.preventDefault(); if(!setupTarget) return; setBusy(true);
+    try {
+      const body={id:setupTarget.id,setup:{cors_origins:setupTarget.setup?.cors_origins || []},...(setupRotate ? {rotate_credentials:true} : {credentials:{access_key_id:setupAccess,secret_access_key:setupSecret}})};
+      const response=await fetch(`${API}/object-storage?${withParams()}`,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      if(!response.ok) throw new Error(await response.text());
+      setCredentialResult(await response.json());setSetupSecret("");setSetupTarget(null);await load();
+    }catch(error){setError((error as Error).message)}finally{setBusy(false)}
+  };
   const destroy = async (item: ObjectStorageWire) => {
     const scope = item.bucket ? `bucket ${item.bucket}` : `subscription ${item.name}`;
     if (!window.confirm(`Permanently delete ${scope}? Scaleway buckets must be empty. This cannot be undone.`)) return;
@@ -694,7 +709,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
       <div className="flex flex-wrap items-center gap-2 px-1 pb-1">
         <div>
           <div className="text-sm text-text font-medium">Object storage</div>
-          <div className="text-[11px] text-text-muted">Instances provisions the resource and displays S3 credentials once. It does not store objects or create a Connection.</div>
+          <div className="text-[11px] text-text-muted">Instances sets up a private bucket and browser access, then returns S3 credentials.</div>
         </div>
         <span className="flex-1" />
         <button type="button" onClick={() => setShowCreate(true)}
@@ -719,6 +734,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
             </div>
             <span className="flex-1" />
             <span className={statusColor(item.status) + " text-[10px] uppercase tracking-wider"}>{item.status}</span>
+            <><span className="text-xs">{item.setup ? `Setup: ${item.setup.stage}` : "Setup not configured"}</span><button disabled={busy} onClick={() => retrySetup(item)} className="text-xs border border-border rounded px-2">{item.setup ? "Retry setup" : "Configure storage"}</button></>
             <button type="button" disabled={busy} onClick={() => rotate(item)}
               className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded disabled:opacity-50">
               Rotate credentials
@@ -737,11 +753,18 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
         </article>
       ))}
 
+      {setupTarget && <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60"><form onSubmit={submitSetup} className="bg-bg border border-border rounded p-5 space-y-3">
+        <h2>Configure {setupTarget.name}</h2><p className="text-xs">Use your saved S3 credentials to resume bucket setup.</p>
+        <input aria-label="S3 access key" autoComplete="off" value={setupAccess} onChange={event=>setSetupAccess(event.target.value)} disabled={setupRotate} placeholder="Access key ID" className="block bg-bg-input border border-border rounded p-2" />
+        <input aria-label="S3 secret key" type="password" autoComplete="new-password" value={setupSecret} onChange={event=>setSetupSecret(event.target.value)} disabled={setupRotate} placeholder="Secret access key" className="block bg-bg-input border border-border rounded p-2" />
+        <label className="block text-xs"><input type="checkbox" checked={setupRotate} onChange={event=>setSetupRotate(event.target.checked)} /> Replace lost credentials (invalidates existing keys)</label>
+        <button type="button" onClick={()=>{setSetupTarget(null);setSetupSecret("")}}>Cancel</button><button type="submit" disabled={busy||(!setupRotate&&(!setupAccess||!setupSecret))} className="ml-3">Run bucket setup</button>
+      </form></div>}
       {showCreate && (
         <CreateObjectStorageDialog
           withParams={withParams}
           onClose={() => setShowCreate(false)}
-          onCreated={(result) => { setShowCreate(false); if (result.credentials) setCredentialResult(result); load(); }}
+          onCreated={(result) => { setShowCreate(false); setCredentialResult(result); load(); }}
           setError={setError}
         />
       )}
@@ -755,7 +778,7 @@ function ObjectStorageSection({ withParams, setError, refresh }: {
 function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }: {
   withParams: () => string;
   onClose: () => void;
-  onCreated: (result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string }) => void;
+  onCreated: (result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire | null; warning?: string }) => void;
   setError: (value: string) => void;
 }) {
   const [providers, setProviders] = useState<ObjectStorageProviderWire[]>([]);
@@ -766,6 +789,8 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
   const [region, setRegion] = useState("");
   const [plan, setPlan] = useState("");
   const [bucket, setBucket] = useState("");
+  const [corsOrigins, setCorsOrigins] = useState("");
+  const [requestKey] = useState(() => crypto.randomUUID());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [localError, setLocalError] = useState("");
@@ -830,7 +855,7 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
         method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: name.trim(), provider: selectedProvider.provider, provider_connection_id: selectedProvider.connection_id,
-          region, plan, bucket: selectedProvider.provider === "scaleway" ? bucket.trim() : "",
+          region, plan, bucket: bucket.trim(), request_key: requestKey, setup: { private: true, cors_origins: corsOrigins.split(/[,\n]/).map(value => value.trim()).filter(Boolean) },
         }),
       });
       if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "")}`);
@@ -852,7 +877,7 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
       <form onSubmit={submit} onClick={(event) => event.stopPropagation()} className="bg-bg border border-border rounded shadow-xl overflow-hidden" style={{ width: "min(560px, 100%)" }}>
         <div className="px-5 py-4 space-y-1" style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}>
           <h2 className="text-text font-semibold">Provision object storage</h2>
-          <p className="text-xs text-text-muted">Creates provider infrastructure and returns S3 credentials. Scaleway credentials grant Object Storage access across the selected project; use a dedicated project for isolation.</p>
+          <p className="text-xs text-text-muted">Creates a private bucket and returns S3 credentials. Scaleway credentials grant Object Storage access across the selected project; use a dedicated project for isolation.</p>
         </div>
         <div className="p-5 space-y-4">
           {localError && <div className="text-xs text-red">{localError}</div>}
@@ -890,15 +915,16 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
               </select>
             </div>
           </div>
-          {selectedProvider?.provider === "scaleway" && (
+          {(
             <div>
               <label className="text-xs text-text-muted block mb-1">Bucket name <span className="text-text-dim">(optional)</span></label>
               <input value={bucket} onChange={(event) => setBucket(event.target.value.toLowerCase())}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" placeholder="Generated automatically when blank" />
             </div>
           )}
+          <div><label className="text-xs text-text-muted block mb-1">Allowed browser origins (optional, comma separated)</label><input value={corsOrigins} onChange={event => setCorsOrigins(event.target.value)} placeholder="https://app.example.com" className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm" /></div>
           <div className="rounded p-3 text-[11px] text-amber" style={{ backgroundColor: "rgba(245,158,11,0.06)", border: "1px solid rgba(245,158,11,0.18)" }}>
-            The secret key will be displayed once after provisioning. Instances does not save it, so copy it before closing the next screen.
+            Save the returned credentials after setup. Instances keeps no copy of the secret key.
           </div>
           <div className="flex justify-end gap-2">
             <button type="button" onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm border border-border rounded disabled:opacity-50">Cancel</button>
@@ -912,10 +938,11 @@ function CreateObjectStorageDialog({ withParams, onClose, onCreated, setError }:
 }
 
 function ObjectStorageCredentialsDialog({ result, onClose }: {
-  result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire; warning?: string; warnings?: string[] };
+  result: { object_storage: ObjectStorageWire; credentials: ObjectStorageCredentialsWire | null; warning?: string; warnings?: string[] };
   onClose: () => void;
 }) {
   const credentials = result.credentials;
+ if (!credentials) return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70"><div className="bg-bg border border-border rounded p-5 space-y-3"><h2>Storage setup: {result.object_storage.setup?.stage || result.object_storage.status}</h2><p>Credentials are not stored. Use your saved credentials to resume setup.</p>{result.object_storage.error && <p className="text-red">{result.object_storage.error}</p>}<button onClick={onClose}>Close</button></div></div>;
   const copy = (value: string) => navigator.clipboard.writeText(value);
   const copyAll = () => copy([
     `S3_ENDPOINT=${credentials.endpoint}`,

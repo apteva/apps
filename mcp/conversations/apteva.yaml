@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.22.0
+version: 0.23.3
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -37,6 +37,11 @@ requires:
     - platform.telemetry.read
     - platform.connections.read
     - platform.connections.execute
+  apps:
+    - name: storage
+      version: ">=0.12.3"
+      optional: true
+      reason: Optional private copies of sent attachments with durable file IDs. Enable attachment_storage to use the bound Storage install.
   integrations:
     - role: telegram_bot
       kind: integration
@@ -47,6 +52,11 @@ requires:
       hint: "Bind the Telegram integration connections Conversations may use for project chat routes."
 
 config_schema:
+  - name: attachment_storage
+    type: toggle
+    default: "false"
+    label: Copy attachments to Storage
+    description: Save private copies of sent attachments in the bound Storage app and return file IDs. Conversations retains its originals for authorized history and downloads. Storage copies have independent retention.
   - name: identity_resolver_install_ids
     type: text
     required: false
@@ -67,6 +77,7 @@ provides:
     - { name: create,           description: "Main-thread conversation management only: create a conversation led by this agent. Conversation threads and generic workers do not create conversations. Args: title. Title-idempotent per agent." }
     - { name: list,             description: "Main-thread conversation management only: list conversations this agent participates in. Conversation threads already have their exact id; generic workers report to their parent. Args: limit?, query?." }
     - { name: history,          description: "Read a conversation transcript. Main may inspect a participating conversation; a conversation thread may read only its own exact conversation; generic workers are not granted this tool. Args: conversation_id, since_id?, limit?." }
+    - { name: read_attachment, description: "Read a sent attachment in the current conversation; args conversation_id, attachment_id." }
     - { name: inbox_post, exposure: app_only, description: "INTERNAL - sibling-app entry point via CallAppResult; agent calls are refused. Agents use conversations_alert / conversations_report / conversations_request_approval into a conversation (conversations_list to find one, conversations_create to make one). Args: kind (report|alert|approval), title, body?, severity?, actions?, source_app (required for app callers), callback_tool?, agent_id?, client_message_id? (reuse for identical retries). When callback_tool is set, actions call back into the posting app." }
   ui_panels:
     - slot: project.page
@@ -92,6 +103,11 @@ provides:
             title: Conversation layout
             enum: [browser, single]
             default: browser
+          composer_layout:
+            type: string
+            title: Composer layout
+            enum: [auto, compact, expanded]
+            default: auto
           show_new_conversation:
             type: boolean
             title: Show new conversation
