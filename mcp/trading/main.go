@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.11.0
+version: 0.12.0
 description: Live trading workstation with canonical market data, codified portfolio universes, generic execution profiles, hard risk controls, objectives, durable strategy scorecards, broker execution, and reproducible backtests.
 author: Apteva
 icon: /ui/icon.svg
@@ -185,6 +185,8 @@ provides:
       description: "Pause a portfolio (no new orders)."
     - name: portfolio_arm_live
       description: "Explicitly arm or disarm real-money automated execution."
+    - name: strategy_catalog
+      description: "Discover indicators, conditions and hourly strategy research templates."
     - name: strategy_create
       description: "Create a deterministic strategy definition."
     - name: strategy_update

@@ -35,11 +35,13 @@ type StrategyRule struct {
 }
 
 type StrategyCondition struct {
-	Symbol    string  `json:"symbol,omitempty"`
-	Indicator string  `json:"indicator"`
-	Operator  string  `json:"operator"`
-	Value     float64 `json:"value,omitempty"`
-	Compare   string  `json:"compare,omitempty"`
+	All       []StrategyCondition `json:"all,omitempty"`
+	Any       []StrategyCondition `json:"any,omitempty"`
+	Symbol    string              `json:"symbol,omitempty"`
+	Indicator string              `json:"indicator"`
+	Operator  string              `json:"operator"`
+	Value     float64             `json:"value,omitempty"`
+	Compare   string              `json:"compare,omitempty"`
 }
 
 type StrategyAllocation struct {
@@ -48,11 +50,14 @@ type StrategyAllocation struct {
 }
 
 type StrategyRank struct {
-	Symbols []string `json:"symbols"`
-	By      string   `json:"by"`
-	Top     int      `json:"top"`
-	Weight  string   `json:"weight,omitempty"`
-	Min     float64  `json:"min,omitempty"`
+	Where     *StrategyCondition `json:"where,omitempty"`
+	Direction string             `json:"direction,omitempty"`
+	Budget    float64            `json:"budget,omitempty"`
+	Symbols   []string           `json:"symbols"`
+	By        string             `json:"by"`
+	Top       int                `json:"top"`
+	Weight    string             `json:"weight,omitempty"`
+	Min       float64            `json:"min,omitempty"`
 }
 
 type StrategyRisk struct {
@@ -123,9 +128,7 @@ func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
 	}
 	if len(def.Universe) == 0 {
 		for _, r := range def.Rules {
-			if r.When != nil && strings.TrimSpace(r.When.Symbol) != "" {
-				def.Universe = append(def.Universe, r.When.Symbol)
-			}
+			def.Universe = append(def.Universe, conditionSymbols(r.When)...)
 			for _, a := range r.Allocate {
 				def.Universe = append(def.Universe, a.Symbol)
 			}
@@ -175,21 +178,31 @@ func validateStrategyDefinition(raw map[string]any) (*StrategyDefinition, []stri
 		if len(rule.Allocate) == 0 && rule.Rank == nil {
 			warnings = append(warnings, fmt.Sprintf("rule %q has no allocation output", nonEmpty(rule.Name, "(unnamed)")))
 		}
-		if rule.When != nil && strings.TrimSpace(rule.When.Indicator) == "" {
-			return nil, nil, fmt.Errorf("rule %q condition indicator required", nonEmpty(rule.Name, "(unnamed)"))
+		if err := validateCondition(rule.When, universe, 0); err != nil {
+			return nil, nil, err
 		}
-		if rule.When != nil {
-			symbol := strings.ToUpper(strings.TrimSpace(rule.When.Symbol))
-			if symbol != "" && !universe[symbol] {
-				return nil, nil, fmt.Errorf("rule %q condition symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), symbol)
-			}
-		}
+
 		for _, allocation := range rule.Allocate {
 			if !universe[allocation.Symbol] {
 				return nil, nil, fmt.Errorf("rule %q allocation symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), allocation.Symbol)
 			}
 		}
 		if rule.Rank != nil {
+			if _, err := parseIndicator(rule.Rank.By); err != nil {
+				return nil, nil, err
+			}
+			if err := validateCondition(rule.Rank.Where, universe, 0); err != nil {
+				return nil, nil, err
+			}
+			if rule.Rank.Direction != "" && rule.Rank.Direction != "asc" && rule.Rank.Direction != "desc" {
+				return nil, nil, errors.New("rank direction must be asc or desc")
+			}
+			if rule.Rank.Budget < 0 || rule.Rank.Budget > 1 {
+				return nil, nil, errors.New("rank budget must be between 0 and 1")
+			}
+			if rule.Rank.Weight != "" && rule.Rank.Weight != "equal_weight" {
+				return nil, nil, errors.New("rank supports equal_weight only")
+			}
 			for _, symbol := range rule.Rank.Symbols {
 				if !universe[symbol] {
 					return nil, nil, fmt.Errorf("rule %q rank symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), symbol)
@@ -246,6 +259,26 @@ func evaluateStrategy(strategy *Strategy, market strategyMarket) (*StrategyEvalu
 }
 
 func evalStrategyCondition(c StrategyCondition, def *StrategyDefinition, market strategyMarket) (bool, string, error) {
+	if len(c.All) > 0 || len(c.Any) > 0 {
+		group, all := c.All, true
+		if len(c.Any) > 0 {
+			group, all = c.Any, false
+		}
+		matched := 0
+		reasons := []string{}
+		for _, child := range group {
+			ok, reason, err := evalStrategyCondition(child, def, market)
+			if err != nil {
+				return false, "", err
+			}
+			if ok {
+				matched++
+			}
+			reasons = append(reasons, reason)
+		}
+		return (all && matched == len(group)) || (!all && matched > 0), strings.Join(reasons, "; "), nil
+	}
+
 	symbol := strings.ToUpper(strings.TrimSpace(c.Symbol))
 	if symbol == "" && len(def.Universe) > 0 {
 		symbol = def.Universe[0]
@@ -264,6 +297,27 @@ func evalStrategyCondition(c StrategyCondition, def *StrategyDefinition, market 
 		label = fmt.Sprintf("%s %s %s", c.Indicator, c.Operator, c.Compare)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Operator)) {
+	case "crosses_above", "crosses_below":
+		h := market.history[symbol]
+		if len(h) < 2 {
+			return false, "", errors.New("crossover requires a previous closed bar")
+		}
+		previous := strategyMarket{history: map[string][]float64{symbol: h[:len(h)-1]}, prices: map[string]float64{symbol: h[len(h)-2]}}
+		pl, err := strategyMetric(symbol, c.Indicator, previous)
+		if err != nil {
+			return false, "", err
+		}
+		pr := c.Value
+		if c.Compare != "" {
+			pr, err = strategyMetric(symbol, c.Compare, previous)
+			if err != nil {
+				return false, "", err
+			}
+		}
+		if strings.EqualFold(strings.TrimSpace(c.Operator), "crosses_above") {
+			return pl <= pr && lhs > rhs, label, nil
+		}
+		return pl >= pr && lhs < rhs, label, nil
 	case ">", "above":
 		return lhs > rhs, fmt.Sprintf("%s: %.4f > %.4f", label, lhs, rhs), nil
 	case ">=", "at_or_above":
@@ -288,6 +342,15 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 	}
 	rows := []row{}
 	for _, symbol := range symbols {
+		if rank.Where != nil {
+			ok, _, err := evalStrategyCondition(*rank.Where, &StrategyDefinition{Universe: []string{symbol}}, market)
+			if err != nil {
+				return nil, "", err
+			}
+			if !ok {
+				continue
+			}
+		}
 		v, err := strategyMetric(symbol, rank.By, market)
 		if err != nil {
 			return nil, "", fmt.Errorf("rank %s metric unavailable for %s: %w", rank.By, symbol, err)
@@ -295,9 +358,14 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 		rows = append(rows, row{symbol: symbol, value: v})
 	}
 	if len(rows) == 0 {
-		return nil, "", fmt.Errorf("rank %s has no computable symbols", rank.By)
+		return []StrategyAllocation{}, "no symbols passed the indicator filter; holding cash", nil
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].value > rows[j].value })
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rank.Direction == "asc" {
+			return rows[i].value < rows[j].value
+		}
+		return rows[i].value > rows[j].value
+	})
 	rankedValues := make([]string, 0, len(rows))
 	for _, r := range rows {
 		rankedValues = append(rankedValues, fmt.Sprintf("%s %.4f", r.symbol, r.value))
@@ -315,10 +383,17 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 		}
 	}
 	top := rank.Top
+	if top <= 0 {
+		top = 1
+	}
 	if top > len(rows) {
 		top = len(rows)
 	}
-	weight := 1.0 / float64(top)
+	budget := rank.Budget
+	if budget == 0 {
+		budget = 1
+	}
+	weight := budget / float64(top)
 	out := make([]StrategyAllocation, 0, top)
 	picked := []string{}
 	for _, r := range rows[:top] {
@@ -331,6 +406,10 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 func strategyMetric(symbol, indicator string, market strategyMarket) (float64, error) {
 	symbol = strings.ToUpper(strings.TrimSpace(symbol))
 	indicator = strings.ToLower(strings.TrimSpace(indicator))
+	spec, err := parseIndicator(indicator)
+	if err != nil {
+		return 0, err
+	}
 	if symbol == "" {
 		return 0, errors.New("symbol required")
 	}
@@ -360,10 +439,14 @@ func strategyMetric(symbol, indicator string, market strategyMarket) (float64, e
 			history = []float64{v}
 		}
 	}
+	switch spec.kind {
+	case "ema_sma", "rsi_wilder", "macd", "macd_signal", "macd_hist", "bb_upper", "bb_lower", "bb_width", "bb_percent_b", "zscore":
+		return extendedIndicator(spec, history)
+	}
 	switch {
-	case strings.HasPrefix(indicator, "sma_"):
+	case spec.kind == "sma":
 		return latestFloatSMA(history, parseMetricWindow(indicator, "sma", 20))
-	case strings.HasPrefix(indicator, "ema_"):
+	case spec.kind == "ema":
 		return latestFloatEMA(history, parseMetricWindow(indicator, "ema", 20))
 	case strings.HasPrefix(indicator, "rsi_") || indicator == "rsi":
 		return latestFloatRSI(history, parseMetricWindow(indicator, "rsi", 14))
@@ -736,11 +819,10 @@ func strategyRequiredBars(def *StrategyDefinition) int {
 	if def != nil {
 		for _, rule := range def.Rules {
 			if rule.When != nil {
-				maxBars = max(maxBars, indicatorRequiredBars(rule.When.Indicator))
-				maxBars = max(maxBars, indicatorRequiredBars(rule.When.Compare))
+				maxBars = max(maxBars, conditionRequiredBars(rule.When))
 			}
 			if rule.Rank != nil {
-				maxBars = max(maxBars, indicatorRequiredBars(rule.Rank.By))
+				maxBars = max(maxBars, indicatorRequiredBars(rule.Rank.By), conditionRequiredBars(rule.Rank.Where))
 			}
 		}
 	}
@@ -754,23 +836,11 @@ func strategyRequiredBars(def *StrategyDefinition) int {
 }
 
 func indicatorRequiredBars(indicator string) int {
-	indicator = strings.ToLower(strings.TrimSpace(indicator))
-	switch {
-	case indicator == "", indicator == "price":
-		return 1
-	case strings.HasPrefix(indicator, "sma_"):
-		return parseMetricWindow(indicator, "sma", 20)
-	case strings.HasPrefix(indicator, "ema_"):
-		return parseMetricWindow(indicator, "ema", 20)
-	case strings.HasPrefix(indicator, "rsi_") || indicator == "rsi":
-		return parseMetricWindow(indicator, "rsi", 14) + 1
-	case strings.HasPrefix(indicator, "return_") || indicator == "return":
-		return parseMetricWindow(indicator, "return", 20) + 1
-	case strings.HasPrefix(indicator, "volatility_") || indicator == "volatility":
-		return parseMetricWindow(indicator, "volatility", 20) + 1
-	default:
+	spec, err := parseIndicator(indicator)
+	if err != nil {
 		return 1
 	}
+	return spec.bars
 }
 
 // ─── Strategy MCP tools ────────────────────────────────────────────
@@ -1460,6 +1530,14 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/strategies")
 	rest = strings.Trim(rest, "/")
+	if rest == "catalog" {
+		if r.Method != http.MethodGet {
+			httpErr(w, 405, "GET")
+			return
+		}
+		httpJSON(w, 200, strategyCatalog(strings.Split(r.URL.Query().Get("symbols"), ",")))
+		return
+	}
 	if rest == "" {
 		switch r.Method {
 		case http.MethodGet:

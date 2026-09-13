@@ -184,3 +184,42 @@ func TestFillTimeRiskLimitsPreventCombinedOverexposure(t *testing.T) {
 		t.Fatalf("combined orders exceeded risk limit: %+v", e.State)
 	}
 }
+
+// Hourly OHLC cannot resolve millisecond fills. Keep the approximation explicit:
+// zero latency may use the next bar's open at the close boundary; any positive
+// latency waits for a genuinely fresh later quote, never the observed bar close.
+func TestHourlyOpenQuoteLatencyResolution(t *testing.T) {
+	inputs := []Input{quote("q0", 0, 100, 100), {ID: "closed", Type: "market.bar.close", Symbol: "XYZ", EventTime: epoch, AvailableAt: epoch.Add(time.Hour), Data: map[string]float64{"price": 105}}, quote("q1", 3600, 110, 100), quote("q2", 7200, 120, 100)}
+	for _, ms := range []int64{0, 1, 250} {
+		strategy := func(s *State, in Input) ([]Command, error) {
+			if in.ID == "closed" {
+				return []Command{{Order: &Order{Symbol: "XYZ", Side: "buy", Qty: 1}}}, nil
+			}
+			return nil, nil
+		}
+		e, err := New(Config{StartingCash: 1000, SubmissionLatencyMS: ms}, inputs, nil, strategy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		outputs := finish(t, e)
+		wantPrice, wantTime := 110.0, epoch.Add(time.Hour)
+		if ms > 0 {
+			wantPrice, wantTime = 120, epoch.Add(2*time.Hour)
+		}
+		if e.State.Orders[0].AvgFillPrice != wantPrice {
+			t.Fatalf("latency %d price %v", ms, e.State.Orders[0].AvgFillPrice)
+		}
+		seen := false
+		for _, out := range outputs {
+			if out.Type == "fill" {
+				seen = true
+				if !out.At.Equal(wantTime) {
+					t.Fatalf("latency %d fill at %s", ms, out.At)
+				}
+			}
+		}
+		if !seen {
+			t.Fatal("missing fill")
+		}
+	}
+}

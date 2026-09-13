@@ -25,6 +25,7 @@ var brokerHistoryMu sync.Mutex
 
 func (a *App) MCPTools() []sdk.Tool {
 	definitions := []sdk.Tool{
+		{Name: "strategy_catalog", Description: "Discover indicator formulas, logical conditions and hourly multi-symbol research templates. Call before composing a strategy.", InputSchema: schemaObject(map[string]any{"symbols": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}}, nil), Handler: a.toolStrategyCatalog},
 		// ─── Lifecycle ────────────────────────────────────────────
 		{Name: "portfolio_create", Description: "Create a portfolio. execution_environment is simulation, broker_paper, or broker_live. Legacy mode=paper|live remains accepted. Broker portfolios pull balances from the bound broker.",
 			InputSchema: schemaObject(map[string]any{

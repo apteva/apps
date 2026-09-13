@@ -27,7 +27,7 @@ progress, isolated runs, and replayable artifacts. See [Validation suites](VALID
 
 ```
 apps/mcp/trading/
-├── apteva.yaml             # manifest — kind: source, declares 62 mcp_tools
+├── apteva.yaml             # manifest — kind: source, declares 63 mcp_tools
 ├── go.mod / go.sum
 ├── main.go                 # App impl, HTTP routes, Workers wiring
 ├── tools.go                # MCP tools (the agent's surface)
@@ -321,3 +321,5 @@ atomically and are deduplicated per portfolio. Import does not debit broker cash
 again; fees absent from history are recorded as unknown. Account snapshots remain
 authoritative. Automated tests use provider fixtures and local transport mocks;
 these checks do not certify a real account connection or place venue orders.
+
+Indicator formulas, templates and research sources: [INDICATOR_STRATEGIES.md](INDICATOR_STRATEGIES.md). Discover them through `strategy_catalog` or `GET /strategies/catalog`.
