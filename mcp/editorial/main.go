@@ -19,6 +19,9 @@ import (
 //go:embed apteva.yaml
 var manifestYAML []byte
 
+//go:embed ui/icon.svg
+var iconSVG []byte
+
 // All writes share a lock; revisions protect against stale clients.
 type App struct {
 	ctx    *sdk.AppCtx
@@ -45,7 +48,11 @@ func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
-	return []sdk.Route{{Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}}
+	return []sdk.Route{{Method: "GET", Pattern: "/ui/icon.svg", Handler: func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Write(iconSVG)
+	}}, {Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}}
 }
 func str(m map[string]any, k string) string { v, _ := m[k].(string); return v }
 func number(m map[string]any, k string) int64 {

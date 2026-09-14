@@ -2,6 +2,12 @@
 
 A standalone content calendar and content-operations app. Install it with **all optional integrations skipped** and immediately plan ideas, briefs, articles, videos, podcasts, newsletters, campaigns and refreshes. No CRM, Calendar, Jobs, Social, Campaigns, Storage, or external account is needed.
 
+## Interface
+
+The panel follows the same compact layout and shared components as CRM and Social. Calendar, Board, Content, Backlog and Settings views inherit the dashboard's Terminal or Clean theme in light and dark mode. Select a content item to edit its Brief, Details, Releases or History in a side inspector, with a responsive overlay on smaller screens and a prompt before discarding unsaved changes.
+
+The monochrome app icon is embedded in the sidecar and served independently of its working directory.
+
 ## Planning
 
 - Calendar (publication dates and channel releases, or editorial deadlines), board, table and unscheduled backlog.
