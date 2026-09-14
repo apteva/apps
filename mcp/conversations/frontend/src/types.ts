@@ -41,7 +41,14 @@ export interface ToolActivity {
   name: string; reason: string; status: "running" | "completed" | "failed" | "interrupted";
   started_at: string; ended_at: string; duration_ms?: number; revision: number;
 }
+export interface ResponseProgress {
+ phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
+ run_id: string; revision: number; after_message_id: number; started_at: string;
+ tool_name?: string; call_id?: string;
+}
 export interface StreamFrame {
+ response_progress?: ResponseProgress;
+
   created_at?: string;
   tool_activity?: ToolActivity;
  after_message_id?: number;

@@ -332,3 +332,41 @@ for (const host of ["dashboard", "external", "package"]) {
   expect((await geometry()).input.height).toBe(24);
  });
 }
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: preparation pulses, tools finish, continuation resumes and approval waiting stops activity`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=new Date(Date.now()-1000).toISOString();
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  const progress={run_id:"response-1",revision:1,after_message_id:0,started_at:start,phase:"thinking"};
+  const phase=async(phase:string,revision:number,extra={})=>request.post("/emit",{data:{...frame,response_progress:{...progress,phase,revision,...extra}}});
+  await phase("thinking",1);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await phase("preparing_tool",2,{tool_name:"code_repos_list",call_id:"call-1"});
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await expect(row).toHaveAttribute("aria-label",/Preparing/);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await page.screenshot({path:test.info().outputPath("preparing-tool.png")});
+  const activity={id:501,chat_id:chat,agent_id:41,thread_id:chat,call_id:"call-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",3);
+  await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
+  await expect(row).toHaveAttribute("aria-label",/Done/);
+  await phase("continuing",4);
+  await expect(row.getByText("Preparing next step…")).toBeVisible();
+  await expect(row.getByText("42ms",{exact:true})).toBeVisible();
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
+  await phase("idle",5);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
+  // An approval verdict begins a new turn. Existing tool history stays done.
+  await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+ });
+}

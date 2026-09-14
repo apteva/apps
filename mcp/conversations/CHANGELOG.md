@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.16 — 2026-09-14
+
+- Restore live tool preparation and pulsing continuation from the dashboard chat lifecycle. Model and tool events drive progress; background work after final replies and approval waiting stays silent.
+- Paint rapid tool starts before results while preserving actual execution durations. Report Core success=false results as failures.
+- Clear pending thinking when an approval card is delivered and start a fresh indicator when the approval verdict reaches the requesting agent. Preserve room isolation and old-card replay handling.
+- Share the lifecycle and animations across dashboard panels, app-loaded embeds and npm React exports.
+
 ## 0.23.15 — 2026-09-14
 
 - Define approval action IDs, labels, styles and bounds in the tool schema, including the app-only inbox tool, so agents do not have to discover required fields through failed calls.

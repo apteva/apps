@@ -123,3 +123,21 @@ func TestConversationsToolsHiddenFromLiveAndHistory(t *testing.T) {
 		t.Fatal("unrelated tools hidden")
 	}
 }
+
+func TestToolActivityHonorsCoreFailureFlag(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	now := time.Now()
+	if err := a.ingestToolActivity("tool.call", 41, thread, `{"id":"wrong-tool","name":"code_repos_archive","reason":"Oops wrong tool"}`, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.ingestToolActivity("tool.result", 41, thread, `{"id":"wrong-tool","name":"code_repos_archive","success":false,"duration_ms":3,"result":"slug required"}`, now.Add(3*time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 1 || rows[0].Status != "failed" {
+		t.Fatalf("failure lost: %+v %v", rows, err)
+	}
+}

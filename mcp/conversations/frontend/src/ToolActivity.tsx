@@ -119,7 +119,7 @@ export function ChatToolActivity({
       : t("chat.panel.toolCalls", { count: tools.length })
     : reasonLabel(tools[0]!, t);
   const focusTool = summaryFocusTool(tools);
-  const focusReason = reasonLabel(focusTool, t);
+  const focusReason = continuing ? t("chat.panel.preparingNextStep") : reasonLabel(focusTool, t);
   const copyIsActive =
     continuing || status.state === "preparing" || status.state === "running";
   const failedCount = tools.filter((tool) => visualState(tool) === "failed").length;

@@ -1,5 +1,7 @@
 import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
+import { splitActivityPaint } from "./toolActivityPaint";
+import type { ResponseProgress } from "./types";
 import { pendingResponsePhase } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline, isVisibleChatTool } from "./toolActivityModel";
@@ -1157,9 +1159,12 @@ function normalizeStreamText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
+type LiveResponseProgress = ResponseProgress & {agent_id?: number; thread_id?: string; updatedAt: number};
+
 function useConversationTransport(conversationID: string, projectId: string) {
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [messages, setMessages] = useState<Message[]>([]);
+  const [progresses, setProgresses] = useState<LiveResponseProgress[]>([]);
   const [activities, setActivities] = useState<ToolActivity[]>([]);
   const mergeActivities = (incoming: ToolActivity[]) => setActivities(current => {
     const map = new Map(current.map(item => [item.id,item]));
@@ -1185,10 +1190,12 @@ function useConversationTransport(conversationID: string, projectId: string) {
     if (!valid.length) return;
     for(const m of valid)if(m.role==="user")lastUserIdRef.current=Math.max(lastUserIdRef.current,m.id);
     for (const m of valid) {
-      if (m.role !== "agent" || m.component_kind) continue;
+      // A new approval card also fulfils the pending response. Other cards
+      // may arrive independently and must not dismiss an active reply.
+      if (m.role !== "agent" || (m.component_kind && m.component_kind !== "approval")) continue;
       for (const [key, value] of streamRef.current) {
         if (value.agentId !== m.agent_id || m.id <= (value.afterMessageId ?? 0)) continue;
-        if (value.phase === "acknowledgement" || (value.text && normalizeStreamText(m.content) === normalizeStreamText(value.text))) {
+        if (value.phase === "acknowledgement" || (!m.component_kind && value.text && normalizeStreamText(m.content) === normalizeStreamText(value.text))) {
           settledRef.current.set(key, Date.now()); streamRef.current.delete(key);
         }
       }
@@ -1214,17 +1221,47 @@ function useConversationTransport(conversationID: string, projectId: string) {
   useEffect(() => {
     generationRef.current++;
     let cancelled = false, loading = false, initialized = false, cursor = 0;
-    setMessages([]); setActivities([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
+    setMessages([]); setActivities([]); setProgresses([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
     streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
+    let paintHandle: number | undefined;
+    let queuedActivities: ToolActivity[] = [];
+    const flushActivities = () => {
+      paintHandle = undefined;
+      if (cancelled) return;
+      const {paint,deferred} = splitActivityPaint(queuedActivities);
+      queuedActivities = deferred;
+      mergeActivities(paint);
+      if (deferred.length) paintHandle = window.requestAnimationFrame(flushActivities);
+    };
     const applyFrame = (frame: StreamFrame) => {
       if (cancelled || frame.chat_id !== conversationID) return;
-      if (frame.tool_activity) { mergeActivities([frame.tool_activity]); return; }
+      if (frame.response_progress) {
+        const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now()};
+        setProgresses(current => {
+          const existing = current.find(p=>p.agent_id===progress.agent_id && p.thread_id===progress.thread_id);
+          if (existing && existing.revision >= progress.revision) return current;
+          return [...current.filter(p=>p!==existing),progress];
+        });
+        if (progress.phase === "idle") {
+          for (const [key,value] of streamRef.current) if (value.agentId===frame.agent_id && !value.text) {
+            streamRef.current.delete(key);settledRef.current.set(key,Date.now());
+          }
+          publishBubbles();
+        }
+        return;
+      }
+      if (frame.tool_activity) {
+        queuedActivities.push(frame.tool_activity);
+        if (paintHandle === undefined) paintHandle = window.requestAnimationFrame(flushActivities);
+        return;
+      }
       const key = `${frame.agent_id ?? 0}:${frame.thread_id ?? ""}:${frame.call_id}:${frame.run_id ?? ""}`;
       if (frame.done) {
         for (const [k,v] of streamRef.current) if ((frame.run_id ? k === key : v.callId === frame.call_id) && (!frame.agent_id || v.agentId === frame.agent_id)) {
           streamRef.current.delete(k); settledRef.current.set(k, Date.now());
         }
       } else if (!settledRef.current.has(key)) {
+        if (frame.phase === "acknowledgement") setProgresses(current=>current.filter(p=>p.agent_id!==frame.agent_id || p.run_id===frame.call_id));
         const afterMessageId=frame.after_message_id ?? Math.max(lastUserIdRef.current,...[...streamRef.current.values()].filter(v=>v.agentId===frame.agent_id).map(v=>v.afterMessageId ?? 0));
         if (frame.phase !== "acknowledgement") for (const [k,v] of streamRef.current) {
           if (v.agentId === frame.agent_id && v.phase === "acknowledgement") streamRef.current.delete(k);
@@ -1260,18 +1297,19 @@ function useConversationTransport(conversationID: string, projectId: string) {
       onFrame: applyFrame,
       onResync: () => { void load(); },
       onOpen: () => { if (!cancelled) { setConnected(true); void load(); } },
-      onError: () => { if (!cancelled) { setConnected(false); streamRef.current.clear(); publishBubbles(); } },
+      onError: () => { if (!cancelled) { setConnected(false); setProgresses([]); streamRef.current.clear(); publishBubbles(); } },
     });
     void load();
     const poll = window.setInterval(() => {
       void load();
       for (const [k,v] of streamRef.current) if (Date.now()-v.updatedAt>90_000) streamRef.current.delete(k);
       for (const [k,t] of settledRef.current) if (Date.now()-t>SETTLED_STREAM_TTL_MS) settledRef.current.delete(k);
+      setProgresses(current => current.filter(p=>Date.now()-p.updatedAt<=90_000));
       publishBubbles();
     }, 5000);
-    return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); es.close(); };
+    return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); if (paintHandle!==undefined) window.cancelAnimationFrame(paintHandle); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, activities, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, progresses, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
@@ -1326,7 +1364,7 @@ export function ConversationChat({
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const { messages, activities: storedActivities, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const { messages, activities: storedActivities, progresses, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
@@ -1345,8 +1383,13 @@ export function ConversationChat({
     ? agentNames[id] || (id === conversation.lead_agent_id ? conversation.lead_agent_name : undefined) || t("common.agent")
     : undefined;
   const runningActivity = activities.find(item => item.status === "running");
-  const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : null);
+  const responseProgress = progresses.find(p=>p.phase!=="idle");
+  const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
   const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
+  const tail = timeline.at(-1);
+  const continuing = progresses.find(p=>p.phase==="continuing" && (tail?.kind==="toolGroup" || tail?.kind==="tool")
+    && (tail.kind==="toolGroup" ? tail.tools : [tail.tool]).some(tool=>tool.agentId===p.agent_id && tool.startedAt>=Date.parse(p.started_at))
+    && !activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running"));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
     const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
@@ -1513,6 +1556,7 @@ export function ConversationChat({
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
+          continuing={Boolean(continuing && item===tail)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
         /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
@@ -1523,7 +1567,17 @@ export function ConversationChat({
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && phase === null) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={phase === "preparing"} />}</div>; })}</> : null}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={phase === "preparing"} />}</div>; })}
+        {progresses.map(p => {
+          if (p.phase === "idle" || p.phase === "running" || p === continuing || bubbles.some(b=>b.agentId===p.agent_id && b.text)
+            || activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running")) return null;
+          if (p.phase === "preparing_tool" && p.tool_name) {
+            if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;
+            return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry}/>;
+          }
+          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase!=="thinking"}/>;
+        })}
+      </> : null}
       emptyMessage={emptyMessage}
       headerActions={headerActions}
       bottomRef={bottomRef}

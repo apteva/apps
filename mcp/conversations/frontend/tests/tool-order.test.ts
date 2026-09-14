@@ -14,3 +14,13 @@ test("tool durations use provider duration and group parallel intervals once", (
   const second = {...base, id:"2", startedAt:1800, finishedAt:2800, durationMs:1000};
   expect(toolGroupDurationMs([base, second], 9999)).toBe(1800);
 });
+
+test("fast call/result bursts paint running first without blocking parallel starts", async () => {
+ const {splitActivityPaint}=await import("../src/toolActivityPaint");
+ const a={id:1,status:"running",revision:1} as any;
+ const result={...a,status:"completed",revision:2};
+ const b={...a,id:2};
+ const first=splitActivityPaint([a,result,b]);
+ expect(first.paint).toEqual([a,b]);expect(first.deferred).toEqual([result]);
+ expect(splitActivityPaint(first.deferred).paint).toEqual([result]);
+});

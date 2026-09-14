@@ -79,3 +79,113 @@ func TestMainCannotAcknowledgeAnotherThreadApproval(t *testing.T) {
 		t.Fatal("main acknowledged another thread's approval")
 	}
 }
+
+func TestApprovalCardSettlesOnlyRequestingAgentAck(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	caller := boundConversationCaller(t, app, conv, 41)
+	frames, cancel := app.hub.subscribeFrames(conv.ID)
+	defer cancel()
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 42)
+	first := <-frames
+	second := <-frames
+	if _, err := app.toolRequestApproval(caller, ctx, map[string]any{"conversation_id": conv.ID, "title": "Confirm deleting patch repository"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-frames:
+		if !frame.Done || frame.CallID != first.CallID || frame.AgentID != 41 {
+			t.Fatalf("unexpected settlement: %+v", frame)
+		}
+	default:
+		t.Fatal("approval left thinking acknowledgement active")
+	}
+	// The response lifecycle also terminates; it is separate from ack frames.
+	select {
+	case frame := <-frames:
+		if frame.Progress == nil || frame.Progress.Phase != "idle" || frame.AgentID != 41 {
+			t.Fatalf("missing idle progress: %+v", frame)
+		}
+	default:
+		t.Fatal("response progress stayed active")
+	}
+	// Another room participant remains active.
+	app.streamer.settleAck(conv.ID, 42)
+	select {
+	case frame := <-frames:
+		if !frame.Done || frame.CallID != second.CallID {
+			t.Fatalf("other agent acknowledgement lost: %+v", frame)
+		}
+	default:
+		t.Fatal("other agent acknowledgement was cleared")
+	}
+}
+
+func TestApprovalVerdictStartsNewResponseIndicator(t *testing.T) {
+	for _, verdict := range []string{"approve", "deny"} {
+		t.Run(verdict, func(t *testing.T) {
+			app, ctx, platform := newTestEnv(t)
+			conv := mkConversation(t, app, 41)
+			caller := boundConversationCaller(t, app, conv, 41)
+			out, err := app.toolRequestApproval(caller, ctx, map[string]any{"conversation_id": conv.ID, "title": "Proceed?"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			approval, _ := app.store.GetMessage(out.(map[string]any)["message_id"].(int64))
+			later, err := app.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", AgentID: 41, Content: "Additional details"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			frames, cancel := app.hub.subscribeFrames(conv.ID)
+			defer cancel()
+			if _, err := app.resolveApproval(ctx, approval, verdict, "", 1); err != nil {
+				t.Fatal(err)
+			}
+			if len(platform.trackedEvents) != 1 {
+				t.Fatal("verdict not delivered")
+			}
+			select {
+			case frame := <-frames:
+				if frame.Done || frame.Phase != "acknowledgement" || frame.AgentID != 41 || frame.ThreadID != conversationThreadID(conv.ID) || frame.AfterMessageID != later.ID {
+					t.Fatalf("invalid resumed frame: %+v", frame)
+				}
+			default:
+				t.Fatal("no thinking indicator after verdict")
+			}
+			if _, err := app.toolSend(caller, ctx, map[string]any{"conversation_id": conv.ID, "text": "Decision received"}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case frame := <-frames:
+				if !frame.Done {
+					t.Fatalf("reply did not finish indicator: %+v", frame)
+				}
+			default:
+				t.Fatal("missing completion frame")
+			}
+		})
+	}
+}
+
+func TestFailedApprovalDeliveryDoesNotStartThinking(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	caller := boundConversationCaller(t, app, conv, 41)
+	out, err := app.toolRequestApproval(caller, ctx, map[string]any{"conversation_id": conv.ID, "title": "Proceed?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval, _ := app.store.GetMessage(out.(map[string]any)["message_id"].(int64))
+	platform.failSend = true
+	frames, cancel := app.hub.subscribeFrames(conv.ID)
+	defer cancel()
+	if _, err := app.resolveApproval(ctx, approval, "approve", "", 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-frames:
+		t.Fatalf("failed delivery claimed agent activity: %+v", frame)
+	default:
+	}
+}

@@ -87,6 +87,7 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		ToolCallID string   `json:"tool_call_id"`
 		Reason     string   `json:"reason"`
 		DurationMs *float64 `json:"duration_ms"`
+		Success    *bool    `json:"success"`
 		IsError    bool     `json:"is_error"`
 	}
 	if err := json.Unmarshal([]byte(data), &d); err != nil {
@@ -123,7 +124,7 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 			return nil
 		}
 		item.Status = "completed"
-		if d.IsError {
+		if d.IsError || (d.Success != nil && !*d.Success) {
 			item.Status = "failed"
 		}
 		item.EndedAt = at

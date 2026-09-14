@@ -256,3 +256,36 @@ for (const style of ["danger", undefined]) test(`approval choices stay distinct 
  expect(keep.className).not.toContain("text-accent");
  expect(remove.className+keep.className).not.toMatch(/bg-success|bg-error/);
 });
+
+test("new approval clears its agent's thinking while historical cards and other agents remain isolated", async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const ack=(agent:number)=>({chat_id:"a",agent_id:agent,thread_id:"chat-a",call_id:`ack-${agent}`,text:"",phase:"acknowledgement",after_message_id:300});
+ await act(async()=>{for(const agent of [41,42])events.listeners.get("stream")?.({data:JSON.stringify(ack(agent))});});
+ expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(2);
+ const approval=(id:number)=>({...message(id),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Confirm deletion",status:"pending",actions:[{id:"approve",label:"Approve"},{id:"deny",label:"Deny"}]}}]});
+ await act(async()=>events.emit(approval(200)));
+ expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(2);
+ await act(async()=>events.emit(approval(301)));
+ expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(1);
+ // Replayed acknowledgement cannot resurrect the completed agent's indicator.
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify(ack(41))}));
+ expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(1);
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify({...ack(42),done:true})}));
+ expect(element.querySelectorAll('[aria-label="Thinking"]').length).toBe(0);
+ expect(element.textContent).toContain("Confirm deletion");
+});
+
+test("approval verdict starts a fresh thinking indicator that survives the card update and ends on reply", async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const approval={...message(301),role:"agent",agent_id:41,component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Confirm deletion",status:"pending",actions:[{id:"approve",label:"Approve"}]}}]};
+ await act(async()=>events.emit(approval));
+ const resumed={chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"ack-verdict",text:"",phase:"acknowledgement",after_message_id:301};
+ await act(async()=>events.listeners.get("stream")?.({data:JSON.stringify(resumed)}));
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await act(async()=>events.emit({...approval,revision:2,components:[{...approval.components[0],props:{...approval.components[0].props,status:"approve"}}]}));
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await act(async()=>events.emit({...message(302,"a","Decision received"),role:"agent",agent_id:41}));
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});

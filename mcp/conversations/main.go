@@ -434,6 +434,11 @@ func (a *App) toolSend(ctx context.Context, app *sdk.AppCtx, args map[string]any
 	}
 	// The durable reply supersedes any pending thinking bubble.
 	a.streamer.settleAck(conv.ID, from.AgentID)
+	if phase == "final" {
+		a.streamer.finishResponse(conv.ID, from.AgentID)
+	} else {
+		a.streamer.intermediateReply(conv.ID, from.AgentID)
+	}
 	return map[string]any{"message_id": msg.ID, "conversation_id": conv.ID, "phase": msg.Phase,
 		"inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }
@@ -472,6 +477,11 @@ func (a *App) toolRequestApproval(ctx context.Context, app *sdk.AppCtx, args map
 	})
 	if err != nil {
 		return nil, err
+	}
+	// The approval card is the response: the next step belongs to the user.
+	if inserted {
+		a.streamer.settleAck(conv.ID, from.AgentID)
+		a.streamer.finishResponse(conv.ID, from.AgentID)
 	}
 	return map[string]any{"message_id": msg.ID, "status": "pending", "inserted": inserted, "duplicate_suppressed": !inserted}, nil
 }

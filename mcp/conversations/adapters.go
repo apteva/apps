@@ -34,7 +34,7 @@ type adapterRegistry struct {
 func newAdapterRegistry(app *App, h *hub) *adapterRegistry {
 	r := &adapterRegistry{byID: map[string]adapter{}}
 	r.register(&webAdapter{hub: h})
-	r.register(&agentAdapter{})
+	r.register(&agentAdapter{app: app})
 	r.register(&agentInboundAdapter{app: app})
 	r.register(&appCallbackAdapter{})
 	r.register(&telegramAdapter{app: app})
@@ -87,11 +87,11 @@ func (w *webAdapter) Deliver(_ *sdk.AppCtx, target string, conv *Conversation, m
 
 // agentAdapter is the durable approval-result transport. Failed agent/thread
 // delivery stays in the outbox and is retried by the worker.
-type agentAdapter struct{}
+type agentAdapter struct{ app *App }
 
 func (*agentAdapter) ID() string { return "agent" }
 
-func (*agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) error {
+func (d *agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversation, msg *Message) error {
 	if app == nil {
 		return errors.New("platform unavailable")
 	}
@@ -119,12 +119,23 @@ func (*agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversation,
 	if client == nil {
 		return errors.New("platform does not support idempotent approval receipts")
 	}
+	// Anchor the new response after the current transcript, not the original
+	// approval's creation time: resolving an old card starts a new turn.
+	afterID := msg.ID
+	if d.app != nil && conv != nil {
+		if err := d.app.store.db.QueryRow(`SELECT COALESCE(MAX(id),0) FROM messages WHERE conversation_id=?`, conv.ID).Scan(&afterID); err != nil {
+			return err
+		}
+	}
 	receipt, err := client.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: agentID, ThreadID: threadID, SourceEventID: event.ID, Message: event.Message})
 	if err != nil {
 		return err
 	}
 	if receipt == nil || receipt.SourceEventID != event.ID || receipt.ThreadID != threadID || (!receipt.Accepted && !receipt.Duplicate) {
 		return errors.New("platform did not acknowledge the original approval destination")
+	}
+	if d.app != nil && conv != nil && !receipt.Duplicate {
+		d.app.streamer.emitAck(conv.ID, threadID, agentID, afterID)
 	}
 	return nil
 }

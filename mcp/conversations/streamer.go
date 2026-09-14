@@ -36,18 +36,19 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
-	Activity       *ToolActivity `json:"tool_activity,omitempty"`
-	AfterMessageID int64         `json:"after_message_id,omitempty"`
-	Type           string        `json:"type"` // always "stream"
-	ConversationID string        `json:"chat_id"`
-	AgentID        int64         `json:"agent_id,omitempty"`
-	ThreadID       string        `json:"thread_id"`
-	CallID         string        `json:"call_id"`
-	RunID          string        `json:"run_id,omitempty"`
-	Text           string        `json:"text"`
-	Phase          string        `json:"phase,omitempty"`
-	Done           bool          `json:"done"`
-	CreatedAt      time.Time     `json:"created_at"`
+	Progress       *ResponseProgress `json:"response_progress,omitempty"`
+	Activity       *ToolActivity     `json:"tool_activity,omitempty"`
+	AfterMessageID int64             `json:"after_message_id,omitempty"`
+	Type           string            `json:"type"` // always "stream"
+	ConversationID string            `json:"chat_id"`
+	AgentID        int64             `json:"agent_id,omitempty"`
+	ThreadID       string            `json:"thread_id"`
+	CallID         string            `json:"call_id"`
+	RunID          string            `json:"run_id,omitempty"`
+	Text           string            `json:"text"`
+	Phase          string            `json:"phase,omitempty"`
+	Done           bool              `json:"done"`
+	CreatedAt      time.Time         `json:"created_at"`
 }
 
 type streamState struct {
@@ -63,14 +64,16 @@ type streamState struct {
 }
 
 type streamer struct {
-	hub      *hub
-	resolve  func(int64, string) string
-	throttle time.Duration
-	mu       sync.Mutex
-	buffers  map[string]*streamState
-	lastEmit map[string]string
-	touched  map[string]time.Time
-	ackTimes map[string]time.Time
+	responses   map[string]*responseProgressState
+	progressSeq uint64
+	hub         *hub
+	resolve     func(int64, string) string
+	throttle    time.Duration
+	mu          sync.Mutex
+	buffers     map[string]*streamState
+	lastEmit    map[string]string
+	touched     map[string]time.Time
+	ackTimes    map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
@@ -90,10 +93,11 @@ func (s *streamer) publish(frame StreamFrame) {
 
 func newStreamer(h *hub) *streamer {
 	return &streamer{
-		hub:      h,
-		buffers:  map[string]*streamState{},
-		lastEmit: map[string]string{},
-		touched:  map[string]time.Time{}, ackTimes: map[string]time.Time{},
+		hub:       h,
+		responses: map[string]*responseProgressState{},
+		buffers:   map[string]*streamState{},
+		lastEmit:  map[string]string{},
+		touched:   map[string]time.Time{}, ackTimes: map[string]time.Time{},
 		pendingAcks: map[string]string{},
 	}
 }
@@ -101,6 +105,11 @@ func newStreamer(h *hub) *streamer {
 // All ephemeral maps have a time and size bound, including final-only calls.
 func (s *streamer) pruneLocked() {
 	now := time.Now()
+	for key, p := range s.responses {
+		if now.Sub(p.touched) > 5*time.Minute || len(s.responses) > 1024 {
+			delete(s.responses, key)
+		}
+	}
 	for key, at := range s.touched {
 		if now.Sub(at) > 5*time.Minute || len(s.touched) > 1024 {
 			delete(s.touched, key)
@@ -173,6 +182,7 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 	if conversationID == "" {
 		return
 	}
+	s.ingestProgress(eventType, agentID, threadID, conversationID, dataJSON, ts)
 	switch eventType {
 	case "llm.tool_chunk":
 		s.onChunk(agentID, threadID, conversationID, dataJSON, ts)
@@ -335,6 +345,7 @@ func (s *streamer) emitAck(conversationID, threadID string, agentID int64, after
 	if len(afterMessageIDs) > 0 {
 		afterID = afterMessageIDs[0]
 	}
+	s.responses[responseProgressKey(conversationID, agentID)] = &responseProgressState{ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, AfterMessageID: afterID, StartedAt: time.Now()}, agentID: agentID, threadID: threadID, chatID: conversationID, touched: time.Now()}
 	s.pendingAcks[conversationID+":"+strconv.FormatInt(agentID, 10)] = id
 	s.ackTimes[conversationID+":"+strconv.FormatInt(agentID, 10)] = time.Now()
 	s.mu.Unlock()
@@ -382,7 +393,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
 	ch, err := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
-		Events:       []string{"llm.tool_chunk", "tool.call", "tool.result"},
+		Events:       []string{"llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
 		ThreadPrefix: "chat-",
 	})
 	if err != nil {
