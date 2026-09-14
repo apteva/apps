@@ -97,6 +97,12 @@ func properties(keys []string) map[string]any {
 			t = map[string]any{"type": "integer", "minimum": 0}
 		case "sources", "attachments", "tags", "statuses", "formats", "channels":
 			t = map[string]any{"type": "array", "items": map[string]any{"type": "string"}}
+		case "brands":
+			t = map[string]any{"type": "array", "items": object(map[string]any{
+				"id": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "color": map[string]any{"type": "string"}, "logo_url": map[string]any{"type": "string"},
+				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}},
+				"campaign_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer", "minimum": 1}},
+			}, "id", "name")}
 		case "fields", "results":
 			t = map[string]any{"type": "object"}
 		case "archived":
@@ -111,16 +117,16 @@ func (a *App) MCPTools() []sdk.Tool {
 		name, description string
 		schema            map[string]any
 	}{
-		{"items_list", "List planning items and releases with pagination. archived: false, true or all.", object(properties([]string{"q", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
+		{"items_list", "List planning items and releases with pagination. archived: false, true or all. brand_id: a brand ID, unassigned, or omit for all brands.", object(properties([]string{"q", "brand_id", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
 		{"items_get", "Read an item, releases and latest 100 history entries.", object(properties([]string{"id"}), "id")},
 		{"items_create", "Create a planning item. Dates: YYYY-MM-DD or RFC3339. No external action.", object(properties(itemFields), "title")},
 		{"items_update", "Patch with current revision. Content changes invalidate an existing approval.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(itemFields))}, "id", "revision", "patch")},
 		{"releases_create", "Plan a release; never schedules delivery. Optional app/external_id links an existing record.", object(properties(append(append([]string{}, releaseFields...), "item_id")), "item_id", "channel")},
 		{"releases_update", "Update using current revision. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(releaseFields))}, "id", "revision", "patch")},
 		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
-		{"settings_get", "Read formats, statuses and channel suggestions.", object(nil)},
-		{"settings_update", "Configure formats, statuses and channels. Keep values used by existing items.", object(properties([]string{"revision", "statuses", "formats", "channels"}), "revision", "statuses", "formats", "channels")},
-		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records. Never publishes.", object(properties([]string{"app"}))},
+		{"settings_get", "Read project brands, formats, statuses and channel suggestions.", object(nil)},
+		{"settings_update", "Configure brands, formats, statuses and channels. Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels"}), "revision", "statuses", "formats", "channels")},
+		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records, with optional brand_id to apply saved mappings. Never publishes.", object(properties([]string{"app", "brand_id"}))},
 	}
 	out := []sdk.Tool{}
 	for _, s := range specs {

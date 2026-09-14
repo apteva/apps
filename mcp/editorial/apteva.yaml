@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.1.1
+version: 0.2.0
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -46,7 +46,7 @@ provides:
       entry: /ui/EditorialPanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.1.1, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.2.0, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:
