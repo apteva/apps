@@ -1,35 +1,31 @@
-import { useEffect, useMemo, useState } from "react";
-import { ProcessFlow } from "./ProcessFlow";
+/// <reference path="./flow-css.d.ts" />
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ReactFlow,
+  Background,
+  Controls,
+  MiniMap,
+  Handle,
+  Position,
+  MarkerType,
+  type Node,
+  type NodeProps,
+  type Edge,
+  type ReactFlowInstance,
+} from "@xyflow/react";
+import flowStyles from "@xyflow/react/dist/style.css" with { type: "text" };
+import {
+  layoutProject,
+  liveRun,
+  overlayRuns,
+  runColor,
+  runLabel,
+  STEP_WIDTH,
+  type MapProcess,
+  type MapRun,
+} from "./project-map-model";
 import type { Step, StepRun } from "./Workflow";
 
-type Assignment = {
-  id: string;
-  name: string;
-  target?: string;
-  owner_agent_id?: number;
-  status: string;
-  schedule?: { kind: string; every?: string; cron?: string; timezone?: string };
-};
-type Process = {
-  id: string;
-  name: string;
-  description?: string;
-  status: string;
-  version: number;
-  steps?: Step[];
-  assignments?: Assignment[];
-};
-type Run = {
-  id: string;
-  process_id?: string;
-  state: string;
-  workflow?: boolean;
-  steps?: StepRun[];
-  assignment_id?: string;
-  assignment?: Assignment;
-  created_at?: string;
-  backend?: string;
-};
 type Props = {
   appName?: string;
   projectId?: string;
@@ -37,109 +33,180 @@ type Props = {
   eventRevision?: number;
   agents?: { id: number; name: string }[];
 };
-
-const terminal = (s: string) =>
-  ["completed", "failed", "cancelled"].includes(s);
-function url(props: Props, path: string) {
+type Selection = { processId: string; stepKey?: string; runId?: string };
+type BoundaryData = { process: MapProcess; runs: MapRun[]; select: () => void };
+type StepData = {
+  step: Step;
+  vertical: boolean;
+  executions: { run: MapRun; step?: StepRun; agent: string }[];
+  select: (runId?: string) => void;
+};
+function Boundary({ data }: NodeProps<Node<BoundaryData>>) {
+  return (
+    <section className="pm-boundary" aria-label={`${data.process.name} SOP`}>
+      <button className="pm-boundary-head nodrag" onClick={data.select}>
+        <strong>{data.process.name}</strong>
+        <span>
+          v{data.process.version} · {data.process.status} ·{" "}
+          {data.process.steps?.length || 0} steps
+        </span>
+        <span>
+          {data.runs.filter(liveRun).length} live ·{" "}
+          {data.process.assignments?.length || 0} assignments
+        </span>
+      </button>
+      {!data.process.steps?.length && (
+        <p className="pm-no-steps">
+          No structured steps · select SOP for execution details
+        </p>
+      )}
+    </section>
+  );
+}
+function MapStep({ data }: NodeProps<Node<StepData>>) {
+  return (
+    <div className="pm-step">
+      <Handle
+        type="target"
+        position={data.vertical ? Position.Top : Position.Left}
+        isConnectable={false}
+      />
+      <button className="pm-step-title nodrag" onClick={() => data.select()}>
+        <small>
+          {data.step.kind === "approval"
+            ? "Approval"
+            : data.step.role.replaceAll("_", " ")}
+        </small>
+        <strong>{data.step.name}</strong>
+      </button>
+      {data.executions.map(({ run, step, agent }) => (
+        <button
+          className="pm-execution nodrag"
+          key={run.id}
+          data-run={run.id}
+          style={{ borderLeftColor: runColor(run.id) }}
+          onClick={() => data.select(run.id)}
+          title={`${runLabel(run)} · ${step?.state || "not started"} · ${agent}`}
+        >
+          <span>{runLabel(run)}</span>
+          <span>
+            <b data-state={step?.state}>{step?.state || "not started"}</b>
+            {agent && ` · ${agent}`}
+          </span>
+        </button>
+      ))}
+      <Handle
+        type="source"
+        position={data.vertical ? Position.Bottom : Position.Right}
+        isConnectable={false}
+      />
+    </div>
+  );
+}
+const nodeTypes = { sop: Boundary, sopStep: MapStep };
+function apiURL(props: Props, path: string) {
   const q = new URLSearchParams();
   if (props.projectId) q.set("project_id", props.projectId);
   if (props.installId) q.set("install_id", String(props.installId));
   return `/api/apps/${encodeURIComponent(props.appName || "processes")}/processes${path}?${q}`;
 }
-function MapBoundary({
-  process,
-  runs,
-  agents,
-}: {
-  process: Process;
-  runs: Run[];
-  agents: Props["agents"];
-}) {
-  const live = runs.filter((r) => !terminal(r.state) && r.steps?.length);
-  return (
-    <section className="pm-boundary" aria-label={`${process.name} SOP`}>
-      <header className="pm-boundary-head">
-        <div>
-          <h2>{process.name}</h2>
-          <p className="small muted">
-            SOP v{process.version} · {process.assignments?.length || 0}{" "}
-            assignment{process.assignments?.length === 1 ? "" : "s"} ·{" "}
-            {process.steps?.length || 0} steps
-          </p>
-        </div>
-        <span className={`pill ${process.status}`}>{process.status}</span>
-      </header>
-      <div className="pm-flow">
-        <ProcessFlow
-          steps={process.steps || []}
-          runExecutions={live.map((r) => r.steps!)}
-          agents={agents}
-        />
-      </div>
-      <div className="pm-run-legend">
-        <span className="small muted">Live executions</span>
-        {live.length ? (
-          live.map((r, i) => (
-            <span className="pm-run" key={r.id} data-run={r.id}>
-              <span className={`pill ${r.state}`}>{r.state}</span>{" "}
-              {r.assignment?.name || r.assignment_id || "Manual"} · run{" "}
-              {r.id.slice(-8)}
-            </span>
-          ))
-        ) : (
-          <span className="small muted">None running</span>
-        )}
-      </div>
-    </section>
-  );
+function detailURL(props: Props, process: MapProcess, run?: MapRun) {
+  const q = new URLSearchParams({ project_id: props.projectId || "" });
+  if (run?.backend === "tasks") q.set("task_id", run.id);
+  else {
+    q.set("process_id", process.id);
+    if (run) q.set("run_id", run.id);
+    if (props.installId) q.set("install_id", String(props.installId));
+  }
+  return `/apps/${run?.backend === "tasks" ? "tasks" : encodeURIComponent(props.appName || "processes")}/page?${q}`;
 }
 export default function ProjectMap(props: Props) {
-  const [processes, setProcesses] = useState<Process[]>([]),
-    [runs, setRuns] = useState<Record<string, Run[]>>({}),
-    [search, setSearch] = useState(""),
+  const [processes, setProcesses] = useState<MapProcess[]>([]),
+    [runs, setRuns] = useState<Record<string, MapRun[]>>({});
+  const [search, setSearch] = useState(""),
     [status, setStatus] = useState(""),
-    [liveOnly, setLiveOnly] = useState(false),
-    [loading, setLoading] = useState(true),
-    [error, setError] = useState("");
-  const load = async () => {
-    if (!props.projectId) return;
-    setLoading(true);
-    try {
-      const list = await fetch(url(props, ""), {
-        credentials: "same-origin",
-      }).then((r) => r.json());
-      const ps: Process[] = list.processes || [];
-      const entries = await Promise.all(
-        ps.map(async (p) => {
-          const d = await fetch(
-            url(props, `/${encodeURIComponent(p.id)}/runs`),
-            { credentials: "same-origin" },
-          ).then((r) => r.json());
-          const rs: Run[] = [
-            ...(d.direct_runs || []),
-            ...(d.runs || []).map((x: any) => ({
-              ...x.task,
-              process_id: p.id,
-              backend: "tasks",
-              assignment_id: x.assignment_id,
-              assignment: x.assignment,
-            })),
-          ];
-          return [p.id, rs] as const;
-        }),
-      );
-      setProcesses(ps);
-      setRuns(Object.fromEntries(entries));
-      setError("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
+    [liveOnly, setLiveOnly] = useState(false);
+  const [loaded, setLoaded] = useState(false),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [refresh, setRefresh] = useState(0);
+  const [selection, setSelection] = useState<Selection>();
+  const flow = useRef<ReactFlowInstance | null>(null);
+  const scope = `${props.projectId}:${props.installId}:${props.appName}`;
+  const previousScope = useRef(scope);
   useEffect(() => {
-    void load();
-  }, [props.projectId, props.installId, props.eventRevision]);
+    const controller = new AbortController();
+    if (scope !== previousScope.current) {
+      setProcesses([]);
+      setRuns({});
+      setLoaded(false);
+      setSelection(undefined);
+      previousScope.current = scope;
+    }
+    if (!props.projectId) {
+      setBusy(false);
+      return () => controller.abort();
+    }
+    const get = async (path: string) => {
+      const response = await fetch(apiURL(props, path), {
+        credentials: "same-origin",
+        signal: controller.signal,
+      });
+      if (!response.ok)
+        throw new Error(`Could not load map (${response.status})`);
+      return response.json();
+    };
+    setBusy(true);
+    void (async () => {
+      try {
+        const list = await get("");
+        const ps: MapProcess[] = list.processes || [],
+          result: Record<string, MapRun[]> = {},
+          warnings: string[] = [];
+        const queue = [...ps];
+        await Promise.all(
+          Array.from({ length: Math.min(4, ps.length) }, async () => {
+            while (queue.length && !controller.signal.aborted) {
+              const p = queue.shift()!;
+              try {
+                const d = await get(`/${encodeURIComponent(p.id)}/runs`);
+                result[p.id] = [
+                  ...(d.direct_runs || []),
+                  ...(d.runs || []).map((x: any) => ({
+                    ...x.task,
+                    backend: "tasks",
+                    version: x.version,
+                    assignment_id: x.assignment_id,
+                    assignment: x.assignment,
+                  })),
+                ];
+                if (d.tasks_error || d.has_more)
+                  warnings.push(
+                    `${p.name}: ${d.tasks_error ? "Tasks execution data unavailable" : "Tasks history is limited; open SOP for more"}`,
+                  );
+              } catch (e) {
+                if (!controller.signal.aborted)
+                  warnings.push(
+                    `${p.name}: ${e instanceof Error ? e.message : e}`,
+                  );
+              }
+            }
+          }),
+        );
+        if (controller.signal.aborted) return;
+        setProcesses(ps);
+        setRuns(result);
+        setLoaded(true);
+        setError(warnings.join(". "));
+      } catch (e) {
+        if (!controller.signal.aborted)
+          setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!controller.signal.aborted) setBusy(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [scope, props.eventRevision, refresh]);
   const visible = useMemo(
     () =>
       processes.filter(
@@ -149,15 +216,96 @@ export default function ProjectMap(props: Props) {
               .toLowerCase()
               .includes(search.toLowerCase())) &&
           (!status || p.status === status) &&
-          (!liveOnly || (runs[p.id] || []).some((r) => !terminal(r.state))),
+          (!liveOnly || (runs[p.id] || []).some(liveRun)),
       ),
     [processes, runs, search, status, liveOnly],
   );
+  const graph = useMemo(() => {
+    const nodes: Node[] = [],
+      edges: Edge[] = [];
+    for (const box of layoutProject(visible, runs)) {
+      const p = box.process,
+        rs = runs[p.id] || [],
+        overlays = overlayRuns(p, rs),
+        parentId = `sop:${p.id}`;
+      const select = (stepKey?: string, runId?: string) =>
+        setSelection({ processId: p.id, stepKey, runId });
+      nodes.push({
+        id: parentId,
+        type: "sop",
+        position: { x: box.x, y: box.y },
+        style: { width: box.width, height: box.height, pointerEvents: "auto" },
+        zIndex: 0,
+        data: { process: p, runs: rs, select: () => select() },
+        selectable: false,
+      });
+      for (const step of p.steps || []) {
+        const id = `${parentId}:${step.key}`;
+        nodes.push({
+          id,
+          parentId,
+          extent: "parent",
+          type: "sopStep",
+          position: box.positions[step.key],
+          style: {
+            width: STEP_WIDTH,
+            height: box.stepHeight,
+            pointerEvents: "auto",
+          },
+          zIndex: 2,
+          data: {
+            step,
+            vertical: box.vertical,
+            select: (runId?: string) => select(step.key, runId),
+            executions: overlays.map((run) => {
+              const execution = run.steps?.find((s) => s.key === step.key);
+              const agentID = execution?.executor?.agent_id;
+              return {
+                run,
+                step: execution,
+                agent:
+                  execution?.executor?.kind === "human"
+                    ? "Human"
+                    : props.agents?.find((a) => a.id === agentID)?.name ||
+                      (agentID ? `Agent ${agentID}` : ""),
+              };
+            }),
+          },
+        });
+        for (const dep of step.depends_on)
+          if (p.steps?.some((s) => s.key === dep))
+            edges.push({
+              id: `${id}:${dep}`,
+              source: `${parentId}:${dep}`,
+              target: id,
+              type: "smoothstep",
+              zIndex: 1,
+              markerEnd: { type: MarkerType.ArrowClosed },
+              style: { stroke: "#748397", strokeWidth: 1.5 },
+              animated: overlays.some((r) =>
+                r.steps?.some(
+                  (s) => s.key === step.key && s.state === "running",
+                ),
+              ),
+            });
+      }
+    }
+    return { nodes, edges };
+  }, [visible, runs, props.agents]);
+  const selectedProcess = processes.find((p) => p.id === selection?.processId),
+    selectedRun =
+      selectedProcess &&
+      runs[selectedProcess.id]?.find((r) => r.id === selection?.runId);
+  const selectedStep = selectedProcess?.steps?.find(
+    (s) => s.key === selection?.stepKey,
+  );
   return (
     <section className="pm" aria-label="Project SOP map">
-      <style>{`.pm{height:100%;overflow:auto}.pm-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.pm-toolbar input{min-width:220px;flex:1}.pm-toolbar label{display:flex;gap:6px;align-items:center;font-size:12px}.pm-toolbar button{font:inherit}.pm-summary{font-size:12px;color:var(--pc-muted);margin-bottom:14px}.pm-boundary{border:2px solid var(--pc-line);border-radius:14px;margin:0 0 22px;overflow:hidden;background:color-mix(in srgb,var(--pc-panel) 82%,transparent)}.pm-boundary-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid var(--pc-line)}.pm-boundary-head h2{margin:0;font-size:17px}.pm-boundary-head p{margin:4px 0 0}.pm-flow{height:460px;min-height:300px}.pm-flow .react-flow{height:100%;background:var(--pc-bg)}.pm-run-legend{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 16px;border-top:1px solid var(--pc-line)}.pm-run{font-size:11px}.pm-empty{padding:50px 20px;text-align:center;border:1px dashed var(--pc-line);border-radius:12px}@media(max-width:760px){.pm-boundary-head{padding:12px}.pm-flow{height:410px}.pm-toolbar input{min-width:160px}}`}</style>
+      <style>{flowStyles}</style>
+      <style>{styles}</style>
       <div className="pm-toolbar">
         <input
+          type="search"
           aria-label="Search SOPs"
           placeholder="Search SOPs…"
           value={search}
@@ -169,8 +317,8 @@ export default function ProjectMap(props: Props) {
           onChange={(e) => setStatus(e.target.value)}
         >
           <option value="">All statuses</option>
-          {["draft", "active", "paused", "archived"].map((x) => (
-            <option key={x}>{x}</option>
+          {["draft", "active", "paused", "archived"].map((s) => (
+            <option key={s}>{s}</option>
           ))}
         </select>
         <label>
@@ -178,42 +326,172 @@ export default function ProjectMap(props: Props) {
             type="checkbox"
             checked={liveOnly}
             onChange={(e) => setLiveOnly(e.target.checked)}
-          />{" "}
+          />
           Live only
         </label>
-        <button onClick={() => void load()}>Refresh map</button>
+        <button onClick={() => setRefresh((r) => r + 1)} disabled={busy}>
+          {busy ? "Refreshing…" : "Refresh map"}
+        </button>
+        <button
+          onClick={() =>
+            flow.current?.fitView({ padding: 0.08, duration: 250 })
+          }
+        >
+          Fit all SOPs
+        </button>
       </div>
       {error && (
         <p role="alert" className="notice">
           {error}
         </p>
       )}
-      {loading ? (
-        <p className="muted">Loading SOP map…</p>
-      ) : (
-        <>
-          <p className="pm-summary">
-            {visible.length} of {processes.length} SOPs ·{" "}
-            {
-              Object.values(runs)
-                .flat()
-                .filter((r) => !terminal(r.state)).length
-            }{" "}
-            live executions
-          </p>
-          {visible.map((p) => (
-            <MapBoundary
-              key={p.id}
-              process={p}
-              runs={runs[p.id] || []}
-              agents={props.agents}
-            />
-          ))}
-          {!visible.length && (
-            <div className="pm-empty">No SOPs match these filters.</div>
+      <p className="pm-summary">
+        {!props.projectId
+          ? "Select a project to see its SOPs."
+          : !loaded
+            ? "Loading SOP map…"
+            : `${visible.length} of ${processes.length} SOPs · ${Object.values(runs).flat().filter(liveRun).length} live executions${error ? " · execution data incomplete" : ""}`}
+        <span>Every step · select a SOP or step for details</span>
+      </p>
+      <div className="pm-workspace">
+        <div className="pm-canvas">
+          {loaded && visible.length > 0 ? (
+            <ReactFlow
+              key={scope}
+              nodes={graph.nodes}
+              edges={graph.edges}
+              nodeTypes={nodeTypes}
+              onInit={(instance) => {
+                flow.current = instance;
+              }}
+              fitView
+              fitViewOptions={{ padding: 0.08 }}
+              minZoom={0.08}
+              maxZoom={1.6}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              elementsSelectable={false}
+              panOnScroll
+              zoomOnScroll={false}
+              zoomOnPinch
+              preventScrolling={false}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={24} size={1} color="#74839730" />
+              <Controls showInteractive={false} />
+              <MiniMap
+                pannable
+                zoomable
+                nodeColor={(n) => (n.type === "sop" ? "#74839730" : "#8396aa")}
+              />
+            </ReactFlow>
+          ) : (
+            loaded && (
+              <div className="pm-empty">No SOPs match these filters.</div>
+            )
           )}
-        </>
-      )}
+        </div>
+        {selectedProcess && (
+          <aside className="pm-inspector" aria-label="Map details">
+            <button
+              className="pm-close"
+              onClick={() => setSelection(undefined)}
+              aria-label="Close map details"
+            >
+              ×
+            </button>
+            <h2>{selectedStep?.name || selectedProcess.name}</h2>
+            <p>
+              {selectedProcess.name} · SOP v{selectedProcess.version}
+            </p>
+            {selectedStep && (
+              <>
+                <p className="pm-instructions">{selectedStep.instructions}</p>
+                <p>
+                  <strong>Expected output:</strong>{" "}
+                  {selectedStep.expected_output}
+                </p>
+              </>
+            )}
+            <a href={detailURL(props, selectedProcess)}>Open SOP</a>
+            <h3>Executions</h3>
+            {!(runs[selectedProcess.id] || []).length && (
+              <p>No executions yet.</p>
+            )}
+            {(runs[selectedProcess.id] || [])
+              .filter((r) => !r.schedule_kind || r.schedule_kind === "once")
+              .sort((a, b) => Number(liveRun(b)) - Number(liveRun(a)))
+              .map((run) => (
+                <div
+                  className="pm-run-detail"
+                  key={run.id}
+                  style={{ borderLeftColor: runColor(run.id) }}
+                >
+                  <button
+                    onClick={() =>
+                      setSelection({ ...selection!, runId: run.id })
+                    }
+                    aria-expanded={selectedRun?.id === run.id}
+                  >
+                    <strong>{runLabel(run)}</strong>
+                    <span>
+                      {run.state} ·{" "}
+                      {run.version ? `v${run.version}` : "version unavailable"}
+                    </span>
+                  </button>
+                  {run.version !== selectedProcess.version && (
+                    <p>Original version · shown in execution details</p>
+                  )}
+                  {selectedRun?.id === run.id && (
+                    <>
+                      <ol>
+                        {run.steps?.map((step) => (
+                          <li key={step.id}>
+                            <strong>{step.definition?.name || step.key}</strong>
+                            <span>
+                              {step.state}
+                              {step.executor?.agent_id
+                                ? ` · ${props.agents?.find((a) => a.id === step.executor.agent_id)?.name || `Agent ${step.executor.agent_id}`}`
+                                : ""}
+                            </span>
+                          </li>
+                        ))}
+                      </ol>
+                      {!run.steps?.length && (
+                        <p>
+                          {run.current_step ||
+                            "No structured step data for this run."}
+                        </p>
+                      )}
+                      <a href={detailURL(props, selectedProcess, run)}>
+                        Open run
+                      </a>
+                    </>
+                  )}
+                </div>
+              ))}
+          </aside>
+        )}
+      </div>
     </section>
   );
 }
+const styles = `
+.pm{min-width:0;color:var(--pc-text,#e7edf5)}.pm *{box-sizing:border-box}
+.pm .pm-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.pm .pm-toolbar input[type=search]{width:auto;min-width:160px;flex:1 1 220px;max-width:420px}
+.pm .pm-toolbar select{width:auto;max-width:180px;flex:0 1 auto}
+.pm .pm-toolbar label{display:flex;align-items:center;gap:7px;white-space:nowrap;margin:0;font-size:12px}
+.pm .pm-toolbar input[type=checkbox]{width:15px;height:15px;min-width:0;flex:0 0 15px;margin:0;padding:0;appearance:auto;accent-color:var(--pc-accent,#ff8000)}
+.pm .pm-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--pc-muted,#9aa8b9);margin:12px 0}
+.pm-workspace{position:relative;min-width:0}.pm-canvas{height:clamp(480px,72vh,1000px);border:1px solid var(--pc-line,#334155);border-radius:12px;overflow:hidden;background:var(--pc-bg,#10151d)}
+.pm .react-flow__node-sop{border:none;background:none;border-radius:14px;z-index:0}.pm-boundary{height:100%;border:1.5px solid var(--pc-line,#465365);border-radius:14px;background:color-mix(in srgb,var(--pc-panel,#1b2430) 65%,transparent);overflow:hidden}
+.pm button.pm-boundary-head{display:flex;flex-direction:column;gap:5px;width:100%;height:88px;text-align:left;padding:15px 22px;border:0;border-bottom:1px solid var(--pc-line,#334155);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
+.pm-boundary-head strong{font-size:16px;line-height:20px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.pm-boundary-head span{font-size:11px;line-height:14px;flex-shrink:0;color:var(--pc-muted,#9aa8b9)}
+.pm-step{height:100%;border:1px solid var(--pc-line,#465365);border-radius:10px;background:var(--pc-panel,#1b2430);box-shadow:0 3px 12px #0002;overflow:hidden}
+.pm button.pm-step-title{display:flex;flex-direction:column;gap:7px;width:100%;height:90px;border:0;border-radius:0;background:none;color:inherit;text-align:left;padding:12px 15px;font:inherit;cursor:pointer}.pm-step-title strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.pm-step-title small{font-size:10px;color:var(--pc-muted,#9aa8b9);text-transform:uppercase;letter-spacing:.07em;max-width:100%;overflow:hidden;white-space:nowrap}
+.pm button.pm-execution{display:flex;flex-direction:column;gap:4px;width:calc(100% - 16px);height:44px;margin:0 8px 4px;padding:5px 8px;background:var(--pc-bg,#10151d);border:0;border-left:3px solid;border-radius:4px;text-align:left;font:inherit;color:inherit;cursor:pointer}.pm-execution span{font-size:10px;line-height:14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:100%}.pm-execution b{font-weight:600}.pm [data-state=running]{color:#549cff}.pm [data-state=completed]{color:#2ac6a0}.pm [data-state=blocked],.pm [data-state=waiting]{color:#f4ad57}
+.pm .react-flow__handle{width:7px;height:7px;background:#748397;border:1px solid var(--pc-panel,#1b2430)}.pm .react-flow__controls button{padding:5px;width:28px;height:28px;border-radius:0;border:0;border-bottom:1px solid #334155;background:var(--pc-panel,#1b2430);color:var(--pc-text,#e7edf5)}.pm .react-flow__controls button svg{fill:currentColor;max-width:14px;max-height:14px}.pm .react-flow__minimap{background:var(--pc-panel,#1b2430);border-radius:6px;width:140px;height:95px}.pm .react-flow__minimap-mask{fill:#0002}
+.pm-inspector{position:absolute;right:12px;top:12px;bottom:12px;width:min(350px,calc(100% - 24px));overflow:auto;background:var(--pc-panel,#1b2430);border:1px solid var(--pc-line,#465365);border-radius:10px;padding:18px;box-shadow:0 8px 32px #0005;z-index:6;font-size:12px}.pm .pm-inspector h2{font-size:16px;padding-right:26px;margin:0 0 10px}.pm .pm-inspector h3{font-size:13px;margin:22px 0 12px}.pm .pm-inspector p{line-height:1.6;overflow-wrap:anywhere}.pm .pm-close{float:right;padding:0 6px;font-size:20px;background:none;border:0}.pm-instructions{white-space:pre-wrap}.pm-run-detail{border-left:3px solid;margin:12px 0;padding:4px 0 4px 10px}.pm .pm-run-detail>button{display:flex;flex-direction:column;gap:5px;border:0;background:none;padding:0;text-align:left;color:inherit;font:inherit;cursor:pointer;max-width:100%;overflow-wrap:anywhere}.pm-run-detail span{color:var(--pc-muted,#9aa8b9);font-size:11px}.pm-run-detail ol{padding-left:17px}.pm-run-detail li{margin:12px 0}.pm-run-detail li span{display:block;margin-top:4px}.pm-no-steps,.pm-empty{padding:30px;color:var(--pc-muted,#9aa8b9);font-size:12px}.pm button:hover{filter:brightness(1.12)}
+@media(max-width:600px){.pm .pm-toolbar input[type=search]{max-width:none}.pm .pm-summary>span{display:none}.pm .react-flow__minimap{display:none}.pm-canvas{height:65vh;min-height:460px}}
+`;

@@ -305,10 +305,19 @@ outcomes. These are separate from the deterministic Go integration suite.
 
 ## Project map
 
-The Processes panel includes a Project map view for the whole project. Every SOP
-is rendered as a separate bounded graph with all of its steps and dependency edges.
-Assignment context and each concurrent live run are shown on the same SOP graph;
-run overlays retain their own execution status, agent, and run ID. Search, SOP status,
-and live-only filters are available. Selecting a step or run leads to its existing
-detail view. The map is read-only and refreshes from process, assignment, run, task,
-approval, and delivery events.
+The Processes panel includes a Project map view for the whole project. One shared
+canvas shows every SOP inside its own boundary, including every defined step and
+dependency. Horizontal and vertical layouts pack the boundaries into a roughly
+square overview, with shared pan, zoom, minimap, and Fit all SOPs controls.
+
+Concurrent live runs of the current procedure version appear separately on each
+step, labeled with assignment, run ID, state, and agent. Runs from older or unknown
+versions remain in the SOP execution inspector with their original step snapshots;
+they are never projected onto the latest definition. Select a SOP, step, or run to
+inspect instructions and execution details, then open the existing SOP/run page.
+Unstructured runs remain visible in the inspector. Recurring Tasks schedule records
+are not counted as live executions. The map has search, status and live-only filters.
+
+The read-only map uses the panel's existing event stream. Refresh preserves the
+viewport, cancels stale requests, limits concurrent history reads to four, and
+reports missing or truncated execution data while retaining all SOP boundaries.

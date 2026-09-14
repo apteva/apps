@@ -2,7 +2,7 @@ import { useState } from "react";
 import Widget from "../ProcessOverviewWidget";
 import { createRoot } from "react-dom/client";
 import Panel from "../ProcessesPanel";
-import ProjectMap from "../ProjectMap";
+
 const step = (key: string, name: string, depends_on: string[]) => ({
   key,
   name,
@@ -65,41 +65,9 @@ window.fetch = (async (url: unknown, init?: RequestInit) => {
     path === "/api/apps/processes/processes" &&
     location.search.includes("map")
   )
-    return Response.json({ processes: [process] });
+    return originalFetch("/fixture/map-processes", init);
   if (path.endsWith("/runs") && location.search.includes("map"))
-    return Response.json({
-      direct_runs: [
-        {
-          id: "run-map",
-          process_id: "weather",
-          state: "running",
-          workflow: true,
-          created_at: "2026-09-13T17:00:00Z",
-          assignment_id: "barcelona",
-          assignment: {
-            name: "Barcelona",
-            target: "Barcelona",
-            owner_agent_id: 7,
-          },
-          steps: [
-            {
-              id: "step-weather",
-              run_id: "run-map",
-              key: "fetch_weather",
-              state: "running",
-              progress: 50,
-              executor: { kind: "agent", agent_id: 7 },
-              definition: {
-                name: "Fetch current weather",
-                kind: "work",
-                role: "weather_agent",
-                depends_on: [],
-              },
-            },
-          ],
-        },
-      ],
-    });
+    return originalFetch(`/fixture/map-runs/${path.split("/").at(-2)}`, init);
   if (path.endsWith("/overview")) return originalFetch(String(url), init);
   if (path === "/api/agents")
     return Response.json(
@@ -186,12 +154,6 @@ function WidgetFixture() {
 createRoot(document.getElementById("root")!).render(
   location.search.includes("widget") ? (
     <WidgetFixture />
-  ) : location.search.includes("map") ? (
-    <ProjectMap
-      projectId="test"
-      installId={77}
-      agents={[{ id: 7, name: "Weather agent" }]}
-    />
   ) : (
     <Panel projectId="test" installId={77} />
   ),

@@ -104,23 +104,3 @@ test("selected run links into Processes history", async ({ page }) => {
     page.getByRole("button", { name: "Refresh history" }),
   ).toBeVisible();
 });
-
-test("project map separates SOP boundaries and overlays each live run on every step", async ({
-  page,
-}) => {
-  await page.goto("/?map");
-  await expect(
-    page.getByRole("region", { name: "Project SOP map" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("region", { name: "Hourly weather alerts SOP" }),
-  ).toBeVisible();
-  await expect(
-    page.getByText("SOP v1 · 0 assignments · 3 steps"),
-  ).toBeVisible();
-  await expect(
-    page.getByText("Live executions", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByText("Barcelona · run run-map")).toBeVisible();
-  await expect(page.locator(".pm-boundary .react-flow")).toHaveCount(1);
-});
