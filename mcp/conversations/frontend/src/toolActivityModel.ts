@@ -136,3 +136,27 @@ export function buildChatTimeline(
   }
   return timeline;
 }
+
+// Execution time excludes model preparation and freezes as soon as a result arrives.
+export function toolDurationMs(tool: ToolActivity, now: number): number | undefined {
+  if (tool.state === "running") return Math.max(0, now - tool.startedAt);
+  if (Number.isFinite(tool.durationMs) && tool.durationMs! >= 0) return tool.durationMs;
+  return tool.finishedAt !== undefined && Number.isFinite(tool.finishedAt)
+    ? Math.max(0, tool.finishedAt - tool.startedAt) : undefined;
+}
+
+// Union the execution intervals: parallel calls must not double-count elapsed
+// time, and gaps spent preparing subsequent calls are not tool execution.
+export function toolGroupDurationMs(tools: ToolActivity[], now: number): number | undefined {
+  const intervals = tools.flatMap(tool => {
+    const duration = toolDurationMs(tool, now);
+    return duration === undefined ? [] : [[tool.startedAt, tool.startedAt + duration]];
+  }).sort((a, b) => a[0]! - b[0]!);
+  if (!intervals.length) return undefined;
+  let total = 0, end = -Infinity;
+  for (const [start, finish] of intervals) {
+    total += Math.max(0, finish! - Math.max(start!, end));
+    end = Math.max(end, finish!);
+  }
+  return total;
+}

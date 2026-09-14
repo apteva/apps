@@ -29,5 +29,5 @@ export function toChatToolActivity(activity:StoredActivity):ToolActivity {
   return {id:String(activity.id),callId:activity.call_id,agentId:activity.agent_id,threadId:activity.thread_id,
     name:activity.name,reason:activity.reason,state:activity.status === "running" ? "running" : activity.status === "interrupted" ? "interrupted" : "done",
     success:activity.status === "failed" ? false : activity.status === "completed" ? true : undefined,
-    startedAt,finishedAt,durationMs:finishedAt===undefined?undefined:Math.max(0,finishedAt-startedAt)};
+    startedAt,finishedAt,durationMs:Number.isFinite(activity.duration_ms) && activity.duration_ms! >= 0 ? activity.duration_ms : finishedAt===undefined?undefined:Math.max(0,finishedAt-startedAt)};
 }

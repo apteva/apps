@@ -10,24 +10,25 @@ import (
 
 // Only display metadata crosses into a chat; arguments and results stay in telemetry.
 type ToolActivity struct {
-	ID             int64  `json:"id"`
-	ConversationID string `json:"chat_id"`
-	AgentID        int64  `json:"agent_id"`
-	ThreadID       string `json:"thread_id"`
-	CallID         string `json:"call_id"`
-	Name           string `json:"name"`
-	Reason         string `json:"reason"`
-	Status         string `json:"status"`
-	StartedAt      string `json:"started_at"`
-	EndedAt        string `json:"ended_at"`
-	Revision       int64  `json:"revision"`
+	ID             int64    `json:"id"`
+	ConversationID string   `json:"chat_id"`
+	AgentID        int64    `json:"agent_id"`
+	ThreadID       string   `json:"thread_id"`
+	CallID         string   `json:"call_id"`
+	Name           string   `json:"name"`
+	Reason         string   `json:"reason"`
+	Status         string   `json:"status"`
+	StartedAt      string   `json:"started_at"`
+	EndedAt        string   `json:"ended_at"`
+	DurationMs     *float64 `json:"duration_ms,omitempty"`
+	Revision       int64    `json:"revision"`
 }
 
-const activityColumns = `id,conversation_id,agent_id,thread_id,call_id,name,reason,status,started_at,ended_at,revision`
+const activityColumns = `id,conversation_id,agent_id,thread_id,call_id,name,reason,status,started_at,ended_at,revision,duration_ms`
 
 func scanActivity(row interface{ Scan(...any) error }) (ToolActivity, error) {
 	var a ToolActivity
-	err := row.Scan(&a.ID, &a.ConversationID, &a.AgentID, &a.ThreadID, &a.CallID, &a.Name, &a.Reason, &a.Status, &a.StartedAt, &a.EndedAt, &a.Revision)
+	err := row.Scan(&a.ID, &a.ConversationID, &a.AgentID, &a.ThreadID, &a.CallID, &a.Name, &a.Reason, &a.Status, &a.StartedAt, &a.EndedAt, &a.Revision, &a.DurationMs)
 	return a, err
 }
 func (s *store) toolActivities(chat string) ([]ToolActivity, error) {
@@ -76,13 +77,14 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		return nil
 	}
 	var d struct {
-		Name       string `json:"name"`
-		Tool       string `json:"tool"`
-		ID         string `json:"id"`
-		CallID     string `json:"call_id"`
-		ToolCallID string `json:"tool_call_id"`
-		Reason     string `json:"reason"`
-		IsError    bool   `json:"is_error"`
+		Name       string   `json:"name"`
+		Tool       string   `json:"tool"`
+		ID         string   `json:"id"`
+		CallID     string   `json:"call_id"`
+		ToolCallID string   `json:"tool_call_id"`
+		Reason     string   `json:"reason"`
+		DurationMs *float64 `json:"duration_ms"`
+		IsError    bool     `json:"is_error"`
 	}
 	if err := json.Unmarshal([]byte(data), &d); err != nil {
 		return nil
@@ -122,8 +124,11 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 			item.Status = "failed"
 		}
 		item.EndedAt = at
+		if d.DurationMs != nil && *d.DurationMs >= 0 {
+			item.DurationMs = d.DurationMs
+		}
 		item.Revision++
-		_, err = tx.Exec(`UPDATE conversation_tool_activity SET status=?,ended_at=?,revision=? WHERE id=?`, item.Status, item.EndedAt, item.Revision, item.ID)
+		_, err = tx.Exec(`UPDATE conversation_tool_activity SET status=?,ended_at=?,revision=?,duration_ms=? WHERE id=?`, item.Status, item.EndedAt, item.Revision, item.DurationMs, item.ID)
 	}
 	if err != nil {
 		return err

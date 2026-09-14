@@ -1,38 +1,26 @@
-//go:build live
+//go:build scenario
 
 package main
 
-// Tier 3 — live smoke against a real Apteva platform with a real
-// LLM-backed agent. One simple scenario: a Codex-backed agent answers
-// a chat message through the conversations app end-to-end (platform
-// proxy → sidecar → thread spawn → provider → conversations_send).
-//
-// Credentials come from the operator's shell, never a checked-in
-// fixture:
-//
-//	APTEVA_API_KEY=sk-...            (required)
-//	APTEVA_BASE_URL=http://...       (default http://localhost:5280)
-//	APTEVA_LIVE_AGENT_ID=123         (optional: reuse an existing agent)
-//	APTEVA_LIVE_PROJECT_ID=...       (optional: project for a temp agent)
-//
-// Without APTEVA_LIVE_AGENT_ID the test creates a temporary agent
-// whose default provider is openai-codex and deletes it afterward —
-// this requires the conversations install to have
-// default_for_new_agents enabled so the new agent gets the MCP.
-//
-// Everything the test creates (agent, conversation) it deletes. It
-// never touches pre-existing conversations.
-//
-// Run:
-//	APTEVA_API_KEY=sk-... go test -tags live -v -run TestLive_ ./...
+// Tier 3 client workflows executed ONLY by apteva test. The runner provisions
+// the server, peer apps/bindings, agents and provider, captures telemetry, applies
+// budgets and removes its resources. These drivers exercise HTTP/SSE interactions
+// and durable outcomes that cannot be expressed as a single prompt/assert pair.
+// See scenarios/*.yaml and TESTING.md. Do not run this build tag directly.
 
 import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,39 +29,43 @@ import (
 	"time"
 )
 
-type liveClient struct {
-	t    *testing.T
-	base string
-	key  string
+type scenarioClient struct {
+	t         *testing.T
+	agents    []int64
+	nextAgent int
+	installs  map[string]int64
+	base      string
+	key       string
 }
 
-func newLiveClient(t *testing.T) *liveClient {
-	key := os.Getenv("APTEVA_API_KEY")
-	if key == "" {
-		t.Skip("APTEVA_API_KEY not set — skipping live smoke")
+func newScenarioClient(t *testing.T) *scenarioClient {
+	t.Helper()
+	c := &scenarioClient{t: t, base: os.Getenv("APTEVA_TEST_SERVER_URL"), key: os.Getenv("APTEVA_TEST_SERVER_API_KEY")}
+	if c.base == "" || c.key == "" || os.Getenv("APTEVA_TEST_PROJECT_ID") == "" {
+		t.Fatal("run this workflow through apteva test; runner context is required")
 	}
-	base := os.Getenv("APTEVA_BASE_URL")
-	if base == "" {
-		base = "http://localhost:5280"
+	if err := json.Unmarshal([]byte(os.Getenv("APTEVA_TEST_AGENT_IDS")), &c.agents); err != nil || len(c.agents) == 0 {
+		t.Fatal("runner did not provision agents")
 	}
-	return &liveClient{t: t, base: strings.TrimRight(base, "/"), key: key}
+	if err := json.Unmarshal([]byte(os.Getenv("APTEVA_TEST_INSTALLS")), &c.installs); err != nil || c.installs["conversations"] == 0 {
+		t.Fatal("runner did not provision Conversations")
+	}
+	return c
 }
 
-func (c *liveClient) do(method, path string, body any, out any) int {
+func (c *scenarioClient) do(method, path string, body any, out any) int {
 	c.t.Helper()
-	if strings.HasPrefix(path, "/api/apps/conversations/") {
-		projectID := strings.TrimSpace(os.Getenv("APTEVA_LIVE_PROJECT_ID"))
-		if projectID == "" {
-			c.t.Fatalf("APTEVA_LIVE_PROJECT_ID is required for conversations live tests")
+	if strings.HasPrefix(path, "/api/apps/") {
+		slug := strings.Split(strings.TrimPrefix(path, "/api/apps/"), "/")[0]
+		id := c.installs[slug]
+		if id == 0 {
+			c.t.Fatalf("runner has no install for %s", slug)
 		}
 		separator := "?"
 		if strings.Contains(path, "?") {
 			separator = "&"
 		}
-		path += separator + "project_id=" + projectID
-		if installID := strings.TrimSpace(os.Getenv("APTEVA_LIVE_INSTALL_ID")); installID != "" {
-			path += "&install_id=" + url.QueryEscape(installID)
-		}
+		path += separator + "project_id=" + url.QueryEscape(os.Getenv("APTEVA_TEST_PROJECT_ID")) + "&install_id=" + fmt.Sprint(id)
 	}
 	var reader *bytes.Reader
 	if body != nil {
@@ -95,6 +87,11 @@ func (c *liveClient) do(method, path string, body any, out any) int {
 		c.t.Fatalf("%s %s: %v", method, path, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		c.t.Logf("%s %s returned %d: %s", method, path, resp.StatusCode, strings.ReplaceAll(string(data), c.key, "[redacted]"))
+		return resp.StatusCode
+	}
 	if out != nil {
 		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			c.t.Fatalf("decode %s %s response: %v", method, path, err)
@@ -103,44 +100,23 @@ func (c *liveClient) do(method, path string, body any, out any) int {
 	return resp.StatusCode
 }
 
-// ensureAgent returns (agentID, cleanup). With APTEVA_LIVE_AGENT_ID it
-// reuses the operator's agent; otherwise it creates a temporary
-// Codex-backed one and the cleanup deletes it.
-func (c *liveClient) ensureAgent() (int64, func()) {
+// Allocate the next runner-owned agent. Drivers never create or delete agents.
+func (c *scenarioClient) ensureAgent() (int64, func()) {
 	c.t.Helper()
-	if raw := os.Getenv("APTEVA_LIVE_AGENT_ID"); raw != "" {
-		var id int64
-		fmt.Sscanf(raw, "%d", &id)
-		if id == 0 {
-			c.t.Fatalf("invalid APTEVA_LIVE_AGENT_ID %q", raw)
-		}
-		return id, func() {}
+	if c.nextAgent >= len(c.agents) {
+		c.t.Fatal("scenario must declare enough setup.agents")
 	}
-	var created struct {
-		ID int64 `json:"id"`
-	}
-	status := c.do("POST", "/api/agents", map[string]any{
-		"name":       "conversations-live-codex",
-		"directive":  "You are an operations and customer-support agent. Answer chat messages briefly and directly. When monitor or scheduler events arrive, act on them per your conversations skill. Policy: you may approve refunds up to $100 yourself; larger refunds require operator approval. Refuse impossible or absurd requests politely without escalating.",
-		"mode":       "autonomous",
-		"config":     `{"default_provider":"openai-codex","include_channels":false}`,
-		"project_id": os.Getenv("APTEVA_LIVE_PROJECT_ID"),
-	}, &created)
-	if status != 200 || created.ID == 0 {
-		c.t.Fatalf("create temp agent: status=%d id=%d", status, created.ID)
-	}
-	c.t.Logf("created temp Codex agent %d", created.ID)
-	return created.ID, func() {
-		c.do("POST", fmt.Sprintf("/api/agents/%d/stop", created.ID), nil, nil)
-		c.do("DELETE", fmt.Sprintf("/api/agents/%d", created.ID), nil, nil)
-	}
+	id := c.agents[c.nextAgent]
+	c.nextAgent++
+	c.t.Logf("using runner-owned agent %d", id)
+	return id, func() {}
 }
 
-// TestLive_CodexChatRoundTrip: create a conversation with the agent,
+// TestScenario_ChatRoundTrip: create a conversation with the agent,
 // send one message, and require a real model-authored reply through
 // conversations_send within the deadline.
-func TestLive_CodexChatRoundTrip(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_ChatRoundTrip(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -184,12 +160,12 @@ func TestLive_CodexChatRoundTrip(t *testing.T) {
 	t.Fatal("no agent reply within 120s")
 }
 
-// TestLive_CodexSingleConversationRoundTrip proves the focused widget's
+// TestScenario_SingleConversationRoundTrip proves the focused widget's
 // server-selected conversation is the same durable chat used for a real Codex
 // turn. It covers the lead-agent projection without introducing a second chat
 // transport or transcript implementation.
-func TestLive_CodexSingleConversationRoundTrip(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_SingleConversationRoundTrip(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -231,13 +207,13 @@ func TestLive_CodexSingleConversationRoundTrip(t *testing.T) {
 	t.Fatal("no Codex reply in the focused conversation within 120s")
 }
 
-// TestLive_CodexSoftBreak opens the real streaming channel, waits for the
+// TestScenario_SoftBreak opens the real streaming channel, waits for the
 // acknowledgement that makes the UI's Break control visible, then submits a
 // durable advisory event against that exact active response. The model may
 // finish an already-running provider call; it must nevertheless consume the
 // later event and acknowledge the user's changed intent on its next turn.
-func TestLive_CodexSoftBreak(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_SoftBreak(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -255,7 +231,7 @@ func TestLive_CodexSoftBreak(t *testing.T) {
 	streamCtx, cancelStream := context.WithCancel(context.Background())
 	defer cancelStream()
 	streamURL := c.base + "/api/apps/conversations/stream?chat_id=" + conv.ID +
-		"&project_id=" + os.Getenv("APTEVA_LIVE_PROJECT_ID")
+		"&project_id=" + os.Getenv("APTEVA_TEST_PROJECT_ID") + "&install_id=" + fmt.Sprint(c.installs["conversations"])
 	streamReq, err := http.NewRequestWithContext(streamCtx, http.MethodGet, streamURL, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -364,75 +340,135 @@ func TestLive_CodexSoftBreak(t *testing.T) {
 	t.Fatal("Codex did not acknowledge the soft-break event within 150s")
 }
 
-// TestLive_CodexImageStorageTicket is a Tier 3 end-to-end attachment check.
-// It is opt-in because it uses a real LLM and creates a temporary ticket.
-// The Conversations install must have a Storage binding with
-// attachment_storage enabled, and the agent must have the Tickets tools.
-// Required: APTEVA_LIVE_TICKETS_AGENT_ID (or APTEVA_LIVE_AGENT_ID),
-// APTEVA_LIVE_PROJECT_ID, APTEVA_LIVE_STORAGE_ENABLED=true.
-func TestLive_CodexImageStorageTicket(t *testing.T) {
-	if os.Getenv("APTEVA_LIVE_STORAGE_ENABLED") != "true" {
-		t.Skip("APTEVA_LIVE_STORAGE_ENABLED=true required for Tier 3 Storage attachment test")
+// The title and expected image colour change each run. Only actual vision can
+// supply the colour; neither the filename nor the prompt reveals it.
+func TestScenario_ImageStorageTicket(t *testing.T) {
+	c := newScenarioClient(t)
+	if c.installs["storage"] == 0 || c.installs["tickets"] == 0 {
+		t.Fatal("scenario must provision Storage and Tickets")
 	}
-	c := newLiveClient(t)
-	agentID, cleanupAgent := c.ensureAgent()
-	defer cleanupAgent()
-	var conv struct {
-		ID string `json:"id"`
+	agent, _ := c.ensureAgent()
+	var conv Conversation
+	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agent, "title": "Image Storage ticket"}, &conv); status != 200 || conv.ID == "" {
+		t.Fatalf("create: %d", status)
 	}
-	if status := c.do("POST", "/api/apps/conversations/chats", map[string]any{"agent_id": agentID, "title": "Live image Storage ticket"}, &conv); status != http.StatusOK || conv.ID == "" {
-		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	defer c.deleteConversation(conv.ID)
+	colours := []struct {
+		name  string
+		value color.RGBA
+	}{{"red", color.RGBA{255, 0, 0, 255}}, {"blue", color.RGBA{0, 0, 255, 255}}, {"green", color.RGBA{0, 180, 0, 255}}}
+	selected := colours[time.Now().UnixNano()%int64(len(colours))]
+	canvas := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: selected.value}, image.Point{}, draw.Src)
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, canvas); err != nil {
+		t.Fatal(err)
 	}
-	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
-	image := base64.StdEncoding.EncodeToString(onePixelPNG())
+	title := fmt.Sprintf("TIER3_IMAGE_STORAGE_%d", time.Now().UnixNano())
 	var uploaded Attachment
-	if status := c.do("POST", "/api/apps/conversations/attachments?chat_id="+conv.ID, map[string]any{"id": "tier3-image-storage-1234", "name": "tier3.png", "content_base64": image}, &uploaded); status != http.StatusOK || uploaded.ID == "" {
-		t.Fatalf("upload image: status=%d attachment=%+v", status, uploaded)
+	if status := c.do("POST", "/api/apps/conversations/attachments?chat_id="+conv.ID, map[string]any{"id": title, "name": "picture.png", "content_base64": base64.StdEncoding.EncodeToString(encoded.Bytes())}, &uploaded); status != 200 || uploaded.ID == "" {
+		t.Fatalf("upload: %d", status)
 	}
-	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
-		"content":           "Use the attached image to create a Tickets ticket titled TIER3_IMAGE_STORAGE_TEST. After creating it, attach this same image using the Storage file ID exposed with the image. Reply exactly TIER3_IMAGE_STORAGE_DONE only after tickets_add_attachment succeeds.",
-		"client_message_id": "tier3-image-storage-message",
-		"attachments":       []Attachment{{ID: uploaded.ID, Type: uploaded.Type}},
-	}, nil); status != http.StatusOK {
-		t.Fatalf("send image: status=%d", status)
+	body := map[string]any{"content": "Create exactly one Tickets ticket titled " + title + ". In its description name the dominant colour you see in the attached picture. Attach this exact original image using the Storage file ID supplied with it. Do not fetch or re-upload the image. Reply TIER3_IMAGE_STORAGE_DONE only after tickets_add_attachment succeeds.", "client_message_id": title, "attachments": []Attachment{{ID: uploaded.ID, Type: uploaded.Type}}}
+	var original, retry Message
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, body, &original); status != 200 {
+		t.Fatalf("send image: %d", status)
 	}
-	deadline := time.Now().Add(180 * time.Second)
+	if len(original.Attachments) != 1 || original.Attachments[0].FileID <= 0 {
+		t.Fatalf("sent message lacks stable Storage ID: %+v", original.Attachments)
+	}
+	expected := original.Attachments[0].FileID
+	t.Logf("fixture colour=%s; Storage file=%d; original PNG sha256=%x", selected.name, expected, sha256.Sum256(encoded.Bytes()))
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, body, &retry); status != 200 || retry.ID != original.ID || len(retry.Attachments) != 1 || retry.Attachments[0].FileID != expected {
+		t.Fatalf("retry duplicated message or Storage file: status=%d", status)
+	}
+	deadline := time.Now().Add(300 * time.Second)
 	for time.Now().Before(deadline) {
 		var transcript []Message
-		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		if status := c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript); status != 200 {
+			t.Fatalf("history: %d", status)
+		}
+		done := false
 		for _, m := range transcript {
 			if m.Role == "agent" && strings.Contains(m.Content, "TIER3_IMAGE_STORAGE_DONE") {
-				var list struct {
-					Tickets []struct {
-						ID int64 `json:"id"`
-					} `json:"tickets"`
-				}
-				path := "/api/apps/tickets/tickets?q=TIER3_IMAGE_STORAGE_TEST&project_id=" + url.QueryEscape(os.Getenv("APTEVA_LIVE_PROJECT_ID"))
-				if status := c.do("GET", path, nil, &list); status != http.StatusOK || len(list.Tickets) == 0 {
-					t.Fatalf("agent reported success but ticket was not found: status=%d tickets=%+v", status, list.Tickets)
-				}
-				var detail struct {
-					Attachments []struct {
-						StorageFileID string `json:"storage_file_id"`
-					} `json:"attachments"`
-				}
-				status := c.do("GET", fmt.Sprintf("/api/apps/tickets/tickets/%d?project_id=%s", list.Tickets[0].ID, url.QueryEscape(os.Getenv("APTEVA_LIVE_PROJECT_ID"))), nil, &detail)
-				if status != http.StatusOK || len(detail.Attachments) == 0 || detail.Attachments[0].StorageFileID == "" {
-					t.Fatalf("ticket has no Storage attachment: status=%d detail=%+v", status, detail)
-				}
-				t.Logf("Tier 3 image reached Core vision and Tickets attachment with storage_file_id=%s", detail.Attachments[0].StorageFileID)
-				return
+				done = true
 			}
 		}
-		time.Sleep(3 * time.Second)
+		if !done {
+			time.Sleep(time.Second)
+			continue
+		}
+		var list struct {
+			Tickets []struct {
+				ID    int64  `json:"id"`
+				Title string `json:"title"`
+			} `json:"tickets"`
+		}
+		if status := c.do("GET", "/api/apps/tickets/tickets?q="+url.QueryEscape(title), nil, &list); status != 200 || len(list.Tickets) != 1 || list.Tickets[0].Title != title {
+			t.Fatalf("expected one uniquely titled ticket: status=%d count=%d", status, len(list.Tickets))
+		}
+		var detail struct {
+			Ticket struct {
+				Description string `json:"description"`
+			} `json:"ticket"`
+			Attachments []struct {
+				StorageFileID string `json:"storage_file_id"`
+			} `json:"attachments"`
+		}
+		if status := c.do("GET", fmt.Sprintf("/api/apps/tickets/tickets/%d", list.Tickets[0].ID), nil, &detail); status != 200 {
+			t.Fatalf("ticket detail: %d", status)
+		}
+		if len(detail.Attachments) != 1 || detail.Attachments[0].StorageFileID != fmt.Sprint(expected) {
+			t.Fatalf("ticket attachment differs from original Storage file %d: %+v", expected, detail.Attachments)
+		}
+		found := false
+		for _, event := range c.ownershipToolEvents(agent) {
+			if event.Data.Name == "tickets_add_attachment" || strings.HasSuffix(event.Data.Name, "_tickets_add_attachment") {
+				var fileID any
+				if err := json.Unmarshal(event.Data.Args["file_id"], &fileID); err != nil {
+					t.Fatal(err)
+				}
+				if fmt.Sprint(fileID) != fmt.Sprint(expected) {
+					t.Fatalf("agent used wrong file ID: %v", fileID)
+				}
+				if event.ThreadID != conversationThreadID(conv.ID) {
+					t.Fatalf("attachment tool escaped originating chat: %s", event.ThreadID)
+				}
+				found = true
+			}
+		}
+		if !found {
+			time.Sleep(time.Second)
+			continue // persisted telemetry can arrive after the final chat message
+		}
+		req, err := http.NewRequest("GET", fmt.Sprintf("%s/api/apps/storage/files/%d/download?project_id=%s&install_id=%d", c.base, expected, url.QueryEscape(os.Getenv("APTEVA_TEST_PROJECT_ID")), c.installs["storage"]), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+c.key)
+		response, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		originalBytes, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
+		response.Body.Close()
+		if err != nil || response.StatusCode != 200 || !bytes.Equal(originalBytes, encoded.Bytes()) {
+			t.Fatalf("Storage does not contain the original image bytes: status=%d err=%v", response.StatusCode, err)
+		}
+		t.Logf("Storage and Tickets reference the same original bytes and file ID %d; tool stayed in the originating thread", expected)
+		if !strings.Contains(strings.ToLower(detail.Ticket.Description), selected.name) {
+			t.Fatalf("vision failed: expected %s in ticket description %q", selected.name, detail.Ticket.Description)
+		}
+		t.Logf("vision=%s; ticket=%d; message and ticket share Storage file %d; retry reused original message; tool ran in originating thread", selected.name, list.Tickets[0].ID, expected)
+		return
 	}
-	t.Fatal("real agent did not complete the image-to-ticket Storage flow within 180s")
+	t.Fatal("real agent did not complete image-to-ticket flow within 300s")
 }
 
-// TestLive_CodexTwoConversationIsolation proves that one agent can hold two
+// TestScenario_TwoConversationIsolation proves that one agent can hold two
 // simultaneous Conversations threads without replies crossing between them.
-func TestLive_CodexTwoConversationIsolation(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_TwoConversationIsolation(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -509,7 +545,7 @@ func TestLive_CodexTwoConversationIsolation(t *testing.T) {
 
 // ─── background scenarios (the manually-proven suite, codified) ─────
 
-func (c *liveClient) injectEvent(agentID int64, text string) {
+func (c *scenarioClient) injectEvent(agentID int64, text string) {
 	c.t.Helper()
 	status := c.do("POST", fmt.Sprintf("/api/agents/%d/event", agentID),
 		map[string]any{"message": text}, nil)
@@ -565,7 +601,7 @@ func approvalActionID(item liveInboxItem) string {
 // pollInbox waits for a pending inbox item from the given agent with
 // the given kind. The inbox is instance-global, so filtering by agent
 // keeps the test independent of pre-existing items.
-func (c *liveClient) pollInbox(agentID int64, kind string, deadline time.Duration) liveInboxItem {
+func (c *scenarioClient) pollInbox(agentID int64, kind string, deadline time.Duration) liveInboxItem {
 	c.t.Helper()
 	end := time.Now().Add(deadline)
 	for time.Now().Before(end) {
@@ -582,17 +618,17 @@ func (c *liveClient) pollInbox(agentID int64, kind string, deadline time.Duratio
 	return liveInboxItem{}
 }
 
-func (c *liveClient) deleteConversation(id string) {
+func (c *scenarioClient) deleteConversation(id string) {
 	if id != "" {
 		c.do("DELETE", "/api/apps/conversations/chats?id="+id, nil, nil)
 	}
 }
 
-// TestLive_CodexAlertFlow: a monitor error at main must become an
+// TestScenario_AlertFlow: a monitor error at main must become an
 // error/warn alert in an agent-created conversation — the agent picks
 // or creates the conversation itself (list → create → alert).
-func TestLive_CodexAlertFlow(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_AlertFlow(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -624,12 +660,12 @@ func TestLive_CodexAlertFlow(t *testing.T) {
 	t.Logf("alert landed in agent-created %q (%s)", conv.Title, item.Message.ConversationID)
 }
 
-// TestLive_CodexApprovalRoundTrip: the agent requests approval for a
+// TestScenario_ApprovalRoundTrip: the agent requests approval for a
 // destructive action and STOPS; the operator approves with a note;
 // the card mutates in place and the verdict reaches the agent, which
 // acknowledges in the conversation.
-func TestLive_CodexApprovalRoundTrip(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_ApprovalRoundTrip(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -691,11 +727,11 @@ func TestLive_CodexApprovalRoundTrip(t *testing.T) {
 	t.Log("approval card mutated and the agent acknowledged the verdict")
 }
 
-// TestLive_CodexReportFlow: a scheduler event produces a report that
+// TestScenario_ReportFlow: a scheduler event produces a report that
 // is pending in the inbox AND visible in its conversation's
 // transcript (the 0.5.1 guarantee).
-func TestLive_CodexReportFlow(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_ReportFlow(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -723,15 +759,15 @@ func TestLive_CodexReportFlow(t *testing.T) {
 	t.Logf("report visible in inbox and transcript (%s)", item.Message.ConversationID)
 }
 
-// TestLive_CodexPublicVisitorEscalation — the public-audience story
+// TestScenario_PublicVisitorEscalation — the public-audience story
 // end-to-end with a real model: a visitor (public keyed conversation,
 // as a gateway app would create it) asks for something above the
 // bot's authority. The agent must reply to the visitor in the public
 // conversation, must NOT put any inbox item there (the structural
 // guard), and should escalate by raising an approval or alert in an
 // OPERATOR conversation.
-func TestLive_CodexPublicVisitorEscalation(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_PublicVisitorEscalation(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -820,7 +856,7 @@ func TestLive_CodexPublicVisitorEscalation(t *testing.T) {
 // assertQuietInbox waits out a settle window and fails if the agent
 // raised ANY inbox item — the negative-space proof that self-serve
 // and refusal paths do not bother the operator.
-func (c *liveClient) assertQuietInbox(agentID int64, settle time.Duration) {
+func (c *scenarioClient) assertQuietInbox(agentID int64, settle time.Duration) {
 	c.t.Helper()
 	time.Sleep(settle)
 	var items []liveInboxItem
@@ -838,7 +874,7 @@ func (c *liveClient) assertQuietInbox(agentID int64, settle time.Duration) {
 // gateway app would, posts the visitor's message, and waits for the
 // agent's reply — failing if any inbox card appears in the public
 // transcript on the way.
-func (c *liveClient) publicVisitorConversation(agentID int64, message string) string {
+func (c *scenarioClient) publicVisitorConversation(agentID int64, message string) string {
 	c.t.Helper()
 	var conv struct {
 		ID       string `json:"id"`
@@ -877,12 +913,12 @@ func (c *liveClient) publicVisitorConversation(agentID int64, message string) st
 	return ""
 }
 
-// TestLive_CodexPublicSelfServe: a request WITHIN the agent's stated
+// TestScenario_PublicSelfServe: a request WITHIN the agent's stated
 // authority ($20 refund, policy allows up to $100) — the agent must
 // handle it alone: reply to the visitor, no approval, no alert, no
 // operator involvement at all.
-func TestLive_CodexPublicSelfServe(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_PublicSelfServe(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -894,11 +930,11 @@ func TestLive_CodexPublicSelfServe(t *testing.T) {
 	t.Log("self-serve refund handled without any operator involvement")
 }
 
-// TestLive_CodexPublicRefusal: an impossible/absurd request — the
+// TestScenario_PublicRefusal: an impossible/absurd request — the
 // agent must refuse politely on its own, without escalating anything
 // to the operator.
-func TestLive_CodexPublicRefusal(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_PublicRefusal(t *testing.T) {
+	c := newScenarioClient(t)
 	agentID, cleanupAgent := c.ensureAgent()
 	defer cleanupAgent()
 
@@ -912,14 +948,14 @@ func TestLive_CodexPublicRefusal(t *testing.T) {
 }
 
 // Real multi-agent fan-out plus HTTP retry must keep one durable user request.
-func TestLive_CodexRoomFanoutAndRetry(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_RoomFanoutAndRetry(t *testing.T) {
+	c := newScenarioClient(t)
 	first, cleanFirst := c.ensureAgent()
 	defer cleanFirst()
 	second, cleanSecond := c.ensureAgent()
 	defer cleanSecond()
 	if first == second {
-		t.Skip("room test requires two temporary agents; unset APTEVA_LIVE_AGENT_ID")
+		t.Fatal("room scenario requires two distinct runner-owned agents")
 	}
 	var conv struct {
 		ID string `json:"id"`
@@ -964,8 +1000,8 @@ func TestLive_CodexRoomFanoutAndRetry(t *testing.T) {
 	t.Fatal("both Codex room participants did not reply within 120s")
 }
 
-func TestLive_CodexConversationApprovalDestination(t *testing.T) {
-	c := newLiveClient(t)
+func TestScenario_ConversationApprovalDestination(t *testing.T) {
+	c := newScenarioClient(t)
 	agent, cleanup := c.ensureAgent()
 	defer cleanup()
 	var conv struct {

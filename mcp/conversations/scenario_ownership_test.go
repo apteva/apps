@@ -1,11 +1,10 @@
-//go:build live
+//go:build scenario
 
 package main
 
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"reflect"
 	"sort"
 	"strings"
@@ -20,7 +19,7 @@ type ownershipProfile struct {
 	MCPNames  []string `json:"mcp_names"`
 }
 
-func (c *liveClient) ownershipProfiles(agent int64) map[string]ownershipProfile {
+func (c *scenarioClient) ownershipProfiles(agent int64) map[string]ownershipProfile {
 	c.t.Helper()
 	var rows []ownershipProfile
 	if status := c.do("GET", fmt.Sprintf("/api/agents/%d/threads", agent), nil, &rows); status != 200 {
@@ -44,7 +43,7 @@ type ownershipToolEvent struct {
 	} `json:"data"`
 }
 
-func (c *liveClient) ownershipToolEvents(agent int64) []ownershipToolEvent {
+func (c *scenarioClient) ownershipToolEvents(agent int64) []ownershipToolEvent {
 	c.t.Helper()
 	var rows []ownershipToolEvent
 	if status := c.do("GET", fmt.Sprintf("/api/telemetry?agent_id=%d&type=tool.call&limit=1000", agent), nil, &rows); status != 200 {
@@ -59,11 +58,8 @@ func (c *liveClient) ownershipToolEvents(agent int64) []ownershipToolEvent {
 // This is a behavioral regression, not proof that Core forbids mutation.
 // Do not add the desired no-update instruction to the test agent's directive:
 // the installed Conversations skill and app-provided thread context must teach it.
-func TestLive_CodexPreservesConversationOwnership(t *testing.T) {
-	c := newLiveClient(t)
-	if os.Getenv("APTEVA_LIVE_AGENT_ID") != "" {
-		t.Fatal("ownership challenges require a temporary agent; unset APTEVA_LIVE_AGENT_ID")
-	}
+func TestScenario_PreservesConversationOwnership(t *testing.T) {
+	c := newScenarioClient(t)
 	agent, cleanup := c.ensureAgent()
 	t.Cleanup(cleanup)
 	create := func(title, audience string) string {

@@ -1,5 +1,6 @@
 import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
+import { pendingResponsePhase } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
@@ -410,14 +411,14 @@ function StreamingBubble({ text }: { text: string }) {
 // ThinkingMessagePlaceholder is the dashboard's thinking row — the
 // animated chat-thinking-dots (class from the dashboard stylesheet)
 // with the label, occupying transcript space like a message.
-function ThinkingMessagePlaceholder() {
+function ThinkingMessagePlaceholder({ preparing = false }: { preparing?: boolean }) {
   const { t } = useConversationLocalization();
   return (
     <div
       className="grid min-h-[42px] min-w-0 shrink-0 grid-cols-[1.9rem_minmax(0,1fr)_auto] items-center gap-2 px-1 py-0.5"
       role="status"
       aria-live="polite"
-      aria-label={t("chat.thinkingLabel")}
+      aria-label={t(preparing ? "chat.panel.startingResponse" : "chat.thinkingLabel")}
     >
       <span
         className="chat-thinking-dots inline-flex h-7 w-7 shrink-0 items-center justify-center gap-1"
@@ -427,7 +428,7 @@ function ThinkingMessagePlaceholder() {
         <span />
         <span />
       </span>
-      <span className="text-[13px] leading-5 text-text-muted">{t("chat.thinking")}</span>
+      <span className="text-[13px] leading-5 text-text-muted">{t(preparing ? "chat.panel.startingResponse" : "chat.thinking")}</span>
       <span className="h-4 w-4 shrink-0" aria-hidden="true" />
     </div>
   );
@@ -1135,6 +1136,8 @@ function MessageBody({
 }
 
 interface StreamBubbleState {
+ threadId?: string;
+ createdAt?: number;
  afterMessageId?: number;
  runId?: string;
   callId: string;
@@ -1226,7 +1229,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
         if (frame.phase !== "acknowledgement") for (const [k,v] of streamRef.current) {
           if (v.agentId === frame.agent_id && v.phase === "acknowledgement") streamRef.current.delete(k);
         }
-        streamRef.current.set(key, {afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
+        streamRef.current.set(key, {threadId:frame.thread_id,createdAt:streamRef.current.get(key)?.createdAt ?? (Date.parse(frame.created_at ?? "") || Date.now()),afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
       }
       publishBubbles();
     };
@@ -1509,7 +1512,6 @@ export function ConversationChat({
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
-          continuing={item === timeline.at(-1) && Boolean(bubble && !bubble.text)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
         /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
@@ -1520,7 +1522,7 @@ export function ConversationChat({
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length ? <>{bubbles.map(b => <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder />}</div>)}</> : null}
+      streamNode={bubbles.length ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && phase === null) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={phase === "preparing"} />}</div>; })}</> : null}
       emptyMessage={emptyMessage}
       headerActions={headerActions}
       bottomRef={bottomRef}

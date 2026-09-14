@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToolTranslation as useTranslation } from "./toolActivityAdapter";
 import { AppIcon } from "./toolAppIcon";
-import type { ToolActivity } from "./toolActivityModel";
+import { toolDurationMs, toolGroupDurationMs, type ToolActivity } from "./toolActivityModel";
 import {
   resolveToolVisual,
   type ToolGlyph,
@@ -98,7 +98,16 @@ export function ChatToolActivity({
   detailsId,
 }: ToolActivityProps) {
   const { t } = useTranslation();
+  const running = tools.some(tool => tool.state === "running");
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!running) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
   if (tools.length === 0) return null;
+  const duration = durationLabel(toolGroupDurationMs(tools, now));
 
   const grouped = tools.length > 1;
   const status = grouped
@@ -172,14 +181,15 @@ export function ChatToolActivity({
             </span>
           ) : null}
         </span>
-        {grouped
-          ? <ChevronIcon expanded={expanded} />
-          : <span className="h-4 w-4 shrink-0" aria-hidden="true" />}
+        <span className="inline-flex shrink-0 items-center gap-2">
+          {duration && <span className="text-[11px] tabular-nums text-text-dim" title={t("tool.executionTime")}>{duration}</span>}
+          {grouped && <ChevronIcon expanded={expanded} />}
+        </span>
       </button>
       {grouped && expanded && (
         <div id={resolvedDetailsId} className="mt-1 grid min-w-0 sm:pl-9">
           {tools.map((tool) => (
-            <ToolCallRow key={tool.id} tool={tool} registry={registry} />
+            <ToolCallRow key={tool.id} tool={tool} registry={registry} now={now} />
           ))}
         </div>
       )}
@@ -233,15 +243,17 @@ function ToolCallRow({
   tool,
   registry,
   standalone = false,
+  now,
 }: {
   tool: ToolActivity;
   registry: ToolVisualRegistry;
   standalone?: boolean;
+  now: number;
 }) {
   const { t } = useTranslation();
   const visual = useMemo(() => resolveToolVisual(tool.name, registry), [tool.name, registry]);
   const state = visualState(tool);
-  const duration = durationLabel(tool.durationMs);
+  const duration = durationLabel(toolDurationMs(tool, now));
   const stateText = stateLabel(tool, t);
   const reason = reasonLabel(tool, t);
   return (

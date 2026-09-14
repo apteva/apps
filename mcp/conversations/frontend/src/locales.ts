@@ -4,6 +4,7 @@ export const catalog = {
   "chat.panel.hideToolCalls": ["Hide tool calls", "Masquer les appels d'outils", "Ocultar llamadas de herramientas"],
   "chat.panel.parallelToolCalls": ["{count} parallel tool calls", "{count} appels parallèles", "{count} llamadas en paralelo"],
   "chat.panel.showToolCalls": ["Show tool calls", "Afficher les appels d'outils", "Mostrar llamadas de herramientas"],
+  "tool.executionTime": ["Tool execution time", "Durée d’exécution des outils", "Tiempo de ejecución de herramientas"],
   "chat.panel.startingResponse": ["Preparing response…", "Préparation de la réponse…", "Preparando respuesta…"],
   "chat.panel.toolCalls": ["{count} tool calls", "{count} appels d’outils", "{count} llamadas de herramientas"],
   "chat.panel.toolDone": ["Done", "Terminé", "Hecho"],

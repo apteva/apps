@@ -39,9 +39,10 @@ export interface Message {
 export interface ToolActivity {
   id: number; chat_id: string; agent_id: number; thread_id: string; call_id: string;
   name: string; reason: string; status: "running" | "completed" | "failed" | "interrupted";
-  started_at: string; ended_at: string; revision: number;
+  started_at: string; ended_at: string; duration_ms?: number; revision: number;
 }
 export interface StreamFrame {
+  created_at?: string;
   tool_activity?: ToolActivity;
  after_message_id?: number;
  run_id?: string;

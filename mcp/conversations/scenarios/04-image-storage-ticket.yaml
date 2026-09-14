@@ -1,0 +1,36 @@
+name: conversations-image-storage-ticket
+timeout: 9m
+max_iterations: 80
+setup:
+  app:
+    path: .
+    spawnable: true
+    config:
+      attachment_storage: "true"
+    bindings:
+      storage: app
+  apps:
+    - path: ../tickets
+      spawnable: true
+      bindings:
+        storage: app
+  agents: 1
+  driver: ["go", "-C", "..", "test", "-tags=scenario", "-run", "^TestScenario_ImageStorageTicket$", "-v", "-count=1", "-timeout=8m", "."]
+directive: |
+  You are an operations and customer-support agent. Answer chat messages briefly
+  and directly. When monitor or scheduler events arrive, act on them per your
+  conversations skill. Policy: you may approve refunds up to $100 yourself;
+  larger refunds require operator approval. Refuse impossible or absurd requests
+  politely without escalating. All operations here use isolated test data.
+budget:
+  total_tokens: 500000
+trajectory_assert:
+  - tool_called_with:
+      tool: tickets_create
+      count: 1
+      before: tickets_add_attachment
+  - tool_called_with:
+      tool: tickets_add_attachment
+      count: 1
+  - tool_not_called: conversations_read_attachment
+  - tool_not_called: storage_files_get_content
