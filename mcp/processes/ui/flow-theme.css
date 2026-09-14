@@ -1,12 +1,12 @@
 /* Shared by the project map, procedure editor and run flows. Host theme tokens
    drive surfaces/accent; border contrast is independent of the host's hairlines. */
 .ap-processes :is(.pm, .pf-shell) {
-  --pf-border: color-mix(in srgb, var(--pc-text) 56%, var(--pc-panel));
-  --pf-divider: color-mix(in srgb, var(--pc-text) 24%, var(--pc-panel));
-  --pf-surface: color-mix(in srgb, var(--pc-panel) 94%, var(--pc-text));
+  --pf-border: color-mix(in srgb, var(--pc-text) 36%, var(--pc-panel));
+  --pf-divider: color-mix(in srgb, var(--pc-text) 16%, var(--pc-panel));
+  --pf-surface: color-mix(in srgb, var(--pc-panel) 97%, var(--pc-text));
   --pf-canvas: var(--pc-bg);
-  --pf-edge: color-mix(in srgb, var(--pc-text) 62%, var(--pc-panel));
-  --pf-dot: color-mix(in srgb, var(--pc-text) 16%, var(--pc-bg));
+  --pf-edge: color-mix(in srgb, var(--pc-text) 44%, var(--pc-panel));
+  --pf-dot: color-mix(in srgb, var(--pc-text) 12%, var(--pc-bg));
   --pf-success: var(
     --color-success,
     color-mix(in srgb, #198b59 70%, var(--pc-text))

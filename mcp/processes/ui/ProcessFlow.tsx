@@ -294,7 +294,7 @@ export function ProcessFlow({
         },
         style: {
           stroke: color,
-          strokeWidth: selected ? 3 : 2,
+          strokeWidth: selected ? 3 : 1.5,
           ...(virtual ? { strokeDasharray: "5 5" } : {}),
         },
       };
