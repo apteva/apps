@@ -1,3 +1,9 @@
+import {
+  TimingEditor,
+  TimingRules,
+  TimingDetails,
+  validTimings,
+} from "./Timing";
 /// <reference path="./flow-css.d.ts" />
 import { useEffect, useMemo, useState, useId } from "react";
 import {
@@ -76,13 +82,19 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
       </div>
       <strong className="pf-step-title">{s.name || "Untitled step"}</strong>
       <div className="pf-step-bottom">
-        <span className="pf-role">{s.role?.replaceAll("_", " ") || "Choose role"}</span>
+        <span className="pf-role">
+          {s.role?.replaceAll("_", " ") || "Choose role"}
+        </span>
         <span>
-          {s.depends_on.length > 1
-            ? `${s.depends_on.length} inputs`
-            : s.depends_on.length
-              ? "After previous step"
-              : "Starts with run"}
+          {s.start_after
+            ? `Start +${s.start_after.offset} ${s.start_after.unit}`
+            : s.due_after
+              ? `Due +${s.due_after.offset} ${s.due_after.unit}`
+              : s.depends_on.length > 1
+                ? `${s.depends_on.length} inputs`
+                : s.depends_on.length
+                  ? "After previous step"
+                  : "Starts with run"}
         </span>
       </div>
       {(data.execution || data.executions?.length) && (
@@ -94,7 +106,11 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
                 data-state={execution.state}
                 key={`${execution.id || execution.key}-${index}`}
               >
-                <FlowStatus state={execution.state} label={execution.decision} />
+                <FlowStatus
+                  state={execution.state}
+                  label={execution.decision}
+                  timing={execution}
+                />
                 <span className="pf-executor">
                   {execution.progress}% ·{" "}
                   {data.executorNames?.[index] || data.executorName}
@@ -322,7 +338,11 @@ export function ProcessFlow({
   const active = steps.find((s) => s.key === selected),
     activeIndex = steps.findIndex((s) => s.key === selected);
   const update = (patch: Partial<Step>) =>
-    onChange?.(steps.map((s) => (s.key === selected ? { ...s, ...patch } : s)));
+    onChange?.(
+      validTimings(
+        steps.map((s) => (s.key === selected ? { ...s, ...patch } : s)),
+      ),
+    );
   const add = (kind: Step["kind"]) => {
     if (!onChange || steps.length >= 30) return;
     const key = nextStepKey(steps),
@@ -548,15 +568,17 @@ export function ProcessFlow({
                 type="button"
                 onClick={() => {
                   onChange!(
-                    steps.map((s) =>
-                      s.key === selectedEdge.target
-                        ? {
-                            ...s,
-                            depends_on: s.depends_on.filter(
-                              (k) => k !== selectedEdge.source,
-                            ),
-                          }
-                        : s,
+                    validTimings(
+                      steps.map((s) =>
+                        s.key === selectedEdge.target
+                          ? {
+                              ...s,
+                              depends_on: s.depends_on.filter(
+                                (k) => k !== selectedEdge.source,
+                              ),
+                            }
+                          : s,
+                      ),
                     ),
                   );
                   setSelectedEdge(null);
@@ -679,9 +701,12 @@ export function ProcessFlow({
                       );
                     })}
                   {!active.depends_on.length && (
-                    <p className="pf-hint">Starts as soon as the run begins.</p>
+                    <p className="pf-hint">
+                      No step dependencies. Timing rules below still apply.
+                    </p>
                   )}
                 </fieldset>
+                <TimingEditor step={active} steps={steps} onChange={update} />
                 <button
                   type="button"
                   className="pf-delete"
@@ -702,6 +727,12 @@ export function ProcessFlow({
                   </span>
                   <span>Role: {active.role}</span>
                 </div>
+                <TimingRules step={active} steps={steps} />
+                {executions
+                  ?.filter((s) => s.key === active.key)
+                  .map((s) => (
+                    <TimingDetails key={s.id} step={s} />
+                  ))}
                 <h4>Instructions</h4>
                 <div className="prose">{active.instructions}</div>
                 <h4>Required output</h4>

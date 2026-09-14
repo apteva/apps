@@ -331,3 +331,45 @@ hairlines and the brighter v0.11.2 treatment. Terminal and Clean themes are chec
 in both light and dark modes. Running/ready work uses
 the host accent; completed, waiting/blocked, and failed work use semantic colors.
 Motion respects the reduced-motion preference.
+
+## Step timing
+
+Each structured step can define an optional `start_after` and `due_after` rule.
+`start_after` holds work until the earliest start time; `due_after` is a completion
+deadline, which flags overdue work without delaying or cancelling it. Rules use
+`after: "run_start"` or `after: "step_completed"` with a `step_key` referencing a
+step dependency or its ancestor. Offsets are nonnegative whole `minutes`, `hours`,
+or `days`, at most 365 days; a day is 24 hours. All dependencies and approvals
+must still finish even if the start time has already passed.
+
+For “send an email now, then send a follow-up 10 minutes later,” define two steps,
+make the second depend on the first, and add this to the second:
+
+```json
+{
+  "start_after": {"after":"step_completed","step_key":"send_first","offset":10,"unit":"minutes"},
+  "due_after": {"after":"step_completed","step_key":"send_first","offset":30,"unit":"minutes"}
+}
+```
+
+The editor exposes these under **Timing**. Agents can create the same rules via
+`create`/`update`. Definitions and timing rules are frozen with each run. Resolved
+`start_at`, `due_at`, and the first successful `completed_at` are persisted in
+SQLite. A completion-relative timer starts when Processes records successful
+completion (or reconciles a Tasks completion), not when an external service says
+it performed the action. Report the first email's completion promptly.
+
+The app's five-second worker changes eligible steps from `scheduled` to `ready`
+and sends the normal tracked event to their assigned agent, or requests human
+work/creates the optional Tasks record. No model requests or sleeping worker are
+needed during the delay. Timed workflows use independent step deliveries; untimed
+sequential workflows still reuse their existing worker. Restarts retain timers;
+if the app was offline when due, it dispatches after recovery. Retries reuse the
+same delivery identity. Cancellation stops future handoffs; pausing an assignment
+only stops new runs. Start times are earliest eligibility, not guaranteed delivery
+or completion times.
+
+Live flows, the project map, Work, and the overview widget show scheduled timing
+and deadlines. Procedure-relative deadlines cannot be overridden on an individual
+task. Date-parameter anchors, business calendars, reminders and escalation rules
+are not part of this release. No Server or Core changes are required.

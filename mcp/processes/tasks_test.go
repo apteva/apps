@@ -293,6 +293,15 @@ func TestNativeTaskMigrationPreservesLegacyWorkAndForeignKeys(t *testing.T) {
 	if e = tx.Commit(); e != nil {
 		t.Fatal(e)
 	}
+	for _, file := range []string{"007_app_events.sql", "008_run_workers.sql", "009_step_timing.sql"} {
+		raw, err := os.ReadFile("migrations/" + file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = db.Exec(string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	a := &App{db: db}
 	s, e := a.task("project-a", "old-step")
 	if e != nil || s.ID != "old-step" || s.Output != "Preserved result" || s.ExecutionID != "exec-old" || !s.Required || s.Origin != "process_step" {

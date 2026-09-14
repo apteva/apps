@@ -1,3 +1,4 @@
+import { TimingDetails, TimingRules } from "./Timing";
 /// <reference path="./flow-css.d.ts" />
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -109,7 +110,7 @@ function MapStep({ data }: NodeProps<Node<StepData>>) {
         >
           <span>{runLabel(run)}</span>
           <span>
-            <FlowStatus state={step?.state || "pending"} />
+            <FlowStatus state={step?.state || "pending"} timing={step} />
             {agent && ` · ${agent}`}
           </span>
         </button>
@@ -498,6 +499,7 @@ export default function ProjectMap(props: Props) {
             </p>
             {selectedStep && (
               <>
+                <TimingRules step={selectedStep} steps={selectedProcess.steps || []} />
                 <p className="pm-instructions">{selectedStep.instructions}</p>
                 <p>
                   <strong>Expected output:</strong>{" "}
@@ -546,6 +548,7 @@ export default function ProjectMap(props: Props) {
                                 ? ` · ${props.agents?.find((a) => a.id === step.executor.agent_id)?.name || `Agent ${step.executor.agent_id}`}`
                                 : ""}
                             </span>
+                            <TimingDetails step={step} />
                           </li>
                         ))}
                       </ol>

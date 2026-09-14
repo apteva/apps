@@ -6,6 +6,7 @@ import Widget, {
   overviewLink,
   overviewQueue,
   executionStatus,
+  type Data,
 } from "./ProcessOverviewWidget";
 import { overviewFixture } from "./tests/overview-fixture";
 const originalFetch = globalThis.fetch;
@@ -183,4 +184,15 @@ test("right column uses live step state and accounts for parallel work, review a
   run.state = "blocked";
   run.steps[1].state = "blocked";
   expect(executionStatus(entry).state).toBe("blocked");
+});
+
+test("timed executions appear with schedules and retain a run link", () => {
+  const data: Data = structuredClone(overviewFixture);
+  data.active[0].state = "scheduled";
+  data.active[0].steps = [{ id: "follow-up", name: "Send follow-up", state: "scheduled", progress: 0, kind: "work", origin: "process_step", executor: { kind: "agent", agent_id: 7 }, start_at: new Date(Date.now() + 600_000).toISOString() }];
+  const entry = overviewQueue(data).find(x => x.item.id === data.active[0].id)!;
+  expect(entry.group).toBe("scheduled");
+  expect(entry.assignment).toBe(false);
+  expect(executionStatus(entry).label).toContain("Starts in 10 min");
+  expect(overviewLink({ projectId: "project-a" }, entry.item)).toContain("run_id=");
 });

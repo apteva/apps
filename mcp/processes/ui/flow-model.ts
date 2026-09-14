@@ -1,3 +1,4 @@
+import { validTimings } from "./Timing";
 import type { Step } from "./Workflow";
 export const NODE_WIDTH = 236;
 export const COLUMN_GAP = 328;
@@ -77,9 +78,9 @@ export function connectSteps(
     : steps;
 }
 export function removeStep(steps: Step[], key: string): Step[] {
-  return steps
+  return validTimings(steps
     .filter((s) => s.key !== key)
-    .map((s) => ({ ...s, depends_on: s.depends_on.filter((k) => k !== key) }));
+    .map((s) => ({ ...s, depends_on: s.depends_on.filter((k) => k !== key) })));
 }
 export function nextStepKey(steps: Step[]): string {
   let n = 1;

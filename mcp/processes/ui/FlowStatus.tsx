@@ -1,3 +1,4 @@
+import { timingLabel, useTimingNow, type TimedExecution } from "./Timing";
 import {
   Check,
   CircleAlert,
@@ -12,13 +13,34 @@ import {
 
 export function flowState(states: (string | undefined)[]): string {
   const values = states.filter(Boolean);
-  for (const state of ["running", "blocked", "failed", "waiting", "ready"])
+  for (const state of [
+    "running",
+    "blocked",
+    "failed",
+    "waiting",
+    "ready",
+    "scheduled",
+  ])
     if (values.includes(state)) return state;
   if (values.length && values.every((s) => s === "completed"))
     return "completed";
   return values.length ? "pending" : "idle";
 }
-export function FlowStatus({ state, label }: { state: string; label?: string }) {
+export function FlowStatus({
+  state,
+  label,
+  timing,
+}: {
+  state: string;
+  label?: string;
+  timing?: TimedExecution;
+}) {
+  const now = useTimingNow();
+  const timedLabel = timing ? timingLabel(timing, now) : "";
+  const overdue =
+    !!timing?.due_at &&
+    Date.parse(timing.due_at) < now &&
+    !["completed", "failed", "cancelled"].includes(state);
   const Icon =
     state === "running"
       ? LoaderCircle
@@ -28,15 +50,30 @@ export function FlowStatus({ state, label }: { state: string; label?: string }) 
           ? CircleAlert
           : state === "failed"
             ? CircleX
-            : state === "waiting"
+            : state === "waiting" || state === "scheduled"
               ? Clock3
               : state === "ready"
                 ? Play
                 : CircleDashed;
   return (
-    <span className="flow-status" data-state={state}>
+    <span
+      className="flow-status"
+      data-state={overdue ? "overdue" : state}
+      title={
+        timing
+          ? [
+              timing.start_at &&
+                `Earliest start: ${new Date(timing.start_at).toLocaleString()}`,
+              timing.due_at &&
+                `Deadline: ${new Date(timing.due_at).toLocaleString()}`,
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          : undefined
+      }
+    >
       <Icon size={12} aria-hidden="true" />
-      {(label || state).replaceAll("_", " ")}
+      {(label || timedLabel || state).replaceAll("_", " ")}
     </span>
   );
 }

@@ -58,7 +58,7 @@ export function supplementalRuns(p: MapProcess, runs: MapRun[]) {
 export function currentRunSteps(run: MapRun) {
   const active =
     run.steps?.filter((s) =>
-      ["running", "blocked", "waiting", "ready"].includes(s.state),
+      ["running", "blocked", "waiting", "ready", "scheduled"].includes(s.state),
     ) || [];
   return active.length
     ? active.map((s) => s.definition?.name || s.key).join(" · ")

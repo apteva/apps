@@ -1,3 +1,4 @@
+import { timingLabel, useTimingNow } from "./Timing";
 import { useEffect, useState } from "react";
 
 type Props = {
@@ -9,6 +10,9 @@ type Props = {
   widgetSettings?: Record<string, unknown>;
 };
 type Step = {
+  start_at?: string;
+  due_at?: string;
+  completed_at?: string;
   id: string;
   name: string;
   state: string;
@@ -99,7 +103,11 @@ export function overviewQueue(
       : data.active.map((item) => ({
           item,
           assignment: false,
-          group: working(item) ? ("running" as const) : ("history" as const),
+          group: working(item)
+            ? ("running" as const)
+            : item.state === "scheduled"
+              ? ("scheduled" as const)
+              : ("history" as const),
         }))),
     ...(settings?.show_upcoming === false
       ? []
@@ -156,7 +164,7 @@ export function executionStatus({ item: x, assignment }: QueueEntry) {
     };
   const steps = x.steps || [];
   const current = steps.filter((s) =>
-    ["running", "blocked", "waiting", "ready"].includes(s.state),
+    ["running", "blocked", "waiting", "ready", "scheduled"].includes(s.state),
   );
   const matching = current.find((s) => s.state === x.state);
   if (["blocked", "waiting"].includes(x.state) && !matching)
@@ -177,7 +185,9 @@ export function executionStatus({ item: x, assignment }: QueueEntry) {
     current[0];
   const same = current.filter((s) => s.state === step?.state);
   return {
-    label: step?.name || x.current_step || "Preparing run",
+    label: step
+      ? `${step.name}${timingLabel(step) ? ` · ${timingLabel(step)}` : ""}`
+      : x.current_step || "Preparing run",
     state:
       step?.kind === "approval" &&
       step.executor.kind === "human" &&
@@ -208,6 +218,7 @@ export default function ProcessOverviewWidget(props: Props) {
   );
 }
 function Overview(props: Props) {
+  useTimingNow();
   const [view, setView] = useState("all"),
     [selected, setSelected] = useState<string | null>(null),
     [data, setData] = useState<Data | null>(null),
@@ -485,6 +496,19 @@ function Overview(props: Props) {
                           </small>
                         </span>
                         {badge(s.state)}
+                        {timingLabel(s) && (
+                          <small
+                            title={[
+                              s.start_at &&
+                                `Earliest start: ${when(s.start_at)}`,
+                              s.due_at && `Deadline: ${when(s.due_at)}`,
+                            ]
+                              .filter(Boolean)
+                              .join(" · ")}
+                          >
+                            {timingLabel(s)}
+                          </small>
+                        )}
                       </li>
                     ))}
                   </ol>

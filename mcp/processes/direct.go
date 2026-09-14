@@ -310,7 +310,7 @@ func (a *App) tickDirect(ctx context.Context, now time.Time) error {
 			r := &runs[i]
 			if r.Workflow {
 				if !terminal(r.State) {
-					if e = a.reconcileWorkflow(p, r); e != nil {
+					if e = a.reconcileWorkflowAt(p, r, now); e != nil {
 						failures = append(failures, e)
 					}
 				}
