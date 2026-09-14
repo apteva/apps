@@ -336,3 +336,31 @@ func TestHTTPCreateUpdateConflict(t *testing.T) {
 		}
 	}
 }
+
+// The icon must work when source-installed binaries run from a directory
+// without ./ui, including before the full panel assets have been resolved.
+func TestIconRouteIndependentOfWorkingDirectory(t *testing.T) {
+	a := &App{}
+	var route *sdk.Route
+	for _, r := range a.HTTPRoutes() {
+		if r.Pattern == "/ui/icon.svg" {
+			copy := r
+			route = &copy
+		}
+	}
+	if route == nil {
+		t.Fatal("missing canonical icon route")
+	}
+	t.Chdir(t.TempDir())
+	w := httptest.NewRecorder()
+	route.Handler(w, httptest.NewRequest("GET", "/ui/icon.svg?v=0.1.1", nil))
+	if w.Code != 200 || w.Header().Get("Content-Type") != "image/svg+xml" {
+		t.Fatal(w.Code, w.Header())
+	}
+	if !bytes.Equal(w.Body.Bytes(), iconSVG) || !bytes.Contains(w.Body.Bytes(), []byte(`stroke="currentColor"`)) {
+		t.Fatal("missing adaptive icon")
+	}
+	if a.Manifest().Icon != "/ui/icon.svg" || a.Manifest().IconStyle != "monochrome" {
+		t.Fatal("icon manifest drift")
+	}
+}
