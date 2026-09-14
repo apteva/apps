@@ -462,8 +462,10 @@ func (s *devSupervisor) startDevRunContext(callCtx context.Context, ctx *sdk.App
 		return s.startRemoteRun(ctx, in, srcDir, fw, def.RemoteRunner)
 	}
 
-	if (fw != "static" || strings.TrimSpace(in.RunCmd) != "") && !localExecutionEnabled(ctx) {
-		return nil, errors.New("local dev commands require trusted_local_execution=true; use Workspaces for untrusted code")
+	if fw != "static" || strings.TrimSpace(in.RunCmd) != "" {
+		if err := requireLocalExecution(ctx, in.Repo); err != nil {
+			return nil, err
+		}
 	}
 	port, err := s.allocateDevPort()
 	if err != nil {

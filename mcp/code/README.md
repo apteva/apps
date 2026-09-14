@@ -63,6 +63,12 @@ exclude generated trees. Ambiguous global template slugs fail; MCP accepts
 `from_project_id` to select the owner. Metadata updates validate every supplied
 field before a single column-selective SQL update.
 
+## Local execution permission
+
+Live Run previews and `runtime=local` commands require an explicit permission for the repository. The Run button presents **Allow and run** the first time; agents can use `repos_execution_configure` with `enabled=true, confirm=true`. The permission is stored by repository, survives restarts, and can be revoked for future runs. `trusted_local_execution=true` remains an installation-wide default for operators who have explicitly trusted every repository.
+
+`repos_execution_status` reports whether the selected repository needs local execution and where its permission comes from. Workspaces remain the automatic isolated runtime for finite commands.
+
 ## Commands and Workspaces
 
 `repos_run_command` defaults to `runtime=workspace`, using the optional bound

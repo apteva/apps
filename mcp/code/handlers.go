@@ -1224,6 +1224,8 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 		return
 	}
 	switch action {
+	case "execution":
+		a.httpExecutionPermission(w, r, repo)
 	case "start":
 		if r.Method != http.MethodPost {
 			httpErr(w, http.StatusMethodNotAllowed, "POST")

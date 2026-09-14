@@ -43,6 +43,8 @@ function uptimeStr(startedAt?: string): string {
   return `${Math.floor(ms / 3_600_000)}h${Math.floor((ms % 3_600_000) / 60_000)}m`;
 }
 
+interface ExecutionPermission { enabled: boolean; source: string; requires_local_execution: boolean; }
+
 export function DevBar({
   slug,
   api,
@@ -62,6 +64,9 @@ export function DevBar({
 }) {
   const [run, setRun] = useState<DevRunWire | null>(null);
   const [busy, setBusy] = useState(false);
+  const [permission, setPermission] = useState<ExecutionPermission | null>(null);
+  const [permissionDialog, setPermissionDialog] = useState<"run" | "settings" | null>(null);
+  const executionPath = `/repos/${encodeURIComponent(slug)}/dev/execution`;
  const alive=useRef(true);const gate=useRef(new RequestGate());
  useEffect(()=>{alive.current=true;return()=>{alive.current=false;gate.current.invalidate();};},[]);
 
@@ -87,13 +92,45 @@ export function DevBar({
   const start = async () => {
     setBusy(true);
     try {
-      await api("POST", `/repos/${slug}/dev/start`, {});
-      await refresh();
+      const next = await api<ExecutionPermission>("GET", executionPath);
+      if (!alive.current) return;
+      setPermission(next);
+      if (next.requires_local_execution && !next.enabled) {
+        setPermissionDialog("run");
+        return;
+      }
+      await api("POST", `/repos/${encodeURIComponent(slug)}/dev/start`, {});
+      if (alive.current) await refresh();
     } catch (e) {
       if (alive.current) onError("Run failed: " + (e as Error).message);
     } finally {
       if (alive.current) setBusy(false);
     }
+  };
+
+  const showPermission = async () => {
+    setBusy(true);
+    try {
+      const next = await api<ExecutionPermission>("GET", executionPath);
+      if (!alive.current) return;
+      setPermission(next); setPermissionDialog("settings");
+    } catch (e) { if (alive.current) onError((e as Error).message); }
+    finally { if (alive.current) setBusy(false); }
+  };
+  const configurePermission = async (enabled: boolean) => {
+    setBusy(true);
+    try {
+      const next = await api<ExecutionPermission>("PATCH", executionPath, { enabled, confirm: enabled });
+      if (!alive.current) return;
+      setPermission(next);
+      const runAfter = permissionDialog === "run" && enabled;
+      setPermissionDialog(null);
+      if (runAfter) {
+        await api("POST", `/repos/${encodeURIComponent(slug)}/dev/start`, {});
+        if (alive.current) await refresh();
+      }
+    } catch (e) { if (alive.current) onError((e as Error).message); }
+    finally { if (alive.current) setBusy(false); }
   };
 
   const stop = async () => {
@@ -114,7 +151,8 @@ export function DevBar({
   const isRemote = run?.runner === "simulator";
 
   return (
-    <div className="px-3 py-2 border-b border-border flex items-center gap-2 bg-bg-input/40">
+    <div className="border-b border-border bg-bg-input/40">
+    <div className="px-3 py-2 flex items-center gap-2">
       <span className={`text-xs ${devStatusColor(status)}`}>●</span>
       <span className="text-xs text-text-muted">
         {status === "live" && isRemote ? (
@@ -144,6 +182,7 @@ export function DevBar({
         )}
       </span>
       <span className="flex-1" />
+      <button type="button" disabled={busy} onClick={() => void showPermission()} className="px-2 py-0.5 text-xs border border-border rounded text-text-muted disabled:opacity-50">Execution</button>
       <button
         type="button"
         onClick={onToggleLogs}
@@ -164,6 +203,16 @@ export function DevBar({
           className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
         >{isBusy ? "Starting…" : "Run"}</button>
       )}
+    </div>
+    {permissionDialog && permission && <div role="dialog" aria-label="Local execution permission" className="mx-3 mb-3 p-3 border border-border rounded text-xs space-y-3">
+      <strong>{permission.enabled ? "Local execution allowed" : "Allow local execution?"}</strong>
+      <p>Scripts and dependency installs in <strong>{slug}</strong> will run with the Code service’s permissions, including access to files and network resources available to it.</p>
+      <p className="text-text-muted">This choice is saved for this repository and takes effect immediately. Disabling it prevents future local runs; use Stop to end a running preview.</p>
+      <div className="flex gap-3">
+        {permission.enabled ? <button disabled={busy} onClick={() => void configurePermission(false)} className="text-red disabled:opacity-50">Disable local execution</button> : <button disabled={busy} onClick={() => void configurePermission(true)} className="text-accent disabled:opacity-50">{busy ? "Allowing…" : permissionDialog === "run" ? "Allow and run" : "Allow local execution"}</button>}
+        <button disabled={busy} onClick={() => setPermissionDialog(null)}>Cancel</button>
+      </div>
+    </div>}
     </div>
   );
 }

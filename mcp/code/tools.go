@@ -475,7 +475,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_run_command",
-			Description: "Run a finite repo command and wait for it to exit. runtime defaults to workspace. runtime=local requires trusted_local_execution and uses the Code sidecar OS authority; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
+			Description: "Run a finite repo command and wait for it to exit. runtime defaults to workspace. runtime=local requires local execution permission (repos_execution_configure or installation config) and uses the Code sidecar OS authority; runtime=workspace creates or reuses an isolated Workspaces environment, installs dependencies when inputs change, safely synchronizes source, and preserves its cache. Use this for builds, tests, lint, typecheck, generators, and validation commands. " +
 				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
 				"For monorepos, workspace_paths selects editable doublestar globs and support_paths adds read-only build inputs; only the selected files are transferred and only workspace_paths may be applied back. Omitted scope arguments reuse the linked workspace scope; pass workspace_paths=[\"**\"] to switch back to the full repository. " +
 				"Returns structured status, runtime, workspace_id when applicable, exit_code, duration_ms, dependency_install_ran, and bounded logs. Args: slug, command, runtime? (local|workspace), profile? (go|bun|python|apteva), image? (allowlisted immutable workspace image override), workspace_paths?, support_paths?, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
@@ -538,6 +538,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	tools = append(tools, a.gitMCPTools()...)
+	tools = append(tools, a.executionTools()...)
 	return authenticatedTools(append(tools, a.autoSyncTools()...))
 }
 
@@ -677,8 +678,10 @@ func (a *App) toolRunCommand(callCtx context.Context, ctx *sdk.AppCtx, args map[
 	if runtime == "" {
 		runtime = "workspace"
 	}
-	if runtime == "local" && !localExecutionEnabled(ctx) {
-		return nil, errors.New("local execution is disabled; use runtime=workspace or enable trusted_local_execution for this installation")
+	if runtime == "local" {
+		if err := requireLocalExecution(ctx, repo); err != nil {
+			return nil, err
+		}
 	}
 	if runtime == "workspace" {
 		callCtx, untrack := a.commands.track(callCtx, repo.ID)

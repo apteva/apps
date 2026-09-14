@@ -1235,7 +1235,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
               </aside>
 
               <section className="flex-1 min-w-0 overflow-hidden flex flex-col">
-                <DevBar key={selectedSlug}
+                <DevBar key={`${projectId}:${selectedSlug}`}
                   slug={selectedSlug}
                   api={api}
                   withParams={withParams}
