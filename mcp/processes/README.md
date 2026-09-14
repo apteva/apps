@@ -312,8 +312,10 @@ square overview, with shared pan, zoom, minimap, and Fit all SOPs controls.
 
 Concurrent live runs of the current procedure version appear separately on each
 step, labeled with assignment, run ID, state, and agent. Runs from older or unknown
-versions remain in the SOP execution inspector with their original step snapshots;
-they are never projected onto the latest definition. Select a SOP, step, or run to
+versions, and runs without matching step tracking, have their own visible run cards
+inside the SOP boundary, showing version, state and current work. Each live run is
+accounted for on the canvas. Their original step snapshots remain available in the
+execution inspector; they are never projected onto the latest definition. Select a SOP, step, or run to
 inspect instructions and execution details, then open the existing SOP/run page.
 Unstructured runs remain visible in the inspector. Recurring Tasks schedule records
 are not counted as live executions. The map has search, status and live-only filters.
@@ -321,3 +323,10 @@ are not counted as live executions. The map has search, status and live-only fil
 The read-only map uses the panel's existing event stream. Refresh preserves the
 viewport, cancels stale requests, limits concurrent history reads to four, and
 reports missing or truncated execution data while retaining all SOP boundaries.
+
+
+Project and individual flows share Apteva theme colors, status icons, selection
+outlines, and theme geometry. Neutral step borders are checked at 3:1 contrast in
+Terminal and Clean themes, in both light and dark modes. Running/ready work uses
+the host accent; completed, waiting/blocked, and failed work use semantic colors.
+Motion respects the reduced-motion preference.

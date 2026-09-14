@@ -1,0 +1,134 @@
+/* Shared by the project map, procedure editor and run flows. Host theme tokens
+   drive surfaces/accent; border contrast is independent of the host's hairlines. */
+.ap-processes :is(.pm, .pf-shell) {
+  --pf-border: color-mix(in srgb, var(--pc-text) 56%, var(--pc-panel));
+  --pf-divider: color-mix(in srgb, var(--pc-text) 24%, var(--pc-panel));
+  --pf-surface: color-mix(in srgb, var(--pc-panel) 94%, var(--pc-text));
+  --pf-canvas: var(--pc-bg);
+  --pf-edge: color-mix(in srgb, var(--pc-text) 62%, var(--pc-panel));
+  --pf-dot: color-mix(in srgb, var(--pc-text) 16%, var(--pc-bg));
+  --pf-success: var(
+    --color-success,
+    color-mix(in srgb, #198b59 70%, var(--pc-text))
+  );
+  --pf-warning: var(
+    --color-warn,
+    color-mix(in srgb, #b87513 70%, var(--pc-text))
+  );
+  --pf-danger: var(
+    --color-error,
+    color-mix(in srgb, #d04040 70%, var(--pc-text))
+  );
+}
+.ap-processes :is(.pm, .pf-shell) [data-state] {
+  --flow-state: var(--pc-muted);
+}
+.ap-processes :is(.pm, .pf-shell) [data-state="running"],
+.ap-processes :is(.pm, .pf-shell) [data-state="ready"] {
+  --flow-state: var(--pc-accent);
+}
+.ap-processes :is(.pm, .pf-shell) [data-state="completed"] {
+  --flow-state: var(--pf-success);
+}
+.ap-processes :is(.pm, .pf-shell) [data-state="blocked"],
+.ap-processes :is(.pm, .pf-shell) [data-state="waiting"] {
+  --flow-state: var(--pf-warning);
+}
+.ap-processes :is(.pm, .pf-shell) [data-state="failed"] {
+  --flow-state: var(--pf-danger);
+}
+.ap-processes .flow-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-transform: capitalize;
+  color: var(--flow-state);
+  background: color-mix(in srgb, var(--flow-state) 10%, var(--pf-surface));
+  border: 1px solid color-mix(in srgb, var(--flow-state) 55%, var(--pf-surface));
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+.ap-processes .flow-status svg {
+  flex: none;
+}
+.ap-processes .flow-kind {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--pc-accent);
+  font-size: 10px;
+  line-height: 18px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  width: 100%;
+}
+.ap-processes .flow-number {
+  margin-left: auto;
+  color: var(--pc-muted);
+  font-variant-numeric: tabular-nums;
+}
+.ap-processes
+  :is(.pm-step, .pf-step)[data-state]:not([data-state="idle"]):not(
+    [data-state="pending"]
+  ) {
+  border-color: var(--flow-state);
+  box-shadow:
+    inset 3px 0 var(--flow-state),
+    0 4px 14px #0001;
+}
+.ap-processes :is(.pm-step, .pf-step)[data-state="running"] {
+  background: color-mix(in srgb, var(--pc-accent) 7%, var(--pf-surface));
+}
+.ap-processes :is(.pm-step, .pf-step)[data-state="completed"] .flow-kind {
+  color: var(--pf-success);
+}
+.ap-processes :is(.pm-step, .pf-step).is-selected {
+  outline: 2px solid var(--pc-accent);
+  outline-offset: 3px;
+}
+.ap-processes :is(.pm, .pf-shell) .react-flow__controls {
+  border: 1px solid var(--pf-border);
+  box-shadow: 0 4px 14px #0002;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.ap-processes :is(.pm, .pf-shell) .react-flow__controls button {
+  border-color: var(--pf-divider);
+}
+.ap-processes :is(.pm, .pf-shell) :is(button, [role="button"]):focus-visible {
+  outline: 2px solid var(--pc-accent);
+  outline-offset: 3px;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .ap-processes .flow-status[data-state="running"] svg {
+    animation: flow-spin 2s linear infinite;
+  }
+  @keyframes flow-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ap-processes :is(.pm, .pf-shell) .react-flow__edge.animated path {
+    animation: none;
+  }
+}
+
+.ap-processes :is(.pm-boundary, .pf-shell, .pm-canvas) {
+  border-radius: var(--radius-lg, 12px);
+}
+.ap-processes :is(.pm-step, .pf-step, .pm-run-card, .pm-inspector) {
+  border-radius: var(--radius-md, 8px);
+}
+.ap-processes :is(.pm-inspector, .pf-inspector) {
+  border-color: var(--pf-border);
+  box-shadow: var(--shadow-popover, 0 8px 28px #0003);
+}
+
+.ap-processes .pm button.pm-run-card {border-radius:var(--radius-md,8px)}

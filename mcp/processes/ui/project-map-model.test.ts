@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   layoutProject,
   overlayRuns,
+  supplementalRuns,
   liveRun,
   type MapProcess,
 } from "./project-map-model";
@@ -49,8 +50,14 @@ test("recurring definitions and historical/unknown versions do not become curren
   expect(liveRun({ id: "once", state: "running", schedule_kind: "once" })).toBe(
     true,
   );
-  const p: MapProcess = { id: "p", name: "SOP", status: "active", version: 3 };
-  const steps = [{}] as any;
+  const p: MapProcess = {
+    id: "p",
+    name: "SOP",
+    status: "active",
+    version: 3,
+    steps: [step("s1")],
+  };
+  const steps = [{ key: "s1" }] as any;
   expect(
     overlayRuns(p, [
       { id: "new", state: "running", version: 3, steps },
@@ -58,4 +65,51 @@ test("recurring definitions and historical/unknown versions do not become curren
       { id: "unknown", state: "running", steps },
     ]).map((r) => r.id),
   ).toEqual(["new"]);
+});
+
+test("every live run appears exactly once in the overlay or supplemental set", () => {
+  const p: MapProcess = {
+    id: "p",
+    name: "SOP",
+    status: "active",
+    version: 3,
+    steps: [step("s1")],
+  };
+  const runs = [
+    {
+      id: "current",
+      state: "running",
+      version: 3,
+      steps: [{ key: "s1" }] as any,
+    },
+    {
+      id: "earlier",
+      state: "running",
+      version: 2,
+      steps: [{ key: "old" }] as any,
+    },
+    { id: "no-steps", state: "blocked", version: 3 },
+    { id: "unknown", state: "waiting" },
+    {
+      id: "mismatch",
+      state: "ready",
+      version: 3,
+      steps: [{ key: "other" }] as any,
+    },
+    { id: "done", state: "completed", version: 3 },
+  ];
+  expect(overlayRuns(p, runs).map((r) => r.id)).toEqual(["current"]);
+  expect(supplementalRuns(p, runs).map((r) => r.id)).toEqual([
+    "earlier",
+    "no-steps",
+    "unknown",
+    "mismatch",
+  ]);
+  const [box] = layoutProject([p], { p: runs });
+  for (const position of Object.values(box.runPositions)) {
+    expect(position.y + 110).toBeLessThan(box.height);
+    expect(position.x + box.runWidth).toBeLessThan(box.width);
+    for (const s of Object.values(box.positions))
+      expect(position.y).toBeGreaterThan(s.y + box.stepHeight);
+  }
 });

@@ -1,3 +1,4 @@
+import {flowThemes, applyFlowTheme, expectBorderContrast} from "./flow-themes";
 import { test, expect } from "@playwright/test";
 const step=(key:string,name:string,depends_on:string[],state:string,agent:number)=>({id:key,run_id:"run-live",key,state,progress:state==="completed"?100:0,output:"",error:"",decision:"",updated_at:new Date().toISOString(),executor:{kind:"agent",agent_id:agent},definition:{key,name,depends_on,kind:"work",role:"worker",instructions:"Follow this step",expected_output:"Evidence"}});
 const run=(done=false)=>({id:"run-live",process_id:"weather",version:1,workflow:true,state:done?"completed":"running",progress:done?100:0,created_at:new Date().toISOString(),steps:[step("fetch_weather","Fetch current weather",[],done?"completed":"running",7),step("post_conversations","Post alert in Conversations",["fetch_weather"],done?"completed":"pending",8),step("send_pushover","Send Pushover notification",["post_conversations"],done?"completed":"pending",9)]});
@@ -57,4 +58,25 @@ test("flow labels keep human executors distinct and wrap long agent names", asyn
  await expect(page.getByRole('button', { name: 'Step 3: Send Pushover notification', exact: true })).toContainText('Agent 9');
  const fits = await first.locator('.pf-executor').evaluate(el => el.scrollWidth <= el.clientWidth);
  expect(fits).toBe(true);
+});
+
+
+test("detail flow shares themed statuses, borders and selection", async ({page,request}) => {
+ const data=run();
+ data.steps[0].state='completed'; data.steps[1].state='running'; data.steps[2].state='pending';
+ await request.post('/fixture/runs',{data:[data]});
+ await page.goto('/?live');
+ await page.getByRole('button',{name:'Hourly weather alerts',exact:true}).click();
+ await page.getByRole('button',{name:'Runs',exact:true}).click();
+ await expect(page.locator('.pf-step[data-state="running"]')).toHaveCount(1);
+ await expect(page.locator('.pf-step[data-state="completed"]')).toHaveCount(1);
+ for(const theme of flowThemes) {
+  await applyFlowTheme(page,theme);
+  await expectBorderContrast(page,'.pf-step[data-state="pending"]');
+  await expect(page.locator('.pf-step').first()).toHaveCSS('border-top-left-radius',theme.radius);
+  await page.getByRole('region',{name:'Process flow',exact:true}).screenshot({path:`/private/tmp/processes-detail-${theme.name}.png`});
+ }
+ await page.getByRole('button',{name:'Step 2: Post alert in Conversations',exact:true}).click();
+ await expect(page.locator('.pf-step[data-state="running"]')).toHaveClass(/is-selected/);
+ await expect(page.getByRole('complementary',{name:'Step details'})).toBeVisible();
 });

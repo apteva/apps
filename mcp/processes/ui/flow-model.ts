@@ -21,7 +21,7 @@ export function stepRanks(steps: Step[]): Map<string, number> {
   steps.forEach((s) => visit(s.key));
   return ranks;
 }
-export function layoutSteps(steps: Step[]): Step[] {
+export function layoutSteps(steps: Step[], rowGap = ROW_GAP): Step[] {
   const ranks = stepRanks(steps),
     groups = new Map<number, Step[]>();
   steps.forEach((s) =>
@@ -37,7 +37,7 @@ export function layoutSteps(steps: Step[]): Step[] {
       ...s,
       position: {
         x: ranks.get(s.key)! * COLUMN_GAP,
-        y: ((max - group.length) / 2 + group.indexOf(s)) * ROW_GAP + 100,
+        y: ((max - group.length) / 2 + group.indexOf(s)) * rowGap + 100,
       },
     };
   });

@@ -1,3 +1,8 @@
+import {
+  flowThemes,
+  applyFlowTheme,
+  expectBorderContrast,
+} from "./flow-themes";
 import { expect, test } from "@playwright/test";
 const step = (key: string, depends_on: string[] = []) => ({
   key,
@@ -74,6 +79,13 @@ test.beforeEach(async ({ page }) => {
       run("run-second", "Madrid", "blocked"),
       run("run-third", "Barcelona", "ready"),
       run("run-old", "Valencia", "waiting", 2),
+      {
+        id: "run-untracked",
+        state: "blocked",
+        version: 3,
+        assignment: { name: "Lisbon" },
+        current_step: "Waiting for a weather source",
+      },
     ],
   };
   await page.route("**/fixture/map-processes", (route) =>
@@ -136,6 +148,9 @@ test("all SOPs and steps share a packed canvas inside the real panel", async ({
     path: "/private/tmp/processes-unified-map-desktop.png",
   });
   await page.setViewportSize({ width: 390, height: 900 });
+  await page.reload();
+  await page.getByRole("button", { name: "Project map", exact: true }).click();
+  await expect(page.locator(".pm-step")).toHaveCount(10);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
@@ -160,6 +175,29 @@ test("simultaneous runs keep their identity and old versions retain original det
   await expect(page.locator('.pm-execution[data-run="run-old"]')).toHaveCount(
     0,
   );
+  const represented = await page
+    .locator(".pm-execution,.pm-run-card")
+    .evaluateAll((nodes) =>
+      [...new Set(nodes.map((n) => n.getAttribute("data-run")))].sort(),
+    );
+  expect(represented).toEqual([
+    "run-first",
+    "run-old",
+    "run-second",
+    "run-third",
+    "run-untracked",
+  ]);
+  await expect(page.locator('.pm-run-card[data-run="run-old"]')).toContainText(
+    "v2",
+  );
+  await expect(
+    page.locator('.pm-run-card[data-run="run-untracked"]'),
+  ).toContainText("Waiting for a weather source");
+  await page.locator('.pm-run-card[data-run="run-old"]').click();
+  await expect(
+    page.getByRole("complementary", { name: "Map details" }),
+  ).toContainText("waiting · v2");
+  await page.getByRole("button", { name: "Close map details" }).click();
   await page.locator('.pm-execution[data-run="run-second"]').first().click();
   const detail = page.getByRole("complementary", { name: "Map details" });
   await expect(detail).toContainText("Madrid · n-second");
@@ -250,4 +288,21 @@ test("a late cancelled refresh cannot overwrite a newer event", async ({
   await expect(
     page.locator('.pm-execution[data-run="run-first"]').first(),
   ).toContainText("completed");
+});
+
+test("project flow follows all host themes with visible card borders", async ({
+  page,
+}) => {
+  for (const theme of flowThemes) {
+    await applyFlowTheme(page, theme);
+    await expectBorderContrast(page, '.pm-step[data-state="idle"]');
+    await expect(page.locator(".pm-step").first()).toHaveCSS(
+      "border-top-left-radius",
+      theme.radius,
+    );
+    await expect(page.locator('.pm-step[data-state="running"]')).toHaveCount(1);
+    await page
+      .getByRole("region", { name: "Project SOP map", exact: true })
+      .screenshot({ path: `/private/tmp/processes-map-${theme.name}.png` });
+  }
 });
