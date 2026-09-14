@@ -22,7 +22,6 @@ export interface ToolActivity {
 }
 
 
-export const TOOL_GROUP_IDLE_GAP_MS = 30_000;
 export const MESSAGE_GROUP_GAP_MS = 5 * 60_000;
 export const TIME_MARKER_GAP_MS = 15 * 60_000;
 export type ChatTimelineItem =
@@ -111,10 +110,8 @@ export function buildChatTimeline(
       });
       continue;
     }
-    const previousTool = pendingTools[pendingTools.length - 1];
-    if (previousTool && item.tool.startedAt - previousTool.startedAt > TOOL_GROUP_IDLE_GAP_MS) {
-      flushTools();
-    }
+    // Messages delimit tool groups. Time spent thinking or executing must
+    // not split one uninterrupted sequence into additional summary rows.
     pendingTools.push(item.tool);
   }
   flushTools();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.18 — 2026-09-14
+
+- Keep consecutive tool calls on one updating, expandable summary line, including across long pauses and after reload. Only intervening messages split tool groups; remove the former 30-second cutoff.
+- Preserve live pulsing, individual call details, and actual execution durations in dashboard, embedded, and npm-exported chat.
+
 ## 0.23.17 — 2026-09-14
 
 - Show an immediate response indicator on Send, including while the request is in flight; clear it on failure or replace it with confirmed live progress.

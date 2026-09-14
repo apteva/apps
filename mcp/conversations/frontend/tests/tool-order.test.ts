@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { pendingResponsePhase, responseToolGroup } from "../src/responseActivity";
-import { toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
+import { buildChatTimeline, toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
 
 const base: ToolActivity = { id:"1", callId:"c1", agentId:41, threadId:"chat-1", name:"repos", reason:"Checking repositories", state:"done", startedAt:1000, finishedAt:2500, durationMs:1500 };
 test("tool activity owns progress while a response is calling tools", () => {
@@ -34,4 +34,17 @@ test("tool progress belongs to the response, not the last transcript item",()=>{
  expect(responseToolGroup({...response,threadId:"other"},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,afterMessageId:8,createdAt:3000},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,optimistic:true,createdAt:3000},timeline,[user])).toBeUndefined();
+});
+
+test("consecutive tools keep one stable group across long gaps until a message",()=>{
+ const later={...base,id:"2",callId:"c2",startedAt:120000,finishedAt:120100,durationMs:100};
+ const first=buildChatTimeline([], [base]).find(item=>item.kind==="toolGroup")!;
+ const groups=buildChatTimeline([], [base,later]).filter(item=>item.kind==="toolGroup");
+ expect(groups).toHaveLength(1);
+ expect(groups[0]!.key).toBe(first.key);
+ expect(groups[0]!.tools).toEqual([base,later]);
+ expect(toolGroupDurationMs(groups[0]!.tools,130000)).toBe(1600);
+ const message={id:1,role:"agent",content:"An intermediate update",created_at:new Date(60000).toISOString()} as any;
+ const separated=buildChatTimeline([message], [base,later]).filter(item=>item.kind!=="day" && item.kind!=="time");
+ expect(separated.map(item=>item.kind)).toEqual(["toolGroup","message","toolGroup"]);
 });

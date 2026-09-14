@@ -432,3 +432,32 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
  });
 }
+
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: consecutive tool calls stay on one line across long gaps and reload`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=Date.now()-180000;
+  const activity={id:701,chat_id:chat,agent_id:41,thread_id:chat,call_id:"first",name:"code_repos_list",reason:"Inspecting app repository",status:"completed",started_at:new Date(start).toISOString(),ended_at:new Date(start+100).toISOString(),duration_ms:100,revision:2};
+  const emit=(tool:any)=>request.post("/emit",{data:{chat_id:chat,agent_id:41,tool_activity:tool}});
+  await emit(activity);
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await emit({...activity,id:702,call_id:"second",reason:"Verifying React project files",started_at:new Date(start+120000).toISOString(),ended_at:new Date(start+120200).toISOString(),duration_ms:200});
+  await expect(row).toHaveCount(1);
+  await expect(row.getByText("Verifying React project files",{exact:true})).toBeVisible();
+  await expect(row.getByText("+1",{exact:true})).toBeVisible();
+  await expect(row.getByText("300ms",{exact:true})).toBeVisible();
+  await row.getByRole("button").first().click();
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(2);
+  await page.reload();await expect(row).toHaveCount(1);
+  await expect(row.getByText("+1",{exact:true})).toBeVisible();
+  // A real message is the boundary; elapsed time alone never is.
+  await request.post("/append-message",{data:{id:901,conversation_id:chat,role:"agent",agent_id:41,content:"The files are ready.",components:[],created_at:new Date(start+130000).toISOString()}});
+  await emit({...activity,id:703,call_id:"third",reason:"Checking the build",started_at:new Date(start+140000).toISOString(),ended_at:new Date(start+140100).toISOString()});
+  await expect(row).toHaveCount(2);
+  await expect(page.getByText("The files are ready.")).toBeVisible();
+ });
+}
