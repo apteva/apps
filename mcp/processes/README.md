@@ -301,3 +301,14 @@ Tier 3 live-LLM smoke tests are in [scenarios/README.md](scenarios/README.md).
 Run `bun run scenarios/run.ts` from this app directory to use Codex /
 `gpt-5.6-terra` and verify persisted direct-run, assignment, and approval-gate
 outcomes. These are separate from the deterministic Go integration suite.
+
+
+## Project map
+
+The Processes panel includes a Project map view for the whole project. Every SOP
+is rendered as a separate bounded graph with all of its steps and dependency edges.
+Assignment context and each concurrent live run are shown on the same SOP graph;
+run overlays retain their own execution status, agent, and run ID. Search, SOP status,
+and live-only filters are available. Selecting a step or run leads to its existing
+detail view. The map is read-only and refreshes from process, assignment, run, task,
+approval, and delivery events.

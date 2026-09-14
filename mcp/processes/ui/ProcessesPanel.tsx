@@ -2,6 +2,7 @@ import { LiveContext, useProcessEvents, useScopedRevision, type AppEvent } from 
 import { useEffect, useState } from "react";
 import WorkPanel, { RunWork } from "./Work";
 import { ProcessFlow } from "./ProcessFlow";
+import ProjectMap from "./ProjectMap";
 import { stepProblem } from "./flow-model";
 import { StepEditor, RunSteps, type Step, type StepRun } from "./Workflow";
 import Assignments, {
@@ -446,6 +447,12 @@ function Panel(props: Props) {
             Processes
           </button>
           <button
+            className={area === "map" ? "on" : ""}
+            onClick={() => setArea("map")}
+          >
+            Project map
+          </button>
+          <button
             className={area === "work" ? "on" : ""}
             onClick={() => setArea("work")}
           >
@@ -467,6 +474,8 @@ function Panel(props: Props) {
         <div className="empty">Select a project to manage its processes.</div>
       ) : loading ? (
         <p className="muted">Loading processes…</p>
+      ) : !selected && !creating && area === "map" ? (
+        <ProjectMap projectId={props.projectId} installId={props.installId} appName={props.appName} eventRevision={liveEvents.eventRevision} agents={agents} />
       ) : !selected && !creating && area === "work" ? (
         <WorkPanel
           key={`${props.projectId}:${props.installId}`}
