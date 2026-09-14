@@ -228,3 +228,16 @@ test("soft break copy describes an advisory request and existing send failures f
  expect(element.textContent).toContain("lost response");
  expect(element.querySelector("textarea")!.value).toBe("Request");
 });
+
+test("old stored Conversations tools stay hidden and approval actions use host theme",async()=>{
+ const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"danger"}]}}]};
+ fetcher=url=> url.includes("/activity") ? json([{id:1,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"legacy",name:"conversations_request_approval",reason:"Requesting deletion approval",status:"running",started_at:message(1).created_at,ended_at:"",revision:1}]) : url.includes("/deliveries") ? json([]) : json({messages:[approval],cursor:2,before:2,has_more:false});
+ await render();
+ expect(element.textContent).toContain("Approve deletion");
+ expect(element.textContent).not.toContain("Requesting deletion approval");
+ const approve=[...element.querySelectorAll("button")].find(b=>b.textContent==="Approve")!;
+ const deny=[...element.querySelectorAll("button")].find(b=>b.textContent==="Deny")!;
+ expect(approve.className).toContain("bg-accent");
+ expect(deny.className).toContain("border-border");
+ expect(approve.className+deny.className).not.toMatch(/bg-success|bg-error/);
+});

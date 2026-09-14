@@ -2,7 +2,7 @@ import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
 import { pendingResponsePhase } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline } from "./toolActivityModel";
+import { buildChatTimeline, isVisibleChatTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -284,7 +284,7 @@ export function ApprovalCard({
         <span className="font-semibold uppercase tracking-wide">{t("card.approval")}</span>
         {status !== "pending" && (
           <span
-            className={`ml-auto px-1.5 py-0.5 rounded text-bg ${status === "approve" ? "bg-success" : "bg-error"}`}
+            className="ml-auto px-1.5 py-0.5 rounded border border-border text-text-muted"
           >
             {statusLabel(status)}
           </span>
@@ -311,11 +311,9 @@ export function ApprovalCard({
                 disabled={busy}
                 onClick={() => act(a.id)}
                 className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${
-                  a.style === "danger"
-                    ? "bg-error text-bg"
-                    : a.style === "primary"
-                      ? "bg-success text-bg"
-                      : "border border-border text-text hover:bg-bg-input"
+                  a.style === "primary"
+                    ? "border border-accent bg-accent text-bg hover:opacity-90"
+                    : "border border-border text-text hover:bg-bg-input"
                 }`}
               >
                 {a.label}
@@ -1326,8 +1324,9 @@ export function ConversationChat({
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const { messages, activities, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const { messages, activities: storedActivities, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   // Resolve display names only for a room or a transcript with multiple speakers.
+  const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
   const showAgentNames = conversation.kind === "room" || speakerIds.size > 1;
   const [agentNames, setAgentNames] = useState<Record<number, string>>({});

@@ -43,7 +43,9 @@ func (s *store) toolActivities(chat string) ([]ToolActivity, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, a)
+		if visibleActivityTool(a.Name) {
+			out = append(out, a)
+		}
 	}
 	return out, rows.Err()
 }
@@ -61,7 +63,8 @@ func (a *App) handleToolActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, rows)
 }
 func visibleActivityTool(name string) bool {
-	return name != "" && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
+	name = strings.ToLower(strings.TrimSpace(name))
+	return name != "" && !strings.HasPrefix(name, "conversations_") && !strings.Contains(name, "_conversations_") && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
 }
 func activityTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 func (a *App) ingestToolActivity(event string, agent int64, thread, data string, ts time.Time) error {
@@ -116,7 +119,7 @@ func (a *App) ingestToolActivity(event string, agent int64, thread, data string,
 		if err != nil {
 			return err
 		}
-		if item.Status == "completed" || item.Status == "failed" {
+		if !visibleActivityTool(item.Name) || item.Status == "completed" || item.Status == "failed" {
 			return nil
 		}
 		item.Status = "completed"

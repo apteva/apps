@@ -89,3 +89,37 @@ func TestToolActivityLifecycleIsolationAndRecovery(t *testing.T) {
 		t.Fatalf("activity became messages: %v %v", msgs, err)
 	}
 }
+
+func TestConversationsToolsHiddenFromLiveAndHistory(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	for _, name := range []string{"conversations_request_approval", "conversations_conversations_request_approval", "conversations_report", "conversations_alert", "conversations_history", "conversations_read_attachment"} {
+		t.Run(name, func(t *testing.T) {
+			if visibleActivityTool(name) {
+				t.Fatal("internal tool is visible")
+			}
+			data, _ := json.Marshal(map[string]string{"id": name, "name": name})
+			if err := a.ingestToolActivity("tool.call", 41, thread, string(data), time.Now()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("live rows: %+v, %v", rows, err)
+	}
+	// Simulate an approval call persisted by a previous version.
+	_, err = a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "legacy", "conversations_request_approval", activityTime(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("history rows: %+v, %v", rows, err)
+	}
+	if !visibleActivityTool("tickets_create") || !visibleActivityTool("code_delete_repository") {
+		t.Fatal("unrelated tools hidden")
+	}
+}

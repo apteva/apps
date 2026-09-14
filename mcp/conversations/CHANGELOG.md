@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.14 — 2026-09-14
+
+- Hide all Conversations tools from live and historical activity, including approval requests already represented by cards.
+- Use the host accent for primary approval actions and neutral outlined secondary actions and status badges in both dashboard and exported chat.
+- Include the shared progress and execution-duration fixes from 0.23.13 in the public npm package.
+
 ## 0.23.12 — 2026-09-13
 
 - Hide integration logos in narrow chat tool rows (up to 640px) so tool text and status controls remain aligned and readable. Roomy chats keep the existing icons.

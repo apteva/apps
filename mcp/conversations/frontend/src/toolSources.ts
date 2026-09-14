@@ -241,6 +241,12 @@ export const toolSources = [
     "icon_style": "monochrome"
   },
   {
+    "name": "editorial",
+    "display_name": "Editorial",
+    "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Crect%20x%3D%223%22%20y%3D%225%22%20width%3D%2218%22%20height%3D%2216%22%20rx%3D%222%22%2F%3E%3Cpath%20d%3D%22M16%203v4M8%203v4M3%2011h18M7%2015h3M7%2018h7M15%2015h2%22%2F%3E%3C%2Fsvg%3E%0A",
+    "icon_style": "monochrome"
+  },
+  {
     "name": "email-checker",
     "display_name": "Email Checker",
     "icon": "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22currentColor%22%20stroke-width%3D%221.8%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%0A%20%20%3C!--%20Apteva%20adaptive%20app%20icon.%20Geometry%20based%20on%20Lucide%20Icons%20(ISC).%20--%3E%0A%20%20%3Cpath%20d%3D%22M22%2013V6a2%202%200%200%200-2-2H4a2%202%200%200%200-2%202v12c0%201.1.9%202%202%202h8%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m22%207-8.97%205.7a1.94%201.94%200%200%201-2.06%200L2%207%22%2F%3E%0A%20%20%3Cpath%20d%3D%22m16%2019%202%202%204-4%22%2F%3E%0A%3C%2Fsvg%3E%0A",
