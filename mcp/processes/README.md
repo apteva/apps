@@ -326,7 +326,8 @@ reports missing or truncated execution data while retaining all SOP boundaries.
 
 
 Project and individual flows share Apteva theme colors, status icons, selection
-outlines, and theme geometry. Neutral step borders are checked at 3:1 contrast in
-Terminal and Clean themes, in both light and dark modes. Running/ready work uses
+outlines, and theme geometry. Neutral step outlines and connectors use moderate contrast, between the host
+hairlines and the brighter v0.11.2 treatment. Terminal and Clean themes are checked
+in both light and dark modes. Running/ready work uses
 the host accent; completed, waiting/blocked, and failed work use semantic colors.
 Motion respects the reduced-motion preference.

@@ -87,5 +87,10 @@ export async function expectBorderContrast(page: Page, selector: string) {
       return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
     }),
   );
-  for (const ratio of ratios) expect(ratio).toBeGreaterThanOrEqual(3);
+  // Decorative outlines should sit between the faint host hairlines and the
+  // overly bright v0.11.2 treatment. Text and active-state colors stay intact.
+  for (const ratio of ratios) {
+    expect(ratio).toBeGreaterThanOrEqual(1.7);
+    expect(ratio).toBeLessThanOrEqual(3.2);
+  }
 }
