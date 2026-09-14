@@ -192,12 +192,19 @@ func resolvePendingIndexerFiles(
 	out := make([]StorageFile, 0, len(ids))
 	for _, id := range ids {
 		f := resolved[id]
-		if f == nil || isExcludedFromCatalog(f.Folder) {
+		if f == nil {
+			// Keep the row pending so a transient Storage outage or eventual
+			// consistency gap is retried, but make the reason visible.
+			_ = recordIndexerDiagnostic(db, projectID, id, "storage file not found during pending resolve")
 			continue
 		}
 		if !isMediaContentType(f.ContentType) && !isMediaByExt(f.Name) {
+			_ = markFailed(db, projectID, id, f.SHA256, "unsupported", "storage file is not a supported media type")
 			continue
 		}
+		// This is the explicit, exact-ID queue. Discovery-only folder
+		// exclusions (including /.composer/) must not silently discard a
+		// valid media file after media_reindex reported queued:1.
 		out = append(out, *f)
 	}
 	return out, nil
@@ -312,10 +319,15 @@ func processOne(
 		return
 	}
 	defer releaseInFlight(projectID, fid)
+	attempt, err := claimIndexerAttempt(app.AppDB(), projectID, f)
+	if err != nil {
+		app.Logger().Warn("indexer claim failed", "file_id", fid, "err", err)
+		return
+	}
 
 	maxBytes := int64(toInt(maxSizeMB)) * 1024 * 1024
 	logger := app.Logger()
-	logCtx := []any{"file_id", fid, "name", f.Name, "content_type", f.ContentType, "size", f.SizeBytes}
+	logCtx := []any{"file_id", fid, "name", f.Name, "content_type", f.ContentType, "size", f.SizeBytes, "attempt", attempt}
 
 	// force_probe (set by media_reindex(force=true)) bypasses both
 	// the dedupe-check below AND the size cap further down. The flag
@@ -343,6 +355,7 @@ func processOne(
 	if forceProbe == 0 {
 		if existing, err := getMedia(app.AppDB(), projectID, fid); err == nil &&
 			existing.SourceSHA256 == f.SHA256 && existing.ProbeStatus == "ok" && !mediaNeedsDerivationRepair(app, existing) {
+			clearIndexerClaim(app.AppDB(), projectID, fid)
 			return
 		}
 	}

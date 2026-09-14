@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.4
+version: 0.14.5
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,11 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.4 fixes processing, worker lifecycle, catalog,
+  through storage. v0.14.5 fixes a Media indexing queue defect that could leave
+  valid files permanently pending, including files in hidden Storage folders.
+  Explicit reindex requests now dispatch immediately; stale claims are
+  reclaimed, retries are durable, and queue diagnostics expose attempts and
+  failures. v0.14.4 fixes processing, worker lifecycle, catalog,
   and rendering issues. Adds verified source and render-result caches,
   bounded processing and uploads, and video quality levels with Legacy
   as the default. Improves Smart Crop and reliable completion delivery.
@@ -285,7 +289,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.4
+    ref: media/v0.14.5
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -2051,10 +2055,10 @@ func boolArg(v any) (bool, bool) {
 	return false, false
 }
 
-// toolReindex flips one row (or all failed rows) back to pending so
-// the indexer's next tick re-probes them. MCP wrapper around the
-// existing /reindex HTTP route. force=true (file_id only) sets
-// force_probe=1 on the row so processOne skips the size cap.
+// toolReindex queues one row (or all failed rows) for probing. An exact
+// file_id is dispatched immediately and remains durable for the periodic
+// worker fallback. force=true (file_id only) sets force_probe=1 so
+// processOne skips the size cap.
 func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -2068,6 +2072,32 @@ func (a *App) toolReindex(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err := queueMediaReindex(ctx.AppDB(), pid, fid, force); err != nil {
 			return nil, err
 		}
+		// Wake an exact-ID worker immediately. The durable row remains the
+		// fallback if the sidecar is shutting down or the async resolve fails.
+		startMediaWorker(ctx, func() {
+			workCtx, cancel := mediaContext(context.Background(), ctx)
+			defer cancel()
+			sc := newStorageClient()
+			resolved, resolveErr := sc.ResolveFiles(workCtx, pid, []string{fid})
+			if resolveErr != nil {
+				_ = recordIndexerDiagnostic(ctx.AppDB(), pid, fid, "storage resolve failed: "+resolveErr.Error())
+				ctx.Logger().Warn("reindex storage resolve failed", "file_id", fid, "err", resolveErr)
+				return
+			}
+			f := resolved[fid]
+			if f == nil {
+				_ = recordIndexerDiagnostic(ctx.AppDB(), pid, fid, "storage file not found during reindex")
+				ctx.Logger().Warn("reindex storage file not found", "file_id", fid)
+				return
+			}
+			if !isMediaContentType(f.ContentType) && !isMediaByExt(f.Name) {
+				_ = markFailed(ctx.AppDB(), pid, fid, f.SHA256, "unsupported", "storage file is not a supported media type")
+				return
+			}
+			c := readIndexerConfig(ctx)
+			processOne(workCtx, ctx, sc, pid, *f, c.ffmpegPath, c.ffprobePath,
+				c.maxSizeMB, c.thumbSeek, c.thumbWidth, c.waveW, c.waveH)
+		})
 		return map[string]any{"queued": 1, "file_id": fid, "force": force}, nil
 	}
 	if v, _ := args["failed_only"].(bool); v {
@@ -2107,7 +2137,36 @@ func (a *App) toolIndexStatus(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		counts[status] = n
 	}
-	return map[string]any{"counts": counts}, nil
+	// Include bounded queue diagnostics so an operator can distinguish a
+	// genuinely running attempt from a stale claim or a repeated Storage
+	// resolve miss without opening the sidecar database.
+	type queueRow struct {
+		FileID    string `json:"file_id"`
+		Attempts  int64  `json:"attempts"`
+		ClaimedAt string `json:"claimed_at,omitempty"`
+		LastError string `json:"last_error,omitempty"`
+	}
+	qrows, err := ctx.AppDB().Query(`
+		SELECT file_id, index_attempts, COALESCE(index_claimed_at,''), COALESCE(index_last_error,'')
+		FROM media
+		WHERE project_id=? AND probe_status IN ('pending','failed')
+		ORDER BY updated_at ASC, file_id ASC LIMIT 100`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer qrows.Close()
+	queue := make([]queueRow, 0, 16)
+	for qrows.Next() {
+		var row queueRow
+		if err := qrows.Scan(&row.FileID, &row.Attempts, &row.ClaimedAt, &row.LastError); err != nil {
+			return nil, err
+		}
+		queue = append(queue, row)
+	}
+	if err := qrows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"counts": counts, "queue": queue}, nil
 }
 
 // ─── Render tool handlers ──────────────────────────────────────────

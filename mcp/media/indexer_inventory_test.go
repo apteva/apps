@@ -109,11 +109,91 @@ func TestResolvePendingIndexerFiles_BypassesInventoryWindow(t *testing.T) {
 	if len(got) != 1 || got[0].ID != 11788 || got[0].SHA256 != "new-sha" {
 		t.Fatalf("resolved rows=%+v", got)
 	}
-	if resolveQueries != 1 {
-		t.Fatalf("exact resolve queries=%d, want 1", resolveQueries)
+	// media_reindex now wakes an exact-ID worker immediately; depending on
+	// scheduling, that worker may resolve before this direct sweep as well.
+	if resolveQueries < 1 {
+		t.Fatalf("exact resolve queries=%d, want at least 1", resolveQueries)
 	}
 	if inventoryQueries != 0 {
 		t.Fatalf("pending dispatch made %d bulk inventory requests", inventoryQueries)
+	}
+}
+
+func TestResolvePendingIndexerFiles_AllowsExplicitHiddenMedia(t *testing.T) {
+	app := newTestCtx(t)
+	queued, err := (&App{}).toolReindex(app, map[string]any{
+		"file_id": "11789",
+	})
+	if err != nil {
+		t.Fatalf("toolReindex: %v", err)
+	}
+	if queued.(map[string]any)["queued"] != 1 {
+		t.Fatalf("unexpected queue response: %#v", queued)
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("ids") != "11789" {
+			http.Error(w, "expected exact resolve", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"files": []StorageFile{{
+			ID: 11789, Name: "composition.mp3", Folder: "/.composer/",
+			ContentType: "audio/mpeg", SHA256: "composer-sha",
+		}}})
+	}))
+	defer srv.Close()
+	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
+	t.Setenv("APTEVA_OUTBOUND_TOKEN", "test-token")
+
+	got, err := resolvePendingIndexerFiles(t.Context(), newStorageClient(), app.AppDB(), testProj, directIndexerBatchSize)
+	if err != nil {
+		t.Fatalf("resolvePendingIndexerFiles: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != 11789 || got[0].Folder != "/.composer/" {
+		t.Fatalf("resolved rows=%+v; explicit hidden media must remain eligible", got)
+	}
+}
+
+func TestPendingIndexerFileIDs_ReclaimsStaleClaim(t *testing.T) {
+	app := newTestCtx(t)
+	if err := queueMediaReindex(app.AppDB(), testProj, "stale-1", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AppDB().Exec(`UPDATE media SET index_claimed_at='2000-01-01T00:00:00Z' WHERE project_id=? AND file_id=?`, testProj, "stale-1"); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := pendingIndexerFileIDs(app.AppDB(), testProj, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != "stale-1" {
+		t.Fatalf("stale claim was not reclaimed: %v", ids)
+	}
+}
+
+func TestClaimIndexerAttemptRecordsAttemptAndRefreshesClaim(t *testing.T) {
+	app := newTestCtx(t)
+	f := StorageFile{ID: 11790, Name: "voice.mp3", Folder: "/.composer/", ContentType: "audio/mpeg", SHA256: "sha"}
+	attempt, err := claimIndexerAttempt(app.AppDB(), testProj, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 1 {
+		t.Fatalf("first attempt=%d, want 1", attempt)
+	}
+	attempt, err = claimIndexerAttempt(app.AppDB(), testProj, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 2 {
+		t.Fatalf("second attempt=%d, want 2", attempt)
+	}
+	var claimed string
+	if err := app.AppDB().QueryRow(`SELECT COALESCE(index_claimed_at,'') FROM media WHERE project_id=? AND file_id=?`, testProj, "11790").Scan(&claimed); err != nil {
+		t.Fatal(err)
+	}
+	if claimed == "" {
+		t.Fatal("claim timestamp was not recorded")
 	}
 }
 

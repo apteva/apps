@@ -106,6 +106,11 @@ type MediaRow struct {
 	CreatedAt string `json:"created_at,omitempty"`
 	UpdatedAt string `json:"updated_at,omitempty"`
 
+	// Durable indexer diagnostics exposed for queue troubleshooting.
+	IndexAttempts  int64  `json:"index_attempts,omitempty"`
+	IndexClaimedAt string `json:"index_claimed_at,omitempty"`
+	IndexLastError string `json:"index_last_error,omitempty"`
+
 	Derivations []DerivationRow `json:"derivations,omitempty"`
 }
 
@@ -166,6 +171,8 @@ func upsertMedia(db *sql.DB, projectID string, fileID string, p *Probe, sha, fol
 			probe_at=excluded.probe_at,
 			raw_probe=excluded.raw_probe,
 			updated_at=excluded.updated_at,
+			index_claimed_at=NULL,
+			index_last_error='',
 			force_probe=0`,
 		fileID, projectID, sha, folder, name,
 		p.FormatName, p.DurationMs, p.Bitrate,
@@ -256,6 +263,8 @@ func markFailed(db *sql.DB, projectID, fileID, sha, kind, msg string) error {
 			probe_error=excluded.probe_error,
 			probe_at=excluded.probe_at,
 			updated_at=excluded.updated_at,
+			index_claimed_at=NULL,
+			index_last_error=excluded.probe_error,
 			force_probe=0`,
 		fileID, projectID, sha, kind, msg, now, now,
 	)
@@ -715,7 +724,8 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 			COALESCE(t.status, ''),
 			m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
 			m.metadata, m.metadata_version,
-			m.created_at, m.updated_at
+			m.created_at, m.updated_at,
+			m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, '')
 		FROM media m
 		LEFT JOIN transcripts t
 		  ON t.file_id = m.file_id AND t.project_id = m.project_id
@@ -746,6 +756,8 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		descAttemptedAt, descError     string
 		transcriptStatus               string
 		metadata                       string
+		indexAttempts                  int64
+		indexClaimedAt, indexLastError string
 	)
 	err := row.Scan(
 		&m.FileID, &m.ProjectID, &m.SourceSHA256, &m.Folder, &m.Name,
@@ -760,6 +772,7 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 		&m.AudienceRating, &m.AudienceReasoning, &m.AudienceUpdatedAt,
 		&metadata, &m.MetadataVersion,
 		&createdAt, &updatedAt,
+		&indexAttempts, &indexClaimedAt, &indexLastError,
 	)
 	if err != nil {
 		return nil, err
@@ -789,6 +802,9 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 	m.TranscriptStatus = transcriptStatus
 	m.CreatedAt = createdAt.String
 	m.UpdatedAt = updatedAt.String
+	m.IndexAttempts = indexAttempts
+	m.IndexClaimedAt = indexClaimedAt
+	m.IndexLastError = indexLastError
 	if rawProbe != "" {
 		m.RawProbe = json.RawMessage(rawProbe)
 	}
@@ -1040,7 +1056,8 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		COALESCE(t.status, ''),
 		m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
 		m.metadata, m.metadata_version,
-		m.created_at, m.updated_at
+		m.created_at, m.updated_at,
+		m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, '')
 	FROM media m
 	LEFT JOIN transcripts t
 	  ON t.file_id = m.file_id AND t.project_id = m.project_id
@@ -1378,6 +1395,7 @@ func pendingIndexerFileIDs(db *sql.DB, projectID string, limit int) ([]string, e
 		SELECT file_id
 		FROM media
 		WHERE project_id=? AND probe_status IN ('pending', 'failed')
+		  AND (index_claimed_at IS NULL OR julianday(index_claimed_at) <= julianday('now', '-15 minutes'))
 		ORDER BY force_probe DESC,
 			CASE probe_status WHEN 'pending' THEN 0 ELSE 1 END,
 			updated_at ASC,
@@ -1397,6 +1415,55 @@ func pendingIndexerFileIDs(db *sql.DB, projectID string, limit int) ([]string, e
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// claimIndexerAttempt records a durable worker claim before any bytes are
+// downloaded. A claim older than 15 minutes is eligible for reclamation by
+// pendingIndexerFileIDs, so a crashed sidecar cannot wedge a file forever.
+func claimIndexerAttempt(db *sql.DB, projectID string, f StorageFile) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	fid := fmt.Sprint(f.ID)
+	_, err := db.Exec(`
+		INSERT INTO media (
+			file_id, project_id, source_sha256, folder, name, probe_status,
+			probe_error, index_attempts, index_claimed_at, index_last_error, updated_at
+		) VALUES (?, ?, ?, ?, ?, 'pending', '', 1, ?, '', ?)
+		ON CONFLICT(file_id) DO UPDATE SET
+			project_id=excluded.project_id,
+			folder=excluded.folder,
+			name=excluded.name,
+			index_attempts=media.index_attempts+1,
+			index_claimed_at=excluded.index_claimed_at,
+			index_last_error='',
+			updated_at=excluded.updated_at`,
+		fid, projectID, f.SHA256, f.Folder, f.Name, now, now)
+	if err != nil {
+		return 0, err
+	}
+	var attempts int64
+	if err := db.QueryRow(`SELECT index_attempts FROM media WHERE project_id=? AND file_id=?`, projectID, fid).Scan(&attempts); err != nil {
+		return 0, err
+	}
+	return attempts, nil
+}
+
+// recordIndexerDiagnostic keeps a queued row retryable while preserving the
+// reason an exact Storage resolve did not reach processOne. This is used for
+// transient Storage misses; permanent non-media rows are marked unsupported
+// by the caller instead.
+func recordIndexerDiagnostic(db *sql.DB, projectID, fileID, msg string) error {
+	if len(msg) > 1000 {
+		msg = msg[:1000] + "…"
+	}
+	_, err := db.Exec(`
+		UPDATE media
+		   SET index_last_error=?, updated_at=?
+		 WHERE project_id=? AND file_id=?`, msg, time.Now().UTC().Format(time.RFC3339), projectID, fileID)
+	return err
+}
+
+func clearIndexerClaim(db *sql.DB, projectID, fileID string) {
+	_, _ = db.Exec(`UPDATE media SET index_claimed_at=NULL WHERE project_id=? AND file_id=?`, projectID, fileID)
 }
 
 // queueMediaReindex creates a durable pending row even when the file has

@@ -1,3 +1,19 @@
+# Media 0.14.5
+
+Media 0.14.5 fixes a general indexing queue defect that could leave valid
+Storage files permanently pending.
+
+- Dispatches exact `media_reindex(file_id)` requests immediately instead of
+  relying only on the inventory sweep. Explicit requests are allowed to index
+  valid media in hidden folders such as `/.composer/`; discovery-only hidden
+  folder exclusions remain unchanged.
+- Reclaims pending/failed rows whose worker claim is older than 15 minutes, so
+  crashes and stale in-flight state cannot wedge indexing indefinitely.
+- Records durable attempt counts, claim timestamps, and the last diagnostic;
+  `media_get` and `media_index_status` expose this information for operations.
+- Keeps transient Storage resolve misses retryable and marks unsupported exact
+  files with an actionable reason.
+
 # Media 0.14.4
 
 Media 0.14.4 fixes catalog, processing and rendering defects identified in the

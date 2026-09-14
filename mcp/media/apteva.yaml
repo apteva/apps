@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.4
+version: 0.14.5
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,6 +19,10 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
+  v0.14.5 fixes a Media indexing queue defect that could leave valid files
+  permanently pending, including files in hidden Storage folders. Explicit
+  reindex requests now dispatch immediately; stale claims are reclaimed,
+  retries are durable, and queue diagnostics expose attempts and failures.
   v0.14.4 fixes processing, worker lifecycle, catalog, and rendering issues.
   Adds verified source and render-result caches, bounded processing and uploads,
   and a general video quality setting with Legacy as the default. Improves
@@ -507,7 +511,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.4
+    ref: media/v0.14.5
     entry: mcp/media
   port: 8080
   health_check: /health
