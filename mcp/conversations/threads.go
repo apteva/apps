@@ -109,6 +109,7 @@ func conversationThreadDirective(conv *Conversation) string {
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +
 		" global conversation management, autonomous alerts, and reports belong to the parent/main thread." +
 		" Use conversations_request_approval before consequential external actions requested here." +
+		" The approval card already explains the decision; request it directly without a separate conversations_send announcing or repeating it." +
 		" A local alert is only for an urgent issue caused by work originating in this conversation." +
 		" When delegating, do not grant the child Conversations tools; the child reports to you and you communicate here." +
 		" A [chat soft break] is an advisory user event, not proof that execution was canceled:" +

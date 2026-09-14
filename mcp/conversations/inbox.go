@@ -30,7 +30,7 @@ type approvalAction struct {
 func defaultApprovalActions() []approvalAction {
 	return []approvalAction{
 		{ID: "approve", Label: "Approve", Style: "primary"},
-		{ID: "deny", Label: "Deny", Style: "danger"},
+		{ID: "deny", Label: "Deny", Style: "secondary"},
 	}
 }
 

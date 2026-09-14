@@ -126,9 +126,16 @@ thread. (Agent status lives in the status app, not here.)
   consequence of approving or denying.
 
 Never raise inbox items for routine progress, ordinary failures,
-normal final answers, or duplicates of chat messages. If an approval
-or alert arises during a live conversation, also send one concise chat
-message there explaining what needs attention.
+normal final answers, or duplicates of chat messages. An approval card already explains the decision in the chat. Call
+`conversations_request_approval` directly; do not first send a message saying
+that you will ask for approval, or repeat the card with `conversations_send`.
+For an alert, send a separate explanation only if it adds necessary context.
+
+Omit `actions` for the standard Approve/Deny choices. Custom actions are an
+array of `{id, label, style?}`; `id` is required, not `value`. Use unique IDs
+other than `pending` or `resolved`. Styles are `primary`, `secondary`, or
+`danger`. Put the proposed action first and the alternative second; without
+styles the first gets an accent outline and the others stay neutral.
 
 ## Approvals block until answered
 

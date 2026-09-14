@@ -304,7 +304,7 @@ export function ApprovalCard({
             className="bg-bg-input border border-border rounded px-2 py-1.5 text-xs text-text"
           />
           <div className="flex items-center gap-2">
-            {actions.map((a) => (
+            {actions.map((a, index) => (
               <button
                 key={a.id}
                 type="button"
@@ -313,7 +313,9 @@ export function ApprovalCard({
                 className={`px-3 py-1.5 rounded text-xs font-semibold disabled:opacity-50 ${
                   a.style === "primary"
                     ? "border border-accent bg-accent text-bg hover:opacity-90"
-                    : "border border-border text-text hover:bg-bg-input"
+                    : a.style === "danger" || (!a.style && index === 0)
+                      ? "border border-accent text-accent hover:bg-accent/10"
+                      : "border border-border text-text hover:bg-bg-input"
                 }`}
               >
                 {a.label}

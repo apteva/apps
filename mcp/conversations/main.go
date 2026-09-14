@@ -176,12 +176,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Ask the operator to approve gated work owned by main or by the originating conversation " +
 				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
 				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
-				"asking thread as approval.result.",
+				"asking thread as approval.result. The card itself asks the question: call this directly, without a separate conversations_send announcing the approval. " +
+				"Omit actions for Approve/Deny defaults. Custom actions require id and label (not value); style is optional.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
 				"title":           map[string]any{"type": "string"},
 				"body":            map[string]any{"type": "string"},
-				"actions":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"actions":         approvalActionsSchema(),
 			}, []string{"conversation_id", "title"}),
 			HandlerCtx: a.toolRequestApproval,
 		},
@@ -259,7 +260,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"title":             map[string]any{"type": "string"},
 				"body":              map[string]any{"type": "string"},
 				"severity":          map[string]any{"type": "string"},
-				"actions":           map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+				"actions":           approvalActionsSchema(),
 				"sections":          map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 				"callback_tool":     map[string]any{"type": "string"},
 				"client_message_id": map[string]any{"type": "string", "maxLength": 200, "description": "Stable request key scoped to the authenticated app install. Reuse only for identical retries."},
@@ -714,6 +715,23 @@ func attachmentsArg(args map[string]any, key string) ([]Attachment, error) {
 		}
 	}
 	return out, nil
+}
+
+// Keep the model-facing contract aligned with approvalActionsArg.
+func approvalActionsSchema() map[string]any {
+	return map[string]any{
+		"type": "array", "minItems": 1, "maxItems": 8,
+		"description": "Optional custom choices. Omit for Approve/Deny. Each choice requires a unique id and label; use id, not value. The selected id is returned in approval.result. Without styles the first choice has an accent outline, the rest are neutral.",
+		"items": map[string]any{
+			"type": "object", "additionalProperties": false,
+			"required": []string{"id", "label"},
+			"properties": map[string]any{
+				"id":    map[string]any{"type": "string", "minLength": 1, "description": "Unique non-empty action identifier. pending and resolved are reserved."},
+				"label": map[string]any{"type": "string", "minLength": 1, "description": "Human-readable choice, such as Delete repository or Keep repository."},
+				"style": map[string]any{"type": "string", "enum": []string{"primary", "secondary", "danger"}, "description": "primary: filled theme accent; secondary: neutral outline; danger: accent outline for a consequential action."},
+			},
+		},
+	}
 }
 
 func approvalActionsArg(args map[string]any) ([]approvalAction, error) {

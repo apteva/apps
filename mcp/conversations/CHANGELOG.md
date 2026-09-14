@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.15 — 2026-09-14
+
+- Define approval action IDs, labels, styles and bounds in the tool schema, including the app-only inbox tool, so agents do not have to discover required fields through failed calls.
+- Ask for approval directly through the card without a redundant announcement message.
+- Give unstyled first choices and destructive choices an accent outline; keep alternatives neutral, including the default Deny action. Applies to existing cards and dashboard/exported chat.
+
 ## 0.23.14 — 2026-09-14
 
 - Hide all Conversations tools from live and historical activity, including approval requests already represented by cards.

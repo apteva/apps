@@ -230,7 +230,7 @@ test("soft break copy describes an advisory request and existing send failures f
 });
 
 test("old stored Conversations tools stay hidden and approval actions use host theme",async()=>{
- const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"danger"}]}}]};
+ const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"secondary"}]}}]};
  fetcher=url=> url.includes("/activity") ? json([{id:1,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"legacy",name:"conversations_request_approval",reason:"Requesting deletion approval",status:"running",started_at:message(1).created_at,ended_at:"",revision:1}]) : url.includes("/deliveries") ? json([]) : json({messages:[approval],cursor:2,before:2,has_more:false});
  await render();
  expect(element.textContent).toContain("Approve deletion");
@@ -240,4 +240,19 @@ test("old stored Conversations tools stay hidden and approval actions use host t
  expect(approve.className).toContain("bg-accent");
  expect(deny.className).toContain("border-border");
  expect(approve.className+deny.className).not.toMatch(/bg-success|bg-error/);
+});
+
+
+for (const style of ["danger", undefined]) test(`approval choices stay distinct with style=${style ?? "omitted"}`, async () => {
+ const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Confirm deleting RepeatList",status:"pending",actions:[{id:"approve",label:"Delete RepeatList",style},{id:"deny",label:"Keep RepeatList"}]}}]};
+ fetcher=url=>url.includes("/activity")||url.includes("/deliveries")?json([]):json({messages:[approval],cursor:2,before:2,has_more:false});
+ await render();
+ const buttons=[...element.querySelectorAll("button")];
+ const remove=buttons.find(button=>button.textContent==="Delete RepeatList")!;
+ const keep=buttons.find(button=>button.textContent==="Keep RepeatList")!;
+ expect(remove.className).toContain("border-accent");
+ expect(remove.className).toContain("text-accent");
+ expect(keep.className).toContain("border-border");
+ expect(keep.className).not.toContain("text-accent");
+ expect(remove.className+keep.className).not.toMatch(/bg-success|bg-error/);
 });
