@@ -18,12 +18,17 @@ import {
   layoutProject,
   liveRun,
   overlayRuns,
+  supplementalRuns,
+  currentRunSteps,
   runColor,
   runLabel,
   STEP_WIDTH,
   type MapProcess,
   type MapRun,
 } from "./project-map-model";
+import { FlowStatus, StepKind, flowState } from "./FlowStatus";
+import { Workflow } from "lucide-react";
+import themeStyles from "./flow-theme.css" with { type: "text" };
 import type { Step, StepRun } from "./Workflow";
 
 type Props = {
@@ -34,25 +39,40 @@ type Props = {
   agents?: { id: number; name: string }[];
 };
 type Selection = { processId: string; stepKey?: string; runId?: string };
-type BoundaryData = { process: MapProcess; runs: MapRun[]; select: () => void };
+type BoundaryData = {
+  process: MapProcess;
+  runs: MapRun[];
+  selected: boolean;
+  select: () => void;
+};
 type StepData = {
   step: Step;
+  index: number;
+  selected: boolean;
   vertical: boolean;
   executions: { run: MapRun; step?: StepRun; agent: string }[];
   select: (runId?: string) => void;
 };
 function Boundary({ data }: NodeProps<Node<BoundaryData>>) {
   return (
-    <section className="pm-boundary" aria-label={`${data.process.name} SOP`}>
+    <section
+      className={`pm-boundary ${data.selected ? "is-selected" : ""}`}
+      aria-label={`${data.process.name} SOP`}
+    >
       <button className="pm-boundary-head nodrag" onClick={data.select}>
-        <strong>{data.process.name}</strong>
+        <strong>
+          <Workflow size={17} aria-hidden="true" />
+          {data.process.name}
+        </strong>
         <span>
           v{data.process.version} · {data.process.status} ·{" "}
           {data.process.steps?.length || 0} steps
         </span>
         <span>
-          {data.runs.filter(liveRun).length} live ·{" "}
-          {data.process.assignments?.length || 0} assignments
+          <b className="pm-live-count">
+            {data.runs.filter(liveRun).length} live
+          </b>{" "}
+          · {data.process.assignments?.length || 0} assignments
         </span>
       </button>
       {!data.process.steps?.length && (
@@ -65,18 +85,17 @@ function Boundary({ data }: NodeProps<Node<BoundaryData>>) {
 }
 function MapStep({ data }: NodeProps<Node<StepData>>) {
   return (
-    <div className="pm-step">
+    <div
+      className={`pm-step ${data.selected ? "is-selected" : ""}`}
+      data-state={flowState(data.executions.map((e) => e.step?.state))}
+    >
       <Handle
         type="target"
         position={data.vertical ? Position.Top : Position.Left}
         isConnectable={false}
       />
       <button className="pm-step-title nodrag" onClick={() => data.select()}>
-        <small>
-          {data.step.kind === "approval"
-            ? "Approval"
-            : data.step.role.replaceAll("_", " ")}
-        </small>
+        <StepKind approval={data.step.kind === "approval"} index={data.index} />
         <strong>{data.step.name}</strong>
       </button>
       {data.executions.map(({ run, step, agent }) => (
@@ -90,7 +109,7 @@ function MapStep({ data }: NodeProps<Node<StepData>>) {
         >
           <span>{runLabel(run)}</span>
           <span>
-            <b data-state={step?.state}>{step?.state || "not started"}</b>
+            <FlowStatus state={step?.state || "pending"} />
             {agent && ` · ${agent}`}
           </span>
         </button>
@@ -103,7 +122,36 @@ function MapStep({ data }: NodeProps<Node<StepData>>) {
     </div>
   );
 }
-const nodeTypes = { sop: Boundary, sopStep: MapStep };
+type RunCardData = {
+  run: MapRun;
+  process: MapProcess;
+  selected: boolean;
+  select: () => void;
+};
+function RunCard({ data }: NodeProps<Node<RunCardData>>) {
+  const { run, process } = data;
+  return (
+    <button
+      className={`pm-run-card nodrag ${data.selected ? "is-selected" : ""}`}
+      data-run={run.id}
+      data-state={run.state}
+      style={{ borderLeftColor: runColor(run.id) }}
+      onClick={data.select}
+      title={`${run.id} · ${currentRunSteps(run)}`}
+    >
+      <span className="pm-run-card-meta">
+        {run.version ? `v${run.version}` : "Version unknown"} ·{" "}
+        {run.version !== process.version
+          ? "Original execution"
+          : "Run execution"}
+        <FlowStatus state={run.state} />
+      </span>
+      <strong>{runLabel(run)}</strong>
+      <span className="pm-run-current">{currentRunSteps(run)}</span>
+    </button>
+  );
+}
+const nodeTypes = { sop: Boundary, sopStep: MapStep, sopRun: RunCard };
 function apiURL(props: Props, path: string) {
   const q = new URLSearchParams();
   if (props.projectId) q.set("project_id", props.projectId);
@@ -236,7 +284,15 @@ export default function ProjectMap(props: Props) {
         position: { x: box.x, y: box.y },
         style: { width: box.width, height: box.height, pointerEvents: "auto" },
         zIndex: 0,
-        data: { process: p, runs: rs, select: () => select() },
+        data: {
+          process: p,
+          runs: rs,
+          selected:
+            selection?.processId === p.id &&
+            !selection?.stepKey &&
+            !selection?.runId,
+          select: () => select(),
+        },
         selectable: false,
       });
       for (const step of p.steps || []) {
@@ -255,6 +311,9 @@ export default function ProjectMap(props: Props) {
           zIndex: 2,
           data: {
             step,
+            index: p.steps!.indexOf(step),
+            selected:
+              selection?.processId === p.id && selection?.stepKey === step.key,
             vertical: box.vertical,
             select: (runId?: string) => select(step.key, runId),
             executions: overlays.map((run) => {
@@ -280,8 +339,20 @@ export default function ProjectMap(props: Props) {
               target: id,
               type: "smoothstep",
               zIndex: 1,
-              markerEnd: { type: MarkerType.ArrowClosed },
-              style: { stroke: "#748397", strokeWidth: 1.5 },
+              markerEnd: {
+                type: MarkerType.ArrowClosed,
+                color: "var(--pf-edge)",
+              },
+              style: {
+                stroke: overlays.some((r) =>
+                  r.steps?.some(
+                    (s) => s.key === step.key && s.state === "running",
+                  ),
+                )
+                  ? "var(--pc-accent)"
+                  : "var(--pf-edge)",
+                strokeWidth: 2,
+              },
               animated: overlays.some((r) =>
                 r.steps?.some(
                   (s) => s.key === step.key && s.state === "running",
@@ -289,9 +360,25 @@ export default function ProjectMap(props: Props) {
               ),
             });
       }
+      for (const run of supplementalRuns(p, rs))
+        nodes.push({
+          id: `${parentId}:run:${run.id}`,
+          parentId,
+          extent: "parent",
+          type: "sopRun",
+          position: box.runPositions[run.id],
+          style: { width: box.runWidth, height: 110, pointerEvents: "auto" },
+          zIndex: 2,
+          data: {
+            run,
+            process: p,
+            selected: selection?.runId === run.id,
+            select: () => select(undefined, run.id),
+          },
+        });
     }
     return { nodes, edges };
-  }, [visible, runs, props.agents]);
+  }, [visible, runs, props.agents, selection]);
   const selectedProcess = processes.find((p) => p.id === selection?.processId),
     selectedRun =
       selectedProcess &&
@@ -302,7 +389,10 @@ export default function ProjectMap(props: Props) {
   return (
     <section className="pm" aria-label="Project SOP map">
       <style>{flowStyles}</style>
-      <style>{styles}</style>
+      <style>
+        {styles}
+        {themeStyles}
+      </style>
       <div className="pm-toolbar">
         <input
           type="search"
@@ -377,12 +467,14 @@ export default function ProjectMap(props: Props) {
               preventScrolling={false}
               proOptions={{ hideAttribution: true }}
             >
-              <Background gap={24} size={1} color="#74839730" />
+              <Background gap={24} size={1} color="var(--pf-dot)" />
               <Controls showInteractive={false} />
               <MiniMap
                 pannable
                 zoomable
-                nodeColor={(n) => (n.type === "sop" ? "#74839730" : "#8396aa")}
+                nodeColor={(n) =>
+                  n.type === "sop" ? "var(--pf-divider)" : "var(--pc-accent)"
+                }
               />
             </ReactFlow>
           ) : (
@@ -484,14 +576,21 @@ const styles = `
 .pm .pm-toolbar label{display:flex;align-items:center;gap:7px;white-space:nowrap;margin:0;font-size:12px}
 .pm .pm-toolbar input[type=checkbox]{width:15px;height:15px;min-width:0;flex:0 0 15px;margin:0;padding:0;appearance:auto;accent-color:var(--pc-accent,#ff8000)}
 .pm .pm-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--pc-muted,#9aa8b9);margin:12px 0}
-.pm-workspace{position:relative;min-width:0}.pm-canvas{height:clamp(480px,72vh,1000px);border:1px solid var(--pc-line,#334155);border-radius:12px;overflow:hidden;background:var(--pc-bg,#10151d)}
-.pm .react-flow__node-sop{border:none;background:none;border-radius:14px;z-index:0}.pm-boundary{height:100%;border:1.5px solid var(--pc-line,#465365);border-radius:14px;background:color-mix(in srgb,var(--pc-panel,#1b2430) 65%,transparent);overflow:hidden}
-.pm button.pm-boundary-head{display:flex;flex-direction:column;gap:5px;width:100%;height:88px;text-align:left;padding:15px 22px;border:0;border-bottom:1px solid var(--pc-line,#334155);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
+.pm-workspace{position:relative;min-width:0}.pm-canvas{height:clamp(480px,72vh,1000px);border:1px solid var(--pf-border);border-radius:12px;overflow:hidden;background:var(--pc-bg,#10151d)}
+.pm .react-flow__node-sop{border:none;background:none;border-radius:14px;z-index:0}.pm-boundary{height:100%;border:2px solid var(--pf-border);border-radius:14px;background:color-mix(in srgb,var(--pc-panel,#1b2430) 88%,var(--pc-bg));overflow:hidden}
+.pm button.pm-boundary-head{display:flex;flex-direction:column;gap:5px;width:100%;height:88px;text-align:left;padding:15px 22px;border:0;border-bottom:1px solid var(--pf-border);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
 .pm-boundary-head strong{font-size:16px;line-height:20px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.pm-boundary-head span{font-size:11px;line-height:14px;flex-shrink:0;color:var(--pc-muted,#9aa8b9)}
-.pm-step{height:100%;border:1px solid var(--pc-line,#465365);border-radius:10px;background:var(--pc-panel,#1b2430);box-shadow:0 3px 12px #0002;overflow:hidden}
+.pm-step{height:100%;border:1px solid var(--pf-border);border-radius:10px;background:var(--pf-surface);box-shadow:0 4px 14px #0002;overflow:hidden}
 .pm button.pm-step-title{display:flex;flex-direction:column;gap:7px;width:100%;height:90px;border:0;border-radius:0;background:none;color:inherit;text-align:left;padding:12px 15px;font:inherit;cursor:pointer}.pm-step-title strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.pm-step-title small{font-size:10px;color:var(--pc-muted,#9aa8b9);text-transform:uppercase;letter-spacing:.07em;max-width:100%;overflow:hidden;white-space:nowrap}
-.pm button.pm-execution{display:flex;flex-direction:column;gap:4px;width:calc(100% - 16px);height:44px;margin:0 8px 4px;padding:5px 8px;background:var(--pc-bg,#10151d);border:0;border-left:3px solid;border-radius:4px;text-align:left;font:inherit;color:inherit;cursor:pointer}.pm-execution span{font-size:10px;line-height:14px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:100%}.pm-execution b{font-weight:600}.pm [data-state=running]{color:#549cff}.pm [data-state=completed]{color:#2ac6a0}.pm [data-state=blocked],.pm [data-state=waiting]{color:#f4ad57}
-.pm .react-flow__handle{width:7px;height:7px;background:#748397;border:1px solid var(--pc-panel,#1b2430)}.pm .react-flow__controls button{padding:5px;width:28px;height:28px;border-radius:0;border:0;border-bottom:1px solid #334155;background:var(--pc-panel,#1b2430);color:var(--pc-text,#e7edf5)}.pm .react-flow__controls button svg{fill:currentColor;max-width:14px;max-height:14px}.pm .react-flow__minimap{background:var(--pc-panel,#1b2430);border-radius:6px;width:140px;height:95px}.pm .react-flow__minimap-mask{fill:#0002}
-.pm-inspector{position:absolute;right:12px;top:12px;bottom:12px;width:min(350px,calc(100% - 24px));overflow:auto;background:var(--pc-panel,#1b2430);border:1px solid var(--pc-line,#465365);border-radius:10px;padding:18px;box-shadow:0 8px 32px #0005;z-index:6;font-size:12px}.pm .pm-inspector h2{font-size:16px;padding-right:26px;margin:0 0 10px}.pm .pm-inspector h3{font-size:13px;margin:22px 0 12px}.pm .pm-inspector p{line-height:1.6;overflow-wrap:anywhere}.pm .pm-close{float:right;padding:0 6px;font-size:20px;background:none;border:0}.pm-instructions{white-space:pre-wrap}.pm-run-detail{border-left:3px solid;margin:12px 0;padding:4px 0 4px 10px}.pm .pm-run-detail>button{display:flex;flex-direction:column;gap:5px;border:0;background:none;padding:0;text-align:left;color:inherit;font:inherit;cursor:pointer;max-width:100%;overflow-wrap:anywhere}.pm-run-detail span{color:var(--pc-muted,#9aa8b9);font-size:11px}.pm-run-detail ol{padding-left:17px}.pm-run-detail li{margin:12px 0}.pm-run-detail li span{display:block;margin-top:4px}.pm-no-steps,.pm-empty{padding:30px;color:var(--pc-muted,#9aa8b9);font-size:12px}.pm button:hover{filter:brightness(1.12)}
+.pm button.pm-execution{display:flex;flex-direction:column;gap:2px;width:calc(100% - 16px);height:44px;margin:0 8px 4px;padding:3px 8px;background:var(--pc-bg,#10151d);border:1px solid var(--pf-divider);border-left:3px solid;border-radius:4px;text-align:left;font:inherit;color:inherit;cursor:pointer}.pm-execution span{font-size:10px;line-height:16px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;max-width:100%}.pm-execution b{font-weight:600}
+.pm .react-flow__handle{width:7px;height:7px;background:var(--pf-edge);border:1px solid var(--pc-panel,#1b2430)}.pm .react-flow__controls button{padding:5px;width:28px;height:28px;border-radius:0;border:0;border-bottom:1px solid #334155;background:var(--pc-panel,#1b2430);color:var(--pc-text,#e7edf5)}.pm .react-flow__controls button svg{fill:currentColor;max-width:14px;max-height:14px}.pm .react-flow__minimap{background:var(--pc-panel,#1b2430);border-radius:6px;width:140px;height:95px}.pm .react-flow__minimap-mask{fill:#0002}
+.pm-inspector{position:absolute;right:12px;top:12px;bottom:12px;width:min(350px,calc(100% - 24px));overflow:auto;background:var(--pc-panel,#1b2430);border:1px solid var(--pf-border);border-radius:10px;padding:18px;box-shadow:0 8px 32px #0005;z-index:6;font-size:12px}.pm .pm-inspector h2{font-size:16px;padding-right:26px;margin:0 0 10px}.pm .pm-inspector h3{font-size:13px;margin:22px 0 12px}.pm .pm-inspector p{line-height:1.6;overflow-wrap:anywhere}.pm .pm-close{float:right;padding:0 6px;font-size:20px;background:none;border:0}.pm-instructions{white-space:pre-wrap}.pm-run-detail{border-left:3px solid;margin:12px 0;padding:4px 0 4px 10px}.pm .pm-run-detail>button{display:flex;flex-direction:column;gap:5px;border:0;background:none;padding:0;text-align:left;color:inherit;font:inherit;cursor:pointer;max-width:100%;overflow-wrap:anywhere}.pm-run-detail span{color:var(--pc-muted,#9aa8b9);font-size:11px}.pm-run-detail ol{padding-left:17px}.pm-run-detail li{margin:12px 0}.pm-run-detail li span{display:block;margin-top:4px}.pm-no-steps,.pm-empty{padding:30px;color:var(--pc-muted,#9aa8b9);font-size:12px}.pm button:hover{filter:brightness(1.12)}
 @media(max-width:600px){.pm .pm-toolbar input[type=search]{max-width:none}.pm .pm-summary>span{display:none}.pm .react-flow__minimap{display:none}.pm-canvas{height:65vh;min-height:460px}}
+
+.pm .pm-boundary-head strong{display:flex;gap:9px;align-items:center}.pm-boundary-head strong svg{color:var(--pc-accent);flex:none}
+.pm .pm-live-count{color:var(--pc-accent);font-weight:600}.pm .pm-boundary.is-selected{border-color:var(--pc-accent)}
+.pm .pm-execution>span:last-child{display:flex;align-items:center;gap:5px}.pm .pm-execution .flow-status{border:0;padding:0 4px;flex:none;overflow:visible;font-size:9px;line-height:16px}.pm .pm-execution .flow-status svg{width:10px;height:10px}
+.pm button.pm-run-card{height:100%;width:100%;display:flex;flex-direction:column;gap:10px;padding:12px 14px;text-align:left;font:inherit;color:var(--pc-text);background:var(--pf-surface);border:1px solid var(--pf-border);border-left:3px solid;border-radius:9px;cursor:pointer}
+.pm-run-card-meta{display:flex;justify-content:space-between;gap:8px;align-items:center;font-size:10px;color:var(--pc-muted);width:100%}.pm-run-card strong{font-size:12px;line-height:18px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.pm-run-current{font-size:11px;line-height:16px;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--pc-muted)}
+.pm .pm-run-card.is-selected{outline:2px solid var(--pc-accent);outline-offset:3px}
 `;

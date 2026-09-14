@@ -44,7 +44,27 @@ export function runColor(id: string) {
   ];
 }
 export const overlayRuns = (p: MapProcess, runs: MapRun[]) =>
-  runs.filter((r) => liveRun(r) && r.version === p.version && r.steps?.length);
+  runs.filter(
+    (r) =>
+      liveRun(r) &&
+      r.version === p.version &&
+      r.steps?.some((s) => p.steps?.some((def) => def.key === s.key)),
+  );
+// Every live run belongs either on the shared steps or in an explicit run card.
+export function supplementalRuns(p: MapProcess, runs: MapRun[]) {
+  const mapped = new Set(overlayRuns(p, runs).map((r) => r.id));
+  return runs.filter((r) => liveRun(r) && !mapped.has(r.id));
+}
+export function currentRunSteps(run: MapRun) {
+  const active =
+    run.steps?.filter((s) =>
+      ["running", "blocked", "waiting", "ready"].includes(s.state),
+    ) || [];
+  return active.length
+    ? active.map((s) => s.definition?.name || s.key).join(" · ")
+    : run.current_step ||
+        (run.steps?.length ? "Awaiting next step" : "No step tracking");
+}
 export const STEP_WIDTH = 248;
 export type MapLayout = {
   process: MapProcess;
@@ -54,6 +74,8 @@ export type MapLayout = {
   height: number;
   vertical: boolean;
   stepHeight: number;
+  runWidth: number;
+  runPositions: Record<string, { x: number; y: number }>;
   positions: Record<string, { x: number; y: number }>;
 };
 function shape(
@@ -82,6 +104,19 @@ function shape(
       y: 108 + (vertical ? rank : lane) * (stepHeight + 64),
     };
   }
+  const width = 56 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64;
+  let height = 136 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
+  const other = supplementalRuns(process, runs);
+  const columns = Math.max(1, Math.floor((width - 40) / (STEP_WIDTH + 16)));
+  const runWidth = (width - 56 - (columns - 1) * 16) / columns;
+  const runPositions: MapLayout["runPositions"] = {};
+  other.forEach((run, i) => {
+    runPositions[run.id] = {
+      x: 28 + (i % columns) * (runWidth + 16),
+      y: height + Math.floor(i / columns) * 126,
+    };
+  });
+  if (other.length) height += Math.ceil(other.length / columns) * 126 + 12;
   return {
     process,
     x: 0,
@@ -89,8 +124,10 @@ function shape(
     vertical,
     stepHeight,
     positions,
-    width: 56 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64,
-    height: 136 + (vertical ? depth : breadth) * (stepHeight + 64) - 64,
+    width,
+    height,
+    runWidth,
+    runPositions,
   };
 }
 // Try shelf widths and both dependency directions. Penalize elongated canvases,

@@ -17,6 +17,8 @@ import {
   type ReactFlowInstance,
 } from "@xyflow/react";
 import flowStyles from "@xyflow/react/dist/style.css" with { type: "text" };
+import { FlowStatus, StepKind, flowState } from "./FlowStatus";
+import themeStyles from "./flow-theme.css" with { type: "text" };
 import type { Step, StepRun } from "./Workflow";
 import {
   canConnect,
@@ -47,6 +49,11 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
   return (
     <div
       className={`pf-step ${s.kind} ${selected ? "is-selected" : ""} ${data.problem ? "incomplete" : ""}`}
+      data-state={flowState(
+        (data.executions || (data.execution ? [data.execution] : [])).map(
+          (e) => e.state,
+        ),
+      )}
       role="button"
       tabIndex={0}
       aria-label={`Step ${data.index + 1}: ${s.name || "Untitled step"}`}
@@ -65,16 +72,11 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
         aria-label={`Input to ${s.name}`}
       />
       <div className="pf-step-top">
-        <span className="pf-step-number">
-          {String(data.index + 1).padStart(2, "0")}
-        </span>
-        <span className="pf-kind">
-          {s.kind === "approval" ? "◇ Approval" : "▤ Work"}
-        </span>
+        <StepKind approval={s.kind === "approval"} index={data.index} />
       </div>
       <strong className="pf-step-title">{s.name || "Untitled step"}</strong>
       <div className="pf-step-bottom">
-        <span className="pf-role">{s.role || "Choose role"}</span>
+        <span className="pf-role">{s.role?.replaceAll("_", " ") || "Choose role"}</span>
         <span>
           {s.depends_on.length > 1
             ? `${s.depends_on.length} inputs`
@@ -92,9 +94,7 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
                 data-state={execution.state}
                 key={`${execution.id || execution.key}-${index}`}
               >
-                <span className={`pill ${execution.state}`}>
-                  {execution.decision || execution.state}
-                </span>
+                <FlowStatus state={execution.state} label={execution.decision} />
                 <span className="pf-executor">
                   {execution.progress}% ·{" "}
                   {data.executorNames?.[index] || data.executorName}
@@ -184,12 +184,15 @@ export function ProcessFlow({
     [nodes, setNodes] = useState<Node[]>([]);
   const [notice, setNotice] = useState("");
   const positioned = useMemo(() => {
-    const arranged = layoutSteps(steps);
+    const arranged = layoutSteps(
+      steps,
+      executions?.length || runExecutions?.length ? 280 : 192,
+    );
     return steps.map((s, i) => ({
       ...s,
       position: s.position || arranged[i].position!,
     }));
-  }, [steps]);
+  }, [steps, !!executions?.length, !!runExecutions?.length]);
   const minX = Math.min(0, ...positioned.map((s) => s.position.x)),
     maxX = Math.max(0, ...positioned.map((s) => s.position.x));
   const minY = Math.min(100, ...positioned.map((s) => s.position.y)),
@@ -266,8 +269,18 @@ export function ProcessFlow({
           to.position.x <= from.position.x)
           ? minY - 55
           : undefined;
+      const state = flowState([
+        executions?.find((e) => e.key === target)?.state,
+      ]);
+      const color =
+        selected || state === "running" || state === "ready"
+          ? "var(--pc-accent)"
+          : state === "completed"
+            ? "var(--pf-success)"
+            : "var(--pf-edge)";
       return {
         id: `${source}:${target}`,
+        animated: state === "running",
         source,
         target,
         type: "dependency",
@@ -277,10 +290,10 @@ export function ProcessFlow({
           type: MarkerType.ArrowClosed,
           width: 18,
           height: 18,
-          color: selected ? "var(--pc-accent)" : "var(--pf-edge)",
+          color,
         },
         style: {
-          stroke: selected ? "var(--pc-accent)" : "var(--pf-edge)",
+          stroke: color,
           strokeWidth: selected ? 3 : 2,
           ...(virtual ? { strokeDasharray: "5 5" } : {}),
         },
@@ -292,7 +305,7 @@ export function ProcessFlow({
         : [edge("__start", s.key, true)]),
       ...(!used.has(s.key) ? [edge(s.key, "__end", true)] : []),
     ]);
-  }, [positioned, selectedEdge, editable]);
+  }, [positioned, selectedEdge, editable, executions]);
   // Refit when connections or available canvas width change; keep text edits and drags stable.
   const inspectorOpen = steps.some((s) => s.key === selected);
   const topology = steps
@@ -350,6 +363,7 @@ export function ProcessFlow({
       <style>
         {flowStyles}
         {styles}
+        {themeStyles}
       </style>
       <div className="pf-toolbar">
         <div>
@@ -477,7 +491,7 @@ export function ProcessFlow({
               panOnScroll={false}
               defaultEdgeOptions={{ type: "dependency" }}
               aria-label="Connected process steps"
-              colorMode="dark"
+              proOptions={{ hideAttribution: true }}
             >
               <Background gap={22} size={1} color="var(--pf-dot)" />
               <Controls showInteractive={false} />
