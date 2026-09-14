@@ -137,3 +137,14 @@ func TestPreviewNeedsPublishedPortAndActiveTTL(t *testing.T) {
 		t.Fatal("expired workspace accepted")
 	}
 }
+
+func TestPreviewStopAfterWorkspaceDestroyed(t *testing.T) {
+	a, ctx, c, w, _ := previewFixture(t)
+	actor, _ := actorFrom(c, ctx)
+	if _, err := a.destroyWorkspace(ctx, actor, w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.toolPreviewStop(c, ctx, map[string]any{"workspace_id": w.ID}); err != nil {
+		t.Fatal("already-destroyed preview blocked Stop:", err)
+	}
+}

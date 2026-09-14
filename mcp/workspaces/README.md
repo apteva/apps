@@ -1,5 +1,12 @@
 # Workspaces
 
+## v0.6.2
+
+Preview Stop succeeds when the workspace was already destroyed, allowing Code
+to restart or delete the repository after workspace retention cleanup. Requires
+Containers 0.5.2 for source updates alongside dependency caches.
+
+
 ## v0.6.1
 
 Requires Containers 0.5.1 for compatibility with SDK project-routing metadata.

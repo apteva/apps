@@ -220,6 +220,11 @@ func (a *App) toolPreviewStop(c context.Context, app *sdk.AppCtx, args map[strin
 	if err != nil {
 		return nil, err
 	}
+	// Expiry or an operator may have already destroyed this preview workspace.
+	// Preserve idempotent Stop so Code can restart or delete its repository.
+	if w.LifecycleStatus == statusDestroyed {
+		return map[string]any{"workspace": w}, nil
+	}
 	w, err = a.stopWorkspace(app, actor, w, "workspace.stopped")
 	return map[string]any{"workspace": w}, err
 }
