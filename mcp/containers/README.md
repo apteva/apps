@@ -1,5 +1,15 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.5.2
+
+Source imports can update a running workspace after dependency installation.
+Only destination paths touched by the archive are checked for symlinks, so
+unrelated `node_modules/.bin` links are preserved. Writes through destination
+symlinks remain rejected; the workload remains paused during validation and
+copy. Replacing a file also breaks pre-existing hardlinks rather than modifying
+the linked file. Real-Docker regressions cover all three cases.
+
+
 ## v0.5.1
 
 Accept SDK `_project_id` routing metadata separately from the strict Docker
