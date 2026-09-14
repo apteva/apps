@@ -305,10 +305,10 @@ func (a *App) taskDetails(project, actor, id string) (map[string]any, error) {
 		out["dependency_outputs"] = dependencyOutputs(s, all)
 		out["dependencies"] = dependencyEvidence(s, all)
 	}
-	out["can_update"] = executorIsActor(s.Executor, actor) && !terminal(s.State) && s.State != "pending" && !stepUsesTasks(r, s) && (!terminal(r.State) || s.Origin == "attached" && !s.Required && r.State == "completed")
+	out["can_update"] = executorIsActor(s.Executor, actor) && !terminal(s.State) && s.State != "pending" && s.State != "scheduled" && stepTimeReady(s, time.Now()) && !stepUsesTasks(r, s) && (!terminal(r.State) || s.Origin == "attached" && !s.Required && r.State == "completed")
 	out["can_manage"] = taskManager(s, r, actor) && !terminal(s.State)
 	out["can_edit"] = out["can_manage"] == true && (!terminal(r.State) || s.Origin == "attached" && !s.Required && r.State == "completed")
-	out["can_reassign"] = out["can_edit"] == true && s.Attempts == 0 && s.DeliveredAt == "" && s.LifecycleSequence < 0 && (s.State == "pending" || s.State == "ready" || s.State == "waiting")
+	out["can_reassign"] = out["can_edit"] == true && s.Attempts == 0 && s.DeliveredAt == "" && s.LifecycleSequence < 0 && (s.State == "pending" || s.State == "scheduled" || s.State == "ready" || s.State == "waiting")
 	rows, e := a.db.Query(`SELECT actor,state,decision,output,error,details_json,created_at FROM process_step_events WHERE step_id=? ORDER BY id DESC LIMIT 100`, id)
 	if e != nil {
 		return nil, e
@@ -384,6 +384,9 @@ func (a *App) changeTask(project, actor, id, action string, args map[string]any)
 			if !valid {
 				return nil, errors.New("due_at must be a string")
 			}
+			if s.Definition.DueAfter != nil && value != s.DueAt {
+				return nil, errors.New("this deadline follows the frozen procedure timing rule")
+			}
 			s.DueAt, e = taskDue(value)
 			if e != nil {
 				return nil, e
@@ -395,7 +398,7 @@ func (a *App) changeTask(project, actor, id, action string, args map[string]any)
 			if !ok {
 				continue
 			}
-			if s.DeliveredAt != "" || s.Attempts > 0 || s.LifecycleSequence >= 0 || s.State != "pending" && s.State != "ready" && s.State != "waiting" {
+			if s.DeliveredAt != "" || s.Attempts > 0 || s.LifecycleSequence >= 0 || s.State != "pending" && s.State != "scheduled" && s.State != "ready" && s.State != "waiting" {
 				return nil, errors.New("execution may have started; only the due date can change")
 			}
 			if k == "executor" {
@@ -406,7 +409,7 @@ func (a *App) changeTask(project, actor, id, action string, args map[string]any)
 					return nil, e
 				}
 				s.ThreadID = ""
-				if s.State != "pending" {
+				if s.State != "pending" && s.State != "scheduled" {
 					s.State = "ready"
 					if s.Executor.Kind == "human" {
 						s.State = "waiting"

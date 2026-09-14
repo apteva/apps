@@ -306,3 +306,14 @@ test("project flow follows all host themes with visible card borders", async ({
       .screenshot({ path: `/private/tmp/processes-map-${theme.name}.png` });
   }
 });
+
+
+test("project map shows timed concurrent work without losing run identity", async ({ page }) => {
+  runData.direct_runs[0].state = "scheduled";
+  runData.direct_runs[0].steps[0].state = "scheduled";
+  runData.direct_runs[0].steps[0].start_at = new Date(Date.now() + 600_000).toISOString();
+  await page.getByRole("button", { name: "Refresh map", exact: true }).click();
+  const execution = page.locator('.pm-execution[data-run="run-first"]').first();
+  await expect(execution).toContainText("Starts in 10 min");
+  await expect(execution).toContainText("Barcelona");
+});

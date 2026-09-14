@@ -31,6 +31,8 @@
   --flow-state: var(--pf-success);
 }
 .ap-processes :is(.pm, .pf-shell) [data-state="blocked"],
+.ap-processes :is(.pm, .pf-shell) [data-state="scheduled"],
+.ap-processes :is(.pm, .pf-shell) [data-state="overdue"],
 .ap-processes :is(.pm, .pf-shell) [data-state="waiting"] {
   --flow-state: var(--pf-warning);
 }

@@ -1052,6 +1052,7 @@ function Panel(props: Props) {
                     "queued",
                     "running",
                     "waiting",
+                    "scheduled",
                     "blocked",
                     "completed",
                     "failed",
@@ -1136,7 +1137,7 @@ function Panel(props: Props) {
                       {r.record.result ||
                         r.record.error ||
                         r.record.current_step ||
-                        "Queued for the owner agent."}
+                        (r.record.state === "scheduled" ? "Waiting for the next step’s scheduled start." : "Queued for the owner agent.")}
                     </div>
                     {(r.backend === "agent" || r.record.workflow) && (
                       <RunWork

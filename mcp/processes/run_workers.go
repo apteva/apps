@@ -20,6 +20,10 @@ func sequentialAgent(r Run, all []StepRun) int64 {
 		if s.Origin != "process_step" {
 			continue
 		}
+		// Timed runs release workers between steps; the app owns every wake-up.
+		if s.Definition.StartAfter != nil {
+			return 0
+		}
 		deps := s.Definition.DependsOn
 		if previous == "" && len(deps) != 0 || previous != "" && (len(deps) != 1 || deps[0] != previous) {
 			return 0

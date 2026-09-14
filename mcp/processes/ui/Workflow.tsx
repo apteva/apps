@@ -1,6 +1,9 @@
+import { TimingDetails, type TimingRule } from "./Timing";
 import { useState } from "react";
 import { ProcessFlow } from "./ProcessFlow";
 export type Step = {
+  start_after?: TimingRule;
+  due_after?: TimingRule;
   key: string;
   name: string;
   role: string;
@@ -12,6 +15,9 @@ export type Step = {
 };
 export type Executor = { kind: "agent" | "human"; agent_id?: number };
 export type StepRun = {
+  start_at?: string;
+  due_at?: string;
+  completed_at?: string;
   id: string;
   run_id: string;
   key: string;
@@ -274,6 +280,7 @@ export function RunSteps({
                 ? `Depends on: ${s.definition.depends_on.join(", ")}`
                 : "Starts with the run"}
             </p>
+            <TimingDetails step={s} />
             {s.delivery_warning && (
               <div className="notice">
                 Delivery retry pending: {s.delivery_warning}

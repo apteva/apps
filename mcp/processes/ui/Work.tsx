@@ -1,3 +1,4 @@
+import { TimingDetails } from "./Timing";
 import { useScopedRevision } from "./live-events";
 import { useEffect, useState } from "react";
 import type { StepRun, Executor } from "./Workflow";
@@ -335,6 +336,7 @@ export function TaskDetail({
                 `Agent ${s.executor.agent_id}`}
             {s.due_at && ` · Due ${new Date(s.due_at).toLocaleString()}`}
           </p>
+          <TimingDetails step={s} />
           <div className="prose">{s.definition.instructions}</div>
           <p>Expected result: {s.definition.expected_output}</p>
           {!!Object.keys(detail.dependency_outputs || {}).length && (
@@ -438,7 +440,7 @@ export function TaskDetail({
                 onSubmit={(e) => {
                   e.preventDefault();
                   const body: Record<string, unknown> = {
-                    due_at: dateValue(due),
+                    ...(s.definition.due_after ? {} : { due_at: dateValue(due) }),
                   };
                   if (
                     detail.can_reassign &&
@@ -457,6 +459,7 @@ export function TaskDetail({
                   Due date
                   <input
                     type="datetime-local"
+                    disabled={!!s.definition.due_after}
                     value={due}
                     onChange={(e) => setDue(e.target.value)}
                   />
@@ -702,6 +705,7 @@ export default function WorkPanel({
           <option value="">All statuses</option>
           {[
             "pending",
+            "scheduled",
             "ready",
             "running",
             "waiting",

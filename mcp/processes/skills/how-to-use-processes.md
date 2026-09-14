@@ -180,3 +180,23 @@ approvals. Report once when the run is terminal. Do not poll or ask main to
 forward subsequent steps. Other workflows retain independent workers for branches
 and different agents. Main can execute with `step_get`/`step_update` if workers
 cannot access Processes.
+
+## Step delays and deadlines
+
+When the user asks to wait between actions, encode a structured `start_after`
+rule in the step definition, not only prose. Example: a follow-up email step
+with `depends_on:["send_first"]` and
+`start_after:{"after":"step_completed","step_key":"send_first","offset":10,"unit":"minutes"}`.
+Processes persists the timer and notifies the executor when eligible. For a
+completion deadline use `due_after` with the same shape; it never delays execution.
+References may be `run_start`, or `step_completed` with an ancestor step key.
+Units are minutes, hours or 24-hour days, with nonnegative integer offsets up to
+365 days. Clarify whether ambiguous timing means earliest start or deadline.
+
+Read `step_get` before acting. A `pending` or `scheduled` step cannot be executed
+or completed early; all dependencies and approvals still apply. Do not sleep,
+poll, create a duplicate task/timer, or keep a worker alive for the delay. Timed
+runs use separate step deliveries: finish only the current step, report its result
+promptly, then end the worker. The app will notify the assigned agent for the next
+step when due. `start_at` and `due_at` are UTC timestamps, and overdue work can
+still complete. The clock starts when Processes records the referenced completion.
