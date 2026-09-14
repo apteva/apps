@@ -188,3 +188,11 @@ func TestStopDuringWorkspaceProvisioning(t *testing.T) {
 		t.Fatalf("leaked startup workspace: %+v %s", dr, p.status)
 	}
 }
+
+func TestPreviewNamesAreUniqueAndBounded(t *testing.T) {
+	repo := &Repo{Slug: strings.Repeat("long-repository-", 10)}
+	first, second := workspacePreviewName(repo), workspacePreviewName(repo)
+	if first == second || len(first) > 80 || len(second) > 80 {
+		t.Fatal(first, second)
+	}
+}

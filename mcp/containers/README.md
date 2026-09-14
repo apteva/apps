@@ -1,5 +1,12 @@
 Containers manages individual Docker workloads locally and on hosts supplied by the Instances app. Version 0.5.0 contains the audit fixes based on `containers/v0.4.0` and pins installation source to `containers/v0.5.0`. See [RELEASE-0.5.0.md](RELEASE-0.5.0.md) for changes and upgrade notes.
 
+## v0.5.1
+
+Accept SDK `_project_id` routing metadata separately from the strict Docker
+run specification. Ownership still comes from authenticated caller context;
+all other unknown run fields remain rejected. SDK pinned to v0.77.0.
+
+
 Run `RUN_CONTAINERS_TESTS=1 ./scripts/verify.sh` from this directory to run Go tests with the race detector, disposable Docker integration tests, vet, UI interaction tests, TypeScript checks, panel/source-map generation, and vulnerability scanning. Omit `RUN_CONTAINERS_TESTS=1` to skip Docker tests. Dependencies: Go 1.25.13 or newer, Bun, and a running local Docker daemon. Go commands use `GOWORK=off` so validation uses the pinned SDK v0.75.0, rather than a neighboring development checkout. Set `GOCACHE` to a dedicated writable directory if another task is clearing the shared cache.
 
 Behavior and limits:

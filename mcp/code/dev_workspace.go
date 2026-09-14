@@ -13,6 +13,14 @@ import (
 
 const workspacePreviewPort = 3000
 
+func workspacePreviewName(repo *Repo) string {
+	base := slugify(repo.Slug)
+	if len(base) > 48 {
+		base = base[:48]
+	}
+	return fmt.Sprintf("%s preview %x", base, time.Now().UnixNano())
+}
+
 func workspacePreviewConnected(app *sdk.AppCtx) (bool, error) {
 	if app == nil || app.PlatformAPI() == nil {
 		return false, nil
@@ -112,7 +120,7 @@ func (s *devSupervisor) startWorkspacePreview(callCtx context.Context, app *sdk.
 	var created struct {
 		Workspace workspaceWire `json:"workspace"`
 	}
-	input := map[string]any{"name": workspaceResourceName(in.Repo), "purpose": "Live preview for Code repository " + in.Repo.Slug, "profile": sourceProfile(in.Repo, snapshot), "resource_kind": "code.preview", "resource_id": fmt.Sprint(in.Repo.ID), "repo_label": in.Repo.Slug, "preview_port": workspacePreviewPort, "source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest, "source_paths": snapshot.Paths}
+	input := map[string]any{"name": workspacePreviewName(in.Repo), "purpose": "Live preview for Code repository " + in.Repo.Slug, "profile": sourceProfile(in.Repo, snapshot), "resource_kind": "code.preview", "resource_id": fmt.Sprint(in.Repo.ID), "repo_label": in.Repo.Slug, "preview_port": workspacePreviewPort, "source_archive_base64": snapshot.Archive, "source_digest": snapshot.Digest, "source_paths": snapshot.Paths}
 	if in.Repo.WorkspaceImage != "" {
 		input["image"] = in.Repo.WorkspaceImage
 	}

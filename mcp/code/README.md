@@ -1,5 +1,11 @@
 # Apteva Code
 
+## v0.13.1
+
+Uses a unique workspace name for each preview attempt, including retries after
+failed provisioning. Requires Workspaces 0.6.1 and Containers 0.5.1.
+
+
 ## v0.13.0 — Run in a connected workspace
 
 When Workspaces is connected, both the Run button and `repos_dev_start` execute

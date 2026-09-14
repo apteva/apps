@@ -1,5 +1,10 @@
 # Workspaces
 
+## v0.6.1
+
+Requires Containers 0.5.1 for compatibility with SDK project-routing metadata.
+
+
 ## v0.6.0
 
 App callers can create a workspace with `preview_port` and use

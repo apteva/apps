@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.6.0
+version: 0.6.1
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -10,7 +10,7 @@ description: |
   command execution, and bounded logs. v0.4.0 adds a generic, app-only source
   round trip: producers can refresh managed files without deleting caches,
   export a filtered source snapshot, and acknowledge an applied revision.
-  v0.6.0 lets operators and originating apps select an allowlisted custom
+  v0.6.1 lets operators and originating apps select an allowlisted custom
   container image per workspace while retaining approved runtime profiles.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -32,7 +32,7 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.5.0"
+      version: ">=0.5.1"
       optional: false
       reason: Owns each persistent Docker workspace, named volumes, stateful PTY shell execution, cancellation, and bounded logs used by Workspaces.
 
@@ -145,7 +145,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: workspaces/v0.6.0
+    ref: workspaces/v0.6.1
     entry: mcp/workspaces
   port: 8080
   health_check: /health

@@ -1113,6 +1113,16 @@ func writeResult(w http.ResponseWriter, v any, err error) {
 // Arg helpers.
 
 func parseRunSpec(args map[string]any) (RunSpec, error) {
+	// SDK project routing metadata is not a Docker option. Authorization uses
+	// the authenticated caller context, never this argument. Keep rejecting
+	// every other unknown field so runtime configuration stays strict.
+	clean := make(map[string]any, len(args))
+	for key, value := range args {
+		if key != "_project_id" {
+			clean[key] = value
+		}
+	}
+	args = clean
 	var spec RunSpec
 	raw, err := json.Marshal(args)
 	if err != nil {
