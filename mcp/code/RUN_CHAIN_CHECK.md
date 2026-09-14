@@ -1,5 +1,30 @@
 # Run chain check — 2026-09-14
 
+## Live container preview result
+
+Validated through the local platform gateway with Code 0.13.1, Workspaces
+0.6.1 and Containers 0.5.2, using a disposable copy of the reported React app:
+
+- The execution-permission endpoint reported that no local grant was needed;
+  the fixture had no local grant.
+- Run returned `runner=workspaces`, a workspace ID, `pid=0`, and an automatically
+  mapped loopback URL. Docker showed a running workload publishing port 3000.
+- React HTML and transformed JavaScript returned HTTP 200.
+- A source edit in Code reached the running container, and Vite emitted reload
+  and HMR events. Logs were readable through Code's MCP tool.
+- Stop closed the published preview port and stopped the container. The test
+  repository and workspace were removed through their app APIs.
+- The original test-app was then started through the same path. Home and About
+  rendered in a real browser with no JavaScript errors. Its preview was left live.
+
+The live checks additionally exposed and fixed SDK `_project_id` routing
+metadata being rejected by Containers, duplicate workspace names on repeated
+Run, and source imports rejecting unrelated dependency symlinks. Containers
+0.5.2 retains path-redirection protection and breaks destination hardlinks when
+replacing files; the full real-Docker race suite passed. Workspaces 0.6.2 adds
+idempotent preview Stop after the workspace has already been destroyed, with a
+regression test, so retention cleanup cannot block a later Run or repo deletion.
+
 ## Container preview follow-up
 
 Code 0.13.0 and Workspaces 0.6.0 add the missing preview contract described
