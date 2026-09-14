@@ -2,7 +2,7 @@ import { useComposerAttachments, type ComposerOptions } from "./composer";
 import type { SendMessage } from "./client";
 import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
-import { pendingResponsePhase } from "./responseActivity";
+import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
 import { buildChatTimeline, isVisibleChatTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
@@ -1138,6 +1138,7 @@ function MessageBody({
 }
 
 interface StreamBubbleState {
+ optimistic?: boolean;
  threadId?: string;
  createdAt?: number;
  afterMessageId?: number;
@@ -1185,6 +1186,15 @@ function useConversationTransport(conversationID: string, projectId: string) {
   const streamRef = useRef(new Map<string, StreamBubbleState & { updatedAt: number }>());
   const settledRef = useRef(new Map<string, number>());
   const publishBubbles = useCallback(() => setBubbles([...streamRef.current.values()]), []);
+  const beginResponse = (agentId: number | undefined, afterMessageId: number) => {
+    setProgresses(current=>current.filter(p=>p.agent_id!==agentId));
+    const key = `local:${newClientMessageId()}`;
+    const now = Date.now();
+    streamRef.current.set(key, {callId:key,agentId,text:"",phase:"acknowledgement",optimistic:true,afterMessageId,createdAt:now,updatedAt:now});
+    publishBubbles();
+    // Only remove our optimistic indicator; a real response may already exist.
+    return () => {streamRef.current.delete(key);publishBubbles();};
+  };
   const mergeMessages = useCallback((incoming: Message[]) => {
     const valid = incoming.filter(m => m.conversation_id === conversationID);
     if (!valid.length) return;
@@ -1235,6 +1245,10 @@ function useConversationTransport(conversationID: string, projectId: string) {
     };
     const applyFrame = (frame: StreamFrame) => {
       if (cancelled || frame.chat_id !== conversationID) return;
+      if (frame.response_progress || (!frame.tool_activity && !frame.done)) {
+        for (const [key,value] of streamRef.current) if (value.optimistic && value.agentId === frame.agent_id) streamRef.current.delete(key);
+        publishBubbles();
+      }
       if (frame.response_progress) {
         const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now()};
         setProgresses(current => {
@@ -1309,7 +1323,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }, 5000);
     return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); if (paintHandle!==undefined) window.cancelAnimationFrame(paintHandle); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, activities, progresses, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
@@ -1364,7 +1378,7 @@ export function ConversationChat({
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-  const { messages, activities: storedActivities, progresses, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
@@ -1386,10 +1400,12 @@ export function ConversationChat({
   const responseProgress = progresses.find(p=>p.phase!=="idle");
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
   const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
-  const tail = timeline.at(-1);
-  const continuing = progresses.find(p=>p.phase==="continuing" && (tail?.kind==="toolGroup" || tail?.kind==="tool")
-    && (tail.kind==="toolGroup" ? tail.tools : [tail.tool]).some(tool=>tool.agentId===p.agent_id && tool.startedAt>=Date.parse(p.started_at))
-    && !activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running"));
+  const progressResponses = progresses.filter(p=>p.phase!=="idle").map(p=>({
+    agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at),
+  }));
+  const pendingResponses = [...progressResponses, ...bubbles.filter(b=>!b.text && !progresses.some(p=>p.agent_id===b.agentId))];
+  const continuingToolKeys = new Set(pendingResponses.map(response=>responseToolGroup(response,timeline,messages)).filter(Boolean));
+  const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
     const next=new Set(current);if(next.has(key))next.delete(key);else next.add(key);return next;
@@ -1469,7 +1485,7 @@ export function ConversationChat({
   const nearBottomRef = useRef(true);
   useEffect(() => {
     if (nearBottomRef.current) bottomRef.current?.scrollIntoView({block:"end"});
-  }, [activities]);
+  }, [activities, bubbles, progresses]);
   useEffect(() => {
     const bottom=bottomRef.current, scroller=bottom?.parentElement;
     if (!bottom || !scroller) return;
@@ -1494,6 +1510,7 @@ export function ConversationChat({
     if (!request) request={content,client_message_id:newClientMessageId(),...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
+    const cancelOptimistic = activeResponse ? () => {} : beginResponse(conversation.lead_agent_id, Math.max(0,...messages.map(m=>m.id)));
     setSending(true);setSendError(""); setUnconfirmedSendError("");
     try {
       const row=await conversationsClient.send(conversation.id, request);
@@ -1502,7 +1519,7 @@ export function ConversationChat({
       if (!mountedRef.current) return;
       mergeMessages([row]);setDraft(current => current.trim()===request!.content ? "" : current);
       inputRef.current?.focus();
-    } catch(err) {if(mountedRef.current)setUnconfirmedSendError(String(err));}
+    } catch(err) {if(mountedRef.current){cancelOptimistic();setUnconfirmedSendError(String(err));}}
     finally {if(mountedRef.current)setSending(false);}
   };
 
@@ -1556,7 +1573,7 @@ export function ConversationChat({
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
-          continuing={Boolean(continuing && item===tail)}
+          continuing={continuingToolKeys.has(item.key)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
         /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
@@ -1567,9 +1584,9 @@ export function ConversationChat({
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={phase === "preparing"} />}</div>; })}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={b.optimistic || phase === "preparing"} />}</div>; })}
         {progresses.map(p => {
-          if (p.phase === "idle" || p.phase === "running" || p === continuing || bubbles.some(b=>b.agentId===p.agent_id && b.text)
+          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text)
             || activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running")) return null;
           if (p.phase === "preparing_tool" && p.tool_name) {
             if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;

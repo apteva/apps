@@ -9,6 +9,7 @@ for (const host of ["dashboard", "external"]) {
   await emit(activity);
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await page.setViewportSize({width:390,height:800});
   await page.screenshot({path:test.info().outputPath("live-tool-mobile.png")});
   await expect(page.getByRole("button",{name:"Ask the agent to pause and reconsider"})).toBeEnabled();
@@ -17,10 +18,19 @@ for (const host of ["dashboard", "external"]) {
   await page.getByRole("textbox").fill("");
   await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
   await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   // Delayed snapshots/events cannot regress the completed row.
   await emit(activity);await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   await emit({...activity,status:"completed",ended_at:new Date().toISOString(),revision:2});
   await page.reload();await expect(row).toHaveAttribute("aria-label",/Done/);
+  // History without an active response must remain settled.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   await expect(row).toHaveCount(1);
   await emit({...activity,id:72,call_id:"tool-72",status:"failed",revision:2});
   await expect(row).toHaveAttribute("aria-label",/failed/i);
@@ -354,10 +364,15 @@ for (const host of ["dashboard","external","package"]) {
   const activity={id:501,chat_id:chat,agent_id:41,thread_id:chat,call_id:"call-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
   await request.post("/emit",{data:{...frame,tool_activity:activity}});await phase("running",3);
   await expect(row).toHaveCount(1);await expect(row).toHaveAttribute("aria-label",/Running/);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
   await expect(row).toHaveAttribute("aria-label",/Done/);
+  // No blank/static gap while waiting for the next model event.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
   await phase("continuing",4);
-  await expect(row.getByText("Preparing next step…")).toBeVisible();
+  await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await expect(row.getByText("42ms",{exact:true})).toBeVisible();
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
@@ -367,6 +382,53 @@ for (const host of ["dashboard","external","package"]) {
   // An approval verdict begins a new turn. Existing tool history stays done.
   await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+ });
+}
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: send responds immediately and failed delivery clears the local indicator`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  // Completion of the previous turn must not hide the next optimistic state.
+  await request.post("/emit",{data:{chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false,response_progress:{phase:"idle",run_id:"old",revision:1,started_at:new Date(Date.now()-1000).toISOString(),after_message_id:0}}});
+  let release!:()=>void;
+  const pending=new Promise<void>(resolve=>{release=resolve;});
+  await page.route("**/messages?**",async route=>{
+   if(route.request().method()!=="POST")return route.continue();
+   await pending;await route.fulfill({status:500,body:"delivery unavailable"});
+  });
+  await page.locator("textarea").fill("Hello");await page.getByRole("button",{name:"Send",exact:true}).click();
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toBeVisible();
+  release();
+  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
+ });
+ test(`${host}: result groups keep pulsing through intermediate replies and parallel calls`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const start=new Date(Date.now()-1000).toISOString();
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  // Legacy acknowledgement frames must also transfer ownership to tool rows.
+  await request.post("/emit",{data:{...frame,call_id:"ack-1",phase:"acknowledgement",created_at:start}});
+  const activity={id:601,chat_id:chat,agent_id:41,thread_id:chat,call_id:"parallel-1",name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository"}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository",status:"completed",ended_at:new Date().toISOString(),duration_ms:64,revision:2}}});
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
+  // A durable intermediate reply moves the tail away from the tool group.
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
+  await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
+  await expect(page.getByText("I am checking the next step.")).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
+  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"idle",run_id:"ack-1",revision:2,started_at:start,after_message_id:0}}});
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
  });
 }

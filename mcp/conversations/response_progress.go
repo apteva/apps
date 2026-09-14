@@ -101,6 +101,16 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		phase = "preparing_tool"
 		p.ToolName = name
 		p.CallID = firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
+	case "tool.result":
+		if !visibleActivityTool(name) || !p.hadTools {
+			s.mu.Unlock()
+			return
+		}
+		// The response remains active across the result-to-model gap. The UI
+		// keeps the tool group pulsing without extending execution durations.
+		phase = "continuing"
+		p.ToolName = ""
+		p.CallID = ""
 	case "tool.call":
 		if !visibleActivityTool(name) {
 			s.mu.Unlock()

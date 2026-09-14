@@ -289,3 +289,19 @@ test("approval verdict starts a fresh thinking indicator that survives the card 
  await act(async()=>events.emit({...message(302,"a","Decision received"),role:"agent",agent_id:41}));
  expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
 });
+
+
+test("optimistic response survives send completion and hands off once to the server",async()=>{
+ let complete!:(r:Response)=>void;
+ fetcher=(url,init)=>init?.method==="POST"&&url.includes("/messages")?new Promise(resolve=>{complete=resolve}):(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ await render();await type("hello");await send();
+ expect(element.querySelectorAll('[role="status"]')).toHaveLength(1);
+ expect(element.textContent).toContain("Preparing response");
+ await act(async()=>complete(new Response(JSON.stringify(message(1,"a","hello")))));await settle();
+ expect(element.querySelectorAll('[role="status"]')).toHaveLength(1);
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ await act(async()=>stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"ack-1",text:"",phase:"acknowledgement",after_message_id:1,done:false})}));
+ expect(element.querySelectorAll('[role="status"]')).toHaveLength(1);
+ await act(async()=>FakeEvents.instances[0].emit({...message(2,"a","Hello back"),role:"agent",agent_id:41}));
+ expect(element.querySelectorAll('[role="status"]')).toHaveLength(0);
+});

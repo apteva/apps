@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.17 — 2026-09-14
+
+- Show an immediate response indicator on Send, including while the request is in flight; clear it on failure or replace it with confirmed live progress.
+- Keep the current response’s latest tool group pulsing across results, model preparation, parallel calls and intermediate replies. Keep tool labels and completed execution durations; avoid a separate Preparing response row once tools own progress.
+- Apply the same behavior to dashboard, embedded and npm-exported chat.
+
 ## 0.23.16 — 2026-09-14
 
 - Restore live tool preparation and pulsing continuation from the dashboard chat lifecycle. Model and tool events drive progress; background work after final replies and approval waiting stays silent.

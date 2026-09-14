@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { pendingResponsePhase } from "../src/responseActivity";
+import { pendingResponsePhase, responseToolGroup } from "../src/responseActivity";
 import { toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
 
 const base: ToolActivity = { id:"1", callId:"c1", agentId:41, threadId:"chat-1", name:"repos", reason:"Checking repositories", state:"done", startedAt:1000, finishedAt:2500, durationMs:1500 };
@@ -23,4 +23,15 @@ test("fast call/result bursts paint running first without blocking parallel star
  const first=splitActivityPaint([a,result,b]);
  expect(first.paint).toEqual([a,b]);expect(first.deferred).toEqual([result]);
  expect(splitActivityPaint(first.deferred).paint).toEqual([result]);
+});
+
+test("tool progress belongs to the response, not the last transcript item",()=>{
+ const user={id:7,role:"user",created_at:new Date(900).toISOString()} as any;
+ const timeline=[{kind:"toolGroup",key:"group",tools:[base]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
+ const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
+ expect(responseToolGroup(response,timeline,[user])).toBe("group");
+ expect(responseToolGroup({...response,agentId:42},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,threadId:"other"},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,afterMessageId:8,createdAt:3000},timeline,[user])).toBeUndefined();
+ expect(responseToolGroup({...response,optimistic:true,createdAt:3000},timeline,[user])).toBeUndefined();
 });

@@ -33,6 +33,8 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	}
 	ingest("tool.call", `{"name":"code_repos_list","id":"c1"}`)
 	phase("running")
+	ingest("tool.result", `{"name":"code_repos_list","id":"c1"}`)
+	phase("continuing")
 	ingest("llm.start", `{}`)
 	phase("continuing")
 	s.finishResponse("conv-progress", 41)

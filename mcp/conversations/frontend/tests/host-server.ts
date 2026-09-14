@@ -25,6 +25,12 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
   ]);
   return Response.json({ok:true});
  }
+ if(url.pathname==="/append-message" && req.method==="POST") {
+  const message=await req.json();const user=message.conversation_id.slice("chat-".length);
+  rows.set(user,[...(rows.get(user)??[]),message]);
+  for(const c of streams) {try {c.enqueue(new TextEncoder().encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));}catch{streams.delete(c);}}
+  return Response.json({ok:true});
+ }
  if(url.pathname==="/emit" && req.method==="POST") {
   const frame=await req.json();
   if(frame.tool_activity) {
