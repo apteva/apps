@@ -1,0 +1,56 @@
+schema: apteva-app/v1
+name: editorial
+display_name: Editorial
+version: 0.1.0
+description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [content, editorial, calendar, planning, marketing]
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+requires:
+  permissions: [db.write.app, platform.apps.call]
+  integrations:
+    - role: social
+      kind: app
+      compatible_app_names: [social]
+      required: false
+      label: Social (optional)
+      hint: Link existing posts and refresh delivery results. Planning works without Social.
+    - role: campaigns
+      kind: app
+      compatible_app_names: [campaigns]
+      required: false
+      label: Campaigns (optional)
+      hint: Link existing campaigns and refresh delivery statistics. Planning works without Campaigns.
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: editorial_items_list, description: "Search content items. Filter q, status, format, owner, campaign, approval, archived; limit/offset pagination." }
+    - { name: editorial_items_get, description: "Read an item, its channel-specific releases, and history." }
+    - { name: editorial_items_create, description: "Create a planning item. Only title is required. Does not publish or schedule external delivery." }
+    - { name: editorial_items_update, description: "Patch an item using id, revision and patch. Content changes reset an existing approval to pending." }
+    - { name: editorial_releases_create, description: "Plan a channel-specific release for an item. No external sending or scheduling." }
+    - { name: editorial_releases_update, description: "Patch a release using id, revision and patch; optionally link an existing Social/Campaigns record." }
+    - { name: editorial_releases_refresh, description: "Read results from an optionally bound Social or Campaigns app into a linked release. Never sends or schedules." }
+    - { name: editorial_settings_get, description: "Read configurable formats, workflow statuses and channels." }
+    - { name: editorial_settings_update, description: "Replace formats, statuses and channels using revision. Existing used formats/statuses must remain available." }
+    - { name: editorial_integrations, description: "Check optional Social/Campaigns bindings and browse existing records. No dependency required for planning." }
+  ui_panels:
+    - slot: project.page
+      label: Editorial
+      icon: calendar
+      entry: /ui/EditorialPanel.mjs
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.1.0, entry: mcp/editorial }
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/editorial.db
+  migrations: migrations/
+upgrade_policy: auto-patch
