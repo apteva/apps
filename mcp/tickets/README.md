@@ -16,12 +16,23 @@ The project panel includes both list and Kanban board views. Moving a card
 between workflow columns updates its status through the normal ticket API, so
 the transition remains part of the permanent ticket history.
 
+## Live dashboard updates
+
+The list, Kanban board, and open ticket drawer subscribe to project-scoped
+`ticket.*` app-bus events, filtered to the selected installation. Event bursts
+are combined and refreshes wait for local saves/uploads. Incoming changes
+refresh untouched fields while preserving unsaved edits and reply text.
+The panel shares the dashboard SSE connection, with a resumable standalone
+fallback, and refreshes when the tab becomes visible or focused again.
+The token-authenticated client portal does not subscribe to the private project bus.
+
 ## Development
 
 ```sh
-go test ./...
-go test -tags integration ./...
-bun run ../../scripts/build-panels.ts --app tickets
+GOWORK=off go test ./...
+GOWORK=off go test -tags integration ./...
+bun test ui/live.test.ts
+bun run ../../../scripts/build-panels.ts --app tickets
 ```
 
 The sidecar uses the standard SDK environment and serves its authenticated API

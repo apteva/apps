@@ -62,7 +62,7 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.5" {
+	if m.Name != "tickets" || m.Version != "0.1.6" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
@@ -317,5 +317,33 @@ func TestActorUsesTrustedCaller(t *testing.T) {
 	actor := actorFrom(ctx, map[string]any{}, "agent")
 	if actor.Kind != "agent" || actor.Ref != "42" {
 		t.Fatalf("actor=%+v", actor)
+	}
+}
+
+func TestEditedCommentEmitsProjectUpdate(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder)).WithProject("live-project")
+	if err := ensureProject(ctx.AppDB(), "live-project"); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := createTicket(ctx.AppDB(), "live-project", map[string]any{"title": "Live ticket"}, Actor{Kind: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	comment, err := addComment(ctx.AppDB(), "live-project", ticket.ID, "public", "Original", Actor{Kind: "agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&App{}).toolEditComment(context.Background(), ctx, map[string]any{"id": ticket.ID, "comment_id": comment.ID, "body": "Edited"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := recorder.Events()
+	if len(events) != 1 || events[0].Topic != "ticket.updated" || events[0].ProjectID != "live-project" {
+		t.Fatalf("events = %#v", events)
+	}
+	payload := events[0].Data.(map[string]any)
+	if payload["id"] != ticket.ID || payload["comment_id"] != comment.ID {
+		t.Fatalf("payload = %#v", payload)
 	}
 }
