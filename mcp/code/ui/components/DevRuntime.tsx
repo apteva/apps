@@ -25,6 +25,7 @@ export interface DevRunWire {
   runner?: string;
   sim_id?: string;
   stream_url?: string;
+  workspace_id?: string;
 }
 
 function devStatusColor(s?: string): string {
@@ -162,7 +163,7 @@ export function DevBar({
           </>
         ) : status === "live" ? (
           <>
-            Running on{" "}
+            {run?.runner === "workspaces" ? "Docker workspace · " : "Running on "}
             <a
               href={run?.preview_url || (typeof window!=="undefined" && ["localhost","127.0.0.1","[::1]"].includes(window.location.hostname) ? `http://127.0.0.1:${run?.port}/` : undefined)}
               target="_blank"
@@ -172,7 +173,7 @@ export function DevBar({
             {" "}· {uptimeStr(run?.started_at)} · {run?.framework}
           </>
         ) : status === "starting" ? (
-          <>Starting {run?.framework}…</>
+          <>Starting {run?.runner === "workspaces" ? "Docker workspace" : run?.framework}…</>
         ) : status === "crashed" ? (
           <span className="text-red">
             Crashed: <span className="font-mono">{(run?.error || "").split("\n")[0].slice(0, 80)}</span>
@@ -181,6 +182,7 @@ export function DevBar({
           <>Dev preview stopped · deploy production from the Deploy app</>
         )}
       </span>
+      {run?.status === "live" && run?.error && <span className="text-xs text-red" title={run.error}>{run.error.slice(0, 100)}</span>}
       <span className="flex-1" />
       <button type="button" disabled={busy} onClick={() => void showPermission()} className="px-2 py-0.5 text-xs border border-border rounded text-text-muted disabled:opacity-50">Execution</button>
       <button

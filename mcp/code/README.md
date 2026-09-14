@@ -1,5 +1,30 @@
 # Apteva Code
 
+## v0.13.0 — Run in a connected workspace
+
+When Workspaces is connected, both the Run button and `repos_dev_start` execute
+web previews through Workspaces → Containers → local Docker. No local execution
+grant is needed for that path, and connection failures never fall back to host
+execution. Mobile previews retain the Simulator path; unbound web previews
+retain their existing local execution policy.
+
+Each Run creates a dedicated preview workspace and imports the repository.
+JavaScript uses the workspace's Bun runtime for dependency installation and
+scripts. Vite and Next receive explicit host/port flags. Custom commands must
+listen on `0.0.0.0:$PORT` (port 3000 inside the container). Code edits sync into
+the live preview every three seconds; dependencies are installed when Run starts,
+so restart Run after changing dependency declarations. The preview workspace is
+a one-way source mirror; use the separate command workspace for changes you
+intend to apply back to Code.
+
+The UI labels the runner **Docker workspace**, links to its loopback HTTP port,
+and streams container logs. Stop stops the container and retains its source and
+volumes until workspace expiry; a subsequent Run creates a fresh preview. The
+usual Workspaces TTL applies (two hours by default). A Code/Workspaces restart
+preserves the preview handle. Public exposure remains opt-in through `expose`;
+loopback URLs are for browsers on the Docker host. Requires Workspaces 0.6.0.
+
+
 Code provides project-scoped source repositories, native Git, issues, templates,
 editing and development previews through 56 MCP tools, REST routes and four
 React panels. `apteva.yaml` is the single embedded manifest source.

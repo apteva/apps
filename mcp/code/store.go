@@ -429,16 +429,18 @@ type DevRun struct {
 
 	// Remote-runner fields (mobile repos delegated to the Simulator
 	// app). Empty for local dev runs. See migration 004.
-	Runner    string `json:"runner,omitempty"`     // "" local | "simulator"
-	SimID     string `json:"sim_id,omitempty"`     // Simulator's sim handle
-	StreamURL string `json:"stream_url,omitempty"` // live-stream WebSocket URL
+	WorkspaceID           string `json:"workspace_id,omitempty"`
+	WorkspaceSourceDigest string `json:"-"`
+	Runner                string `json:"runner,omitempty"`     // "" local | "simulator" | "workspaces"
+	SimID                 string `json:"sim_id,omitempty"`     // Simulator's sim handle
+	StreamURL             string `json:"stream_url,omitempty"` // live-stream WebSocket URL
 }
 
 const devRunCols = `id, project_id, repo_id, status, port, pid, framework,
 		run_cmd, env_json, log_path,
 		COALESCE(started_at, '') AS started_at,
 		COALESCE(stopped_at, '') AS stopped_at,
-		error, runner, sim_id, stream_url, ingress_hostname`
+		error, runner, sim_id, stream_url, ingress_hostname, workspace_id, workspace_source_digest`
 
 func scanDevRunRow(s rowScanner) (*DevRun, error) {
 	var dr DevRun
@@ -446,9 +448,12 @@ func scanDevRunRow(s rowScanner) (*DevRun, error) {
 		&dr.ID, &dr.ProjectID, &dr.RepoID, &dr.Status, &dr.Port, &dr.PID,
 		&dr.Framework, &dr.RunCmd, &dr.EnvJSON, &dr.LogPath,
 		&dr.StartedAt, &dr.StoppedAt, &dr.Error,
-		&dr.Runner, &dr.SimID, &dr.StreamURL, &dr.IngressHostname,
+		&dr.Runner, &dr.SimID, &dr.StreamURL, &dr.IngressHostname, &dr.WorkspaceID, &dr.WorkspaceSourceDigest,
 	); err != nil {
 		return nil, err
+	}
+	if dr.Runner == workspacesAppName && dr.Port > 0 {
+		dr.PreviewURL = fmt.Sprintf("http://127.0.0.1:%d/", dr.Port)
 	}
 	if dr.IngressHostname != "" {
 		dr.PreviewURL = "https://" + dr.IngressHostname + "/"
@@ -483,9 +488,9 @@ func dbUpsertDevRun(db *sql.DB, in DevRun) (*DevRun, error) {
 	res, err := db.Exec(`
 		INSERT INTO dev_runs (
 			project_id, repo_id, status, port, pid, framework, run_cmd, env_json, log_path,
-			started_at, error, runner, sim_id, stream_url
+			started_at, error, runner, sim_id, stream_url, workspace_id, workspace_source_digest
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, repo_id) DO UPDATE SET
 			status     = excluded.status,
 			port       = excluded.port,
@@ -499,10 +504,11 @@ func dbUpsertDevRun(db *sql.DB, in DevRun) (*DevRun, error) {
 			error      = excluded.error,
 			runner     = excluded.runner,
 			sim_id     = excluded.sim_id,
-			stream_url = excluded.stream_url
+			stream_url = excluded.stream_url,
+			workspace_id = excluded.workspace_id, workspace_source_digest = excluded.workspace_source_digest
 	`, in.ProjectID, in.RepoID, in.Status, in.Port, in.PID, in.Framework,
 		in.RunCmd, in.EnvJSON, in.LogPath, nullableTS(in.StartedAt), in.Error,
-		in.Runner, in.SimID, in.StreamURL,
+		in.Runner, in.SimID, in.StreamURL, in.WorkspaceID, in.WorkspaceSourceDigest,
 	)
 	if err != nil {
 		return nil, err
@@ -523,7 +529,7 @@ func dbUpdateDevRun(db *sql.DB, id int64, fields map[string]any) error {
 	args := []any{}
 	for _, k := range []string{"status", "port", "pid", "framework", "run_cmd",
 		"env_json", "log_path", "started_at", "stopped_at", "error",
-		"runner", "sim_id", "stream_url", "ingress_hostname"} {
+		"runner", "sim_id", "stream_url", "ingress_hostname", "workspace_id", "workspace_source_digest"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)

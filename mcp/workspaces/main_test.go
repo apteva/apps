@@ -157,17 +157,17 @@ func agentContext(project string, agentID int64, threadID, toolCallID string) co
 func TestManifestAndToolsAgree(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Name != "workspaces" || manifest.Version != "0.5.0" {
+	if manifest.Name != "workspaces" || manifest.Version != "0.6.0" {
 		t.Fatalf("unexpected manifest identity: %s %s", manifest.Name, manifest.Version)
 	}
 	requiredContainers := false
 	for _, dependency := range manifest.Requires.Apps {
-		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.4.0" {
+		if dependency.Name == "containers" && !dependency.Optional && dependency.Version == ">=0.5.0" {
 			requiredContainers = true
 		}
 	}
 	if !requiredContainers {
-		t.Fatal("Containers >=0.4.0 must be the required app dependency")
+		t.Fatal("Containers >=0.5.0 must be the required app dependency")
 	}
 	if len(manifest.Scopes) != 1 || string(manifest.Scopes[0]) != "project" {
 		t.Fatalf("Workspaces must remain project-scoped: %+v", manifest.Scopes)

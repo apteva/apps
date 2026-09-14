@@ -497,6 +497,13 @@ func (s *devSupervisor) startDevRunContext(callCtx context.Context, ctx *sdk.App
 		return s.startRemoteRun(ctx, in, srcDir, fw, def.RemoteRunner)
 	}
 
+	connected, err := workspacePreviewConnected(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if connected {
+		return s.startWorkspacePreview(startCtx, ctx, in, srcDir, fw)
+	}
 	if fw != "static" || strings.TrimSpace(in.RunCmd) != "" {
 		if err := requireLocalExecution(ctx, in.Repo); err != nil {
 			return nil, err
@@ -982,6 +989,12 @@ func (s *devSupervisor) stopDevRun(ctx *sdk.AppCtx, projectID string, repoID int
 	if err != nil {
 		return err
 	}
+	if dr.Runner == workspacesAppName {
+		if err := stopWorkspacePreview(ctx, dr); err != nil {
+			return err
+		}
+		return dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{"status": "stopped", "stopped_at": time.Now().UTC().Format(time.RFC3339)})
+	}
 	if dr.Runner == "simulator" {
 		if err := s.stopRemoteRun(ctx, dr); err != nil {
 			return err
@@ -1068,6 +1081,12 @@ func (s *devSupervisor) reconcileOrphanDevRuns(ctx *sdk.AppCtx) error {
 		return err
 	}
 	for _, dr := range rows {
+		if dr.Runner == workspacesAppName {
+			if dr.WorkspaceID == "" {
+				_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{"status": "crashed", "error": "Code restarted during workspace provisioning; run again"})
+			}
+			continue
+		}
 		if dr.Runner == "simulator" {
 			continue
 		}

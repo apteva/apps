@@ -1,5 +1,17 @@
 # Workspaces
 
+## v0.6.0
+
+App callers can create a workspace with `preview_port` and use
+`workspace_preview_start/get/logs/stop` to manage an HTTP preview. Containers
+publishes an automatically allocated loopback port; the process binds
+`0.0.0.0` inside Docker. Preview executions have a separate lifecycle from the
+command PTY, bounded logs, readiness checks, a ten-minute startup deadline, and
+the workspace TTL as their maximum lifetime. Stop halts the container and
+retains volumes under the workspace retention policy. Handles persist through
+Code and Workspaces restarts. Requires Containers 0.5.0 or later.
+
+
 ## v0.5.0
 
 - Accept an operator-allowlisted, digest-pinned image per workspace while

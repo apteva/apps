@@ -30,6 +30,10 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 	if allowArchive && (actor.InstallID <= 0 || actor.AppName == "") {
 		return nil, errors.New("authenticated app caller required")
 	}
+	previewPort := intArg(args, "preview_port", 0)
+	if previewPort < 0 || previewPort > 65535 || (previewPort > 0 && !allowArchive) {
+		return nil, errors.New("preview_port must be 1-65535 and requires an authenticated app caller")
+	}
 	name, err := normalizeWorkspaceName(strArg(args, "name"))
 	if err != nil {
 		return nil, err
@@ -140,6 +144,11 @@ func (a *App) createWorkspace(callCtx context.Context, app *sdk.AppCtx, args map
 		"restart_policy": "unless-stopped", "pull_policy": "missing",
 		"working_directory": "/workspace",
 		"command":           []string{"/bin/sh", "-c", "trap 'exit 0' TERM INT; while :; do sleep 3600; done"},
+	}
+	if previewPort > 0 {
+		// Preview URLs refer to this host. Never route loopback to a remote default host.
+		input["use_local"] = true
+		input["ports"] = []map[string]any{{"container_port": previewPort, "host_port": 0, "protocol": "tcp", "bind_addr": "127.0.0.1"}}
 	}
 	var runOut workloadResponse
 	if err := app.PlatformAPI().CallAppResult("containers", "containers_run", input, &runOut); err != nil {
@@ -391,8 +400,13 @@ func (a *App) cancelCommand(app *sdk.AppCtx, actor Actor, w *Workspace, c *Comma
 }
 
 func (a *App) stopWorkspace(app *sdk.AppCtx, actor Actor, w *Workspace, eventType string) (*Workspace, error) {
+	unlock := a.lockWorkspace(w.ID)
+	defer unlock()
 	if w.LifecycleStatus == statusDestroyed || w.LifecycleStatus == statusDestroying {
 		return nil, errors.New("workspace has been destroyed")
+	}
+	if err := a.cancelPreview(app, w); err != nil {
+		return nil, err
 	}
 	active, err := listActiveCommands(app.AppDB(), w.ID)
 	if err != nil {
@@ -497,6 +511,9 @@ func (a *App) reconcile(ctx context.Context, app *sdk.AppCtx) error {
 	for _, w := range rows {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if _, err := a.refreshPreview(app, w); err != nil {
+			errs = append(errs, err)
 		}
 		if _, err := a.refreshWorkspace(app, w); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", w.ID, err))

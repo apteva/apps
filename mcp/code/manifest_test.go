@@ -39,12 +39,12 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	workspacesOptional := false
 	for _, dependency := range m.Requires.Apps {
-		if dependency.Name == "workspaces" && dependency.Version == ">=0.5.0" && dependency.Optional {
+		if dependency.Name == "workspaces" && dependency.Version == ">=0.6.0" && dependency.Optional {
 			workspacesOptional = true
 		}
 	}
 	if !workspacesOptional {
-		t.Error("Workspaces >=0.5.0 must remain an optional dependency")
+		t.Error("Workspaces >=0.6.0 must remain an optional dependency")
 	}
 }
 

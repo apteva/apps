@@ -630,6 +630,12 @@ func (a *App) toolDevStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if dr != nil && dr.Runner == workspacesAppName {
+		dr, err = a.refreshWorkspacePreview(context.Background(), ctx, repo, dr)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return map[string]any{"dev_run": dr}, nil
 }
 
@@ -646,6 +652,10 @@ func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	dr, err := dbGetDevRun(ctx.AppDB(), pid, repo.ID)
 	if err != nil {
 		return nil, err
+	}
+	if dr != nil && dr.Runner == workspacesAppName {
+		body, err := workspacePreviewLogs(ctx, dr, intArg(args, "tail", 200))
+		return map[string]any{"log": body, "available": err == nil}, err
 	}
 	if dr == nil || dr.LogPath == "" {
 		return map[string]any{"log": "", "available": false}, nil

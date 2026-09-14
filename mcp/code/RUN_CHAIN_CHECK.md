@@ -1,5 +1,20 @@
 # Run chain check — 2026-09-14
 
+## Container preview follow-up
+
+Code 0.13.0 and Workspaces 0.6.0 add the missing preview contract described
+below. With Workspaces bound, Run now provisions a local Docker workspace with
+an ephemeral loopback port and a persistent preview execution. Unbound Run
+retains the local path. The historical 0.12.x behavior and checks below explain
+why the additional implementation was needed.
+
+Validation: both app race suites, Go vet, Linux builds, panel bundles and
+TypeScript passed. Eleven Playwright checks include bound Run/Stop without a
+local grant. Lifecycle regressions cover startup cancellation, ownership,
+readiness, expiry, failure recovery, source sync, and persisted handles.
+The user's React source also served HTTP 200 from a real Bun/Vite Docker
+container using the generated command.
+
 ## Confirmed preview failure
 
 The local Code v0.12.0 log showed `npm run dev` starting Vite v8.3.0

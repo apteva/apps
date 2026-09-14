@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: workspaces
 display_name: Workspaces
-version: 0.5.0
+version: 0.6.0
 description: |
   Control room for durable development environments. Workspaces owns
   lifecycle, assignment, TTL, command history, activity, and the operator
@@ -10,7 +10,7 @@ description: |
   command execution, and bounded logs. v0.4.0 adds a generic, app-only source
   round trip: producers can refresh managed files without deleting caches,
   export a filtered source snapshot, and acknowledge an applied revision.
-  v0.5.0 lets operators and originating apps select an allowlisted custom
+  v0.6.0 lets operators and originating apps select an allowlisted custom
   container image per workspace while retaining approved runtime profiles.
   v0.3.0 gives each workspace a persistent
   PTY shell session inside its durable container, so current directory, exported
@@ -32,7 +32,7 @@ requires:
     - platform.apps.call
   apps:
     - name: containers
-      version: ">=0.4.0"
+      version: ">=0.5.0"
       optional: false
       reason: Owns each persistent Docker workspace, named volumes, stateful PTY shell execution, cancellation, and bounded logs used by Workspaces.
 
@@ -45,6 +45,18 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: workspace_preview_start
+      description: "Start a persistent container preview on a workspace created with preview_port. App-only. Args: workspace_id, argv, env?."
+      requires: workspaces.write
+    - name: workspace_preview_get
+      description: "Fetch container preview readiness and its published loopback URL. App-only. Args: workspace_id."
+      requires: workspaces.read
+    - name: workspace_preview_logs
+      description: "Tail bounded container preview logs. App-only. Args: workspace_id, tail?."
+      requires: workspaces.read
+    - name: workspace_preview_stop
+      description: "Stop a preview and its container, retaining volumes until workspace expiry. App-only. Args: workspace_id."
+      requires: workspaces.write
     - name: workspaces_create
       description: "Create a local development workspace from an approved runtime profile, optionally overriding it with an allowlisted digest-pinned image. Args: name, purpose?, profile? (go|bun|python|apteva), image?, ttl_minutes?, owner_label?, repo_label?, branch_label?, origin_label?, origin_href?."
       requires: workspaces.write
@@ -133,7 +145,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: workspaces/v0.6.0
     entry: mcp/workspaces
   port: 8080
   health_check: /health

@@ -49,7 +49,11 @@ func (a *App) executionPermission(ctx *sdk.AppCtx, repo *Repo) (*ExecutionPermis
 	}
 	fw := detectDevFramework(a.storeFor(repo), repo.Slug)
 	def := devFrameworkByName(fw)
-	p.RequiresLocalExecution = fw != "static" && (def == nil || def.RemoteRunner == "")
+	connected, err := workspacePreviewConnected(ctx)
+	if err != nil {
+		return nil, err
+	}
+	p.RequiresLocalExecution = !connected && fw != "static" && (def == nil || def.RemoteRunner == "")
 	return p, nil
 }
 func (a *App) configureExecution(ctx *sdk.AppCtx, repo *Repo, enabled, confirm bool, actor string) (*ExecutionPermission, error) {

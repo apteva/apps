@@ -40,7 +40,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("workspaces requires platform app calls")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("workspaces mounted", "version", "0.5.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("workspaces mounted", "version", "0.6.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -77,6 +77,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	for key, value := range createProps {
 		appCreateProps[key] = value
 	}
+	appCreateProps["preview_port"] = intSchema()
 	appCreateProps["owner_agent_id"] = intSchema()
 	appCreateProps["owner_thread_id"] = strSchema()
 	appCreateProps["resource_kind"] = strSchema()
@@ -84,7 +85,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	appCreateProps["source_archive_base64"] = strSchema()
 	appCreateProps["source_digest"] = strSchema()
 	appCreateProps["source_paths"] = map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000}
-	return []sdk.Tool{
+	return append(a.previewTools(), []sdk.Tool{
 		{Name: "workspaces_create", Description: "Create a local workspace from an approved profile with an optional allowlisted, digest-pinned image override.", InputSchema: schemaObject(createProps, []string{"name"}), HandlerCtx: a.toolCreate},
 		{Name: "workspaces_list", Description: "List accessible workspaces in the current project.", InputSchema: schemaObject(map[string]any{"status": strSchema(), "include_destroyed": boolSchema(), "limit": intSchema()}, nil), HandlerCtx: a.toolList},
 		{Name: "workspaces_get", Description: "Fetch a workspace, runtime state, commands, usage, and activity.", InputSchema: schemaObject(workspaceID, []string{"workspace_id"}), HandlerCtx: a.toolGet},
@@ -115,7 +116,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "workspace_source_accept", Description: "Record the source revision accepted by the originating app after it applies exported changes.", InputSchema: schemaObject(map[string]any{
 			"workspace_id": strSchema(), "source_digest": strSchema(), "source_paths": map[string]any{"type": "array", "items": strSchema(), "maxItems": 20000},
 		}, []string{"workspace_id", "source_digest", "source_paths"}), Exposure: sdk.ToolExposureAppOnly, HandlerCtx: a.toolSourceAccept},
-	}
+	}...)
 }
 
 func main() { sdk.Run(&App{}) }

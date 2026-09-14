@@ -1275,6 +1275,13 @@ func (a *App) httpRepoDev(w http.ResponseWriter, r *http.Request, slug, action s
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		if dr != nil && dr.Runner == workspacesAppName {
+			dr, err = a.refreshWorkspacePreview(r.Context(), globalCtx, repo, dr)
+			if err != nil {
+				httpErr(w, 502, err.Error())
+				return
+			}
+		}
 		httpJSON(w, map[string]any{"dev_run": dr})
 	case "log":
 		a.httpRepoDevLog(w, r, pid, repo)
@@ -1291,6 +1298,10 @@ func (a *App) httpRepoDevLog(w http.ResponseWriter, r *http.Request, pid string,
 	dr, err := dbGetDevRun(globalCtx.AppDB(), pid, repo.ID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if dr != nil && dr.Runner == workspacesAppName {
+		a.httpWorkspacePreviewLogs(w, r, dr)
 		return
 	}
 	if dr == nil || dr.LogPath == "" {
