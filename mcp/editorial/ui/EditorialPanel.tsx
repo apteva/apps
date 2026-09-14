@@ -10,13 +10,23 @@ import {
 import { AppIcon, Avatar } from "@apteva/ui-kit";
 
 type Props = { appName: string; installId: number; projectId: string };
+type Brand = {
+  id: string;
+  name: string;
+  color: string;
+  logo_url: string;
+  social_account_ids: number[];
+  campaign_ids: number[];
+};
 type Settings = {
+  brands: Brand[];
   statuses: string[];
   formats: string[];
   channels: string[];
   revision: number;
 };
 type Item = {
+  brand_id: string;
   id: number;
   revision: number;
   title: string;
@@ -66,6 +76,7 @@ const approvalStates = [
   "changes_requested",
 ];
 const itemKeys = [
+  "brand_id",
   "title",
   "body",
   "format",
@@ -129,6 +140,7 @@ const blank = (s: Settings): Item => ({
   planned_at: "",
   approval: "not_required",
   reviewer: "",
+  brand_id: "",
   campaign: "",
   sources: [],
   attachments: [],
@@ -249,6 +261,7 @@ function Planner({ appName, installId, projectId }: Props) {
     [owner, setOwner] = useState(""),
     [approval, setApproval] = useState(""),
     [campaign, setCampaign] = useState(""),
+    [brand, setBrand] = useState(""),
     [archived, setArchived] = useState(false),
     [more, setMore] = useState(false);
   const [month, setMonth] = useState(
@@ -303,7 +316,14 @@ function Planner({ appName, installId, projectId }: Props) {
       if (seq.current === current) {
         setItems(all);
         setReleases(rs);
-        setSettings(s);
+        setSettings({ ...s, brands: s.brands || [] });
+        setBrand((b) =>
+          b &&
+          b !== "unassigned" &&
+          !(s.brands || []).some((x: Brand) => x.id === b)
+            ? ""
+            : b,
+        );
         setError("");
       }
     } catch (e) {
@@ -331,6 +351,8 @@ function Planner({ appName, installId, projectId }: Props) {
       items.filter(
         (i) =>
           i.archived === archived &&
+          (!brand ||
+            (brand === "unassigned" ? !i.brand_id : i.brand_id === brand)) &&
           (!q ||
             `${i.title} ${i.body} ${i.tags.join(" ")}`
               .toLowerCase()
@@ -341,7 +363,7 @@ function Planner({ appName, installId, projectId }: Props) {
           (!approval || i.approval === approval) &&
           (!campaign || i.campaign === campaign),
       ),
-    [items, archived, q, status, format, owner, approval, campaign],
+    [items, archived, q, status, format, owner, approval, campaign, brand],
   );
   const unscheduled = filtered.filter(
     (i) =>
@@ -367,7 +389,7 @@ function Planner({ appName, installId, projectId }: Props) {
       ))}
     </select>
   );
-  const iconParams = new URLSearchParams({ project_id: projectId, v: "0.1.1" });
+  const iconParams = new URLSearchParams({ project_id: projectId, v: "0.2.0" });
   if (installId) iconParams.set("install_id", String(installId));
   const card = (i: Item) => (
     <article
@@ -381,6 +403,7 @@ function Planner({ appName, installId, projectId }: Props) {
       <button className="card-title" onClick={() => open(i)}>
         {i.title}
       </button>
+      <BrandBadge brands={settings?.brands || []} id={i.brand_id} />
       {i.campaign && <p className="small muted truncate">{i.campaign}</p>}
       <div className="card-footer">
         <Owner name={i.owner} />
@@ -430,7 +453,13 @@ function Planner({ appName, installId, projectId }: Props) {
           <Button
             primary
             disabled={!settings}
-            onClick={() => settings && open(blank(settings))}
+            onClick={() =>
+              settings &&
+              open({
+                ...blank(settings),
+                brand_id: brand === "unassigned" ? "" : brand,
+              })
+            }
           >
             + New content
           </Button>
@@ -439,6 +468,22 @@ function Planner({ appName, installId, projectId }: Props) {
       {view !== "settings" && (
         <>
           <div className="toolbar">
+            <select
+              aria-label="Filter by brand"
+              value={brand}
+              onChange={(e) => {
+                setBrand(e.target.value);
+                setCampaign("");
+              }}
+            >
+              <option value="">All brands</option>
+              <option value="unassigned">Unassigned</option>
+              {(settings?.brands || []).map((b) => (
+                <option key={b.id} value={b.id}>
+                  {b.name}
+                </option>
+              ))}
+            </select>
             <input
               className="search"
               aria-label="Search content"
@@ -463,7 +508,17 @@ function Planner({ appName, installId, projectId }: Props) {
               <>
                 {select("All approvals", approval, setApproval, approvalStates)}
                 {select("All campaigns", campaign, setCampaign, [
-                  ...new Set(items.map((i) => i.campaign)),
+                  ...new Set(
+                    items
+                      .filter(
+                        (i) =>
+                          !brand ||
+                          (brand === "unassigned"
+                            ? !i.brand_id
+                            : i.brand_id === brand),
+                      )
+                      .map((i) => i.campaign),
+                  ),
                 ])}
                 <select
                   aria-label="Archive filter"
@@ -511,7 +566,13 @@ function Planner({ appName, installId, projectId }: Props) {
               <Button
                 primary
                 disabled={!settings}
-                onClick={() => settings && open(blank(settings))}
+                onClick={() =>
+                  settings &&
+                  open({
+                    ...blank(settings),
+                    brand_id: brand === "unassigned" ? "" : brand,
+                  })
+                }
               >
                 + Create content
               </Button>
@@ -587,6 +648,7 @@ function Planner({ appName, installId, projectId }: Props) {
                   </div>
                   <Calendar
                     month={month}
+                    brands={settings?.brands || []}
                     items={filtered}
                     releases={releases}
                     field={dateField}
@@ -667,7 +729,11 @@ function Planner({ appName, installId, projectId }: Props) {
                             {i.title}
                           </button>
                           <span className="small dim">
-                            {label(i.format)}
+                            {label(i.format)} ·{" "}
+                            <BrandBadge
+                              brands={settings?.brands || []}
+                              id={i.brand_id}
+                            />
                             {i.campaign && ` · ${i.campaign}`}
                           </span>
                         </td>
@@ -710,6 +776,10 @@ function Planner({ appName, installId, projectId }: Props) {
                         >
                           {i.title}
                         </button>
+                        <BrandBadge
+                          brands={settings?.brands || []}
+                          id={i.brand_id}
+                        />
                         {i.campaign && (
                           <span className="small muted">{i.campaign}</span>
                         )}
@@ -771,6 +841,7 @@ function Planner({ appName, installId, projectId }: Props) {
   );
 }
 function Calendar({
+  brands,
   month,
   items,
   releases,
@@ -778,6 +849,7 @@ function Calendar({
   selected,
   onOpen,
 }: {
+  brands: Brand[];
   month: Date;
   items: Item[];
   releases: Release[];
@@ -828,6 +900,7 @@ function Calendar({
                   >
                     <span className="small dim">{label(i.format)}</span>
                     <div>{i.title}</div>
+                    <BrandBadge brands={brands} id={i.brand_id} />
                   </button>
                 ))}
               {field === "planned_at" &&
@@ -846,6 +919,10 @@ function Calendar({
                     >
                       <span className="small muted">{r.channel}</span>
                       <div>{byId.get(r.item_id)!.title}</div>
+                      <BrandBadge
+                        brands={brands}
+                        id={byId.get(r.item_id)!.brand_id}
+                      />
                     </button>
                   ))}
             </div>
@@ -1177,6 +1254,20 @@ function Inspector({
           <>
             <div className="fields">
               {text("owner", "Owner")}
+              <Field name="Brand">
+                <select
+                  aria-label="Content brand"
+                  value={draft.brand_id || ""}
+                  onChange={(e) => set("brand_id", e.target.value)}
+                >
+                  <option value="">Unassigned</option>
+                  {settings.brands.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
               {text("campaign", "Campaign / initiative")}
               <DateField
                 name="Deadline"
@@ -1327,6 +1418,7 @@ function Inspector({
                 release={r}
                 api={api}
                 settings={settings}
+                brandId={item.brand_id || ""}
                 disabled={draft.archived}
                 onSaved={async () => {
                   await read();
@@ -1339,6 +1431,7 @@ function Inspector({
                 release={blankRelease(draft.id, settings.channels[0])}
                 api={api}
                 settings={settings}
+                brandId={item.brand_id || ""}
                 disabled={draft.archived}
                 onCancel={() => setNewRelease(false)}
                 onSaved={async () => {
@@ -1395,6 +1488,7 @@ function Inspector({
   );
 }
 function ReleaseEditor({
+  brandId,
   release,
   api,
   settings,
@@ -1402,6 +1496,7 @@ function ReleaseEditor({
   onSaved,
   onCancel,
 }: {
+  brandId: string;
   release: Release;
   api: API;
   settings: Settings;
@@ -1546,7 +1641,9 @@ function ReleaseEditor({
               disabled={busy}
               onClick={() =>
                 run(async () => {
-                  const out = await api(`/integrations?app=${r.app}`);
+                  const out = await api(
+                    `/integrations?app=${r.app}&brand_id=${encodeURIComponent(brandId)}`,
+                  );
                   setRecords(out.posts || out.campaigns || []);
                 })
               }
@@ -1647,6 +1744,7 @@ function SettingsView({
       formats: settings.formats.join("\n"),
       channels: settings.channels.join("\n"),
     }),
+    [brands, setBrands] = useState<Brand[]>(settings.brands || []),
     [revision, setRevision] = useState(settings.revision),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
@@ -1658,6 +1756,7 @@ function SettingsView({
     try {
       const s = await api("/settings", "PATCH", {
         revision,
+        brands,
         statuses: split(draft.statuses),
         formats: split(draft.formats),
         channels: split(draft.channels),
@@ -1694,6 +1793,53 @@ function SettingsView({
           {message}
         </p>
       )}
+      <section className="settings-section">
+        <div>
+          <h3>Brands</h3>
+          <p className="small muted" style={{ marginTop: 5 }}>
+            Organize brands within this project. Content can stay unassigned.
+            Reassign content before removing a brand.
+          </p>
+        </div>
+        <div className="stack">
+          {brands.map((b, n) => (
+            <BrandForm
+              key={b.id}
+              brand={b}
+              onChange={(next) => {
+                setMessage("");
+                setBrands((bs) => bs.map((v, i) => (i === n ? next : v)));
+              }}
+              onRemove={() => {
+                setMessage("");
+                setBrands((bs) => bs.filter((v) => v.id !== b.id));
+              }}
+            />
+          ))}
+          <Button
+            onClick={() => {
+              setMessage("");
+              setBrands((bs) => [
+                ...bs,
+                {
+                  id: crypto.randomUUID(),
+                  name: "",
+                  color: "#6366f1",
+                  logo_url: "",
+                  social_account_ids: [],
+                  campaign_ids: [],
+                },
+              ]);
+            }}
+          >
+            + Add brand
+          </Button>
+          <p className="small muted">
+            Save settings to apply brand changes. Optional mappings use accounts
+            and campaigns already connected to this project.
+          </p>
+        </div>
+      </section>
       {(["statuses", "formats", "channels"] as const).map((k) => (
         <section className="settings-section" key={k}>
           <div>
@@ -1754,6 +1900,128 @@ function SettingsView({
           </Button>
         </div>
       </section>
+    </div>
+  );
+}
+
+function BrandBadge({ brands, id }: { brands: Brand[]; id: string }) {
+  const b = brands.find((b) => b.id === id);
+  if (!b) return <span className="small dim">Unassigned</span>;
+  return (
+    <span
+      className="small"
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        maxWidth: "100%",
+      }}
+    >
+      {b.logo_url ? (
+        <img
+          src={b.logo_url}
+          alt=""
+          referrerPolicy="no-referrer"
+          style={{
+            width: 14,
+            height: 14,
+            objectFit: "contain",
+            borderRadius: 3,
+          }}
+        />
+      ) : (
+        <span
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: 4,
+            background: b.color || "var(--accent)",
+            flexShrink: 0,
+          }}
+        />
+      )}
+      <span className="truncate">{b.name}</span>
+    </span>
+  );
+}
+function BrandForm({
+  brand: b,
+  onChange,
+  onRemove,
+}: {
+  brand: Brand;
+  onChange: (b: Brand) => void;
+  onRemove: () => void;
+}) {
+  const ids = (text: string) =>
+    text
+      .split(/[,\s]+/)
+      .filter(Boolean)
+      .map(Number);
+  return (
+    <div className="release-card" style={{ padding: 12, margin: 0 }}>
+      <div className="row between">
+        <BrandBadge brands={[b]} id={b.id} />
+        <Button quiet onClick={onRemove}>
+          Remove brand
+        </Button>
+      </div>
+      <div className="fields" style={{ marginTop: 12 }}>
+        <Field name="Brand name">
+          <input
+            aria-label="Brand name"
+            value={b.name}
+            onChange={(e) => onChange({ ...b, name: e.target.value })}
+          />
+        </Field>
+        <Field name="Brand color">
+          <input
+            aria-label="Brand color"
+            type="color"
+            value={b.color || "#6366f1"}
+            onChange={(e) => onChange({ ...b, color: e.target.value })}
+          />
+        </Field>
+        <Field name="Logo URL (optional)">
+          <input
+            aria-label="Brand logo URL"
+            type="url"
+            placeholder="https://…"
+            value={b.logo_url}
+            onChange={(e) => onChange({ ...b, logo_url: e.target.value })}
+          />
+        </Field>
+      </div>
+      <details style={{ marginTop: 12 }}>
+        <summary className="small muted">
+          Optional Social and Campaigns mappings
+        </summary>
+        <p className="small muted" style={{ margin: "8px 0" }}>
+          Comma-separated Social account IDs and Campaigns record IDs. Empty
+          lists leave browsing unrestricted. Mappings filter record suggestions
+          and result refreshes; they do not grant access or publish content.
+        </p>
+        <div className="fields">
+          <Field name="Social account IDs">
+            <input
+              aria-label="Social account IDs"
+              defaultValue={(b.social_account_ids || []).join(", ")}
+              onBlur={(e) =>
+                onChange({ ...b, social_account_ids: ids(e.target.value) })
+              }
+            />
+          </Field>
+          <Field name="Campaign IDs">
+            <input
+              aria-label="Campaign IDs"
+              defaultValue={(b.campaign_ids || []).join(", ")}
+              onBlur={(e) =>
+                onChange({ ...b, campaign_ids: ids(e.target.value) })
+              }
+            />
+          </Field>
+        </div>
+      </details>
     </div>
   );
 }

@@ -8,6 +8,16 @@ The panel follows the same compact layout and shared components as CRM and Socia
 
 The monochrome app icon is embedded in the sidecar and served independently of its working directory.
 
+## Brands
+
+Create optional brands in **Settings → Brands**, with a name, color and optional HTTP(S) logo URL. Use the **All brands** selector to view one brand or **Unassigned** across Calendar, Board, Content and Backlog. New content inherits the selected brand; an item's brand is editable in Details. Campaign / initiative remains a separate field, and its filter choices follow the current brand.
+
+Brands have stable project-scoped IDs: renaming a brand preserves assignments. Remove a brand only after reassigning every referenced item, including archived content. Changing the brand of approved content resets approval to pending. Brands organize content within the existing project access boundary; they do not create separate permissions.
+
+Optional per-brand mappings accept Social account IDs and Campaigns record IDs from the project's existing app connections. These filter the release browser and guard result refreshes. An empty mapping leaves that app's records unrestricted. Social posts must have all targets in the mapped account list; posts spanning other accounts are omitted. The Social browser still uses the latest 200 posts. Manual links can be saved for planning while disconnected; refreshing a link outside the saved brand mapping fails without erasing previous results. Mappings do not install apps, connect accounts, schedule or publish anything.
+
+Existing v0.1.x records need no data migration: they appear as Unassigned. Zero brands and zero connected apps remain valid defaults.
+
 ## Planning
 
 - Calendar (publication dates and channel releases, or editorial deadlines), board, table and unscheduled backlog.
@@ -33,15 +43,15 @@ Social currently exposes only the latest 200 posts through `post_list`. A linked
 
 All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in `main.go` for the full surface.
 
-- `GET /items`: filters `q`, `status`, `format`, `owner`, `campaign`, `approval`, `archived` (`false`, `true`, `all`); `limit` (default 100, max 500), `offset`. Returns total, items and their releases. The panel loads all pages before filtering/calendar rendering.
+- `GET /items`: filters `q`, `brand_id` (omit for all brands; `unassigned` for records without a brand), `status`, `format`, `owner`, `campaign`, `approval`, `archived` (`false`, `true`, `all`); `limit` (default 100, max 500), `offset`. Returns total, items and their releases. The panel loads all pages before filtering/calendar rendering.
 - `POST /items`: title required; other editable fields optional.
 - `GET /items/:id`: item, releases and latest 100 history snapshots, with `history_truncated`.
 - `PATCH /items/:id`: `{revision, patch}`. Content edits can reset approval.
 - `POST /releases`: `{item_id, channel, ...}`.
 - `PATCH /releases/:id`: `{revision, patch}`.
 - `POST /releases/:id/refresh`: read the saved link's results.
-- `GET /settings`, `PATCH /settings`: settings with revision.
-- `GET /integrations`: optional connection states. `?app=social|campaigns` browses existing records.
+- `GET /settings`, `PATCH /settings`: settings with revision, including optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers.
+- `GET /integrations`: optional connection states. `?app=social|campaigns` browses existing records. Add `brand_id` to apply the saved brand mappings.
 
 Dates accept `YYYY-MM-DD` or RFC3339 with timezone; the panel uses date pickers and displays calendar timestamps in the viewer's local timezone. You can also type a precise timestamp into the date field. Clear fields with empty strings/arrays/objects, not null. Item and release edits require the latest revision; stale writes return HTTP 409. Release `results` are snapshots or manually entered JSON, not normalized cross-platform metrics.
 

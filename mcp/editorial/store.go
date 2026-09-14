@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -19,6 +20,7 @@ func (e validationError) Error() string { return e.message }
 func invalid(s string) error            { return validationError{s} }
 
 type ItemData struct {
+	BrandID     string         `json:"brand_id"`
 	Title       string         `json:"title"`
 	Body        string         `json:"body"`
 	Format      string         `json:"format"`
@@ -63,7 +65,26 @@ type Release struct {
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
+type Brand struct {
+	ID               string  `json:"id"`
+	Name             string  `json:"name"`
+	Color            string  `json:"color"`
+	LogoURL          string  `json:"logo_url"`
+	SocialAccountIDs []int64 `json:"social_account_ids"`
+	CampaignIDs      []int64 `json:"campaign_ids"`
+}
+
+func findBrand(s Settings, id string) *Brand {
+	for _, b := range s.Brands {
+		if b.ID == id {
+			return &b
+		}
+	}
+	return nil
+}
+
 type Settings struct {
+	Brands   []Brand  `json:"brands"`
 	Statuses []string `json:"statuses"`
 	Formats  []string `json:"formats"`
 	Channels []string `json:"channels"`
@@ -71,7 +92,7 @@ type Settings struct {
 }
 
 func defaultSettings() Settings {
-	return Settings{Statuses: []string{"idea", "brief", "in_progress", "review", "ready", "published"}, Formats: []string{"idea", "brief", "article", "video", "podcast", "social_post", "newsletter", "campaign", "refresh"}, Channels: []string{"Website", "Newsletter", "LinkedIn", "Instagram", "YouTube", "Podcast"}}
+	return Settings{Brands: []Brand{}, Statuses: []string{"idea", "brief", "in_progress", "review", "ready", "published"}, Formats: []string{"idea", "brief", "article", "video", "podcast", "social_post", "newsletter", "campaign", "refresh"}, Channels: []string{"Website", "Newsletter", "LinkedIn", "Instagram", "YouTube", "Podcast"}}
 }
 
 type queryer interface {
@@ -123,6 +144,9 @@ func validateURL(s string) error {
 	return nil
 }
 func validateItem(d *ItemData, s Settings) error {
+	if d.BrandID != "" && findBrand(s, d.BrandID) == nil {
+		return invalid("unknown brand in this project")
+	}
 	d.Title = strings.TrimSpace(d.Title)
 	if d.Title == "" {
 		return invalid("title is required")
@@ -227,7 +251,7 @@ func patchJSON(dst any, patch map[string]any, allowed []string) error {
 	return nil
 }
 
-var itemFields = []string{"title", "body", "format", "status", "owner", "deadline", "planned_at", "approval", "reviewer", "campaign", "sources", "attachments", "tags", "fields", "archived"}
+var itemFields = []string{"brand_id", "title", "body", "format", "status", "owner", "deadline", "planned_at", "approval", "reviewer", "campaign", "sources", "attachments", "tags", "fields", "archived"}
 var releaseFields = []string{"channel", "planned_at", "published_at", "url", "status", "notes", "app", "external_id", "results", "archived"}
 
 func readItem(db queryer, pid string, id int64) (Item, error) {
@@ -282,7 +306,7 @@ func saveItem(db *sql.DB, pid string, id, revision int64, patch map[string]any) 
 	}
 	// Approval applies to the reviewed content, not a later edit. A second save is
 	// required to approve changed content, even if approval was supplied in the patch.
-	if before.Approval == "approved" && (before.Title != i.Title || before.Body != i.Body || before.Format != i.Format || !reflect.DeepEqual(before.Sources, i.Sources) || !reflect.DeepEqual(before.Attachments, i.Attachments) || !reflect.DeepEqual(before.Fields, i.Fields)) {
+	if before.Approval == "approved" && (before.BrandID != i.BrandID || before.Title != i.Title || before.Body != i.Body || before.Format != i.Format || !reflect.DeepEqual(before.Sources, i.Sources) || !reflect.DeepEqual(before.Attachments, i.Attachments) || !reflect.DeepEqual(before.Fields, i.Fields)) {
 		i.Approval = "pending"
 	}
 	if e = validateItem(&i.ItemData, s); e != nil {
@@ -415,6 +439,13 @@ func listItems(db *sql.DB, pid string, args map[string]any) (any, error) {
 			where += " AND json_extract(data,'$." + k + "')=?"
 			params = append(params, v)
 		}
+	}
+	if brand := str(args, "brand_id"); brand != "" {
+		if brand == "unassigned" {
+			brand = ""
+		}
+		where += " AND COALESCE(json_extract(data,'$.brand_id'),'')=?"
+		params = append(params, brand)
 	}
 	if q := str(args, "q"); q != "" {
 		where += " AND (instr(lower(json_extract(data,'$.title')),lower(?))>0 OR instr(lower(json_extract(data,'$.body')),lower(?))>0)"
@@ -560,8 +591,50 @@ func saveSettings(db *sql.DB, pid string, args map[string]any) (Settings, error)
 		return old, errConflict
 	}
 	s := old
-	if e = patchJSON(&s, args, []string{"statuses", "formats", "channels", "revision"}); e != nil {
+	if e = patchJSON(&s, args, []string{"brands", "statuses", "formats", "channels", "revision"}); e != nil {
 		return s, e
+	}
+	if len(s.Brands) > 100 {
+		return s, invalid("at most 100 brands per project")
+	}
+	ids, names := map[string]bool{}, map[string]bool{}
+	for n := range s.Brands {
+		b := &s.Brands[n]
+		if !regexp.MustCompile(`^[a-zA-Z0-9_-]{1,80}$`).MatchString(b.ID) || b.ID == "unassigned" || ids[b.ID] {
+			return s, invalid("brand IDs must be unique stable identifiers")
+		}
+		if b.Name != strings.TrimSpace(b.Name) || b.Name == "" || len(b.Name) > 80 || names[strings.ToLower(b.Name)] {
+			return s, invalid("brand names must be unique and 1–80 characters")
+		}
+		if b.Color != "" && !regexp.MustCompile(`^#[0-9a-fA-F]{6}$`).MatchString(b.Color) {
+			return s, invalid("brand color must be a six-digit hex color")
+		}
+		if e := validateURL(b.LogoURL); e != nil {
+			return s, e
+		}
+		for _, list := range [][]int64{b.SocialAccountIDs, b.CampaignIDs} {
+			seen := map[int64]bool{}
+			for _, id := range list {
+				if id <= 0 || seen[id] {
+					return s, invalid("connection IDs must be unique positive integers")
+				}
+				seen[id] = true
+			}
+		}
+		ids[b.ID] = true
+		names[strings.ToLower(b.Name)] = true
+	}
+	for _, b := range old.Brands {
+		if ids[b.ID] {
+			continue
+		}
+		var count int
+		if e := tx.QueryRow("SELECT count(*) FROM editorial_items WHERE project_id=? AND json_extract(data,'$.brand_id')=?", pid, b.ID).Scan(&count); e != nil {
+			return s, e
+		}
+		if count > 0 {
+			return s, invalid("reassign all content, including archived items, before removing brand " + b.Name)
+		}
 	}
 	for _, values := range [][]string{s.Statuses, s.Formats, s.Channels} {
 		if len(values) == 0 || len(values) > 50 {
