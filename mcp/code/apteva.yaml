@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.12.0
+version: 0.12.1
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -25,6 +25,7 @@ description: |
   v0.8.1 adds monorepo-scoped workspaces: editable path globs and read-only
   support inputs are transferred independently and only editable paths can be
   applied back to Code.
+  v0.12.1 aligns Vite preview host and port with readiness checks and reports early startup errors.
   v0.12.0 adds saved repository execution permissions, agent controls and Allow and run in the preview toolbar.
   v0.11.1 reports repeated hard-delete requests as repository-not-found instead of success.
   v0.11.0 adds opt-in automatic commits and origin synchronization with
@@ -298,7 +299,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.12.0
+    ref: code/v0.12.1
     entry: mcp/code
   port: 8080
   health_check: /health

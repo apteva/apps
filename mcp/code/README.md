@@ -95,6 +95,8 @@ a working directory is not a sandbox. Use Workspaces for untrusted code or
 installations requiring repository isolation. Static previews execute no repo
 scripts. Mobile previews delegate to the bound Simulator app.
 
+Vite dev scripts receive an explicit loopback host, the allocated preview port, and `--strictPort`. This keeps Vite, readiness checks and the preview link on the same address. Custom `run_cmd` scripts must honor `PORT` themselves.
+
 ## Preview lifecycle and issues
 
 The supervisor reserves ports through startup, probes until ready or a deadline,

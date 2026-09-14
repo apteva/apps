@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -231,6 +232,40 @@ func cmdDevNode(srcDir string) (string, []string, error) {
 		}
 	}
 	return "", nil, errors.New(`no "dev" or "start" script in package.json — set run_cmd explicitly (or add bun + serve.ts for Bun-script convention)`)
+}
+
+// Pass preview flags only to a directly invoked Vite script. Arbitrary server
+// scripts and explicit run_cmd overrides retain their existing PORT contract.
+func devNodePortArgs(srcDir, pm string, args []string, port int) []string {
+	if len(args) != 2 || args[0] != "run" {
+		return args
+	}
+	body, err := os.ReadFile(filepath.Join(srcDir, "package.json"))
+	if err != nil {
+		return args
+	}
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if json.Unmarshal(body, &pkg) != nil {
+		return args
+	}
+	script := strings.Fields(pkg.Scripts[args[1]])
+	if len(script) == 0 || script[0] != "vite" {
+		return args
+	}
+	// Do not append flags to compound shell scripts or build/preview commands.
+	if len(script) > 1 && !strings.HasPrefix(script[1], "-") && script[1] != "dev" && script[1] != "serve" {
+		return args
+	}
+	if strings.ContainsAny(pkg.Scripts[args[1]], ";&|\n") {
+		return args
+	}
+	args = append([]string(nil), args...)
+	if pm == "npm" {
+		args = append(args, "--")
+	}
+	return append(args, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--strictPort")
 }
 
 // findBunRunScript looks for the Bun-script convention's runtime
@@ -511,6 +546,7 @@ func (s *devSupervisor) startDevRunContext(callCtx context.Context, ctx *sdk.App
 	// test/preview path; production releases still belong to Deploy.
 	processEnv, err := commandEnvironment(s.dataDir, in.EnvJSON)
 	if err != nil {
+		s.markCrashed(ctx, dr.ID, err.Error())
 		logF.Close()
 		return nil, err
 	}
@@ -520,6 +556,7 @@ func (s *devSupervisor) startDevRunContext(callCtx context.Context, ctx *sdk.App
 	if plan, err := nodeDepsInstallPlan(srcDir); fw == "static" && strings.TrimSpace(in.RunCmd) == "" {
 		// Serving static files does not execute repository scripts.
 	} else if err != nil {
+		s.markCrashed(ctx, dr.ID, err.Error())
 		logF.Close()
 		return nil, err
 	} else if plan.Needed {
@@ -778,6 +815,11 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 	if err != nil {
 		return err
 	}
+	// Vite ignores PORT and otherwise chooses 5173 (or silently moves to
+	// another free port). Keep its CLI and our readiness/preview target aligned.
+	if framework == "node" && strings.TrimSpace(runCmd) == "" {
+		args = devNodePortArgs(srcDir, bin, args, port)
+	}
 	cctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cctx, bin, args...)
 	cmd.Dir = srcDir
@@ -858,7 +900,7 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 			case <-cctx.Done():
 				return
 			case <-timer.C:
-				s.markCrashed(ctx, dr.ID, "startup deadline exceeded; process terminated")
+				s.markCrashed(ctx, dr.ID, fmt.Sprintf("startup deadline exceeded waiting for 127.0.0.1:%d; check the dev log and server port; process terminated", port))
 				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
 				select {
 				case <-stop:
