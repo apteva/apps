@@ -341,7 +341,7 @@ func TestCallReadRouteAndSocketStatusExposeTermination(t *testing.T) {
 		t.Fatal(err)
 	}
 	termination, _ := event["termination"].(map[string]any)
-	if event["type"] != "call.status" || event["status"] != "completed" || event["answered_by"] != answeredByHuman || termination["reason"] != terminationTimeLimit || event["ended_at"] == nil {
+	if event["type"] != "call.status" || event["direction"] != "outbound" || event["status"] != "completed" || event["answered_by"] != answeredByHuman || termination["reason"] != terminationTimeLimit || event["ended_at"] == nil {
 		t.Fatalf("call.status frame: %s", softphoneStatusEvent(*stored))
 	}
 	list, err := a.db().listWhere("id = ?", call.ID)
@@ -353,4 +353,57 @@ func TestCallReadRouteAndSocketStatusExposeTermination(t *testing.T) {
 		t.Fatalf("calls list payload: %#v", public)
 	}
 	_ = ctx
+}
+
+func TestOutboundDefaultTimeoutAppliesWhenOmitted(t *testing.T) {
+	platform := &answerPlatform{
+		bindings: map[string]any{"carrier": int64(9)},
+		credentials: &sdk.ConnectionCredentials{
+			Slug:   "twilio",
+			Fields: map[string]string{"auth_token": "test-auth-token", "phone_number": "+14155550101"},
+		},
+		integrationResponse: map[string]json.RawMessage{"make_call": json.RawMessage(`{"sid":"CAoutbound"}`)},
+	}
+	a, ctx := withTelephonyTestContext(t, platform)
+	callerCtx := sdk.WithCaller(context.Background(), &sdk.Caller{AgentID: 7})
+
+	// Built-in defaults before any setting exists: 30 s for agents, 60 s for the softphone.
+	if result, _ := a.toolPlaceCall(callerCtx, ctx, map[string]any{"to": "+14155550100", "directive": "x"}); toolError(result) != "" {
+		t.Fatal(toolError(result))
+	}
+	if dial := lastIntegrationCall(platform, "make_call"); dial == nil || dial.Input["Timeout"] != 30 {
+		t.Fatalf("agent built-in timeout: %#v", dial)
+	}
+	if _, err := a.placeHumanCallForUser(ctx, nil, "project-a", "+14155550110", "", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dial := lastIntegrationCall(platform, "make_call"); dial == nil || dial.Input["Timeout"] != 60 {
+		t.Fatalf("softphone built-in timeout: %#v", dial)
+	}
+
+	if bad, _ := a.toolOutboundSettingsSet(context.Background(), ctx, map[string]any{"default_timeout_sec": float64(3)}); toolError(bad) == "" {
+		t.Fatalf("out-of-range timeout accepted: %#v", bad)
+	}
+	set, _ := a.toolOutboundSettingsSet(context.Background(), ctx, map[string]any{"default_timeout_sec": float64(45)})
+	if msg := toolError(set); msg != "" || set.(map[string]any)["default_timeout_sec"] != 45 {
+		t.Fatalf("set default timeout: %s %#v", msg, set)
+	}
+	if result, _ := a.toolPlaceCall(callerCtx, ctx, map[string]any{"to": "+14155550120", "directive": "x"}); toolError(result) != "" {
+		t.Fatal(toolError(result))
+	}
+	if dial := lastIntegrationCall(platform, "make_call"); dial == nil || dial.Input["Timeout"] != 45 {
+		t.Fatalf("agent call ignored the project default: %#v", dial)
+	}
+	if _, err := a.placeHumanCallForUser(ctx, nil, "project-a", "+14155550130", "", 0, nil); err != nil {
+		t.Fatal(err)
+	}
+	if dial := lastIntegrationCall(platform, "make_call"); dial == nil || dial.Input["Timeout"] != 45 {
+		t.Fatalf("softphone call ignored the project default: %#v", dial)
+	}
+	if result, _ := a.toolPlaceCall(callerCtx, ctx, map[string]any{"to": "+14155550140", "directive": "x", "timeout_sec": float64(20)}); toolError(result) != "" {
+		t.Fatal(toolError(result))
+	}
+	if dial := lastIntegrationCall(platform, "make_call"); dial == nil || dial.Input["Timeout"] != 20 {
+		t.Fatalf("explicit timeout must win: %#v", dial)
+	}
 }

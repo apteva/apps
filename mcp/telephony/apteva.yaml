@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.6.0
+version: 0.6.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -107,7 +107,7 @@ provides:
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
     - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
-    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup)." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup), default_timeout_sec? (0 keeps built-in defaults)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
     - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
     - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }

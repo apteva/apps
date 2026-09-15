@@ -156,7 +156,11 @@ type outboundSettings struct {
 	ProjectID              string `json:"project_id"`
 	MachineDetection       string `json:"machine_detection"`
 	MachineDetectionAction string `json:"machine_detection_action"`
-	UpdatedAt              string `json:"updated_at,omitempty"`
+	// DefaultTimeoutSec is the ring timeout used when a caller omits
+	// timeout_sec. Zero keeps the built-in defaults (30 s for agent calls,
+	// 60 s for the softphone).
+	DefaultTimeoutSec int    `json:"default_timeout_sec"`
+	UpdatedAt         string `json:"updated_at,omitempty"`
 }
 
 func defaultOutboundSettings(projectID string) outboundSettings {
@@ -165,9 +169,9 @@ func defaultOutboundSettings(projectID string) outboundSettings {
 
 func (c *callsDB) outboundSettings(projectID string) (outboundSettings, error) {
 	settings := defaultOutboundSettings(projectID)
-	err := c.db.QueryRow(`SELECT machine_detection, machine_detection_action, updated_at
+	err := c.db.QueryRow(`SELECT machine_detection, machine_detection_action, COALESCE(default_timeout_sec, 0), updated_at
         FROM outbound_settings WHERE project_id = ?`, projectID).
-		Scan(&settings.MachineDetection, &settings.MachineDetectionAction, &settings.UpdatedAt)
+		Scan(&settings.MachineDetection, &settings.MachineDetectionAction, &settings.DefaultTimeoutSec, &settings.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return settings, nil
 	}
@@ -176,11 +180,12 @@ func (c *callsDB) outboundSettings(projectID string) (outboundSettings, error) {
 
 func (c *callsDB) saveOutboundSettings(settings outboundSettings) error {
 	settings.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	_, err := c.db.Exec(`INSERT INTO outbound_settings (project_id, machine_detection, machine_detection_action, updated_at)
-        VALUES (?, ?, ?, ?)
+	_, err := c.db.Exec(`INSERT INTO outbound_settings (project_id, machine_detection, machine_detection_action, default_timeout_sec, updated_at)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(project_id) DO UPDATE SET machine_detection = excluded.machine_detection,
-          machine_detection_action = excluded.machine_detection_action, updated_at = excluded.updated_at`,
-		settings.ProjectID, settings.MachineDetection, settings.MachineDetectionAction, settings.UpdatedAt)
+          machine_detection_action = excluded.machine_detection_action,
+          default_timeout_sec = excluded.default_timeout_sec, updated_at = excluded.updated_at`,
+		settings.ProjectID, settings.MachineDetection, settings.MachineDetectionAction, settings.DefaultTimeoutSec, settings.UpdatedAt)
 	return err
 }
 
@@ -189,8 +194,19 @@ func outboundSettingsPublic(settings outboundSettings) map[string]any {
 		"project_id":               settings.ProjectID,
 		"machine_detection":        settings.MachineDetection,
 		"machine_detection_action": settings.MachineDetectionAction,
+		"default_timeout_sec":      settings.DefaultTimeoutSec,
 		"updated_at":               settings.UpdatedAt,
 	}
+}
+
+// outboundTimeoutDefault returns the project ring timeout for callers that
+// omit timeout_sec, or the built-in default when none is configured.
+func (a *App) outboundTimeoutDefault(projectID string, builtin int) int {
+	settings, err := a.db().outboundSettings(projectID)
+	if err != nil || settings.DefaultTimeoutSec <= 0 {
+		return builtin
+	}
+	return settings.DefaultTimeoutSec
 }
 
 func (a *App) toolOutboundSettingsGet(_ context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -219,6 +235,13 @@ func (a *App) toolOutboundSettingsSet(_ context.Context, ctx *sdk.AppCtx, args m
 			return mcpError(err.Error()), nil
 		}
 		settings.MachineDetectionAction = action
+	}
+	if _, ok := args["default_timeout_sec"]; ok {
+		timeout := intArg(args, "default_timeout_sec", -1)
+		if timeout != 0 && (timeout < 5 || timeout > 120) {
+			return mcpError("default_timeout_sec must be 0 (built-in default) or between 5 and 120 seconds"), nil
+		}
+		settings.DefaultTimeoutSec = timeout
 	}
 	if settings.MachineDetection != machineDetectionOff {
 		if carrier, _ := recordingCarrierSupport(ctx); carrier != "none" && !machineDetectionSupported(carrier) {

@@ -1105,7 +1105,7 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 		return nil, err
 	}
 	if timeoutSec == 0 {
-		timeoutSec = 60
+		timeoutSec = a.outboundTimeoutDefault(projectID, 60)
 	}
 	if timeoutSec < 5 || timeoutSec > 120 {
 		return nil, errors.New("timeout_sec must be between 5 and 120 seconds")
@@ -1165,6 +1165,7 @@ func softphoneStatusEvent(row callRow) []byte {
 	payload := map[string]any{
 		"type":        "call.status",
 		"call_id":     row.ID,
+		"direction":   row.Direction,
 		"status":      row.Status,
 		"termination": terminationPublic(row),
 	}

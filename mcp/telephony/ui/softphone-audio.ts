@@ -68,6 +68,7 @@ export type SoftphoneState = "connecting" | "reconnecting" | "live" | "ended" | 
 export interface SoftphoneCallStatus {
   call_id: string;
   status: string;
+  direction?: string;
   answered_at?: string;
   ended_at?: string;
   answered_by?: string;

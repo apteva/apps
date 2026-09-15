@@ -5,11 +5,12 @@ import { phaseForStatus } from "../src/softphone";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
-function fixture(options: { ringback?: boolean | { country?: string } } = {}) {
+function fixture(options: { ringback?: boolean | { country?: string }; calls?: unknown[] } = {}) {
   const session: CallSession = { call_id: "call-1", media_url: "/api/apps/telephony/_install/42/softphone/media/call-1/secret", session_token: "secret" };
+  const { calls = [{ id: "call-1", status: "ringing" }], ...softphoneOptions } = options;
   const sdk = new AptevaClient({ baseURL: "https://gateway.example", accessToken: "token", fetch: (async (url) => {
     const parsed = new URL(String(url));
-    if (parsed.pathname.endsWith("/calls")) return Response.json({ calls: [{ id: "call-1", status: "ringing" }] });
+    if (parsed.pathname.endsWith("/calls")) return Response.json({ calls });
     if (parsed.pathname.endsWith("/hangup")) return Response.json({ ok: true });
     return Response.json(session);
   }) as typeof fetch });
@@ -28,7 +29,7 @@ function fixture(options: { ringback?: boolean | { country?: string } } = {}) {
       };
     },
   };
-  const phone = client.createSoftphone({ audioRuntime: runtime, pollIntervalMs: 0, ...options });
+  const phone = client.createSoftphone({ audioRuntime: runtime, pollIntervalMs: 0, ...softphoneOptions });
   return { phone, ringback, get callbacks() { return callbacks; } };
 }
 
@@ -102,6 +103,27 @@ describe("softphone call progress", () => {
     expect(plain.ringback).toEqual(["start:default"]);
     await plain.phone.hangup();
     expect(plain.ringback).toEqual(["start:default", "stop"]);
+  });
+
+  test("attached outbound calls ring from the first read, inbound ones never do", async () => {
+    const outbound = fixture({ ringback: true, calls: [{ id: "call-1", status: "ringing", direction: "outbound", peer_kind: "human", from_number: "+1", to_number: "+2" }] });
+    await outbound.phone.attach("call-1");
+    expect(outbound.phone.getSnapshot().phase).toBe("ringing");
+    expect(outbound.ringback).toEqual(["start:default"]);
+    outbound.callbacks.onCallStatus?.({ call_id: "call-1", status: "answered" });
+    expect(outbound.ringback).toEqual(["start:default", "stop"]);
+
+    const inbound = fixture({ ringback: true, calls: [{ id: "call-1", status: "ringing", direction: "inbound", peer_kind: "human", from_number: "+1", to_number: "+2" }] });
+    await inbound.phone.takeover("call-1");
+    expect(inbound.phone.getSnapshot().phase).toBe("ringing");
+    expect(inbound.ringback).toEqual([]);
+
+    // A pushed frame can also settle the direction when the read returned nothing.
+    const late = fixture({ ringback: true, calls: [] });
+    await late.phone.attach("call-1");
+    expect(late.phone.getSnapshot().phase).toBe("placing");
+    late.callbacks.onCallStatus?.({ call_id: "call-1", status: "ringing", direction: "outbound" });
+    expect(late.ringback).toEqual(["start:default"]);
   });
 
   test("answered inbound calls never play ringback", async () => {

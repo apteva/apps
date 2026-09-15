@@ -337,8 +337,12 @@ describe("authorized application-user sessions", () => {
   test("attach uses the existing call and never places or answers a carrier leg", async () => {
     const f = fixture();
     await f.phone.attach("call-1");
-    expect(f.requests).toHaveLength(1);
+    // Attach claims the existing call, then reads it once for direction and
+    // status. It never places or answers a carrier leg.
+    expect(f.requests).toHaveLength(2);
     expect(f.requests[0].url.pathname).toEndWith("/softphone/attach/call-1");
+    expect(f.requests[1].url.pathname).toEndWith("/calls");
+    expect(f.requests.every((r) => !/\/(place|answer)/.test(r.url.pathname))).toBe(true);
     expect(f.phone.getSnapshot().callId).toBe("call-1");
     expect(f.preflighted).toBe(1);
     f.phone.dispose();
