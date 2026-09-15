@@ -11,10 +11,17 @@
 // dashboard's Tailwind JIT doesn't scan apps/mcp/*/ui/ — class-based
 // fill / stroke utilities would render as black.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BankPayments from "./BankPayments";
 
-const API = "/api/apps/finance";
+import { createFinanceAPI, type FinanceAPI } from "./finance-api";
+
+const FinanceAPIContext = createContext<FinanceAPI | null>(null);
+function useFinanceAPI(): FinanceAPI {
+  const api = useContext(FinanceAPIContext);
+  if (!api) throw new Error("Finance panel connection is unavailable");
+  return api;
+}
 
 interface NativePanelProps {
   appName: string;
@@ -262,21 +269,12 @@ function useAppEvents<T = unknown>(
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const r = await fetch(`${API}${path}`, {
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-  return r.json();
-}
-
 function isInvestmentTxnKind(kind: TxnKind): kind is InvestmentTxnKind {
   return kind === "buy" || kind === "sell" || kind === "dividend";
 }
 
 async function resolveTradeInstrument(
+  api: FinanceAPI,
   symbolInput: string,
   kind: TradeInstrumentKind,
   accountCurrency: string,
@@ -432,7 +430,15 @@ function kindIcon(kind: string): string {
 
 // ─── Panel ───────────────────────────────────────────────────────
 
-export default function FinancePanel({ projectId }: NativePanelProps) {
+export default function FinancePanel(props: NativePanelProps) {
+  const api = useMemo(() => createFinanceAPI(props.projectId, props.installId), [props.projectId, props.installId]);
+  return <FinanceAPIContext.Provider value={api}>
+    <FinancePanelContent key={`${props.projectId}:${props.installId}`} {...props} />
+  </FinanceAPIContext.Provider>;
+}
+
+function FinancePanelContent({ projectId }: NativePanelProps) {
+  const api = useFinanceAPI();
   const [tab, setTab] = useState<Tab>("overview");
   const [settings, setSettings] = useState<Settings | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -471,7 +477,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+  }, [api]);
 
   useEffect(() => { refresh(); }, [refresh]);
 
@@ -844,6 +850,7 @@ function arcPath(cx: number, cy: number, r: number, start: number, end: number):
 // ─── Banking tab ─────────────────────────────────────────────────
 
 function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: () => void }) {
+  const api = useFinanceAPI();
   const [connections, setConnections] = useState<BankingConnection[]>([]);
   const [selected, setSelected] = useState("");
   const [accessToken, setAccessToken] = useState("");
@@ -865,7 +872,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
     const next = body.connections ?? [];
     setConnections(next);
     setSelected(prev => prev || (next[0] ? String(next[0].id) : ""));
-  }, []);
+  }, [api]);
 
   useEffect(() => { void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e))); }, [loadConnections]);
 
@@ -1106,13 +1113,14 @@ function AccountsTab({ accounts, base, onChanged }: { accounts: Account[]; base:
 }
 
 function AccountDetail({ account, onBack, onChanged }: { account: Account; onBack: () => void; onChanged: () => void }) {
+  const api = useFinanceAPI();
   const [txns, setTxns] = useState<Transaction[]>([]);
   const [showNewTxn, setShowNewTxn] = useState(false);
   const [showImportCSV, setShowImportCSV] = useState(false);
   const refresh = useCallback(async () => {
     const r = await api<{ transactions: Transaction[] }>(`/txns?account_id=${account.id}&limit=200`);
     setTxns(r.transactions ?? []);
-  }, [account.id]);
+  }, [account.id, api]);
   useEffect(() => { refresh(); }, [refresh]);
 
   return (
@@ -1201,6 +1209,7 @@ function AccountDetail({ account, onBack, onChanged }: { account: Account; onBac
 type SortKey = "value" | "pl" | "pct";
 
 function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Account[] }) {
+  const api = useFinanceAPI();
   const [sortKey, setSortKey] = useState<SortKey>("value");
   const [instruments, setInstruments] = useState<Record<number, Instrument>>({});
 
@@ -1224,7 +1233,7 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
       }
     })();
     return () => { cancelled = true; };
-  }, [holdings, instruments]);
+  }, [holdings, instruments, api]);
 
   const sorted = useMemo(() => {
     const arr = [...holdings];
@@ -1299,6 +1308,7 @@ function HoldingsTab({ holdings, accounts }: { holdings: Holding[]; accounts: Ac
 // ─── Dialogs ─────────────────────────────────────────────────────
 
 function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: () => void; onCreated: () => void; defaultCurrency: string }) {
+  const api = useFinanceAPI();
   const [name, setName] = useState("");
   const [kind, setKind] = useState("cash");
   const [currency, setCurrency] = useState(defaultCurrency);
@@ -1345,6 +1355,7 @@ function NewAccountDialog({ onClose, onCreated, defaultCurrency }: { onClose: ()
 }
 
 function CSVImportDialog({ account, onClose, onImported }: { account: Account; onClose: () => void; onImported: () => void }) {
+  const api = useFinanceAPI();
   const [fileName, setFileName] = useState("");
   const [csvText, setCsvText] = useState("");
   const [headers, setHeaders] = useState<string[]>([]);
@@ -1524,6 +1535,7 @@ function normaliseHeader(s: string): string {
 }
 
 function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClose: () => void; onCreated: () => void }) {
+  const api = useFinanceAPI();
   const [kind, setKind] = useState<TxnKind>(INVESTMENT_ACCOUNT_KINDS.has(account.kind) ? "buy" : "expense");
   const [instrumentKind, setInstrumentKind] = useState<TradeInstrumentKind>("stock");
   const [symbol, setSymbol] = useState("");
@@ -1590,7 +1602,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [investment, symbol, kind, postedAt, showSuggestions]);
+  }, [investment, symbol, kind, postedAt, showSuggestions, api]);
 
   const applyStockHit = (hit: StockSearchHit) => {
     const next = (hit.symbol ?? "").toUpperCase();
@@ -1616,7 +1628,7 @@ function NewTxnDialog({ account, onClose, onCreated }: { account: Account; onClo
     try {
       const posted_at = postedAt + "T00:00:00Z";
       if (isInvestmentTxnKind(kind)) {
-        const instrument = await resolveTradeInstrument(symbol, instrumentKind, account.currency, quote ?? selectedStock);
+        const instrument = await resolveTradeInstrument(api, symbol, instrumentKind, account.currency, quote ?? selectedStock);
         const baseBody = {
           account_id: account.id,
           instrument_id: instrument.id,
@@ -1784,6 +1796,7 @@ function NewBudgetDialog({
   onClose: () => void;
   onCreated: () => void;
 }) {
+  const api = useFinanceAPI();
   // "" = total spend (NULL category_id on the server).
   const [categoryID, setCategoryID] = useState<string>("");
   const [amount, setAmount] = useState("");
