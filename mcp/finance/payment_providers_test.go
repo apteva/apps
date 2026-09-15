@@ -345,3 +345,14 @@ func TestPaymentManifestPublishesToolsAndWorker(t *testing.T) {
 		t.Fatal("missing status worker")
 	}
 }
+
+func TestPlaidNumericAmountPreservesCents(t *testing.T) {
+	for _, n := range []int64{1, 29, 1234, 1000000} {
+		if err := validatePlaidNumericAmount(n); err != nil {
+			t.Fatal(n, err)
+		}
+	}
+	if err := validatePlaidNumericAmount(9007199254740991); err == nil {
+		t.Fatal("accepted amount that loses cents through JSON number conversion")
+	}
+}

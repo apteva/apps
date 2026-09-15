@@ -196,6 +196,9 @@ func (a *App) toolBankingPaymentPrepare(ctx *sdk.AppCtx, args map[string]any) (a
 			return nil, errors.New("recipient_type must be person or business")
 		}
 	} else if r.Mode == "payment" {
+		if err := validatePlaidNumericAmount(r.Amount); err != nil {
+			return nil, err
+		}
 		if r.Currency != "EUR" && r.Currency != "GBP" {
 			return nil, errors.New("Plaid payment mode currently supports EUR and GBP")
 		}
@@ -650,4 +653,20 @@ func paymentResponseMatches(r bankPaymentRequest, raw map[string]any) bool {
 	}
 	n, err := enableMinor(firstString(raw, "amount.value"), r.Currency)
 	return err == nil && n == r.Amount && firstString(raw, "amount.currency") == r.Currency && firstString(raw, "recipient_id") == r.RecipientID && firstString(raw, "reference") == r.Reference
+}
+
+// Plaid Payment Initiation accepts a JSON number in major units. The platform
+// transports object numbers as float64; reject amounts that lose cents during
+// that conversion rather than allowing the reviewed amount to change.
+func validatePlaidNumericAmount(n int64) error {
+	value, err := strconv.ParseFloat(paymentDecimal(n), 64)
+	if err != nil {
+		return err
+	}
+	transported := strconv.FormatFloat(value, 'f', -1, 64)
+	roundTrip, err := enableMinor(transported, "EUR")
+	if err != nil || roundTrip != n {
+		return errors.New("amount cannot be represented exactly by Plaid's numeric payment API")
+	}
+	return nil
 }
