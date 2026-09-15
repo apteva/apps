@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.5.2
+version: 0.6.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -135,6 +135,8 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls." }
+    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults (answering machine detection)." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls." }
     - { name: telephony_recordings_list, description: "List call recordings." }
     - { name: telephony_recording_get, description: "Get one recording and its private Storage or carrier playback URL." }
     - { name: telephony_recording_retry_import, description: "Retry durable Storage import." }
@@ -220,6 +222,7 @@ provides:
     - { name: call.busy, description: "The destination was busy.", payload: *call_event_payload }
     - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
     - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
+    - { name: call.machine_detected, description: "Answering machine detection finished; answered_by reports human, machine, fax, silence, or unknown.", payload: *call_event_payload }
     - name: recording.ready
       description: A provider recording is ready.
       payload: &recording_event_payload
@@ -451,17 +454,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "telephony_place_call",
 			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
 				"Args: to (E.164 phone number, required), from? (owned caller ID; required when several numbers are connected), directive (system instructions for the call, required), voice? (provider-specific; omitted uses the realtime provider default), greeting?, timeout_sec? (ring timeout, default 30). " +
+				"machine_detection? (off|detect|premium) and machine_detection_action? (notify|hangup) override the project outbound settings. " +
 				"Returns: { call_id, thread_id }. Use send/done events to monitor — do not poll telephony_active_calls in a tight loop.",
 			InputSchema: schemaObject(map[string]any{
-				"to":               map[string]any{"type": "string", "description": "Phone number to dial in E.164 format (e.g. +14155551234)."},
-				"from":             map[string]any{"type": "string", "description": "Owned caller-ID number in E.164 format. Required when the bound carrier has multiple connected numbers; otherwise Telephony selects the sole number."},
-				"directive":        map[string]any{"type": "string", "description": "System instructions the realtime model runs with. Should describe the persona, the goal of the call, and when to escalate to main via send(). Keep it short — 2-4 sentences."},
-				"voice":            map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
-				"greeting":         map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
-				"recording":        map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Supported by Twilio, Telnyx, and Plivo."},
-				"timeout_sec":      map[string]any{"type": "integer", "description": "Ring timeout before giving up.", "default": 30, "minimum": 5, "maximum": 120},
-				"max_duration_sec": map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
-				"idempotency_key":  map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
+				"to":                       map[string]any{"type": "string", "description": "Phone number to dial in E.164 format (e.g. +14155551234)."},
+				"from":                     map[string]any{"type": "string", "description": "Owned caller-ID number in E.164 format. Required when the bound carrier has multiple connected numbers; otherwise Telephony selects the sole number."},
+				"directive":                map[string]any{"type": "string", "description": "System instructions the realtime model runs with. Should describe the persona, the goal of the call, and when to escalate to main via send(). Keep it short — 2-4 sentences."},
+				"voice":                    map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
+				"greeting":                 map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
+				"recording":                map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Supported by Twilio, Telnyx, and Plivo."},
+				"timeout_sec":              map[string]any{"type": "integer", "description": "Ring timeout before giving up.", "default": 30, "minimum": 5, "maximum": 120},
+				"max_duration_sec":         map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
+				"idempotency_key":          map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
+				"machine_detection":        map[string]any{"type": "string", "enum": []string{"off", "detect", "premium"}, "description": "Answering machine detection for this call. Omit to use the project default from telephony_outbound_settings_set. Supported by Twilio, SignalWire, Telnyx, and Plivo."},
+				"machine_detection_action": map[string]any{"type": "string", "enum": []string{"notify", "hangup"}, "description": "notify records answered_by and emits call.machine_detected; hangup also ends the call when a machine or fax answers."},
 			}, []string{"to", "directive"}),
 			// Use HandlerCtx so we can pull the calling agent's id from
 			// the Caller context — the realtime thread needs to spawn
@@ -651,6 +657,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"retention_days": map[string]any{"type": "integer", "minimum": 0, "maximum": 3650},
 			}, nil),
 			HandlerCtx: a.toolRecordingSettingsSet,
+		},
+		{
+			Name:        "telephony_outbound_settings_get",
+			Description: "Get outbound call defaults for this project: answering machine detection mode and action.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolOutboundSettingsGet,
+		},
+		{
+			Name:        "telephony_outbound_settings_set",
+			Description: "Set outbound call defaults for future calls. Args: machine_detection (off|detect|premium), machine_detection_action (notify|hangup). Per-call arguments on telephony_place_call and the softphone override these.",
+			InputSchema: schemaObject(map[string]any{
+				"machine_detection":        map[string]any{"type": "string", "enum": []string{"off", "detect", "premium"}},
+				"machine_detection_action": map[string]any{"type": "string", "enum": []string{"notify", "hangup"}},
+			}, nil),
+			HandlerCtx: a.toolOutboundSettingsSet,
 		},
 		{
 			Name:        "telephony_recordings_list",
@@ -948,6 +969,11 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	if recordingMode == recordingModeAlways && !providerSupportsRecording(carrierSlug) {
 		return mcpError("call recording is not implemented for the bound carrier " + carrierSlug), nil
 	}
+	machineDetection, machineDetectionAction, err := a.resolveMachineDetection(ctx, projectID, carrierSlug,
+		strArg(args, "machine_detection", ""), strArg(args, "machine_detection_action", ""))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 
 	callID := newCallID()
 	threadID := "tel-" + callID
@@ -1018,6 +1044,8 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               peerKindRealtime,
+		MachineDetection:       machineDetection,
+		MachineDetectionAction: machineDetectionAction,
 	}
 	if err := a.placeOutboundLeg(ctx, carrier, &row, timeout, maxDuration, func() {
 		_ = ctx.PlatformAPI().KillThread(agentID, threadID)
@@ -1056,16 +1084,18 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	}
 
 	placed, err := carrier.Place(ctx, carrierPlaceRequest{
-		CallID:            row.ID,
-		CallbackSecret:    row.CallbackSecret,
-		ProjectID:         row.ProjectID,
-		To:                row.ToNumber,
-		From:              row.FromNumber,
-		TimeoutSec:        timeout,
-		MaxDurationSec:    maxDuration,
-		AudioBridgeURL:    row.AudioBridgeURL,
-		RecordingMode:     row.RecordingMode,
-		RecordingChannels: row.RecordingChannels,
+		CallID:                 row.ID,
+		CallbackSecret:         row.CallbackSecret,
+		ProjectID:              row.ProjectID,
+		To:                     row.ToNumber,
+		From:                   row.FromNumber,
+		TimeoutSec:             timeout,
+		MaxDurationSec:         maxDuration,
+		AudioBridgeURL:         row.AudioBridgeURL,
+		RecordingMode:          row.RecordingMode,
+		RecordingChannels:      row.RecordingChannels,
+		MachineDetection:       row.MachineDetection,
+		MachineDetectionAction: row.MachineDetectionAction,
 	})
 	if err != nil {
 		_ = a.db().updateStatus(row.ID, "failed", err.Error())
@@ -2208,6 +2238,10 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 			_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), callID)
 		}
 	}
+	if err := a.applyProgressUpdate(row, update); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	switch update.Status {
 	case "completed", "failed", "no-answer", "busy", "canceled":
 		row, _ = a.db().findCall(callID)
@@ -2913,6 +2947,10 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) == 2 && parts[0] == "calls" && r.Method == http.MethodGet {
+		a.handleCallRead(w, r, parts[1])
+		return
+	}
 	if len(parts) != 3 || parts[0] != "calls" || parts[2] != "hangup" {
 		http.NotFound(w, r)
 		return
@@ -2972,6 +3010,7 @@ func (a *App) db() *callsDB {
 			row, err := (&callsDB{db: globalCtx.AppDB()}).findCall(callID)
 			if err == nil && row != nil {
 				a.softphones.updateCallState(callID, row.Direction, row.Status)
+				a.pushSoftphoneStatus(row)
 			}
 		},
 	}
@@ -3195,6 +3234,9 @@ func callsPublic(rows []callRow) []map[string]any {
 			"routing_destination_id": r.RoutingDestinationID,
 			"placed_at":              r.PlacedAt,
 			"answered_at":            r.AnsweredAt,
+			"ended_at":               r.EndedAt,
+			"answered_by":            r.AnsweredBy,
+			"termination":            terminationPublic(r),
 			"duration":               callDuration(r),
 			"recording_mode":         r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
@@ -3227,6 +3269,10 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"placed_at":              r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
 			"termination_initiator": r.TerminationInitiator,
+			"termination_reason":    r.TerminationReason,
+			"termination":           terminationPublic(r),
+			"answered_by":           r.AnsweredBy,
+			"machine_detection":     r.MachineDetection,
 			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
@@ -3340,7 +3386,7 @@ func telnyxHangupStatus(cause string) string {
 		return "no-answer"
 	case strings.Contains(normalized, "cancel"):
 		return "canceled"
-	case strings.Contains(normalized, "normal_clearing"), normalized == "":
+	case strings.Contains(normalized, "normal_clearing"), strings.Contains(normalized, "time_limit"), normalized == "":
 		return "completed"
 	default:
 		return "failed"
@@ -3549,6 +3595,10 @@ type callRow struct {
 	RoutingFlowID           string
 	RoutingFlowVersionID    string
 	RoutingDestinationID    string
+	AnsweredBy              string
+	TerminationReason       string
+	MachineDetection        string
+	MachineDetectionAction  string
 }
 
 type routeRow struct {
@@ -3613,7 +3663,9 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(browser_audio_diagnostics,'{}'), COALESCE(carrier_audio_diagnostics,'{}'),
 	COALESCE(peer_kind,'realtime'), COALESCE(peer_token,''),
 	COALESCE(routing_flow_id,''), COALESCE(routing_flow_version_id,''),
-	COALESCE(routing_destination_id,'')`
+	COALESCE(routing_destination_id,''),
+	COALESCE(answered_by,''), COALESCE(termination_reason,''),
+	COALESCE(machine_detection,'off'), COALESCE(machine_detection_action,'notify')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -3634,7 +3686,8 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.MediaCloseCode, &r.MediaCloseReason, &r.MediaCloseLeg,
 		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
 		&r.PeerKind, &r.PeerToken, &r.RoutingFlowID, &r.RoutingFlowVersionID,
-		&r.RoutingDestinationID); err != nil {
+		&r.RoutingDestinationID, &r.AnsweredBy, &r.TerminationReason,
+		&r.MachineDetection, &r.MachineDetectionAction); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -3651,8 +3704,9 @@ func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
 		         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token, routing_flow_id, routing_flow_version_id, routing_destination_id)
-		        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? <= 0 OR (SELECT COUNT(*) FROM calls WHERE project_id=? AND direction='outbound' AND placed_at>=?) < ?`,
+		         peer_kind, peer_token, routing_flow_id, routing_flow_version_id, routing_destination_id,
+		         machine_detection, machine_detection_action)
+		        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? <= 0 OR (SELECT COUNT(*) FROM calls WHERE project_id=? AND direction='outbound' AND placed_at>=?) < ?`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.ForwardedFrom, r.IngressPath, r.Directive, r.Voice, r.AudioBridgeURL,
@@ -3661,6 +3715,7 @@ func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
 		firstNonEmpty(r.RecordingStorageMode, recordingStorageCopy), r.RecordingRetentionDays,
 		firstNonEmpty(r.PeerKind, peerKindRealtime), r.PeerToken,
 		r.RoutingFlowID, r.RoutingFlowVersionID, r.RoutingDestinationID,
+		firstNonEmpty(r.MachineDetection, machineDetectionOff), firstNonEmpty(r.MachineDetectionAction, machineDetectionNotify),
 		limit, r.ProjectID, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), limit,
 	)
 	if err != nil {

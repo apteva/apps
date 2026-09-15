@@ -9,11 +9,12 @@ export function usePanelSoftphone(projectId: string, installId: number, options:
   callbacks.current = options;
   const client = useMemo(() => new AptevaClient({ baseURL: "" }).use(telephonyExtension, { projectId, installId }), [projectId, installId]);
   const [phone, setPhone] = useState<HeadlessSoftphone>();
-  const [state, setState] = useState<SoftphoneSnapshot>({ audioState: "idle", busy: false, muted: false });
+  const [state, setState] = useState<SoftphoneSnapshot>({ audioState: "idle", busy: false, muted: false, phase: "idle" });
   useEffect(() => {
     const controller = client.createSoftphone({
       audio: callbacks.current.audio,
       pollIntervalMs: 0, // CallsView already watches the call list.
+      ringback: callbacks.current.ringback ?? true, // The bundled panel plays ringback; the SDK default stays off.
       onLevels: (mic, speaker) => callbacks.current.onLevels?.(mic, speaker),
       onDiagnostics: value => callbacks.current.onDiagnostics?.(value),
       onNotice: value => callbacks.current.onNotice?.(value),

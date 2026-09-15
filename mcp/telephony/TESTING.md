@@ -64,3 +64,29 @@ as a caller keypress. Signed carrier DTMF webhooks, flow branching, and generic
 browser keypad commands are covered by the deterministic integration suite.
 A live keypad assertion needs an independent SIP user agent or a number on a
 second carrier as the caller.
+
+## Call progress scenarios
+
+The deterministic suite (`go test ./...`) covers the busy, no-answer, and
+voicemail outcomes without a carrier:
+
+- `TestTerminationReasonMapper` pins every `termination.reason` mapping,
+  including Twilio SIP codes and Telnyx hangup causes.
+- `TestTelnyxOutboundRingingIsSynthesized` proves an outbound Telnyx call
+  rings after `call.initiated` and that a late callback never regresses an
+  answered call.
+- `TestAnsweringMachineDetectionRecordsAndHangsUp` feeds machine, human, and
+  repeated detection results through the same path the carrier webhooks use,
+  with both the `notify` and `hangup` actions.
+- `TestOutboundSettingsDriveMachineDetection` checks the project defaults reach
+  the carrier dial request and that per-call overrides win.
+- `frontend/tests/progress.test.ts` walks the exported softphone through
+  placing, ringing, connected, and ended, including pushed `call.status`
+  frames and the ringback option.
+
+To exercise the same outcomes against a real carrier, use the live profile
+with three destinations: a number that is busy (call it from another phone
+first), a number nobody answers, and a number that goes to voicemail with
+`machine_detection: detect`. Expect `termination.reason` of `busy`,
+`no_answer`, and `completed` with `answered_by: machine`, plus one
+`call.machine_detected` event for the voicemail call.

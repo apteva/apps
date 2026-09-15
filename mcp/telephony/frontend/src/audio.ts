@@ -53,6 +53,9 @@ export interface AudioConnection {
   setMuted(muted: boolean): void;
   sendDTMF(digits: string): void;
   setOutputVolume(volume: number): void;
+  /** Optional locally synthesized ringback; runtimes without audio output may omit it. */
+  startRingback?(country?: string): void;
+  stopRingback?(): void;
 }
 export interface AudioRuntime {
   preflight(options: SoftphoneAudioOptions): Promise<void>;
@@ -86,6 +89,8 @@ export function createBrowserAudio(app?: AppHandle): AudioRuntime { return {
       setMuted: value => session.setMuted(value),
       sendDTMF: digits => session.sendDTMF(digits),
       setOutputVolume: value => session.setOutputVolume(value),
+      startRingback: country => session.startRingback(country),
+      stopRingback: () => session.stopRingback(),
     };
   },
 }; }

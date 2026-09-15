@@ -2,9 +2,15 @@ import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
 import { HeadlessSoftphone, type SoftphoneOptions } from "./softphone";
 
+export interface CallTermination { reason?: string; cause?: string; code?: string; initiator?: string }
 export interface Call {
   id: string;
   status: string;
+  answered_at?: string;
+  ended_at?: string;
+  /** human, machine, fax, silence, or unknown once answering machine detection reports. */
+  answered_by?: string;
+  termination?: CallTermination;
   direction: string;
   peer_kind: string;
   from_number: string;

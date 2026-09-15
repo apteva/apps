@@ -9,6 +9,8 @@
 // browser refuses that rate we fall back to band-limited resampling rather than
 // failing the call.
 
+import { playRingback, ringbackPattern } from "./ringback";
+
 const SAMPLE_RATE = 24_000;
 const JITTER_TARGET_MS = 60;
 const MAX_RECONNECT_MS = 30_000;
@@ -62,11 +64,23 @@ function rms(frame: Float32Array): number {
 
 export type SoftphoneState = "connecting" | "reconnecting" | "live" | "ended" | "error";
 
+/** Server-pushed call progress over the media socket (type "call.status"). */
+export interface SoftphoneCallStatus {
+  call_id: string;
+  status: string;
+  answered_at?: string;
+  ended_at?: string;
+  answered_by?: string;
+  termination?: { reason?: string; cause?: string; code?: string; initiator?: string };
+}
+
 export interface SoftphoneCallbacks {
   onState?: (state: SoftphoneState, detail?: string) => void;
   onNotice?: (detail:string) => void;
   onLevels?: (mic: number, speaker: number) => void;
   onDiagnostics?: (diagnostics: SoftphoneDiagnostics) => void;
+  /** Pushed call progress; hosts may keep polling as a fallback. */
+  onCallStatus?: (status: SoftphoneCallStatus) => void;
 }
 
 export interface SoftphoneAudioOptions {
@@ -353,6 +367,7 @@ export class SoftphoneSession {
   private opened = false;
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
+  private ringback: (() => void) | null = null;
   private diagnostics: SoftphoneDiagnostics = {
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
     droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
@@ -444,6 +459,13 @@ export class SoftphoneSession {
   setOutputVolume(value:number): void { if (this.output) this.output.gain.value=Math.max(0,Math.min(1,value)); }
   sendDTMF(digits: string): void { if (/^[0-9*#]+$/.test(digits)) this.sendText(JSON.stringify({type:"dtmf",digits})); }
 
+  /** Locally synthesized ringback through this session's context, so it follows the chosen output device. */
+  startRingback(country?: string): void {
+    if (this.closed || !this.ctx || this.ringback) return;
+    this.ringback = playRingback(this.ctx, this.ctx.destination, ringbackPattern(country));
+  }
+  stopRingback(): void { this.ringback?.(); this.ringback = null; }
+
   private installWorkletDiagnostics(): void {
     if (!this.capture || !this.playback) return;
     this.capture.port.onmessage = (event: MessageEvent) => {
@@ -526,7 +548,7 @@ export class SoftphoneSession {
   private handleControl(data: string): void {
     if (this.closed) return;
     try {
-      const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number };
+      const parsed = JSON.parse(data) as { type?: string; detail?: string; nonce?: number; capture_sequence_gaps?:number; call_id?: string; status?: string };
       if (parsed.type === "dtmf.error" || parsed.type === "dtmf.sent") { this.callbacks.onNotice?.(parsed.type === "dtmf.sent" ? "Keypad tone sent" : parsed.detail || "Keypad tone failed");
       } else if (parsed.type === "pong" && typeof parsed.nonce === "number" && parsed.nonce >= 0) {
         this.diagnostics.captureSequenceGaps = parsed.capture_sequence_gaps ?? this.diagnostics.captureSequenceGaps;
@@ -536,6 +558,8 @@ export class SoftphoneSession {
         this.closed = true;
         try { this.callbacks.onState?.("ended", parsed.type); }
         finally { this.teardown(); }
+      } else if (parsed.type === "call.status" && typeof parsed.call_id === "string" && typeof parsed.status === "string") {
+        this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.fail(parsed.detail || "The call could not be connected.");
       } else if (parsed.type === "peer.disconnected") {
@@ -606,6 +630,7 @@ export class SoftphoneSession {
   }
 
   private teardown(): void {
+    this.stopRingback();
     this.microphoneTransportReady = false;
     this.cancelWorkerStart?.();
     this.cancelWorkerStart = undefined;

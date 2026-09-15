@@ -123,6 +123,9 @@ func phoneAction(r *http.Request) string {
 	if r.Method == "GET" && path == "/softphone/access" {
 		return "call.read"
 	}
+	if r.Method == "GET" && strings.HasPrefix(path, "/calls/") && strings.Count(strings.Trim(path, "/"), "/") == 1 && path != "/calls/events" {
+		return "call.read"
+	}
 	if r.Method != "POST" {
 		return ""
 	}

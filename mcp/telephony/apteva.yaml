@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.5.2
+version: 0.6.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -71,7 +71,7 @@ provides:
     - { prefix: /softphone/media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
-    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?. Telephony spawns the realtime thread and bridges carrier audio into it." }
+    - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?, machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup). Telephony spawns the realtime thread and bridges carrier audio into it." }
     - { name: telephony_answer_call,  description: "Answer a pending inbound call by spawning a realtime thread. Args: call_id, directive, voice?." }
     - { name: telephony_reject_call,  description: "Reject a pending inbound call. Args: call_id." }
     - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent. Agents own what they create; API keys and panel sessions pass agent_id. Args: phone_number?, phone_number_id?, agent_id?, hold_prompt?, timeout_sec?, answer_mode?, directive?, voice?, greeting?, inbound_transport?." }
@@ -106,6 +106,8 @@ provides:
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's recording and durable-storage policy." }
     - { name: telephony_recording_settings_set, description: "Set recording policy for future calls. Args: default_mode?, channels?, storage_mode?, retention_days?." }
+    - { name: telephony_outbound_settings_get, description: "Get outbound call defaults: answering machine detection mode and action." }
+    - { name: telephony_outbound_settings_set, description: "Set outbound call defaults for future calls. Args: machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup)." }
     - { name: telephony_recordings_list, description: "List call recordings. Args: call_id?, limit?." }
     - { name: telephony_recording_get, description: "Get recording metadata and a private playback URL backed by Storage or the carrier. Args: recording_id." }
     - { name: telephony_recording_retry_import, description: "Retry copying a provider recording into Storage. Args: recording_id." }
@@ -183,6 +185,8 @@ provides:
         talk_duration_seconds: integer
         error_message: string
         termination: object
+        answered_by: string
+        synthesized: boolean
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
     - { name: call.answered, description: "The call was answered.", payload: *call_event_payload }
@@ -191,6 +195,7 @@ provides:
     - { name: call.busy, description: "The destination was busy.", payload: *call_event_payload }
     - { name: call.no_answer, description: "The call was not answered before its deadline.", payload: *call_event_payload }
     - { name: call.canceled, description: "The call was canceled.", payload: *call_event_payload }
+    - { name: call.machine_detected, description: "Answering machine detection finished; answered_by reports human, machine, fax, silence, or unknown.", payload: *call_event_payload }
     - name: recording.ready
       description: A provider recording is ready.
       payload: &recording_event_payload

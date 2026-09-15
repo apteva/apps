@@ -37,6 +37,7 @@ const telephony = loaded.client; // TypeScript: use apps.load<TelephonyClient>(.
 const phone = telephony.createSoftphone({
   onLevels: (microphone, speaker) => updateMeters(microphone, speaker),
   onDiagnostics: diagnostics => updateDiagnostics(diagnostics),
+  ringback: { country: "FR" }, // optional local ringback while an outbound call rings
 });
 renderCallState(phone.getSnapshot());
 const unsubscribe = phone.subscribe(renderCallState);
@@ -100,6 +101,16 @@ this Telephony change does not alter the SDK's own module-loading policy.
 - Transport health is checked in the worker with heartbeats. A ringing call can
   remain connected without a carrier audio peer. Stalled sockets/handshakes retry
   with a bounded budget; mute survives reconnect and buffers discard stale audio.
+- Snapshots expose `phase` (`idle`, `placing`, `ringing`, `connected`, `ended`)
+  next to the raw `carrierStatus`. After a call ends, `termination`
+  (`reason`, `cause`, `code`, `initiator`), `answeredBy`, and `endedAt` stay on
+  the snapshot until the next dial or answer. `detail` is cleared at call end as
+  before.
+- `ringback` plays a locally synthesized tone through the SDK's own audio
+  context from ringing until answer, so it follows the selected output device.
+  It is off by default; pass `true` or `{ country }` (France otherwise).
+- The media socket pushes `call.status` frames (status, answered and ended
+  times, `termination`, `answered_by`), so phases update without polling.
 - Active-call reconciliation polls every two seconds without overlapping reads.
   Pass `pollIntervalMs: 0` and feed `observeCall()` if the host already watches
   calls. `watchCalls()` is an optional cancellable watcher for incoming calls.

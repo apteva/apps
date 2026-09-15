@@ -23,6 +23,10 @@ type carrierPlaceRequest struct {
 	AudioBridgeURL    string
 	RecordingMode     string
 	RecordingChannels string
+	// MachineDetection is off, detect, or premium; MachineDetectionAction is
+	// notify or hangup. Carriers that cannot detect reject non-off modes.
+	MachineDetection       string
+	MachineDetectionAction string
 }
 
 type carrierPlaceResult struct {
@@ -154,7 +158,7 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		ID: req.CallID, CallbackSecret: req.CallbackSecret, ProjectID: req.ProjectID,
 		RecordingMode: req.RecordingMode, RecordingChannels: req.RecordingChannels,
 	})
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"To":                   req.To,
 		"From":                 req.From,
 		"Twiml":                twiml,
@@ -162,7 +166,9 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"StatusCallbackMethod": "POST",
 		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
-	})
+	}
+	applyTwilioMachineDetection(input, req, c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("twilio make_call failed: %w", err)
 	}
@@ -195,7 +201,7 @@ func (c *signalWireCarrier) Slug() string { return "signalwire" }
 
 func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
 	cxml := fmt.Sprintf(`<Response><Connect><Stream url="%s" codec="L16@24000h" realtime="true"/></Connect></Response>`, xmlEscape(c.app.publicWSStreamURL("signalwire", req.CallID, req.CallbackSecret)))
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"To":                   req.To,
 		"From":                 req.From,
 		"Twiml":                cxml,
@@ -203,7 +209,9 @@ func (c *signalWireCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*ca
 		"StatusCallbackMethod": "POST",
 		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
-	})
+	}
+	applyTwilioMachineDetection(input, req, c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("signalwire make_call failed: %w", err)
 	}
@@ -257,6 +265,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"webhook_url_method":                     "POST",
 	}
 	applyTelnyxMediaProfile(input)
+	applyTelnyxMachineDetection(input, req)
 	if req.RecordingMode == recordingModeAlways {
 		input["record"] = "record-from-answer"
 		input["record_channels"] = telnyxRecordingChannels(req.RecordingChannels)
@@ -302,7 +311,7 @@ type plivoCarrier struct {
 func (c *plivoCarrier) Slug() string { return "plivo" }
 
 func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
-	data, err := executeCarrierTool(ctx, c.connID, "make_call", map[string]any{
+	input := map[string]any{
 		"from":          req.From,
 		"to":            req.To,
 		"answer_url":    plivoReliableCallbackURL(c.app.plivoXMLURL(req.CallID, req.CallbackSecret, req.ProjectID)),
@@ -313,7 +322,9 @@ func (c *plivoCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrier
 		"hangup_method": "POST",
 		"ring_timeout":  req.TimeoutSec,
 		"time_limit":    req.MaxDurationSec,
-	})
+	}
+	applyPlivoMachineDetection(input, req, plivoReliableCallbackURL(c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID)))
+	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)
 	if err != nil {
 		return nil, fmt.Errorf("plivo make_call failed: %w", err)
 	}
@@ -350,6 +361,9 @@ type vonageCarrier struct {
 func (c *vonageCarrier) Slug() string { return "vonage" }
 
 func (c *vonageCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrierPlaceResult, error) {
+	if req.MachineDetection != "" && req.MachineDetection != machineDetectionOff {
+		return nil, errors.New("answering machine detection is not supported for provider vonage")
+	}
 	ncco := []map[string]any{{
 		"action": "connect",
 		"endpoint": []map[string]any{{

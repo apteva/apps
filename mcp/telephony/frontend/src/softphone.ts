@@ -1,6 +1,18 @@
-import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
+import { DEFAULT_SOFTPHONE_AUDIO_OPTIONS, playbackBufferOptions, type SoftphoneAudioOptions, type SoftphoneCallStatus, type SoftphoneDiagnostics, type SoftphoneState } from "../../ui/softphone-audio";
 import { createBrowserAudio, type AudioConnection, type AudioRuntime } from "./audio";
-import { isTerminalCall, type AnswerRequest, type Call, type CallSession, type DialRequest, type TelephonyClient } from "./client";
+import { isTerminalCall, type AnswerRequest, type Call, type CallSession, type CallTermination, type DialRequest, type TelephonyClient } from "./client";
+
+/** Coarse call progress derived from carrier status: idle, placing, ringing, connected, ended. */
+export type SoftphonePhase = "idle" | "placing" | "ringing" | "connected" | "ended";
+export interface RingbackOptions { country?: string }
+
+export function phaseForStatus(status?: string): SoftphonePhase {
+  if (!status) return "placing";
+  if (isTerminalCall(status)) return "ended";
+  if (status === "ringing") return "ringing";
+  if (status === "answered" || status === "in-progress") return "connected";
+  return "placing";
+}
 
 export interface SoftphoneSnapshot {
   readonly callId?: string;
@@ -9,6 +21,11 @@ export interface SoftphoneSnapshot {
   readonly busy: boolean;
   readonly muted: boolean;
   readonly detail?: string;
+  readonly phase: SoftphonePhase;
+  /** Retained after the call ends until the next dial or answer. */
+  readonly termination?: CallTermination;
+  readonly answeredBy?: string;
+  readonly endedAt?: string;
 }
 export interface SoftphoneOptions {
   audio?: Partial<SoftphoneAudioOptions>;
@@ -19,13 +36,15 @@ export interface SoftphoneOptions {
   onNotice?: (detail: string) => void;
   /** Alternate device implementation for non-browser hosts or controlled tests. */
   audioRuntime?: AudioRuntime;
+  /** Play a locally synthesized ringback while an outbound call rings. Off by default; pass a country code for its cadence (France otherwise). */
+  ringback?: boolean | RingbackOptions;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /** One human operator's call. UI frameworks subscribe to immutable snapshots. */
 export class HeadlessSoftphone {
-  private snapshot: SoftphoneSnapshot = Object.freeze({ audioState: "idle", busy: false, muted: false });
+  private snapshot: SoftphoneSnapshot = Object.freeze({ audioState: "idle", busy: false, muted: false, phase: "idle" });
   private listeners = new Set<(state: SoftphoneSnapshot) => void>();
   private audio?: AudioConnection;
   private session?: CallSession;
@@ -38,6 +57,8 @@ export class HeadlessSoftphone {
   private leaseGeneration = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private polling?: AbortController;
+  private outbound = false;
+  private ringing = false;
   private readonly runtime: AudioRuntime;
   private audioOptions: SoftphoneAudioOptions;
   private readonly interval: number;
@@ -112,6 +133,7 @@ export class HeadlessSoftphone {
       this.intent = undefined;
       this.assertCurrent(generation);
       attached = true;
+      this.outbound = true;
       await this.attachAudio(placed, generation);
       return placed.call_id;
     } catch (error) {
@@ -132,6 +154,7 @@ export class HeadlessSoftphone {
       claimed = await this.client.answer(id, request);
       this.assertCurrent(generation);
       attached = true;
+      this.outbound = false;
       await this.attachAudio(claimed, generation);
     } catch (error) {
       if (claimed && (this.current(generation) || !attached || this.disposed)) {
@@ -171,6 +194,7 @@ export class HeadlessSoftphone {
       this.assertCurrent(generation);
       const session = await (takeover ? this.client.takeover(id) : this.client.attach(id));
       this.assertCurrent(generation);
+      this.outbound = false;
       await this.attachAudio(session, generation);
     } catch (error) {
       if (this.current(generation)) this.update({ detail: message(error) });
@@ -246,17 +270,40 @@ export class HeadlessSoftphone {
   }
 
   /** Call completion is authoritative; transient media errors keep the call controls. */
-  observeCall(call: Pick<Call, "id" | "status">): void {
+  observeCall(call: Pick<Call, "id" | "status"> & Partial<Pick<Call, "answered_at" | "ended_at" | "answered_by" | "termination">>): void {
     if (this.disposed || call.id !== this.session?.call_id) return;
-    if (isTerminalCall(call.status)) { this.invalidate(); this.clearCall(call.status); this.update({ busy: false }); }
-    else this.update({ carrierStatus: call.status });
+    if (isTerminalCall(call.status)) {
+      this.invalidate();
+      this.clearCall(call.status);
+      this.update({ busy: false, phase: "ended", termination: call.termination, answeredBy: call.answered_by ?? this.snapshot.answeredBy, endedAt: call.ended_at });
+      return;
+    }
+    this.update({ carrierStatus: call.status, phase: phaseForStatus(call.status), answeredBy: call.answered_by ?? this.snapshot.answeredBy });
+    this.syncRingback();
+  }
+
+  private ringbackCountry(): string | undefined {
+    const value = this.options.ringback;
+    return typeof value === "object" && value ? value.country : undefined;
+  }
+  // Ringback is a local courtesy tone for outbound dials only; it starts when
+  // the carrier reports ringing and stops on answer, hangup, or media loss.
+  private syncRingback() {
+    const wanted = this.outbound && Boolean(this.options.ringback) && this.snapshot.phase === "ringing" && this.audio !== undefined;
+    if (wanted && !this.ringing) {
+      this.ringing = true;
+      try { this.audio?.startRingback?.(this.ringbackCountry()); } catch { this.ringing = false; }
+    } else if (!wanted && this.ringing) {
+      this.ringing = false;
+      try { this.audio?.stopRingback?.(); } catch { /* audio may already be gone */ }
+    }
   }
 
   private async attachAudio(session: CallSession, generation: number) {
     this.assertCurrent(generation);
     this.stopAudio();
     this.session = session;
-    this.update({ callId: session.call_id, carrierStatus: undefined, audioState: "connecting" });
+    this.update({ callId: session.call_id, carrierStatus: undefined, audioState: "connecting", phase: "placing", termination: undefined, answeredBy: undefined, endedAt: undefined });
     let audio: AudioConnection | undefined;
     const current = () => !this.disposed && audio !== undefined && this.audio === audio;
     const notify = (callback: () => void) => { if (current()) { try { callback(); } catch { /* isolate host callbacks */ } } };
@@ -278,6 +325,10 @@ export class HeadlessSoftphone {
         onLevels: (mic, speaker) => notify(() => this.options.onLevels?.(mic, speaker)),
         onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
         onNotice: detail => notify(() => this.options.onNotice?.(detail)),
+        onCallStatus: status => notify(() => this.observeCall({
+          id: status.call_id, status: status.status, answered_at: status.answered_at, ended_at: status.ended_at,
+          answered_by: status.answered_by, termination: status.termination,
+        })),
       });
       this.audio = audio;
       this.assertCurrent(generation);
@@ -288,6 +339,7 @@ export class HeadlessSoftphone {
       this.assertCurrent(generation);
       if (!current()) throw new Error(this.snapshot.detail || "Audio connection ended during setup");
       audio.setMuted(this.snapshot.muted);
+      this.syncRingback();
     } catch (error) {
       // An older permission/startup result must never stop a replacement call.
       if (current()) this.stopAudio();
@@ -333,6 +385,10 @@ export class HeadlessSoftphone {
     this.leaseTimer = undefined;
     const audio = this.audio;
     this.audio = undefined;
+    if (this.ringing) {
+      this.ringing = false;
+      try { audio?.stopRingback?.(); } catch { /* adapters must not block call cleanup */ }
+    }
     try { audio?.stop(); } catch { /* adapters must not block call cleanup */ }
     if (audio) { try { this.options.onLevels?.(0, 0); } catch { /* host meters cannot interrupt cleanup */ } }
   }
@@ -365,7 +421,8 @@ export class HeadlessSoftphone {
     this.stopAudio();
     this.stopPolling();
     this.session = undefined;
-    this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined });
+    this.outbound = false;
+    this.update({ callId: undefined, carrierStatus, audioState: "idle", muted: false, detail: undefined, phase: carrierStatus ? "ended" : "idle" });
   }
 
   /** Releases local devices and monitoring. An established carrier call stays up. */

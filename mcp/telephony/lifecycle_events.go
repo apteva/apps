@@ -31,6 +31,9 @@ type lifecycleFacts struct {
 	TerminationCause     string
 	TerminationCode      string
 	TerminationInitiator string
+	// Synthesized marks a progress event Telephony derived itself, for example
+	// ringing for a carrier that never reports it.
+	Synthesized bool
 }
 
 type lifecycleEventRow struct {
@@ -124,6 +127,10 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		terminationCode = firstNonEmpty(facts.TerminationCode, terminationCode)
 		terminationInitiator = firstNonEmpty(facts.TerminationInitiator, terminationInitiator)
 	}
+	terminationReason := current.TerminationReason
+	if isTerminalStatus(status) && (transitionAccepted || current.Status == status) {
+		terminationReason = terminationReasonFor(status, terminationCause, terminationCode)
+	}
 
 	_, err = tx.Exec(`UPDATE calls SET
         status = ?,
@@ -137,13 +144,14 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
         termination_cause = ?,
         termination_code = ?,
         termination_initiator = ?,
+        termination_reason = ?,
         provider_sequence = ?,
         provider_event_id = ?,
         media_active = CASE WHEN ? THEN 0 ELSE media_active END
         WHERE id = ?`,
 		nextStatus, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
 		providerOccurredAt, durationSeconds, talkDurationSeconds, terminationCause,
-		terminationCode, terminationInitiator, providerSequence, providerEventID,
+		terminationCode, terminationInitiator, terminationReason, providerSequence, providerEventID,
 		isTerminalStatus(nextStatus), id)
 	if err != nil {
 		return false, err
@@ -243,7 +251,7 @@ func lifecycleEventID(call callRow, topic string, facts lifecycleFacts) string {
 func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts lifecycleFacts) map[string]any {
 	source := firstNonEmpty(facts.Source, "telephony")
 	eventStatus := call.Status
-	if strings.HasPrefix(topic, "call.") {
+	if strings.HasPrefix(topic, "call.") && topic != topicMachineDetected {
 		eventStatus = strings.ReplaceAll(strings.TrimPrefix(topic, "call."), "_", "-")
 		if eventStatus == "incoming" {
 			eventStatus = "pending"
@@ -272,6 +280,10 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	}
 	addOptionalString(payload, "answered_at", call.AnsweredAt)
 	addOptionalString(payload, "ended_at", call.EndedAt)
+	addOptionalString(payload, "answered_by", call.AnsweredBy)
+	if facts.Synthesized {
+		payload["synthesized"] = true
+	}
 	addOptionalString(payload, "provider_event_id", facts.ProviderEventID)
 	if facts.ProviderSequence > 0 {
 		payload["provider_sequence"] = facts.ProviderSequence
@@ -301,6 +313,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	}
 	payload["media"] = media
 	termination := map[string]any{}
+	addOptionalString(termination, "reason", call.TerminationReason)
 	addOptionalString(termination, "cause", call.TerminationCause)
 	addOptionalString(termination, "code", call.TerminationCode)
 	addOptionalString(termination, "initiator", call.TerminationInitiator)
@@ -720,7 +733,10 @@ type callbackUpdate struct {
 	MediaStatus string
 	MediaError  string
 	CarrierSID  string
-	Facts       lifecycleFacts
+	// AnsweredBy is a normalized answering machine detection result, empty
+	// when the callback carries none.
+	AnsweredBy string
+	Facts      lifecycleFacts
 }
 
 func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
@@ -742,6 +758,7 @@ func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 			Status:     normalizeCallStatus(firstString(body, "CallStatus", "Status", "status", "Event", "event")),
 			Error:      firstString(body, "ErrorMessage", "error", "reason", "StatusReason"),
 			CarrierSID: firstString(body, "CallSid", "CallUUID", "uuid", "call_uuid"),
+			AnsweredBy: normalizeAnsweredBy(firstString(body, "AnsweredBy", "answered_by", "Machine")),
 			Facts: lifecycleFacts{
 				OccurredAt:           firstString(body, "Timestamp", "timestamp", "EventTime", "event_time"),
 				Source:               "provider",
@@ -766,6 +783,7 @@ func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
 	terminationInitiator := firstNonEmpty(r.FormValue("HangupSource"), r.FormValue("hangup_source"))
 	return callbackUpdate{
 		Status: status, Error: providerCallbackError(status, errMsg, terminationCause, terminationInitiator), CarrierSID: carrierSID,
+		AnsweredBy: normalizeAnsweredBy(firstNonEmpty(r.FormValue("AnsweredBy"), r.FormValue("Machine"))),
 		Facts: lifecycleFacts{
 			OccurredAt:           firstNonEmpty(r.FormValue("Timestamp"), r.FormValue("EventTime"), r.FormValue("event_time")),
 			Source:               "provider",
@@ -838,11 +856,17 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 				HangupCause   string `json:"hangup_cause"`
 				HangupSource  string `json:"hangup_source"`
 				SIPCode       string `json:"sip_hangup_cause"`
+				Result        string `json:"result"`
 			} `json:"payload"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
 		return callbackUpdate{Error: "invalid Telnyx callback"}
+	}
+	answeredBy := ""
+	switch body.Data.EventType {
+	case "call.machine.detection.ended", "call.machine.premium.detection.ended":
+		answeredBy = normalizeAnsweredBy(firstNonEmpty(body.Data.Payload.Result, "not_sure"))
 	}
 	status := telnyxStatusFromEvent(body.Data.EventType, body.Data.Payload.HangupCause)
 	mediaStatus := telnyxMediaStatusFromEvent(body.Data.EventType)
@@ -853,7 +877,7 @@ func telnyxCallbackUpdate(r *http.Request) callbackUpdate {
 	return callbackUpdate{
 		Status: status, Error: providerCallbackError(status, "", body.Data.Payload.HangupCause, body.Data.Payload.HangupSource),
 		MediaStatus: mediaStatus, MediaError: mediaError,
-		CarrierSID: body.Data.Payload.CallControlID,
+		CarrierSID: body.Data.Payload.CallControlID, AnsweredBy: answeredBy,
 		Facts: lifecycleFacts{
 			OccurredAt:           body.Data.OccurredAt,
 			Source:               "provider",

@@ -7,7 +7,7 @@ const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElem
 const notice = (text: string) => { el("status").textContent = text; };
 let calls: Call[] = [];
 let selectedIncoming: Call | undefined;
-let current: SoftphoneSnapshot = { audioState: "idle", busy: false, muted: false };
+let current: SoftphoneSnapshot = { audioState: "idle", busy: false, muted: false, phase: "idle" };
 const sdk = new AptevaClient({ baseURL: location.origin });
 const start = performance.now();
 try {
