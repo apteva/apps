@@ -108,7 +108,9 @@ this Telephony change does not alter the SDK's own module-loading policy.
   before.
 - `ringback` plays a locally synthesized tone through the SDK's own audio
   context from ringing until answer, so it follows the selected output device.
-  It is off by default; pass `true` or `{ country }` (France otherwise).
+  It is off by default; pass `true` or `{ country }` (France otherwise). The
+  tone follows the call's direction, so a call placed by a backend and joined
+  with `attach()` or `takeover()` rings like one placed with `dial()`.
 - The media socket pushes `call.status` frames (status, answered and ended
   times, `termination`, `answered_by`), so phases update without polling.
 - Active-call reconciliation polls every two seconds without overlapping reads.

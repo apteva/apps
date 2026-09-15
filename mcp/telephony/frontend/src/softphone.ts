@@ -194,8 +194,10 @@ export class HeadlessSoftphone {
       this.assertCurrent(generation);
       const session = await (takeover ? this.client.takeover(id) : this.client.attach(id));
       this.assertCurrent(generation);
-      this.outbound = false;
       await this.attachAudio(session, generation);
+      // The call was placed elsewhere, so its direction and current status are
+      // unknown here. One read settles both instead of waiting for polling.
+      await this.reconcileAttachedCall(session, generation);
     } catch (error) {
       if (this.current(generation)) this.update({ detail: message(error) });
       throw error;
@@ -270,8 +272,11 @@ export class HeadlessSoftphone {
   }
 
   /** Call completion is authoritative; transient media errors keep the call controls. */
-  observeCall(call: Pick<Call, "id" | "status"> & Partial<Pick<Call, "answered_at" | "ended_at" | "answered_by" | "termination">>): void {
+  observeCall(call: Pick<Call, "id" | "status"> & Partial<Pick<Call, "direction" | "answered_at" | "ended_at" | "answered_by" | "termination">>): void {
     if (this.disposed || call.id !== this.session?.call_id) return;
+    // Ringback depends on the call's direction, not on which method opened
+    // it: a call placed by a backend and attached here is still outbound.
+    if (call.direction) this.outbound = call.direction === "outbound";
     if (isTerminalCall(call.status)) {
       this.invalidate();
       this.clearCall(call.status);
@@ -326,7 +331,7 @@ export class HeadlessSoftphone {
         onDiagnostics: diagnostics => notify(() => this.options.onDiagnostics?.(diagnostics)),
         onNotice: detail => notify(() => this.options.onNotice?.(detail)),
         onCallStatus: status => notify(() => this.observeCall({
-          id: status.call_id, status: status.status, answered_at: status.answered_at, ended_at: status.ended_at,
+          id: status.call_id, status: status.status, direction: status.direction, answered_at: status.answered_at, ended_at: status.ended_at,
           answered_by: status.answered_by, termination: status.termination,
         })),
       });
@@ -346,6 +351,13 @@ export class HeadlessSoftphone {
       if (this.current(generation)) this.update({ audioState: "error", detail: message(error) });
       throw error;
     }
+  }
+
+  private async reconcileAttachedCall(session: CallSession, generation: number) {
+    try {
+      const call = await this.client.getCall(session.call_id);
+      if (this.current(generation) && this.session === session && call) this.observeCall(call);
+    } catch { /* pushed call.status frames or polling catch up */ }
   }
 
   private async reconcileFailedAudio(session: CallSession, generation: number) {

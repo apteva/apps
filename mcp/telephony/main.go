@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.0
+version: 0.6.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -463,7 +463,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"voice":                    map[string]any{"type": "string", "description": "Provider-specific realtime voice id. Omit to use the configured provider default."},
 				"greeting":                 map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
 				"recording":                map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Supported by Twilio, Telnyx, and Plivo."},
-				"timeout_sec":              map[string]any{"type": "integer", "description": "Ring timeout before giving up.", "default": 30, "minimum": 5, "maximum": 120},
+				"timeout_sec":              map[string]any{"type": "integer", "description": "Ring timeout before giving up. Omit to use the project default from telephony_outbound_settings_set, or 30 seconds.", "minimum": 5, "maximum": 120},
 				"max_duration_sec":         map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
 				"idempotency_key":          map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
 				"machine_detection":        map[string]any{"type": "string", "enum": []string{"off", "detect", "premium"}, "description": "Answering machine detection for this call. Omit to use the project default from telephony_outbound_settings_set. Supported by Twilio, SignalWire, Telnyx, and Plivo."},
@@ -666,10 +666,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_outbound_settings_set",
-			Description: "Set outbound call defaults for future calls. Args: machine_detection (off|detect|premium), machine_detection_action (notify|hangup). Per-call arguments on telephony_place_call and the softphone override these.",
+			Description: "Set outbound call defaults for future calls. Args: machine_detection (off|detect|premium), machine_detection_action (notify|hangup), default_timeout_sec (ring timeout when a caller omits timeout_sec; 0 keeps the built-in 30 s for agent calls and 60 s for the softphone). Per-call arguments on telephony_place_call and the softphone override these.",
 			InputSchema: schemaObject(map[string]any{
 				"machine_detection":        map[string]any{"type": "string", "enum": []string{"off", "detect", "premium"}},
 				"machine_detection_action": map[string]any{"type": "string", "enum": []string{"notify", "hangup"}},
+				"default_timeout_sec":      map[string]any{"type": "integer", "minimum": 0, "maximum": 120, "description": "Ring timeout in seconds when timeout_sec is omitted; 0 keeps the built-in defaults."},
 			}, nil),
 			HandlerCtx: a.toolOutboundSettingsSet,
 		},
@@ -892,7 +893,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	directive := strArg(args, "directive", "")
 	voice := strings.TrimSpace(strArg(args, "voice", ""))
 	greeting := strings.TrimSpace(strArg(args, "greeting", "Greet the person who just joined the call, introduce yourself naturally, and begin the conversation."))
-	timeout := intArg(args, "timeout_sec", 30)
+	timeout := intArg(args, "timeout_sec", 0)
 	maxDuration := intArg(args, "max_duration_sec", 3600)
 	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key", ""))
 	recordingOverride, hasRecordingOverride := args["recording"].(bool)
@@ -909,12 +910,6 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	if greeting == "" || len(greeting) > 500 {
 		return mcpError("greeting must be between 1 and 500 characters"), nil
 	}
-	if timeout < 5 {
-		timeout = 5
-	}
-	if timeout > 120 {
-		timeout = 120
-	}
 	if maxDuration < 60 {
 		maxDuration = 60
 	}
@@ -927,6 +922,15 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	projectID := currentProject(ctx)
 	if projectID == "" {
 		return mcpError("project context required for telephony calls"), nil
+	}
+	if timeout == 0 {
+		timeout = a.outboundTimeoutDefault(projectID, 30)
+	}
+	if timeout < 5 {
+		timeout = 5
+	}
+	if timeout > 120 {
+		timeout = 120
 	}
 	if err := a.validatePublicEndpoint(); err != nil {
 		return mcpError(err.Error()), nil
