@@ -62,7 +62,7 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 func TestManifestAndHandlersStayInSync(t *testing.T) {
 	app := &App{}
 	m := app.Manifest()
-	if m.Name != "tickets" || m.Version != "0.1.6" {
+	if m.Name != "tickets" || m.Version != "0.1.7" {
 		t.Fatalf("manifest identity = %s %s", m.Name, m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {

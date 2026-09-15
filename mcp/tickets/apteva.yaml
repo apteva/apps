@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tickets
 display_name: Tickets
-version: 0.1.6
+version: 0.1.7
 description: |
   Client feedback and support requests without repository coupling. Clients
   submit through secure intake links, follow ticket-specific magic links,
@@ -54,11 +54,11 @@ provides:
   mcp_tools:
     - { name: tickets_create, description: "Create a feedback or support ticket. Args: title, description?, area?, type?, priority?, requester fields?, due_at?." }
     - { name: tickets_list, description: "Search and filter tickets. Args: q?, status?, area?, type?, priority?, requester_email?, limit?, offset?." }
-    - { name: tickets_get, description: "Fetch one ticket with comments, attachments, links, and chronological history. Args: id." }
-    - { name: tickets_update, description: "Patch ticket fields. Args: id plus title?, description?, area?, type?, priority?, assignee fields?, requester fields?, due_at?." }
-    - { name: tickets_set_status, description: "Move a ticket through its workflow and record the transition. Args: id, status, reason?." }
+    - { name: tickets_get, description: "Read a single ticket by ID, including its current status, assignee, description, comments, internal notes, attachments, links, and history." }
+    - { name: tickets_update, description: "Edit ticket details or assign/reassign a ticket to an agent or team member using assignee_kind, assignee_ref, and assignee_name. Also updates title, description, area, type, priority, requester, and due date. For status changes, use tickets_set_status." }
+    - { name: tickets_set_status, description: "Change a ticket's workflow status: new, acknowledged, planned, in_progress, waiting_client, resolved, or closed. Use this to acknowledge, start work, resolve, close, or reopen a ticket. Returns the updated ticket." }
     - { name: tickets_comment, description: "Add a public comment visible to the client. Args: id, body, author_name?." }
-    - { name: tickets_add_internal_note, description: "Add an internal team/agent note hidden from the client. Args: id, body, author_name?." }
+    - { name: tickets_add_internal_note, description: "Record internal triage findings, implementation progress, or a resolution summary on a ticket. Hidden from the client. Does not change ticket status." }
     - { name: tickets_edit_comment, description: "Edit a comment while preserving its previous body as a revision. Args: id, comment_id, body." }
     - { name: tickets_add_attachment, description: "Attach an existing Storage file or upload base64 content through optional Storage. Args: id, file_id? or content_base64?, name, content_type?, visibility?, url?." }
     - { name: tickets_link, description: "Link a task, Code issue, deployment, URL, or other record. Args: id, kind, label?, app_name?, external_id?, url?, metadata?." }
