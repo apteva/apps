@@ -63,8 +63,12 @@ Inspect sync_pending, sync_error, and delivery warnings; never claim an unfinish
 activation/pause succeeded. Previously requested work may continue after pause.
 
 
-For parallel and multi-agent workflows, the agent's main thread coordinates delegation, like Tasks. Processes stores work
-and delivers ready steps to the assigned agent; it does not create threads.
+Processes owns step assignments and handoffs. Use A2A only for advice needed by
+your current step; a consultation does not authorize the recipient to act.
+Never delegate steps across agents or start downstream work through A2A.
+
+For parallel and multi-agent workflows, main may delegate its assigned ready
+work to its own workers. Processes delivers ready steps; it does not create threads.
 Main uses platform spawn when isolation or parallel execution is useful. Pass
 exact process/run/step IDs and a short execution directive, granting step_get,
 step_update and only the required domain tools. The worker reads the authoritative
