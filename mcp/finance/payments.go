@@ -66,6 +66,7 @@ type bankPayment struct {
 
 func bankingPaymentCapabilities() map[string]any {
 	return map[string]any{
+		"open-banking-io":    map[string]any{"modes": []string{}, "note": "Open Banking Access supports account data and refresh only. Its connector does not provide payments or transfers."},
 		"plaid":              map[string]any{"modes": []string{"payment", "ach"}, "note": "UK/EU payment initiation requires a Plaid recipient/user and bank authorization in Hosted Link. US ACH transfers require the Transfer product and a linked USD account; debit pulls from that account, credit pays it from your Plaid funding account."},
 		"teller":             map[string]any{"modes": []string{"payment"}, "note": "US Zelle payments where the institution supports Teller's beta payments API. Teller Connect may require MFA."},
 		"enable-banking":     map[string]any{"modes": []string{"payment"}, "note": "Bank payments with bank authorization; deferred execution is available where the chosen bank supports it."},

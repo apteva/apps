@@ -17,7 +17,7 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-var bankingProviderSlugs = []string{"plaid", "teller", "nordigen", "truelayer", "saltedge", "enable-banking", "truelayer-payments", "saltedge-payments"}
+var bankingProviderSlugs = []string{"open-banking-io", "plaid", "teller", "nordigen", "truelayer", "saltedge", "enable-banking", "truelayer-payments", "saltedge-payments"}
 
 type bankingConnectionView struct {
 	ID       int64  `json:"id"`
@@ -30,14 +30,15 @@ type bankingConnectionView struct {
 }
 
 type bankingAccount struct {
-	ExternalID   string         `json:"external_id"`
-	Name         string         `json:"name"`
-	Currency     string         `json:"currency"`
-	Kind         string         `json:"kind"`
-	Institution  string         `json:"institution,omitempty"`
-	Mask         string         `json:"mask,omitempty"`
-	BalanceMinor *int64         `json:"balance_minor,omitempty"`
-	Raw          map[string]any `json:"raw,omitempty"`
+	NeedsReconnect bool           `json:"needs_reconnect,omitempty"`
+	ExternalID     string         `json:"external_id"`
+	Name           string         `json:"name"`
+	Currency       string         `json:"currency"`
+	Kind           string         `json:"kind"`
+	Institution    string         `json:"institution,omitempty"`
+	Mask           string         `json:"mask,omitempty"`
+	BalanceMinor   *int64         `json:"balance_minor,omitempty"`
+	Raw            map[string]any `json:"raw,omitempty"`
 }
 
 type bankingTxn struct {
@@ -83,7 +84,7 @@ func (a *App) toolBankingConnections(ctx *sdk.AppCtx, args map[string]any) (any,
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"providers": bankingProviderSlugs, "connections": conns, "payment_capabilities": bankingPaymentCapabilities()}, nil
+	return map[string]any{"providers": bankingProviderSlugs, "connections": conns, "provider_guidance": bankingProviderGuidance(), "payment_capabilities": bankingPaymentCapabilities()}, nil
 }
 
 func (a *App) toolBankingDiscover(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -137,6 +138,9 @@ func (a *App) toolBankingLinkAccount(ctx *sdk.AppCtx, args map[string]any) (any,
 	if found == nil {
 		return nil, fmt.Errorf("external account %q not found for %s connection %d", externalID, provider, conn.ID)
 	}
+	if found.NeedsReconnect {
+		return nil, errors.New("bank consent expired; reconnect in the provider app before linking")
+	}
 	financeID := int64(intArg(args, "finance_account_id", 0))
 	create := boolArg(args, "create_account", financeID == 0)
 	link, err := linkBankingAccount(ctx, provider, conn, *found, financeID, create, bankingProviderMetadata(args))
@@ -179,6 +183,15 @@ func (a *App) toolBankingSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			continue
 		}
 		adapter := bankingAdapterFor(gotProvider)
+		if refresher, ok := adapter.(interface {
+			RefreshAccount(*sdk.AppCtx, sdk.PlatformConnection, bankingLink) error
+		}); ok && !dry {
+			if err := refresher.RefreshAccount(ctx, conn, link); err != nil {
+				stats.Errors = append(stats.Errors, fmt.Sprintf("account %d refresh: %v", link.Account.ID, err))
+				ctx.AppDB().Exec(`UPDATE accounts SET sync_error=? WHERE id=?`, err.Error(), link.Account.ID)
+				continue
+			}
+		}
 		txns, err := adapter.FetchTransactions(ctx, conn, link, from, to)
 		if err != nil {
 			stats.Errors = append(stats.Errors, fmt.Sprintf("%s account %d: %v", gotProvider, link.Account.ID, err))
@@ -341,6 +354,9 @@ func isBankingProvider(slug string) bool {
 }
 
 func bankingAdapterFor(provider string) bankingAdapter {
+	if provider == "open-banking-io" {
+		return openBankingIOAdapter{}
+	}
 	return genericBankingAdapter{provider: provider}
 }
 
@@ -733,6 +749,9 @@ func amountMinorFromTxn(item map[string]any) int64 {
 }
 
 func linkBankingAccount(ctx *sdk.AppCtx, provider string, conn sdk.PlatformConnection, ba bankingAccount, financeID int64, create bool, extraMeta map[string]any) (bankingLink, error) {
+	if ba.NeedsReconnect {
+		return bankingLink{}, errors.New("bank consent expired; reconnect in the provider app before linking")
+	}
 	if provider == "enable-banking" {
 		return linkEnableBankingAccount(ctx, conn, ba, financeID, create, extraMeta)
 	}
@@ -1056,4 +1075,9 @@ func (a *App) handleBankingSync(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleBankingUnlink(w http.ResponseWriter, r *http.Request) {
 	postBody(w, r, a.toolBankingUnlink)
+}
+
+// Provider onboarding guidance is shared by the HTTP panel and MCP consumers.
+func bankingProviderGuidance() map[string]any {
+	return map[string]any{"open-banking-io": map[string]string{"url": "https://open-banking.io", "label": "Connect or renew bank access", "description": "Link your banks in Open Banking Access, then return and click Discover. Sync linked refreshes bank data before importing. This provider supports account data only."}}
 }
