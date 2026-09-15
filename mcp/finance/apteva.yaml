@@ -47,6 +47,9 @@ provides:
     - name: payment-status
       schedule: "@every 5m"
   http_routes:
+    - prefix: /ui/icon.svg
+      method: GET
+      no_auth: true
     - prefix: /
   mcp_tools:
     - { name: settings_get,        description: "Read project settings (base_currency, week_starts_on)." }

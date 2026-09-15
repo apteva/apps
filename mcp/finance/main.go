@@ -83,6 +83,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // The platform reserves /events; everything else is fair game.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Method: "GET", Pattern: "/ui/icon.svg", NoAuth: true, Handler: serveFinanceIcon},
 		{Pattern: "/settings", Handler: a.handleSettings},
 		{Pattern: "/accounts", Handler: a.handleAccounts},
 		{Pattern: "/accounts/", Handler: a.handleAccountsItem},

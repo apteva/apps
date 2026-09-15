@@ -8,6 +8,10 @@ The manifest declares one optional integration dependency: **Financial connectio
 
 The internal role key remains `open_banking`, so existing account-data selections continue working, including legacy single-ID bindings. When upgrading from v0.2.0, add any connections previously selected only under **Bank payments** or **Brokerage import** to this field. Reuse the saved connections; new credentials are not needed. TrueLayer and Salt Edge's distinct upstream data/payment products are selectable together in the same field.
 
+## App icon
+
+Finance uses the same adaptive `/ui/icon.svg` and `icon_style: monochrome` contract as Stocks. The SVG is also embedded in the binary and served by a public static icon route, so installed-app icons do not depend on the runtime UI directory. Marketplace entries point to this asset in the release tag.
+
 ## Banking providers
 
 | Integration | Import account data | Real payments in Finance |
