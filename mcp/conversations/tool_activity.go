@@ -64,7 +64,7 @@ func (a *App) handleToolActivity(w http.ResponseWriter, r *http.Request) {
 }
 func visibleActivityTool(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
-	return name != "" && !strings.HasPrefix(name, "conversations_") && !strings.Contains(name, "_conversations_") && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
+	return name != "" && name != "search_tools" && !strings.HasPrefix(name, "conversations_") && !strings.Contains(name, "_conversations_") && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
 }
 func activityTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 func (a *App) ingestToolActivity(event string, agent int64, thread, data string, ts time.Time) error {

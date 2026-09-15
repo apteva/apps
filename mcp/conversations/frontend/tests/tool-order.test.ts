@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { pendingResponsePhase, responseToolGroup } from "../src/responseActivity";
-import { buildChatTimeline, toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
+import { isVisibleChatTool, buildChatTimeline, toolDurationMs, toolGroupDurationMs, type ToolActivity } from "../src/toolActivityModel";
 
 const base: ToolActivity = { id:"1", callId:"c1", agentId:41, threadId:"chat-1", name:"repos", reason:"Checking repositories", state:"done", startedAt:1000, finishedAt:2500, durationMs:1500 };
 test("tool activity owns progress while a response is calling tools", () => {
@@ -47,4 +47,9 @@ test("consecutive tools keep one stable group across long gaps until a message",
  const message={id:1,role:"agent",content:"An intermediate update",created_at:new Date(60000).toISOString()} as any;
  const separated=buildChatTimeline([message], [base,later]).filter(item=>item.kind!=="day" && item.kind!=="time");
  expect(separated.map(item=>item.kind)).toEqual(["toolGroup","message","toolGroup"]);
+});
+
+test("only the exact internal search_tools lookup is hidden",()=>{
+ for(const name of ["search_tools"," SEARCH_TOOLS "]) expect(isVisibleChatTool(name)).toBe(false);
+ for(const name of ["tickets_search","agent_query","search_tools_extra","custom_search_tools"]) expect(isVisibleChatTool(name)).toBe(true);
 });

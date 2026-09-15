@@ -161,6 +161,6 @@ export function toolGroupDurationMs(tools: ToolActivity[], now: number): number 
 // Also filter stored rows from older app versions that recorded internal tools.
 export function isVisibleChatTool(name: string): boolean {
   const normalized = name.trim().toLowerCase();
-  return Boolean(normalized) && !normalized.startsWith("conversations_")
+  return Boolean(normalized) && normalized !== "search_tools" && !normalized.startsWith("conversations_")
     && !normalized.includes("_conversations_");
 }

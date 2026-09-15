@@ -24,6 +24,13 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	}
 	ingest("llm.start", `{}`)
 	phase("thinking")
+	beforeDiscovery := len(frames)
+	for _, event := range []string{"llm.tool_chunk", "tool.call", "tool.result"} {
+		ingest(event, `{"name":"search_tools","id":"discovery","chunk":"query"}`)
+	}
+	if len(frames) != beforeDiscovery {
+		t.Fatal("internal lookup changed visible response progress")
+	}
 	ingest("llm.tool_chunk", `{"tool":"code_repos_list","id":"c1","chunk":"private arguments"}`)
 	phase("preparing_tool")
 	n := len(frames)

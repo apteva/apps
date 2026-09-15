@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.19 — 2026-09-15
+
+- Hide the exact internal `search_tools` lookup from preparation, live tool activity, summary counts, and historical activity. Other search/query tools remain visible.
+- Apply the same filtering to the Conversations backend, dashboard panels, embedded chat, and npm React exports.
+
 ## 0.23.18 — 2026-09-14
 
 - Keep consecutive tool calls on one updating, expandable summary line, including across long pauses and after reload. Only intervening messages split tool groups; remove the former 30-second cutoff.

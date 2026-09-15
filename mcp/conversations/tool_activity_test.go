@@ -141,3 +141,38 @@ func TestToolActivityHonorsCoreFailureFlag(t *testing.T) {
 		t.Fatalf("failure lost: %+v %v", rows, err)
 	}
 }
+
+func TestSearchToolsHiddenWithoutHidingOtherQueries(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	now := time.Now()
+	for _, event := range []string{"tool.call", "tool.result"} {
+		if err := a.ingestToolActivity(event, 41, thread, `{"id":"lookup","name":"search_tools"}`, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := a.store.db.QueryRow(`SELECT COUNT(*) FROM conversation_tool_activity WHERE conversation_id=?`, conv.ID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("lookup persisted: %d, %v", count, err)
+	}
+	_, err := a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "old-lookup", "search_tools", activityTime(now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("old lookup visible: %+v, %v", rows, err)
+	}
+	for _, name := range []string{"search_tools", " SEARCH_TOOLS "} {
+		if visibleActivityTool(name) {
+			t.Fatalf("internal lookup visible: %s", name)
+		}
+	}
+	for _, name := range []string{"tickets_search", "agent_query", "search_tools_extra", "custom_search_tools"} {
+		if !visibleActivityTool(name) {
+			t.Fatalf("unrelated tool hidden: %s", name)
+		}
+	}
+}

@@ -461,3 +461,27 @@ for (const host of ["dashboard","external","package"]) {
   await expect(page.getByText("The files are ready.")).toBeVisible();
  });
 }
+
+
+for (const host of ["dashboard","external","package"]) {
+ test(`${host}: internal tool lookup stays hidden live and after reload without hiding other searches`,async({page,request})=>{
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const frame={chat_id:chat,agent_id:41,thread_id:chat,call_id:"",text:"",done:false};
+  const activity={id:801,chat_id:chat,agent_id:41,thread_id:chat,call_id:"lookup",name:"search_tools",reason:"Internal capability lookup",status:"running",started_at:new Date().toISOString(),ended_at:"",revision:1};
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"preparing_tool",tool_name:"search_tools",call_id:"lookup",run_id:"turn",revision:1,after_message_id:0,started_at:activity.started_at}}});
+  await request.post("/emit",{data:{...frame,tool_activity:activity}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:802,call_id:"search",name:"tickets_search",reason:"Searching tickets"}}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
+  await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
+  await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.locator(".chat-tool-activity").getByText("+1",{exact:true})).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
+  await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
+  await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+ });
+}
