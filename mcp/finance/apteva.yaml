@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.2.1
+version: 0.2.2
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. Manual
@@ -136,7 +136,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: finance/v0.2.1
+    ref: finance/v0.2.2
     entry: mcp/finance
   port: 8080
   health_check: /health
