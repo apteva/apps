@@ -1610,15 +1610,18 @@ function Panel({ projectId: project }: Props) {
                         </div>
                       ))
                     ) : (
-                      <Empty title="Extend your network">
+                      <Empty
+                        title="Extend your network"
+                        action={
+                          <button
+                            className="btn"
+                            onClick={() => setWizard("new")}
+                          >
+                            Add connection
+                          </button>
+                        }
+                      >
                         Connect another installation or a public agent.
-                        <button
-                          className="btn"
-                          style={{ marginTop: 12 }}
-                          onClick={() => setWizard("new")}
-                        >
-                          Add connection
-                        </button>
                       </Empty>
                     )}
                   </div>
@@ -1729,16 +1732,18 @@ function Panel({ projectId: project }: Props) {
                           ? "No matching agents"
                           : "No agents discovered yet"
                       }
+
+                      action={
+                        <button
+                          className="btn"
+                          onClick={() => setView("Connections")}
+                        >
+                          Manage connections
+                        </button>
+                      }
                     >
                       Attach A2A to local agents, or check a connection to
                       discover remote agents.
-                      <button
-                        className="btn"
-                        style={{ marginTop: 12 }}
-                        onClick={() => setView("Connections")}
-                      >
-                        Manage connections
-                      </button>
                     </Empty>
                   )
                 )}
@@ -2109,17 +2114,20 @@ function Panel({ projectId: project }: Props) {
             ) : (
               !connections.error && (
                 <section className="panel">
-                  <Empty title="Bring another agent into the conversation">
+                  <Empty
+                    title="Bring another agent into the conversation"
+                    action={
+                      <button
+                        className="btn primary"
+                        onClick={() => setWizard("new")}
+                      >
+                        <Plus size={14} />
+                        Add your first connection
+                      </button>
+                    }
+                  >
                     Connect an Apteva installation or paste a public Agent Card
                     URL. Your agents can then discover its capabilities.
-                    <button
-                      className="btn primary"
-                      style={{ marginTop: 16 }}
-                      onClick={() => setWizard("new")}
-                    >
-                      <Plus size={14} />
-                      Add your first connection
-                    </button>
                   </Empty>
                 </section>
               )
