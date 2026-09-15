@@ -103,3 +103,15 @@ Install/update the integration runtime and catalog containing the payment additi
 Go tests cover the existing audit fixes plus concurrent submissions, unknown outcomes, project isolation, changed/archived sources, expired drafts, invalid amounts, Plaid authorization/ACH decisions, Teller MFA/reconciliation, and Enable Banking pagination/renewal. Bun tests cover exact amount entry/display. The payment review/submission UI was exercised against a local mock with no real bank calls.
 
 Use `go test -race ./...`, `go vet ./...`, `go build .`, and `bun test ui/BankPayments.test.ts` from this directory. Build the panel with `bun run scripts/build-panels.ts --app finance` from the apps repo. The shared panel checker also reports existing failures in unrelated Instances, 3D Studio and SEO bundles.
+
+### Connect a bank with Enable Banking
+
+Select Enable Banking in **Financial connections**, then open **Banking → Connect
+your bank**. Finance shows sandbox/production mode and checks the allowed callback
+URLs. Register the displayed Finance callback URL in the Enable Banking application
+once (the generic OAuth callback is different). Choose country, account type and
+bank, click **Connect bank / renew access**, then **Continue to bank**. Finance
+verifies state and exchanges the code on the server. Return to Finance to choose
+discovered accounts to import. Saved sessions survive reloads; subsequent sync uses
+the account links. Renew consent through the same flow to preserve matching accounts'
+ledgers. No session IDs or authorization codes need to be copied by the user.
