@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.5.1
+version: 0.5.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -109,7 +109,7 @@ provides:
     - { name: telephony_routes_set_transport, description: "Select programmable WebSocket or direct SIP transport for an inbound route." }
     - { name: telephony_routes_configure_carrier, description: "Configure carrier routing for an inbound route." }
     - { name: telephony_routes_disable, description: "Disable an inbound route and restore the prior carrier webhook." }
-    - { name: telephony_routes_list,  description: "List inbound call routes." }
+    - { name: telephony_routes_list,  description: "List inbound call routes. Agents see their own; platform callers see the whole project." }
     - { name: telephony_flows_create, description: "Create a draft carrier-neutral IVR/routing flow." }
     - { name: telephony_flows_list, description: "List routing flows." }
     - { name: telephony_flows_get, description: "Get one routing flow." }
@@ -470,9 +470,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_create",
-			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
+			Description: "Create an inbound route from a carrier phone number to an agent. Agents own the routes they create. Platform callers (API key, panel session) must pass agent_id naming the owning agent in this project. After creating it, call telephony_routes_configure_carrier(route_id) to set provider routing. Args: phone_number? (defaults to bound connection phone_number), phone_number_id?, agent_id? (required for non-agent callers), hold_prompt?, timeout_sec?, answer_mode? (agent|realtime_immediate|human_browser), directive?, voice?, greeting?.",
 			InputSchema: schemaObject(map[string]any{
 				"phone_number":      map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
+				"agent_id":          map[string]any{"type": "integer", "description": "Owning agent id. Required when the caller is not an agent (API key or panel session); agents own the routes they create and may omit it."},
 				"phone_number_id":   map[string]any{"type": "string", "description": "Optional provider phone-number resource ID; auto-discovered when omitted."},
 				"phone_number_sid":  map[string]any{"type": "string", "description": "Legacy alias for phone_number_id."},
 				"hold_prompt":       map[string]any{"type": "string", "description": "Short prompt supported carriers play while the agent decides whether to answer."},
@@ -526,7 +527,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_list",
-			Description: "List inbound phone-number routes for this app/project.",
+			Description: "List inbound phone-number routes for this app/project. Agents see the routes they own; platform callers (API key, panel session) see every project route.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			HandlerCtx:  a.toolRoutesList,
 		},
@@ -1288,51 +1289,69 @@ func (a *App) toolActiveCalls(callerCtx context.Context, ctx *sdk.AppCtx, _ map[
 // ─── inbound routing tools ────────────────────────────────────────
 
 func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	agentID := callerAgentID(callerCtx)
-	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
+	agentID, err := a.resolveRouteOwner(callerCtx, ctx, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	route, next, err := a.createInboundRoute(ctx, agentID, args)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	return map[string]any{
+		"route":       routePublic(a, *route),
+		"inbound_url": a.inboundRouteURL(*route),
+		"next":        next,
+	}, nil
+}
+
+// createInboundRoute validates and persists a new inbound route owned by
+// agentID. The MCP tool and the panel HTTP endpoint share it so every caller
+// type gets identical validation. The returned string is the follow-up step.
+func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string]any) (*routeRow, string, error) {
+	if agentID <= 0 {
+		return nil, "", errors.New("agent_id required")
 	}
 	bound := ctx.IntegrationFor("carrier")
 	if bound == nil {
-		return mcpError("no carrier bound"), nil
+		return nil, "", errors.New("no carrier bound")
 	}
 	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
 	if err != nil {
-		return mcpError("read carrier credentials: " + err.Error()), nil
+		return nil, "", errors.New("read carrier credentials: " + err.Error())
 	}
 	phone := strArg(args, "phone_number", creds.Fields["phone_number"])
 	if !validE164(phone) {
-		return mcpError("phone_number required, or carrier connection must define phone_number"), nil
+		return nil, "", errors.New("phone_number required, or carrier connection must define phone_number")
 	}
 	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
 	if slug == "" {
-		return mcpError("could not determine carrier slug"), nil
+		return nil, "", errors.New("could not determine carrier slug")
 	}
 	if slug != "twilio" && slug != "telnyx" && slug != "plivo" {
-		return mcpError("inbound call routing is not implemented for provider " + slug), nil
+		return nil, "", errors.New("inbound call routing is not implemented for provider " + slug)
 	}
 	transport, err := normalizeInboundTransport(strArg(args, "inbound_transport", inboundTransportProgrammable))
 	if err != nil {
-		return mcpError(err.Error()), nil
+		return nil, "", err
 	}
 	if transport == inboundTransportSIPDirect {
 		if slug != "twilio" && slug != "telnyx" {
-			return mcpError("automatic direct SIP routing is not implemented for provider " + slug), nil
+			return nil, "", errors.New("automatic direct SIP routing is not implemented for provider " + slug)
 		}
 		if err := a.ensureSIPGateway(ctx); err != nil {
-			return mcpError("prepare direct SIP: " + err.Error()), nil
+			return nil, "", errors.New("prepare direct SIP: " + err.Error())
 		}
 	} else if err := a.validatePublicEndpoint(); err != nil {
-		return mcpError(err.Error()), nil
+		return nil, "", err
 	}
 	projectID := currentProject(ctx)
 	if projectID == "" {
-		return mcpError("project context required"), nil
+		return nil, "", errors.New("project context required")
 	}
 	if existing, err := a.db().findRouteByNumber(bound.ConnectionID, phone); err != nil {
-		return mcpError("check existing route: " + err.Error()), nil
+		return nil, "", errors.New("check existing route: " + err.Error())
 	} else if existing != nil {
-		return mcpError("an inbound route already exists for this carrier number: " + existing.ID), nil
+		return nil, "", errors.New("an inbound route already exists for this carrier number: " + existing.ID)
 	}
 	holdPrompt := strArg(args, "hold_prompt", "Please hold while I connect you.")
 	timeout := intArg(args, "timeout_sec", 60)
@@ -1349,17 +1368,17 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		strings.TrimSpace(strArg(args, "greeting", "")),
 	)
 	if err != nil {
-		return mcpError(err.Error()), nil
+		return nil, "", err
 	}
 	recordingMode, err := normalizeRouteRecordingMode(strArg(args, "recording_mode", recordingModeInherit))
 	if err != nil {
-		return mcpError(err.Error()), nil
+		return nil, "", err
 	}
 	if recordingMode == recordingModeAlways && transport == inboundTransportSIPDirect {
-		return mcpError("provider-cloud recording is unavailable on direct SIP routes; set recording_mode to off or inherit"), nil
+		return nil, "", errors.New("provider-cloud recording is unavailable on direct SIP routes; set recording_mode to off or inherit")
 	}
 	if recordingMode == recordingModeAlways && !providerSupportsRecording(slug) {
-		return mcpError("call recording is not implemented for provider " + slug), nil
+		return nil, "", errors.New("call recording is not implemented for provider " + slug)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	route := routeRow{
@@ -1384,37 +1403,19 @@ func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args 
 		InboundTransport:    transport,
 	}
 	if err := a.db().insertRoute(route); err != nil {
-		return mcpError("persist inbound route: " + err.Error()), nil
+		return nil, "", errors.New("persist inbound route: " + err.Error())
 	}
 	next := "Call telephony_routes_configure_carrier with route_id to set the carrier webhook."
 	if transport == inboundTransportSIPDirect {
 		next = "Call telephony_routes_configure_carrier with route_id to assign the carrier number to this installation's direct SIP endpoint."
 	}
-	return map[string]any{
-		"route":       routePublic(a, route),
-		"inbound_url": a.inboundRouteURL(route),
-		"next":        next,
-	}, nil
+	return &route, next, nil
 }
 
 func (a *App) toolRoutesSetAnswerMode(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	agentID := callerAgentID(callerCtx)
-	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
-	}
-	routeID := strings.TrimSpace(strArg(args, "route_id", ""))
-	if routeID == "" {
-		return mcpError("route_id required"), nil
-	}
-	route, err := a.db().findRoute(routeID)
+	route, err := a.routeForCaller(ctx, strArg(args, "route_id", ""), callerAgentID(callerCtx))
 	if err != nil {
-		return mcpError("load route: " + err.Error()), nil
-	}
-	if route == nil {
-		return mcpError("unknown route_id"), nil
-	}
-	if route.AgentID != agentID || route.ProjectID != currentProject(ctx) {
-		return mcpError("route belongs to another agent or project"), nil
+		return mcpError(err.Error()), nil
 	}
 	directive, voice, greeting := route.AutoDirective, route.AutoVoice, route.AutoGreeting
 	if value, ok := optionalStringArg(args, "directive"); ok {
@@ -1444,23 +1445,9 @@ func (a *App) toolRoutesSetAnswerMode(callerCtx context.Context, ctx *sdk.AppCtx
 }
 
 func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	agentID := callerAgentID(callerCtx)
-	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
-	}
-	routeID := strArg(args, "route_id", "")
-	if routeID == "" {
-		return mcpError("route_id required"), nil
-	}
-	route, err := a.db().findRoute(routeID)
+	route, err := a.routeForCaller(ctx, strArg(args, "route_id", ""), callerAgentID(callerCtx))
 	if err != nil {
-		return mcpError("load route: " + err.Error()), nil
-	}
-	if route == nil {
-		return mcpError("unknown route_id"), nil
-	}
-	if route.AgentID != agentID || route.ProjectID != currentProject(ctx) {
-		return mcpError("route belongs to another agent or project"), nil
+		return mcpError(err.Error()), nil
 	}
 	if !route.Enabled {
 		return mcpError("route is disabled"), nil
@@ -1511,27 +1498,24 @@ func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
 }
 
 func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	agentID := callerAgentID(callerCtx)
-	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
-	}
-	routeID := strArg(args, "route_id", "")
-	if routeID == "" {
-		return mcpError("route_id required"), nil
-	}
-	route, err := a.db().findRoute(routeID)
+	route, err := a.routeForCaller(ctx, strArg(args, "route_id", ""), callerAgentID(callerCtx))
 	if err != nil {
-		return mcpError("load route: " + err.Error()), nil
+		return mcpError(err.Error()), nil
 	}
-	if route == nil {
-		return mcpError("unknown route_id"), nil
+	result, err := a.disableInboundRoute(ctx, route)
+	if err != nil {
+		return mcpError(err.Error()), nil
 	}
-	if route.AgentID != agentID || route.ProjectID != currentProject(ctx) {
-		return mcpError("route belongs to another agent or project"), nil
-	}
+	return result, nil
+}
+
+// disableInboundRoute restores the carrier's previous configuration and
+// disables the route. The MCP tool and the panel HTTP endpoint share it.
+func (a *App) disableInboundRoute(ctx *sdk.AppCtx, route *routeRow) (map[string]any, error) {
 	if !route.Enabled {
 		return map[string]any{"ok": true, "route_id": route.ID, "already_disabled": true}, nil
 	}
+	var err error
 	if route.InboundTransport == inboundTransportSIPDirect {
 		err = a.deconfigureDirectSIPCarrierRoute(ctx, route)
 	} else {
@@ -1547,20 +1531,25 @@ func (a *App) toolRoutesDisable(callerCtx context.Context, ctx *sdk.AppCtx, args
 		}
 	}
 	if err != nil {
-		return mcpError(err.Error()), nil
+		return nil, err
 	}
 	if err := a.db().disableRoute(route.ID); err != nil {
-		return mcpError("persist disabled route: " + err.Error()), nil
+		return nil, fmt.Errorf("persist disabled route: %w", err)
 	}
+	route.Enabled = false
 	return map[string]any{"ok": true, "route_id": route.ID, "carrier": route.CarrierSlug}, nil
 }
 
 func (a *App) toolRoutesList(callerCtx context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	agentID := callerAgentID(callerCtx)
+	var routes []routeRow
+	var err error
 	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
+		// Platform principals (API key, panel session) are not bound to one agent.
+		routes, err = a.db().listRoutesForProject(currentProject(ctx))
+	} else {
+		routes, err = a.db().listRoutesForAgent(agentID, currentProject(ctx))
 	}
-	routes, err := a.db().listRoutesForAgent(agentID, currentProject(ctx))
 	if err != nil {
 		return mcpError("db error: " + err.Error()), nil
 	}
@@ -4140,6 +4129,16 @@ func (c *callsDB) findRouteByNumber(connectionID int64, phone string) (*routeRow
 }
 
 func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow, error) {
+	return c.queryRoutes(`agent_id = ? AND project_id = ?`, agentID, project)
+}
+
+// listRoutesForProject returns every inbound route in a project, for platform
+// principals that are not bound to one agent.
+func (c *callsDB) listRoutesForProject(project string) ([]routeRow, error) {
+	return c.queryRoutes(`project_id = ?`, project)
+}
+
+func (c *callsDB) queryRoutes(where string, args ...any) ([]routeRow, error) {
 	rows, err := c.db.Query(`SELECT id, project_id, carrier_slug, carrier_connection_id, phone_number,
 	        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec,
 	        COALESCE(answer_mode,'agent'), COALESCE(auto_directive,''), COALESCE(auto_voice,''),
@@ -4148,7 +4147,7 @@ func (c *callsDB) listRoutesForAgent(agentID int64, project string) ([]routeRow,
 	        COALESCE(recording_mode,'inherit'), COALESCE(inbound_transport,'programmable_websocket'),
 	        COALESCE(transport_config,''), COALESCE(flow_id,''), COALESCE(published_flow_version_id,''),
 	        COALESCE(routing_variables_json,'{}')
-	        FROM inbound_routes WHERE agent_id = ? AND project_id = ? ORDER BY created_at DESC`, agentID, project)
+	        FROM inbound_routes WHERE `+where+` ORDER BY created_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}

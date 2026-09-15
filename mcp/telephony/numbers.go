@@ -1069,6 +1069,16 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			result = map[string]any{"ok": true, "route": routePublic(a, *route)}
 		}
+	case "/numbers/agents":
+		result, err = a.projectAgents(ctx)
+	case "/numbers/routes/create":
+		result, err = a.createRouteFromPanel(ctx, body)
+	case "/numbers/routes/disable":
+		var route *routeRow
+		route, err = a.routeForCaller(ctx, strArg(body, "route_id", ""), 0)
+		if err == nil {
+			result, err = a.disableInboundRoute(ctx, route)
+		}
 	case "/numbers/search":
 		result, err = a.searchNumberInventory(ctx, body)
 	case "/numbers/purchase":
