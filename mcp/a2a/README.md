@@ -10,6 +10,16 @@ the installation's A2A node: it owns the stable node ID, generates cards for
 local attached agents, stores inbound authoritative tasks and outbound task
 records, and communicates with configured peer installations.
 
+## Theme and layout correction (v0.6.1)
+
+The panel follows the compact layout used by Tasks and CRM. It uses the host's
+`--font-base`, radius, shadow, and palette tokens, including terminal/clean
+identity changes and dark/light mode switches. All four views use the full
+available width with standard panel padding. The header, metric cards, rows,
+and controls are compact; short exchange lists no longer stretch to match the
+adjacent column. The browser suite covers all four theme/mode combinations,
+wide screens, mobile layouts, and a single-exchange overview.
+
 ## Network workspace (v0.6.0)
 
 The project panel now opens on **Overview**, with all-time project totals,

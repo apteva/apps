@@ -7,6 +7,9 @@ const build = await Bun.build({
 });
 if (!build.success) throw new Error(build.logs.join("\n"));
 const script = await build.outputs[0].text();
+const hostTheme = await Bun.file(
+  new URL("./host-theme.fixture.css", import.meta.url),
+).text();
 Bun.serve({
   hostname: "127.0.0.1",
   port: Number(process.env.A2A_PREVIEW_PORT || 4196),
@@ -17,9 +20,12 @@ Bun.serve({
         headers: { "Content-Type": "text/javascript" },
       });
     if (path.startsWith("/api/")) return Response.json(fixture(req.url));
+    const params = new URL(req.url).searchParams;
+    const theme = params.get("theme") === "clean" ? "clean" : "terminal";
+    const mode = params.get("mode") === "light" ? "light" : "dark";
     return new Response(
-      `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>A2A · Synthetic preview</title><style>
- :root{--bg:#0f1419;--bg-card:#1a2128;--bg-input:#131a21;--bg-hover:#222b35;--text:#e6edf3;--text-muted:#9eacbc;--border:#303b47;--accent:#68c5b4;--success:#6dcea8;--warn:#e6b65c;--error:#eb8181;--info:#8ab6ef}*{box-sizing:border-box}body{margin:0}#root{height:100dvh}button,input,select{font-family:inherit}</style></head><body><div id="root"></div><script type="module" src="/preview.js"></script></body></html>`,
+      `<!doctype html><html data-theme="${theme}" data-mode="${mode}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>A2A · Synthetic preview</title><style>
+ ${hostTheme}</style></head><body><div id="root"></div><script type="module" src="/preview.js"></script></body></html>`,
       { headers: { "Content-Type": "text/html" } },
     );
   },
