@@ -12,6 +12,7 @@
 // fill / stroke utilities would render as black.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import BankPayments from "./BankPayments";
 
 const API = "/api/apps/finance";
 
@@ -33,6 +34,8 @@ interface Account {
   name: string;
   kind: string;
   source: string;
+  connection_id?: string;
+  external_id?: string;
   currency: string;
   opening_balance: number;
   color: string;
@@ -547,7 +550,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
           <HoldingsTab holdings={holdings} accounts={accounts} />
         )}
         {tab === "banking" && (
-          <BankingTab accounts={accounts} onChanged={refresh} />
+          <BankingTab key={projectId} accounts={accounts} onChanged={refresh} />
         )}
       </div>
 
@@ -845,6 +848,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   const [selected, setSelected] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [providerConnectionID, setProviderConnectionID] = useState("");
+  const [sessionID,setSessionID]=useState("");
   const [bankAccounts, setBankAccounts] = useState<BankingAccount[]>([]);
   const [syncResult, setSyncResult] = useState<BankingSyncStats | null>(null);
   const [busy, setBusy] = useState("");
@@ -863,7 +867,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
     setSelected(prev => prev || (next[0] ? String(next[0].id) : ""));
   }, []);
 
-  useEffect(() => { void loadConnections(); }, [loadConnections]);
+  useEffect(() => { void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e))); }, [loadConnections]);
 
   const selectedConn = connections.find(c => String(c.id) === selected) ?? null;
   const provider = selectedConn?.provider ?? "";
@@ -873,6 +877,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
     provider,
     ...(accessToken ? { access_token: accessToken } : {}),
     ...(providerConnectionID ? { provider_connection_id: providerConnectionID } : {}),
+    ...(sessionID ? { session_id: sessionID } : {}),
   });
 
   const discover = async () => {
@@ -907,6 +912,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   };
 
   const sync = async (dryRun = false) => {
+    if (!selectedConn) return;
     setBusy(dryRun ? "dry" : "sync"); setErr("");
     try {
       const body = await api<BankingSyncStats>("/banking/sync", {
@@ -928,9 +934,9 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
         <div className="mb-3 flex items-center justify-between">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Connections</div>
-            <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge</div>
+            <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge, Enable Banking</div>
           </div>
-          <button onClick={() => void loadConnections()} className="text-text-muted hover:text-text">
+          <button onClick={() => void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e)))} className="text-text-muted hover:text-text">
             <Icon name="arrow-up-right" size={16} />
           </button>
         </div>
@@ -938,7 +944,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
           <EmptyState message="No open-banking connections bound to this project yet." />
         ) : (
           <Field label="Connection">
-            <select value={selected} onChange={e => setSelected(e.target.value)} className="input">
+            <select value={selected} disabled={!!busy} onChange={e => { setSelected(e.target.value); setBankAccounts([]); setSyncResult(null); setAccessToken(""); setProviderConnectionID(""); setSessionID(""); setErr(""); }} className="input">
               {connections.map(c => (
                 <option key={c.id} value={c.id}>{c.name || c.provider} - {c.provider} #{c.id}</option>
               ))}
@@ -947,19 +953,23 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
         )}
         {provider === "plaid" && (
           <Field label="Plaid access token">
-            <input value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
+            <input type="password" autoComplete="off" value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
           </Field>
         )}
+        {provider === "enable-banking" && <Field label="Enable Banking session ID">
+          <input value={sessionID} onChange={e => setSessionID(e.target.value)} className="input" autoComplete="off" placeholder="Authorized session ID" />
+          <p className="mt-1 text-xs text-text-muted">Complete bank consent with the Enable Banking integration, verify the callback state, then exchange its code using authorize_session. Paste the resulting session ID here. Renew consent and rediscover when it expires; matching bank accounts keep their ledger.</p>
+        </Field>}
         {provider === "saltedge" && (
           <Field label="Salt Edge connection id">
             <input value={providerConnectionID} onChange={e => setProviderConnectionID(e.target.value)} className="input" placeholder="connection id" />
           </Field>
         )}
         <div className="mt-3 flex gap-2">
-          <button onClick={discover} disabled={!selectedConn || busy === "discover"} className="btn-primary">
+          <button onClick={discover} disabled={!selectedConn || !!busy || provider.endsWith("-payments")} className="btn-primary">
             {busy === "discover" ? "Discovering..." : "Discover"}
           </button>
-          <button onClick={() => void sync(false)} disabled={busy === "sync" || linked.length === 0} className="btn-secondary">
+          <button onClick={() => void sync(false)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="btn-secondary">
             {busy === "sync" ? "Syncing..." : "Sync linked"}
           </button>
         </div>
@@ -968,17 +978,17 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
       <section className="rounded-lg border border-border bg-bg-card lg:col-span-2">
         <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2">
           <div className="text-xs uppercase tracking-wide text-text-muted">Discovered accounts</div>
-          <button onClick={() => void sync(true)} disabled={busy === "dry" || linked.length === 0} className="text-xs text-text-muted hover:text-text">
+          <button onClick={() => void sync(true)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="text-xs text-text-muted hover:text-text">
             Dry run sync
           </button>
         </header>
         {err && <div className="m-4 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">{err}</div>}
         {bankAccounts.length === 0 ? (
-          <EmptyState message="Choose a connection and discover accounts." />
+          <EmptyState message={provider.endsWith("-payments") ? "Use this connection for payments below. Connect a separate account-data provider to sync accounts." : "Choose a connection and discover accounts."} />
         ) : (
           <ul className="divide-y divide-border-subtle">
             {bankAccounts.map(a => {
-              const existing = linked.find(x => x.external_id === a.external_id);
+              const existing = linked.find(x => x.external_id === a.external_id && x.connection_id === selected && x.source === `integration:${provider}`);
               return (
                 <li key={a.external_id} className="flex items-center justify-between px-4 py-3">
                   <div className="min-w-0">
@@ -994,7 +1004,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
                     ) : (
                       <button
                         onClick={() => void linkAccount(a.external_id)}
-                        disabled={busy === `link:${a.external_id}`}
+                        disabled={!!busy}
                         className="btn-secondary"
                       >
                         {busy === `link:${a.external_id}` ? "Linking..." : "Link"}
@@ -1013,6 +1023,7 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
           </div>
         )}
       </section>
+      <BankPayments connection={selectedConn} accounts={accounts} api={api} />
       <style>{`
         .input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); }
         .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
