@@ -25,10 +25,9 @@ type directSIPProviderConfig struct {
 }
 
 func (a *App) toolRoutesSetTransport(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	// A zero agent id is a platform principal (API key, panel session);
+	// setRouteTransport then scopes ownership to the project only.
 	agentID := callerAgentID(callerCtx)
-	if agentID == 0 {
-		return mcpError("could not determine calling agent id"), nil
-	}
 	routeID := strings.TrimSpace(strArg(args, "route_id", ""))
 	transport := strings.TrimSpace(strArg(args, "inbound_transport", ""))
 	route, err := a.setRouteTransport(ctx, routeID, transport, agentID)

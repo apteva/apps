@@ -1761,6 +1761,12 @@ interface ConnectedRoute {
   transport_configured: boolean;
 }
 
+interface ProjectAgent {
+  id: number;
+  name?: string;
+  status?: string;
+}
+
 interface ConnectedNumber {
   phone_number: string;
   provider: string;
@@ -1901,6 +1907,9 @@ function NumbersView({ projectId }: NativePanelProps) {
   const [transportSaving, setTransportSaving] = useState("");
   const [transportStatus, setTransportStatus] = useState("");
   const [answerModeSaving, setAnswerModeSaving] = useState("");
+  const [agents, setAgents] = useState<ProjectAgent[]>([]);
+  const [routeDrafts, setRouteDrafts] = useState<Record<string, { agent_id: string; answer_mode: string }>>({});
+  const [routeSaving, setRouteSaving] = useState("");
   const [countries, setCountries] = useState("EE, AT");
   const [numberType, setNumberType] = useState("local");
   const [offers, setOffers] = useState<NumberOffer[]>([]);
@@ -1937,6 +1946,14 @@ function NumbersView({ projectId }: NativePanelProps) {
           .filter((number) => number.route)
           .map((number) => [number.route!.id, number.route!.inbound_transport || "programmable_websocket"]),
       ));
+      try {
+        const directory = await postJSON<{ agents?: ProjectAgent[] }>(endpoint("/numbers/agents"), {});
+        if (requestId !== connectedRequestRef.current) return;
+        setAgents(directory.agents ?? []);
+      } catch {
+        // The agent directory is optional; the form falls back to a manual agent id.
+        setAgents([]);
+      }
     } catch (e) {
       if (requestId !== connectedRequestRef.current) return;
       setConnectedNumbers([]);
@@ -2084,6 +2101,61 @@ function NumbersView({ projectId }: NativePanelProps) {
     }
   };
 
+  const routeDraft = (number: ConnectedNumber) =>
+    routeDrafts[number.phone_number] || { agent_id: agents[0] ? String(agents[0].id) : "", answer_mode: "agent" };
+
+  const updateRouteDraft = (number: ConnectedNumber, patch: Partial<{ agent_id: string; answer_mode: string }>) => {
+    const current = routeDraft(number);
+    setRouteDrafts((drafts) => ({ ...drafts, [number.phone_number]: { ...current, ...patch } }));
+  };
+
+  // Bind an unrouted carrier number to an agent. The backend configures the
+  // carrier webhook in the same request; a warning means the route exists but
+  // still needs carrier configuration.
+  const createRoute = async (number: ConnectedNumber) => {
+    const draft = routeDraft(number);
+    const agentId = Number(draft.agent_id);
+    if (!Number.isInteger(agentId) || agentId <= 0) {
+      setTransportStatus("Choose the agent that should own this number");
+      return;
+    }
+    setRouteSaving(number.phone_number);
+    setTransportStatus("");
+    try {
+      const result = await postJSON<{ warning?: string }>(endpoint("/numbers/routes/create"), {
+        phone_number: number.phone_number,
+        phone_number_id: number.provider_number_id || "",
+        agent_id: agentId,
+        answer_mode: draft.answer_mode,
+        configure: true,
+      });
+      setTransportStatus(result.warning
+        ? `${number.phone_number} routed, but ${result.warning}`
+        : `${number.phone_number} now routes to agent ${agentId}`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not create the inbound route");
+    } finally {
+      await loadConnected();
+      setRouteSaving("");
+    }
+  };
+
+  const disableRoute = async (number: ConnectedNumber) => {
+    if (!number.route) return;
+    const routeId = number.route.id;
+    setRouteSaving(routeId);
+    setTransportStatus("");
+    try {
+      await postJSON(endpoint("/numbers/routes/disable"), { route_id: routeId });
+      setTransportStatus(`${number.phone_number} route disabled; the carrier webhook was restored`);
+    } catch (e) {
+      setTransportStatus((e as Error).message || "Could not disable the inbound route");
+    } finally {
+      await loadConnected();
+      setRouteSaving("");
+    }
+  };
+
   return (
     <div className="h-full min-h-0 min-w-0 max-w-full flex flex-col bg-bg text-text">
       <main className="min-h-0 flex-1 overflow-auto">
@@ -2165,11 +2237,70 @@ function NumbersView({ projectId }: NativePanelProps) {
                       {number.route ? (
                         <>
                           <div className="truncate font-mono text-xs" title={number.route.id}>{compactId(number.route.id)}</div>
-                          <span className={`mt-1 inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
-                            {number.route.enabled ? "Enabled" : "Disabled"}
-                          </span>
+                          <div className="mt-1 flex items-center gap-1.5">
+                            <span className={`inline-flex rounded border px-2 py-0.5 text-xs ${number.route.enabled ? "border-success/30 bg-success/10 text-success" : "border-border bg-bg-muted text-text-muted"}`}>
+                              {number.route.enabled ? "Enabled" : "Disabled"}
+                            </span>
+                            {number.route.enabled ? (
+                              <button
+                                type="button"
+                                disabled={routeSaving === number.route.id}
+                                onClick={() => void disableRoute(number)}
+                                className="h-7 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                              >
+                                Disable
+                              </button>
+                            ) : null}
+                          </div>
                         </>
-                      ) : <span className="text-xs text-text-muted">Not routed</span>}
+                      ) : (
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <span className="text-xs text-text-muted">Not routed</span>
+                          {agents.length > 0 ? (
+                            <select
+                              aria-label={`Agent for ${number.phone_number}`}
+                              value={routeDraft(number).agent_id}
+                              onChange={(event) => updateRouteDraft(number, { agent_id: event.target.value })}
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 rounded border border-border bg-bg px-2 text-xs"
+                            >
+                              {agents.map((agent) => (
+                                <option key={agent.id} value={String(agent.id)}>{agent.name || `Agent ${agent.id}`}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              aria-label={`Agent id for ${number.phone_number}`}
+                              value={routeDraft(number).agent_id}
+                              onChange={(event) => updateRouteDraft(number, { agent_id: event.target.value })}
+                              placeholder="Agent ID"
+                              inputMode="numeric"
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 rounded border border-border bg-bg px-2 text-xs"
+                            />
+                          )}
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              aria-label={`Answer mode for ${number.phone_number}`}
+                              value={routeDraft(number).answer_mode}
+                              onChange={(event) => updateRouteDraft(number, { answer_mode: event.target.value })}
+                              disabled={routeSaving === number.phone_number}
+                              className="h-8 min-w-0 flex-1 rounded border border-border bg-bg px-2 text-xs"
+                            >
+                              <option value="agent">Agent decides</option>
+                              <option value="human_browser">Ring in browser</option>
+                            </select>
+                            <button
+                              type="button"
+                              disabled={routeSaving === number.phone_number}
+                              onClick={() => void createRoute(number)}
+                              className="h-8 shrink-0 rounded border border-border px-2 text-xs hover:bg-bg-muted disabled:opacity-40"
+                            >
+                              Create route
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="min-w-0">
                       {number.route ? (
