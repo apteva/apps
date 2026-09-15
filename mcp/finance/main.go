@@ -71,9 +71,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "payment-status", Schedule: "@every 5m", Run: a.paymentStatusWorker}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes ─────────────────────────────────────────────────
@@ -104,6 +106,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/banking/link", Handler: a.handleBankingLink},
 		{Pattern: "/banking/sync", Handler: a.handleBankingSync},
 		{Pattern: "/banking/unlink", Handler: a.handleBankingUnlink},
+		{Pattern: "/banking/payments/", Handler: a.handleBankingPayments},
 		{Pattern: "/valuations", Handler: a.handleValuations},
 		{Pattern: "/categories", Handler: a.handleCategories},
 		{Pattern: "/categories/", Handler: a.handleCategoriesItem},
@@ -123,7 +126,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 // ─── MCP tools ───────────────────────────────────────────────────
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	return append(a.bankingPaymentTools(), []sdk.Tool{
 		{Name: "settings_get", Description: "Read project settings.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolSettingsGet},
@@ -292,7 +295,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"memo":          map[string]any{"type": "string"},
 			}, []string{"account_id", "amount", "posted_at"}),
 			Handler: a.toolTxnsInterest},
-		{Name: "txns_transfer", Description: "Move cash between two accounts in the same currency. Args: from_account_id, to_account_id, amount, posted_at, memo?.",
+		{Name: "txns_transfer", Description: "Record a ledger-only transfer; this does not move money at a bank. Args: from_account_id, to_account_id, amount, posted_at, memo?.",
 			InputSchema: schemaObject(map[string]any{
 				"from_account_id": map[string]any{"type": "integer"},
 				"to_account_id":   map[string]any{"type": "integer"},
@@ -335,21 +338,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"dry_run":          map[string]any{"type": "boolean"},
 			}, nil),
 			Handler: a.toolBrokerageSync},
-		{Name: "banking_connections", Description: "List bound open-banking integration connections supported by Finance. Args: provider? (plaid|teller|nordigen|truelayer|saltedge).",
+		{Name: "banking_connections", Description: "List bound open-banking integration connections supported by Finance. Args: provider? (plaid|teller|nordigen|truelayer|saltedge|enable-banking).",
 			InputSchema: schemaObject(map[string]any{
 				"provider": map[string]any{"type": "string", "enum": bankingProviderSlugs},
 			}, nil),
 			Handler: a.toolBankingConnections},
-		{Name: "banking_discover", Description: "Discover bank accounts from a bound open-banking integration. Args: provider? or connection_id, import_accounts?, access_token? for Plaid, provider_connection_id? for Salt Edge.",
+		{Name: "banking_discover", Description: "Discover bank accounts from a bound open-banking integration. Args: provider? or connection_id, import_accounts?, access_token? for Plaid, provider_connection_id? for Salt Edge, session_id? for Enable Banking.",
 			InputSchema: schemaObject(map[string]any{
 				"provider":               map[string]any{"type": "string", "enum": bankingProviderSlugs},
 				"connection_id":          map[string]any{"type": "integer"},
 				"import_accounts":        map[string]any{"type": "boolean"},
 				"access_token":           map[string]any{"type": "string"},
 				"provider_connection_id": map[string]any{"type": "string"},
+				"session_id":             map[string]any{"type": "string", "description": "Enable Banking authorized session ID."},
 			}, nil),
 			Handler: a.toolBankingDiscover},
-		{Name: "banking_link_account", Description: "Link one discovered bank account to a Finance cash account, creating the cash account by default. Args: external_account_id, provider? or connection_id, finance_account_id?, create_account?, access_token? for Plaid, provider_connection_id? for Salt Edge.",
+		{Name: "banking_link_account", Description: "Link one discovered bank account to a Finance cash account, creating the cash account by default. Args: external_account_id, provider? or connection_id, finance_account_id?, create_account?, access_token? for Plaid, provider_connection_id? for Salt Edge, session_id? for Enable Banking.",
 			InputSchema: schemaObject(map[string]any{
 				"external_account_id":    map[string]any{"type": "string"},
 				"provider":               map[string]any{"type": "string", "enum": bankingProviderSlugs},
@@ -358,6 +362,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"create_account":         map[string]any{"type": "boolean"},
 				"access_token":           map[string]any{"type": "string"},
 				"provider_connection_id": map[string]any{"type": "string"},
+				"session_id":             map[string]any{"type": "string", "description": "Enable Banking authorized session ID."},
 			}, []string{"external_account_id"}),
 			Handler: a.toolBankingLinkAccount},
 		{Name: "banking_sync", Description: "Import transactions and reconcile balances for linked bank accounts. Args: provider?, connection_id?, account_id?, from? YYYY-MM-DD, to? YYYY-MM-DD, dry_run?.",
@@ -487,7 +492,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"period": map[string]any{"type": "string", "enum": []string{"weekly", "monthly", "quarterly", "yearly"}},
 			}, nil),
 			Handler: a.toolBudgetsStatus},
-	}
+	}...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -707,6 +712,9 @@ func loadSettings(ctx *sdk.AppCtx) (Settings, error) {
 // ─── Accounts ────────────────────────────────────────────────────
 
 func (a *App) toolAccountsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateValuationRates(ctx, "", 0); err != nil {
+		return nil, err
+	}
 	pid := projectID(ctx)
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, project_id, name, kind, source, COALESCE(connection_id,''),
@@ -745,6 +753,9 @@ func (a *App) toolAccountsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
+	}
+	if err := validateValuationRates(ctx, "", id); err != nil {
+		return nil, err
 	}
 	acc, err := readAccount(ctx, id)
 	if err != nil {
@@ -789,6 +800,9 @@ func (a *App) toolAccountsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	if _, err := readAccount(ctx, id); err != nil {
+		return nil, err
+	}
 	cols, vals := []string{}, []any{}
 	for _, k := range []string{"name", "color", "opening_at"} {
 		if v, ok := args[k].(string); ok && v != "" {
@@ -822,7 +836,21 @@ func (a *App) toolAccountsDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if _, err := ctx.AppDB().Exec(`DELETE FROM accounts WHERE id=?`, id); err != nil {
+	if _, err := readAccount(ctx, id); err != nil {
+		return nil, err
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM external_links WHERE project_id=? AND ((finance_type='account' AND finance_id=?) OR (finance_type='transaction' AND finance_id IN (SELECT id FROM transactions WHERE account_id=?)))`, projectID(ctx), id, id); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(`DELETE FROM accounts WHERE id=? AND project_id=?`, id, projectID(ctx)); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	ctx.Emit("account.deleted", map[string]any{"account_id": id})
@@ -835,7 +863,7 @@ func readAccount(ctx *sdk.AppCtx, id int64) (Account, error) {
 		        COALESCE(external_id,''), currency, opening_balance, opening_at,
 		        color, archived, COALESCE(last_sync_at,''), COALESCE(sync_error,''),
 		        created_at
-		 FROM accounts WHERE id=?`, id,
+		 FROM accounts WHERE id=? AND project_id=?`, id, projectID(ctx),
 	)
 	return scanAccount(row)
 }
@@ -1016,6 +1044,9 @@ func (a *App) toolInstrumentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	if _, err := readInstrument(ctx, id); err != nil {
+		return nil, err
+	}
 	cols, vals := []string{}, []any{}
 	for _, k := range []string{"name", "exchange"} {
 		if v, ok := args[k].(string); ok && v != "" {
@@ -1044,7 +1075,7 @@ func readInstrument(ctx *sdk.AppCtx, id int64) (Instrument, error) {
 	row := ctx.AppDB().QueryRow(
 		`SELECT id, project_id, kind, symbol, name, COALESCE(isin,''),
 		        COALESCE(exchange,''), quote_currency, metadata, created_at
-		 FROM instruments WHERE id=?`, id,
+		 FROM instruments WHERE id=? AND (project_id IS NULL OR project_id=?)`, id, projectID(ctx),
 	)
 	return scanInstrument(row)
 }
@@ -1068,6 +1099,9 @@ func scanInstrument(r rowScanner) (Instrument, error) {
 // ─── Holdings ────────────────────────────────────────────────────
 
 func (a *App) toolHoldingsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateValuationRates(ctx, "", int64(intArg(args, "account_id", 0))); err != nil {
+		return nil, err
+	}
 	accountID := int64(intArg(args, "account_id", 0))
 	instrumentID := int64(intArg(args, "instrument_id", 0))
 	includeClosed, _ := args["include_closed"].(bool)
@@ -1079,6 +1113,9 @@ func (a *App) toolHoldingsList(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolHoldingsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := validateValuationRates(ctx, "", int64(intArg(args, "account_id", 0))); err != nil {
+		return nil, err
+	}
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
@@ -1104,6 +1141,15 @@ func (a *App) toolHoldingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	cb := int64(intArg(args, "cost_basis", 0))
 	// Upsert.
+	if _, err := readAccount(ctx, accountID); err != nil {
+		return nil, err
+	}
+	if _, err := readInstrument(ctx, instrumentID); err != nil {
+		return nil, err
+	}
+	if math.IsNaN(qty) || math.IsInf(qty, 0) || qty < 0 {
+		return nil, errors.New("quantity must be finite and non-negative")
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -1145,8 +1191,8 @@ func listHoldingsRich(ctx *sdk.AppCtx, accountID, instrumentID int64, includeClo
 	      FROM holdings h
 	      JOIN instruments i ON i.id = h.instrument_id
 	      JOIN accounts    a ON a.id = h.account_id
-	      WHERE 1=1`
-	params := []any{}
+	      WHERE a.project_id=?`
+	params := []any{projectID(ctx)}
 	if accountID != 0 {
 		q += " AND h.account_id=?"
 		params = append(params, accountID)
@@ -1273,6 +1319,8 @@ func decreaseHolding(tx *sql.Tx, accountID, instrumentID int64, qtySold float64)
 
 func (a *App) toolTxnsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	q, params := buildTxnQuery(args)
+	q += " AND account_id IN (SELECT id FROM accounts WHERE project_id=?)"
+	params = append(params, projectID(ctx))
 	limit := intArg(args, "limit", 200)
 	if limit <= 0 || limit > 5000 {
 		limit = 200
@@ -1398,6 +1446,9 @@ func (a *App) toolTxnsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	if _, err := readTxn(ctx, id); err != nil {
+		return nil, err
+	}
 	cols, vals := []string{}, []any{}
 	if v, ok := args["payee"].(string); ok {
 		cols = append(cols, "payee=?")
@@ -1407,10 +1458,24 @@ func (a *App) toolTxnsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		cols = append(cols, "memo=?")
 		vals = append(vals, v)
 	}
-	if v := int64(intArg(args, "category_id", 0)); v != 0 {
+	if _, exists := args["category_id"]; exists {
+		v := int64(intArg(args, "category_id", 0))
+		if v < 0 {
+			return nil, errors.New("category_id must be non-negative")
+		}
+		if v != 0 {
+			if _, err := readCategory(ctx, v); err != nil {
+				return nil, err
+			}
+		}
 		cols = append(cols, "category_id=?")
-		vals = append(vals, v)
+		if v == 0 {
+			vals = append(vals, nil)
+		} else {
+			vals = append(vals, v)
+		}
 	}
+
 	if len(cols) == 0 {
 		return nil, errors.New("no updatable fields supplied — payee, memo, or category_id")
 	}
@@ -1480,6 +1545,12 @@ func (a *App) toolTxnsBuy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("account %d not found", accountID)
 	}
+	if _, err := readInstrument(ctx, instrumentID); err != nil {
+		return nil, err
+	}
+	if math.IsNaN(qty) || math.IsInf(qty, 0) || qty < 0 {
+		return nil, errors.New("quantity must be finite and non-negative")
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -1539,6 +1610,12 @@ func (a *App) toolTxnsSell(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acc, err := readAccount(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("account %d not found", accountID)
+	}
+	if _, err := readInstrument(ctx, instrumentID); err != nil {
+		return nil, err
+	}
+	if math.IsNaN(qty) || math.IsInf(qty, 0) || qty < 0 {
+		return nil, errors.New("quantity must be finite and non-negative")
 	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
@@ -1718,6 +1795,9 @@ func (a *App) toolValuationSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if instrumentID == 0 || value <= 0 {
 		return nil, errors.New("instrument_id and positive value required")
 	}
+	if _, err := readInstrument(ctx, instrumentID); err != nil {
+		return nil, err
+	}
 	asOf := strArg(args, "as_of", time.Now().UTC().Format(time.RFC3339))
 	if _, err := ctx.AppDB().Exec(
 		`INSERT OR REPLACE INTO prices (instrument_id, as_of, price, source) VALUES (?, ?, ?, ?)`,
@@ -1782,6 +1862,9 @@ func (a *App) toolCategoriesCreate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	pid := projectID(ctx)
 	var parentVal any
 	if parentID > 0 {
+		if err := validateCategoryParent(ctx, 0, parentID, kind); err != nil {
+			return nil, err
+		}
 		parentVal = parentID
 	}
 	res, err := ctx.AppDB().Exec(
@@ -1800,6 +1883,9 @@ func (a *App) toolCategoriesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	if _, err := readCategory(ctx, id); err != nil {
+		return nil, err
+	}
 	cols, vals := []string{}, []any{}
 	for _, k := range []string{"name", "color"} {
 		if v, ok := args[k].(string); ok && v != "" {
@@ -1811,10 +1897,23 @@ func (a *App) toolCategoriesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 		cols = append(cols, "archived=?")
 		vals = append(vals, boolToInt(v))
 	}
-	if v := int64(intArg(args, "parent_id", 0)); v != 0 {
+	if _, exists := args["parent_id"]; exists {
+		v := int64(intArg(args, "parent_id", 0))
+		c, err := readCategory(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateCategoryParent(ctx, id, v, c.Kind); err != nil {
+			return nil, err
+		}
 		cols = append(cols, "parent_id=?")
-		vals = append(vals, v)
+		if v == 0 {
+			vals = append(vals, nil)
+		} else {
+			vals = append(vals, v)
+		}
 	}
+
 	if len(cols) == 0 {
 		return nil, errors.New("no updatable fields supplied — name, color, archived, parent_id")
 	}
@@ -1831,6 +1930,9 @@ func (a *App) toolCategoriesDelete(ctx *sdk.AppCtx, args map[string]any) (any, e
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return nil, errors.New("id required")
+	}
+	if _, err := readCategory(ctx, id); err != nil {
+		return nil, err
 	}
 	if _, err := ctx.AppDB().Exec(`DELETE FROM categories WHERE id=?`, id); err != nil {
 		return nil, err
@@ -1915,7 +2017,7 @@ func readCategory(ctx *sdk.AppCtx, id int64) (Category, error) {
 	var arch int
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, project_id, COALESCE(parent_id,0), name, kind, color, archived, created_at
-		 FROM categories WHERE id=?`, id,
+		 FROM categories WHERE id=? AND project_id=?`, id, projectID(ctx),
 	).Scan(&c.ID, &c.ProjectID, &c.ParentID, &c.Name, &c.Kind, &c.Color, &arch, &c.CreatedAt)
 	c.Archived = arch == 1
 	return c, err
@@ -1928,6 +2030,9 @@ func (a *App) toolPricesSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	price := int64(intArg(args, "price", 0))
 	if iid == 0 || price <= 0 {
 		return nil, errors.New("instrument_id and positive price required")
+	}
+	if _, err := readInstrument(ctx, iid); err != nil {
+		return nil, err
 	}
 	asOf := strArg(args, "as_of", time.Now().UTC().Format(time.RFC3339))
 	src := strArg(args, "source", "manual")
@@ -1944,6 +2049,9 @@ func (a *App) toolPricesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	iid := int64(intArg(args, "instrument_id", 0))
 	if iid == 0 {
 		return nil, errors.New("instrument_id required")
+	}
+	if _, err := readInstrument(ctx, iid); err != nil {
+		return nil, err
 	}
 	asOf := strArg(args, "as_of", time.Now().UTC().Format(time.RFC3339))
 	asOfT, err := time.Parse(time.RFC3339, asOf)
@@ -3198,7 +3306,7 @@ func floatAny(v any) (float64, bool) {
 }
 
 func firstTime(maps ...map[string]any) string {
-	keys := []string{"date", "dateTime", "date_time", "created", "createdAt", "created_at", "executedAt", "paidOn", "paid_on", "time", "timestamp"}
+	keys := []string{"bookingDateTime", "bookingDate", "made_on", "posted_at", "valueDate", "date", "dateTime", "date_time", "created", "createdAt", "created_at", "executedAt", "paidOn", "paid_on", "time", "timestamp"}
 	for _, m := range maps {
 		for _, k := range keys {
 			if s := firstString(m, k); s != "" {
@@ -3245,6 +3353,9 @@ func convertCcy(ctx *sdk.AppCtx, amount int64, from, to string) int64 {
 func (a *App) toolReportsNetWorth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
+	if err := validateValuationRates(ctx, base, 0); err != nil {
+		return nil, err
+	}
 	if series := strArg(args, "series", ""); series != "" {
 		from := strArg(args, "from", time.Now().UTC().AddDate(-1, 0, 0).Format(time.RFC3339))
 		to := strArg(args, "to", time.Now().UTC().Format(time.RFC3339))
@@ -3387,6 +3498,9 @@ func holdingsValueAt(ctx *sdk.AppCtx, accountID int64, accountCcy string, at tim
 func (a *App) toolReportsAllocation(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
+	if err := validateValuationRates(ctx, base, 0); err != nil {
+		return nil, err
+	}
 	pid := projectID(ctx)
 
 	accRows, err := ctx.AppDB().Query(
@@ -3485,6 +3599,9 @@ func (a *App) toolReportsAllocation(ctx *sdk.AppCtx, args map[string]any) (any, 
 func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
+	if err := validateValuationRates(ctx, base, 0); err != nil {
+		return nil, err
+	}
 	from := strArg(args, "from", time.Now().UTC().AddDate(-1, 0, 0).Format(time.RFC3339))
 	to := strArg(args, "to", time.Now().UTC().Format(time.RFC3339))
 
@@ -3503,8 +3620,8 @@ func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any,
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.amount, t.cost_basis_delta, a.currency
 		 FROM transactions t JOIN accounts a ON a.id = t.account_id
-		 WHERE t.kind='sell' AND t.posted_at >= ? AND t.posted_at < ?`,
-		from, to,
+		 WHERE t.kind='sell' AND t.posted_at >= ? AND t.posted_at < ? AND a.project_id=?`,
+		from, to, projectID(ctx),
 	)
 	if err == nil {
 		for rows.Next() {
@@ -3528,7 +3645,7 @@ func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any,
 	costs := []costRow{}
 	hRows, err := ctx.AppDB().Query(
 		`SELECT a.currency, h.cost_basis FROM holdings h JOIN accounts a ON a.id = h.account_id
-		 WHERE (h.closed_at IS NULL OR h.closed_at='')`,
+		 WHERE (h.closed_at IS NULL OR h.closed_at='') AND a.project_id=?`, projectID(ctx),
 	)
 	if err == nil {
 		for hRows.Next() {
@@ -3545,7 +3662,7 @@ func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any,
 	// Lookup account currencies for the rich-holdings slice in one
 	// shot via map, so we don't QueryRow inside the loop.
 	accCcy := map[int64]string{}
-	if cRows, err := ctx.AppDB().Query(`SELECT id, currency FROM accounts`); err == nil {
+	if cRows, err := ctx.AppDB().Query(`SELECT id, currency FROM accounts WHERE project_id=?`, projectID(ctx)); err == nil {
 		for cRows.Next() {
 			var id int64
 			var c string
@@ -3575,6 +3692,9 @@ func (a *App) toolReportsPerformance(ctx *sdk.AppCtx, args map[string]any) (any,
 func (a *App) toolReportsCashflow(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
+	if err := validateValuationRates(ctx, base, 0); err != nil {
+		return nil, err
+	}
 	from := strArg(args, "from", "")
 	to := strArg(args, "to", "")
 	if from == "" || to == "" {
@@ -3605,8 +3725,9 @@ func (a *App) toolReportsCashflow(ctx *sdk.AppCtx, args map[string]any) (any, er
 		`SELECT t.kind, t.amount, a.currency, t.posted_at
 		 FROM transactions t JOIN accounts a ON a.id = t.account_id
 		 WHERE t.posted_at >= ? AND t.posted_at < ?
-		   AND t.kind IN ('dividend','interest','income','deposit','expense','fee','tax','withdraw')`,
-		fromT.UTC().Format(time.RFC3339), toT.UTC().Format(time.RFC3339),
+		   AND t.kind IN ('dividend','interest','income','deposit','expense','fee','tax','withdraw') AND a.project_id=?
+ AND (t.external_id IS NULL OR t.external_id NOT LIKE '%:balance-reconcile:%')`,
+		fromT.UTC().Format(time.RFC3339), toT.UTC().Format(time.RFC3339), projectID(ctx),
 	)
 	if err != nil {
 		return nil, err
@@ -4055,6 +4176,9 @@ func (a *App) toolBudgetsSet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// category_id == 0 means "total spend" → NULL in DB.
 	var catVal any
 	if cid := int64(intArg(args, "category_id", 0)); cid > 0 {
+		if _, err := readCategory(ctx, cid); err != nil {
+			return nil, err
+		}
 		catVal = cid
 	}
 
@@ -4099,6 +4223,9 @@ func (a *App) toolBudgetsDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	if _, err := readBudget(ctx, id); err != nil {
+		return nil, err
+	}
 	if _, err := ctx.AppDB().Exec(`DELETE FROM budgets WHERE id=?`, id); err != nil {
 		return nil, err
 	}
@@ -4121,6 +4248,9 @@ func (a *App) toolBudgetsStatus(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	pid := projectID(ctx)
 	settings, _ := loadSettings(ctx)
 	base := settings.BaseCurrency
+	if err := validateValuationRates(ctx, base, 0); err != nil {
+		return nil, err
+	}
 
 	// Pull budgets for this period kind.
 	rows, err := ctx.AppDB().Query(
@@ -4206,7 +4336,7 @@ func readBudget(ctx *sdk.AppCtx, id int64) (Budget, error) {
 	err := ctx.AppDB().QueryRow(
 		`SELECT id, project_id, COALESCE(category_id,0), period, amount, currency,
 		        starts_at, archived, created_at
-		 FROM budgets WHERE id=?`, id,
+		 FROM budgets WHERE id=? AND project_id=?`, id, projectID(ctx),
 	).Scan(&b.ID, &b.ProjectID, &b.CategoryID, &b.Period,
 		&b.Amount, &b.Currency, &b.StartsAt, &arch, &b.CreatedAt)
 	b.Archived = arch == 1
@@ -4325,6 +4455,24 @@ type txnIn struct {
 }
 
 func insertTxn(ctx *sdk.AppCtx, in txnIn) (int64, error) {
+	if _, err := readAccount(ctx, in.AccountID); err != nil {
+		return 0, err
+	}
+	if in.CategoryID != 0 {
+		if _, err := readCategory(ctx, in.CategoryID); err != nil {
+			return 0, err
+		}
+	}
+	if in.HoldingID != 0 {
+		h, err := readHolding(ctx, in.HoldingID)
+		if err != nil {
+			return 0, err
+		}
+		if h.AccountID != in.AccountID {
+			return 0, errors.New("holding belongs to a different account")
+		}
+	}
+
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return 0, err
@@ -4338,6 +4486,12 @@ func insertTxn(ctx *sdk.AppCtx, in txnIn) (int64, error) {
 }
 
 func insertTxnTx(tx *sql.Tx, in txnIn) (int64, error) {
+	at, err := parseFlexibleTime(in.PostedAt)
+	if err != nil {
+		return 0, fmt.Errorf("posted_at: %w", err)
+	}
+	in.PostedAt = at.UTC().Format(time.RFC3339)
+
 	var holdingID, categoryID any
 	if in.HoldingID > 0 {
 		holdingID = in.HoldingID
@@ -4377,7 +4531,7 @@ func readTxn(ctx *sdk.AppCtx, id int64) (Transaction, error) {
 		        quantity, price, cost_basis_delta, payee, memo, COALESCE(category_id,0),
 		        COALESCE(transfer_id,''), COALESCE(external_id,''), pending,
 		        created_at, updated_at
-		 FROM transactions WHERE id=?`, id,
+		 FROM transactions WHERE id=? AND account_id IN (SELECT id FROM accounts WHERE project_id=?)`, id, projectID(ctx),
 	)
 	return scanTxn(row)
 }
@@ -4951,4 +5105,27 @@ func parseFlexibleTime(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("can't parse %q (try RFC3339)", s)
+}
+
+// Category trees must stay within one project and must remain acyclic.
+func validateCategoryParent(ctx *sdk.AppCtx, id, parent int64, kind string) error {
+	if parent < 0 {
+		return errors.New("parent_id must be non-negative")
+	}
+	seen := map[int64]bool{}
+	for parent != 0 {
+		if parent == id || seen[parent] {
+			return errors.New("category parent would create a cycle")
+		}
+		seen[parent] = true
+		c, err := readCategory(ctx, parent)
+		if err != nil {
+			return err
+		}
+		if c.Kind != kind {
+			return errors.New("parent category must have the same kind")
+		}
+		parent = c.ParentID
+	}
+	return nil
 }
