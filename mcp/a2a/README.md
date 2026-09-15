@@ -10,6 +10,51 @@ the installation's A2A node: it owns the stable node ID, generates cards for
 local attached agents, stores inbound authoritative tasks and outbound task
 records, and communicates with configured peer installations.
 
+## Network workspace (v0.6.0)
+
+The project panel now opens on **Overview**, with all-time project totals,
+active exchanges, requests waiting for input, delivery/sync retries, and recent
+activity. Select a metric or exchange to inspect the underlying work.
+
+- **Agents:** search local A2A-attached agents and cached remote agents by name,
+  capability, or installation. Inspect Agent Cards and jump to an agent's
+  exchanges. The optional network map shows configured installations and public
+  agents; selecting a connection opens its directory.
+- **Exchanges:** search the complete project ledger, including message content;
+  filter by agent, connection, status, and UTC creation dates. Results paginate
+  in groups of 30. Details include a message timeline, returned text, structured
+  data and file artifacts, remote sync context, and links to local agent threads.
+- **Connections:** guided public-card and node setup, cached agent lists,
+  credential-presence indicators, explicit discovery checks, and editable
+  inbound discovery/invocation grants for operator-managed nodes.
+
+Connections are installation-wide; local agents, totals, and exchanges are
+project-scoped. Remote entries are labeled cached, and checks are timestamped.
+A successful discovery check does not assert that task execution works.
+Connections start as "Not checked" each time the panel is opened. Failed checks
+keep the last cached directory available. Successful checks hide agents no
+longer advertised while preserving the routing records used by existing tasks.
+
+No dashboard rebuild is needed: the panel bundles its own scoped CSS and uses
+the dashboard's theme variables. Migration 007 adds directory visibility while
+preserving existing tasks, messages, peers, and routing records.
+
+Authenticated operator endpoints added or expanded:
+
+```text
+GET   /overview?project_id=...
+GET   /network?project_id=...
+GET   /network/card?project_id=...&address=a2a:...
+GET   /tasks?project_id=...&q=...&status=...&peer=...&agent_address=agent:41&from=YYYY-MM-DD&to=YYYY-MM-DD&limit=30&offset=0
+POST  /connections/{id}/check?project_id=...
+PATCH /connections/{id}?project_id=...  {"discover_agents":[],"invoke_agents":[]}
+```
+
+`/tasks` returns `total`, `limit`, and `offset` alongside `tasks`. Task rows add
+request previews, message and pending-delivery counts, retry counts, and local
+thread references. Overview totals cover the full ledger, independently of
+pagination. Directory and message failures are visible and retryable.
+
 ## Agent flow
 
 1. `agents_discover` searches local agents and every configured connection.
@@ -135,7 +180,13 @@ requests with a four-second project budget, and backs failed tasks off for
 
 Run deterministic app tests with `GOWORK=off go test -mod=readonly -race ./...`.
 From the apps repository root, run `bun install --frozen-lockfile` and
-`bun run test:a2a-ui` for the React interaction tests. Run the real-agent suite
+`bun run test:a2a-ui` for the React interaction tests. Run
+`bunx playwright test --config mcp/a2a/playwright.config.ts` for browser coverage
+of desktop/mobile layouts, themes, navigation, artifacts, setup, and recovery.
+The browser suite uses synthetic data on loopback only; run
+`bun run mcp/a2a/ui/preview-server.ts` to inspect that preview manually.
+Build the shipped bundle with `bun run scripts/build-panels.ts --app a2a`.
+ Run the real-agent suite
 with the topology-capable CLI from this app directory:
 
 ```sh

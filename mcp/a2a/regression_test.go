@@ -370,17 +370,13 @@ func TestTerminalFollowUpStartsTrackedTaskInSameContext(t *testing.T) {
 	}
 }
 
+type pollTestTransport func(*http.Request) (*http.Response, error)
+
+func (f pollTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 func TestPollingSlowPeersDoesNotBlockHealthyTask(t *testing.T) {
 	var active, peak atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n := active.Add(1)
-		defer active.Add(-1)
-		for {
-			old := peak.Load()
-			if n <= old || peak.CompareAndSwap(old, n) {
-				break
-			}
-		}
 		var req jsonRPCRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		var params taskIDParams
@@ -393,7 +389,19 @@ func TestPollingSlowPeersDoesNotBlockHealthyTask(t *testing.T) {
 	}))
 	defer server.Close()
 	ctx, p := newTestEnv(t)
-	a := &App{}
+	// Count client requests, rather than server handlers: canceled handlers may
+	// still be unwinding when the next bounded worker request starts.
+	a := &App{client: &http.Client{Transport: pollTestTransport(func(r *http.Request) (*http.Response, error) {
+		n := active.Add(1)
+		defer active.Add(-1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}}
 	peer := peerConfig{ID: "node", Name: "Node", BaseURL: server.URL, Kind: "node", Token: "token", ManagedBy: "operator"}
 	keys, err := loadPeerKeyring(ctx)
 	if err != nil {

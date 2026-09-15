@@ -29,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: a2a
 display_name: Agent to Agent
-version: 0.5.1
+version: 0.6.0
 description: |
   Agent-to-agent communication within and between Apteva installations.
   Automatically generates Agent Cards for attached local agents, discovers
@@ -51,6 +51,8 @@ requires:
 provides:
   http_routes:
     - { prefix: /tasks }
+    - { prefix: /overview }
+    - { prefix: /network }
     - { prefix: /connections }
     - { prefix: /directory, no_auth: true }
     - { prefix: /agent-cards, no_auth: true }
@@ -77,7 +79,7 @@ provides:
       entry: /ui/A2APanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: a2a/v0.5.1, entry: mcp/a2a }
+  source: { repo: github.com/apteva/apps, ref: a2a/v0.6.0, entry: mcp/a2a }
   port: 8080
   health_check: /health
 db:
@@ -178,8 +180,11 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/tasks", Handler: a.handleTasks},
+		{Pattern: "/tasks", Handler: a.handlePanelTasks},
 		{Pattern: "/tasks/", Handler: a.handleTaskItem},
+		{Pattern: "/overview", Handler: a.handleOverview},
+		{Pattern: "/network", Handler: a.handleNetwork},
+		{Pattern: "/network/card", Handler: a.handleNetworkCard},
 		{Pattern: "/connections", Handler: a.handleConnections},
 		{Pattern: "/connections/", Handler: a.handleConnectionItem},
 		{Pattern: "/directory/agents", Handler: a.handleDirectory, NoAuth: true},
@@ -1007,34 +1012,9 @@ func emitTask(app *sdk.AppCtx, topic string, task *Task) {
 
 // --- HTTP -------------------------------------------------------------------
 
-// handleTasks lists the project's ledger — dashboard/debugging view.
+// handleTasks retains the original handler name for callers of the panel API.
 func (a *App) handleTasks(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "GET only", http.StatusMethodNotAllowed)
-		return
-	}
-	ctx := globalCtx
-	if ctx == nil {
-		http.Error(w, "not mounted", http.StatusServiceUnavailable)
-		return
-	}
-	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
-		ctx = ctx.WithProject(pid)
-	}
-	var agentID int64
-	if raw := strings.TrimSpace(r.URL.Query().Get("agent_id")); raw != "" {
-		agentID, _ = strconv.ParseInt(raw, 10, 64)
-	}
-	tasks, err := listTasks(ctx.AppDB(), ctx.CurrentProject(), taskFilter{
-		AgentID: agentID,
-		Status:  strings.TrimSpace(r.URL.Query().Get("status")),
-		Limit:   intQuery(r, "limit", 100),
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"tasks": tasks})
+	a.handlePanelTasks(w, r)
 }
 
 // handleTaskItem serves GET /tasks/<id> and GET /tasks/<id>/messages —
@@ -1074,7 +1054,7 @@ func (a *App) handleTaskItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		writeJSON(w, map[string]any{"task": task, "messages": messages})
+		writeJSON(w, map[string]any{"task": panelTask{Task: task, FromThread: task.FromThreadID, ToThread: task.ToThreadID}, "messages": messages})
 		return
 	}
 	writeJSON(w, map[string]any{"task": task})
