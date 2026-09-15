@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.2.3
+version: 0.2.4
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. Manual
@@ -37,7 +37,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [trading212, plaid, teller, nordigen, truelayer, saltedge, enable-banking, truelayer-payments, saltedge-payments]
+      compatible_slugs: [open-banking-io, trading212, plaid, teller, nordigen, truelayer, saltedge, enable-banking, truelayer-payments, saltedge-payments]
       capabilities: [accounts.list, balances.read, transactions.read, positions.list, orders.history, dividends.history, payments.create, payments.authorize, payments.status]
       label: "Financial connections"
       hint: "Select one or more bank or brokerage connections once. Finance uses these same selections for account loading, synchronization and supported payments. Choose a default connection; each provider's enabled products determine available actions."
@@ -139,7 +139,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: finance/v0.2.3
+    ref: finance/v0.2.4
     entry: mcp/finance
   port: 8080
   health_check: /health

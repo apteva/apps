@@ -115,3 +115,20 @@ verifies state and exchanges the code on the server. Return to Finance to choose
 discovered accounts to import. Saved sessions survive reloads; subsequent sync uses
 the account links. Renew consent through the same flow to preserve matching accounts'
 ledgers. No session IDs or authorization codes need to be copied by the user.
+
+### Open Banking Access (open-banking.io)
+
+Select the `open-banking-io` connection in the same **Financial connections** field.
+Link banks and renew consent in open-banking.io first; Finance provides the provider
+link in Banking. **Discover** lists decrypted accounts; **Link** imports an account.
+**Sync linked** refreshes the provider account before importing every transaction
+page and reconciling its booked balance. Dry runs do not refresh the bank. Expired
+consent is shown per account and blocked from import until renewed. Decimal amounts
+are converted exactly, debit/credit direction is retained and duplicate provider
+transaction IDs cannot create duplicate ledger entries.
+
+This uses Finance's shared banking adapter and optional refresh interface, plus
+provider guidance delivered to both the panel and MCP. Credentials and decryption
+stay in the integration service. The current connector has no bank authorization
+or payment-initiation tools: onboarding remains at the provider and payments are
+explicitly unavailable. Partner Connect would require additional connector support.

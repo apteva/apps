@@ -171,6 +171,7 @@ interface BankingConnection {
 }
 
 interface BankingAccount {
+  needs_reconnect?: boolean;
   external_id: string;
   name: string;
   currency: string;
@@ -853,6 +854,7 @@ function arcPath(cx: number, cy: number, r: number, start: number, end: number):
 function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[]; onChanged: () => void; callbackURL: string }) {
   const api = useFinanceAPI();
   const [connections, setConnections] = useState<BankingConnection[]>([]);
+  const [guidance,setGuidance] = useState<Record<string,{url:string;label:string;description:string}>>({});
   const [selected, setSelected] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [providerConnectionID, setProviderConnectionID] = useState("");
@@ -868,9 +870,10 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
   );
 
   const loadConnections = useCallback(async () => {
-    const body = await api<{ connections: BankingConnection[] }>("/banking/connections");
+    const body = await api<{ connections: BankingConnection[]; provider_guidance?: typeof guidance }>("/banking/connections");
     const next = body.connections ?? [];
     setConnections(next);
+    setGuidance(body.provider_guidance ?? {});
     setSelected(prev => next.some(c => String(c.id) === prev) ? prev : (next[0] ? String(next[0].id) : ""));
   }, [api]);
 
@@ -957,7 +960,7 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
         <div className="mb-3 flex items-center justify-between">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Connections</div>
-            <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge, Enable Banking</div>
+            <div className="text-sm text-text-muted">Bank accounts and financial providers</div>
           </div>
           <button aria-label="Refresh connections" title="Refresh connections" onClick={() => void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e)))} className="text-text-muted hover:text-text">
             <Icon name="arrow-up-right" size={16} />
@@ -974,6 +977,10 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
             </select>
           </Field>
         )}
+        {guidance[provider] && <div className="my-3 space-y-2 text-sm">
+          <p className="text-text-muted">{guidance[provider].description}</p>
+          <a className="btn-secondary inline-block" href={guidance[provider].url} target="_blank" rel="noopener noreferrer">{guidance[provider].label} →</a>
+        </div>}
         {provider === "plaid" && (
           <Field label="Plaid access token">
             <input type="password" autoComplete="off" value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
@@ -1013,6 +1020,7 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
                 <li key={a.external_id} className="flex items-center justify-between px-4 py-3">
                   <div className="min-w-0">
                     <div className="truncate text-sm font-medium">{a.name}</div>
+                    {a.needs_reconnect && <p className="text-xs text-error">Consent expired — reconnect in the provider app.</p>}
                     <div className="text-xs text-text-muted">
                       {[a.institution, a.mask, a.currency].filter(Boolean).join(" - ")}
                     </div>
@@ -1024,7 +1032,7 @@ function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[];
                     ) : (
                       <button
                         onClick={() => void linkAccount(a.external_id)}
-                        disabled={!!busy}
+                        disabled={!!busy || a.needs_reconnect}
                         className="btn-secondary"
                       >
                         {busy === `link:${a.external_id}` ? "Linking..." : "Link"}
