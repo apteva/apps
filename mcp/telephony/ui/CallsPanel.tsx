@@ -62,6 +62,8 @@ interface RawCall {
   answered_at?: string;
   EndedAt?: string;
   ended_at?: string;
+  answered_by?: string;
+  termination_reason?: string;
   ProjectID?: string;
   project_id?: string;
   ErrorMessage?: string;
@@ -170,6 +172,8 @@ interface Call {
   terminationCause: string;
   terminationCode: string;
   terminationInitiator: string;
+  terminationReason: string;
+  answeredBy: string;
   browserAudioDiagnostics: BrowserAudioDiagnostics;
   carrierAudioDiagnostics: CarrierAudioDiagnostics;
 }
@@ -261,6 +265,8 @@ function normalizeCall(row: RawCall): Call {
     placedAt: row.placed_at ?? row.PlacedAt ?? "",
     answeredAt: row.answered_at ?? row.AnsweredAt ?? "",
     endedAt: row.ended_at ?? row.EndedAt ?? "",
+    terminationReason: row.termination_reason ?? "",
+    answeredBy: row.answered_by ?? "",
     projectId: row.project_id ?? row.ProjectID ?? "",
     errorMessage: row.error_message ?? row.ErrorMessage ?? "",
     recordingMode: row.recording_mode ?? row.RecordingMode ?? "off",
@@ -1433,6 +1439,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                       <span className={`inline-flex max-w-full items-center rounded border px-2 py-0.5 text-xs ${statusClass(call.status)}`}>
                         <span className="truncate">{call.status || "unknown"}</span>
                       </span>
+                      {call.terminationReason && call.terminationReason !== call.status.replaceAll("-", "_") ? (
+                        <div className="mt-1 truncate text-xs text-text-dim">{call.terminationReason.replaceAll("_", " ")}</div>
+                      ) : null}
+                      {call.answeredBy && call.answeredBy !== "human" ? (
+                        <div className="mt-1 truncate text-xs text-text-dim">Answered by {call.answeredBy}</div>
+                      ) : null}
                     </div>
                     <div className="min-w-0">
                       <div className="truncate text-sm font-medium">{call.toNumber || "-"}</div>

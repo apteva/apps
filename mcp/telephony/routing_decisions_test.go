@@ -586,9 +586,14 @@ func TestDecisionMigrationPreservesExistingCallsAndEvents(t *testing.T) {
 			t.Fatal(e)
 		}
 	}
-	calls := &callsDB{db: db}
+	// Insert with the columns that schema had; the current insertCall targets
+	// the latest schema, which is exactly what the pending migrations add.
 	call := testCall("existing", "answered")
-	if e = calls.insertCall(call); e != nil {
+	if _, e = db.Exec(`INSERT INTO calls (id, thread_id, direction, agent_id, carrier_sid, carrier_slug, carrier_connection_id,
+		callback_secret, to_number, from_number, directive, voice, audio_bridge_url, status, placed_at, project_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		call.ID, call.ThreadID, call.Direction, call.AgentID, call.CarrierSID, call.CarrierSlug, call.CarrierConnectionID,
+		call.CallbackSecret, call.ToNumber, call.FromNumber, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = db.Exec(`INSERT INTO call_events(event_id,call_id,project_id,topic,revision,occurred_at,payload_json,created_at,published_at) VALUES('old','existing','p1','call.answered',1,'then','{}','then','sent')`); e != nil {

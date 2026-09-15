@@ -49,9 +49,12 @@ import (
 type softphoneHub struct {
 	callID string
 
-	mu                  sync.Mutex
-	peer                *websocketWriterPump
-	browser             *websocketWriterPump
+	mu      sync.Mutex
+	peer    *websocketWriterPump
+	browser *websocketWriterPump
+	// readyBrowser is the browser writer that has received the ready frame;
+	// pushed call.status frames only follow that handshake.
+	readyBrowser        *websocketWriterPump
 	direction           string
 	status              string
 	preAnswerMicSamples int64
@@ -170,6 +173,23 @@ func (h *softphoneHub) browserWriter() *websocketWriterPump {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.browser
+}
+
+func (h *softphoneHub) markReady(w *websocketWriterPump) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.readyBrowser = w
+}
+
+// readyBrowserWriter returns the browser writer only after it has been sent
+// the ready frame, so status pushes never precede the session handshake.
+func (h *softphoneHub) readyBrowserWriter() *websocketWriterPump {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.browser != nil && h.browser == h.readyBrowser {
+		return h.browser
+	}
+	return nil
 }
 
 // toBrowser forwards caller audio. A missing or wedged browser is not an error
@@ -489,6 +509,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		hub.setCallState(row.Direction, row.Status)
 	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
+	hub.markReady(writer)
 	unlock()
 	unlock = nil
 
@@ -722,6 +743,10 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 		Recording      *bool  `json:"recording"`
 		TimeoutSec     int    `json:"timeout_sec"`
 		IdempotencyKey string `json:"idempotency_key"`
+		// Optional answering machine detection, defaulting to the project's
+		// outbound settings.
+		MachineDetection       string `json:"machine_detection"`
+		MachineDetectionAction string `json:"machine_detection_action"`
 	}
 	if err := decodeJSONBody(r, &body); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -747,7 +772,8 @@ func (a *App) softphonePlace(w http.ResponseWriter, r *http.Request, project str
 	unlock := a.softphones.lockClaim("dial:" + project + ":" + body.IdempotencyKey)
 	defer unlock()
 	ctx := globalCtx.WithProject(project)
-	session, err := a.placeHumanCallForUser(ctx, p, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording, body.IdempotencyKey)
+	session, err := a.placeHumanCallForUserWithOptions(ctx, p, project, to, strings.TrimSpace(body.From), body.TimeoutSec, body.Recording,
+		outboundCallOptions{MachineDetection: body.MachineDetection, MachineDetectionAction: body.MachineDetectionAction}, body.IdempotencyKey)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1019,7 +1045,17 @@ func (a *App) placeHumanCall(ctx *sdk.AppCtx, projectID, to, requestedFrom strin
 	return a.placeHumanCallForUser(ctx, nil, projectID, to, requestedFrom, timeoutSec, recordingOverride, keys...)
 }
 
+// outboundCallOptions carries optional per-call behaviour for human calls.
+type outboundCallOptions struct {
+	MachineDetection       string
+	MachineDetectionAction string
+}
+
 func (a *App) placeHumanCallForUser(ctx *sdk.AppCtx, principal *phonePrincipal, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool, keys ...string) (*softphoneSession, error) {
+	return a.placeHumanCallForUserWithOptions(ctx, principal, projectID, to, requestedFrom, timeoutSec, recordingOverride, outboundCallOptions{}, keys...)
+}
+
+func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phonePrincipal, projectID, to, requestedFrom string, timeoutSec int, recordingOverride *bool, options outboundCallOptions, keys ...string) (*softphoneSession, error) {
 	// Carriers dial this app's public wss:// media endpoint (publicWSStreamURL),
 	// so an unreachable public URL must fail here rather than after the callee's
 	// phone has already rung. Mirrors the check toolPlaceCall makes.
@@ -1064,6 +1100,10 @@ func (a *App) placeHumanCallForUser(ctx *sdk.AppCtx, principal *phonePrincipal, 
 			recordingMode = recordingModeAlways
 		}
 	}
+	machineDetection, machineDetectionAction, err := a.resolveMachineDetection(ctx, projectID, carrier.Slug(), options.MachineDetection, options.MachineDetectionAction)
+	if err != nil {
+		return nil, err
+	}
 	if timeoutSec == 0 {
 		timeoutSec = 60
 	}
@@ -1102,6 +1142,8 @@ func (a *App) placeHumanCallForUser(ctx *sdk.AppCtx, principal *phonePrincipal, 
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               peerKindHuman,
 		PeerToken:              peerToken,
+		MachineDetection:       machineDetection,
+		MachineDetectionAction: machineDetectionAction,
 	}
 	row.ApplicationUser = principal
 	row.AudioBridgeURL = a.peerLoopbackURL(&row)
@@ -1115,4 +1157,35 @@ func (a *App) placeHumanCallForUser(ctx *sdk.AppCtx, principal *phonePrincipal, 
 		To:       to,
 		From:     from,
 	}, nil
+}
+
+// softphoneStatusEvent is the call.status text frame pushed over the media
+// socket so a softphone learns progress without polling.
+func softphoneStatusEvent(row callRow) []byte {
+	payload := map[string]any{
+		"type":        "call.status",
+		"call_id":     row.ID,
+		"status":      row.Status,
+		"termination": terminationPublic(row),
+	}
+	addOptionalString(payload, "answered_at", row.AnsweredAt)
+	addOptionalString(payload, "ended_at", row.EndedAt)
+	addOptionalString(payload, "answered_by", row.AnsweredBy)
+	encoded, _ := json.Marshal(payload)
+	return encoded
+}
+
+// pushSoftphoneStatus writes call.status to the browser leg when one is
+// attached. A missing or wedged browser is not an error for the call.
+func (a *App) pushSoftphoneStatus(row *callRow) {
+	if row == nil {
+		return
+	}
+	hub := a.softphones.lookup(row.ID)
+	if hub == nil {
+		return
+	}
+	if w := hub.readyBrowserWriter(); w != nil {
+		_ = w.Write(ws.OpText, softphoneStatusEvent(*row))
+	}
 }

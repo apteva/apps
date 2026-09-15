@@ -70,7 +70,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		"call.routing.started", "call.routing.node_entered", "call.offered",
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
-		"call.canceled", "recording.ready", "recording.stored", "recording.deleted",
+		"call.canceled", "call.machine_detected", "recording.ready", "recording.stored", "recording.deleted",
 	}
 	if !reflect.DeepEqual(embeddedTopics, want) {
 		t.Fatalf("published topics = %#v, want %#v", embeddedTopics, want)
