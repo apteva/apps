@@ -21,6 +21,7 @@ var bankingProviderSlugs = []string{"plaid", "teller", "nordigen", "truelayer", 
 
 type bankingConnectionView struct {
 	ID       int64  `json:"id"`
+	Default  bool   `json:"default"`
 	Provider string `json:"provider"`
 	AppSlug  string `json:"app_slug"`
 	Name     string `json:"name"`
@@ -274,30 +275,19 @@ func (a *App) toolBankingUnlink(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func listBankingConnections(ctx *sdk.AppCtx, provider string) ([]bankingConnectionView, error) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return nil, errors.New("platform connections are not available")
+	if provider != "" && !isBankingProvider(provider) {
+		return nil, fmt.Errorf("unsupported banking provider %q", provider)
 	}
-	slugs := bankingProviderSlugs
-	if provider != "" {
-		if !isBankingProvider(provider) {
-			return nil, fmt.Errorf("unsupported banking provider %q", provider)
-		}
-		slugs = []string{provider}
+	conns, err := financeConnections(ctx)
+	if err != nil {
+		return nil, err
 	}
 	out := []bankingConnectionView{}
-	for _, slug := range slugs {
-		conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: slug})
-		if err != nil {
-			return nil, err
+	for _, c := range conns {
+		if !isBankingProvider(c.AppSlug) || (provider != "" && c.AppSlug != provider) {
+			continue
 		}
-		for _, c := range conns {
-			if c.ProjectID != "" && c.ProjectID != projectID(ctx) {
-				continue
-			}
-			out = append(out, bankingConnectionView{
-				ID: c.ID, Provider: slug, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status, Project: c.ProjectID,
-			})
-		}
+		out = append(out, bankingConnectionView{ID: c.ID, Provider: c.AppSlug, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status, Project: c.ProjectID, Default: c.Default})
 	}
 	sortBankingConnections(out)
 	return out, nil
@@ -305,6 +295,9 @@ func listBankingConnections(ctx *sdk.AppCtx, provider string) ([]bankingConnecti
 
 func sortBankingConnections(conns []bankingConnectionView) {
 	sort.SliceStable(conns, func(i, j int) bool {
+		if conns[i].Default != conns[j].Default {
+			return conns[i].Default
+		}
 		if conns[i].Provider != conns[j].Provider {
 			return conns[i].Provider < conns[j].Provider
 		}
@@ -313,51 +306,29 @@ func sortBankingConnections(conns []bankingConnectionView) {
 }
 
 func bankingConnection(ctx *sdk.AppCtx, provider string, requested int64) (sdk.PlatformConnection, string, error) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return sdk.PlatformConnection{}, "", errors.New("platform connections are not available")
+	if provider != "" && !isBankingProvider(provider) {
+		return sdk.PlatformConnection{}, "", fmt.Errorf("unsupported banking provider %q", provider)
 	}
-	if requested != 0 {
-		c, err := ctx.PlatformAPI().GetConnection(requested)
+	if provider == "" && requested == 0 {
+		conns, err := financeConnections(ctx)
 		if err != nil {
 			return sdk.PlatformConnection{}, "", err
 		}
-		if c == nil {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d not found", requested)
+		for _, c := range conns {
+			if isBankingProvider(c.AppSlug) && (c.Status == "" || c.Status == "active" || c.Status == "connected") {
+				return c.PlatformConnection, c.AppSlug, nil
+			}
 		}
-		if c.ProjectID != "" && c.ProjectID != projectID(ctx) {
-			return sdk.PlatformConnection{}, "", errors.New("connection belongs to another project")
-		}
-		if c.Status != "" && c.Status != "active" && c.Status != "connected" {
-			return sdk.PlatformConnection{}, "", errors.New("connection is not active")
-		}
-		got := c.AppSlug
-		if provider != "" && provider != got {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d is %s, not %s", requested, got, provider)
-		}
-		if !isBankingProvider(got) {
-			return sdk.PlatformConnection{}, "", fmt.Errorf("connection %d uses unsupported banking provider %q", requested, got)
-		}
-		return *c, got, nil
+		return sdk.PlatformConnection{}, "", errors.New("no active bank connection selected in Financial connections")
 	}
-	if provider == "" {
-		return sdk.PlatformConnection{}, "", errors.New("provider or connection_id required")
-	}
-	if !isBankingProvider(provider) {
-		return sdk.PlatformConnection{}, "", fmt.Errorf("unsupported banking provider %q", provider)
-	}
-	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: provider})
+	conn, err := financeConnection(ctx, provider, requested)
 	if err != nil {
-		return sdk.PlatformConnection{}, "", err
+		return conn, "", err
 	}
-	for _, c := range conns {
-		if c.ProjectID != "" && c.ProjectID != projectID(ctx) {
-			continue
-		}
-		if c.Status == "" || c.Status == "active" || c.Status == "connected" {
-			return c, provider, nil
-		}
+	if !isBankingProvider(conn.AppSlug) {
+		return conn, "", fmt.Errorf("connection %d does not support banking", conn.ID)
 	}
-	return sdk.PlatformConnection{}, "", fmt.Errorf("no active %s connection bound", provider)
+	return conn, conn.AppSlug, nil
 }
 
 func isBankingProvider(slug string) bool {
