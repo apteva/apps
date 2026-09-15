@@ -22,6 +22,10 @@ func financeConnections(ctx *sdk.AppCtx) ([]financeBoundConnection, error) {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform connections are not available")
 	}
+	// Surface gateway failures instead of presenting them as an empty selection.
+	if _, err := ctx.PlatformAPI().WhoAmI(); err != nil {
+		return nil, fmt.Errorf("load Financial connections: %w", err)
+	}
 	out := []financeBoundConnection{}
 	seen := map[int64]bool{}
 	for _, bound := range ctx.IntegrationsFor(financeConnectionRole) {

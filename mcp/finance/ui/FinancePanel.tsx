@@ -13,6 +13,7 @@
 
 import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BankPayments from "./BankPayments";
+import EnableBankingConnect from "./EnableBankingConnect";
 
 import { createFinanceAPI, type FinanceAPI } from "./finance-api";
 
@@ -437,7 +438,7 @@ export default function FinancePanel(props: NativePanelProps) {
   </FinanceAPIContext.Provider>;
 }
 
-function FinancePanelContent({ projectId }: NativePanelProps) {
+function FinancePanelContent({ projectId, installId }: NativePanelProps) {
   const api = useFinanceAPI();
   const [tab, setTab] = useState<Tab>("overview");
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -556,7 +557,7 @@ function FinancePanelContent({ projectId }: NativePanelProps) {
           <HoldingsTab holdings={holdings} accounts={accounts} />
         )}
         {tab === "banking" && (
-          <BankingTab key={projectId} accounts={accounts} onChanged={refresh} />
+          <BankingTab key={projectId} accounts={accounts} onChanged={refresh} callbackURL={`${window.location.origin}/api/apps/finance/banking/enable/callback?project_id=${encodeURIComponent(projectId)}&install_id=${installId}`} />
         )}
       </div>
 
@@ -849,7 +850,7 @@ function arcPath(cx: number, cy: number, r: number, start: number, end: number):
 
 // ─── Banking tab ─────────────────────────────────────────────────
 
-function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: () => void }) {
+function BankingTab({ accounts, onChanged, callbackURL }: { accounts: Account[]; onChanged: () => void; callbackURL: string }) {
   const api = useFinanceAPI();
   const [connections, setConnections] = useState<BankingConnection[]>([]);
   const [selected, setSelected] = useState("");
@@ -867,14 +868,29 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
   );
 
   const loadConnections = useCallback(async () => {
-    setErr("");
     const body = await api<{ connections: BankingConnection[] }>("/banking/connections");
     const next = body.connections ?? [];
     setConnections(next);
-    setSelected(prev => prev || (next[0] ? String(next[0].id) : ""));
+    setSelected(prev => next.some(c => String(c.id) === prev) ? prev : (next[0] ? String(next[0].id) : ""));
   }, [api]);
 
-  useEffect(() => { void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e))); }, [loadConnections]);
+  useEffect(() => {
+    const reload = () => { void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e))); };
+    reload(); const timer = window.setInterval(reload, 10000);
+    window.addEventListener("focus", reload);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", reload); };
+  }, [loadConnections]);
+  useEffect(() => { setSessionID(""); setBankAccounts([]); setSyncResult(null); }, [selected]);
+  useEffect(() => {
+    if (!sessionID || !selected) return;
+    let cancelled = false;
+    setBusy("discover"); setErr("");
+    api<{ accounts: BankingAccount[] }>("/banking/discover", { method: "POST", body: JSON.stringify({ connection_id: Number(selected), session_id: sessionID }) })
+      .then(out => { if (!cancelled) setBankAccounts(out.accounts ?? []); })
+      .catch(e => { if (!cancelled) setErr(e.message); })
+      .finally(() => { if (!cancelled) setBusy(""); });
+    return () => { cancelled = true; };
+  }, [api, selected, sessionID]);
 
   const selectedConn = connections.find(c => String(c.id) === selected) ?? null;
   const provider = selectedConn?.provider ?? "";
@@ -943,12 +959,12 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
             <div className="text-xs uppercase tracking-wide text-text-muted">Connections</div>
             <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge, Enable Banking</div>
           </div>
-          <button onClick={() => void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e)))} className="text-text-muted hover:text-text">
+          <button aria-label="Refresh connections" title="Refresh connections" onClick={() => void loadConnections().catch(e => setErr(e instanceof Error ? e.message : String(e)))} className="text-text-muted hover:text-text">
             <Icon name="arrow-up-right" size={16} />
           </button>
         </div>
         {connections.length === 0 ? (
-          <EmptyState message="No open-banking connections bound to this project yet." />
+          <EmptyState message="No financial connection selected yet. Open Finance’s app settings, select your saved bank provider under Financial connections, then return here. This list refreshes automatically." />
         ) : (
           <Field label="Connection">
             <select value={selected} disabled={!!busy} onChange={e => { setSelected(e.target.value); setBankAccounts([]); setSyncResult(null); setAccessToken(""); setProviderConnectionID(""); setSessionID(""); setErr(""); }} className="input">
@@ -963,17 +979,14 @@ function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: (
             <input type="password" autoComplete="off" value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
           </Field>
         )}
-        {provider === "enable-banking" && <Field label="Enable Banking session ID">
-          <input value={sessionID} onChange={e => setSessionID(e.target.value)} className="input" autoComplete="off" placeholder="Authorized session ID" />
-          <p className="mt-1 text-xs text-text-muted">Complete bank consent with the Enable Banking integration, verify the callback state, then exchange its code using authorize_session. Paste the resulting session ID here. Renew consent and rediscover when it expires; matching bank accounts keep their ledger.</p>
-        </Field>}
+        {provider === "enable-banking" && selectedConn && <EnableBankingConnect key={selected} api={api} connectionId={selectedConn.id} callbackURL={callbackURL} onSession={setSessionID} />}
         {provider === "saltedge" && (
           <Field label="Salt Edge connection id">
             <input value={providerConnectionID} onChange={e => setProviderConnectionID(e.target.value)} className="input" placeholder="connection id" />
           </Field>
         )}
         <div className="mt-3 flex gap-2">
-          <button onClick={discover} disabled={!selectedConn || !!busy || provider.endsWith("-payments")} className="btn-primary">
+          <button onClick={discover} disabled={!selectedConn || !!busy || provider.endsWith("-payments") || (provider === "enable-banking" && !sessionID)} className="btn-primary">
             {busy === "discover" ? "Discovering..." : "Discover"}
           </button>
           <button onClick={() => void sync(false)} disabled={!selectedConn || !!busy || !linked.some(a => a.connection_id === selected)} className="btn-secondary">
