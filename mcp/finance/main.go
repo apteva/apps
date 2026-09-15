@@ -2568,32 +2568,13 @@ func (a *App) toolBrokerageSync(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func brokerageConnection(ctx *sdk.AppCtx, requested int64) (sdk.PlatformConnection, error) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return sdk.PlatformConnection{}, errors.New("platform connections are not available")
-	}
-	if requested != 0 {
-		c, err := ctx.PlatformAPI().GetConnection(requested)
-		if err != nil {
-			return sdk.PlatformConnection{}, err
-		}
-		if c == nil {
-			return sdk.PlatformConnection{}, fmt.Errorf("connection %d not found", requested)
-		}
-		return *c, nil
-	}
-	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{AppSlug: "trading212"})
-	if err != nil {
-		return sdk.PlatformConnection{}, err
-	}
-	for _, c := range conns {
-		if c.Status == "" || c.Status == "active" || c.Status == "connected" {
-			return c, nil
-		}
-	}
-	return sdk.PlatformConnection{}, errors.New("no active Trading 212 connection bound")
+	return financeConnection(ctx, "trading212", requested)
 }
 
 func executeIntegrationJSON(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, out any) error {
+	if _, err := financeConnection(ctx, "", connID); err != nil {
+		return err
+	}
 	if input == nil {
 		input = map[string]any{}
 	}

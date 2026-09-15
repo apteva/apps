@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.2.0
+version: 0.2.1
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
   real estate, vehicles, pensions, loans — all in one ledger. Manual
@@ -33,41 +33,14 @@ requires:
       optional: true
       reason: optional market-data enrichment for stock and ETF holdings; finance degrades to local/manual prices when absent
   integrations:
-    - role: brokerage_import
-      kind: integration
-      required: false
-      compatible_slugs: [trading212]
-      capabilities:
-        - account.summary
-        - positions.list
-        - orders.history
-        - dividends.history
-        - transactions.history
-      tools:
-        account.summary: get_account_summary
-        positions.list: get_positions
-        orders.history: get_order_history
-        dividends.history: get_dividend_history
-        transactions.history: get_transaction_history
-      label: "Brokerage import"
-      hint: "Connect Trading 212 to import account cash, current positions, filled orders, dividends, and cash movements into Finance. Finance never places broker orders."
     - role: open_banking
       kind: integration
+      mode: multiple
       required: false
-      compatible_slugs: [plaid, teller, nordigen, truelayer, saltedge, enable-banking]
-      capabilities:
-        - accounts.list
-        - balances.read
-        - transactions.read
-      label: "Open banking"
-      hint: "Connect Plaid, Teller, GoCardless/Nordigen, TrueLayer, Salt Edge, or Enable Banking to discover bank accounts, link them to Finance cash accounts, and import transactions/balances. Plaid, Teller and Enable Banking also support reviewed payments with payment product access."
-
-    - role: bank_payments
-      kind: integration
-      required: false
-      compatible_slugs: [plaid, teller, enable-banking, truelayer-payments, saltedge-payments]
-      label: "Bank payments"
-      hint: "Bind a payment-enabled connection for reviewed payments and bank authorization. TrueLayer Payments and Salt Edge PIS use separate connections from account data."
+      compatible_slugs: [trading212, plaid, teller, nordigen, truelayer, saltedge, enable-banking, truelayer-payments, saltedge-payments]
+      capabilities: [accounts.list, balances.read, transactions.read, positions.list, orders.history, dividends.history, payments.create, payments.authorize, payments.status]
+      label: "Financial connections"
+      hint: "Select one or more bank or brokerage connections once. Finance uses these same selections for account loading, synchronization and supported payments. Choose a default connection; each provider's enabled products determine available actions."
 
 provides:
   workers:
@@ -160,7 +133,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: finance/v0.2.0
+    ref: finance/v0.2.1
     entry: mcp/finance
   port: 8080
   health_check: /health

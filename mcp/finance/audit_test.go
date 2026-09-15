@@ -227,7 +227,7 @@ func TestAudit_DrySyncDoesNotWriteErrors(t *testing.T) {
 	}
 }
 func TestAudit_FreshSaltEdgeBalanceAndEmptyResults(t *testing.T) {
-	pf := &auditBankPlatform{balance: 123.45}
+	pf := &auditBankPlatform{bankingPlatform: bankingPlatform{conn: sdk.PlatformConnection{ID: 1, AppSlug: "saltedge", Status: "active"}}, balance: 123.45}
 	ctx := newCtxWithPlatform(t, pf)
 	bal, err := (genericBankingAdapter{provider: "saltedge"}).FetchBalance(ctx, sdk.PlatformConnection{ID: 1}, bankingLink{Account: Account{Currency: "EUR"}, ExternalID: "bank1", Metadata: map[string]any{"balance_minor": float64(1)}})
 	if err != nil || bal == nil || *bal != 12345 || pf.called != "get_account" {

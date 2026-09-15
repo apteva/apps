@@ -1,6 +1,12 @@
 # Finance
 
-Unified personal finance, portfolio and bank-account tracking. Version **0.2.0** adds Enable Banking imports and reviewed payments through five payment providers, alongside the existing ledger.
+Unified personal finance, portfolio and bank-account tracking. Version **0.2.1** adds Enable Banking imports and reviewed payments through five payment providers, alongside the existing ledger.
+
+## One connection selection for all financial operations
+
+The manifest declares one optional integration dependency: **Financial connections**, with `mode: multiple`. Select bank and brokerage connections here once, and choose a default. Account discovery, bank sync, brokerage imports, payment preparation, authorization and status checks all resolve through this same binding. Connections not selected in this field cannot be used by Finance.
+
+The internal role key remains `open_banking`, so existing account-data selections continue working, including legacy single-ID bindings. When upgrading from v0.2.0, add any connections previously selected only under **Bank payments** or **Brokerage import** to this field. Reuse the saved connections; new credentials are not needed. TrueLayer and Salt Edge's distinct upstream data/payment products are selectable together in the same field.
 
 ## Banking providers
 
