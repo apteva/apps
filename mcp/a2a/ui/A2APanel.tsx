@@ -1282,15 +1282,11 @@ function Panel({ projectId: project }: Props) {
     <div className="a2a">
       <style>{styles}</style>
       <header className="header">
-        <div className="eyebrow">
-          Agent to Agent <span style={{ opacity: 0.5 }}> / </span> Network
-          workspace
-        </div>
         <div className="row between title-line">
           <div>
-            <h1>Your agents, working together.</h1>
+            <h1>Agent to Agent</h1>
             <p className="subtitle">
-              Discover capabilities. Follow the work. Manage who connects.
+              Manage agents, exchanges, and connections.
             </p>
           </div>
           <div className="row">
@@ -1378,7 +1374,7 @@ function Panel({ projectId: project }: Props) {
           <>
             <div className="row between">
               <div>
-                <h2>At a glance</h2>
+                <h2>Overview</h2>
                 <p className="subtitle">Project exchanges · all time</p>
               </div>
               <small className="muted">Updated {age(metrics?.as_of)}</small>
@@ -1412,7 +1408,7 @@ function Panel({ projectId: project }: Props) {
                   {
                     label: "Completed",
                     value: metrics?.completed,
-                    note: `${metrics?.total ?? "—"} exchanges in total`,
+                    note: `${metrics?.total ?? "—"} exchange${metrics?.total === 1 ? "" : "s"} in total`,
                     icon: CheckCircle2,
                     status: "completed",
                   },
@@ -1753,7 +1749,7 @@ function Panel({ projectId: project }: Props) {
         {view === "Exchanges" && (
           <>
             <div>
-              <h2>Follow the work</h2>
+              <h2>Exchanges</h2>
               <p className="subtitle">
                 Search the full exchange history, inspect replies, and open the
                 originating threads.
