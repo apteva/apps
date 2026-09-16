@@ -290,6 +290,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
 		return fmt.Errorf("rebuild realized P&L: %w", err)
 	}
+	if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
+		return fmt.Errorf("rebuild strategy attribution: %w", err)
+	}
 
 	if _, err := ctx.AppDB().Exec(`UPDATE validation_suites SET status='paused',error='Process restarted; resume the validation suite' WHERE status='running'`); err != nil {
 		return err

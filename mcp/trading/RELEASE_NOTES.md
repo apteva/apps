@@ -1,3 +1,15 @@
+# Trading v0.14.0
+
+Realized and open P&L is now attributed to the strategy that traded it, and two dashboard widgets read that attribution.
+
+- Add a strategy-own average-cost lot book (`strategy_position_accounting`). A strategy closes against its own lots rather than the portfolio's blended average, so two strategies holding the same symbol no longer report each other's cost basis. Where a symbol has a single owner the strategy and portfolio books agree exactly.
+- Attribute manual, agent and imported broker fills to strategy 0, so the strategy books plus that bucket reconcile against the portfolio book.
+- Rebuild the strategy book from the append-only fills ledger on mount and after broker imports, recovering history from `orders.strategy_id` instead of starting at zero. The rebuild is a full, idempotent replay and matches incremental accrual exactly.
+- Add `GET /strategies/live`, a per-(strategy, portfolio) rollup of realized, open and total P&L, execution costs, open lots marked at current prices, run health, and a shared-symbol count.
+- Add the `portfolio-watch` and `strategy-live` dashboard widgets. Live and armed portfolios are badged and tinted; a strategy sharing a symbol with another book carries a note that its P&L follows the strategy-own close convention.
+
+Migration 022 adds one table and two indexes. No new permissions. The rebuild cannot recover imported opening balances or corporate actions, which never pass through fills; those stay in the portfolio book and appear as the gap between it and the strategy books.
+
 # Trading v0.13.1
 
 - Quantize automated strategy buys and sells to each symbol's effective venue lot size, including after cash-budget scaling. This prevents valid allocations such as BNB from repeatedly failing the execution quantity check.

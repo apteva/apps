@@ -891,6 +891,9 @@ func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb
 		if err := dbRebuildPositionAccounting(ctx.AppDB()); err != nil {
 			ctx.Logger().Warn("import accounting rebuild failed", "err", err)
 		}
+		if err := dbRebuildStrategyAttribution(ctx.AppDB()); err != nil {
+			ctx.Logger().Warn("import strategy attribution rebuild failed", "err", err)
+		}
 	}
 	return wrote
 }

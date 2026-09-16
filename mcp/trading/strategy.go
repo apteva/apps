@@ -1563,6 +1563,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, 200, strategyCatalog(strings.Split(r.URL.Query().Get("symbols"), ",")))
 		return
 	}
+	if rest == "live" {
+		a.handleHTTPStrategiesLive(w, r)
+		return
+	}
 	if rest == "" {
 		switch r.Method {
 		case http.MethodGet:

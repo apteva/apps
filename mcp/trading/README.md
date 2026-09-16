@@ -16,8 +16,11 @@ generic strategy scorecards with backtest evidence and staged paper/live
 promotion gates.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
-sidecar serving MCP tools + REST routes, with two UI surfaces under
-`ui/` — a small dashboard panel and a rich trader-terminal SPA.
+sidecar serving MCP tools + REST routes, with UI surfaces under `ui/` — a
+dashboard panel, two dashboard widgets, and a rich trader-terminal SPA.
+
+Version 0.14 attributes realized and open P&L to the strategy that traded it.
+See [Strategy P&L attribution](#strategy-pl-attribution).
 
 Version 0.11 adds out-of-sample and walk-forward selection, robustness grids,
 stress scenarios, and seeded Monte Carlo execution uncertainty with persisted
@@ -33,6 +36,8 @@ apps/mcp/trading/
 ├── tools.go                # MCP tools (the agent's surface)
 ├── store.go                # DB layer
 ├── exec.go                 # Paper-execution + alert engine (Workers)
+├── strategy_attribution.go # Strategy-own lot book + fills-ledger rebuild
+├── strategy_live.go        # /strategies/live rollup for the dashboard widget
 ├── pricing.go              # Explicit offline mock provider
 ├── pricing_live.go         # Live market-data router
 ├── handlers_test.go        # Tier 1 — in-process handler tests
@@ -121,6 +126,32 @@ by apteva-server. Bare paths shown here.
 | `GET/PUT` | `/strategies/{id}/scorecard?portfolio_id=…` | Read scorecard evidence / configure generic pass criteria |
 | `POST` | `/strategies/{id}/scorecard/evaluate` | Persist an immutable evaluation for a completed backtest |
 | `POST` | `/strategies/{id}/promotion` | Promote, demote, or suspend one strategy for one portfolio |
+| `GET`  | `/strategies/live?scope=live&include_unattributed=…` | Per-strategy realized, open, and total P&L with run health |
+
+## Strategy P&L attribution
+
+`position_accounting` is keyed `(portfolio_id, symbol, outcome)` and has no
+strategy dimension, so when two strategies hold the same symbol a closing fill
+has no attributable cost basis. `strategy_position_accounting` keeps a parallel
+average-cost book scoped to the strategy that originated each fill, read from
+`orders.strategy_id`.
+
+The convention is that **a strategy closes against its own lots, never the
+portfolio's blend**. Where a symbol has exactly one owner the two books agree
+exactly; where several owners overlap they diverge by construction, and
+`/strategies/live` reports `shared_symbols` so a caller can say so rather than
+present a convention-dependent number as the only one.
+
+`strategy_id` 0 is the unattributed bucket — manual orders, agent orders, and
+imported broker history — so the strategy books plus bucket 0 reconcile against
+the portfolio book.
+
+Like `position_accounting`, the table is rebuilt from the append-only fills
+ledger on mount and after a broker import (`dbRebuildStrategyAttribution`). The
+rebuild is a full, idempotent replay, so it is also self-healing. It cannot
+recover imported opening balances or corporate actions, which never pass
+through fills; those stay in the portfolio book and show up as the gap between
+it and the strategy books.
 
 ## Reference-data behavior
 
