@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.3.0
+version: 0.3.1
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -65,7 +65,7 @@ provides:
         properties:
           default_view: {type: string, title: Default view, default: auto, enum: [auto, month, week, list]}
           date_field: {type: string, title: Calendar dates, default: planned_at, enum: [planned_at, deadline]}
-          brand_id: {type: string, title: Brand, description: "Every brand when empty; unassigned for content without one.", default: ""}
+          brand_id: {type: string, title: Starting brand, description: "The selection the widget opens on. Empty means every brand; unassigned means content without one. Viewers can switch brands in the widget.", default: ""}
           show_releases: {type: boolean, title: Channel releases, default: true}
           horizon_days: {type: integer, title: Days ahead in list view, default: 30, minimum: 1, maximum: 365}
   publishes:
@@ -79,7 +79,7 @@ provides:
     - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.0, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.1, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:
