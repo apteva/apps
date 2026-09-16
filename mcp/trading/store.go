@@ -666,6 +666,17 @@ func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty,
 		outcome = polyOutcome(o)
 	}
 
+	// Mirror the fill into the originating strategy's own lot book before the
+	// portfolio blend absorbs it. Execution costs arrive separately, via
+	// accrueStrategyExecutionCost alongside dbAccruePositionAccountingTx.
+	strategyID, err := dbOrderStrategyID(tx, o.ID)
+	if err != nil {
+		return err
+	}
+	if err := dbAccrueStrategyFillTx(tx, portfolioID, strategyID, o.Symbol, outcome, o.Side, qty, price, 0, 0, 0); err != nil {
+		return err
+	}
+
 	// Read current position (if any).
 	row := tx.QueryRow(`
 		SELECT id, qty, avg_cost, realized_pnl

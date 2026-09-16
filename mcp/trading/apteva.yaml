@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.13.1
+version: 0.14.0
 description: |
-  v0.13 adds inverse-volatility strategy sizing and corrects decimal-lot
-  simulation fills, with fixed-parameter virtual portfolios and replay artifacts.
+  v0.14 attributes realized and open P&L to the strategy that traded it, and
+  adds two dashboard widgets: portfolio watch and live strategies.
 
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -256,6 +256,54 @@ provides:
       label: Trading
       icon: trending-up
       entry: /ui/TradingPanel.mjs
+  ui_components:
+    # Portfolio watch is the safety-critical one: it is the surface an
+    # operator glances at without opening the desk, so live and armed
+    # portfolios are badged and tinted rather than merely listed.
+    - name: portfolio-watch
+      label: Portfolios
+      description: Equity, day and total P&L across paper and live portfolios.
+      entry: /ui/PortfolioWatchWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [portfolio.performance.updated, portfolio.status.changed,
+        portfolio.live_armed.changed, portfolio.created, portfolio.agent.changed,
+        portfolio.objective.changed, position.changed, order.filled, order.rejected,
+        risk.limit.breached, alert.fired]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/portfolio-watch.json
+      settings_schema:
+        type: object
+        properties:
+          show_paper: {type: boolean, title: Paper portfolios, default: true}
+          show_live: {type: boolean, title: Live portfolios, default: true}
+          pnl_basis: {type: string, title: P&L shown, default: day, enum: [day, open, total]}
+          sort_by: {type: string, title: Sort, default: equity, enum: [equity, day_pnl_pct, total_pnl_pct, name]}
+          row_limit: {type: integer, title: Visible rows, default: 5, minimum: 1, maximum: 12}
+    # Execution-driven, so it wakes on orders and fills rather than on
+    # scorecard evaluations: this reads what strategies actually did.
+    - name: strategy-live
+      label: Live strategies
+      description: Realized and open P&L attributed to the strategy that traded it.
+      entry: /ui/StrategyLiveWidget.mjs
+      slots: [dashboard.home]
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      refresh_topics: [strategy.assigned, strategy.updated, strategy.created,
+        strategy.promotion.changed, order.placed, order.filled, order.rejected,
+        order.cancelled, position.changed, portfolio.performance.updated,
+        risk.limit.breached]
+      settings_schema:
+        type: object
+        properties:
+          scope: {type: string, title: Show, default: live, enum: [live, all]}
+          primary_metric: {type: string, title: Headline, default: total_pnl, enum: [total_pnl, realized_pnl, unrealized_pnl, execution_cost]}
+          row_limit: {type: integer, title: Visible rows, default: 6, minimum: 1, maximum: 15}
   # No prompt_fragments. Approval policy belongs in the operator's
   # per-instance directive; objective and numeric portfolio risk state are
   # native Trading domains. The MCP tool descriptions carry the
