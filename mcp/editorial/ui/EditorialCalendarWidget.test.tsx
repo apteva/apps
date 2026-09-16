@@ -3,6 +3,8 @@ import { Window } from "happy-dom";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Widget, {
+  brandColor,
+  brandName,
   dateKey,
   eventDay,
   groupByDay,
@@ -10,6 +12,7 @@ import Widget, {
   resolveView,
   startOfWeek,
   windowFor,
+  type Brand,
   type CalendarEvent,
 } from "./EditorialCalendarWidget";
 
@@ -26,6 +29,11 @@ afterEach(async () => {
   await act(async () => root?.unmount());
   document.body.innerHTML = "";
   globalThis.fetch = originalFetch;
+  try {
+    window.localStorage.clear();
+  } catch {
+    // Storage is optional; the widget and these tests work without it.
+  }
 });
 
 const event = (over: Partial<CalendarEvent>): CalendarEvent => ({
@@ -42,11 +50,17 @@ const event = (over: Partial<CalendarEvent>): CalendarEvent => ({
   ...over,
 });
 
-const mount = async (props: Record<string, unknown>, payload: unknown) => {
+const mount = async (
+  props: Record<string, unknown>,
+  payload: unknown,
+  brands: Brand[] = [],
+) => {
   const calls: string[] = [];
   globalThis.fetch = (async (url: string) => {
-    calls.push(String(url));
-    return { ok: true, status: 200, json: async () => payload };
+    const target = String(url);
+    calls.push(target);
+    const body = target.includes("/settings") ? { brands } : payload;
+    return { ok: true, status: 200, json: async () => body };
   }) as unknown as typeof fetch;
   const host = document.createElement("div");
   document.body.appendChild(host);
@@ -54,7 +68,8 @@ const mount = async (props: Record<string, unknown>, payload: unknown) => {
     root = createRoot(host);
     root.render(<Widget appName="editorial" projectId="alpha" {...props} />);
   });
-  return { host, calls };
+  const calendarCalls = () => calls.filter((c) => c.includes("/calendar?"));
+  return { host, calls, calendarCalls, lastCalendar: () => calendarCalls().at(-1)! };
 };
 
 test("half width falls back to the agenda, full width gets the grid", () => {
@@ -113,30 +128,32 @@ test("events bucket on the viewer's local day, not the stored prefix", () => {
 });
 
 test("renders the agenda at half width and asks the calendar endpoint for a window", async () => {
-  const { host, calls } = await mount(
+  const { host, calendarCalls, lastCalendar } = await mount(
     { widgetSize: "half" },
     { events: [event({ at: dateKey(new Date()), date: dateKey(new Date()), title: "Ship the newsletter" })] },
   );
   expect(host.textContent).toContain("Ship the newsletter");
-  expect(calls.length).toBe(1);
-  expect(calls[0]).toContain("/api/apps/editorial/calendar?");
-  expect(calls[0]).toContain("project_id=alpha");
-  expect(calls[0]).toContain("from=");
-  expect(calls[0]).toContain("include_releases=true");
+  expect(calendarCalls().length).toBe(1);
+  expect(lastCalendar()).toContain("/api/apps/editorial/calendar?");
+  expect(lastCalendar()).toContain("project_id=alpha");
+  expect(lastCalendar()).toContain("from=");
+  expect(lastCalendar()).toContain("include_releases=true");
+  // Every brand by default: no brand_id is sent until something is chosen.
+  expect(lastCalendar()).not.toContain("brand_id");
 });
 
 test("release settings and brand reach the query, and releases are marked apart", async () => {
   const today = dateKey(new Date());
-  const { host, calls } = await mount(
+  const { host, lastCalendar } = await mount(
     {
       widgetSize: "half",
       widgetSettings: { brand_id: "acme", show_releases: false, date_field: "deadline", horizon_days: 14 },
     },
     { events: [event({ kind: "release", release_id: 9, channel: "Newsletter", at: today, date: today })] },
   );
-  expect(calls[0]).toContain("brand_id=acme");
-  expect(calls[0]).toContain("include_releases=false");
-  expect(calls[0]).toContain("date_field=deadline");
+  expect(lastCalendar()).toContain("brand_id=acme");
+  expect(lastCalendar()).toContain("include_releases=false");
+  expect(lastCalendar()).toContain("date_field=deadline");
   expect(host.textContent).toContain("Newsletter");
   expect(host.textContent).toContain("Editorial deadlines");
 });
@@ -171,4 +188,104 @@ test("a truncated range says so rather than quietly hiding work", async () => {
     { events: [event({ at: today, date: today })], truncated: true },
   );
   expect(host.textContent).toContain("Open Editorial for the full calendar");
+});
+
+const BRANDS: Brand[] = [
+  { id: "acme", name: "Acme", color: "#c2371f" },
+  { id: "globex", name: "Globex", color: "#3f8ee0" },
+];
+
+test("brand lookups tolerate unknown ids and colourless brands", () => {
+  expect(brandColor(BRANDS, "acme")).toBe("#c2371f");
+  expect(brandName(BRANDS, "globex")).toBe("Globex");
+  // Unassigned content and unknown ids fall back rather than throwing.
+  expect(brandColor(BRANDS, "")).toBe("");
+  expect(brandColor(BRANDS, "missing")).toBe("");
+  expect(brandName(BRANDS, "missing")).toBe("");
+  expect(brandColor([{ id: "x", name: "X", color: "" }], "x")).toBe("");
+});
+
+test("every brand shows by default and the picker offers all, each brand, and unassigned", async () => {
+  const today = dateKey(new Date());
+  const { host, lastCalendar } = await mount(
+    { widgetSize: "full" },
+    { events: [event({ at: today, date: today, brand_id: "acme" })] },
+    BRANDS,
+  );
+  const select = host.querySelector("select") as HTMLSelectElement;
+  expect(select).toBeTruthy();
+  expect([...select.options].map((o) => o.value)).toEqual(["", "acme", "globex", "unassigned"]);
+  expect([...select.options].map((o) => o.textContent)).toEqual([
+    "All brands",
+    "Acme",
+    "Globex",
+    "Unassigned",
+  ]);
+  // Default selection is every brand, so the request carries no brand filter.
+  expect(select.value).toBe("");
+  expect(lastCalendar()).not.toContain("brand_id");
+});
+
+test("choosing a brand refetches the calendar scoped to it", async () => {
+  const today = dateKey(new Date());
+  const { host, calendarCalls, lastCalendar } = await mount(
+    { widgetSize: "full" },
+    { events: [event({ at: today, date: today, brand_id: "acme" })] },
+    BRANDS,
+  );
+  expect(calendarCalls().length).toBe(1);
+
+  const select = host.querySelector("select") as HTMLSelectElement;
+  await act(async () => {
+    select.value = "globex";
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+  expect(calendarCalls().length).toBe(2);
+  expect(lastCalendar()).toContain("brand_id=globex");
+
+  // "Unassigned" is a real selection, not the same as clearing the filter.
+  await act(async () => {
+    select.value = "unassigned";
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+  expect(lastCalendar()).toContain("brand_id=unassigned");
+
+  await act(async () => {
+    select.value = "";
+    select.dispatchEvent(new window.Event("change", { bubbles: true }));
+  });
+  expect(lastCalendar()).not.toContain("brand_id");
+});
+
+test("entries carry their brand's colour, and unbranded ones keep the kind colour", async () => {
+  const today = dateKey(new Date());
+  const { host } = await mount(
+    { widgetSize: "half" },
+    {
+      events: [
+        event({ item_id: 1, at: today, date: today, brand_id: "acme", title: "Branded" }),
+        event({ item_id: 2, at: today, date: today, brand_id: "", title: "House" }),
+      ],
+    },
+    BRANDS,
+  );
+  const marks = host.querySelectorAll(".ec-mark");
+  expect(marks.length).toBe(2);
+  // Inline colour only where a brand supplies one; otherwise the stylesheet wins.
+  expect((marks[0] as HTMLElement).style.background).toBeTruthy();
+  expect((marks[1] as HTMLElement).style.background).toBe("");
+  // Colour is never the only carrier of the brand.
+  expect(host.querySelector('[title="Branded — Acme"]')).toBeTruthy();
+  expect(host.textContent).toContain("Acme");
+});
+
+test("a project with no brands gets no picker and no brand chrome", async () => {
+  const today = dateKey(new Date());
+  const { host, lastCalendar } = await mount(
+    { widgetSize: "full" },
+    { events: [event({ at: today, date: today })] },
+    [],
+  );
+  expect(host.querySelector("select")).toBeNull();
+  expect(lastCalendar()).not.toContain("brand_id");
 });

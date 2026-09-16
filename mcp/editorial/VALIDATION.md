@@ -44,3 +44,17 @@ No schema migration. No new permissions: the widget reads through the existing `
 Browser render of the built `EditorialCalendarWidget.mjs` against stubbed data, in a standalone host supplying the dashboard's colour variables, at full and half width: verified the month grid, the stretched week grid, the compact dot grid, agenda grouping and ordering, the picked-day agenda under a compact cell, the today marker, and the colour separation between content and release entries. This caught two defects that the DOM tests could not see, both fixed here: anchors inheriting the browser's default link colour, and the week grid leaving the body empty below its single row.
 
 Not yet done for this release: browser checks against the real dashboard stylesheet and shared UI kit in Terminal and Clean themes across light and dark modes, the 390px layout pass, and placing the widget on a live Home surface through the widget gallery at both sizes. The v0.2.0 panel checks still stand, since the panel and its bundle are unchanged — the panel bundle rebuilds byte-identically from this branch.
+
+
+## v0.3.1 brands in the home widget
+
+Validated on 2026-09-16 on a worktree branched from `main` at editorial/v0.3.0. UI only — no Go, schema or endpoint changes; `GET /calendar` already accepted `brand_id` including `unassigned`, and brands come from the existing `GET /settings`.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race ./...` — passed unchanged.
+- `bun run test:editorial-ui` — 14 widget tests passed, 5 of them new: brand lookups against unknown ids and colourless brands, the picker's option set and all-brands default, refetch scoped to a chosen brand including Unassigned and back to all, brand colour applied only where a brand supplies one, and a no-brands project getting no picker.
+- Strict TypeScript and the panel build with host React import-surface verification — passed. The panel bundle again rebuilt byte-identically.
+- Browser render against stubbed data at both widths: the picker appears in all three views, brand colours resolve exactly (Acme `#e0533f` → `rgb(224,83,63)`, Globex `#3f8ee0` → `rgb(63,142,224)`, Initech `#5ec27a` → `rgb(94,194,122)`), unbranded entries keep the accent, and three widget instances on one page held independent selections, confirming the per-instance storage key.
+
+Brand filtering is applied by the sidecar, not the browser: the widget sends `brand_id` and the endpoint's own tests cover the scoping, including archived exclusion and project isolation. A viewer's selection is a view preference, not a permission boundary — brands organize content inside the existing project access boundary, as in v0.2.0.
+
+Not yet done: browser checks against the real dashboard stylesheet in Terminal and Clean themes across light and dark modes, the 390px layout pass, and placing the widget on a live Home surface. Note that at half width the toolbar wraps to two lines once a brand picker is present.

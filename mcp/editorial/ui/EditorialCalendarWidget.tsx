@@ -5,6 +5,7 @@ type Props = {
   projectId?: string;
   installId?: number;
   eventRevision?: number;
+  widgetId?: string;
   widgetSize?: "half" | "full";
   widgetSettings?: Record<string, unknown>;
 };
@@ -26,6 +27,24 @@ export type CalendarEvent = {
 };
 
 export type View = "month" | "week" | "list";
+
+export type Brand = { id: string; name: string; color: string };
+
+// Sentinels the picker and the endpoint agree on: "" is every brand, and
+// "unassigned" is content that deliberately has none.
+export const ALL_BRANDS = "";
+export const UNASSIGNED = "unassigned";
+
+// Brand colour wins over the kind colour, because on an all-brands calendar
+// "whose is this" is the question the operator is actually asking. Projects
+// with no brands configured keep the kind colours and never see a picker.
+export const brandColor = (brands: Brand[], id: string): string => {
+  if (!id) return "";
+  const brand = brands.find((b) => b.id === id);
+  return brand?.color || "";
+};
+export const brandName = (brands: Brand[], id: string): string =>
+  brands.find((b) => b.id === id)?.name || "";
 
 const setting = <T,>(settings: Record<string, unknown> | undefined, key: string, fallback: T): T => {
   const value = settings?.[key];
@@ -144,6 +163,9 @@ const css = `
 .ec-widget .ec-dots{display:flex;flex-wrap:wrap;gap:2px;justify-content:flex-end}
 .ec-widget .ec-dot{width:5px;height:5px;border-radius:50%;background:var(--color-accent,#ff8c36)}
 .ec-widget .ec-dot.release{background:var(--color-info,#5aa9e6)}
+.ec-widget .ec-select{border:1px solid var(--color-border,#303030);background:var(--color-bg-card,#141414);color:inherit;border-radius:3px;padding:3px 6px;font-size:11px;line-height:18px;font-family:inherit;max-width:150px}
+.ec-widget .ec-select:hover{border-color:var(--color-accent,#ff8c36)}
+.ec-widget .ec-swatch{width:7px;height:7px;border-radius:2px;flex:0 0 7px;display:inline-block}
 .ec-widget .ec-daybtn{display:block;width:100%;height:100%;border:0;background:transparent;padding:0;text-align:right}
 .ec-widget .ec-agenda{border-top:1px solid var(--color-border,#303030)}
 .ec-widget .ec-daygroup{padding:9px 16px;border-bottom:1px solid var(--color-border,#303030)}
@@ -161,6 +183,13 @@ const css = `
 @media (max-width:560px){.ec-widget .ec-cell{min-height:52px}}
 `;
 
+// Colour is not a label: screen readers and colour-blind viewers get the brand
+// name through the accessible title instead.
+const titleOf = (brands: Brand[], e: CalendarEvent) => {
+  const name = brandName(brands, e.brand_id);
+  return name ? `${e.title} — ${name}` : e.title;
+};
+
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const PANEL = "/apps/editorial/page";
 
@@ -168,9 +197,30 @@ export default function EditorialCalendarWidget(props: Props) {
   const size = props.widgetSize === "half" ? "half" : "full";
   const preference = setting<string>(props.widgetSettings, "default_view", "auto");
   const dateField = setting<string>(props.widgetSettings, "date_field", "planned_at");
-  const brandId = setting<string>(props.widgetSettings, "brand_id", "");
+  const brandDefault = setting<string>(props.widgetSettings, "brand_id", ALL_BRANDS);
   const showReleases = setting<boolean>(props.widgetSettings, "show_releases", true);
   const horizonDays = Math.max(1, Math.min(365, Number(setting<number>(props.widgetSettings, "horizon_days", 30)) || 30));
+
+  const [brands, setBrands] = useState<Brand[]>([]);
+  // The operator setting supplies the starting selection; the viewer's own
+  // choice overrides it and persists per widget instance.
+  const brandKey = `apteva:editorial:brand:${props.widgetId || `${props.projectId || "global"}:${props.installId || 0}`}`;
+  const [brand, setBrand] = useState<string>(() => {
+    try {
+      const stored = window.localStorage.getItem(brandKey);
+      if (stored !== null) return stored;
+    } catch {
+      // Filtering stays usable when browser storage is unavailable.
+    }
+    return brandDefault;
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(brandKey, brand);
+    } catch {
+      // As above: a failed write only costs the preference, not the render.
+    }
+  }, [brandKey, brand]);
 
   const [view, setView] = useState<View>(() => resolveView(preference, size));
   const [anchor, setAnchor] = useState(() => new Date());
@@ -182,6 +232,29 @@ export default function EditorialCalendarWidget(props: Props) {
 
   // A resize changes which view is readable, so an automatic choice follows it.
   useEffect(() => setView(resolveView(preference, size)), [preference, size]);
+
+  useEffect(() => {
+    if (!props.projectId) return;
+    let alive = true;
+    const controller = new AbortController();
+    const q = new URLSearchParams({ project_id: props.projectId });
+    if (props.installId) q.set("install_id", String(props.installId));
+    fetch(`/api/apps/${encodeURIComponent(props.appName || "editorial")}/settings?${q}`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    })
+      .then((r) => (r.ok ? r.json() : { brands: [] }))
+      .then((data) => {
+        if (alive) setBrands(Array.isArray(data?.brands) ? data.brands : []);
+      })
+      .catch(() => {
+        // Brands are decoration and a filter; the calendar renders without them.
+      });
+    return () => {
+      alive = false;
+      controller.abort();
+    };
+  }, [props.appName, props.projectId, props.installId, props.eventRevision]);
 
   const range = useMemo(() => windowFor(view, anchor, horizonDays), [view, anchor, horizonDays]);
 
@@ -198,7 +271,7 @@ export default function EditorialCalendarWidget(props: Props) {
       include_releases: showReleases ? "true" : "false",
     });
     if (props.installId) q.set("install_id", String(props.installId));
-    if (brandId) q.set("brand_id", brandId);
+    if (brand) q.set("brand_id", brand);
     fetch(`/api/apps/${encodeURIComponent(props.appName || "editorial")}/calendar?${q}`, {
       credentials: "same-origin",
       signal: controller.signal,
@@ -232,7 +305,7 @@ export default function EditorialCalendarWidget(props: Props) {
     range.from,
     range.to,
     dateField,
-    brandId,
+    brand,
     showReleases,
   ]);
 
@@ -298,6 +371,25 @@ export default function EditorialCalendarWidget(props: Props) {
           </div>
         )}
         <span className="ec-period">{period}</span>
+        {brands.length > 0 && (
+          <select
+            className="ec-select"
+            aria-label="Filter by brand"
+            value={brand}
+            onChange={(e) => {
+              setBrand(e.target.value);
+              setPicked("");
+            }}
+          >
+            <option value={ALL_BRANDS}>All brands</option>
+            {brands.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+            <option value={UNASSIGNED}>Unassigned</option>
+          </select>
+        )}
         <div className="ec-views" role="group" aria-label="Calendar view">
           {(["month", "week", "list"] as View[]).map((v) => (
             <button
@@ -319,9 +411,10 @@ export default function EditorialCalendarWidget(props: Props) {
         {error ? (
           <p className="ec-error">{error}</p>
         ) : view === "list" ? (
-          <Agenda byDay={byDay} from={today} days={horizonDays} loading={loading} />
+          <Agenda brands={brands} byDay={byDay} from={today} days={horizonDays} loading={loading} />
         ) : (
           <Grid
+            brands={brands}
             days={view === "month" ? monthGrid(anchor) : weekDays(anchor)}
             month={view === "month" ? anchor.getMonth() : -1}
             stretch={view === "week" && !picked}
@@ -335,7 +428,7 @@ export default function EditorialCalendarWidget(props: Props) {
         )}
         {view !== "list" && picked && (
           <div className="ec-agenda">
-            <DayGroup date={picked} events={byDay[picked] || []} />
+            <DayGroup brands={brands} date={picked} events={byDay[picked] || []} />
           </div>
         )}
       </div>
@@ -355,6 +448,7 @@ const weekDays = (anchor: Date) => {
 };
 
 function Grid({
+  brands,
   days,
   month,
   byDay,
@@ -365,6 +459,7 @@ function Grid({
   loading,
   stretch,
 }: {
+  brands: Brand[];
   days: Date[];
   month: number;
   stretch?: boolean;
@@ -400,7 +495,11 @@ function Grid({
                 </span>
                 <span className="ec-dots">
                   {dayEvents.slice(0, 6).map((e, n) => (
-                    <span className={`ec-dot ${e.kind === "release" ? "release" : ""}`} key={n} />
+                    <span
+                      className={`ec-dot ${e.kind === "release" ? "release" : ""}`}
+                      key={n}
+                      style={{ background: brandColor(brands, e.brand_id) || undefined }}
+                    />
                   ))}
                 </span>
               </button>
@@ -410,7 +509,13 @@ function Grid({
                   <span className={key === today ? "today" : ""}>{d.getDate()}</span>
                 </div>
                 {dayEvents.slice(0, 3).map((e) => (
-                  <a className={`ec-chip ${e.kind}`} key={`${e.kind}${e.release_id || e.item_id}`} href={PANEL} title={e.title}>
+                  <a
+                    className={`ec-chip ${e.kind}`}
+                    key={`${e.kind}${e.release_id || e.item_id}`}
+                    href={PANEL}
+                    title={titleOf(brands, e)}
+                    style={{ borderLeftColor: brandColor(brands, e.brand_id) || undefined }}
+                  >
                     <em>{e.kind === "release" ? e.channel : label(e.format)}</em> {e.title}
                   </a>
                 ))}
@@ -429,11 +534,13 @@ function Grid({
 }
 
 function Agenda({
+  brands,
   byDay,
   from,
   days,
   loading,
 }: {
+  brands: Brand[];
   byDay: Record<string, CalendarEvent[]>;
   from: string;
   days: number;
@@ -452,13 +559,13 @@ function Agenda({
   return (
     <div aria-busy={loading}>
       {keys.map((key) => (
-        <DayGroup key={key} date={key} events={byDay[key]} />
+        <DayGroup key={key} brands={brands} date={key} events={byDay[key]} />
       ))}
     </div>
   );
 }
 
-function DayGroup({ date, events }: { date: string; events: CalendarEvent[] }) {
+function DayGroup({ brands, date, events }: { brands: Brand[]; date: string; events: CalendarEvent[] }) {
   const d = new Date(`${date}T12:00:00`);
   return (
     <div className="ec-daygroup">
@@ -472,10 +579,22 @@ function DayGroup({ date, events }: { date: string; events: CalendarEvent[] }) {
         <p className="ec-meta">Nothing scheduled.</p>
       ) : (
         events.map((e) => (
-          <a className="ec-row" key={`${e.kind}${e.release_id || e.item_id}`} href={e.url || PANEL} {...(e.url ? { target: "_blank", rel: "noreferrer" } : {})}>
-            <span className={`ec-mark ${e.kind === "release" ? "release" : ""}`} />
+          <a
+            className="ec-row"
+            key={`${e.kind}${e.release_id || e.item_id}`}
+            href={e.url || PANEL}
+            title={titleOf(brands, e)}
+            {...(e.url ? { target: "_blank", rel: "noreferrer" } : {})}
+          >
+            <span
+              className={`ec-mark ${e.kind === "release" ? "release" : ""}`}
+              style={{ background: brandColor(brands, e.brand_id) || undefined }}
+            />
             <span className="ec-title">{e.title || "Untitled"}</span>
-            <span className="ec-meta">{e.kind === "release" ? e.channel : label(e.status)}</span>
+            <span className="ec-meta">
+              {brandName(brands, e.brand_id) && <span>{brandName(brands, e.brand_id)} · </span>}
+              {e.kind === "release" ? e.channel : label(e.status)}
+            </span>
           </a>
         ))
       )}

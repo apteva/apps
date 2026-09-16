@@ -12,7 +12,9 @@ The monochrome app icon is embedded in the sidecar and served independently of i
 
 **Editorial calendar** is a `dashboard.home` widget with Month, Week and List views. Operators add it from the Home widget gallery; `suggested` only ranks it there and never places it on its own. Half width defaults to the agenda and renders the grid as day numbers with per-entry dots, because one column of the dashboard's two-column layout cannot hold seven readable columns; full width defaults to the month grid. Clicking a compact day, or the "+n more" chip on a full cell, opens that day's entries underneath.
 
-Per-instance settings cover default view, `planned_at` or `deadline` dates, one brand or all, whether channel releases appear, and the list horizon. The widget reads `GET /calendar` only; it never writes, and every entry links back into the panel. Releases with a saved URL link to that record instead.
+The widget opens on **All brands**. When the project has brands, a picker in the toolbar filters to one brand or to Unassigned, and each entry is marked in its brand's colour — the chip's left border, the compact day dots and the agenda row mark — with the brand name in the agenda row and in every entry's accessible title, so colour is never the only carrier. Projects with no brands get no picker and keep the content/release colours. The selection is per widget instance and per viewer; the `brand_id` setting only chooses what the widget opens on.
+
+Per-instance settings cover default view, `planned_at` or `deadline` dates, the starting brand, whether channel releases appear, and the list horizon. The widget reads `GET /calendar` and `GET /settings` only; it never writes, and every entry links back into the panel. Releases with a saved URL link to that record instead.
 
 The widget refreshes on the app bus topics under `publishes`, so a content or release write anywhere — panel, HTTP or MCP — updates an open dashboard without a reload.
 
