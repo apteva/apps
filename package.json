@@ -9,7 +9,8 @@
     "test:code:ui": "bun test mcp/code/ui/components/*.test.ts",
     "test:code:browser": "playwright test --config mcp/code/playwright.config.ts",
     "test:a2a-ui": "bun test mcp/a2a/ui/A2APanel.test.tsx",
-    "test:trading-ui": "bun test mcp/trading/ui/*.test.tsx"
+    "test:trading-ui": "bun test mcp/trading/ui/*.test.tsx",
+    "test:editorial-ui": "bun test mcp/editorial/ui/*.test.tsx"
   },
   "dependencies": {
     "@xyflow/react": "^12.10.2",
