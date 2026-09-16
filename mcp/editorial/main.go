@@ -52,7 +52,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.Write(iconSVG)
-	}}, {Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}}
+	}}, {Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}, {Pattern: "/calendar", Handler: a.http}}
 }
 func str(m map[string]any, k string) string { v, _ := m[k].(string); return v }
 func number(m map[string]any, k string) int64 {
@@ -105,7 +105,7 @@ func properties(keys []string) map[string]any {
 			}, "id", "name")}
 		case "fields", "results":
 			t = map[string]any{"type": "object"}
-		case "archived":
+		case "archived", "include_releases":
 			t = map[string]any{"type": "boolean"}
 		}
 		p[k] = t
@@ -124,6 +124,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{"releases_create", "Plan a release; never schedules delivery. Optional app/external_id links an existing record.", object(properties(append(append([]string{}, releaseFields...), "item_id")), "item_id", "channel")},
 		{"releases_update", "Update using current revision. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(releaseFields))}, "id", "revision", "patch")},
 		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
+		{"calendar", "List dated items and channel releases between from and to (YYYY-MM-DD) as one flat, sorted stream. Defaults to the next 30 days. date_field planned_at or deadline; releases appear on planned_at only.", object(properties([]string{"from", "to", "date_field", "brand_id", "include_releases", "limit"}))},
 		{"settings_get", "Read project brands, formats, statuses and channel suggestions.", object(nil)},
 		{"settings_update", "Configure brands, formats, statuses and channels. Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels"}), "revision", "statuses", "formats", "channels")},
 		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records, with optional brand_id to apply saved mappings. Never publishes.", object(properties([]string{"app", "brand_id"}))},
@@ -138,6 +139,33 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 	return out
 }
+
+// Dashboard widgets refresh off the app bus, so every write that can move
+// something on a calendar announces itself. Emission is best-effort by design:
+// a dropped event leaves a widget stale until its next render, and must never
+// turn a committed write into a failed one.
+func (a *App) emitItem(ctx *sdk.AppCtx, topic string, i Item) {
+	ctx.Emit(topic, map[string]any{"id": i.ID, "revision": i.Revision, "brand_id": i.BrandID, "title": i.Title,
+		"status": i.Status, "approval": i.Approval, "planned_at": i.PlannedAt, "deadline": i.Deadline, "archived": i.Archived})
+}
+func (a *App) emitRelease(ctx *sdk.AppCtx, topic string, r Release) {
+	ctx.Emit(topic, map[string]any{"id": r.ID, "item_id": r.ItemID, "revision": r.Revision, "channel": r.Channel,
+		"status": r.Status, "planned_at": r.PlannedAt, "published_at": r.PublishedAt, "archived": r.Archived})
+}
+
+// Archiving is what removes an item from every calendar, so it gets its own
+// topic rather than hiding inside the general update stream.
+func itemTopic(patch map[string]any) string {
+	archived, ok := patch["archived"].(bool)
+	if !ok {
+		return "content.updated"
+	}
+	if archived {
+		return "content.archived"
+	}
+	return "content.restored"
+}
+
 func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, error) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil, errors.New("app not mounted")
@@ -159,18 +187,28 @@ func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, er
 		return listItems(db, pid, args)
 	case "items_get":
 		return itemDetail(db, pid, number(args, "id"))
+	case "calendar":
+		return calendarEvents(db, pid, args)
 	case "settings_get":
 		return getSettings(db, pid)
 	case "integrations":
 		return integrations(ctx, args)
 	case "releases_refresh":
-		return a.refresh(ctx, number(args, "id"))
+		result, e := a.refresh(ctx, number(args, "id"))
+		if r, ok := result.(Release); ok && e == nil {
+			a.emitRelease(ctx, "release.refreshed", r)
+		}
+		return result, e
 	}
 	a.writes.Lock()
 	defer a.writes.Unlock()
 	switch op {
 	case "items_create":
-		return saveItem(db, pid, 0, 0, args)
+		i, e := saveItem(db, pid, 0, 0, args)
+		if e == nil {
+			a.emitItem(ctx, "content.created", i)
+		}
+		return i, e
 	case "items_update", "releases_update":
 		id, revision := number(args, "id"), number(args, "revision")
 		if id <= 0 || revision <= 0 {
@@ -181,18 +219,34 @@ func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, er
 			return nil, invalid("patch object required")
 		}
 		if op == "items_update" {
-			return saveItem(db, pid, id, revision, patch)
+			i, e := saveItem(db, pid, id, revision, patch)
+			if e == nil {
+				a.emitItem(ctx, itemTopic(patch), i)
+			}
+			return i, e
 		}
-		return saveRelease(db, pid, id, 0, revision, patch, false)
+		r, e := saveRelease(db, pid, id, 0, revision, patch, false)
+		if e == nil {
+			a.emitRelease(ctx, "release.updated", r)
+		}
+		return r, e
 	case "releases_create":
 		id := number(args, "item_id")
 		if id <= 0 {
 			return nil, invalid("item_id is required")
 		}
 		delete(args, "item_id")
-		return saveRelease(db, pid, 0, id, 0, args, false)
+		r, e := saveRelease(db, pid, 0, id, 0, args, false)
+		if e == nil {
+			a.emitRelease(ctx, "release.created", r)
+		}
+		return r, e
 	case "settings_update":
-		return saveSettings(db, pid, args)
+		s, e := saveSettings(db, pid, args)
+		if e == nil {
+			ctx.Emit("settings.updated", map[string]any{"revision": s.Revision, "brands": len(s.Brands)})
+		}
+		return s, e
 	}
 	return nil, invalid("unknown operation")
 }
@@ -258,6 +312,8 @@ func (a *App) http(w http.ResponseWriter, r *http.Request) {
 	case len(path) == 3 && path[0] == "releases" && path[2] == "refresh" && r.Method == "POST":
 		op = "releases_refresh"
 		args["id"] = path[1]
+	case len(path) == 1 && path[0] == "calendar" && r.Method == "GET":
+		op = "calendar"
 	case len(path) == 1 && path[0] == "settings" && r.Method == "GET":
 		op = "settings_get"
 	case len(path) == 1 && path[0] == "settings" && r.Method == "PATCH":

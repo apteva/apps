@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.2.0
+version: 0.3.0
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -36,6 +36,7 @@ provides:
     - { name: editorial_releases_create, description: "Plan a channel-specific release for an item. No external sending or scheduling." }
     - { name: editorial_releases_update, description: "Patch a release using id, revision and patch; optionally link an existing Social/Campaigns record." }
     - { name: editorial_releases_refresh, description: "Read results from an optionally bound Social or Campaigns app into a linked release. Never sends or schedules." }
+    - { name: editorial_calendar, description: "List dated content and channel releases between two dates as one flat, sorted stream. Read-only planning view; never publishes or schedules." }
     - { name: editorial_settings_get, description: "Read configurable formats, workflow statuses and channels." }
     - { name: editorial_settings_update, description: "Replace formats, statuses and channels using revision. Existing used formats/statuses must remain available." }
     - { name: editorial_integrations, description: "Check optional Social/Campaigns bindings and browse existing records. No dependency required for planning." }
@@ -44,9 +45,41 @@ provides:
       label: Editorial
       icon: calendar
       entry: /ui/EditorialPanel.mjs
+  ui_components:
+    # Half width cannot hold a readable month grid, so the widget carries three
+    # views and defaults by size: an agenda when narrow, the grid when wide.
+    # Operators still add it to Home themselves; suggested only ranks it.
+    - name: editorial-calendar
+      label: Editorial calendar
+      description: Upcoming publications, deadlines and channel releases.
+      entry: /ui/EditorialCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: full
+      refresh_topics: [content.created, content.updated, content.archived, content.restored,
+        release.created, release.updated, release.refreshed, settings.updated]
+      settings_schema:
+        type: object
+        properties:
+          default_view: {type: string, title: Default view, default: auto, enum: [auto, month, week, list]}
+          date_field: {type: string, title: Calendar dates, default: planned_at, enum: [planned_at, deadline]}
+          brand_id: {type: string, title: Brand, description: "Every brand when empty; unassigned for content without one.", default: ""}
+          show_releases: {type: boolean, title: Channel releases, default: true}
+          horizon_days: {type: integer, title: Days ahead in list view, default: 30, minimum: 1, maximum: 365}
+  publishes:
+    - { name: content.created, description: "A content item was created." }
+    - { name: content.updated, description: "Content fields changed, including planning dates and approval." }
+    - { name: content.archived, description: "A content item was archived and left every calendar." }
+    - { name: content.restored, description: "An archived content item was restored." }
+    - { name: release.created, description: "A channel release was planned for a content item." }
+    - { name: release.updated, description: "A channel release changed, including its planned date or link." }
+    - { name: release.refreshed, description: "Results were read from a linked Social or Campaigns record." }
+    - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.2.0, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.0, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:

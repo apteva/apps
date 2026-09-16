@@ -8,6 +8,14 @@ The panel follows the same compact layout and shared components as CRM and Socia
 
 The monochrome app icon is embedded in the sidecar and served independently of its working directory.
 
+## Home widget
+
+**Editorial calendar** is a `dashboard.home` widget with Month, Week and List views. Operators add it from the Home widget gallery; `suggested` only ranks it there and never places it on its own. Half width defaults to the agenda and renders the grid as day numbers with per-entry dots, because one column of the dashboard's two-column layout cannot hold seven readable columns; full width defaults to the month grid. Clicking a compact day, or the "+n more" chip on a full cell, opens that day's entries underneath.
+
+Per-instance settings cover default view, `planned_at` or `deadline` dates, one brand or all, whether channel releases appear, and the list horizon. The widget reads `GET /calendar` only; it never writes, and every entry links back into the panel. Releases with a saved URL link to that record instead.
+
+The widget refreshes on the app bus topics under `publishes`, so a content or release write anywhere — panel, HTTP or MCP — updates an open dashboard without a reload.
+
 ## Brands
 
 Create optional brands in **Settings → Brands**, with a name, color and optional HTTP(S) logo URL. Use the **All brands** selector to view one brand or **Unassigned** across Calendar, Board, Content and Backlog. New content inherits the selected brand; an item's brand is editable in Details. Campaign / initiative remains a separate field, and its filter choices follow the current brand.
@@ -50,12 +58,17 @@ All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in
 - `POST /releases`: `{item_id, channel, ...}`.
 - `PATCH /releases/:id`: `{revision, patch}`.
 - `POST /releases/:id/refresh`: read the saved link's results.
+- `GET /calendar`: the flat, pre-merged planning stream a calendar surface needs. Filters `from`, `to` (`YYYY-MM-DD` or RFC3339, defaulting to today and 30 days out, 400 days maximum), `date_field` (`planned_at` or `deadline`), `brand_id`, `include_releases`, `limit` (default 500, max 2000). Returns `events` sorted by date with `truncated`. Each event carries `kind` (`item` or `release`), `date` (the server-side bucket), `at` (the value as stored), the item's identity and, for releases, `release_id`, `channel` and `url`. Releases are matched on their own planned date and joined back to their parent, so a release inside the window appears even when its item's date sits outside it — which is why this is not a filter on `/items`. Archived content and archived releases are always excluded, and releases appear on `planned_at` views only, as in the panel.
 - `GET /settings`, `PATCH /settings`: settings with revision, including optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers.
 - `GET /integrations`: optional connection states. `?app=social|campaigns` browses existing records. Add `brand_id` to apply the saved brand mappings.
 
 Dates accept `YYYY-MM-DD` or RFC3339 with timezone; the panel uses date pickers and displays calendar timestamps in the viewer's local timezone. You can also type a precise timestamp into the date field. Clear fields with empty strings/arrays/objects, not null. Item and release edits require the latest revision; stale writes return HTTP 409. Release `results` are snapshots or manually entered JSON, not normalized cross-platform metrics.
 
 Project-scoped installs stay pinned to their project. Global HTTP calls use the gateway project header first, then the authenticated dashboard's `project_id` query. MCP tools require the SDK's current project and ignore argument attempts to override it. The sidecar belongs behind Apteva's authenticated gateway.
+
+## Events
+
+Writes emit on the project's app bus: `content.created`, `content.updated`, `content.archived`, `content.restored`, `release.created`, `release.updated`, `release.refreshed` and `settings.updated`. Emission is best-effort and never fails a committed write; a dropped event leaves a widget stale until its next render. Archiving gets its own topic because it is what removes an item from every calendar.
 
 ## Development
 
@@ -66,6 +79,7 @@ GOWORK=off GOTOOLCHAIN=local go build -o /tmp/apteva-editorial .
 APTEVA_BIND_HOST=127.0.0.1 APTEVA_APP_PORT=8098 APTEVA_PROJECT_ID=demo DB_PATH=/tmp/editorial-demo.db /tmp/apteva-editorial
 # From apps/:
 bun run scripts/build-panels.ts --app editorial
+bun run test:editorial-ui
 ```
 
 Go 1.25.1+, app-sdk v0.81.0 (latest tag by ancestry when implemented). The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.
