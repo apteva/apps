@@ -12,6 +12,29 @@ Runs whose runtime cleanup fails stay `stopping`. Reconciliation retries cleanup
 before permitting a replacement runtime for the same definition. Reconciliation
 processes all active runs independently of the 200-entry history list.
 
+## Seeds
+
+Seeds run in spec order when an environment starts. A seed can consume what an
+earlier seed created by putting a reference object anywhere in its `input`:
+
+```json
+{"seeds": [
+  {"app": "crm", "tool": "contact_create", "input": {"name": "Ada"}},
+  {"app": "crm", "tool": "activity_log",
+   "input": {"contact_id": {"$ref": "0.contact.id"}, "kind": "note", "body": "hi"}}
+]}
+```
+
+`$ref` is `"<index>.<path>"`: the index of an earlier seed, then a dotted path
+into its result. An empty path (`"0"`) references the whole result. References
+resolve anywhere in the input tree, including inside arrays, and a `$ref` object
+must carry no other keys.
+
+A reference that cannot resolve fails the run at the seed that carries it rather
+than passing an unresolved object to the tool. Referencing a later seed, the seed
+itself, or a malformed index is rejected when the definition is written. The path
+walks objects only — it cannot index into an array.
+
 ## Assertions and voice evidence
 
 `mcp_tool_call` requires `mcp` and matches names qualified by that server. Omitting

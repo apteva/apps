@@ -149,14 +149,22 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
 	}
+	// Seed results stay addressable so a later seed can reference what an
+	// earlier one created, through {"$ref": "<index>.<path>"} in its input.
+	results := make([]any, 0, len(spec.Seeds))
 	for i, seed := range spec.Seeds {
 		if strings.TrimSpace(seed.App) == "" || strings.TrimSpace(seed.Tool) == "" {
 			return run, fmt.Errorf("seed %d: app and tool required", i)
 		}
+		input, refErr := resolveSeedRefs(seed.Input, results)
+		if refErr != nil {
+			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, refErr)
+		}
 		var result any
-		if err = s.runtime().CallRuntimeAppResult(runtimeID, seed.App, seed.Tool, seed.Input, &result); err != nil {
+		if err = s.runtime().CallRuntimeAppResult(runtimeID, seed.App, seed.Tool, input, &result); err != nil {
 			return run, fmt.Errorf("seed %d %s.%s: %w", i, seed.App, seed.Tool, err)
 		}
+		results = append(results, result)
 	}
 	for i, agent := range spec.Agents {
 		_, err = s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused, Provider: agent.Provider, Model: agent.Model})
@@ -489,6 +497,11 @@ func validateSpec(spec EnvironmentSpec) error {
 	if len(spec.MCPServerIDs) > 16 {
 		return errors.New("mcp_server_ids may contain at most 16 entries")
 	}
+	for i, seed := range spec.Seeds {
+		if err := validateSeedRefs(seed.Input, i); err != nil {
+			return fmt.Errorf("seed %d: %w", i, err)
+		}
+	}
 	seen := map[string]bool{}
 	for i, fixture := range spec.WebFixtures {
 		if !validID(fixture.ID) {
@@ -530,6 +543,14 @@ func token(n int) string {
 	return hex.EncodeToString(b)[:n]
 }
 func jsonPath(v any, path string) any {
+	got, _ := jsonPathLookup(v, path)
+	return got
+}
+
+// jsonPathLookup walks dotted map keys and reports whether the path resolved,
+// which lets callers tell a missing key apart from a value that is really null.
+// It walks objects only: a list on the way down is a miss.
+func jsonPathLookup(v any, path string) (any, bool) {
 	cur := v
 	for _, p := range strings.Split(strings.Trim(path, "."), ".") {
 		if p == "" {
@@ -537,11 +558,15 @@ func jsonPath(v any, path string) any {
 		}
 		m, ok := cur.(map[string]any)
 		if !ok {
-			return nil
+			return nil, false
 		}
-		cur = m[p]
+		next, ok := m[p]
+		if !ok {
+			return nil, false
+		}
+		cur = next
 	}
-	return cur
+	return cur, true
 }
 
 func runtimeNotFound(err error) bool {

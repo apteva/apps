@@ -74,9 +74,13 @@ var environmentSpecSchema = strictObject(map[string]any{
 		"enabled":            map[string]any{"type": "boolean"},
 	})),
 	"seeds": arraySchema(strictObject(map[string]any{
-		"app":   map[string]any{"type": "string"},
-		"tool":  map[string]any{"type": "string"},
-		"input": anyObjectSchema(),
+		"app":  map[string]any{"type": "string"},
+		"tool": map[string]any{"type": "string"},
+		"input": map[string]any{
+			"type":                 "object",
+			"additionalProperties": true,
+			"description":          `Tool arguments. Anywhere in this object, {"$ref": "<index>.<path>"} is replaced by the value at that dotted path in the result of an earlier seed, so seed 1 can use an id created by seed 0. An empty path references the whole result.`,
+		},
 	}, "app", "tool")),
 	"agents": arraySchema(strictObject(map[string]any{
 		"source_agent_id": map[string]any{"type": "integer"},

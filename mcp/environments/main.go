@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.4
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.4 fixes lifecycle recovery, partial updates, evaluation evidence, carrier call correlation, and stale UI state, with cached catalogs, batched reads, and optional history retention.
+version: 0.7.5
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.5 lets a seed reference an earlier seed's result by index and path, so seeded records can be chained, and rejects a reference that cannot resolve instead of passing it through to the tool.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -71,7 +71,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.4, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.5, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
