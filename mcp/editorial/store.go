@@ -88,11 +88,15 @@ type Settings struct {
 	Statuses []string `json:"statuses"`
 	Formats  []string `json:"formats"`
 	Channels []string `json:"channels"`
-	Revision int64    `json:"revision"`
+	// A bare YYYY-MM-DD names a day, not an instant. These two say which instant
+	// that day becomes due at, so a London and a Sydney operator agree.
+	Timezone string `json:"timezone"`
+	DueTime  string `json:"due_time"`
+	Revision int64  `json:"revision"`
 }
 
 func defaultSettings() Settings {
-	return Settings{Brands: []Brand{}, Statuses: []string{"idea", "brief", "in_progress", "review", "ready", "published"}, Formats: []string{"idea", "brief", "article", "video", "podcast", "social_post", "newsletter", "campaign", "refresh"}, Channels: []string{"Website", "Newsletter", "LinkedIn", "Instagram", "YouTube", "Podcast"}}
+	return Settings{Timezone: "", DueTime: defaultDueTime, Brands: []Brand{}, Statuses: []string{"idea", "brief", "in_progress", "review", "ready", "published"}, Formats: []string{"idea", "brief", "article", "video", "podcast", "social_post", "newsletter", "campaign", "refresh"}, Channels: []string{"Website", "Newsletter", "LinkedIn", "Instagram", "YouTube", "Podcast"}}
 }
 
 type queryer interface {
@@ -598,7 +602,13 @@ func saveSettings(db *sql.DB, pid string, args map[string]any) (Settings, error)
 		return old, errConflict
 	}
 	s := old
-	if e = patchJSON(&s, args, []string{"brands", "statuses", "formats", "channels", "revision"}); e != nil {
+	if e = patchJSON(&s, args, []string{"brands", "statuses", "formats", "channels", "timezone", "due_time", "revision"}); e != nil {
+		return s, e
+	}
+	if _, e = dueLocation(s); e != nil {
+		return s, e
+	}
+	if _, e = dueOffset(s); e != nil {
 		return s, e
 	}
 	if len(s.Brands) > 100 {

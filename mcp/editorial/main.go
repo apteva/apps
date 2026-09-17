@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 //go:embed apteva.yaml
@@ -28,6 +29,16 @@ var iconSVG []byte
 type App struct {
 	ctx    *sdk.AppCtx
 	writes sync.Mutex
+	// now is injectable so due-window tests can place themselves in time
+	// rather than sleeping against the wall clock.
+	now func() time.Time
+}
+
+func (a *App) clock() time.Time {
+	if a.now != nil {
+		return a.now()
+	}
+	return time.Now()
 }
 
 func main() { sdk.Run(&App{}) }
@@ -45,9 +56,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.ctx = ctx
 	return nil
 }
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	// The SDK fans this out per project on every tick — the pinned project for a
+	// project-scoped install, every project the owner can see for a global one —
+	// so the body only ever handles one project at a time.
+	return []sdk.Worker{{Name: "due_scanner", Schedule: dueSchedule, Run: a.runDueScanner}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{{Method: "GET", Pattern: "/ui/icon.svg", Handler: func(w http.ResponseWriter, r *http.Request) {
@@ -133,8 +149,8 @@ func toolSpecs() []toolSpec {
 		{"releases_update", "Update using current revision. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(releaseFields))}, "id", "revision", "patch")},
 		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
 		{"calendar", "List dated items and channel releases between from and to (YYYY-MM-DD) as one flat, sorted stream. Defaults to the next 30 days. date_field planned_at or deadline; releases appear on planned_at only.", object(properties([]string{"from", "to", "date_field", "brand_id", "include_releases", "limit"}))},
-		{"settings_get", "Read project brands, formats, statuses and channel suggestions.", object(nil)},
-		{"settings_update", "Configure brands, formats, statuses and channels. Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels"}), "revision", "statuses", "formats", "channels")},
+		{"settings_get", "Read project brands, formats, statuses, channel suggestions and the due-date timezone and time.", object(nil)},
+		{"settings_update", "Configure brands, formats, statuses, channels and when a bare date falls due (timezone as an IANA name, due_time as HH:MM). Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels", "timezone", "due_time"}), "revision", "statuses", "formats", "channels")},
 		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records, with optional brand_id to apply saved mappings. Never publishes.", object(properties([]string{"app", "brand_id"}))},
 	}
 	for i := range specs {

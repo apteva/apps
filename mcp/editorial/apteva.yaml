@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.3.3
+version: 0.4.0
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -68,7 +68,15 @@ provides:
           brand_id: {type: string, title: Starting brand, description: "The selection the widget opens on. Empty means every brand; unassigned means content without one. Viewers can switch brands in the widget.", default: ""}
           show_releases: {type: boolean, title: Channel releases, default: true}
           horizon_days: {type: integer, title: Days ahead in list view, default: 30, minimum: 1, maximum: 365}
+  workers:
+    # "@every" is the SDK's only schedule grammar, so a due time is a frequent
+    # tick that asks whether the instant has passed, not a cron expression.
+    - name: due_scanner
+      schedule: "@every 5m"
   publishes:
+    - { name: content.due, description: "A content item reached its planned publication date." }
+    - { name: content.deadline, description: "A content item reached its editorial deadline." }
+    - { name: release.due, description: "A channel release reached its planned publication date." }
     - { name: content.created, description: "A content item was created." }
     - { name: content.updated, description: "Content fields changed, including planning dates and approval." }
     - { name: content.archived, description: "A content item was archived and left every calendar." }
@@ -79,7 +87,7 @@ provides:
     - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.3, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.4.0, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:

@@ -94,3 +94,22 @@ The check now lives in `dispatch`, the one place both doors pass through, so an 
 - End-to-end against a standalone sidecar over real JSON-RPC: `editorial_items_list` with `{"tags":...}` and `{"nonsense":...}` now fail with the accepted list, `{"q":"case-study"}` still returns the tag-only match, and `{"status":"idea"}` is unaffected. The HTTP door still returns 400 and 1 result for the same two cases.
 
 Behaviour change: an MCP caller — including an agent — that passed an argument no tool declares now gets a tool error instead of a silently unfiltered result. That is the intent, and it is the same break v0.3.2 made for HTTP callers.
+
+
+## v0.4.0 due events
+
+Validated on 2026-09-17 on a worktree branched from `main` at editorial/v0.3.3.
+
+A content calendar whose dates did nothing was a drawing of a schedule rather than a schedule: every topic Editorial emitted was an echo of a write someone had just made, and `Workers()` returned nil. This release adds a `due_scanner` worker that emits `content.due`, `content.deadline` and `release.due` when a planning date arrives. Editorial still publishes nothing itself.
+
+Every due payload carries `brand_id` and the human `brand` name, both empty strings for unassigned content so subscribers can route on brand without a settings lookup and without a varying shape.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, `gofmt` — passed, every earlier suite unchanged.
+- The due tests drive an injected clock rather than sleeping, and cover: no replay of dates older than the first scan; exactly one event across repeated scans; a rescheduled date re-arming and firing again; brand, identity and `due_at` on item, deadline and release payloads; empty brand fields for unassigned content; `Australia/Sydney` at `08:00` firing at 21:00 UTC the previous day; an RFC3339 value ignoring both settings; archived items staying quiet; project isolation; the SDK's empty-project tick being a silent no-op; rejection of a bad timezone and three malformed due times; and the manifest declaring the worker and every topic it emits.
+- Migration 002 applied to an existing v0.3.x database in a standalone sidecar — `applied migration file=002_due_notices.sql`, with `editorial_due_notices` and `editorial_due_state` created alongside the original tables and no change to existing rows.
+
+Design notes. The fired marker lives in the app's own table, not on the item: writing it through the record would bump `revision` and 409 anyone with the panel open, append a history snapshot, and risk tripping the approval-reset rule. The due instant is part of the primary key, which is what makes rescheduling re-arm rather than needing an explicit reset. The first scan writes a watermark so installing into a project with a backlog does not stampede the bus, and a 48-hour catch-up floor means a sidecar that was down overnight still delivers recent events without replaying history. Unusable timezone or due-time settings fall back to UTC and 09:00 with a warning rather than wedging the worker for every other project.
+
+Scheduling is `@every 5m` because the SDK's `parseSchedule` accepts only `@every <duration>`; a due time is therefore a frequent check that asks whether the instant has passed, not a cron expression. The platform's worker loop fans out per project — the pinned project for a project-scoped install, `ListProjects()` for a global one — so no fan-out code of our own was needed, and `ListProjects` requires no manifest permission.
+
+Not done: `content.overdue`. "Overdue" means past deadline and still not done, but workflow statuses are project-configurable — `published` is only a default and a project may rename or remove it — so there is no reliable test for "done" without either hardcoding a status name or adding a terminal-status concept to settings. That is a design decision worth taking on its own. Also not done: per-user notifications, digest events, and any UI affordance for what is due today; the widget and panel are unchanged in this release.
