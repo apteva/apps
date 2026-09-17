@@ -76,7 +76,7 @@ type Scenario struct {
 // final state, read back through an app tool.
 type Check struct {
 	Name   string         `json:"name"`
-	Type   string         `json:"type,omitempty"`
+	Type   string         `json:"type,omitempty"` // app_state (default), mcp_state, telemetry, edge_call…
 	App    string         `json:"app,omitempty"`
 	MCP    string         `json:"mcp,omitempty"`
 	Tool   string         `json:"tool,omitempty"`

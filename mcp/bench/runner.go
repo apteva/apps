@@ -186,9 +186,16 @@ func (s *service) ensureSuite(pack *Pack) (*packSuite, error) {
 func checksToAssertions(checks []Check) []map[string]any {
 	assertions := make([]map[string]any, 0, len(checks))
 	for _, check := range checks {
+		// Environments names these types app_state / mcp_state and errors on
+		// anything else, so a check authored without a type — which is the
+		// common case from the panel — must land on app_state rather than on
+		// bench's own shorthand.
 		kind := check.Type
-		if kind == "" {
-			kind = "app"
+		switch kind {
+		case "", "app":
+			kind = "app_state"
+		case "mcp":
+			kind = "mcp_state"
 		}
 		assertion := map[string]any{"name": check.Name, "type": kind}
 		if check.App != "" {

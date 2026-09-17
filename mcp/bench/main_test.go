@@ -631,3 +631,21 @@ func TestManifestDeclaresItsDependenciesAndPermissions(t *testing.T) {
 		}
 	}
 }
+
+func TestChecksMapOntoEnvironmentsAssertionTypes(t *testing.T) {
+	// Environments errors on an unrecognised assertion type, so an untyped
+	// check — what the panel produces by default — must not reach it as
+	// bench's own shorthand.
+	assertions := checksToAssertions([]Check{
+		{Name: "untyped", App: "crm", Tool: "crm_contact_get"},
+		{Name: "shorthand", Type: "app", App: "crm"},
+		{Name: "mcp shorthand", Type: "mcp", MCP: "server"},
+		{Name: "explicit", Type: "telemetry"},
+	})
+	want := []string{"app_state", "app_state", "mcp_state", "telemetry"}
+	for i, expected := range want {
+		if got := assertions[i]["type"]; got != expected {
+			t.Errorf("assertion %d type = %v, want %q", i, got, expected)
+		}
+	}
+}
