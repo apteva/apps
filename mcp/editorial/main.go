@@ -161,43 +161,87 @@ func (a *App) MCPTools() []sdk.Tool {
 // rejects unknown arguments through additionalProperties; HTTP now matches it.
 var infraParams = map[string]bool{"project_id": true, "install_id": true, "api_key": true}
 
+func allowedArgs(op string) map[string]bool {
+	allowed := map[string]bool{}
+	for _, s := range toolSpecs() {
+		if s.name != op {
+			continue
+		}
+		if props, ok := s.schema["properties"].(map[string]any); ok {
+			for k := range props {
+				allowed[k] = true
+			}
+		}
+	}
+	return allowed
+}
+
+func unknownKeys(keys, allowed map[string]bool) []string {
+	out := []string{}
+	for k := range keys {
+		if !allowed[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func acceptedList(allowed map[string]bool) string {
+	names := []string{}
+	for k := range allowed {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// The SDK publishes inputSchema but does not enforce it — tools/call hands a
+// tool its arguments verbatim — so additionalProperties:false is advice to
+// clients, not a guarantee. dispatch is the one place MCP and HTTP both pass
+// through, so an unknown argument fails identically on either door.
+func checkArgs(op string, args map[string]any) error {
+	allowed := allowedArgs(op)
+	keys := map[string]bool{}
+	for k := range args {
+		keys[k] = true
+	}
+	unknown := unknownKeys(keys, allowed)
+	if len(unknown) == 0 {
+		return nil
+	}
+	message := "unknown argument: " + strings.Join(unknown, ", ")
+	if accepted := acceptedList(allowed); accepted != "" {
+		message += "; this operation accepts " + accepted
+	} else {
+		message += "; this operation takes no arguments"
+	}
+	return invalid(message)
+}
+
 func checkQuery(op, method string, query url.Values, idFromPath bool) error {
 	allowed := map[string]bool{}
 	// Only GET carries arguments in the query; POST and PATCH read the body, so
 	// a filter pinned to their query would never have been applied either.
 	if method == http.MethodGet {
-		for _, s := range toolSpecs() {
-			if s.name != op {
-				continue
-			}
-			if props, ok := s.schema["properties"].(map[string]any); ok {
-				for k := range props {
-					allowed[k] = true
-				}
-			}
-		}
+		allowed = allowedArgs(op)
 	}
 	if idFromPath {
 		delete(allowed, "id")
 	}
-	unknown := []string{}
+	keys := map[string]bool{}
 	for k := range query {
-		if !infraParams[k] && !allowed[k] {
-			unknown = append(unknown, k)
+		if !infraParams[k] {
+			keys[k] = true
 		}
 	}
+	unknown := unknownKeys(keys, allowed)
 	if len(unknown) == 0 {
 		return nil
 	}
-	sort.Strings(unknown)
-	accepted := []string{}
-	for k := range allowed {
-		accepted = append(accepted, k)
-	}
-	sort.Strings(accepted)
 	message := "unknown query parameter: " + strings.Join(unknown, ", ")
-	if len(accepted) > 0 {
-		message += "; this operation accepts " + strings.Join(accepted, ", ")
+	if accepted := acceptedList(allowed); accepted != "" {
+		message += "; this operation accepts " + accepted
 	} else {
 		message += "; this operation takes its arguments in the request body"
 	}
@@ -240,11 +284,14 @@ func (a *App) dispatch(ctx *sdk.AppCtx, op string, args map[string]any) (any, er
 	}
 	argsCopy := map[string]any{}
 	for k, v := range args {
-		if k != "project_id" && k != "_project_id" {
+		if !infraParams[k] && k != "_project_id" {
 			argsCopy[k] = v
 		}
 	}
 	args = argsCopy
+	if e := checkArgs(op, args); e != nil {
+		return nil, e
+	}
 	db := ctx.AppDB()
 	switch op {
 	case "items_list":
