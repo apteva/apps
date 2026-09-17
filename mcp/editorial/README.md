@@ -53,8 +53,9 @@ Social currently exposes only the latest 200 posts through `post_list`. A linked
 
 All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in `main.go` for the full surface.
 
-- `GET /items`: filters `q`, `brand_id` (omit for all brands; `unassigned` for records without a brand), `status`, `format`, `owner`, `campaign`, `approval`, `archived` (`false`, `true`, `all`); `limit` (default 100, max 500), `offset`. Returns total, items and their releases. The panel loads all pages before filtering/calendar rendering.
+- `GET /items`: `q` matches title, body, tag values and custom field values, case-insensitively; a custom field's key is not searchable. Filters `brand_id` (omit for all brands; `unassigned` for records without a brand), `status`, `format`, `owner`, `campaign`, `approval`, `archived` (`false`, `true`, `all`); `limit` (default 100, max 500), `offset`. Returns total, items and their releases. The panel loads all pages before filtering/calendar rendering.
 - `POST /items`: title required; other editable fields optional.
+- Unknown query parameters are rejected with HTTP 400 naming what the operation accepts, rather than being ignored — an unrecognised filter used to answer a deliberately narrow query with a full unfiltered page. `POST` and `PATCH` read their arguments from the body, so any argument in their query is refused too. This matches the MCP tools, whose schemas have always rejected unknown arguments. There is still no structured filter on an individual custom field (`fields.<key>=<value>`); search reaches their values, but narrowing by one named field is not yet a filter.
 - `GET /items/:id`: item, releases and latest 100 history snapshots, with `history_truncated`.
 - `PATCH /items/:id`: `{revision, patch}`. Content edits can reset approval.
 - `POST /releases`: `{item_id, channel, ...}`.

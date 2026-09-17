@@ -11,6 +11,8 @@ import (
 	"math"
 	_ "modernc.org/sqlite"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -112,11 +114,17 @@ func properties(keys []string) map[string]any {
 	}
 	return p
 }
-func (a *App) MCPTools() []sdk.Tool {
-	specs := []struct {
-		name, description string
-		schema            map[string]any
-	}{
+
+type toolSpec struct {
+	name, description string
+	schema            map[string]any
+}
+
+// toolSpecs is the single source of truth for every operation's accepted
+// arguments. MCP publishes it as the tool schema; HTTP validates query
+// parameters against it.
+func toolSpecs() []toolSpec {
+	specs := []toolSpec{
 		{"items_list", "List planning items and releases with pagination. archived: false, true or all. brand_id: a brand ID, unassigned, or omit for all brands.", object(properties([]string{"q", "brand_id", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
 		{"items_get", "Read an item, releases and latest 100 history entries.", object(properties([]string{"id"}), "id")},
 		{"items_create", "Create a planning item. Dates: YYYY-MM-DD or RFC3339. No external action.", object(properties(itemFields), "title")},
@@ -129,15 +137,71 @@ func (a *App) MCPTools() []sdk.Tool {
 		{"settings_update", "Configure brands, formats, statuses and channels. Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels"}), "revision", "statuses", "formats", "channels")},
 		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records, with optional brand_id to apply saved mappings. Never publishes.", object(properties([]string{"app", "brand_id"}))},
 	}
-	out := []sdk.Tool{}
-	for _, s := range specs {
-		operation := s.name
-		if operation == "items_list" {
-			s.schema["properties"].(map[string]any)["archived"] = map[string]any{"type": "string", "enum": []string{"false", "true", "all"}}
+	for i := range specs {
+		if specs[i].name == "items_list" {
+			specs[i].schema["properties"].(map[string]any)["archived"] = map[string]any{"type": "string", "enum": []string{"false", "true", "all"}}
 		}
+	}
+	return specs
+}
+
+func (a *App) MCPTools() []sdk.Tool {
+	out := []sdk.Tool{}
+	for _, s := range toolSpecs() {
+		operation := s.name
 		out = append(out, sdk.Tool{Name: "editorial_" + s.name, Description: s.description, InputSchema: s.schema, Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) { return a.dispatch(ctx, operation, args) }})
 	}
 	return out
+}
+
+// The gateway forwards a caller's query untouched apart from project_id, so any
+// other parameter is the caller's own. An unrecognised filter used to be
+// ignored in silence, which answered a deliberately narrow query with a full
+// unfiltered page — the worst possible failure for a filter. MCP already
+// rejects unknown arguments through additionalProperties; HTTP now matches it.
+var infraParams = map[string]bool{"project_id": true, "install_id": true, "api_key": true}
+
+func checkQuery(op, method string, query url.Values, idFromPath bool) error {
+	allowed := map[string]bool{}
+	// Only GET carries arguments in the query; POST and PATCH read the body, so
+	// a filter pinned to their query would never have been applied either.
+	if method == http.MethodGet {
+		for _, s := range toolSpecs() {
+			if s.name != op {
+				continue
+			}
+			if props, ok := s.schema["properties"].(map[string]any); ok {
+				for k := range props {
+					allowed[k] = true
+				}
+			}
+		}
+	}
+	if idFromPath {
+		delete(allowed, "id")
+	}
+	unknown := []string{}
+	for k := range query {
+		if !infraParams[k] && !allowed[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	accepted := []string{}
+	for k := range allowed {
+		accepted = append(accepted, k)
+	}
+	sort.Strings(accepted)
+	message := "unknown query parameter: " + strings.Join(unknown, ", ")
+	if len(accepted) > 0 {
+		message += "; this operation accepts " + strings.Join(accepted, ", ")
+	} else {
+		message += "; this operation takes its arguments in the request body"
+	}
+	return invalid(message)
 }
 
 // Dashboard widgets refresh off the app bus, so every write that can move
@@ -322,6 +386,10 @@ func (a *App) http(w http.ResponseWriter, r *http.Request) {
 		op = "integrations"
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if e := checkQuery(op, r.Method, r.URL.Query(), len(path) >= 2); e != nil {
+		respond(w, nil, e)
 		return
 	}
 	result, e := a.dispatch(ctx, op, args)
