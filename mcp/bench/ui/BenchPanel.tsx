@@ -8,6 +8,11 @@ interface NativePanelProps {
   projectId: string;
 }
 
+interface Scope {
+  projectId: string;
+  installId: number;
+}
+
 interface Budget {
   duration_ms: number;
   cost_usd: number;
@@ -15,14 +20,28 @@ interface Budget {
   turns: number;
 }
 
+interface Check {
+  name: string;
+  type?: string;
+  app?: string;
+  tool?: string;
+  input?: Record<string, unknown>;
+  path?: string;
+  equals?: unknown;
+}
+
 interface Scenario {
   id: string;
   name: string;
   prompt: string;
+  goals?: string[];
   environment_id?: string;
   snapshot_id?: string;
-  checks: unknown[];
+  checks: Check[];
   budget: Budget;
+  timeout_seconds?: number;
+  max_turns?: number;
+  weight?: number;
 }
 
 interface Pack {
@@ -33,9 +52,15 @@ interface Pack {
   version?: string;
   digest?: string;
   scoring_version?: string;
-  source_pack_id?: string;
   scenarios: Scenario[];
   updated_at: string;
+}
+
+interface Target {
+  agent_id: number;
+  agent_name?: string;
+  provider?: string;
+  model?: string;
 }
 
 interface TargetSummary {
@@ -61,6 +86,20 @@ interface Summary {
   targets: TargetSummary[];
 }
 
+interface Result {
+  id: string;
+  scenario_id: string;
+  scenario_name: string;
+  target: Target;
+  trial: number;
+  admission: string;
+  invalid_reason?: string;
+  passed: boolean;
+  score: { score: number; cost_basis?: string };
+  metrics: { duration_ms: number; turns_used: number; tokens_total: number; cost_usd: number; errors: number };
+  error?: string;
+}
+
 interface Run {
   id: string;
   pack_id: string;
@@ -71,6 +110,7 @@ interface Run {
   trials: number;
   status: string;
   summary: Summary;
+  results?: Result[];
   error?: string;
   created_at: string;
 }
@@ -78,7 +118,6 @@ interface Run {
 interface LeaderboardRow {
   label: string;
   runs: number;
-  passed: number;
   pass_rate: number;
   average_score: number;
   average_duration_ms: number;
@@ -87,9 +126,11 @@ interface LeaderboardRow {
   mixed_cost_basis: boolean;
 }
 
-interface Scope {
-  projectId: string;
-  installId: number;
+interface Catalog {
+  agents?: { id: number; name: string; status?: string }[];
+  models?: { gateway_model?: string; provider?: string; model_id?: string }[];
+  environments?: { id: string; name: string }[];
+  snapshots?: { id: string; description?: string }[];
 }
 
 // The platform proxy routes /api/apps/<name>/... by project. An absent
@@ -117,47 +158,69 @@ async function call<T>(path: string, scope: Scope, init?: RequestInit): Promise<
   return response.json();
 }
 
-const pct = (value: number) => `${Math.round(value * 100)}%`;
-const seconds = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`);
-const short = (digest?: string) => (digest ? digest.slice(0, 12) : "");
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+const secs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`);
+const short = (d?: string) => (d ? d.slice(0, 12) : "");
+const modelLabel = (m: Catalog["models"] extends (infer T)[] | undefined ? T : never) =>
+  m.gateway_model || `${m.provider || ""}/${m.model_id || ""}`.replace(/^\//, "");
+
+const btn = "border border-border rounded px-2 py-1 text-sm hover:bg-bg-input disabled:opacity-40";
+const field = "bg-bg-input border border-border rounded px-2 py-1 text-sm w-full";
+const labelCls = "text-xs text-text-dim";
+
+function emptyScenario(): Scenario {
+  return {
+    id: "", name: "", prompt: "", goals: [], environment_id: "", snapshot_id: "",
+    checks: [{ name: "", app: "", tool: "", path: "", equals: "" }],
+    budget: { duration_ms: 120000, cost_usd: 1, tokens_total: 80000, turns: 12 },
+    timeout_seconds: 600, max_turns: 12, weight: 1,
+  };
+}
 
 export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   const [packs, setPacks] = useState<Pack[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
-  const [selectedId, setSelectedId] = useState<string>("");
+  const [catalog, setCatalog] = useState<Catalog>({});
+  const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<"definition" | "runs" | "leaderboard">("definition");
   const [board, setBoard] = useState<LeaderboardRow[]>([]);
   const [status, setStatus] = useState("");
-  const scope = useMemo<Scope>(() => ({ projectId, installId }), [projectId, installId]);
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState<Scenario | null>(null);
+  const [newPackOpen, setNewPackOpen] = useState(false);
+  const [runFormOpen, setRunFormOpen] = useState(false);
+  const [openRun, setOpenRun] = useState<Run | null>(null);
 
+  const scope = useMemo<Scope>(() => ({ projectId, installId }), [projectId, installId]);
   const selected = useMemo(() => packs.find((p) => p.id === selectedId), [packs, selectedId]);
   const packRuns = useMemo(
-    () => runs.filter((run) => !selected || run.pack_digest === selected.digest),
+    () => (selected ? runs.filter((r) => r.pack_digest === selected.digest || r.pack_id === selected.id) : runs),
     [runs, selected],
   );
 
   const refresh = useCallback(async () => {
     if (!projectId) return;
     try {
-      const [nextPacks, nextRuns] = await Promise.all([
+      const [p, r] = await Promise.all([
         call<Pack[]>("/api/packs", scope),
         call<Run[]>("/api/runs?limit=50", scope),
       ]);
-      setPacks(nextPacks || []);
-      setRuns(nextRuns || []);
-      setSelectedId((current) => current || nextPacks?.[0]?.id || "");
-    } catch (error) {
-      setStatus(String(error));
+      setPacks(p || []);
+      setRuns(r || []);
+      setSelectedId((cur) => cur || p?.[0]?.id || "");
+    } catch (e) {
+      setStatus(String(e));
     }
   }, [projectId, scope]);
 
   useEffect(() => {
     if (!projectId) return;
     void refresh();
+    call<Catalog>("/api/catalog", scope).then(setCatalog).catch(() => setCatalog({}));
     // Runs advance on a 5s worker tick; match it rather than poll harder.
     const timer = setInterval(() => void refresh(), 5000);
     return () => clearInterval(timer);
-  }, [refresh, projectId]);
+  }, [refresh, projectId, scope]);
 
   useEffect(() => {
     if (tab !== "leaderboard" || !selected?.digest || !projectId) {
@@ -165,38 +228,24 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
       return;
     }
     call<{ rows: LeaderboardRow[] }>(`/api/packs/${selected.id}/leaderboard`, scope)
-      .then((result) => setBoard(result.rows || []))
-      .catch((error) => setStatus(String(error)));
+      .then((r) => setBoard(r.rows || []))
+      .catch((e) => setStatus(String(e)));
   }, [tab, selected, projectId, scope]);
 
-  const seal = async (pack: Pack) => {
+  const act = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(true);
     setStatus("");
     try {
-      const sealed = await call<Pack>(`/api/packs/${pack.id}/seal`, scope, { method: "POST", body: "{}" });
+      await fn();
       await refresh();
-      setSelectedId(sealed.id);
-      setStatus(`Sealed ${sealed.name} v${sealed.version} · ${short(sealed.digest)}`);
-    } catch (error) {
-      setStatus(String(error));
+      if (label) setStatus(label);
+    } catch (e) {
+      setStatus(String(e));
+    } finally {
+      setBusy(false);
     }
   };
 
-  const fork = async (pack: Pack) => {
-    setStatus("");
-    try {
-      const draft = await call<Pack>(`/api/packs/${pack.id}/fork`, scope, { method: "POST", body: "{}" });
-      await refresh();
-      setSelectedId(draft.id);
-    } catch (error) {
-      setStatus(String(error));
-    }
-  };
-
-  const drafts = packs.filter((pack) => pack.state === "draft");
-  const sealed = packs.filter((pack) => pack.state === "sealed");
-
-  // Without a project the proxy cannot resolve a project-scoped install, so
-  // say so rather than firing requests that would 404.
   if (!projectId) {
     return (
       <div className="h-full flex items-center justify-center bg-bg text-text-dim text-sm">
@@ -205,33 +254,36 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
     );
   }
 
+  const drafts = packs.filter((p) => p.state === "draft");
+  const sealed = packs.filter((p) => p.state === "sealed");
+  const isDraft = selected?.state === "draft";
+
   return (
     <div className="h-full flex flex-col bg-bg text-text">
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
         <span className="font-medium">Bench</span>
         {selected && (
           <span className="text-xs text-text-dim">
-            {selected.state === "sealed"
-              ? `v${selected.version} · ${short(selected.digest)}`
-              : "draft · not runnable until sealed"}
+            {selected.state === "sealed" ? `v${selected.version} · ${short(selected.digest)}` : "draft · seal to run"}
           </span>
         )}
-        {status && <span className="ml-auto text-xs text-text-dim truncate max-w-[40%]">{status}</span>}
+        {status && <span className="ml-auto text-xs text-text-dim truncate max-w-[45%]">{status}</span>}
       </div>
 
-      <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: "260px 1fr" }}>
+      <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: "250px 1fr" }}>
         <div className="border-r border-border overflow-auto p-3 flex flex-col gap-3">
+          <button className={btn} onClick={() => setNewPackOpen(true)}>+ New benchmark</button>
           <PackGroup label="Drafts" packs={drafts} selectedId={selectedId} onSelect={setSelectedId} />
           <PackGroup label="Sealed" packs={sealed} selectedId={selectedId} onSelect={setSelectedId} />
           {packs.length === 0 && (
             <div className="text-xs text-text-dim">
-              No packs yet. Create one with the <code>bench_pack_create</code> tool, add scenarios, then seal it.
+              No benchmarks yet. Create one, add scenarios, then seal it to make it runnable.
             </div>
           )}
         </div>
 
         <div className="overflow-auto p-4 flex flex-col gap-4">
-          {!selected && <div className="text-sm text-text-dim">Select a pack.</div>}
+          {!selected && <div className="text-sm text-text-dim">Select or create a benchmark.</div>}
 
           {selected && (
             <>
@@ -241,67 +293,122 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
                   <div className="text-xs text-text-dim">{selected.description || "No description."}</div>
                 </div>
                 <div className="flex gap-2">
-                  {selected.state === "draft" && (
-                    <button className="border border-border rounded px-2 py-1 text-sm" onClick={() => void seal(selected)}>
-                      Seal version
+                  {isDraft && (
+                    <button className={btn} disabled={busy || selected.scenarios.length === 0}
+                      onClick={() => act("", async () => {
+                        const s = await call<Pack>(`/api/packs/${selected.id}/seal`, scope, { method: "POST", body: "{}" });
+                        setSelectedId(s.id);
+                        setStatus(`Sealed v${s.version} · ${short(s.digest)}`);
+                      })}>Seal version</button>
+                  )}
+                  {!isDraft && (
+                    <button className={btn} disabled={busy} onClick={() => { setRunFormOpen(true); setTab("runs"); }}>
+                      Run benchmark
                     </button>
                   )}
-                  <button className="border border-border rounded px-2 py-1 text-sm" onClick={() => void fork(selected)}>
-                    Fork to draft
-                  </button>
+                  <button className={btn} disabled={busy}
+                    onClick={() => act("Forked to a new draft.", async () => {
+                      const d = await call<Pack>(`/api/packs/${selected.id}/fork`, scope, { method: "POST", body: "{}" });
+                      setSelectedId(d.id);
+                    })}>Fork</button>
+                  <button className={btn} disabled={busy}
+                    onClick={() => {
+                      if (!confirm(`Delete "${selected.name}"? This cannot be undone.`)) return;
+                      void act("Deleted.", async () => {
+                        await call(`/api/packs/${selected.id}`, scope, { method: "DELETE" });
+                        setSelectedId("");
+                      });
+                    }}>Delete</button>
                 </div>
               </div>
 
               <div className="flex gap-2 text-sm border-b border-border">
-                {(["definition", "runs", "leaderboard"] as const).map((key) => (
-                  <button
-                    key={key}
-                    onClick={() => setTab(key)}
-                    className={`px-2 py-1 border-b-2 ${tab === key ? "border-text" : "border-transparent text-text-dim"}`}
-                  >
-                    {key[0].toUpperCase() + key.slice(1)}
+                {(["definition", "runs", "leaderboard"] as const).map((k) => (
+                  <button key={k} onClick={() => setTab(k)}
+                    className={`px-2 py-1 border-b-2 ${tab === k ? "border-text" : "border-transparent text-text-dim"}`}>
+                    {k[0].toUpperCase() + k.slice(1)}
                   </button>
                 ))}
               </div>
 
-              {tab === "definition" && <Definition pack={selected} />}
-              {tab === "runs" && <Runs runs={packRuns} />}
+              {tab === "definition" && (
+                <Definition pack={selected} isDraft={!!isDraft}
+                  onAdd={() => setEditing(emptyScenario())}
+                  onEdit={(s) => setEditing({ ...s })}
+                  onDelete={(sid) => act("Scenario removed.", () =>
+                    call(`/api/packs/${selected.id}/scenarios/${encodeURIComponent(sid)}`, scope, { method: "DELETE" }))}
+                />
+              )}
+
+              {tab === "runs" && (
+                <Runs runs={packRuns} busy={busy}
+                  onNew={() => setRunFormOpen(true)}
+                  onOpen={async (id) => {
+                    try { setOpenRun(await call<Run>(`/api/runs/${id}`, scope)); }
+                    catch (e) { setStatus(String(e)); }
+                  }}
+                  onCancel={(id) => act("Run cancelled.", () =>
+                    call(`/api/runs/${id}/cancel`, scope, { method: "POST", body: "{}" }))}
+                  runnable={!isDraft}
+                />
+              )}
+
               {tab === "leaderboard" && <Leaderboard pack={selected} rows={board} />}
             </>
           )}
         </div>
       </div>
+
+      {newPackOpen && (
+        <NewPackForm busy={busy} onClose={() => setNewPackOpen(false)}
+          onSave={(name, description) => act("Benchmark created.", async () => {
+            const p = await call<Pack>("/api/packs", scope, { method: "POST", body: JSON.stringify({ name, description }) });
+            setSelectedId(p.id);
+            setNewPackOpen(false);
+          })} />
+      )}
+
+      {editing && selected && (
+        <ScenarioForm scenario={editing} catalog={catalog} busy={busy}
+          onClose={() => setEditing(null)}
+          onSave={(s) => act("Scenario saved.", async () => {
+            await call(`/api/packs/${selected.id}/scenarios`, scope, { method: "PUT", body: JSON.stringify(s) });
+            setEditing(null);
+          })} />
+      )}
+
+      {runFormOpen && selected && (
+        <RunForm pack={selected} catalog={catalog} busy={busy}
+          onClose={() => setRunFormOpen(false)}
+          onSave={(targets, trials, name) => act("Run queued.", async () => {
+            await call("/api/runs", scope, {
+              method: "POST",
+              body: JSON.stringify({ pack_id: selected.id, name, targets, trials }),
+            });
+            setRunFormOpen(false);
+            setTab("runs");
+          })} />
+      )}
+
+      {openRun && <RunDetail run={openRun} onClose={() => setOpenRun(null)} />}
     </div>
   );
 }
 
-function PackGroup({
-  label,
-  packs,
-  selectedId,
-  onSelect,
-}: {
-  label: string;
-  packs: Pack[];
-  selectedId: string;
-  onSelect: (id: string) => void;
+function PackGroup({ label, packs, selectedId, onSelect }: {
+  label: string; packs: Pack[]; selectedId: string; onSelect: (id: string) => void;
 }) {
   if (packs.length === 0) return null;
   return (
     <div className="flex flex-col gap-1">
       <div className="text-xs text-text-dim uppercase tracking-wide">{label}</div>
-      {packs.map((pack) => (
-        <button
-          key={pack.id}
-          onClick={() => onSelect(pack.id)}
-          className={`text-left border rounded px-2 py-1.5 ${
-            pack.id === selectedId ? "border-text" : "border-border"
-          }`}
-        >
-          <div className="font-medium text-sm">{pack.name}</div>
+      {packs.map((p) => (
+        <button key={p.id} onClick={() => onSelect(p.id)}
+          className={`text-left border rounded px-2 py-1.5 ${p.id === selectedId ? "border-text" : "border-border"}`}>
+          <div className="font-medium text-sm">{p.name}</div>
           <div className="text-xs text-text-dim">
-            {pack.state === "sealed" ? `v${pack.version} · ${short(pack.digest)}` : "draft"} ·{" "}
-            {pack.scenarios?.length || 0} scenario{(pack.scenarios?.length || 0) === 1 ? "" : "s"}
+            {p.state === "sealed" ? `v${p.version} · ${short(p.digest)}` : "draft"} · {p.scenarios?.length || 0} scenario
+            {(p.scenarios?.length || 0) === 1 ? "" : "s"}
           </div>
         </button>
       ))}
@@ -309,80 +416,338 @@ function PackGroup({
   );
 }
 
-function Definition({ pack }: { pack: Pack }) {
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-6" onClick={onClose}>
+      <div className="bg-bg border border-border rounded w-full max-w-2xl max-h-full overflow-auto"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-border px-4 py-2">
+          <span className="font-medium text-sm">{title}</span>
+          <button className="text-text-dim text-sm" onClick={onClose}>✕</button>
+        </div>
+        <div className="p-4 flex flex-col gap-3">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function NewPackForm({ busy, onSave, onClose }: {
+  busy: boolean; onSave: (n: string, d: string) => void; onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  return (
+    <Modal title="New benchmark" onClose={onClose}>
+      <label className={labelCls}>Name</label>
+      <input className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Apteva Core" />
+      <label className={labelCls}>Description</label>
+      <textarea className={field} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+      <div className="flex justify-end gap-2">
+        <button className={btn} onClick={onClose}>Cancel</button>
+        <button className={btn} disabled={busy || !name.trim()} onClick={() => onSave(name, description)}>Create</button>
+      </div>
+    </Modal>
+  );
+}
+
+function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
+  scenario: Scenario; catalog: Catalog; busy: boolean; onSave: (s: Scenario) => void; onClose: () => void;
+}) {
+  const [s, setS] = useState<Scenario>(scenario);
+  const set = (patch: Partial<Scenario>) => setS((cur) => ({ ...cur, ...patch }));
+  const setBudget = (patch: Partial<Budget>) => setS((cur) => ({ ...cur, budget: { ...cur.budget, ...patch } }));
+  const setCheck = (i: number, patch: Partial<Check>) =>
+    setS((cur) => ({ ...cur, checks: cur.checks.map((c, j) => (j === i ? { ...c, ...patch } : c)) }));
+
+  // `equals` is typed as unknown server-side: try JSON so 91 and true keep
+  // their types, and fall back to the raw string for ordinary values.
+  const parseEquals = (raw: string): unknown => {
+    const t = raw.trim();
+    if (t === "") return "";
+    try { return JSON.parse(t); } catch { return raw; }
+  };
+  const showEquals = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? ""));
+
+  return (
+    <Modal title={scenario.id ? `Edit ${scenario.name}` : "Add scenario"} onClose={onClose}>
+      <label className={labelCls}>Name</label>
+      <input className={field} value={s.name} onChange={(e) => set({ name: e.target.value })}
+        placeholder="Create then update a contact" />
+
+      <label className={labelCls}>Prompt — what the agent is asked to do</label>
+      <textarea className={field} rows={4} value={s.prompt} onChange={(e) => set({ prompt: e.target.value })} />
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>Environment</label>
+          <select className={field} value={s.environment_id || ""} onChange={(e) => set({ environment_id: e.target.value })}>
+            <option value="">— none —</option>
+            {(catalog.environments || []).map((e) => <option key={e.id} value={e.id}>{e.name || e.id}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className={labelCls}>Or pinned snapshot</label>
+          <select className={field} value={s.snapshot_id || ""} onChange={(e) => set({ snapshot_id: e.target.value })}>
+            <option value="">— none —</option>
+            {(catalog.snapshots || []).map((x) => <option key={x.id} value={x.id}>{x.description || x.id}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="text-xs text-text-dim">
+        A scenario needs one of these — sealing refuses a world it cannot reproduce.
+      </div>
+
+      <div className="flex items-center justify-between pt-2">
+        <span className={labelCls}>Final-state checks — what must be true when the agent stops</span>
+        <button className={btn} onClick={() => set({ checks: [...s.checks, { name: "", app: "", tool: "", path: "", equals: "" }] })}>
+          + Check
+        </button>
+      </div>
+      {s.checks.map((c, i) => (
+        <div key={i} className="border border-border rounded p-2 grid grid-cols-6 gap-2 items-end">
+          <div className="col-span-2">
+            <label className={labelCls}>Name</label>
+            <input className={field} value={c.name} onChange={(e) => setCheck(i, { name: e.target.value })} />
+          </div>
+          <div>
+            <label className={labelCls}>App</label>
+            <input className={field} value={c.app || ""} onChange={(e) => setCheck(i, { app: e.target.value })} placeholder="crm" />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Tool</label>
+            <input className={field} value={c.tool || ""} onChange={(e) => setCheck(i, { tool: e.target.value })} placeholder="crm_contact_get" />
+          </div>
+          <button className={btn} onClick={() => set({ checks: s.checks.filter((_, j) => j !== i) })}>Remove</button>
+          <div className="col-span-3">
+            <label className={labelCls}>Tool input (JSON)</label>
+            <input className={field} defaultValue={JSON.stringify(c.input || {})}
+              onChange={(e) => { try { setCheck(i, { input: JSON.parse(e.target.value || "{}") }); } catch { /* keep typing */ } }} />
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Path</label>
+            <input className={field} value={c.path || ""} onChange={(e) => setCheck(i, { path: e.target.value })} placeholder="lifecycle" />
+          </div>
+          <div>
+            <label className={labelCls}>Equals</label>
+            <input className={field} value={showEquals(c.equals)} onChange={(e) => setCheck(i, { equals: parseEquals(e.target.value) })} />
+          </div>
+        </div>
+      ))}
+
+      <div className={labelCls + " pt-2"}>Budgets — full efficiency points at or under, zero at twice</div>
+      <div className="grid grid-cols-4 gap-3">
+        <div>
+          <label className={labelCls}>Duration (s)</label>
+          <input className={field} type="number" value={Math.round(s.budget.duration_ms / 1000)}
+            onChange={(e) => setBudget({ duration_ms: Number(e.target.value) * 1000 })} />
+        </div>
+        <div>
+          <label className={labelCls}>Turns</label>
+          <input className={field} type="number" value={s.budget.turns}
+            onChange={(e) => setBudget({ turns: Number(e.target.value) })} />
+        </div>
+        <div>
+          <label className={labelCls}>Tokens</label>
+          <input className={field} type="number" value={s.budget.tokens_total}
+            onChange={(e) => setBudget({ tokens_total: Number(e.target.value) })} />
+        </div>
+        <div>
+          <label className={labelCls}>Cost (USD)</label>
+          <input className={field} type="number" step="0.01" value={s.budget.cost_usd}
+            onChange={(e) => setBudget({ cost_usd: Number(e.target.value) })} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div>
+          <label className={labelCls}>Timeout (s)</label>
+          <input className={field} type="number" value={s.timeout_seconds || 600}
+            onChange={(e) => set({ timeout_seconds: Number(e.target.value) })} />
+        </div>
+        <div>
+          <label className={labelCls}>Max turns</label>
+          <input className={field} type="number" value={s.max_turns || 12}
+            onChange={(e) => set({ max_turns: Number(e.target.value) })} />
+        </div>
+      </div>
+
+      <div className="flex justify-end gap-2 pt-2">
+        <button className={btn} onClick={onClose}>Cancel</button>
+        <button className={btn} disabled={busy || !s.name.trim() || !s.prompt.trim()}
+          onClick={() => onSave({ ...s, checks: s.checks.filter((c) => c.name.trim() || c.tool?.trim()) })}>
+          Save scenario
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function RunForm({ pack, catalog, busy, onSave, onClose }: {
+  pack: Pack; catalog: Catalog; busy: boolean;
+  onSave: (targets: Target[], trials: number, name: string) => void; onClose: () => void;
+}) {
+  const [targets, setTargets] = useState<Target[]>([{ agent_id: 0, provider: "", model: "" }]);
+  const [trials, setTrials] = useState(3);
+  const [name, setName] = useState("");
+  const setTarget = (i: number, patch: Partial<Target>) =>
+    setTargets((cur) => cur.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+  const valid = targets.some((t) => t.agent_id > 0);
+
+  return (
+    <Modal title={`Run ${pack.name} v${pack.version}`} onClose={onClose}>
+      <label className={labelCls}>Run name (optional)</label>
+      <input className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="gpt-5.5 vs kimi-k3" />
+
+      <div className="flex items-center justify-between pt-2">
+        <span className={labelCls}>Targets — each is one agent, optionally pinned to a provider and model</span>
+        <button className={btn} onClick={() => setTargets([...targets, { agent_id: 0, provider: "", model: "" }])}>
+          + Target
+        </button>
+      </div>
+      {targets.map((t, i) => (
+        <div key={i} className="border border-border rounded p-2 grid grid-cols-5 gap-2 items-end">
+          <div className="col-span-2">
+            <label className={labelCls}>Agent</label>
+            <select className={field} value={t.agent_id || ""}
+              onChange={(e) => {
+                const id = Number(e.target.value);
+                const a = (catalog.agents || []).find((x) => x.id === id);
+                setTarget(i, { agent_id: id, agent_name: a?.name });
+              }}>
+              <option value="">— select —</option>
+              {(catalog.agents || []).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+          <div className="col-span-2">
+            <label className={labelCls}>Model (optional)</label>
+            <select className={field} value={t.model || ""}
+              onChange={(e) => {
+                const m = (catalog.models || []).find((x) => modelLabel(x) === e.target.value);
+                setTarget(i, { model: e.target.value, provider: m?.provider || t.provider });
+              }}>
+              <option value="">— agent default —</option>
+              {(catalog.models || []).map((m) => {
+                const l = modelLabel(m);
+                return <option key={l} value={l}>{l}</option>;
+              })}
+            </select>
+          </div>
+          <button className={btn} onClick={() => setTargets(targets.filter((_, j) => j !== i))}>Remove</button>
+        </div>
+      ))}
+
+      <div className="grid grid-cols-2 gap-3 pt-2">
+        <div>
+          <label className={labelCls}>Trials per target</label>
+          <input className={field} type="number" min={1} value={trials}
+            onChange={(e) => setTrials(Math.max(1, Number(e.target.value)))} />
+        </div>
+        <div className="text-xs text-text-dim self-end">
+          {pack.scenarios.length} scenario{pack.scenarios.length === 1 ? "" : "s"} × {targets.length} target
+          {targets.length === 1 ? "" : "s"} × {trials} = {pack.scenarios.length * targets.length * trials} runs
+        </div>
+      </div>
+
+      <div className="flex justify-end gap-2 pt-2">
+        <button className={btn} onClick={onClose}>Cancel</button>
+        <button className={btn} disabled={busy || !valid}
+          onClick={() => onSave(targets.filter((t) => t.agent_id > 0), trials, name)}>Queue run</button>
+      </div>
+    </Modal>
+  );
+}
+
+function Definition({ pack, isDraft, onAdd, onEdit, onDelete }: {
+  pack: Pack; isDraft: boolean; onAdd: () => void;
+  onEdit: (s: Scenario) => void; onDelete: (id: string) => void;
+}) {
   return (
     <div className="flex flex-col gap-3">
       {pack.state === "sealed" && (
         <div className="text-xs text-text-dim border border-border rounded p-2">
-          Scoring contract <code>{pack.scoring_version}</code>. Results are only comparable with other runs of
-          this digest under the same contract.
+          Sealed under <code>{pack.scoring_version}</code>. Immutable — fork it to change anything.
         </div>
       )}
-      {(pack.scenarios || []).map((scenario) => (
-        <div key={scenario.id} className="border border-border rounded p-3 flex flex-col gap-2">
+      {isDraft && (
+        <div className="flex justify-end"><button className={btn} onClick={onAdd}>+ Add scenario</button></div>
+      )}
+      {(pack.scenarios || []).map((s) => (
+        <div key={s.id} className="border border-border rounded p-3 flex flex-col gap-2">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <div className="font-medium text-sm">{scenario.name}</div>
-              <div className="text-xs text-text-dim">{scenario.id}</div>
+              <div className="font-medium text-sm">{s.name}</div>
+              <div className="text-xs text-text-dim">{s.id}</div>
             </div>
-            <div className="text-xs text-text-dim">
-              {scenario.checks?.length || 0} check{(scenario.checks?.length || 0) === 1 ? "" : "s"}
+            <div className="flex gap-2 items-center">
+              <span className="text-xs text-text-dim">{s.checks?.length || 0} check{(s.checks?.length || 0) === 1 ? "" : "s"}</span>
+              {isDraft && <button className={btn} onClick={() => onEdit(s)}>Edit</button>}
+              {isDraft && <button className={btn} onClick={() => onDelete(s.id)}>Remove</button>}
             </div>
           </div>
-          <div className="text-sm">{scenario.prompt}</div>
+          <div className="text-sm">{s.prompt}</div>
           <div className="text-xs text-text-dim flex flex-wrap gap-3">
-            <span>≤ {seconds(scenario.budget.duration_ms)}</span>
-            <span>≤ {scenario.budget.turns} turns</span>
-            <span>≤ {scenario.budget.tokens_total.toLocaleString()} tokens</span>
-            {scenario.budget.cost_usd > 0 && <span>≤ ${scenario.budget.cost_usd}</span>}
-            <span>{scenario.snapshot_id || scenario.environment_id || "no pinned world"}</span>
+            <span>≤ {secs(s.budget.duration_ms)}</span>
+            <span>≤ {s.budget.turns} turns</span>
+            <span>≤ {s.budget.tokens_total.toLocaleString()} tokens</span>
+            {s.budget.cost_usd > 0 && <span>≤ ${s.budget.cost_usd}</span>}
+            <span>{s.snapshot_id || s.environment_id || "no pinned world"}</span>
           </div>
         </div>
       ))}
       {(pack.scenarios || []).length === 0 && (
         <div className="text-sm text-text-dim">
-          No scenarios. Add them with <code>bench_scenario_put</code>.
+          No scenarios yet. {isDraft ? "Add one to describe a task, the world it runs in, and what must be true afterwards." : ""}
         </div>
       )}
     </div>
   );
 }
 
-function Runs({ runs }: { runs: Run[] }) {
-  if (runs.length === 0) return <div className="text-sm text-text-dim">No runs for this pack yet.</div>;
+function Runs({ runs, busy, runnable, onNew, onOpen, onCancel }: {
+  runs: Run[]; busy: boolean; runnable: boolean;
+  onNew: () => void; onOpen: (id: string) => void; onCancel: (id: string) => void;
+}) {
   return (
     <div className="flex flex-col gap-3">
-      {runs.map((run) => (
-        <div key={run.id} className="border border-border rounded p-3 flex flex-col gap-2">
+      <div className="flex justify-end">
+        <button className={btn} disabled={busy || !runnable} onClick={onNew}
+          title={runnable ? "" : "Seal the benchmark before running it"}>+ New run</button>
+      </div>
+      {runs.length === 0 && <div className="text-sm text-text-dim">No runs yet.</div>}
+      {runs.map((r) => (
+        <div key={r.id} className="border border-border rounded p-3 flex flex-col gap-2">
           <div className="flex items-start justify-between gap-4">
             <div>
-              <div className="font-medium text-sm">{run.name || run.id}</div>
+              <div className="font-medium text-sm">{r.name || r.id}</div>
               <div className="text-xs text-text-dim">
-                {run.status} · {run.trials} trial{run.trials === 1 ? "" : "s"} ·{" "}
-                {new Date(run.created_at).toLocaleString()}
+                {r.status} · {r.trials} trial{r.trials === 1 ? "" : "s"} · {new Date(r.created_at).toLocaleString()}
               </div>
             </div>
-            {run.summary?.verified > 0 && (
-              <div className="text-right">
-                <div className="font-medium text-sm">{pct(run.summary.pass_rate)}</div>
-                <div className="text-xs text-text-dim">{run.summary.average_score}/100</div>
-              </div>
-            )}
+            <div className="flex items-center gap-3">
+              {r.summary?.verified > 0 && (
+                <div className="text-right">
+                  <div className="font-medium text-sm">{pct(r.summary.pass_rate)}</div>
+                  <div className="text-xs text-text-dim">{r.summary.average_score}/100</div>
+                </div>
+              )}
+              <button className={btn} onClick={() => onOpen(r.id)}>Results</button>
+              {(r.status === "queued" || r.status === "running") && (
+                <button className={btn} disabled={busy} onClick={() => onCancel(r.id)}>Cancel</button>
+              )}
+            </div>
           </div>
-          {run.error && <div className="text-xs text-text-dim">{run.error}</div>}
-          {run.summary?.invalid > 0 && (
+          {r.error && <div className="text-xs text-text-dim">{r.error}</div>}
+          {r.summary?.invalid > 0 && (
             <div className="text-xs text-text-dim">
-              {run.summary.invalid} result{run.summary.invalid === 1 ? "" : "s"} withheld as harness failures —
-              excluded from the pass rate.
+              {r.summary.invalid} withheld as harness failures — excluded from the pass rate.
             </div>
           )}
-          {(run.summary?.targets || []).map((target) => (
-            <div key={target.target_index} className="text-xs flex justify-between gap-4 border-t border-border pt-1">
-              <span>{target.label}</span>
+          {(r.summary?.targets || []).map((t) => (
+            <div key={t.target_index} className="text-xs flex justify-between gap-4 border-t border-border pt-1">
+              <span>{t.label}</span>
               <span className="text-text-dim">
-                {pct(target.pass_rate)} · {target.average_score}/100 · {seconds(target.average_duration_ms)} ·{" "}
-                {Math.round(target.average_tokens).toLocaleString()} tok
-                {target.invalid > 0 ? ` · ${target.invalid} withheld` : ""}
+                {pct(t.pass_rate)} · {t.average_score}/100 · {secs(t.average_duration_ms)} ·{" "}
+                {Math.round(t.average_tokens).toLocaleString()} tok{t.invalid > 0 ? ` · ${t.invalid} withheld` : ""}
               </span>
             </div>
           ))}
@@ -392,26 +757,56 @@ function Runs({ runs }: { runs: Run[] }) {
   );
 }
 
+function RunDetail({ run, onClose }: { run: Run; onClose: () => void }) {
+  return (
+    <Modal title={run.name || run.id} onClose={onClose}>
+      <div className="text-xs text-text-dim">
+        {run.pack_name} v{run.pack_version} · {short(run.pack_digest)} · {run.status}
+      </div>
+      <table className="text-sm w-full">
+        <thead className="text-xs text-text-dim">
+          <tr className="text-left border-b border-border">
+            <th className="py-1">Scenario</th><th>Target</th><th>Trial</th><th>Outcome</th><th>Score</th><th>Duration</th><th>Tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          {(run.results || []).map((r) => (
+            <tr key={r.id} className="border-b border-border">
+              <td className="py-1">{r.scenario_name}</td>
+              <td>{r.target?.model || r.target?.agent_name || "—"}</td>
+              <td>{r.trial}</td>
+              <td>
+                {r.admission === "invalid"
+                  ? <span className="text-text-dim" title={r.invalid_reason}>withheld</span>
+                  : r.passed ? "pass" : "fail"}
+              </td>
+              <td>{r.admission === "invalid" ? "—" : r.score?.score}</td>
+              <td>{r.admission === "invalid" ? "—" : secs(r.metrics?.duration_ms || 0)}</td>
+              <td>{r.admission === "invalid" ? "—" : (r.metrics?.tokens_total || 0).toLocaleString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {(run.results || []).length === 0 && <div className="text-sm text-text-dim">No results recorded.</div>}
+    </Modal>
+  );
+}
+
 function Leaderboard({ pack, rows }: { pack: Pack; rows: LeaderboardRow[] }) {
   if (pack.state !== "sealed") {
-    return <div className="text-sm text-text-dim">Only sealed packs have a leaderboard. Seal a version first.</div>;
+    return <div className="text-sm text-text-dim">Only sealed benchmarks have a leaderboard. Seal a version first.</div>;
   }
   if (rows.length === 0) return <div className="text-sm text-text-dim">No admitted results yet.</div>;
   return (
     <div className="flex flex-col gap-2">
       <div className="text-xs text-text-dim">
-        Every admitted result for digest <code>{short(pack.digest)}</code> under <code>{pack.scoring_version}</code>.
+        Every admitted result for <code>{short(pack.digest)}</code> under <code>{pack.scoring_version}</code>.
         Ranked by pass rate; score breaks ties.
       </div>
       <table className="text-sm w-full">
         <thead className="text-xs text-text-dim">
           <tr className="text-left border-b border-border">
-            <th className="py-1">Target</th>
-            <th>Pass</th>
-            <th>Score</th>
-            <th>Duration</th>
-            <th>Tokens</th>
-            <th>Runs</th>
+            <th className="py-1">Target</th><th>Pass</th><th>Score</th><th>Duration</th><th>Tokens</th><th>Runs</th>
           </tr>
         </thead>
         <tbody>
@@ -419,16 +814,11 @@ function Leaderboard({ pack, rows }: { pack: Pack; rows: LeaderboardRow[] }) {
             <tr key={row.label} className="border-b border-border">
               <td className="py-1">
                 {row.label}
-                {row.mixed_cost_basis && (
-                  <span className="text-xs text-text-dim" title="Some runs priced in cost, others in tokens">
-                    {" "}
-                    · mixed basis
-                  </span>
-                )}
+                {row.mixed_cost_basis && <span className="text-xs text-text-dim" title="Some runs priced in cost, others in tokens"> · mixed basis</span>}
               </td>
               <td>{pct(row.pass_rate)}</td>
               <td>{row.average_score}</td>
-              <td>{seconds(row.average_duration_ms)}</td>
+              <td>{secs(row.average_duration_ms)}</td>
               <td>{Math.round(row.average_tokens).toLocaleString()}</td>
               <td className="text-text-dim">{row.runs}</td>
             </tr>

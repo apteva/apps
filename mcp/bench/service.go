@@ -303,24 +303,25 @@ func slugify(value string) string {
 // ---- catalog ----
 
 func (s *service) catalog() (map[string]any, error) {
+	// Evals already aggregates agents, models, and Environments for its own
+	// target picker. Reusing it keeps one catalog shape across both apps and
+	// spares bench a dependency on llm just to list models.
 	catalog := map[string]any{}
-	var environmentCatalog map[string]any
-	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &environmentCatalog); err != nil {
-		return nil, fmt.Errorf("environments catalog: %w", err)
+	if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_catalog", map[string]any{}, &catalog); err != nil {
+		return nil, fmt.Errorf("evals catalog: %w", err)
 	}
-	for key, value := range environmentCatalog {
-		catalog[key] = value
+	if catalog == nil {
+		catalog = map[string]any{}
 	}
-	var environments []map[string]any
-	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_list", map[string]any{}, &environments); err == nil {
-		catalog["environments"] = environments
-	}
+	// Snapshots are a bench-specific way to pin a scenario's world, so they are
+	// fetched directly rather than relying on what Evals happens to surface.
 	var snapshots []map[string]any
 	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_snapshot_list", map[string]any{}, &snapshots); err == nil {
 		catalog["snapshots"] = snapshots
 	}
 	catalog["scoring_version"] = ScoringVersion
 	catalog["scoring_formula"] = ScoringFormula
+	catalog["scoring_weights"] = ScoreWeights
 	return catalog, nil
 }
 
