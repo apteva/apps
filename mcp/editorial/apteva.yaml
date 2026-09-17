@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: editorial
 display_name: Editorial
-version: 0.3.1
+version: 0.3.2
 description: Standalone editorial calendar and content operations. Plan ideas, briefs, articles, videos, podcasts, campaigns and refreshes with owners, approvals and channel-specific releases. No other apps required.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/editorial
@@ -29,7 +29,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: editorial_items_list, description: "Search content items. Filter q, status, format, owner, campaign, approval, archived; limit/offset pagination." }
+    - { name: editorial_items_list, description: "Search content items. q matches title, body, tags and custom field values. Filter status, format, owner, campaign, approval, brand_id, archived; limit/offset pagination." }
     - { name: editorial_items_get, description: "Read an item, its channel-specific releases, and history." }
     - { name: editorial_items_create, description: "Create a planning item. Only title is required. Does not publish or schedule external delivery." }
     - { name: editorial_items_update, description: "Patch an item using id, revision and patch. Content changes reset an existing approval to pending." }
@@ -79,7 +79,7 @@ provides:
     - { name: settings.updated, description: "Brands, workflow statuses, formats or channels changed." }
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.1, entry: mcp/editorial }
+  source: { repo: github.com/apteva/apps, ref: editorial/v0.3.2, entry: mcp/editorial }
   port: 8080
   health_check: /health
 db:

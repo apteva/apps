@@ -58,3 +58,24 @@ Validated on 2026-09-16 on a worktree branched from `main` at editorial/v0.3.0. 
 Brand filtering is applied by the sidecar, not the browser: the widget sends `brand_id` and the endpoint's own tests cover the scoping, including archived exclusion and project isolation. A viewer's selection is a view preference, not a permission boundary — brands organize content inside the existing project access boundary, as in v0.2.0.
 
 Not yet done: browser checks against the real dashboard stylesheet in Terminal and Clean themes across light and dark modes, the 390px layout pass, and placing the widget on a live Home surface. Note that at half width the toolbar wraps to two lines once a brand picker is present.
+
+
+## v0.3.2 search reach and strict query parameters
+
+Validated on 2026-09-17 on a worktree branched from `main` at editorial/v0.3.1. Backend only; no UI, schema or migration changes.
+
+Two defects were reported and both were confirmed in the shipped code before being fixed:
+
+- `q` matched `$.title` and `$.body` only, so tags and custom fields — item data the panel shows and the API accepts — were invisible to search. It now also matches tag values and custom field values through `json_each`, which walks values and therefore never matches a custom field's key.
+- Unknown query parameters were ignored in silence, so `GET /items?tags=x` returned every item: a deliberately narrow query answered with a full unfiltered page. They are now rejected with HTTP 400 naming the accepted parameters. `POST` and `PATCH` take arguments from the body, so any argument in their query is refused as well, and an `id` supplied by the path is refused in the query where it would have been ignored.
+
+The accepted set is derived from the same `toolSpecs` the MCP tools publish, so the two front doors cannot drift: a test asserts every tool still sets `additionalProperties: false` and that `items_list` retains its `archived` enum after the refactor.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, `gofmt` — passed, including every v0.1.x–v0.3.1 suite unchanged.
+- New tests cover tag and custom field matches, case-insensitivity, a field key deliberately not matching, rejection of unknown parameters on reads, writes and path-supplied ids, and that documented filters plus `project_id`/`install_id`/`api_key` still pass.
+- A row inserted without `tags` or `fields` — the v0.1.x shape — stays searchable by title and body: `json_each` yields no rows for a missing path instead of failing the query. Covered by a regression test.
+- End-to-end against a standalone sidecar on an isolated database: `q=case-study` now finds a tag-only match, `q=Research` finds a custom field value, `q=desk` correctly finds nothing, `?tags=` and `?fields=` return 400 with the accepted list, and `status`/`archived`/`limit` are unaffected.
+
+Compatibility: every request the panel and the calendar widget make was audited against the new rule — `/items?archived&limit&offset`, `/items/:id`, `/releases/:id/refresh`, `/settings`, `/integrations?app&brand_id`, `/calendar?from&to&date_field&include_releases&brand_id` — and all use only schema or infrastructure parameters. The gateway forwards a caller's query untouched apart from setting `project_id`, so nothing else is injected in front of the sidecar. A third-party caller relying on a silently-ignored parameter will now get a 400; that is the point of the change, and it is a behaviour change worth noting for anyone scripting against the HTTP API.
+
+Not done: a structured per-field filter (`fields.<key>=<value>`), which the report also asked about. Search now reaches custom field values, but narrowing by one named field needs a deliberate design for typing and indexing rather than a `LIKE` over the JSON blob.

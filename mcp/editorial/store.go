@@ -448,8 +448,15 @@ func listItems(db *sql.DB, pid string, args map[string]any) (any, error) {
 		params = append(params, brand)
 	}
 	if q := str(args, "q"); q != "" {
-		where += " AND (instr(lower(json_extract(data,'$.title')),lower(?))>0 OR instr(lower(json_extract(data,'$.body')),lower(?))>0)"
-		params = append(params, q, q)
+		// Tags and custom fields are item data the panel shows and the API accepts,
+		// so search reaches them too. json_each walks values only, which keeps a
+		// custom field's key from matching and yields no rows when the record
+		// predates either attribute.
+		where += " AND (instr(lower(json_extract(data,'$.title')),lower(?))>0" +
+			" OR instr(lower(json_extract(data,'$.body')),lower(?))>0" +
+			" OR EXISTS (SELECT 1 FROM json_each(data,'$.tags') WHERE instr(lower(json_each.value),lower(?))>0)" +
+			" OR EXISTS (SELECT 1 FROM json_each(data,'$.fields') WHERE instr(lower(json_each.value),lower(?))>0))"
+		params = append(params, q, q, q, q)
 	}
 	var total int
 	if e := db.QueryRow("SELECT count(*) FROM editorial_items WHERE "+where, params...).Scan(&total); e != nil {
