@@ -62,16 +62,28 @@ All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in
 - `PATCH /releases/:id`: `{revision, patch}`.
 - `POST /releases/:id/refresh`: read the saved link's results.
 - `GET /calendar`: the flat, pre-merged planning stream a calendar surface needs. Filters `from`, `to` (`YYYY-MM-DD` or RFC3339, defaulting to today and 30 days out, 400 days maximum), `date_field` (`planned_at` or `deadline`), `brand_id`, `include_releases`, `limit` (default 500, max 2000). Returns `events` sorted by date with `truncated`. Each event carries `kind` (`item` or `release`), `date` (the server-side bucket), `at` (the value as stored), the item's identity and, for releases, `release_id`, `channel` and `url`. Releases are matched on their own planned date and joined back to their parent, so a release inside the window appears even when its item's date sits outside it — which is why this is not a filter on `/items`. Archived content and archived releases are always excluded, and releases appear on `planned_at` views only, as in the panel.
-- `GET /settings`, `PATCH /settings`: settings with revision, including optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers.
+- `GET /settings`, `PATCH /settings`: settings with revision, including `timezone` (IANA name; empty means UTC) and `due_time` (`HH:MM`, default `09:00`) which decide when a bare date falls due, and optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers.
 - `GET /integrations`: optional connection states. `?app=social|campaigns` browses existing records. Add `brand_id` to apply the saved brand mappings.
 
 Dates accept `YYYY-MM-DD` or RFC3339 with timezone; the panel uses date pickers and displays calendar timestamps in the viewer's local timezone. You can also type a precise timestamp into the date field. Clear fields with empty strings/arrays/objects, not null. Item and release edits require the latest revision; stale writes return HTTP 409. Release `results` are snapshots or manually entered JSON, not normalized cross-platform metrics.
 
 Project-scoped installs stay pinned to their project. Global HTTP calls use the gateway project header first, then the authenticated dashboard's `project_id` query. MCP tools require the SDK's current project and ignore argument attempts to override it. The sidecar belongs behind Apteva's authenticated gateway.
 
+## Due events
+
+A `due_scanner` worker turns planning dates into app-bus events. It emits `content.due` when an item reaches its planned publication date, `content.deadline` when it reaches its editorial deadline, and `release.due` when a channel release reaches its planned date. Editorial still publishes nothing itself — the event is the product, and a Workflow, agent or person decides what to do with it.
+
+Every due payload carries the brand: `brand_id` and the human `brand` name, both empty strings for unassigned content so the shape never varies. Items also carry title, format, status, approval, owner, which `date_field` fired and the resolved `due_at` instant; releases add `item_id`, `channel`, `url` and their parent's title, brand and approval.
+
+A bare `YYYY-MM-DD` names a day, not an instant, so **Settings** carries a `timezone` (IANA name, default UTC) and a `due_time` (`HH:MM`, default `09:00`) that decide when that day falls due. A stored RFC3339 timestamp already carries its own offset and is used as written, ignoring both.
+
+Each (topic, record, due instant) fires exactly once, tracked in the app's own table rather than on the record — writing a marker into an item would bump its revision and conflict with anyone editing it. Because the instant is part of the key, rescheduling re-arms the notice: move a release to Friday and it fires on Friday; move it back and it stays quiet. The first scan of a project starts the clock, so installing into a project holding a year of back-dated content does not replay it, and a sidecar that was down still delivers the last 48 hours rather than an unbounded backlog. Archived content and archived releases never come due.
+
+The scanner ticks every five minutes — the SDK's schedule grammar is `@every <duration>` only, so a due time is a frequent check rather than a cron expression. The platform runs it once per project, so both project-scoped and global installs work.
+
 ## Events
 
-Writes emit on the project's app bus: `content.created`, `content.updated`, `content.archived`, `content.restored`, `release.created`, `release.updated`, `release.refreshed` and `settings.updated`. Emission is best-effort and never fails a committed write; a dropped event leaves a widget stale until its next render. Archiving gets its own topic because it is what removes an item from every calendar.
+Writes emit on the project's app bus: `content.created`, `content.updated`, `content.archived`, `content.restored`, `release.created`, `release.updated`, `release.refreshed` and `settings.updated`, plus the `content.due`, `content.deadline` and `release.due` events above. Emission is best-effort and never fails a committed write; a dropped event leaves a widget stale until its next render. Archiving gets its own topic because it is what removes an item from every calendar.
 
 ## Development
 
