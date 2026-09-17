@@ -69,7 +69,7 @@ Two defects were reported and both were confirmed in the shipped code before bei
 - `q` matched `$.title` and `$.body` only, so tags and custom fields — item data the panel shows and the API accepts — were invisible to search. It now also matches tag values and custom field values through `json_each`, which walks values and therefore never matches a custom field's key.
 - Unknown query parameters were ignored in silence, so `GET /items?tags=x` returned every item: a deliberately narrow query answered with a full unfiltered page. They are now rejected with HTTP 400 naming the accepted parameters. `POST` and `PATCH` take arguments from the body, so any argument in their query is refused as well, and an `id` supplied by the path is refused in the query where it would have been ignored.
 
-The accepted set is derived from the same `toolSpecs` the MCP tools publish, so the two front doors cannot drift: a test asserts every tool still sets `additionalProperties: false` and that `items_list` retains its `archived` enum after the refactor.
+The accepted set is derived from the same `toolSpecs` the MCP tools publish, so the two front doors cannot drift: a test asserts every tool still sets `additionalProperties: false` and that `items_list` retains its `archived` enum after the refactor. **Superseded by v0.3.3:** this release enforced the rule in the HTTP handler only, on the mistaken assumption that MCP already rejected unknown arguments through `additionalProperties`. It does not — see below.
 
 - `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, `gofmt` — passed, including every v0.1.x–v0.3.1 suite unchanged.
 - New tests cover tag and custom field matches, case-insensitivity, a field key deliberately not matching, rejection of unknown parameters on reads, writes and path-supplied ids, and that documented filters plus `project_id`/`install_id`/`api_key` still pass.
@@ -79,3 +79,18 @@ The accepted set is derived from the same `toolSpecs` the MCP tools publish, so 
 Compatibility: every request the panel and the calendar widget make was audited against the new rule — `/items?archived&limit&offset`, `/items/:id`, `/releases/:id/refresh`, `/settings`, `/integrations?app&brand_id`, `/calendar?from&to&date_field&include_releases&brand_id` — and all use only schema or infrastructure parameters. The gateway forwards a caller's query untouched apart from setting `project_id`, so nothing else is injected in front of the sidecar. A third-party caller relying on a silently-ignored parameter will now get a 400; that is the point of the change, and it is a behaviour change worth noting for anyone scripting against the HTTP API.
 
 Not done: a structured per-field filter (`fields.<key>=<value>`), which the report also asked about. Search now reaches custom field values, but narrowing by one named field needs a deliberate design for typing and indexing rather than a `LIKE` over the JSON blob.
+
+
+## v0.3.3 the same rule on the MCP door
+
+Validated on 2026-09-17 on a worktree branched from `main` at editorial/v0.3.2.
+
+v0.3.2 rejected unknown arguments in the HTTP handler and claimed MCP already did the same through `additionalProperties: false`. That claim was wrong. The SDK publishes each tool's `inputSchema` in `tools/list` but `tools/call` reads `req.Params["arguments"]` and hands it to the handler verbatim — there is no schema validation anywhere in the sidecar or the SDK. `additionalProperties` tells a client what is accepted; it does not stop a call. Verified against a running sidecar before the fix: `editorial_items_list` with `{"tags":"case-study"}` returned every item, exactly the silent failure v0.3.2 set out to remove.
+
+The check now lives in `dispatch`, the one place both doors pass through, so an unknown argument fails identically whether it arrives as an MCP argument or an HTTP query parameter. Transport parameters (`project_id`, `install_id`, `api_key`) are stripped before validation, because the panel and widget send them on every request and they are not arguments. The HTTP layer keeps its own check for the two cases `dispatch` cannot see: an argument in a `POST`/`PATCH` query, which is never read, and an `id` in the query when the path already supplied one.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, `gofmt` — passed, every earlier suite unchanged.
+- A new test drives `dispatch` directly — the MCP path — for unknown arguments on reads and writes, for an operation that takes no arguments at all, and for transport parameters not being mistaken for arguments.
+- End-to-end against a standalone sidecar over real JSON-RPC: `editorial_items_list` with `{"tags":...}` and `{"nonsense":...}` now fail with the accepted list, `{"q":"case-study"}` still returns the tag-only match, and `{"status":"idea"}` is unaffected. The HTTP door still returns 400 and 1 result for the same two cases.
+
+Behaviour change: an MCP caller — including an agent — that passed an argument no tool declares now gets a tool error instead of a silently unfiltered result. That is the intent, and it is the same break v0.3.2 made for HTTP callers.

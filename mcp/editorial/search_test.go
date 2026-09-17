@@ -183,3 +183,46 @@ func TestMCPAndHTTPAgreeOnAcceptedArguments(t *testing.T) {
 		t.Fatalf("documented parameters must pass: %v", e)
 	}
 }
+
+// The MCP door. The SDK publishes inputSchema but hands a tool its arguments
+// verbatim, so additionalProperties is advice to clients and dispatch is what
+// has to refuse an unknown argument. Until v0.3.3 an MCP caller passing tags
+// got every item back — the same silent failure that was fixed over HTTP.
+func TestMCPArgumentsRejectUnknownKeys(t *testing.T) {
+	a, c := testApp(t, nil)
+	create(t, a, c, map[string]any{"title": "Tagged item", "tags": []any{"case-study"}})
+	create(t, a, c, map[string]any{"title": "Other item"})
+
+	for _, args := range []map[string]any{
+		{"tags": "case-study"},
+		{"fields": "anything"},
+		{"nonsense": "zzz"},
+	} {
+		_, e := a.dispatch(c, "items_list", args)
+		var v validationError
+		if !errors.As(e, &v) {
+			t.Fatalf("items_list(%v) was accepted, got %v", args, e)
+		}
+		if !strings.Contains(e.Error(), "unknown argument") {
+			t.Fatalf("unhelpful message for %v: %v", args, e)
+		}
+	}
+	// Writes are refused the same way, not only reads.
+	if _, e := a.dispatch(c, "items_create", map[string]any{"title": "x", "bogus": 1}); e == nil {
+		t.Fatal("items_create accepted an unknown argument")
+	}
+	// An operation that takes nothing says so rather than listing an empty set.
+	_, e := a.dispatch(c, "settings_get", map[string]any{"status": "idea"})
+	if e == nil || !strings.Contains(e.Error(), "takes no arguments") {
+		t.Fatalf("settings_get should refuse arguments: %v", e)
+	}
+
+	// Documented arguments still work, and transport parameters are not
+	// arguments: the panel sends them on every request.
+	if got := titles(t, a, c, map[string]any{"q": "case-study"}); len(got) != 1 {
+		t.Fatalf("q still has to work, got %v", got)
+	}
+	if got := titles(t, a, c, map[string]any{"project_id": "alpha", "install_id": 3, "api_key": "x"}); len(got) != 2 {
+		t.Fatalf("transport parameters must not be treated as arguments, got %v", got)
+	}
+}
