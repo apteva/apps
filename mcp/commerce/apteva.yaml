@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commerce
 display_name: Commerce
-version: 0.9.0
+version: 0.9.1
 description: |
   Multi-store commerce orchestration for Apteva. Owns stores, storefront
   listings, variants, collections, immutable sale snapshots, and merchant
@@ -17,6 +17,9 @@ description: |
   makes that surface provider-neutral: Meta Pixels and Google conversion
   actions are offered side by side, a store can run both at once, and the
   storefront drives every provider through one canonical event vocabulary.
+  Version 0.9.1 validates CJ Dropshipping catalog responses so silently
+  ignored page-size, keyword, and price filters surface as errors instead of
+  mismatched products.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
@@ -161,7 +164,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: commerce/v0.9.0
+    ref: commerce/v0.9.1
     entry: mcp/commerce
   port: 8080
   health_check: /health

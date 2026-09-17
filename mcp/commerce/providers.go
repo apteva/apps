@@ -173,11 +173,79 @@ func (a *App) toolProviderCatalog(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	if err := validateProviderCatalogResponse(bound.AppSlug, input, raw); err != nil {
+		return nil, err
+	}
 	products := normalizeProviderProducts(bound.AppSlug, raw, false)
 	return map[string]any{
 		"provider": bound.AppSlug, "connection_id": bound.ConnectionID,
 		"products": products, "count": len(products), "raw": raw,
 	}, nil
+}
+
+func validateProviderCatalogResponse(provider string, input map[string]any, raw any) error {
+	if provider != "cjdropshipping" {
+		return nil
+	}
+	root := anyMap(raw)
+	data := anyMap(root["data"])
+	if len(data) == 0 {
+		return errors.New("CJ catalog response is missing data")
+	}
+
+	if requestedSize := intArg(input, "pageSize"); requestedSize > 0 {
+		actualSize, ok := numberValue(data["pageSize"])
+		if !ok || int64(actualSize) != requestedSize {
+			return fmt.Errorf(
+				"CJ did not honor pageSize=%d (response pageSize=%v)",
+				requestedSize, data["pageSize"],
+			)
+		}
+	}
+
+	content := anySlice(data["content"])
+	requestedKeyword := normalizeCatalogKeyword(strArg(input, "productNameEn"))
+	if requestedKeyword != "" && len(content) > 0 {
+		search := anyMap(content[0])
+		echoedKeyword := normalizeCatalogKeyword(firstNonEmpty(
+			firstString(search, "keyWordOld"),
+			firstString(search, "keyWord"),
+		))
+		if echoedKeyword == "" || echoedKeyword != requestedKeyword {
+			return fmt.Errorf(
+				"CJ did not honor productNameEn=%q (response keyword=%q)",
+				strArg(input, "productNameEn"),
+				firstNonEmpty(firstString(search, "keyWordOld"), firstString(search, "keyWord")),
+			)
+		}
+	}
+
+	minimum, hasMinimum := numberValue(input["startSellPrice"])
+	maximum, hasMaximum := numberValue(input["endSellPrice"])
+	if !hasMinimum && !hasMaximum {
+		return nil
+	}
+	for _, section := range content {
+		for _, row := range anySlice(anyMap(section)["productList"]) {
+			product := anyMap(row)
+			price, ok := numberValue(product["sellPrice"])
+			if !ok {
+				continue
+			}
+			if hasMinimum && price < minimum || hasMaximum && price > maximum {
+				return fmt.Errorf(
+					"CJ returned product %q with sellPrice=%v outside requested range %v-%v",
+					firstNonEmpty(firstString(product, "id"), firstString(product, "sku")),
+					product["sellPrice"], input["startSellPrice"], input["endSellPrice"],
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func normalizeCatalogKeyword(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 func (a *App) toolProviderProductGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -1318,6 +1318,85 @@ func TestNormalizeCJProductListV2AndDetailFallback(t *testing.T) {
 	}
 }
 
+func TestValidateCJCatalogResponseRejectsIgnoredSearch(t *testing.T) {
+	input := map[string]any{
+		"productNameEn":  "wireless charger",
+		"pageSize":       5,
+		"startSellPrice": 5,
+		"endSellPrice":   40,
+	}
+	valid := map[string]any{
+		"code": 200,
+		"data": map[string]any{
+			"pageSize": 5,
+			"content": []any{map[string]any{
+				"keyWordOld": "wireless charger",
+				"productList": []any{
+					map[string]any{"id": "charger-1", "sellPrice": "12.50"},
+				},
+			}},
+		},
+	}
+	if err := validateProviderCatalogResponse("cjdropshipping", input, valid); err != nil {
+		t.Fatalf("valid filtered response rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+		want   string
+	}{
+		{
+			name: "default page size",
+			mutate: func(response map[string]any) {
+				mapArg(response, "data")["pageSize"] = 10
+			},
+			want: "did not honor pageSize=5",
+		},
+		{
+			name: "generic keyword",
+			mutate: func(response map[string]any) {
+				section := anyMap(anySlice(mapArg(response, "data")["content"])[0])
+				section["keyWordOld"] = ""
+				section["keyWord"] = ""
+			},
+			want: "did not honor productNameEn",
+		},
+		{
+			name: "price outside range",
+			mutate: func(response map[string]any) {
+				section := anyMap(anySlice(mapArg(response, "data")["content"])[0])
+				product := anyMap(anySlice(section["productList"])[0])
+				product["sellPrice"] = "49.99"
+			},
+			want: "outside requested range",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := deepCopyMap(t, valid)
+			test.mutate(response)
+			err := validateProviderCatalogResponse("cjdropshipping", input, response)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error=%v, want substring %q", err, test.want)
+			}
+		})
+	}
+}
+
+func deepCopyMap(t *testing.T, value map[string]any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var copied map[string]any
+	if err := json.Unmarshal(raw, &copied); err != nil {
+		t.Fatal(err)
+	}
+	return copied
+}
+
 func TestNormalizeCJShippingOptions(t *testing.T) {
 	bound := &sdk.BoundIntegration{AppSlug: "cjdropshipping", ConnectionID: 112}
 	raw := map[string]any{"code": 200, "data": []any{
