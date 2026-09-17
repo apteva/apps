@@ -693,7 +693,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "campaign_create",
 			Description: "Create a campaign on the bound ad account. " +
 				"Unified args: ad_account_id (local id from account_list), name, objective (sales|leads|traffic|engagement|awareness|app_promotion), status (PAUSED|ACTIVE — defaults to PAUSED), daily_budget_cents?, lifetime_budget_cents?, bid_strategy? (lowest_cost|cost_cap|bid_cap), start_time?, end_time?. " +
-				"channel_type selects the Google Ads campaign shape (search|performance_max|display|shopping|video|demand_gen, default search) and is ignored on other platforms; objective is the optimisation goal and does not set it. " +
+				"channel_type selects the Google Ads campaign shape (search|performance_max|display|shopping|video|demand_gen, default search) and is ignored on other platforms. " +
+				"On Google the objective picks a bidding strategy (sales=maximize conversion value, leads=maximize conversions, traffic=target spend, awareness=target impression share); " +
+				"bid_strategy overrides it with a named Google strategy. " +
 				"Pass platform_options for any field the unified surface doesn't cover (Meta requires special_ad_categories — pass [] when none).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
@@ -708,10 +710,52 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status":                map[string]any{"type": "string", "enum": []string{"PAUSED", "ACTIVE"}, "default": "PAUSED"},
 				"daily_budget_cents":    map[string]any{"type": "integer"},
 				"lifetime_budget_cents": map[string]any{"type": "integer"},
-				"bid_strategy":          map[string]any{"type": "string", "enum": []string{"lowest_cost", "cost_cap", "bid_cap"}},
-				"start_time":            map[string]any{"type": "string"},
-				"end_time":              map[string]any{"type": "string"},
-				"platform_options":      map[string]any{"type": "object"},
+				"bid_strategy": map[string]any{
+					"type": "string",
+					"enum": []string{
+						"lowest_cost", "cost_cap", "bid_cap",
+						"manual_cpc", "maximize_clicks", "target_spend", "maximize_conversions",
+						"target_cpa", "maximize_conversion_value", "target_roas", "target_impression_share",
+					},
+					"description": "The first three names are Meta's. The rest are Google's and override the " +
+						"objective mapping; maximize_clicks is Google's TargetSpend. Smart Bidding needs conversion " +
+						"history, so a new Google account should start on manual_cpc or maximize_clicks.",
+				},
+				"target_roas": map[string]any{
+					"type": "number", "minimum": 0,
+					"description": "Google, value bidding. Target return on ad spend, e.g. 3.5 for 350%.",
+				},
+				"target_cpa_cents": map[string]any{
+					"type": "integer", "minimum": 0,
+					"description": "Google, conversion bidding. Target cost per acquisition.",
+				},
+				"cpc_bid_ceiling_cents": map[string]any{
+					"type": "integer", "minimum": 0,
+					"description": "Google. Maximum CPC for target_spend and target_impression_share bidding.",
+				},
+				"impression_share_location": map[string]any{
+					"type":        "string",
+					"enum":        []string{"ANYWHERE_ON_PAGE", "TOP_OF_PAGE", "ABSOLUTE_TOP_OF_PAGE"},
+					"description": "Google, awareness bidding. Defaults to ANYWHERE_ON_PAGE.",
+				},
+				"impression_share_percent": map[string]any{
+					"type": "number", "minimum": 1, "maximum": 100,
+					"description": "Google, awareness bidding. Target impression share. Defaults to 65.",
+				},
+				"contains_eu_political_advertising": map[string]any{
+					"type": "boolean", "default": false,
+					"description": "Google Ads requires this declaration on every campaign create. Set true only " +
+						"when the campaign does carry EU political advertising.",
+				},
+				"shared_budget": map[string]any{
+					"type": "boolean", "default": false,
+					"description": "Google. Create the budget as explicitly shared. Requires a portfolio bidding " +
+						"strategy via platform_options.campaign.biddingStrategy; Google rejects an inline strategy " +
+						"against a shared budget.",
+				},
+				"start_time":       map[string]any{"type": "string"},
+				"end_time":         map[string]any{"type": "string"},
+				"platform_options": map[string]any{"type": "object"},
 				"funding_source_resource_id": map[string]any{
 					"type": "integer",
 					"description": "Normalized funding source, for X Ads and Reddit Ads only, where a campaign must name a " +
@@ -903,6 +947,32 @@ func (a *App) MCPTools() []sdk.Tool {
 				"adset_id":      map[string]any{"type": "string"},
 			}, []string{"ad_account_id", "adset_id"}),
 			Handler: a.toolAdSetDelete,
+		},
+
+		// ── Budgets (Google) ──
+		{
+			Name: "budget_list",
+			Description: "List Google campaign budgets on an ad account. reference_count is the number of campaigns " +
+				"using each budget, so reference_count=0 marks a budget nothing points at — typically stranded by a " +
+				"campaign create that failed after its budget landed. Args: ad_account_id, only_orphaned?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"only_orphaned": map[string]any{"type": "boolean", "default": false},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 200},
+			}, []string{"ad_account_id"}),
+			Handler: a.toolBudgetList,
+		},
+		{
+			Name:        "budget_delete",
+			Description: "Remove Google campaign budgets. A budget still referenced by a campaign cannot be removed. Args: ad_account_id, budget_ids (from budget_list).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"budget_ids": map[string]any{
+					"type": "array", "minItems": 1, "maxItems": 100,
+					"items": map[string]any{"type": "string"},
+				},
+			}, []string{"ad_account_id", "budget_ids"}),
+			Handler: a.toolBudgetDelete,
 		},
 
 		// ── Keywords (Google) ──
@@ -3539,62 +3609,93 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	if intArg(args, "lifetime_budget_cents", 0) > 0 {
 		return mcpError("Google Ads generic campaigns support daily_budget_cents only; use native platform_options for other budget semantics"), nil
 	}
-	// Google has no campaign "objective": the shape comes from
-	// advertisingChannelType and the goal from the bidding strategy. Rejecting
-	// every objective but traffic blocked conversion-focused Search campaigns
-	// outright, so map the unified objective onto a bidding strategy instead.
-	biddingStrategy, biddingPayload := googleBiddingStrategy(stringArgAny(args, "objective"))
-	budgetMicros := googleBudgetMicros(args)
 	opts, _ := args["platform_options"].(map[string]any)
-	if budgetMicros == "" && opts["campaignBudget"] == nil && opts["campaign_budget"] == nil {
-		return mcpError("google campaign_create requires daily_budget_cents or platform_options.campaignBudget"), nil
+
+	// Everything that can be rejected is checked before the first mutate. The
+	// budget and the campaign are separate mutates, so a validation failure
+	// after the budget lands would leave an orphan behind.
+	channelType, channelErr := googleChannelType(stringArgAny(args, "channel_type"))
+	if channelErr != nil {
+		return mcpError(channelErr.Error()), nil
+	}
+	nativeStrategy := googleCampaignHasBiddingStrategy(opts)
+	biddingField := ""
+	if !nativeStrategy {
+		field, biddingErr := googleBiddingField(args, channelType)
+		if biddingErr != nil {
+			return mcpError(biddingErr.Error()), nil
+		}
+		biddingField = field
 	}
 
-	var budget any
+	budgetMicros := googleBudgetMicros(args)
 	budgetResource := toString(opts["campaignBudget"])
 	if budgetResource == "" {
 		budgetResource = toString(opts["campaign_budget"])
 	}
+	if budgetMicros == "" && budgetResource == "" {
+		return mcpError("google campaign_create requires daily_budget_cents or platform_options.campaignBudget"), nil
+	}
+
+	// An explicitly shared budget requires a portfolio bidding strategy: Google
+	// rejects an inline campaign-level strategy against one with
+	// BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET. One budget per
+	// campaign is the normal case and what this unified surface implies, so
+	// sharing is opt-in and incompatible combinations are refused up front.
+	sharedBudget := boolArgDefault(args, "shared_budget", false)
+	if custom, ok := opts["budget"].(map[string]any); ok {
+		if raw, present := custom["explicitlyShared"]; present {
+			sharedBudget = googleBool(raw)
+		}
+		if raw, present := custom["explicitly_shared"]; present {
+			sharedBudget = googleBool(raw)
+		}
+	}
+	if sharedBudget && biddingField != "" {
+		return mcpError("shared_budget=true requires a portfolio bidding strategy: create a BiddingStrategy and pass " +
+			"platform_options.campaign.biddingStrategy=<resource name>. Google rejects an inline campaign-level " +
+			"strategy against a shared budget (BIDDING_STRATEGY_TYPE_INCOMPATIBLE_WITH_SHARED_BUDGET)."), nil
+	}
+
+	var budget any
+	createdBudget := false
 	if budgetResource == "" {
 		budgetCreate := map[string]any{
-			"name":           name + " Budget",
-			"amountMicros":   budgetMicros,
-			"deliveryMethod": "STANDARD",
+			"name":             name + " Budget",
+			"amountMicros":     budgetMicros,
+			"deliveryMethod":   "STANDARD",
+			"explicitlyShared": sharedBudget,
 		}
 		if custom, ok := opts["budget"].(map[string]any); ok {
 			for k, v := range custom {
 				budgetCreate[k] = v
 			}
 		}
-		var err error
-		budget, err = a.execOrErr(ctx, acct, "budget_mutate", map[string]any{
+		created, budgetErr := a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
 			"customer_id": acct.NativeAccountID,
 			"operations":  []any{map[string]any{"create": budgetCreate}},
 		})
-		if err != nil {
-			return nil, err
+		if budgetErr != nil {
+			return budgetErr, nil
 		}
-		budgetResource = firstResourceName(budget)
+		budget = created
+		budgetResource = firstResourceName(created)
 		if budgetResource == "" {
 			return mcpError("google budget_mutate returned no resourceName"), nil
 		}
+		createdBudget = true
 	}
 
-	channelType, channelErr := googleChannelType(stringArgAny(args, "channel_type"))
-	if channelErr != nil {
-		return mcpError(channelErr.Error()), nil
-	}
 	campaign := map[string]any{
 		"name":                   name,
 		"status":                 googleCampaignStatus(stringArgAny(args, "status")),
 		"advertisingChannelType": channelType,
 		"campaignBudget":         budgetResource,
+		// Required on create since Google Ads API v23.
+		"containsEuPoliticalAdvertising": googleEUPoliticalDeclaration(args),
 	}
-	// Only when the caller has not chosen one natively: an explicit strategy in
-	// platform_options.campaign must win, and some shapes (Performance Max)
-	// require strategies this mapping deliberately does not guess at.
-	if !googleCampaignHasBiddingStrategy(opts) {
-		campaign[biddingStrategy] = biddingPayload
+	if biddingField != "" {
+		campaign[biddingField] = googleBiddingPayload(biddingField, args)
 	}
 	if v, _ := args["start_time"].(string); v != "" {
 		campaign["startDate"] = googleDate(v)
@@ -3619,23 +3720,37 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	delete(campaign, "budget")
 	delete(campaign, "campaign")
 	delete(campaign, "campaign_budget")
+	collapseGoogleFieldSpellings(campaign)
 	out, errOut := a.execIntegrationTool(ctx, acct, def.CampaignCreateTool, map[string]any{
 		"customer_id": acct.NativeAccountID,
 		"operations":  []any{map[string]any{"create": campaign}},
 	})
 	if errOut != nil {
-		if budget != nil {
+		if createdBudget {
 			_, cleanupErr := a.execIntegrationTool(ctx, acct, "budget_mutate", map[string]any{
 				"customer_id": acct.NativeAccountID,
 				"operations":  []any{map[string]any{"remove": budgetResource}},
 			})
 			if cleanupErr != nil {
+				// Name the survivor: budgets are otherwise invisible through
+				// this app, so an unrollbackable one is silently stranded.
 				errOut["cleanup_warning"] = "campaign creation failed and the new budget could not be removed"
+				errOut["orphaned_budget"] = budgetResource
+				errOut["hint"] = "remove the stranded budget with budget_delete, or reuse it via platform_options.campaignBudget"
 			}
 		}
 		return errOut, nil
 	}
-	return map[string]any{"budget": budget, "campaign": out}, nil
+	result := map[string]any{"budget": budget, "campaign": out}
+	// Surface the created id so a caller can chain straight into adset_create
+	// without parsing a provider resource name.
+	if id := createdProviderID(out, "campaign"); id != "" {
+		result["id"] = id
+		if payload := asMap(out); payload != nil {
+			payload["id"] = id
+		}
+	}
+	return result, nil
 }
 
 func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
@@ -4183,6 +4298,7 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	out, err := platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad_group"); id != "" {
+			annotateCreatedID(out, id)
 			row := cloneMap(args)
 			row["id"] = id
 			if persistErr := a.upsertDeliveryEntities(ctx, acct, "ad_group", []map[string]any{row}, campaignID); persistErr != nil {
@@ -4273,6 +4389,7 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out, err := platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
 	if err == nil && successfulProviderResult(out) {
 		if id := createdProviderID(out, "ad"); id != "" {
+			annotateCreatedID(out, id)
 			row := cloneMap(args)
 			row["id"] = id
 			row["adset_id"] = adSetID
@@ -4807,19 +4924,6 @@ var googleChannelTypes = map[string]string{
 	"demand_gen":      "DEMAND_GEN",
 }
 
-// googleBiddingStrategy maps the unified objective onto the Google strategy
-// that expresses the same goal. Conversion objectives bid for conversions;
-// everything else bids for clicks. Strategies needing parameters we cannot
-// infer (target impression share, target ROAS) are left to platform_options.
-func googleBiddingStrategy(objective string) (string, map[string]any) {
-	switch strings.ToLower(strings.TrimSpace(objective)) {
-	case "sales", "leads":
-		return "maximizeConversions", map[string]any{}
-	default:
-		return "maximizeClicks", map[string]any{}
-	}
-}
-
 // googleCampaignHasBiddingStrategy reports whether a native payload already
 // selects one, in any of the spellings the Google Ads API accepts.
 func googleCampaignHasBiddingStrategy(opts map[string]any) bool {
@@ -4944,6 +5048,19 @@ func googleMaskField(field string) string {
 // allResourceNames returns every resourceName in a mutate response, in order.
 // A batch asset create returns one result per operation and each has to be
 // linked separately.
+// annotateCreatedID surfaces the normalized provider id on a create response so
+// a caller can chain campaign -> ad group -> ad without parsing resource names.
+func annotateCreatedID(out any, id string) {
+	if id == "" {
+		return
+	}
+	if payload := asMap(out); payload != nil {
+		if _, exists := payload["id"]; !exists {
+			payload["id"] = id
+		}
+	}
+}
+
 func allResourceNames(v any) []string {
 	names := make([]string, 0)
 	for _, row := range resultRows(v) {

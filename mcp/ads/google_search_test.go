@@ -532,12 +532,14 @@ func TestGoogleCampaignObjectiveSelectsBiddingStrategy(t *testing.T) {
 	app := &App{}
 	accountID := seedResourceTestAccount(t, ctx, "google", "1234567890")
 
-	// A conversion objective used to be rejected outright, which made a
-	// conversion-focused Search campaign impossible through this app.
+	// Every name here must be a real field in Campaign's campaign_bidding_strategy
+	// oneof. v0.1.47 sent "maximizeClicks", which does not exist — Maximize
+	// Clicks is TargetSpend — and Google rejected the whole mutate.
 	for objective, want := range map[string]string{
-		"sales":   "maximizeConversions",
-		"leads":   "maximizeConversions",
-		"traffic": "maximizeClicks",
+		"sales":     "maximizeConversionValue",
+		"leads":     "maximizeConversions",
+		"traffic":   "targetSpend",
+		"awareness": "targetImpressionShare",
 	} {
 		result, err := app.toolCampaignCreate(ctx, googleCampaignCreateArgs(accountID,
 			map[string]any{"objective": objective}))

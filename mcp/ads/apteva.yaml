@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.47
+version: 0.1.48
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -79,6 +79,22 @@ description: |
   and optimization_goal fields, and a Google customer whose detail read fails
   is resolved through the account hierarchy or flagged, rather than being
   offered as a plain operating account with no manager flag.
+  v0.1.48 fixes Google campaign creation, which v0.1.47 could not complete at
+  any objective. Campaigns now declare contains_eu_political_advertising,
+  required by Google Ads API v23. Budgets are created unshared by default, so
+  an inline campaign-level bidding strategy is no longer rejected as
+  incompatible with a shared budget; sharing is opt-in and requires a
+  portfolio strategy. The objective-to-bidding map now uses real fields from
+  the campaign bidding oneof: sales maximizes conversion value, leads
+  maximizes conversions, traffic and maximize_clicks use target spend, and
+  awareness uses target impression share with its required location and share
+  settings. bid_strategy accepts Google's own strategy names alongside Meta's,
+  so a new account can start on manual CPC or maximize clicks before moving to
+  Smart Bidding. Every rejection is now raised before the first mutate, so a
+  failed create cannot strand a budget, an unrollbackable budget is named in
+  the error, and budget_list and budget_delete make stranded budgets visible
+  and removable. Campaign, ad group and ad creates return the provider id so
+  callers can chain between them.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -157,7 +173,7 @@ provides:
     - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
     - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
-    - { name: campaign_create,             description: "Create a campaign on the bound ad account. channel_type selects the Google campaign shape." }
+    - { name: campaign_create,             description: "Create a campaign on the bound ad account. channel_type selects the Google campaign shape; objective or bid_strategy selects its bidding strategy." }
     - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
     - { name: campaign_import,             description: "Import selected campaigns into this project." }
     - { name: campaign_remove_from_project, description: "Remove a campaign from project management without deleting it upstream." }
@@ -173,6 +189,8 @@ provides:
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
     - { name: adset_update,                 description: "Update an ad set." }
     - { name: adset_delete,                 description: "Delete an ad set." }
+    - { name: budget_list,                  description: "List Google campaign budgets, flagging any that no campaign references." }
+    - { name: budget_delete,                description: "Remove unused Google campaign budgets." }
     - { name: keyword_create,               description: "Add keywords with exact, phrase, or broad match to a Google ad group." }
     - { name: keyword_list,                 description: "List keywords on a Google ad group, optionally including negatives." }
     - { name: keyword_update,               description: "Update a Google keyword's status or CPC bid." }
@@ -218,7 +236,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.47
+    ref: ads/v0.1.48
     entry: mcp/ads
   port: 8080
   health_check: /health
