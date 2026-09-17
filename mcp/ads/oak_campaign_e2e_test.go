@@ -113,6 +113,8 @@ func oakPlatform() *recordingPlatform {
 					`{"resourceName":"customers/1875399872/assets/%d"}`, 20+i))
 			}
 			return executeJSON(`{"results":[` + strings.Join(results, ",") + `]}`), nil
+		case "campaign_criterion_mutate":
+			return executeJSON(`{"results":[{"resourceName":"customers/1875399872/campaignCriteria/987~11"}]}`), nil
 		case "campaign_asset_mutate":
 			return executeJSON(`{"results":[{"resourceName":"customers/1875399872/campaignAssets/987~20~SITELINK"}]}`), nil
 		}
@@ -148,6 +150,9 @@ func TestOakGoogleSearchCampaignEndToEnd(t *testing.T) {
 		"ad_account_id": accountID, "name": "Oak & Vault — Mirror Jewelry Cabinet — US Search",
 		"objective": "sales", "channel_type": "search", "status": "PAUSED",
 		"daily_budget_cents": 2000,
+		// The store ships US-only. Without this the campaign serves everywhere.
+		"locations": []any{"geoTargetConstants/2840"},
+		"languages": []any{"languageConstants/1000"},
 		"platform_options": map[string]any{
 			"contains_eu_political_advertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
 		},
@@ -169,6 +174,14 @@ func TestOakGoogleSearchCampaignEndToEnd(t *testing.T) {
 	cid := toString(asMap(camp["campaign"])["id"])
 	if cid != "987" {
 		t.Fatalf("campaign id not chainable: %#v", camp)
+	}
+
+	if _, warned := camp["targeting_warning"]; warned {
+		t.Fatalf("a campaign created with locations should not warn: %#v", camp)
+	}
+	geo := asMap(asMap(asMap(criterionOps(t, pf)[0])["create"])["location"])
+	if geo["geoTargetConstant"] != "geoTargetConstants/2840" {
+		t.Fatalf("US location criterion not applied: %#v", criterionOps(t, pf))
 	}
 
 	// 2. Ad group, with no Meta targeting field in sight.

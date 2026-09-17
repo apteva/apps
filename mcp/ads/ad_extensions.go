@@ -210,8 +210,10 @@ func (a *App) toolAdExtensionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 		filter = " AND campaign_asset.field_type IN (SITELINK, CALLOUT, STRUCTURED_SNIPPET)"
 	}
 	query := fmt.Sprintf(
-		"SELECT campaign_asset.asset, campaign_asset.field_type, campaign_asset.status, "+
-			"asset.id, asset.name, asset.sitelink_asset.link_text, asset.callout_asset.callout_text, "+
+		"SELECT campaign.id, campaign_asset.asset, campaign_asset.field_type, campaign_asset.status, "+
+			"asset.id, asset.name, asset.final_urls, asset.sitelink_asset.link_text, "+
+			"asset.sitelink_asset.description1, asset.sitelink_asset.description2, "+
+			"asset.callout_asset.callout_text, "+
 			"asset.structured_snippet_asset.header, asset.structured_snippet_asset.values "+
 			"FROM campaign_asset WHERE campaign.id = %s AND campaign_asset.status != REMOVED%s",
 		campaignID, filter,
@@ -236,6 +238,15 @@ func (a *App) toolAdExtensionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 		}
 		if sitelink := mapAt(asset, "sitelinkAsset"); len(sitelink) > 0 {
 			item["link_text"] = firstString(sitelink, "linkText", "link_text")
+			if value := firstString(sitelink, "description1"); value != "" {
+				item["description1"] = value
+			}
+			if value := firstString(sitelink, "description2"); value != "" {
+				item["description2"] = value
+			}
+			if urls, ok := asset["finalUrls"].([]any); ok && len(urls) > 0 {
+				item["final_urls"] = urls
+			}
 		}
 		if callout := mapAt(asset, "calloutAsset"); len(callout) > 0 {
 			item["text"] = firstString(callout, "calloutText", "callout_text")

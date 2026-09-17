@@ -696,6 +696,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"channel_type selects the Google Ads campaign shape (search|performance_max|display|shopping|video|demand_gen, default search) and is ignored on other platforms. " +
 				"On Google the objective picks a bidding strategy (sales=maximize conversion value, leads=maximize conversions, traffic=target spend, awareness=target impression share); " +
 				"bid_strategy overrides it with a named Google strategy. " +
+				"On Google, pass locations (and optionally excluded_locations and languages) or the campaign will target everywhere. " +
 				"Pass platform_options for any field the unified surface doesn't cover (Meta requires special_ad_categories — pass [] when none).",
 			InputSchema: schemaObject(map[string]any{
 				"ad_account_id": map[string]any{"type": "integer"},
@@ -741,6 +742,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"impression_share_percent": map[string]any{
 					"type": "number", "minimum": 1, "maximum": 100,
 					"description": "Google, awareness bidding. Target impression share. Defaults to 65.",
+				},
+				"locations": map[string]any{
+					"type": "array", "maxItems": 500,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Geo target constant ids or geoTargetConstants/<id> resource names from targeting_catalog_search. A campaign created without these targets everywhere.",
+				},
+				"excluded_locations": map[string]any{
+					"type": "array", "maxItems": 500,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Locations to exclude, in the same form as locations.",
+				},
+				"languages": map[string]any{
+					"type": "array", "maxItems": 100,
+					"items":       map[string]any{"type": "string"},
+					"description": "Google. Language constant ids or languageConstants/<id> resource names.",
 				},
 				"contains_eu_political_advertising": map[string]any{
 					"type": "boolean", "default": false,
@@ -973,6 +989,43 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, []string{"ad_account_id", "budget_ids"}),
 			Handler: a.toolBudgetDelete,
+		},
+
+		// ── Campaign targeting (Google) ──
+		{
+			Name: "campaign_targeting_add",
+			Description: "Add location and language targeting to a Google campaign. A campaign with no location criteria " +
+				"serves everywhere, so this is what confines it to a market. Ids come from targeting_catalog_search and may " +
+				"be bare numbers or geoTargetConstants/<id> resource names. " +
+				"Args: ad_account_id, campaign_id, locations?, excluded_locations?, languages?.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id":      map[string]any{"type": "integer"},
+				"campaign_id":        map[string]any{"type": "string"},
+				"locations":          map[string]any{"type": "array", "maxItems": 500, "items": map[string]any{"type": "string"}},
+				"excluded_locations": map[string]any{"type": "array", "maxItems": 500, "items": map[string]any{"type": "string"}},
+				"languages":          map[string]any{"type": "array", "maxItems": 100, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolCampaignTargetingAdd,
+		},
+		{
+			Name: "campaign_targeting_list",
+			Description: "List location and language criteria on a Google campaign. targets_everywhere is true when no " +
+				"location criteria exist. Args: ad_account_id, campaign_id.",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+			}, []string{"ad_account_id", "campaign_id"}),
+			Handler: a.toolCampaignTargetingList,
+		},
+		{
+			Name:        "campaign_targeting_remove",
+			Description: "Remove location or language criteria from a Google campaign. Args: ad_account_id, campaign_id, criterion_ids (from campaign_targeting_list).",
+			InputSchema: schemaObject(map[string]any{
+				"ad_account_id": map[string]any{"type": "integer"},
+				"campaign_id":   map[string]any{"type": "string"},
+				"criterion_ids": map[string]any{"type": "array", "minItems": 1, "maxItems": 1000, "items": map[string]any{"type": "string"}},
+			}, []string{"ad_account_id", "campaign_id", "criterion_ids"}),
+			Handler: a.toolCampaignTargetingRemove,
 		},
 
 		// ── Keywords (Google) ──
@@ -3618,6 +3671,12 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	if channelErr != nil {
 		return mcpError(channelErr.Error()), nil
 	}
+	// Validated here, applied after the campaign exists: a bad geo id must not
+	// cost a budget and a campaign.
+	targeting, targetingErr := normalizedCampaignTargeting(args)
+	if targetingErr != nil {
+		return mcpError(targetingErr.Error()), nil
+	}
 	nativeStrategy := googleCampaignHasBiddingStrategy(opts)
 	biddingField := ""
 	if !nativeStrategy {
@@ -3744,11 +3803,39 @@ func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, de
 	result := map[string]any{"budget": budget, "campaign": out}
 	// Surface the created id so a caller can chain straight into adset_create
 	// without parsing a provider resource name.
-	if id := createdProviderID(out, "campaign"); id != "" {
-		result["id"] = id
+	campaignID := createdProviderID(out, "campaign")
+	if campaignID != "" {
+		result["id"] = campaignID
 		if payload := asMap(out); payload != nil {
-			payload["id"] = id
+			payload["id"] = campaignID
 		}
+	}
+	if !targeting.empty() {
+		if campaignID == "" {
+			result["targeting_warning"] = "campaign created but its id could not be read, so location and language targeting was not applied"
+			return result, nil
+		}
+		applied, targetErrOut := a.execIntegrationTool(ctx, acct, def.CampaignCriterionMutateTool, map[string]any{
+			"customer_id": acct.NativeAccountID,
+			"operations":  targeting.operations(acct.NativeAccountID, campaignID),
+		})
+		if targetErrOut != nil {
+			// The campaign exists and currently targets everywhere. That is the
+			// dangerous state, so it is reported rather than folded away.
+			targetErrOut["campaign_id"] = campaignID
+			targetErrOut["campaign_created"] = true
+			targetErrOut["hint"] = "the campaign was created but targets everywhere; apply targeting with campaign_targeting_add before activating it"
+			return targetErrOut, nil
+		}
+		result["targeting"] = map[string]any{
+			"locations":          len(targeting.Locations),
+			"excluded_locations": len(targeting.ExcludedLocations),
+			"languages":          len(targeting.Languages),
+			"result":             applied,
+		}
+	} else {
+		// Nothing rejects an untargeted campaign, so name the consequence.
+		result["targeting_warning"] = "no locations were supplied, so this campaign targets everywhere; set them with campaign_targeting_add before activating it"
 	}
 	return result, nil
 }

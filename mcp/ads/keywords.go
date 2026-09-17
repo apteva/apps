@@ -276,7 +276,7 @@ func (a *App) toolKeywordList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		limit = 500
 	}
 	query := fmt.Sprintf(
-		"SELECT ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "+
+		"SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "+
 			"ad_group_criterion.keyword.match_type, ad_group_criterion.status, "+
 			"ad_group_criterion.negative, ad_group_criterion.cpc_bid_micros "+
 			"FROM ad_group_criterion WHERE ad_group_criterion.type = KEYWORD "+
@@ -438,7 +438,7 @@ func (a *App) toolNegativeKeywordList(ctx *sdk.AppCtx, args map[string]any) (any
 	if level == keywordLevelCampaign {
 		container = "campaignCriterion"
 		query = fmt.Sprintf(
-			"SELECT campaign_criterion.criterion_id, campaign_criterion.keyword.text, "+
+			"SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.keyword.text, "+
 				"campaign_criterion.keyword.match_type, campaign_criterion.negative "+
 				"FROM campaign_criterion WHERE campaign_criterion.type = KEYWORD "+
 				"AND campaign_criterion.negative = TRUE AND campaign.id = %s", parentID,
@@ -446,7 +446,7 @@ func (a *App) toolNegativeKeywordList(ctx *sdk.AppCtx, args map[string]any) (any
 	} else {
 		container = "adGroupCriterion"
 		query = fmt.Sprintf(
-			"SELECT ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "+
+			"SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, "+
 				"ad_group_criterion.keyword.match_type, ad_group_criterion.negative "+
 				"FROM ad_group_criterion WHERE ad_group_criterion.type = KEYWORD "+
 				"AND ad_group_criterion.negative = TRUE AND ad_group_criterion.status != REMOVED "+

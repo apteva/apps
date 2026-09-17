@@ -370,8 +370,9 @@ func TestAdExtensionCreateReportsOrphanedAssetsWhenLinkFails(t *testing.T) {
 func TestAdExtensionListNormalizesRows(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.executeResponses["search"] = executeJSON(`{"results":[
-		{"campaignAsset":{"asset":"customers/1234567890/assets/11","fieldType":"SITELINK","status":"ENABLED"},
-		 "asset":{"id":"11","name":"Shop Sale","sitelinkAsset":{"linkText":"Shop Sale"}}},
+		{"campaign":{"id":"987"},"campaignAsset":{"asset":"customers/1234567890/assets/11","fieldType":"SITELINK","status":"ENABLED"},
+		 "asset":{"id":"11","name":"Shop Sale","finalUrls":["https://example.com/sale"],
+		  "sitelinkAsset":{"linkText":"Shop Sale","description1":"Up to 50% off","description2":"Ends Sunday"}}},
 		{"campaignAsset":{"asset":"customers/1234567890/assets/12","fieldType":"CALLOUT","status":"ENABLED"},
 		 "asset":{"id":"12","name":"Free Returns","calloutAsset":{"calloutText":"Free Returns"}}}
 	]}`)
@@ -392,6 +393,17 @@ func TestAdExtensionListNormalizesRows(t *testing.T) {
 	items := out["extensions"].([]map[string]any)
 	if items[0]["link_text"] != "Shop Sale" || items[0]["field_type"] != "SITELINK" {
 		t.Fatalf("sitelink not normalized: %#v", items[0])
+	}
+	// ad_extension_delete sources asset_resource_names from here, so the row has
+	// to carry enough to act on and to read.
+	if items[0]["asset_resource_name"] != "customers/1234567890/assets/11" {
+		t.Fatalf("asset resource name missing: %#v", items[0])
+	}
+	if items[0]["description1"] != "Up to 50% off" || items[0]["description2"] != "Ends Sunday" {
+		t.Fatalf("sitelink descriptions not surfaced: %#v", items[0])
+	}
+	if urls, ok := items[0]["final_urls"].([]any); !ok || len(urls) != 1 {
+		t.Fatalf("sitelink final urls not surfaced: %#v", items[0])
 	}
 	if items[1]["text"] != "Free Returns" || items[1]["field_type"] != "CALLOUT" {
 		t.Fatalf("callout not normalized: %#v", items[1])

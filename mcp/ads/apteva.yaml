@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.48
+version: 0.1.49
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -95,6 +95,20 @@ description: |
   the error, and budget_list and budget_delete make stranded budgets visible
   and removable. Campaign, ad group and ad creates return the provider id so
   callers can chain between them.
+  v0.1.49 adds Google location and language targeting, which had no tool at
+  all: campaign_targeting_add, campaign_targeting_list and
+  campaign_targeting_remove write campaign criteria, and campaign_create
+  accepts locations, excluded_locations and languages so a campaign is not born
+  serving everywhere. Ids may be bare numbers or the geoTargetConstants/<id>
+  resource names targeting_catalog_search returns. A campaign created without
+  locations now says so, campaign_targeting_list reports targets_everywhere,
+  and a campaign whose targeting could not be applied is named in the error
+  rather than left quietly global. Also fixes four GAQL reads that filtered on
+  campaign.id or ad_group.id without selecting it, which Google rejects:
+  keyword_list, both levels of negative_keyword_list, and ad_extension_list,
+  the last of which made ad_extension_delete unusable because its input came
+  from a list that never returned. ad_extension_list now also returns sitelink
+  descriptions and final URLs.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -189,6 +203,9 @@ provides:
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
     - { name: adset_update,                 description: "Update an ad set." }
     - { name: adset_delete,                 description: "Delete an ad set." }
+    - { name: campaign_targeting_add,       description: "Add location and language targeting to a Google campaign so it does not serve everywhere." }
+    - { name: campaign_targeting_list,      description: "List a Google campaign's location and language criteria, flagging one that targets everywhere." }
+    - { name: campaign_targeting_remove,    description: "Remove location or language criteria from a Google campaign." }
     - { name: budget_list,                  description: "List Google campaign budgets, flagging any that no campaign references." }
     - { name: budget_delete,                description: "Remove unused Google campaign budgets." }
     - { name: keyword_create,               description: "Add keywords with exact, phrase, or broad match to a Google ad group." }
@@ -236,7 +253,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.48
+    ref: ads/v0.1.49
     entry: mcp/ads
   port: 8080
   health_check: /health
