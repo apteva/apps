@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.3.1
+version: 0.3.2
 description: Reproducible, publishable benchmarks for agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; admission control keeps harness failures out of the record; leaderboards compare targets across runs and over time. Execution is delegated to Evals inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
@@ -57,7 +57,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.3.1
+    ref: bench/v0.3.2
     entry: mcp/bench
   port: 8080
   health_check: /health

@@ -851,6 +851,10 @@ const VIZ_CSS = `
 }
 .bench-scroll { overflow-x: auto; }
 .bench-fig { width: 100%; max-width: 620px; }
+/* Never style SVG fill with a utility class: Tailwind only emits classes it
+   finds in dashboard source, and a runtime-loaded panel is not scanned. */
+.bench-viz text { fill: currentColor; }
+.bench-viz .viz-dim { opacity: 0.68; }
 .bench-viz {
   --viz-grid: color-mix(in srgb, currentColor 14%, transparent);
   --viz-surface: var(--bg, #fcfcfb);
@@ -877,7 +881,7 @@ function barPath(x: number, y: number, w: number, h: number, r = 4): string {
 
 // ~6px per character at 11px; a label that would overflow the gutter is
 // truncated with the full text kept in the tooltip and the table, never clipped.
-const MAX_LABEL_CHARS = 25;
+const MAX_LABEL_CHARS = 20;
 function fitLabel(label: string): string {
   return label.length <= MAX_LABEL_CHARS ? label : label.slice(0, MAX_LABEL_CHARS - 1) + "\u2026";
 }
@@ -893,7 +897,7 @@ const FONT = 12;
 // value direct-labelled at the tip. No legend — the title names the series.
 function RankBars({ title, rows, max, format, unit }: {
   title: string;
-  rows: { label: string; value: number }[];
+  rows: { label: string; value: number; color: string }[];
   max?: number;
   format: (v: number) => string;
   unit?: string;
@@ -918,16 +922,44 @@ function RankBars({ title, rows, max, format, unit }: {
           return (
             <g key={r.label}>
               <title>{`${r.label}: ${format(r.value)}`}</title>
-              <text x={LABEL_W - 10} y={y + BAR_H / 2 + 4} textAnchor="end"
-                className="fill-current text-text" style={{ fontSize: FONT }}>{fitLabel(r.label)}</text>
-              <path d={barPath(LABEL_W, y, Math.max(w, 1), BAR_H)} fill="var(--s1)" />
+              <RowKey rank={i + 1} color={r.color} label={r.label} y={y} />
+              <path d={barPath(LABEL_W, y, Math.max(w, 1), BAR_H)} fill={r.color} />
               <text x={LABEL_W + w + 8} y={y + BAR_H / 2 + 4}
-                className="fill-current text-text" style={{ fontSize: FONT }}>{format(r.value)}</text>
+                style={{ fontSize: FONT }}>{format(r.value)}</text>
             </g>
           );
         })}
       </svg>
     </figure>
+  );
+}
+
+const MODEL_HUES = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)",
+  "var(--s6)", "var(--s7)", "var(--s8)"];
+
+// Colour follows the entity, never its rank: keyed off a stable alphabetical
+// order so re-sorting the board leaves every model its own hue.
+function hueMap(labels: string[]): Record<string, string> {
+  const ordered = [...new Set(labels)].sort();
+  const out: Record<string, string> = {};
+  ordered.forEach((l, i) => { out[l] = MODEL_HUES[i % MODEL_HUES.length]; });
+  return out;
+}
+
+const RANK_W = 18;
+const SWATCH_W = 16;
+
+// Rank number, colour key, then the name — laid out left to right so the
+// ordering reads without relying on bar length or hue.
+function RowKey({ rank, color, label, y, swatch = true }: {
+  rank: number; color: string; label: string; y: number; swatch?: boolean;
+}) {
+  return (
+    <g>
+      <text x={0} y={y + BAR_H / 2 + 4} className="viz-dim" style={{ fontSize: FONT }}>{rank}</text>
+      {swatch && <rect x={RANK_W} y={y + BAR_H / 2 - 5} width="10" height="10" rx="2" fill={color} />}
+      <text x={RANK_W + (swatch ? SWATCH_W : 0)} y={y + BAR_H / 2 + 4} style={{ fontSize: FONT }}>{fitLabel(label)}</text>
+    </g>
   );
 }
 
@@ -942,7 +974,7 @@ const COMPONENT_SERIES = [
 // Part-to-whole across five fixed scoring components: stacked bars, categorical,
 // legend always present. Segments are separated by a 2px surface gap, and the
 // numbers live in the table below rather than crowding the interior segments.
-function CompositionBars({ rows }: { rows: { label: string; components: Record<string, number> }[] }) {
+function CompositionBars({ rows }: { rows: { label: string; components: Record<string, number>; color: string }[] }) {
   if (rows.length === 0) return null;
   const plot = VIEW_W - LABEL_W - VALUE_W;
   const height = rows.length * ROW_H + 16;
@@ -972,8 +1004,7 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
           return (
             <g key={r.label}>
               <title>{`${r.label}: ${round1(total)} of 100`}</title>
-              <text x={LABEL_W - 10} y={y + BAR_H / 2 + 4} textAnchor="end"
-                className="fill-current text-text" style={{ fontSize: FONT }}>{fitLabel(r.label)}</text>
+              <RowKey rank={i + 1} color={r.color} label={r.label} y={y} swatch={false} />
               {segs.map((s) => s.w <= 0 ? null : (
                 <g key={s.c.key}>
                   <title>{`${r.label} — ${s.c.label}: ${s.v} of ${s.c.max}`}</title>
@@ -982,7 +1013,7 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
                 </g>
               ))}
               <text x={LABEL_W + plot + 8} y={y + BAR_H / 2 + 4}
-                className="fill-current text-text" style={{ fontSize: FONT }}>{round1(total)}</text>
+                style={{ fontSize: FONT }}>{round1(total)}</text>
             </g>
           );
         })}
@@ -1003,7 +1034,7 @@ const round1 = (v: number) => Math.round(v * 10) / 10;
 
 // Three light-mode palette slots sit under 3:1 contrast, so the component
 // values must also be readable as text — the relief rule, not decoration.
-function ComponentTable({ rows }: { rows: { label: string; components: Record<string, number> }[] }) {
+function ComponentTable({ rows }: { rows: { label: string; components: Record<string, number>; color: string }[] }) {
   return (
     <div className="bench-viz flex flex-col gap-2">
       <div className="text-xs text-text-dim">Score components</div>
@@ -1035,20 +1066,28 @@ function ComponentTable({ rows }: { rows: { label: string; components: Record<st
 
 // The table is not optional: three light-mode palette slots sit under 3:1
 // contrast, and the relief rule requires the values be readable as text too.
-function BoardTable({ rows }: { rows: LeaderboardRow[] }) {
+function BoardTable({ rows, hues, labelOf }: {
+  rows: LeaderboardRow[]; hues: Record<string, string>; labelOf: (r: LeaderboardRow, i: number) => string;
+}) {
   return (
-    <table className="text-sm w-full">
+    <table className="text-sm w-full bench-viz">
       <thead className="text-xs text-text-dim">
         <tr className="text-left border-b border-border">
-          <th className="py-1">Target</th><th>Pass</th><th>Score</th><th>Duration</th>
+          <th className="py-1">#</th><th>Target</th><th>Pass</th><th>Score</th><th>Duration</th>
           <th>Tokens</th><th>Runs</th><th>Coverage</th>
         </tr>
       </thead>
       <tbody>
-        {rows.map((row) => (
+        {rows.map((row, i) => (
           <tr key={row.label} className="border-b border-border">
+            <td className="py-1 text-text-dim">{i + 1}</td>
             <td className="py-1">
-              {row.label}
+              <span className="flex items-center gap-2">
+                <svg width="10" height="10" aria-hidden="true">
+                  <rect width="10" height="10" rx="2" fill={hues[labelOf(row, i)]} />
+                </svg>
+                {row.label}
+              </span>
               {row.mixed_cost_basis && (
                 <span className="text-xs text-text-dim" title="Some runs priced in cost, others in tokens"> · mixed basis</span>
               )}
@@ -1075,8 +1114,11 @@ function Board({ rows, byScenario, note }: {
   const models = rows.map((r) => r.model || r.label);
   const distinct = new Set(models).size === models.length;
   const chartLabel = (r: LeaderboardRow, i: number) => (distinct ? models[i] : r.label);
+  const hues = hueMap(rows.map((r, i) => chartLabel(r, i)));
+  const colorOf = (r: LeaderboardRow, i: number) => hues[chartLabel(r, i)];
   const componentRows = rows.map((r, i) => ({
     label: chartLabel(r, i), components: (r.components || {}) as Record<string, number>,
+    color: colorOf(r, i),
   }));
   return (
     <div className="flex flex-col gap-8">
@@ -1087,16 +1129,16 @@ function Board({ rows, byScenario, note }: {
         <ComponentTable rows={componentRows} />
       </div>
       <div className="bench-grid">
-        <RankBars title="Pass rate" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.pass_rate * 100 }))}
+        <RankBars title="Pass rate" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.pass_rate * 100, color: colorOf(r, i) }))}
           max={100} format={(v) => `${Math.round(v)}%`} unit="%" />
-        <RankBars title="Average score" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_score }))}
+        <RankBars title="Average score" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_score, color: colorOf(r, i) }))}
           max={100} format={(v) => String(round1(v))} unit="of 100" />
-        <RankBars title="Average duration" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_duration_ms }))}
+        <RankBars title="Average duration" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_duration_ms, color: colorOf(r, i) }))}
           format={(v) => secs(v)} />
-        <RankBars title="Average tokens" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_tokens }))}
+        <RankBars title="Average tokens" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_tokens, color: colorOf(r, i) }))}
           format={(v) => Math.round(v).toLocaleString()} />
       </div>
-      <BoardTable rows={rows} />
+      <BoardTable rows={rows} hues={hues} labelOf={chartLabel} />
       {byScenario && byScenario.length > 0 && (
         <div className="flex flex-col gap-1">
           <div className="text-xs text-text-dim">By scenario — where an aggregate hides a weak spot</div>
