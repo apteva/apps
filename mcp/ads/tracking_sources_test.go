@@ -150,14 +150,16 @@ func TestTrackingSourceCreateReturnsStructuredUnsupportedError(t *testing.T) {
 	platform := newRecordingPlatform()
 	ctx := newAdsCtx(t, platform)
 	app := &App{}
-	accountID := seedResourceTestAccount(t, ctx, "google", "1234567890")
+	// Meta creates a Pixel and Google creates a conversion action; Reddit still
+	// has no create path, and must say so without calling the provider.
+	accountID := seedResourceTestAccount(t, ctx, "reddit", "t2_abc")
 
 	resultAny, err := app.toolTrackingSourceCreate(ctx, map[string]any{"ad_account_id": accountID, "name": "Main"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := resultAny.(map[string]any)
-	if result["code"] != "unsupported_operation" || result["platform"] != "google" || len(platform.executeCalls) != 0 {
+	if result["code"] != "unsupported_operation" || result["platform"] != "reddit" || len(platform.executeCalls) != 0 {
 		t.Fatalf("unexpected unsupported response: %#v calls=%#v", result, platform.executeCalls)
 	}
 }
@@ -331,7 +333,7 @@ func TestTrackingSourceCapabilitiesAreProviderNeutral(t *testing.T) {
 	if meta["create"] != true || meta["resource_kind"] != resourceTrackingSource {
 		t.Fatalf("unexpected Meta capabilities: %#v", meta)
 	}
-	if google["create"] != false || google["resource_kind"] != resourceConversionAction {
+	if google["create"] != true || google["install"] != true || google["resource_kind"] != resourceConversionAction {
 		t.Fatalf("unexpected Google capabilities: %#v", google)
 	}
 	if x["supported"] != false || x["create"] != false {

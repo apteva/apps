@@ -3,6 +3,7 @@
 # explicit; gitignore globs can't match "file with same name as parent
 # dir" cleanly, so we enumerate.
 mcp/a2a/a2a
+mcp/ads/ads
 mcp/analytics/analytics
 mcp/auth/auth
 mcp/backup/backup

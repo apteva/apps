@@ -55,7 +55,7 @@ func TestTrackingSourceInstallationEnforcesAccountOwnershipAndProvider(t *testin
 	app := &App{}
 	metaAccountID := seedResourceTestAccount(t, ctx, "meta", "act_1")
 	otherAccountID := seedResourceTestAccount(t, ctx, "meta", "act_2")
-	googleAccountID := seedResourceTestAccount(t, ctx, "google", "1234567890")
+	redditAccountID := seedResourceTestAccount(t, ctx, "reddit", "t2_abc")
 	resource, err := app.upsertResource(ctx, &adAccount{ID: metaAccountID, Platform: "meta"}, discoveredResource{
 		Kind: resourceTrackingSource, ProviderType: "meta_pixel", NativeID: "pixel_1", DisplayName: "Main", Status: "active",
 	})
@@ -73,12 +73,14 @@ func TestTrackingSourceInstallationEnforcesAccountOwnershipAndProvider(t *testin
 		t.Fatalf("cross-account resource was accepted: %#v", resultAny)
 	}
 
-	resultAny, err = app.toolTrackingSourceInstallationGet(ctx, map[string]any{"ad_account_id": googleAccountID})
+	// Meta returns the Pixel base code and Google returns the gtag snippet;
+	// Reddit still has neither.
+	resultAny, err = app.toolTrackingSourceInstallationGet(ctx, map[string]any{"ad_account_id": redditAccountID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	result := resultAny.(map[string]any)
-	if result["code"] != "unsupported_operation" || result["platform"] != "google" {
+	if result["code"] != "unsupported_operation" || result["platform"] != "reddit" {
 		t.Fatalf("unexpected unsupported response: %#v", result)
 	}
 }

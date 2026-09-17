@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.46
+version: 0.1.47
 description: |
   Manage paid advertising across networks behind one MCP surface.
   v0.1 supports Meta Ads, Google Ads, X Ads, and Reddit Ads behind the
@@ -66,6 +66,19 @@ description: |
   reads, and reconciles analytics without overwriting campaign snapshots.
   Cached reports avoid provider scans; unsupported Reddit budget updates fail
   explicitly. Legacy Google uploads with missing diagnostics require a new sync.
+  v0.1.47 makes a Google Search campaign buildable end to end: keyword
+  targeting with exact, phrase and broad match types, negative keywords at
+  campaign and ad-group level, and normalized Responsive Search Ads with
+  headline and description pinning. Campaign shape is now a first-class
+  channel_type rather than a hardcoded Search default, and every objective is
+  accepted and mapped to a Google bidding strategy instead of only traffic.
+  Google conversion actions can be created with a category and counting rule,
+  and return their gtag global site tag, event snippet, conversion id and
+  label. Sitelink, callout and structured-snippet extensions can be created,
+  listed and unlinked. Google ad groups no longer require Meta-only targeting
+  and optimization_goal fields, and a Google customer whose detail read fails
+  is resolved through the account hierarchy or flagged, rather than being
+  offered as a plain operating account with no manager flag.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
@@ -136,7 +149,7 @@ provides:
     - { name: resource_list,               description: "List normalized provider resources without requiring native provider IDs." }
     - { name: resource_get,                description: "Get one normalized provider resource with project and account ownership validation." }
     - { name: resource_set_default,        description: "Set or clear the default resource used for a purpose such as publishing identity or conversion source." }
-    - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source without installing website tracking code." }
+    - { name: tracking_source_create,      description: "Create or safely reuse a normalized conversion tracking source (Meta Pixel or Google conversion action) without installing website tracking code." }
     - { name: tracking_source_installation_get, description: "Return browser-public installation configuration for a normalized tracking source." }
     - { name: lead_form_create,             description: "Create a normalized Meta Instant Form or Google lead-form asset." }
     - { name: lead_form_list,               description: "List normalized lead forms and optionally refresh them from the provider." }
@@ -144,7 +157,7 @@ provides:
     - { name: lead_form_update,             description: "Update provider-supported lead form fields." }
     - { name: lead_form_archive,            description: "Archive or remove a normalized lead form and clear its default." }
     - { name: account_disconnect,          description: "Remove an ad account from this project without disconnecting the shared provider integration." }
-    - { name: campaign_create,             description: "Create a campaign on the bound ad account." }
+    - { name: campaign_create,             description: "Create a campaign on the bound ad account. channel_type selects the Google campaign shape." }
     - { name: campaign_import_candidates_list, description: "List transient campaign summaries available to import." }
     - { name: campaign_import,             description: "Import selected campaigns into this project." }
     - { name: campaign_remove_from_project, description: "Remove a campaign from project management without deleting it upstream." }
@@ -156,11 +169,21 @@ provides:
     - { name: campaign_resume,              description: "Convenience: set campaign status=ACTIVE." }
     - { name: delivery_activate,             description: "Safely and resumably activate an ad, its ad set/ad group, and its campaign, returning each resulting provider state." }
     - { name: campaign_delete,              description: "Delete a campaign (and its ad sets / ads upstream)." }
-    - { name: adset_create,                 description: "Create an ad set under a campaign. Accepts targeting passthrough via platform_options." }
+    - { name: adset_create,                 description: "Create an ad set (Meta) or ad group (Google) under a campaign. Accepts targeting passthrough via platform_options." }
     - { name: adset_list,                   description: "List ad sets under a campaign or ad account." }
     - { name: adset_update,                 description: "Update an ad set." }
     - { name: adset_delete,                 description: "Delete an ad set." }
-    - { name: ad_create,                    description: "Create an ad referencing an existing creative." }
+    - { name: keyword_create,               description: "Add keywords with exact, phrase, or broad match to a Google ad group." }
+    - { name: keyword_list,                 description: "List keywords on a Google ad group, optionally including negatives." }
+    - { name: keyword_update,               description: "Update a Google keyword's status or CPC bid." }
+    - { name: keyword_delete,               description: "Remove keywords from a Google ad group." }
+    - { name: negative_keyword_create,      description: "Add negative keywords at Google ad-group or campaign level." }
+    - { name: negative_keyword_list,        description: "List negative keywords at Google ad-group or campaign level." }
+    - { name: negative_keyword_delete,      description: "Remove negative keywords at Google ad-group or campaign level." }
+    - { name: ad_extension_create,          description: "Create sitelink, callout, or structured-snippet extensions and link them to a Google campaign." }
+    - { name: ad_extension_list,            description: "List sitelink, callout, and structured-snippet extensions on a Google campaign." }
+    - { name: ad_extension_delete,          description: "Unlink extensions from a Google campaign." }
+    - { name: ad_create,                    description: "Create an ad. Meta, X and Reddit reference a creative; Google builds a Responsive Search Ad from headlines and descriptions." }
     - { name: ad_list,                      description: "List ads under an ad set or ad account." }
     - { name: ad_update,                    description: "Update an ad." }
     - { name: ad_delete,                    description: "Delete an ad." }
@@ -195,7 +218,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: ads/v0.1.46
+    ref: ads/v0.1.47
     entry: mcp/ads
   port: 8080
   health_check: /health
