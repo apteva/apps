@@ -53,6 +53,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/packs/", Handler: a.handlePack},
 		{Pattern: "/api/runs", Handler: a.handleRuns},
 		{Pattern: "/api/runs/", Handler: a.handleRun},
+		{Pattern: "/api/leaderboard", Handler: a.handleGlobalLeaderboard},
 		{Pattern: "/api/catalog", Handler: a.handleCatalog},
 		{Pattern: "/api/scoring", Handler: a.handleScoring},
 	}

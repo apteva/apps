@@ -86,6 +86,10 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "bench_leaderboard", Description: "Rank targets across every run of one sealed pack.", InputSchema: requiredSchema("pack_digest"),
 			Handler: a.toolLeaderboard},
+		{Name: "bench_leaderboard_global", Description: "Rank targets across every sealed pack under one scoring contract.", InputSchema: objectSchema,
+			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+				return a.svc.globalLeaderboard(str(args, "scoring_version"))
+			}},
 		{Name: "bench_baseline_set", Description: "Pin a run's result as the baseline for a pack scenario.", InputSchema: requiredSchema("run_id", "scenario_id"),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
 				return a.svc.setBaseline(str(args, "run_id"), str(args, "scenario_id"), intArg(args, "target_index"), str(args, "label"))

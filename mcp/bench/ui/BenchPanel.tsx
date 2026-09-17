@@ -123,7 +123,27 @@ interface LeaderboardRow {
   average_duration_ms: number;
   average_tokens: number;
   scenarios: number;
+  packs?: number;
   mixed_cost_basis: boolean;
+  components?: Record<string, number>;
+}
+
+interface ScenarioRow {
+  scenario_id: string;
+  scenario_name: string;
+  label: string;
+  runs: number;
+  pass_rate: number;
+  average_score: number;
+}
+
+interface GlobalBoard {
+  scoring_version: string;
+  scoring_versions?: string[];
+  packs: { digest: string; name: string; version: string }[];
+  rows: LeaderboardRow[];
+  by_scenario?: ScenarioRow[];
+  comparable: boolean;
 }
 
 interface Catalog {
@@ -184,6 +204,9 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<"definition" | "runs" | "leaderboard">("definition");
   const [board, setBoard] = useState<LeaderboardRow[]>([]);
+  const [boardScenarios, setBoardScenarios] = useState<ScenarioRow[]>([]);
+  const [globalBoard, setGlobalBoard] = useState<GlobalBoard | null>(null);
+  const [view, setView] = useState<"pack" | "global">("pack");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Scenario | null>(null);
@@ -223,14 +246,23 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   }, [refresh, projectId, scope]);
 
   useEffect(() => {
-    if (tab !== "leaderboard" || !selected?.digest || !projectId) {
+    if (tab !== "leaderboard" || !selected?.digest || !projectId || view !== "pack") {
       setBoard([]);
+      setBoardScenarios([]);
       return;
     }
-    call<{ rows: LeaderboardRow[] }>(`/api/packs/${selected.id}/leaderboard`, scope)
-      .then((r) => setBoard(r.rows || []))
+    call<{ rows: LeaderboardRow[]; by_scenario: ScenarioRow[] }>(`/api/packs/${selected.id}/leaderboard`, scope)
+      .then((r) => { setBoard(r.rows || []); setBoardScenarios(r.by_scenario || []); })
       .catch((e) => setStatus(String(e)));
-  }, [tab, selected, projectId, scope]);
+  }, [tab, selected, projectId, scope, view]);
+
+  useEffect(() => {
+    if (view !== "global" || !projectId) return;
+    const load = () => call<GlobalBoard>("/api/leaderboard", scope).then(setGlobalBoard).catch((e) => setStatus(String(e)));
+    void load();
+    const timer = setInterval(load, 10000);
+    return () => clearInterval(timer);
+  }, [view, projectId, scope]);
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -262,7 +294,8 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
     <div className="h-full flex flex-col bg-bg text-text">
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
         <span className="font-medium">Bench</span>
-        {selected && (
+        {view === "global" && <span className="text-xs text-text-dim">every sealed benchmark</span>}
+        {view === "pack" && selected && (
           <span className="text-xs text-text-dim">
             {selected.state === "sealed" ? `v${selected.version} · ${short(selected.digest)}` : "draft · seal to run"}
           </span>
@@ -272,9 +305,14 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
 
       <div className="flex-1 min-h-0 grid" style={{ gridTemplateColumns: "250px 1fr" }}>
         <div className="border-r border-border overflow-auto p-3 flex flex-col gap-3">
-          <button className={btn} onClick={() => setNewPackOpen(true)}>+ New benchmark</button>
-          <PackGroup label="Drafts" packs={drafts} selectedId={selectedId} onSelect={setSelectedId} />
-          <PackGroup label="Sealed" packs={sealed} selectedId={selectedId} onSelect={setSelectedId} />
+          <button className={`text-left border rounded px-2 py-1.5 ${view === "global" ? "border-text" : "border-border"}`}
+            onClick={() => setView("global")}>
+            <div className="font-medium text-sm">Global leaderboard</div>
+            <div className="text-xs text-text-dim">Every sealed benchmark</div>
+          </button>
+          <button className={btn} onClick={() => { setView("pack"); setNewPackOpen(true); }}>+ New benchmark</button>
+          <PackGroup label="Drafts" packs={drafts} selectedId={view === "pack" ? selectedId : ""} onSelect={(id) => { setView("pack"); setSelectedId(id); }} />
+          <PackGroup label="Sealed" packs={sealed} selectedId={view === "pack" ? selectedId : ""} onSelect={(id) => { setView("pack"); setSelectedId(id); }} />
           {packs.length === 0 && (
             <div className="text-xs text-text-dim">
               No benchmarks yet. Create one, add scenarios, then seal it to make it runnable.
@@ -283,9 +321,13 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
         </div>
 
         <div className="overflow-auto p-4 flex flex-col gap-4">
-          {!selected && <div className="text-sm text-text-dim">Select or create a benchmark.</div>}
+          {view === "global" && (
+            <GlobalLeaderboard board={globalBoard} />
+          )}
 
-          {selected && (
+          {view === "pack" && !selected && <div className="text-sm text-text-dim">Select or create a benchmark.</div>}
+
+          {view === "pack" && selected && (
             <>
               <div className="flex items-start justify-between gap-4">
                 <div>
@@ -353,7 +395,7 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
                 />
               )}
 
-              {tab === "leaderboard" && <Leaderboard pack={selected} rows={board} />}
+              {tab === "leaderboard" && <Leaderboard pack={selected} rows={board} byScenario={boardScenarios} />}
             </>
           )}
         </div>
@@ -792,39 +834,298 @@ function RunDetail({ run, onClose }: { run: Run; onClose: () => void }) {
   );
 }
 
-function Leaderboard({ pack, rows }: { pack: Pack; rows: LeaderboardRow[] }) {
-  if (pack.state !== "sealed") {
-    return <div className="text-sm text-text-dim">Only sealed benchmarks have a leaderboard. Seal a version first.</div>;
+
+// ── Chart layer ────────────────────────────────────────────────────────────
+// Hand-rolled SVG rather than a chart library: these are a handful of bars, and
+// recharts would add ~430KB to a 21KB panel. Palette is the validated
+// categorical set (both modes checked for CVD separation and contrast).
+const VIZ_CSS = `
+.bench-viz {
+  --viz-grid: color-mix(in srgb, currentColor 14%, transparent);
+  --viz-surface: var(--bg, #fcfcfb);
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .bench-viz {
+    --viz-surface: var(--bg, #1a1a19);
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
   }
-  if (rows.length === 0) return <div className="text-sm text-text-dim">No admitted results yet.</div>;
+}
+:root[data-theme="dark"] .bench-viz {
+  --viz-surface: var(--bg, #1a1a19);
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+}
+`;
+
+// Square at the baseline, 4px rounded at the data end — never a pill.
+function barPath(x: number, y: number, w: number, h: number, r = 4): string {
+  const rr = Math.max(0, Math.min(r, w));
+  if (rr <= 0) return `M${x},${y} H${x + w} V${y + h} H${x} Z`;
+  return `M${x},${y} H${x + w - rr} A${rr},${rr} 0 0 1 ${x + w},${y + rr} V${y + h - rr} A${rr},${rr} 0 0 1 ${x + w - rr},${y + h} H${x} Z`;
+}
+
+// ~6px per character at 11px; a label that would overflow the gutter is
+// truncated with the full text kept in the tooltip and the table, never clipped.
+const MAX_LABEL_CHARS = 25;
+function fitLabel(label: string): string {
+  return label.length <= MAX_LABEL_CHARS ? label : label.slice(0, MAX_LABEL_CHARS - 1) + "\u2026";
+}
+
+const ROW_H = 30;
+const BAR_H = 18;
+const LABEL_W = 160;
+
+// One measure across a few named targets: magnitude, so a single hue with the
+// value direct-labelled at the tip. No legend — the title names the series.
+function RankBars({ title, rows, max, format, unit }: {
+  title: string;
+  rows: { label: string; value: number }[];
+  max?: number;
+  format: (v: number) => string;
+  unit?: string;
+}) {
+  if (rows.length === 0) return null;
+  const top = max ?? Math.max(...rows.map((r) => r.value), 1);
+  const width = 460;
+  const plot = width - LABEL_W - 56;
+  const height = rows.length * ROW_H + 24;
+  const ticks = [0, 0.5, 1].map((t) => t * top);
   return (
-    <div className="flex flex-col gap-2">
-      <div className="text-xs text-text-dim">
-        Every admitted result for <code>{short(pack.digest)}</code> under <code>{pack.scoring_version}</code>.
-        Ranked by pass rate; score breaks ties.
+    <figure className="bench-viz m-0 flex flex-col gap-1">
+      <figcaption className="text-xs text-text-dim">{title}{unit ? ` (${unit})` : ""}</figcaption>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label={title}>
+        {ticks.map((t, i) => {
+          const x = LABEL_W + (plot * t) / top;
+          return <line key={i} x1={x} y1={14} x2={x} y2={height - 10}
+            stroke="var(--viz-grid)" strokeWidth="1" shapeRendering="crispEdges" />;
+        })}
+        {rows.map((r, i) => {
+          const y = 14 + i * ROW_H;
+          const w = top > 0 ? (plot * Math.max(0, r.value)) / top : 0;
+          return (
+            <g key={r.label}>
+              <title>{`${r.label}: ${format(r.value)}`}</title>
+              <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end"
+                className="fill-current text-text" style={{ fontSize: 11 }}>{fitLabel(r.label)}</text>
+              <path d={barPath(LABEL_W, y, Math.max(w, 1), BAR_H)} fill="var(--s1)" />
+              <text x={LABEL_W + w + 6} y={y + BAR_H / 2 + 4}
+                className="fill-current text-text-dim" style={{ fontSize: 11 }}>{format(r.value)}</text>
+            </g>
+          );
+        })}
+      </svg>
+    </figure>
+  );
+}
+
+const COMPONENT_SERIES = [
+  { key: "success", label: "Task success", color: "var(--s1)", max: 70 },
+  { key: "duration", label: "Duration", color: "var(--s2)", max: 10 },
+  { key: "cost", label: "Cost / tokens", color: "var(--s3)", max: 10 },
+  { key: "turns", label: "Turns", color: "var(--s4)", max: 5 },
+  { key: "tool_errors", label: "No tool errors", color: "var(--s5)", max: 5 },
+] as const;
+
+// Part-to-whole across five fixed scoring components: stacked bars, categorical,
+// legend always present. Segments are separated by a 2px surface gap, and the
+// numbers live in the table below rather than crowding the interior segments.
+function CompositionBars({ rows }: { rows: { label: string; components: Record<string, number> }[] }) {
+  if (rows.length === 0) return null;
+  const width = 460;
+  const plot = width - LABEL_W - 56;
+  const height = rows.length * ROW_H + 24;
+  const GAP = 2;
+  return (
+    <figure className="bench-viz m-0 flex flex-col gap-1">
+      <figcaption className="text-xs text-text-dim">Where the 100 points went</figcaption>
+      <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label="Score composition by target">
+        {[0, 50, 100].map((t) => {
+          const x = LABEL_W + (plot * t) / 100;
+          return <line key={t} x1={x} y1={14} x2={x} y2={height - 10}
+            stroke="var(--viz-grid)" strokeWidth="1" shapeRendering="crispEdges" />;
+        })}
+        {rows.map((r, i) => {
+          const y = 14 + i * ROW_H;
+          let cursor = LABEL_W;
+          const total = COMPONENT_SERIES.reduce((sum, c) => sum + (r.components[c.key] || 0), 0);
+          const segs = COMPONENT_SERIES.map((c, ci) => {
+            const v = r.components[c.key] || 0;
+            const raw = (plot * v) / 100;
+            const last = ci === COMPONENT_SERIES.length - 1;
+            const w = Math.max(0, raw - (last ? 0 : GAP));
+            const seg = { x: cursor, w, c, v, last };
+            cursor += raw;
+            return seg;
+          });
+          return (
+            <g key={r.label}>
+              <title>{`${r.label}: ${round1(total)} of 100`}</title>
+              <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end"
+                className="fill-current text-text" style={{ fontSize: 11 }}>{fitLabel(r.label)}</text>
+              {segs.map((s) => s.w <= 0 ? null : (
+                <g key={s.c.key}>
+                  <title>{`${r.label} — ${s.c.label}: ${s.v} of ${s.c.max}`}</title>
+                  <path d={s.last ? barPath(s.x, y, s.w, BAR_H) : `M${s.x},${y} h${s.w} v${BAR_H} h${-s.w} Z`}
+                    fill={s.c.color} />
+                </g>
+              ))}
+              <text x={LABEL_W + plot + 6} y={y + BAR_H / 2 + 4}
+                className="fill-current text-text-dim" style={{ fontSize: 11 }}>{round1(total)}</text>
+            </g>
+          );
+        })}
+      </svg>
+      <div className="flex flex-wrap gap-3 text-xs text-text-dim">
+        {COMPONENT_SERIES.map((c) => (
+          <span key={c.key} className="flex items-center gap-1">
+            <svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill={c.color} /></svg>
+            {c.label} <span className="opacity-60">/{c.max}</span>
+          </span>
+        ))}
       </div>
-      <table className="text-sm w-full">
-        <thead className="text-xs text-text-dim">
+      <table className="text-xs w-full">
+        <thead className="text-text-dim">
           <tr className="text-left border-b border-border">
-            <th className="py-1">Target</th><th>Pass</th><th>Score</th><th>Duration</th><th>Tokens</th><th>Runs</th>
+            <th className="py-1">Target</th>
+            {COMPONENT_SERIES.map((c) => <th key={c.key}>{c.label}</th>)}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={row.label} className="border-b border-border">
-              <td className="py-1">
-                {row.label}
-                {row.mixed_cost_basis && <span className="text-xs text-text-dim" title="Some runs priced in cost, others in tokens"> · mixed basis</span>}
-              </td>
-              <td>{pct(row.pass_rate)}</td>
-              <td>{row.average_score}</td>
-              <td>{secs(row.average_duration_ms)}</td>
-              <td>{Math.round(row.average_tokens).toLocaleString()}</td>
-              <td className="text-text-dim">{row.runs}</td>
+          {rows.map((r) => (
+            <tr key={r.label} className="border-b border-border">
+              <td className="py-1">{r.label}</td>
+              {COMPONENT_SERIES.map((c) => (
+                <td key={c.key} className="text-text-dim">{r.components[c.key] ?? 0}<span className="opacity-60">/{c.max}</span></td>
+              ))}
             </tr>
           ))}
         </tbody>
       </table>
+    </figure>
+  );
+}
+
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+// The table is not optional: three light-mode palette slots sit under 3:1
+// contrast, and the relief rule requires the values be readable as text too.
+function BoardTable({ rows }: { rows: LeaderboardRow[] }) {
+  return (
+    <table className="text-sm w-full">
+      <thead className="text-xs text-text-dim">
+        <tr className="text-left border-b border-border">
+          <th className="py-1">Target</th><th>Pass</th><th>Score</th><th>Duration</th>
+          <th>Tokens</th><th>Runs</th><th>Coverage</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((row) => (
+          <tr key={row.label} className="border-b border-border">
+            <td className="py-1">
+              {row.label}
+              {row.mixed_cost_basis && (
+                <span className="text-xs text-text-dim" title="Some runs priced in cost, others in tokens"> · mixed basis</span>
+              )}
+            </td>
+            <td>{pct(row.pass_rate)}</td>
+            <td>{row.average_score}</td>
+            <td>{secs(row.average_duration_ms)}</td>
+            <td>{Math.round(row.average_tokens).toLocaleString()}</td>
+            <td className="text-text-dim">{row.runs}</td>
+            <td className="text-text-dim">{row.packs ?? 1} pack{(row.packs ?? 1) === 1 ? "" : "s"} · {row.scenarios} scen.</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function Board({ rows, byScenario, note }: {
+  rows: LeaderboardRow[]; byScenario?: ScenarioRow[]; note?: string;
+}) {
+  if (rows.length === 0) return <div className="text-sm text-text-dim">No admitted results yet.</div>;
+  // Chart gutters are narrow, so drop the shared provider prefix when the model
+  // alone still identifies each row. The table keeps the full label.
+  const models = rows.map((r) => r.model || r.label);
+  const distinct = new Set(models).size === models.length;
+  const chartLabel = (r: LeaderboardRow, i: number) => (distinct ? models[i] : r.label);
+  return (
+    <div className="flex flex-col gap-5">
+      <style dangerouslySetInnerHTML={{ __html: VIZ_CSS }} />
+      {note && <div className="text-xs text-text-dim border border-border rounded p-2">{note}</div>}
+      <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))" }}>
+        <RankBars title="Pass rate" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.pass_rate * 100 }))}
+          max={100} format={(v) => `${Math.round(v)}%`} unit="%" />
+        <RankBars title="Average score" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_score }))}
+          max={100} format={(v) => String(round1(v))} unit="of 100" />
+        <CompositionBars rows={rows.map((r, i) => ({ label: chartLabel(r, i), components: (r.components || {}) as Record<string, number> }))} />
+        <RankBars title="Average tokens" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_tokens }))}
+          format={(v) => Math.round(v).toLocaleString()} />
+      </div>
+      <BoardTable rows={rows} />
+      {byScenario && byScenario.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <div className="text-xs text-text-dim">By scenario — where an aggregate hides a weak spot</div>
+          <table className="text-sm w-full">
+            <thead className="text-xs text-text-dim">
+              <tr className="text-left border-b border-border">
+                <th className="py-1">Scenario</th><th>Target</th><th>Pass</th><th>Score</th><th>Runs</th>
+              </tr>
+            </thead>
+            <tbody>
+              {byScenario.map((r, i) => (
+                <tr key={i} className="border-b border-border">
+                  <td className="py-1">{r.scenario_name || r.scenario_id}</td>
+                  <td>{r.label}</td><td>{pct(r.pass_rate)}</td><td>{r.average_score}</td>
+                  <td className="text-text-dim">{r.runs}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Leaderboard({ pack, rows, byScenario }: {
+  pack: Pack; rows: LeaderboardRow[]; byScenario: ScenarioRow[];
+}) {
+  if (pack.state !== "sealed") {
+    return <div className="text-sm text-text-dim">Only sealed benchmarks have a leaderboard. Seal a version first.</div>;
+  }
+  return (
+    <Board rows={rows} byScenario={byScenario}
+      note={`Every admitted result for digest ${short(pack.digest)} under ${pack.scoring_version}. Ranked by pass rate; score breaks ties.`} />
+  );
+}
+
+function GlobalLeaderboard({ board }: { board: GlobalBoard | null }) {
+  if (!board) return <div className="text-sm text-text-dim">Loading…</div>;
+  if (!board.rows || board.rows.length === 0) {
+    return <div className="text-sm text-text-dim">No admitted results yet. Seal a benchmark and run it.</div>;
+  }
+  const packs = board.packs || [];
+  // A ranking across targets that faced different benchmarks is not a fair
+  // comparison; say so rather than letting the ordering imply otherwise.
+  const note = board.comparable
+    ? `Every target has faced all ${packs.length} sealed benchmark${packs.length === 1 ? "" : "s"} under ${board.scoring_version}. Ranked by pass rate; score breaks ties.`
+    : `Targets here have not all faced the same benchmarks, so this ranking is not a like-for-like comparison — check the coverage column. Scoring contract ${board.scoring_version}.`;
+  return (
+    <div className="flex flex-col gap-4">
+      <div>
+        <div className="font-medium">Global leaderboard</div>
+        <div className="text-xs text-text-dim">
+          {packs.length} sealed benchmark{packs.length === 1 ? "" : "s"}: {packs.map((p) => `${p.name} v${p.version}`).join(", ")}
+        </div>
+      </div>
+      {(board.scoring_versions?.length || 0) > 1 && (
+        <div className="text-xs text-text-dim border border-border rounded p-2">
+          Results exist under {board.scoring_versions!.length} scoring contracts; only {board.scoring_version} is shown.
+          Scores from different contracts are not comparable.
+        </div>
+      )}
+      <Board rows={board.rows} byScenario={board.by_scenario} note={note} />
     </div>
   );
 }

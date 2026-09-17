@@ -463,81 +463,113 @@ func (s *service) compareToBaselines(benchRunID string) (map[string]any, error) 
 
 // ---- leaderboard ----
 
-type leaderboardRow struct {
-	Label             string  `json:"label"`
-	Provider          string  `json:"provider,omitempty"`
-	Model             string  `json:"model,omitempty"`
-	Runs              int     `json:"runs"`
-	Passed            int     `json:"passed"`
-	PassRate          float64 `json:"pass_rate"`
-	AverageScore      float64 `json:"average_score"`
-	AverageDurationMS float64 `json:"average_duration_ms"`
-	AverageTokens     float64 `json:"average_tokens"`
-	AverageCostUSD    float64 `json:"average_cost_usd"`
-	Scenarios         int     `json:"scenarios"`
-	MixedCostBasis    bool    `json:"mixed_cost_basis"`
+// ScoreComponents averages each part of the scoring contract, so a reader can
+// see *why* a target scores what it does rather than only the total.
+type ScoreComponents struct {
+	Success    float64 `json:"success"`
+	Duration   float64 `json:"duration"`
+	Cost       float64 `json:"cost"`
+	Turns      float64 `json:"turns"`
+	ToolErrors float64 `json:"tool_errors"`
 }
 
-// leaderboard ranks every admitted result for one sealed digest. Rows are keyed
-// by provider/model rather than agent id, so the same model benchmarked from
-// different agents aggregates into one row.
-func (s *service) leaderboard(packDigest string) (map[string]any, error) {
-	pack, err := s.db.getPackByDigest(packDigest)
-	if err != nil {
-		return nil, err
-	}
-	if pack == nil {
-		return nil, errors.New("no sealed pack with that digest")
-	}
-	results, err := s.db.listResultsForDigest(packDigest, pack.ScoringVersion)
-	if err != nil {
-		return nil, err
-	}
+type leaderboardRow struct {
+	Label             string          `json:"label"`
+	Provider          string          `json:"provider,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	Runs              int             `json:"runs"`
+	Passed            int             `json:"passed"`
+	PassRate          float64         `json:"pass_rate"`
+	AverageScore      float64         `json:"average_score"`
+	AverageDurationMS float64         `json:"average_duration_ms"`
+	AverageTokens     float64         `json:"average_tokens"`
+	AverageCostUSD    float64         `json:"average_cost_usd"`
+	Scenarios         int             `json:"scenarios"`
+	Packs             int             `json:"packs"`
+	MixedCostBasis    bool            `json:"mixed_cost_basis"`
+	Components        ScoreComponents `json:"components"`
+}
 
-	type agg struct {
+// scenarioRow is one target's record on one scenario, for the per-scenario
+// breakdown under a pack's leaderboard.
+type scenarioRow struct {
+	ScenarioID   string  `json:"scenario_id"`
+	ScenarioName string  `json:"scenario_name"`
+	Label        string  `json:"label"`
+	Runs         int     `json:"runs"`
+	Passed       int     `json:"passed"`
+	PassRate     float64 `json:"pass_rate"`
+	AverageScore float64 `json:"average_score"`
+}
+
+// aggregate folds admitted results into ranked rows keyed by provider/model, so
+// the same model benchmarked from different agents lands in one row.
+func aggregate(results []resultWithPack) []leaderboardRow {
+	type group struct {
 		row       leaderboardRow
 		scenarios map[string]struct{}
+		packs     map[string]struct{}
 		bases     map[string]struct{}
 	}
-	groups := map[string]*agg{}
+	groups := map[string]*group{}
+	order := []string{}
+
 	for _, result := range results {
 		key := result.Target.label()
-		if groups[key] == nil {
-			groups[key] = &agg{
+		g := groups[key]
+		if g == nil {
+			g = &group{
 				row:       leaderboardRow{Label: key, Provider: result.Target.Provider, Model: result.Target.Model},
-				scenarios: map[string]struct{}{},
-				bases:     map[string]struct{}{},
+				scenarios: map[string]struct{}{}, packs: map[string]struct{}{}, bases: map[string]struct{}{},
 			}
+			groups[key] = g
+			order = append(order, key)
 		}
-		group := groups[key]
-		group.row.Runs++
+		g.row.Runs++
 		if result.Passed {
-			group.row.Passed++
+			g.row.Passed++
 		}
-		group.row.AverageScore += result.Score.Score
-		group.row.AverageDurationMS += float64(result.Metrics.DurationMS)
-		group.row.AverageTokens += float64(result.Metrics.TokensTotal)
-		group.row.AverageCostUSD += result.Metrics.CostUSD
-		group.scenarios[result.ScenarioID] = struct{}{}
+		g.row.AverageScore += result.Score.Score
+		g.row.AverageDurationMS += float64(result.Metrics.DurationMS)
+		g.row.AverageTokens += float64(result.Metrics.TokensTotal)
+		g.row.AverageCostUSD += result.Metrics.CostUSD
+		g.row.Components.Success += result.Score.SuccessPoints
+		g.row.Components.Duration += result.Score.DurationPoints
+		g.row.Components.Cost += result.Score.CostPoints
+		g.row.Components.Turns += result.Score.TurnPoints
+		g.row.Components.ToolErrors += result.Score.ToolErrorPoints
+		g.scenarios[result.ScenarioID] = struct{}{}
+		if result.PackDigest != "" {
+			g.packs[result.PackDigest] = struct{}{}
+		}
 		if result.Score.CostBasis != "" {
-			group.bases[result.Score.CostBasis] = struct{}{}
+			g.bases[result.Score.CostBasis] = struct{}{}
 		}
 	}
 
 	rows := make([]leaderboardRow, 0, len(groups))
-	for _, group := range groups {
-		divisor := float64(group.row.Runs)
-		if divisor == 0 {
+	for _, key := range order {
+		g := groups[key]
+		n := float64(g.row.Runs)
+		if n == 0 {
 			continue
 		}
-		group.row.PassRate = round3(float64(group.row.Passed) / divisor)
-		group.row.AverageScore = round1(group.row.AverageScore / divisor)
-		group.row.AverageDurationMS = round1(group.row.AverageDurationMS / divisor)
-		group.row.AverageTokens = round1(group.row.AverageTokens / divisor)
-		group.row.AverageCostUSD = round3(group.row.AverageCostUSD / divisor)
-		group.row.Scenarios = len(group.scenarios)
-		group.row.MixedCostBasis = len(group.bases) > 1
-		rows = append(rows, group.row)
+		g.row.PassRate = round3(float64(g.row.Passed) / n)
+		g.row.AverageScore = round1(g.row.AverageScore / n)
+		g.row.AverageDurationMS = round1(g.row.AverageDurationMS / n)
+		g.row.AverageTokens = round1(g.row.AverageTokens / n)
+		g.row.AverageCostUSD = round3(g.row.AverageCostUSD / n)
+		g.row.Components = ScoreComponents{
+			Success:    round1(g.row.Components.Success / n),
+			Duration:   round1(g.row.Components.Duration / n),
+			Cost:       round1(g.row.Components.Cost / n),
+			Turns:      round1(g.row.Components.Turns / n),
+			ToolErrors: round1(g.row.Components.ToolErrors / n),
+		}
+		g.row.Scenarios = len(g.scenarios)
+		g.row.Packs = len(g.packs)
+		g.row.MixedCostBasis = len(g.bases) > 1
+		rows = append(rows, g.row)
 	}
 	// Pass rate is the benchmark's headline; score only breaks ties.
 	sort.Slice(rows, func(a, b int) bool {
@@ -546,10 +578,126 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 		}
 		return rows[a].AverageScore > rows[b].AverageScore
 	})
+	return rows
+}
 
+// byScenario breaks each target's record down per scenario, which is where an
+// aggregate score hides a target that is strong on one task and weak on another.
+func byScenario(results []resultWithPack) []scenarioRow {
+	type key struct{ scenario, label string }
+	acc := map[key]*scenarioRow{}
+	order := []key{}
+	for _, result := range results {
+		k := key{result.ScenarioID, result.Target.label()}
+		if acc[k] == nil {
+			acc[k] = &scenarioRow{ScenarioID: result.ScenarioID, ScenarioName: result.ScenarioName, Label: k.label}
+			order = append(order, k)
+		}
+		row := acc[k]
+		row.Runs++
+		if result.Passed {
+			row.Passed++
+		}
+		row.AverageScore += result.Score.Score
+	}
+	rows := make([]scenarioRow, 0, len(acc))
+	for _, k := range order {
+		row := acc[k]
+		row.PassRate = round3(float64(row.Passed) / float64(row.Runs))
+		row.AverageScore = round1(row.AverageScore / float64(row.Runs))
+		rows = append(rows, *row)
+	}
+	sort.Slice(rows, func(a, b int) bool {
+		if rows[a].ScenarioID != rows[b].ScenarioID {
+			return rows[a].ScenarioID < rows[b].ScenarioID
+		}
+		return rows[a].AverageScore > rows[b].AverageScore
+	})
+	return rows
+}
+
+// leaderboard ranks every admitted result for one sealed digest under that
+// pack's scoring version. Comparability is enforced by the join, not convention.
+func (s *service) leaderboard(packDigest string) (map[string]any, error) {
+	pack, err := s.db.getPackByDigest(packDigest)
+	if err != nil {
+		return nil, err
+	}
+	if pack == nil {
+		return nil, errors.New("no sealed pack with that digest")
+	}
+	all, err := s.db.listAdmittedResults(pack.ScoringVersion)
+	if err != nil {
+		return nil, err
+	}
+	scoped := make([]resultWithPack, 0, len(all))
+	for _, result := range all {
+		if result.PackDigest == packDigest {
+			scoped = append(scoped, result)
+		}
+	}
 	return map[string]any{
 		"pack":            map[string]any{"id": pack.ID, "name": pack.Name, "version": pack.Version, "digest": pack.Digest},
 		"scoring_version": pack.ScoringVersion,
-		"rows":            rows,
+		"rows":            aggregate(scoped),
+		"by_scenario":     byScenario(scoped),
+		"scenarios":       len(pack.Scenarios),
+	}, nil
+}
+
+// globalLeaderboard ranks targets across every sealed pack under one scoring
+// version. Targets that ran different packs are still listed, with their
+// coverage reported and comparable=false, rather than being averaged together
+// as though they had faced the same work.
+func (s *service) globalLeaderboard(scoringVersion string) (map[string]any, error) {
+	versions, err := s.db.scoringVersions()
+	if err != nil {
+		return nil, err
+	}
+	if scoringVersion == "" {
+		scoringVersion = ScoringVersion
+		if len(versions) > 0 {
+			scoringVersion = versions[0]
+		}
+	}
+	results, err := s.db.listAdmittedResults(scoringVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	packs := map[string]map[string]any{}
+	for _, result := range results {
+		if packs[result.PackDigest] == nil {
+			packs[result.PackDigest] = map[string]any{
+				"digest": result.PackDigest, "name": result.PackName, "version": result.PackVersion,
+			}
+		}
+	}
+	packList := make([]map[string]any, 0, len(packs))
+	for _, p := range packs {
+		packList = append(packList, p)
+	}
+	sort.Slice(packList, func(a, b int) bool {
+		return packList[a]["digest"].(string) < packList[b]["digest"].(string)
+	})
+
+	rows := aggregate(results)
+	// Every target must have faced the same packs for the ranking to be a fair
+	// comparison; say so plainly instead of letting the reader assume it.
+	comparable := true
+	for _, row := range rows {
+		if row.Packs != len(packList) {
+			comparable = false
+			break
+		}
+	}
+
+	return map[string]any{
+		"scoring_version":  scoringVersion,
+		"scoring_versions": versions,
+		"packs":            packList,
+		"rows":             rows,
+		"by_scenario":      byScenario(results),
+		"comparable":       comparable,
 	}, nil
 }

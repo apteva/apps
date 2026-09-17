@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.2.1
+version: 0.3.0
 description: Reproducible, publishable benchmarks for agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; admission control keeps harness failures out of the record; leaderboards compare targets across runs and over time. Execution is delegated to Evals inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
@@ -36,6 +36,7 @@ provides:
     - { name: bench_run_get, description: "Get one benchmark run with its scored results." }
     - { name: bench_run_cancel, description: "Cancel a queued or running benchmark run." }
     - { name: bench_leaderboard, description: "Rank targets across every run of one sealed pack." }
+    - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack under one scoring contract." }
     - { name: bench_baseline_set, description: "Pin a run's result as the baseline for a pack scenario." }
     - { name: bench_baseline_compare, description: "Compare a run against pinned baselines." }
     - { name: bench_evidence_export, description: "Export a run's full provenance and scoring evidence bundle." }
@@ -56,7 +57,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.2.1
+    ref: bench/v0.3.0
     entry: mcp/bench
   port: 8080
   health_check: /health

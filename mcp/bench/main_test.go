@@ -649,3 +649,137 @@ func TestChecksMapOntoEnvironmentsAssertionTypes(t *testing.T) {
 		}
 	}
 }
+
+// ---- leaderboards ----
+
+func seedResult(t *testing.T, svc *service, runID, scenarioID string, target Target, passed bool, score Score, m Metrics) {
+	t.Helper()
+	r := Result{
+		ID: newID("r"), BenchRunID: runID, ScenarioID: scenarioID, ScenarioName: scenarioID,
+		Target: target, Trial: 1, Passed: passed, Admission: AdmissionVerified,
+		Score: score, Metrics: m, CreatedAt: time.Now().UTC(),
+	}
+	if err := svc.db.saveResult(&r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sealedPackWithRun(t *testing.T, svc *service, name string, target Target) (*Pack, *Run) {
+	t.Helper()
+	scenario := crmScenario()
+	scenario.ID, scenario.Name = "sc-"+slugify(name), name
+	draft, err := svc.savePack(&Pack{Name: name, Scenarios: []Scenario{scenario}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.createRun(sealed.ID, "", []Target{target}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = RunStatusCompleted
+	if err := svc.db.saveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	return sealed, run
+}
+
+func TestLeaderboardReportsWhereThePointsWent(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	target := Target{Provider: "opencode-go", Model: "kimi-k3"}
+	sealed, run := sealedPackWithRun(t, svc, "Core", target)
+
+	// Two passes that differ only in the cost component — the real signature of
+	// a model that is correct but verbose.
+	seedResult(t, svc, run.ID, sealed.Scenarios[0].ID, target, true,
+		Score{Score: 90, SuccessPoints: 70, DurationPoints: 10, CostPoints: 0, TurnPoints: 5, ToolErrorPoints: 5, CostBasis: "tokens_total"},
+		Metrics{DurationMS: 50_000, TokensTotal: 120_000})
+	seedResult(t, svc, run.ID, sealed.Scenarios[0].ID, target, true,
+		Score{Score: 95, SuccessPoints: 70, DurationPoints: 10, CostPoints: 5, TurnPoints: 5, ToolErrorPoints: 5, CostBasis: "tokens_total"},
+		Metrics{DurationMS: 44_000, TokensTotal: 90_000})
+
+	board, err := svc.leaderboard(sealed.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := board["rows"].([]leaderboardRow)
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %d", len(rows))
+	}
+	c := rows[0].Components
+	if c.Success != 70 || c.Duration != 10 || c.Turns != 5 || c.ToolErrors != 5 {
+		t.Fatalf("unexpected components: %+v", c)
+	}
+	// The averaged cost component is what shows the budget is the binding
+	// constraint rather than correctness.
+	if c.Cost != 2.5 {
+		t.Fatalf("cost component = %v, want 2.5", c.Cost)
+	}
+	if rows[0].Packs != 1 || rows[0].Scenarios != 1 {
+		t.Fatalf("coverage = %d pack(s), %d scenario(s)", rows[0].Packs, rows[0].Scenarios)
+	}
+	if len(board["by_scenario"].([]scenarioRow)) != 1 {
+		t.Fatal("expected a per-scenario breakdown")
+	}
+}
+
+func TestGlobalLeaderboardFlagsUnequalCoverage(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	wide := Target{Provider: "opencode-go", Model: "kimi-k3"}
+	narrow := Target{Provider: "opencode-go", Model: "deepseek-flash"}
+
+	packA, runA := sealedPackWithRun(t, svc, "Core", wide)
+	packB, runB := sealedPackWithRun(t, svc, "Extras", wide)
+	full := Score{Score: 90, SuccessPoints: 70, DurationPoints: 10, TurnPoints: 5, ToolErrorPoints: 5, CostBasis: "cost_usd"}
+	seedResult(t, svc, runA.ID, packA.Scenarios[0].ID, wide, true, full, Metrics{DurationMS: 1000})
+	seedResult(t, svc, runB.ID, packB.Scenarios[0].ID, wide, true, full, Metrics{DurationMS: 1000})
+	// deepseek only ever faced one of the two packs.
+	seedResult(t, svc, runA.ID, packA.Scenarios[0].ID, narrow, true, full, Metrics{DurationMS: 1000})
+
+	board, err := svc.globalLeaderboard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if comparable := board["comparable"].(bool); comparable {
+		t.Fatal("targets covering different packs must not be reported as comparable")
+	}
+	rows := board["rows"].([]leaderboardRow)
+	byLabel := map[string]leaderboardRow{}
+	for _, r := range rows {
+		byLabel[r.Label] = r
+	}
+	if byLabel["opencode-go/kimi-k3"].Packs != 2 {
+		t.Errorf("kimi-k3 packs = %d, want 2", byLabel["opencode-go/kimi-k3"].Packs)
+	}
+	if byLabel["opencode-go/deepseek-flash"].Packs != 1 {
+		t.Errorf("deepseek-flash packs = %d, want 1", byLabel["opencode-go/deepseek-flash"].Packs)
+	}
+	if len(board["packs"].([]map[string]any)) != 2 {
+		t.Error("expected both sealed packs listed")
+	}
+}
+
+func TestGlobalLeaderboardIsComparableWhenCoverageMatches(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	a := Target{Provider: "opencode-go", Model: "kimi-k3"}
+	b := Target{Provider: "opencode-go", Model: "deepseek-flash"}
+	pack, run := sealedPackWithRun(t, svc, "Core", a)
+	full := Score{Score: 90, SuccessPoints: 70, CostBasis: "cost_usd"}
+	seedResult(t, svc, run.ID, pack.Scenarios[0].ID, a, true, full, Metrics{DurationMS: 1000})
+	seedResult(t, svc, run.ID, pack.Scenarios[0].ID, b, false, Score{CostBasis: "cost_usd"}, Metrics{DurationMS: 1000})
+
+	board, err := svc.globalLeaderboard("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !board["comparable"].(bool) {
+		t.Fatal("equal coverage should be reported as comparable")
+	}
+	rows := board["rows"].([]leaderboardRow)
+	if rows[0].Label != "opencode-go/kimi-k3" {
+		t.Fatalf("leader = %q, want kimi-k3 on pass rate", rows[0].Label)
+	}
+}

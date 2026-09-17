@@ -248,6 +248,15 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleGlobalLeaderboard(w http.ResponseWriter, r *http.Request) {
+	board, err := a.svc.globalLeaderboard(r.URL.Query().Get("scoring_version"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, board)
+}
+
 func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	catalog, err := a.svc.catalog()
 	if err != nil {

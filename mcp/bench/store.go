@@ -312,18 +312,68 @@ func (s store) listResults(benchRunID string) ([]Result, error) {
 	return scanResults(rows)
 }
 
-// listResultsForDigest gathers every admitted result ever recorded for one
-// sealed pack digest under one scoring version. This is the leaderboard's
-// source of truth: comparability is enforced by the join, not by convention.
-func (s store) listResultsForDigest(digest, scoringVersion string) ([]Result, error) {
-	rows, err := s.db.Query(`SELECT r.`+strings.ReplaceAll(resultColumns, ",", ",r.")+`
+// resultWithPack carries the sealed pack a result belongs to, so a global
+// leaderboard can report coverage rather than silently averaging targets that
+// ran different benchmarks.
+type resultWithPack struct {
+	Result
+	PackDigest  string
+	PackName    string
+	PackVersion string
+}
+
+// listAdmittedResults gathers every admitted result under one scoring version
+// across all sealed packs. Comparability is enforced by the scoring-version
+// filter; coverage differences are reported rather than hidden.
+func (s store) listAdmittedResults(scoringVersion string) ([]resultWithPack, error) {
+	rows, err := s.db.Query(`SELECT r.`+strings.ReplaceAll(resultColumns, ",", ",r.")+`,
+		b.pack_digest, b.pack_name, b.pack_version
 		FROM bench_results r JOIN bench_runs b ON b.id = r.bench_run_id
-		WHERE b.pack_digest=? AND b.scoring_version=? AND r.admission<>?
-		ORDER BY r.scenario_id, r.target_index, r.trial`, digest, scoringVersion, AdmissionInvalid)
+		WHERE b.scoring_version=? AND r.admission<>? AND b.pack_digest<>''
+		ORDER BY b.pack_digest, r.scenario_id, r.target_index, r.trial`, scoringVersion, AdmissionInvalid)
 	if err != nil {
 		return nil, err
 	}
-	return scanResults(rows)
+	defer rows.Close()
+	out := []resultWithPack{}
+	for rows.Next() {
+		var item resultWithPack
+		var target, score, metrics, created string
+		var passed int
+		if err := rows.Scan(&item.ID, &item.BenchRunID, &item.ScenarioID, &item.ScenarioName,
+			&item.TargetIndex, &target, &item.Trial, &item.EvalRunID, &item.Admission,
+			&item.InvalidReason, &passed, &score, &metrics, &item.Error, &created,
+			&item.PackDigest, &item.PackName, &item.PackVersion); err != nil {
+			return nil, err
+		}
+		decodeJSON(target, &item.Target)
+		decodeJSON(score, &item.Score)
+		decodeJSON(metrics, &item.Metrics)
+		item.Passed = passed == 1
+		item.CreatedAt = parseTime(created)
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+// scoringVersions lists every scoring version with recorded results, so a
+// caller can tell when the record spans more than one incomparable contract.
+func (s store) scoringVersions() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT scoring_version FROM bench_runs
+		WHERE scoring_version<>'' ORDER BY scoring_version DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	versions := []string{}
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
 }
 
 // ---- baselines ----
