@@ -840,6 +840,17 @@ function RunDetail({ run, onClose }: { run: Run; onClose: () => void }) {
 // recharts would add ~430KB to a 21KB panel. Palette is the validated
 // categorical set (both modes checked for CVD separation and contrast).
 const VIZ_CSS = `
+.bench-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 28px 40px;
+  align-items: start;
+}
+@media (min-width: 880px) {
+  .bench-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.bench-scroll { overflow-x: auto; }
+.bench-fig { width: 100%; max-width: 620px; }
 .bench-viz {
   --viz-grid: color-mix(in srgb, currentColor 14%, transparent);
   --viz-surface: var(--bg, #fcfcfb);
@@ -871,9 +882,12 @@ function fitLabel(label: string): string {
   return label.length <= MAX_LABEL_CHARS ? label : label.slice(0, MAX_LABEL_CHARS - 1) + "\u2026";
 }
 
-const ROW_H = 30;
-const BAR_H = 18;
-const LABEL_W = 160;
+const ROW_H = 38;
+const BAR_H = 22;        // <= 24px cap
+const LABEL_W = 150;
+const VALUE_W = 86;      // gutter reserved for the direct label at the bar tip
+const VIEW_W = 560;
+const FONT = 12;
 
 // One measure across a few named targets: magnitude, so a single hue with the
 // value direct-labelled at the tip. No legend — the title names the series.
@@ -886,30 +900,29 @@ function RankBars({ title, rows, max, format, unit }: {
 }) {
   if (rows.length === 0) return null;
   const top = max ?? Math.max(...rows.map((r) => r.value), 1);
-  const width = 460;
-  const plot = width - LABEL_W - 56;
-  const height = rows.length * ROW_H + 24;
+  const plot = VIEW_W - LABEL_W - VALUE_W;
+  const height = rows.length * ROW_H + 16;
   const ticks = [0, 0.5, 1].map((t) => t * top);
   return (
-    <figure className="bench-viz m-0 flex flex-col gap-1">
+    <figure className="bench-viz bench-fig m-0 flex flex-col gap-2">
       <figcaption className="text-xs text-text-dim">{title}{unit ? ` (${unit})` : ""}</figcaption>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label={title}>
+      <svg viewBox={`0 0 ${VIEW_W} ${height}`} width="100%" role="img" aria-label={title}>
         {ticks.map((t, i) => {
           const x = LABEL_W + (plot * t) / top;
-          return <line key={i} x1={x} y1={14} x2={x} y2={height - 10}
+          return <line key={i} x1={x} y1={6} x2={x} y2={height - 6}
             stroke="var(--viz-grid)" strokeWidth="1" shapeRendering="crispEdges" />;
         })}
         {rows.map((r, i) => {
-          const y = 14 + i * ROW_H;
+          const y = 8 + i * ROW_H;
           const w = top > 0 ? (plot * Math.max(0, r.value)) / top : 0;
           return (
             <g key={r.label}>
               <title>{`${r.label}: ${format(r.value)}`}</title>
-              <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end"
-                className="fill-current text-text" style={{ fontSize: 11 }}>{fitLabel(r.label)}</text>
+              <text x={LABEL_W - 10} y={y + BAR_H / 2 + 4} textAnchor="end"
+                className="fill-current text-text" style={{ fontSize: FONT }}>{fitLabel(r.label)}</text>
               <path d={barPath(LABEL_W, y, Math.max(w, 1), BAR_H)} fill="var(--s1)" />
-              <text x={LABEL_W + w + 6} y={y + BAR_H / 2 + 4}
-                className="fill-current text-text-dim" style={{ fontSize: 11 }}>{format(r.value)}</text>
+              <text x={LABEL_W + w + 8} y={y + BAR_H / 2 + 4}
+                className="fill-current text-text" style={{ fontSize: FONT }}>{format(r.value)}</text>
             </g>
           );
         })}
@@ -931,21 +944,20 @@ const COMPONENT_SERIES = [
 // numbers live in the table below rather than crowding the interior segments.
 function CompositionBars({ rows }: { rows: { label: string; components: Record<string, number> }[] }) {
   if (rows.length === 0) return null;
-  const width = 460;
-  const plot = width - LABEL_W - 56;
-  const height = rows.length * ROW_H + 24;
+  const plot = VIEW_W - LABEL_W - VALUE_W;
+  const height = rows.length * ROW_H + 16;
   const GAP = 2;
   return (
-    <figure className="bench-viz m-0 flex flex-col gap-1">
+    <figure className="bench-viz bench-fig m-0 flex flex-col gap-2">
       <figcaption className="text-xs text-text-dim">Where the 100 points went</figcaption>
-      <svg viewBox={`0 0 ${width} ${height}`} width="100%" role="img" aria-label="Score composition by target">
+      <svg viewBox={`0 0 ${VIEW_W} ${height}`} width="100%" role="img" aria-label="Score composition by target">
         {[0, 50, 100].map((t) => {
           const x = LABEL_W + (plot * t) / 100;
-          return <line key={t} x1={x} y1={14} x2={x} y2={height - 10}
+          return <line key={t} x1={x} y1={6} x2={x} y2={height - 6}
             stroke="var(--viz-grid)" strokeWidth="1" shapeRendering="crispEdges" />;
         })}
         {rows.map((r, i) => {
-          const y = 14 + i * ROW_H;
+          const y = 8 + i * ROW_H;
           let cursor = LABEL_W;
           const total = COMPONENT_SERIES.reduce((sum, c) => sum + (r.components[c.key] || 0), 0);
           const segs = COMPONENT_SERIES.map((c, ci) => {
@@ -960,8 +972,8 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
           return (
             <g key={r.label}>
               <title>{`${r.label}: ${round1(total)} of 100`}</title>
-              <text x={LABEL_W - 8} y={y + BAR_H / 2 + 4} textAnchor="end"
-                className="fill-current text-text" style={{ fontSize: 11 }}>{fitLabel(r.label)}</text>
+              <text x={LABEL_W - 10} y={y + BAR_H / 2 + 4} textAnchor="end"
+                className="fill-current text-text" style={{ fontSize: FONT }}>{fitLabel(r.label)}</text>
               {segs.map((s) => s.w <= 0 ? null : (
                 <g key={s.c.key}>
                   <title>{`${r.label} — ${s.c.label}: ${s.v} of ${s.c.max}`}</title>
@@ -969,20 +981,33 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
                     fill={s.c.color} />
                 </g>
               ))}
-              <text x={LABEL_W + plot + 6} y={y + BAR_H / 2 + 4}
-                className="fill-current text-text-dim" style={{ fontSize: 11 }}>{round1(total)}</text>
+              <text x={LABEL_W + plot + 8} y={y + BAR_H / 2 + 4}
+                className="fill-current text-text" style={{ fontSize: FONT }}>{round1(total)}</text>
             </g>
           );
         })}
       </svg>
-      <div className="flex flex-wrap gap-3 text-xs text-text-dim">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-text-dim">
         {COMPONENT_SERIES.map((c) => (
-          <span key={c.key} className="flex items-center gap-1">
+          <span key={c.key} className="flex items-center gap-1.5">
             <svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill={c.color} /></svg>
             {c.label} <span className="opacity-60">/{c.max}</span>
           </span>
         ))}
       </div>
+    </figure>
+  );
+}
+
+const round1 = (v: number) => Math.round(v * 10) / 10;
+
+// Three light-mode palette slots sit under 3:1 contrast, so the component
+// values must also be readable as text — the relief rule, not decoration.
+function ComponentTable({ rows }: { rows: { label: string; components: Record<string, number> }[] }) {
+  return (
+    <div className="bench-viz flex flex-col gap-2">
+      <div className="text-xs text-text-dim">Score components</div>
+      <div className="bench-scroll">
       <table className="text-xs w-full">
         <thead className="text-text-dim">
           <tr className="text-left border-b border-border">
@@ -995,17 +1020,18 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
             <tr key={r.label} className="border-b border-border">
               <td className="py-1">{r.label}</td>
               {COMPONENT_SERIES.map((c) => (
-                <td key={c.key} className="text-text-dim">{r.components[c.key] ?? 0}<span className="opacity-60">/{c.max}</span></td>
+                <td key={c.key} className="text-text-dim">
+                  {r.components[c.key] ?? 0}<span className="opacity-60">/{c.max}</span>
+                </td>
               ))}
             </tr>
           ))}
         </tbody>
       </table>
-    </figure>
+      </div>
+    </div>
   );
 }
-
-const round1 = (v: number) => Math.round(v * 10) / 10;
 
 // The table is not optional: three light-mode palette slots sit under 3:1
 // contrast, and the relief rule requires the values be readable as text too.
@@ -1049,16 +1075,24 @@ function Board({ rows, byScenario, note }: {
   const models = rows.map((r) => r.model || r.label);
   const distinct = new Set(models).size === models.length;
   const chartLabel = (r: LeaderboardRow, i: number) => (distinct ? models[i] : r.label);
+  const componentRows = rows.map((r, i) => ({
+    label: chartLabel(r, i), components: (r.components || {}) as Record<string, number>,
+  }));
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-8">
       <style dangerouslySetInnerHTML={{ __html: VIZ_CSS }} />
       {note && <div className="text-xs text-text-dim border border-border rounded p-2">{note}</div>}
-      <div className="grid gap-6" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))" }}>
+      <div className="bench-grid">
+        <CompositionBars rows={componentRows} />
+        <ComponentTable rows={componentRows} />
+      </div>
+      <div className="bench-grid">
         <RankBars title="Pass rate" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.pass_rate * 100 }))}
           max={100} format={(v) => `${Math.round(v)}%`} unit="%" />
         <RankBars title="Average score" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_score }))}
           max={100} format={(v) => String(round1(v))} unit="of 100" />
-        <CompositionBars rows={rows.map((r, i) => ({ label: chartLabel(r, i), components: (r.components || {}) as Record<string, number> }))} />
+        <RankBars title="Average duration" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_duration_ms }))}
+          format={(v) => secs(v)} />
         <RankBars title="Average tokens" rows={rows.map((r, i) => ({ label: chartLabel(r, i), value: r.average_tokens }))}
           format={(v) => Math.round(v).toLocaleString()} />
       </div>
