@@ -87,8 +87,26 @@ interface LeaderboardRow {
   mixed_cost_basis: boolean;
 }
 
-async function call<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
+interface Scope {
+  projectId: string;
+  installId: number;
+}
+
+// The platform proxy routes /api/apps/<name>/... by project. An absent
+// project_id can only resolve a *global* install, and Bench is project-scoped,
+// so a request without it 404s. An empty one is rejected outright — that is a
+// panel fetching before its project context hydrated — so callers wait for a
+// real project id instead of sending a blank.
+function scopedPath(path: string, scope: Scope): string {
+  const url = new URL(API + path, window.location.origin);
+  if (scope.installId) url.searchParams.set("install_id", String(scope.installId));
+  url.searchParams.set("project_id", scope.projectId);
+  return url.pathname + url.search;
+}
+
+async function call<T>(path: string, scope: Scope, init?: RequestInit): Promise<T> {
+  const response = await fetch(scopedPath(path, scope), {
+    credentials: "same-origin",
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
   });
@@ -103,13 +121,14 @@ const pct = (value: number) => `${Math.round(value * 100)}%`;
 const seconds = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`);
 const short = (digest?: string) => (digest ? digest.slice(0, 12) : "");
 
-export default function BenchPanel({}: NativePanelProps) {
+export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   const [packs, setPacks] = useState<Pack[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [selectedId, setSelectedId] = useState<string>("");
   const [tab, setTab] = useState<"definition" | "runs" | "leaderboard">("definition");
   const [board, setBoard] = useState<LeaderboardRow[]>([]);
   const [status, setStatus] = useState("");
+  const scope = useMemo<Scope>(() => ({ projectId, installId }), [projectId, installId]);
 
   const selected = useMemo(() => packs.find((p) => p.id === selectedId), [packs, selectedId]);
   const packRuns = useMemo(
@@ -118,10 +137,11 @@ export default function BenchPanel({}: NativePanelProps) {
   );
 
   const refresh = useCallback(async () => {
+    if (!projectId) return;
     try {
       const [nextPacks, nextRuns] = await Promise.all([
-        call<Pack[]>("/api/packs"),
-        call<Run[]>("/api/runs?limit=50"),
+        call<Pack[]>("/api/packs", scope),
+        call<Run[]>("/api/runs?limit=50", scope),
       ]);
       setPacks(nextPacks || []);
       setRuns(nextRuns || []);
@@ -129,29 +149,30 @@ export default function BenchPanel({}: NativePanelProps) {
     } catch (error) {
       setStatus(String(error));
     }
-  }, []);
+  }, [projectId, scope]);
 
   useEffect(() => {
+    if (!projectId) return;
     void refresh();
     // Runs advance on a 5s worker tick; match it rather than poll harder.
     const timer = setInterval(() => void refresh(), 5000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, projectId]);
 
   useEffect(() => {
-    if (tab !== "leaderboard" || !selected?.digest) {
+    if (tab !== "leaderboard" || !selected?.digest || !projectId) {
       setBoard([]);
       return;
     }
-    call<{ rows: LeaderboardRow[] }>(`/api/packs/${selected.id}/leaderboard`)
+    call<{ rows: LeaderboardRow[] }>(`/api/packs/${selected.id}/leaderboard`, scope)
       .then((result) => setBoard(result.rows || []))
       .catch((error) => setStatus(String(error)));
-  }, [tab, selected]);
+  }, [tab, selected, projectId, scope]);
 
   const seal = async (pack: Pack) => {
     setStatus("");
     try {
-      const sealed = await call<Pack>(`/api/packs/${pack.id}/seal`, { method: "POST", body: "{}" });
+      const sealed = await call<Pack>(`/api/packs/${pack.id}/seal`, scope, { method: "POST", body: "{}" });
       await refresh();
       setSelectedId(sealed.id);
       setStatus(`Sealed ${sealed.name} v${sealed.version} · ${short(sealed.digest)}`);
@@ -163,7 +184,7 @@ export default function BenchPanel({}: NativePanelProps) {
   const fork = async (pack: Pack) => {
     setStatus("");
     try {
-      const draft = await call<Pack>(`/api/packs/${pack.id}/fork`, { method: "POST", body: "{}" });
+      const draft = await call<Pack>(`/api/packs/${pack.id}/fork`, scope, { method: "POST", body: "{}" });
       await refresh();
       setSelectedId(draft.id);
     } catch (error) {
@@ -173,6 +194,16 @@ export default function BenchPanel({}: NativePanelProps) {
 
   const drafts = packs.filter((pack) => pack.state === "draft");
   const sealed = packs.filter((pack) => pack.state === "sealed");
+
+  // Without a project the proxy cannot resolve a project-scoped install, so
+  // say so rather than firing requests that would 404.
+  if (!projectId) {
+    return (
+      <div className="h-full flex items-center justify-center bg-bg text-text-dim text-sm">
+        Waiting for project context…
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">

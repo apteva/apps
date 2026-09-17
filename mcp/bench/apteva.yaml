@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.1.0
+version: 0.1.1
 description: Reproducible, publishable benchmarks for agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; admission control keeps harness failures out of the record; leaderboards compare targets across runs and over time. Execution is delegated to Evals inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
@@ -49,14 +49,14 @@ provides:
     - { name: bench.record.broken, description: "A target beat the pinned baseline for a scenario." }
     - { name: bench.regression.detected, description: "A target fell below the pinned baseline for a scenario." }
   ui_panels:
-    - { slot: project.page, label: "Bench", icon: gauge, entry: /ui/BenchPanel.mjs }
+    - { slot: project.page, label: "Bench", icon: chart-column, entry: /ui/BenchPanel.mjs }
   workers:
     - { name: runner, schedule: "@every 5s" }
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.1.0
+    ref: bench/v0.1.1
     entry: mcp/bench
   port: 8080
   health_check: /health
