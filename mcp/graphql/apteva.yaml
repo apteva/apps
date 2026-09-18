@@ -1,0 +1,104 @@
+schema: apteva-app/v1
+
+name: graphql
+display_name: GraphQL
+version: 0.1.0
+description: |
+  Standalone GraphQL and realtime API runtime. Owns schemas, resolver
+  bindings, aggregation, source adapters and GraphQL subscriptions without
+  depending on the API gateway app.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/graphql
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [graphql, realtime, subscriptions, aggregation, api]
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - net.egress
+    - platform.ingress.write
+  apps:
+    - name: auth
+      optional: true
+      reason: Used to verify JWT/OIDC identities when configured.
+    - name: domains
+      optional: true
+      reason: Used to attach a GraphQL hostname when configured.
+    - name: database
+      optional: true
+      reason: Provides collection queries, writes and native aggregation.
+    - name: tables
+      optional: true
+      reason: Provides typed table rows and aggregation.
+      events: [row.inserted, row.updated, row.deleted]
+    - name: functions
+      optional: true
+      reason: Provides custom GraphQL resolvers and event publishers.
+
+provides:
+  http_routes:
+    - prefix: /graphql
+    - prefix: /admin/
+    - prefix: /health
+  mcp_tools:
+    - name: graphql_schema_create
+      description: Create or replace a draft GraphQL schema for a project and environment.
+    - name: graphql_schema_get
+      description: Fetch the active or draft GraphQL schema.
+    - name: graphql_schema_list
+      description: List GraphQL schema versions.
+    - name: graphql_schema_validate
+      description: Parse and validate a GraphQL schema without publishing it.
+    - name: graphql_schema_publish
+      description: Publish a validated schema version.
+    - name: graphql_source_add
+      description: Bind a resolver source such as database, tables, function or HTTP.
+    - name: graphql_source_list
+      description: List configured GraphQL sources.
+    - name: graphql_resolver_set
+      description: Bind a GraphQL field to a source operation, including aggregation.
+    - name: graphql_resolver_list
+      description: List resolver bindings.
+    - name: graphql_deploy
+      description: Promote an environment schema and resolver set to active.
+    - name: graphql_logs
+      description: List recent GraphQL request logs.
+  ui_panels:
+    - slot: project.page
+      label: GraphQL
+      icon: share
+      entry: /ui/GraphQLPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/graphql
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/graphql.db
+  migrations: migrations/
+
+config_schema:
+  - name: max_query_depth
+    type: text
+    default: "12"
+    label: Maximum query depth
+  - name: max_query_complexity
+    type: text
+    default: "1000"
+    label: Maximum query complexity
+  - name: max_request_bytes
+    type: text
+    default: "1048576"
+    label: Maximum GraphQL request bytes
+
+upgrade_policy: auto-patch

@@ -1,0 +1,90 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"errors"
+	"net/http"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+//go:embed apteva.yaml
+var manifestYAML []byte
+
+// App is deliberately independent from the API gateway app. It owns the
+// GraphQL HTTP/WebSocket surface and calls source apps through PlatformAPI.
+type App struct {
+	httpClient *http.Client
+	hub        *subscriptionHub
+	ctx        *sdk.AppCtx
+}
+
+func main() { sdk.Run(&App{}) }
+
+func (a *App) Manifest() sdk.Manifest {
+	m, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		panic("invalid embedded manifest: " + err.Error())
+	}
+	return *m
+}
+
+func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if ctx.AppDB() == nil {
+		return errors.New("graphql requires a db block")
+	}
+	if a.httpClient == nil {
+		a.httpClient = http.DefaultClient
+	}
+	a.ctx = ctx
+	a.hub = newSubscriptionHub()
+	ctx.Logger().Info("graphql mounted", "project_id", ctx.CurrentProject())
+	return nil
+}
+
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.hub != nil {
+		a.hub.close()
+	}
+	return nil
+}
+
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "row.inserted", Handler: a.handleSourceEvent},
+		{Event: "row.updated", Handler: a.handleSourceEvent},
+		{Event: "row.deleted", Handler: a.handleSourceEvent},
+	}
+}
+
+func (a *App) HTTPRoutes() []sdk.Route {
+	return []sdk.Route{
+		{Pattern: "/graphql", Handler: a.handleGraphQL},
+		{Pattern: "/graphql/", Handler: a.handleGraphQL},
+		{Pattern: "/realtime", Handler: a.handleRealtime},
+		{Pattern: "/admin/", Handler: a.handleAdminHTTP},
+	}
+}
+
+func (a *App) MCPTools() []sdk.Tool {
+	return graphqlTools(a)
+}
+
+func appProject(ctx *sdk.AppCtx, callCtx context.Context, args map[string]any) (string, error) {
+	if caller := sdk.CallerFrom(callCtx); caller != nil && caller.ProjectID != "" {
+		if v, ok := args["project_id"].(string); ok && v != "" && v != caller.ProjectID {
+			return "", forbidden("project override is not allowed")
+		}
+		return caller.ProjectID, nil
+	}
+	if ctx != nil && ctx.CurrentProject() != "" {
+		return ctx.CurrentProject(), nil
+	}
+	if v, ok := args["project_id"].(string); ok && v != "" {
+		return v, nil
+	}
+	return "", invalid("project_id is required")
+}
