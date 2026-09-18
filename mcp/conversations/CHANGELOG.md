@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.22 — 2026-09-18
+
+- Rebuild the manifest-loaded `AgentConversationsWidget.mjs` so the generic `show_page_context: false` presentation setting shipped in 0.23.21 is honored at runtime.
+- Add a release regression check that rejects a stale compiled widget bundle missing the declared page-context display setting.
+
 ## 0.23.21 — 2026-09-18
 
 - Add the generic `show_page_context` agent-conversation widget setting. It defaults to `true`; setting it to `false` hides the complete context row without changing the page-context snapshot attached to sent messages.

@@ -86,8 +86,16 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
 			}
 		}
-		if _, err := os.Stat("ui/AgentConversationsWidget.mjs"); err != nil {
+		bundle, err := os.ReadFile("ui/AgentConversationsWidget.mjs")
+		if err != nil {
 			t.Fatalf("widget bundle: %v", err)
+		}
+		// The browser loads the generated bundle, not the TypeScript source.
+		// Keep release packaging from silently shipping an older bundle that
+		// ignores a setting already declared by the manifest and covered by
+		// source-level tests.
+		if !strings.Contains(string(bundle), "show_page_context") {
+			t.Fatal("agent-conversations bundle is stale: rebuild panels after changing widget settings")
 		}
 		return
 	}
