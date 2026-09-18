@@ -1,12 +1,13 @@
 # Database
 
-Independent Apteva sidecar app, version 0.3.0. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.4.0. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
 ## Working in this version
 
 - Several named databases per authenticated project or calling-app scope, with SQLite as the default and an explicit adapter for each database.
 - SQLite collections use a typed, `WITHOUT ROWID` storage layout with native composite primary keys. Existing v1 collections remain readable and migrate atomically on their first write through a shadow-table swap.
-- SQLite uses a serialized writer with persistent prepared statements, a separate four-connection read-only pool, and checkpoint work amortized through a larger WAL threshold. The `durable` profile is the default; the opt-in `balanced` profile uses `synchronous=NORMAL` for Tables-like commit behavior with a wider crash-loss window.
+- SQLite uses a serialized writer with persistent prepared statements, a separate four-connection read-only pool, and checkpoint work amortized through a larger WAL threshold. The `durable` profile is the default; the opt-in `balanced` profile uses `synchronous=NORMAL` with a wider crash-loss window.
+- SQLite bulk inserts use compiled multi-row statements inside the same atomic transaction, reducing per-record statement overhead without weakening durable commits.
 - Several independently defined collections in every database.
 - Typed records, UUID defaults, composite primary keys, exact int64 values encoded as decimal strings, and service-owned timestamps/versions.
 - `get`, `find`, `insert`, `update`, `delete`, `upsert`, `count`, `aggregate`, `batch`, and `explain`.
