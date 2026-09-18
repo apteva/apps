@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.20 — 2026-09-18
+
+- Carry the operator's explicitly shared dashboard page identifiers through the Conversations widget, durable message metadata, retries, and agent events. Context is project-bound, allowlisted, size-limited, and clearly marked as untrusted descriptive data rather than instructions or authorization.
+- Show the context snapshot beside the composer with a per-page remove action, keep it out of public conversations, and expose the same typed option to app-served and npm React chat surfaces.
+- Add browser-level transport coverage and an HTTP-to-durable-store-to-agent-event regression test so future frontend or delivery changes cannot silently drop context again.
+
 ## 0.23.19 — 2026-09-15
 
 - Hide the exact internal `search_tools` lookup from preparation, live tool activity, summary counts, and historical activity. Other search/query tools remain visible.

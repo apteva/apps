@@ -21,6 +21,7 @@ import {
 } from "./agentConversations";
 
 export interface AgentConversationsWidgetProps extends ConversationLocalization {
+  pageContext?: import("./pageContext").PageContext;
  composer?:ComposerOptions;
   appName: string;
   installId: number;

@@ -10,6 +10,7 @@ export interface CreateConversation {
   directive?: string;
 }
 export interface SendMessage {
+  page_context?: import("./pageContext").PageContext;
   content: string;
   client_message_id: string;
   attachments?: Message["attachments"];

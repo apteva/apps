@@ -31,6 +31,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
+import { useHostPageContext } from "./context";
+import { PageContextChip, useMessagePageContext } from "./pageContext";
 import { isSoftBreakMetadata, softBreakMessageInput } from "./softBreak";
 
 import { useConversationAPI } from "./context";
@@ -1379,6 +1381,8 @@ export function ConversationChat({
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
+  const hostPage = useHostPageContext();
+  const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
@@ -1507,7 +1511,7 @@ export function ConversationChat({
     const content=draft.trim(); if ((!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
-    if (!request) request={content,client_message_id:newClientMessageId(),...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
+    if (!request) request={content,client_message_id:newClientMessageId(),page_context:sharedPage.context,...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
     pendingSendRef.current=request;
     try {sessionStorage.setItem(storageKey+":pending",JSON.stringify(request));} catch {}
     const cancelOptimistic = activeResponse ? () => {} : beginResponse(conversation.lead_agent_id, Math.max(0,...messages.map(m=>m.id)));
@@ -1562,6 +1566,7 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
+      contextChip={<PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} />}
       attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}

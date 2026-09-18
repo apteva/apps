@@ -1,13 +1,15 @@
 import type { ComposerOptions } from "./composer";
 export type { ComposerOptions } from "./composer";
-type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions};
+import type { PageContext } from "./pageContext";
+export type { PageContext } from "./pageContext";
+type ChatConfiguration = ConversationLocalization & {composer?:ComposerOptions;pageContext?:PageContext};
 import { ConversationLocalizationProvider, ConversationLocaleRegion, type ConversationLocalization } from "./i18n";
 export { ConversationLocalizationProvider } from "./i18n";
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";
 import type { ReactNode } from "react";
 import AgentWidget from "./AgentConversationsWidget";
 import { ConversationChat as Thread, type Conversation } from "./ConversationsPanel";
-import { ConversationsProvider } from "./context";
+import { ConversationsProvider, PageContextProvider } from "./context";
 import type { ConversationsClient } from "./client";
 export { ConversationsProvider } from "./context";
 
@@ -17,10 +19,10 @@ export interface ChatProps extends ChatConfiguration {
   showNewConversation?: boolean;
   className?: string;
 }
-function Surface({ conversations, children, className, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
-  return <ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
+function Surface({ conversations, children, className, pageContext, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
+  return <PageContextProvider.Provider value={pageContext}><ConversationsProvider conversations={conversations} {...localization} key={conversations.storageKey}>
     <ConversationLocaleRegion className={className}>{children}</ConversationLocaleRegion>
-  </ConversationsProvider>;
+  </ConversationsProvider></PageContextProvider.Provider>;
 }
 export function ConversationChat({ conversations, agentId, showNewConversation = true, className, ...localization }: ChatProps) {
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget

@@ -19,6 +19,7 @@ import (
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	routes := []sdk.Route{
+		{Method: "GET", Pattern: "/operator-context", Handler: a.handleOperatorContext},
 		{Pattern: "/chats", Handler: a.handleChats},
 		{Pattern: "/participants", Handler: a.handleParticipants},
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
@@ -669,13 +670,14 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	conversationID := r.URL.Query().Get("chat_id")
 	var body struct {
-		ChatID         string       `json:"chat_id"`
-		Content        string       `json:"content"`
-		ClientID       string       `json:"client_message_id"`
-		Intent         string       `json:"intent"`
-		TargetCallID   string       `json:"target_call_id"`
-		Attachments    []Attachment `json:"attachments"`
-		TargetAgentIDs []int64      `json:"target_agent_ids"`
+		ChatID         string          `json:"chat_id"`
+		Content        string          `json:"content"`
+		ClientID       string          `json:"client_message_id"`
+		Intent         string          `json:"intent"`
+		TargetCallID   string          `json:"target_call_id"`
+		Attachments    []Attachment    `json:"attachments"`
+		TargetAgentIDs []int64         `json:"target_agent_ids"`
+		PageContext    json.RawMessage `json:"page_context"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 6<<20)).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -746,7 +748,16 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	metadata := map[string]any{"target_agent_ids": targets}
+	pageContext, err := cleanPageContext(body.PageContext, conv.ProjectID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if pageContext != nil && conv.Audience != "operator" {
+		http.Error(w, "page context requires an operator conversation", http.StatusForbidden)
+		return
+	}
+	metadata := map[string]any{"target_agent_ids": targets, "page_context": pageContext}
 	if body.Intent != "" {
 		metadata["intent"] = body.Intent
 	}
@@ -864,7 +875,7 @@ func isRouteWordByte(b byte) bool {
 }
 
 func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {
-	text := "[chat] " + msg.Content
+	text := "[chat] " + msg.Content + pageContextText(msg)
 	if messageIntent(msg) == messageIntentSoftBreak {
 		text = "[chat soft break] The user requested a conversational break while work may still be in progress. " +
 			"This is a new advisory event: no model call, tool, or thread was canceled. " +

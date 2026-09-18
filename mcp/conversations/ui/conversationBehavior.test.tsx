@@ -10,11 +10,13 @@ import { reportSectionsText } from "./messageContent";
 
 import { AptevaClient } from "@apteva/web-sdk";
 import { conversationsExtension, type ConversationsClient } from "../frontend/src/client";
-import { ConversationsProvider } from "../frontend/src/context";
+import { ConversationsProvider, PageContextProvider } from "../frontend/src/context";
+import type { PageContext } from "../frontend/src/pageContext";
 import type { ComponentProps } from "react";
 let conversations: ConversationsClient;
-function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization) {
- return <ConversationsProvider conversations={conversations} locale={props.locale} timeZone={props.timeZone} messages={props.messages}><ChatSource {...props}/></ConversationsProvider>;
+function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization & { pageContext?: PageContext }) {
+ const { pageContext, ...chatProps } = props;
+ return <PageContextProvider.Provider value={pageContext}><ConversationsProvider conversations={conversations} locale={props.locale} timeZone={props.timeZone} messages={props.messages}><ChatSource {...chatProps}/></ConversationsProvider></PageContextProvider.Provider>;
 }
 let win: Window, root: Root, element: HTMLElement;
 let fetcher: (url:string, init?:RequestInit) => Promise<Response>;
@@ -71,6 +73,15 @@ test("ordinary retry preserves the original submission id",async()=>{
  fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return bodies.length===1?Promise.reject(new Error("lost response")):json(message(1,"a",bodies[0].content));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
  await render();await type("hello");await send();await settle();await send();await settle();
  expect(bodies.length).toBe(2);expect(bodies[1]).toEqual(bodies[0]);
+});
+test("page context is included in the posted message snapshot",async()=>{
+ const bodies:any[]=[];
+ const pageContext:PageContext={version:1,page:"app",project_id:"project",app:"tickets",installation_id:17,panel:"details"};
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){bodies.push(JSON.parse(String(init.body)));return json(message(1,"a","inspect this page"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});};
+ await act(async()=>root.render(<ConversationChat pageContext={pageContext} conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));await settle();
+ expect(element.textContent).toContain("Using context: tickets app");
+ await type("inspect this page");await send();await settle();
+ expect(bodies).toHaveLength(1);expect(bodies[0].page_context).toEqual(pageContext);
 });
 test("report sections preserve headings, content and additional structured fields",()=>{
  expect(reportSectionsText([{title:"Results",body:"All checks passed",metrics:{count:3}}])).toContain("All checks passed");

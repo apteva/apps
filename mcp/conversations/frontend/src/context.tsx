@@ -2,6 +2,10 @@ import type { ComposerOptions } from "./composer";
 import { ConversationLocalizationProvider, type ConversationLocalization } from "./i18n";
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import type { ConversationsClient } from "./client";
+import type { PageContext } from "./pageContext";
+
+export const PageContextProvider = createContext<PageContext | undefined>(undefined);
+export function useHostPageContext() { return useContext(PageContextProvider); }
 
 const Context = createContext<{ client: ConversationsClient; legacyDrafts: boolean; composer?:ComposerOptions } | null>(null);
 export function ConversationsProvider({ conversations, children, legacyDrafts = false, locale, timeZone, messages, composer }: ConversationLocalization & { conversations: ConversationsClient; children: ReactNode; legacyDrafts?: boolean; composer?:ComposerOptions }) {
