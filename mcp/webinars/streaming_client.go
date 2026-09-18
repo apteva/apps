@@ -8,13 +8,24 @@ import (
 // that lets tests inject a fake. Production wiring uses
 // platformStreamingCaller, which forwards to the SDK's PlatformAPI.
 
+// Every method takes the project explicitly.
+//
+// v0.2 passed `_project_id` on CreateStream, SignedURL and SetURLPolicy
+// but not on the other five. streaming's tools all start with
+// resolveProjectFromArgs, which ERRORS when the id is absent and
+// APTEVA_PROJECT_ID isn't set — so under `scope: global` every one of
+// those five calls failed outright: GetStream returned an error, the
+// live room saw no snapshot and served "Starting shortly" forever,
+// viewer counts read zero, and StopStream/DeleteStream silently never
+// tore anything down. The manifest has declared `scopes: [project,
+// global]` since v0.1.
 type streamingCaller interface {
 	CreateStream(req CreateStreamReq) (CreateStreamResp, error)
-	GetStream(id int64) (StreamSnapshot, error)
-	StopStream(id int64) error
-	DeleteStream(id int64) error
-	GetMetrics(id int64) (StreamMetrics, error)
-	ReplayURL(id int64) (ReplayURLs, error)
+	GetStream(projectID string, id int64) (StreamSnapshot, error)
+	StopStream(projectID string, id int64) error
+	DeleteStream(projectID string, id int64) error
+	GetMetrics(projectID string, id int64) (StreamMetrics, error)
+	ReplayURL(projectID string, id int64) (ReplayURLs, error)
 
 	// SignedURL mints a short-lived playback URL carrying `exp` + an
 	// HMAC `sig`. Unlike the per-stream playback_token — which is
@@ -124,39 +135,51 @@ func (p *platformStreamingCaller) CreateStream(req CreateStreamReq) (CreateStrea
 	return out, err
 }
 
-func (p *platformStreamingCaller) GetStream(id int64) (StreamSnapshot, error) {
+// streamArgs builds the argument map every per-stream streaming tool
+// takes. `_project_id` is omitted when empty so a scope=project install
+// (where streaming reads APTEVA_PROJECT_ID from its own environment)
+// behaves exactly as before.
+func streamArgs(projectID string, id int64) map[string]any {
+	args := map[string]any{"id": id}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	return args
+}
+
+func (p *platformStreamingCaller) GetStream(projectID string, id int64) (StreamSnapshot, error) {
 	var wrap struct {
 		Stream StreamSnapshot `json:"stream"`
 		Found  bool           `json:"found"`
 	}
 	err := p.ctx.PlatformAPI().CallAppResult("streaming", "streams_get",
-		map[string]any{"id": id}, &wrap)
+		streamArgs(projectID, id), &wrap)
 	return wrap.Stream, err
 }
 
-func (p *platformStreamingCaller) StopStream(id int64) error {
+func (p *platformStreamingCaller) StopStream(projectID string, id int64) error {
 	var out map[string]any
 	return p.ctx.PlatformAPI().CallAppResult("streaming", "streams_stop",
-		map[string]any{"id": id}, &out)
+		streamArgs(projectID, id), &out)
 }
 
-func (p *platformStreamingCaller) DeleteStream(id int64) error {
+func (p *platformStreamingCaller) DeleteStream(projectID string, id int64) error {
 	var out map[string]any
 	return p.ctx.PlatformAPI().CallAppResult("streaming", "streams_delete",
-		map[string]any{"id": id}, &out)
+		streamArgs(projectID, id), &out)
 }
 
-func (p *platformStreamingCaller) GetMetrics(id int64) (StreamMetrics, error) {
+func (p *platformStreamingCaller) GetMetrics(projectID string, id int64) (StreamMetrics, error) {
 	var out StreamMetrics
 	err := p.ctx.PlatformAPI().CallAppResult("streaming", "streams_get_metrics",
-		map[string]any{"id": id}, &out)
+		streamArgs(projectID, id), &out)
 	return out, err
 }
 
-func (p *platformStreamingCaller) ReplayURL(id int64) (ReplayURLs, error) {
+func (p *platformStreamingCaller) ReplayURL(projectID string, id int64) (ReplayURLs, error) {
 	var out ReplayURLs
 	err := p.ctx.PlatformAPI().CallAppResult("streaming", "streams_replay_url",
-		map[string]any{"id": id}, &out)
+		streamArgs(projectID, id), &out)
 	return out, err
 }
 

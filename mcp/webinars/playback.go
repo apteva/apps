@@ -171,7 +171,7 @@ func (a *App) ReplayPlayback(ctx *sdk.AppCtx, w *Webinar) (PlaybackURL, error) {
 
 	// Fall back to the legacy non-expiring URL so an older streaming
 	// install keeps serving replays. Signed=false marks the gap.
-	urls, uErr := a.streamingCaller.ReplayURL(w.StreamID)
+	urls, uErr := a.streamingCaller.ReplayURL(w.ProjectID, w.StreamID)
 	if uErr != nil || !urls.Available {
 		return PlaybackURL{}, errReplayUnavailable
 	}

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -18,6 +20,27 @@ import (
 // via messaging, marking the row sent | skipped | failed.
 //
 // Runs as a Worker — apteva-server schedules it.
+
+// projectFilter renders an optional `AND <col> = ?` for a worker query.
+//
+// apteva-server dispatches every Worker once PER PROJECT each tick
+// (see the SDK's runWorker/dispatchProjects). Every worker in this file
+// was written as if it ran once globally — project-agnostic scans,
+// project-agnostic UPDATEs — so a 50-project install repeated the same
+// full scan 50 times per tick against a pool the SDK pins to ONE
+// connection. Sequential dispatch kept it correct; it was purely
+// wasted writer time, on the one resource everything else here is
+// tuned around.
+//
+// An empty project (single-project install, or a fresh one with none
+// created yet) means "no filter" and restores the old behaviour.
+func projectFilter(app *sdk.AppCtx, col string) (string, []any) {
+	pid := app.CurrentProject()
+	if pid == "" {
+		return "", nil
+	}
+	return " AND " + col + " = ?", []any{pid}
+}
 
 // reminderTickBudget caps how long one scheduler tick will keep pulling
 // batches, so a large wave drains across several batches inside one tick
@@ -50,7 +73,15 @@ func (a *App) runReminderScheduler(ctx context.Context, app *sdk.AppCtx) error {
 		if len(jobs) == 0 {
 			return nil
 		}
-		a.dispatchReminderBatch(app, jobs, concurrency)
+		stuck := a.dispatchReminderBatch(app, jobs, concurrency)
+		if stuck > 0 {
+			// Those rows are still 'pending' and the next dueReminders
+			// would hand them straight back, re-sending each one for the
+			// rest of the tick budget. Give up this tick instead.
+			app.Logger().Warn("reminder rows could not be closed out; ending tick early",
+				"stuck", stuck, "batch", len(jobs))
+			return nil
+		}
 		if len(jobs) < batchSize || time.Now().After(deadline) {
 			return nil
 		}
@@ -68,7 +99,7 @@ type reminderJob struct {
 	ProjectID, Channel, Lead    string
 	ScheduledFor                string
 	Email, Phone, Name, Token   string
-	Title, StartsAt             string
+	Title, StartsAt, Timezone   string
 }
 
 // dueReminders pulls the next batch of dispatchable rows.
@@ -83,20 +114,24 @@ type reminderJob struct {
 // one, so multi-slot webinars quote the time that registrant actually
 // signed up for rather than the webinar-level scheduled_at.
 func (a *App) dueReminders(app *sdk.AppCtx, limit int) ([]reminderJob, error) {
+	scope, scopeArgs := projectFilter(app, "r.project_id")
+	args := append([]any{nowRFC3339()}, scopeArgs...)
+	args = append(args, limit)
 	rows, err := app.AppDB().Query(
 		`SELECT r.id, r.project_id, r.webinar_id, r.registrant_id,
 				r.channel, r.lead_label, r.scheduled_for,
 				COALESCE(reg.email,''), COALESCE(reg.phone,''),
 				COALESCE(reg.display_name,''), reg.join_token,
-				w.title, COALESCE(s.starts_at, w.scheduled_at, '')
+				w.title, COALESCE(s.starts_at, w.scheduled_at, ''),
+				COALESCE(s.timezone, w.timezone, 'UTC')
 		 FROM webinar_reminders r
 		 JOIN webinar_registrants reg ON reg.id = r.registrant_id
 		 JOIN webinars w ON w.id = r.webinar_id
 		 LEFT JOIN webinar_slots s ON s.id = reg.slot_id
 		 WHERE r.status = 'pending' AND r.scheduled_for <= ?
-		   AND w.status IN ('draft','scheduled','live')
+		   AND w.status IN ('draft','scheduled','live')`+scope+`
 		 ORDER BY r.scheduled_for ASC
-		 LIMIT ?`, nowRFC3339(), limit)
+		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +142,7 @@ func (a *App) dueReminders(app *sdk.AppCtx, limit int) ([]reminderJob, error) {
 		var j reminderJob
 		if err := rows.Scan(&j.ID, &j.ProjectID, &j.WebinarID, &j.RegistrantID,
 			&j.Channel, &j.Lead, &j.ScheduledFor, &j.Email, &j.Phone, &j.Name,
-			&j.Token, &j.Title, &j.StartsAt); err == nil {
+			&j.Token, &j.Title, &j.StartsAt, &j.Timezone); err == nil {
 			jobs = append(jobs, j)
 		}
 	}
@@ -119,13 +154,18 @@ func (a *App) dueReminders(app *sdk.AppCtx, limit int) ([]reminderJob, error) {
 // a 500-row batch took 50–100s and overran its own one-minute tick,
 // capping throughput at ~500/min — so the T-15m wave for a big webinar
 // landed 20+ minutes late.
-func (a *App) dispatchReminderBatch(app *sdk.AppCtx, jobs []reminderJob, concurrency int) {
-	runBounded(jobs, concurrency, func(j reminderJob) {
+//
+// Returns the number of rows that were dispatched but could not be
+// marked, so the caller can stop re-reading them.
+func (a *App) dispatchReminderBatch(app *sdk.AppCtx, jobs []reminderJob, concurrency int) int {
+	var stuck atomic.Int64
+	runBounded(jobs, concurrency, guarded(app, "reminder-dispatch", func(j reminderJob) {
 		w := &Webinar{
 			ID:          j.WebinarID,
 			ProjectID:   j.ProjectID,
 			Title:       j.Title,
 			ScheduledAt: j.StartsAt,
+			Timezone:    j.Timezone,
 		}
 		to := j.Email
 		if j.Channel == "sms" {
@@ -140,18 +180,23 @@ func (a *App) dispatchReminderBatch(app *sdk.AppCtx, jobs []reminderJob, concurr
 			Channel:      j.Channel,
 			To:           to,
 			Lead:         j.Lead,
-			Body:         defaultReminderBody(w, j.Lead),
+			Body:         a.reminderBody(app, w, j.Lead, a.joinURL(app, j.Token)),
 			IdemSuffix:   "at:" + j.ScheduledFor,
 		})
+		var markErr error
 		switch {
 		case err == nil:
-			a.markReminder(app, j.ID, "sent", msgID, "")
+			markErr = a.markReminder(app, j.ID, "sent", msgID, "")
 		case errors.Is(err, errMessagingNotBound):
-			a.markReminder(app, j.ID, "skipped", 0, "messaging not bound")
+			markErr = a.markReminder(app, j.ID, "skipped", 0, "messaging not bound")
 		default:
-			a.markReminder(app, j.ID, "failed", 0, err.Error())
+			markErr = a.markReminder(app, j.ID, "failed", 0, err.Error())
 		}
-	})
+		if markErr != nil {
+			stuck.Add(1)
+		}
+	}))
+	return int(stuck.Load())
 }
 
 // reminderConcurrency — how many reminder dispatches run in flight.
@@ -168,6 +213,10 @@ func (a *App) reminderConcurrency(ctx *sdk.AppCtx) int {
 
 // runBounded applies fn to every item with at most `concurrency` in
 // flight. fn must be safe to call concurrently.
+//
+// Wrap fn in guarded() when it can panic — these pools run inside
+// scheduled workers, where an unrecovered panic in a goroutine takes
+// the whole sidecar down, live room and all.
 func runBounded[T any](items []T, concurrency int, fn func(T)) {
 	if len(items) == 0 {
 		return
@@ -203,6 +252,19 @@ func runBounded[T any](items []T, concurrency int, fn func(T)) {
 }
 
 // ─── Reminder scheduling ─────────────────────────────────────────
+
+// guarded contains a panic to the one item that caused it, logging it
+// through the app's own logger rather than taking the process with it.
+func guarded[T any](app *sdk.AppCtx, label string, fn func(T)) func(T) {
+	return func(it T) {
+		defer func() {
+			if r := recover(); r != nil {
+				app.Logger().Error("recovered panic", "where", label, "panic", fmt.Sprint(r))
+			}
+		}()
+		fn(it)
+	}
+}
 
 // plannedReminder is one row scheduleReminders is about to write.
 type plannedReminder struct {
@@ -487,18 +549,35 @@ func (a *App) dispatchOneReminder(ctx *sdk.AppCtx, pid string, w *Webinar, d rem
 // markReminder closes out one reminder row. msgID is messaging's record
 // id — the audit column existed from day one but every row was written
 // with 0, so "did registrant 9 get the T-1h SMS?" had no answer.
-func (a *App) markReminder(app *sdk.AppCtx, id int64, status string, msgID int64, errMsg string) {
+// markReminder closes out one reminder row and reports whether the row
+// actually moved.
+//
+// It used to discard both the error and the row count. A reminder whose
+// UPDATE kept failing stayed 'pending', so the scheduler's batch loop
+// re-fetched the same rows and re-sent them for the rest of its 45s
+// budget — the failure was invisible and the cost was a send storm.
+func (a *App) markReminder(app *sdk.AppCtx, id int64, status string, msgID int64, errMsg string) error {
+	var res sql.Result
+	var err error
 	if status == "sent" {
-		_, _ = app.AppDB().Exec(
+		res, err = app.AppDB().Exec(
 			`UPDATE webinar_reminders
 			 SET status = ?, sent_at = ?, messaging_id = ?, error = NULL
 			 WHERE id = ?`, status, nowRFC3339(), nullablePositiveInt64(msgID), id)
-		return
+	} else {
+		res, err = app.AppDB().Exec(
+			`UPDATE webinar_reminders
+			 SET status = ?, sent_at = ?, error = ?
+			 WHERE id = ?`, status, nowRFC3339(), nullStr(errMsg), id)
 	}
-	_, _ = app.AppDB().Exec(
-		`UPDATE webinar_reminders
-		 SET status = ?, sent_at = ?, error = ?
-		 WHERE id = ?`, status, nowRFC3339(), nullStr(errMsg), id)
+	if err != nil {
+		app.Logger().Warn("mark reminder", "reminder_id", id, "status", status, "err", err)
+		return err
+	}
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return fmt.Errorf("reminder %d not updated", id)
+	}
+	return nil
 }
 
 // nullablePositiveInt64 keeps messaging_id NULL rather than 0 when the
@@ -510,23 +589,66 @@ func nullablePositiveInt64(v int64) any {
 	return v
 }
 
-func defaultReminderBody(w *Webinar, lead string) string {
-	at := w.ScheduledAt
-	if at == "" {
-		at = "soon"
-	}
-	switch lead {
-	case "T-24h":
-		return fmt.Sprintf("Reminder: %q starts tomorrow at %s.", w.Title, at)
-	case "T-1h":
-		return fmt.Sprintf("Reminder: %q starts in one hour (%s).", w.Title, at)
-	case "T-15m":
-		return fmt.Sprintf("Reminder: %q starts in 15 minutes (%s).", w.Title, at)
-	case "live":
-		return fmt.Sprintf("We're live! Join %q now.", w.Title)
+// reminderBody renders the message a registrant actually receives.
+//
+// Two things were wrong with the version this replaces, and both made
+// the reminder useless rather than merely ugly:
+//
+//   - No join link. Ever. The join token was selected on both dispatch
+//     paths and then dropped on the floor, so "We're live! Join now."
+//     arrived with nothing to click. The only time a registrant ever
+//     saw their room URL was the redirect immediately after they
+//     registered — close that tab and the funnel was over.
+//   - Raw storage timestamps. "starts tomorrow at 2026-09-20T15:00:00Z"
+//     is what the recipient read, while webinars.timezone (captured at
+//     create time precisely for this) went unused.
+func (a *App) reminderBody(ctx *sdk.AppCtx, w *Webinar, lead, joinURL string) string {
+	at := formatWebinarTime(w.ScheduledAt, w.Timezone)
+	var head string
+	switch {
+	case lead == "live":
+		head = fmt.Sprintf("We're live! %s has started.", w.Title)
+	case at == "":
+		head = fmt.Sprintf("%s is starting soon.", w.Title)
+	case lead == "T-24h":
+		head = fmt.Sprintf("Reminder: %s starts tomorrow, %s.", w.Title, at)
+	case lead == "T-1h":
+		head = fmt.Sprintf("Reminder: %s starts in one hour, at %s.", w.Title, at)
+	case lead == "T-15m":
+		head = fmt.Sprintf("Reminder: %s starts in 15 minutes, at %s.", w.Title, at)
 	default:
-		return fmt.Sprintf("%q is scheduled for %s.", w.Title, at)
+		head = fmt.Sprintf("%s is scheduled for %s.", w.Title, at)
 	}
+	return appendJoinLink(head, joinURL)
+}
+
+// appendJoinLink adds the registrant's room URL to a message body,
+// unless the caller already put one there (a custom body from
+// webinars_send_reminder may well have).
+func appendJoinLink(body, joinURL string) string {
+	if joinURL == "" || strings.Contains(body, joinURL) {
+		return body
+	}
+	return body + "\n\nJoin here: " + joinURL
+}
+
+// formatWebinarTime renders a stored UTC timestamp for a human, in the
+// webinar's own timezone. Returns "" when there is no usable time.
+//
+// time/tzdata is imported in main.go so LoadLocation works on a scratch
+// container with no /usr/share/zoneinfo.
+func formatWebinarTime(iso, tz string) string {
+	t, err := parseDBTime(iso)
+	if err != nil {
+		return ""
+	}
+	loc := time.UTC
+	if tz = strings.TrimSpace(tz); tz != "" {
+		if l, lerr := time.LoadLocation(tz); lerr == nil {
+			loc = l
+		}
+	}
+	return t.In(loc).Format("Mon 2 Jan 2006 at 15:04 MST")
 }
 
 func activityKindForChannel(channel, direction string) string {
@@ -564,17 +686,20 @@ func defaultSenderForChannel(ctx *sdk.AppCtx, channel string) string {
 
 func (a *App) sweepSlotStatuses(app *sdk.AppCtx) error {
 	now := nowRFC3339()
+	scope, scopeArgs := projectFilter(app, "project_id")
 	if _, err := app.AppDB().Exec(
 		`UPDATE webinar_slots SET status = 'ended', updated_at = ?
 		 WHERE status IN ('scheduled','open','live')
-		   AND COALESCE(NULLIF(ends_at,''), starts_at) <= ?`, now, now); err != nil {
+		   AND COALESCE(NULLIF(ends_at,''), starts_at) <= ?`+scope,
+		append([]any{now, now}, scopeArgs...)...); err != nil {
 		return err
 	}
 	_, err := app.AppDB().Exec(
 		`UPDATE webinar_slots SET status = 'live', updated_at = ?
 		 WHERE status IN ('scheduled','open')
 		   AND starts_at <= ?
-		   AND COALESCE(NULLIF(ends_at,''), starts_at) > ?`, now, now, now)
+		   AND COALESCE(NULLIF(ends_at,''), starts_at) > ?`+scope,
+		append([]any{now, now, now}, scopeArgs...)...)
 	return err
 }
 
@@ -588,9 +713,10 @@ func (a *App) runOfferBroadcaster(ctx context.Context, app *sdk.AppCtx) error {
 	if app == nil || app.AppDB() == nil {
 		return nil
 	}
+	scope, scopeArgs := projectFilter(app, "project_id")
 	rows, err := app.AppDB().Query(
 		`SELECT id, project_id, started_at FROM webinars
-		 WHERE status = 'live' AND started_at IS NOT NULL`)
+		 WHERE status = 'live' AND started_at IS NOT NULL`+scope, scopeArgs...)
 	if err != nil {
 		return err
 	}
@@ -640,10 +766,19 @@ func (a *App) runOfferBroadcaster(ctx context.Context, app *sdk.AppCtx) error {
 		due.Close()
 		for _, oid := range offerIDs {
 			seq := a.nextWebinarSequence(app, lw.ID)
-			if _, err := app.AppDB().Exec(
+			// `AND shown_at IS NULL` + RowsAffected, so the stamp is the
+			// thing that decides whether this tick owns the broadcast.
+			// Without it any re-entrant or duplicated tick would re-stamp
+			// an already-shown offer with a fresh sequence and emit it to
+			// the room a second time.
+			res, err := app.AppDB().Exec(
 				`UPDATE webinar_offers
 				 SET shown_at = ?, sequence = ?
-				 WHERE id = ?`, nowRFC3339(), seq, oid); err != nil {
+				 WHERE id = ? AND shown_at IS NULL`, nowRFC3339(), seq, oid)
+			if err != nil {
+				continue
+			}
+			if n, _ := res.RowsAffected(); n == 0 {
 				continue
 			}
 			app.Emit("webinar.offer.shown", map[string]any{
@@ -676,34 +811,49 @@ func (a *App) runAttendanceDecay(ctx context.Context, app *sdk.AppCtx) error {
 	idle := a.viewerIdleSeconds(app)
 	now := nowUTC()
 	cutoff := formatRFC3339(now.Add(-time.Duration(idle) * time.Second))
+	scope, scopeArgs := projectFilter(app, "project_id")
 
 	if _, err := app.AppDB().Exec(
 		`UPDATE webinar_attendance
 		 SET left_at = ?
-		 WHERE left_at IS NULL AND last_heartbeat < ?`, nowRFC3339(), cutoff); err != nil {
+		 WHERE left_at IS NULL AND last_heartbeat < ?`+scope,
+		append([]any{nowRFC3339(), cutoff}, scopeArgs...)...); err != nil {
 		app.Logger().Warn("attendance-decay: mark left", "err", err)
 	}
 
+	// Backstop promotion for rows the flush worker didn't cover.
+	// Placeholders run in source order: the outer project filter, the
+	// watermark, then the subquery's project filter.
 	since := a.promoteWatermark(now)
-	if _, err := app.AppDB().Exec(
-		`UPDATE webinar_registrants
-		 SET attended_live = 1
-		 WHERE attended_live = 0 AND id IN (
-			SELECT registrant_id FROM webinar_attendance
-			 WHERE source = 'live' AND last_heartbeat >= ?
-		 )`, since); err != nil {
-		app.Logger().Warn("attendance-decay: promote live", "err", err)
+	promote := func(column, source string) {
+		args := make([]any, 0, len(scopeArgs)*2+1)
+		args = append(args, scopeArgs...)
+		args = append(args, since)
+		args = append(args, scopeArgs...)
+		if _, err := app.AppDB().Exec(
+			`UPDATE webinar_registrants
+			 SET `+column+` = 1
+			 WHERE `+column+` = 0`+scope+` AND id IN (
+				SELECT registrant_id FROM webinar_attendance
+				 WHERE source = ? AND last_heartbeat >= ?`+scope+`
+			 )`, insertSourceArg(args, source, len(scopeArgs))...); err != nil {
+			app.Logger().Warn("attendance-decay: promote "+source, "err", err)
+		}
 	}
-	if _, err := app.AppDB().Exec(
-		`UPDATE webinar_registrants
-		 SET attended_replay = 1
-		 WHERE attended_replay = 0 AND id IN (
-			SELECT registrant_id FROM webinar_attendance
-			 WHERE source = 'replay' AND last_heartbeat >= ?
-		 )`, since); err != nil {
-		app.Logger().Warn("attendance-decay: promote replay", "err", err)
-	}
+	promote("attended_live", "live")
+	promote("attended_replay", "replay")
 	return nil
+}
+
+// insertSourceArg splices the attendance source in ahead of the
+// watermark, so the subquery binds (source, last_heartbeat) rather than
+// interpolating the value into the SQL text.
+func insertSourceArg(args []any, source string, at int) []any {
+	out := make([]any, 0, len(args)+1)
+	out = append(out, args[:at]...)
+	out = append(out, source)
+	out = append(out, args[at:]...)
+	return out
 }
 
 // promoteWatermark returns the lower bound for this sweep's promotion
