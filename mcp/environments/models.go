@@ -257,16 +257,21 @@ type AgentSpec struct {
 }
 
 type Definition struct {
-	ID           string              `json:"id"`
-	Name         string              `json:"name"`
-	Description  string              `json:"description,omitempty"`
-	DesiredState string              `json:"desired_state"`
-	SpecVersion  int                 `json:"spec_version"`
-	Spec         EnvironmentSpec     `json:"spec"`
-	CreatedAt    time.Time           `json:"created_at"`
-	UpdatedAt    time.Time           `json:"updated_at"`
-	ActiveRun    *Run                `json:"active_run,omitempty"`
-	Runtime      *sdk.RuntimeSummary `json:"runtime,omitempty"`
+	ID                string              `json:"id"`
+	Name              string              `json:"name"`
+	Description       string              `json:"description,omitempty"`
+	DesiredState      string              `json:"desired_state"`
+	SpecVersion       int                 `json:"spec_version"`
+	Spec              EnvironmentSpec     `json:"spec"`
+	CreatedAt         time.Time           `json:"created_at"`
+	UpdatedAt         time.Time           `json:"updated_at"`
+	ReconcileStatus   string              `json:"reconcile_status"`
+	ReconcileFailures int                 `json:"reconcile_failures"`
+	ReconcileError    string              `json:"reconcile_error,omitempty"`
+	ReconcileNextAt   *time.Time          `json:"reconcile_next_at,omitempty"`
+	DegradedAt        *time.Time          `json:"degraded_at,omitempty"`
+	ActiveRun         *Run                `json:"active_run,omitempty"`
+	Runtime           *sdk.RuntimeSummary `json:"runtime,omitempty"`
 }
 
 type Run struct {

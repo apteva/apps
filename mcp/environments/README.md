@@ -12,6 +12,15 @@ Runs whose runtime cleanup fails stay `stopping`. Reconciliation retries cleanup
 before permitting a replacement runtime for the same definition. Reconciliation
 processes all active runs independently of the 200-entry history list.
 
+Failed provisioning and cleanup attempts use persisted exponential backoff,
+starting at 30 seconds and capped at 15 minutes. After five consecutive failures,
+the definition enters `degraded` state and automatic reconciliation stops. A
+successful running-runtime health check clears the failure streak. An explicit
+`environment_start`, dashboard Retry, or definition update clears the terminal
+state and permits another bounded sequence. Set
+`ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD` to a value from 1 through 1000 to
+change the default threshold of five.
+
 ## Seeds
 
 Seeds run in spec order when an environment starts. A seed can consume what an

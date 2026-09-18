@@ -121,10 +121,172 @@ func TestReconcileFindsActiveRunBeyondHistoryLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	old, _ := s.db.getRun("run0")
-	if old.Status != "expired" || p.created != 1 {
+	definition, _ := s.db.getDefinition("env")
+	if old.Status != "expired" || p.created != 0 || definition.ReconcileStatus != "retrying" || definition.ReconcileFailures != 1 {
 		t.Fatalf("old=%+v created=%d", old, p.created)
 	}
 }
+
+func TestReconcileBacksOffAndDegradesAfterPersistentFailure(t *testing.T) {
+	t.Setenv("ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD", "3")
+	s, p := auditService(t)
+	p.seedErr = errors.New("seed is permanently broken")
+	if err := s.db.saveDefinition(&Definition{ID: "env", Name: "Broken", DesiredState: "running", Spec: EnvironmentSpec{Version: 1, Seeds: []SeedStep{{App: "tasks", Tool: "create"}}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := s.reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		d, _ := s.db.getDefinition("env")
+		if d.ReconcileFailures != attempt {
+			t.Fatalf("attempt %d failures=%d", attempt, d.ReconcileFailures)
+		}
+		if attempt < 3 {
+			if d.ReconcileStatus != "retrying" || d.ReconcileNextAt == nil {
+				t.Fatalf("attempt %d state=%+v", attempt, d)
+			}
+			// An immediate worker tick is suppressed. Move the persisted deadline
+			// into the past to exercise the next scheduled attempt.
+			if err := s.reconcile(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if p.created != attempt {
+				t.Fatalf("backoff allowed attempt %d to run again", attempt)
+			}
+			_, _ = s.db.db.Exec(`UPDATE environment_definitions SET reconcile_next_at=? WHERE id='env'`, time.Now().Add(-time.Second).Format(time.RFC3339Nano))
+		} else if d.ReconcileStatus != "degraded" || d.DegradedAt == nil || d.ReconcileNextAt != nil {
+			t.Fatalf("terminal state=%+v", d)
+		}
+	}
+
+	for i := 0; i < 4; i++ {
+		if err := s.reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if p.created != 3 {
+		t.Fatalf("degraded definition kept provisioning: created=%d", p.created)
+	}
+	var runs int
+	if err := s.db.db.QueryRow(`SELECT COUNT(*) FROM environment_runs WHERE environment_id='env'`).Scan(&runs); err != nil || runs != 3 {
+		t.Fatalf("runs=%d err=%v", runs, err)
+	}
+}
+
+func TestDefinitionUpdateAndExplicitStartResetDegradedState(t *testing.T) {
+	t.Setenv("ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD", "1")
+	s, p := auditService(t)
+	p.seedErr = errors.New("seed is permanently broken")
+	if err := s.db.saveDefinition(&Definition{ID: "env", Name: "Broken", DesiredState: "running", Spec: EnvironmentSpec{Version: 1, Seeds: []SeedStep{{App: "tasks", Tool: "create"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.db.getDefinition("env")
+	if d.ReconcileStatus != "degraded" {
+		t.Fatalf("state=%+v", d)
+	}
+
+	if _, err := s.updateDefinition("env", map[string]any{"name": "Updated"}); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = s.db.getDefinition("env")
+	if d.ReconcileStatus != "healthy" || d.ReconcileFailures != 0 {
+		t.Fatalf("update did not reset state: %+v", d)
+	}
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p.created != 2 {
+		t.Fatalf("updated definition was not retried: created=%d", p.created)
+	}
+
+	if _, err := s.startDefinition("env"); err == nil {
+		t.Fatal("explicit retry unexpectedly succeeded")
+	}
+	if p.created != 3 {
+		t.Fatalf("explicit retry did not provision: created=%d", p.created)
+	}
+}
+
+func TestReconcileBackoffAndThresholdConfiguration(t *testing.T) {
+	if got := reconcileBackoff(1); got != 30*time.Second {
+		t.Fatalf("first backoff=%v", got)
+	}
+	if got := reconcileBackoff(2); got != time.Minute {
+		t.Fatalf("second backoff=%v", got)
+	}
+	if got := reconcileBackoff(20); got != reconcileBackoffMax {
+		t.Fatalf("capped backoff=%v", got)
+	}
+	t.Setenv("ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD", "7")
+	if got, err := reconcileFailureThreshold(); err != nil || got != 7 {
+		t.Fatalf("threshold=%d err=%v", got, err)
+	}
+	t.Setenv("ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD", "0")
+	if _, err := reconcileFailureThreshold(); err == nil {
+		t.Fatal("invalid threshold accepted")
+	}
+}
+
+func TestCleanupRetriesAreBackedOffAndBounded(t *testing.T) {
+	t.Setenv("ENVIRONMENTS_RECONCILE_FAILURE_THRESHOLD", "3")
+	s, p := auditService(t)
+	if err := s.db.saveDefinition(&Definition{ID: "env", Name: "Cleanup", DesiredState: "running", Spec: EnvironmentSpec{Version: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.startDefinition("env"); err != nil {
+		t.Fatal(err)
+	}
+	p.destroyErr = errors.New("runtime destroy unavailable")
+	if err := s.stopDefinition("env"); err == nil {
+		t.Fatal("cleanup failure hidden")
+	}
+	if p.destroyed != 1 {
+		t.Fatalf("destroy attempts=%d", p.destroyed)
+	}
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p.destroyed != 1 {
+		t.Fatal("cleanup backoff was ignored")
+	}
+	for failures := 2; failures <= 3; failures++ {
+		_, _ = s.db.db.Exec(`UPDATE environment_definitions SET reconcile_next_at=? WHERE id='env'`, time.Now().Add(-time.Second).Format(time.RFC3339Nano))
+		if err := s.reconcile(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		d, _ := s.db.getDefinition("env")
+		if d.ReconcileFailures != failures {
+			t.Fatalf("cleanup failures=%d, want %d", d.ReconcileFailures, failures)
+		}
+	}
+	d, _ := s.db.getDefinition("env")
+	if d.ReconcileStatus != "degraded" || p.destroyed != 3 {
+		t.Fatalf("state=%+v destroy attempts=%d", d, p.destroyed)
+	}
+	p.destroyErr = nil
+	if err := s.reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p.destroyed != 3 {
+		t.Fatal("degraded cleanup retried automatically")
+	}
+	if err := s.stopDefinition("env"); err != nil {
+		t.Fatal(err)
+	}
+	if p.destroyed != 4 {
+		t.Fatal("explicit stop did not retry cleanup")
+	}
+	d, _ = s.db.getDefinition("env")
+	if d.ReconcileStatus != "healthy" || d.ActiveRun != nil {
+		t.Fatalf("cleanup recovery state=%+v", d)
+	}
+}
+
 func TestCleanupFailureRemainsActiveAndIsRetried(t *testing.T) {
 	s, p := auditService(t)
 	r, err := s.start("env", "eval", EnvironmentSpec{})
