@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,12 +111,21 @@ func (a *App) finalizeStream(ctx *sdk.AppCtx, pid string, id int64, opts finaliz
 // finite. So the runner keeps every segment on disk and we build the
 // full manifest here, once, at finalize.
 //
-// EXTINF durations are the configured segment length rather than the
-// exact per-segment duration: the live playlist that carried the real
-// numbers has already rolled past most of them, and re-deriving them
-// would mean demuxing every segment. With -c copy and keyframe-aligned
-// cuts the two differ by well under one segment, which VOD players
-// tolerate (seeking interpolates).
+// EXTINF durations are the REAL per-segment durations, captured from
+// the live playlist as it rolled by and kept in segments.log (see
+// trackSegmentDurations). v0.2 wrote the configured segment length for
+// every entry, which is wrong twice over: the last segment of a stream
+// is a short partial, so the replay's advertised duration overshot the
+// media and the seek bar drifted; and with -c copy ffmpeg can only cut
+// on a keyframe, so segments regularly run LONGER than -hls_time and a
+// TARGETDURATION of -hls_time made the playlist invalid per RFC 8216
+// (§4.3.3.1: it must be >= every EXTINF, rounded to the nearest
+// integer). Strict players reject or stall on that.
+//
+// Anything missing from the log — a stream recorded by v0.2, a segment
+// written while the tracker was down — falls back to the configured
+// length, and TARGETDURATION is still computed from whatever the
+// resulting set actually holds.
 //
 // Lexical sort == numeric order because the runner writes seg-%05d.ts.
 func writeReplayPlaylist(dir string, segSeconds int) error {
@@ -142,15 +152,38 @@ func writeReplayPlaylist(dir string, segSeconds int) error {
 	}
 	sort.Strings(names)
 
+	logged := readSegmentDurations(dir)
+	durations := make([]float64, len(names))
+	longest := 0.0
+	for i, n := range names {
+		d, ok := logged[n]
+		if !ok || d <= 0 {
+			d = float64(segSeconds)
+		}
+		durations[i] = d
+		if d > longest {
+			longest = d
+		}
+	}
+	// TARGETDURATION must be >= the longest segment, rounded to the
+	// nearest integer.
+	target := int(math.Round(longest))
+	if float64(target) < longest {
+		target++
+	}
+	if target < 1 {
+		target = 1
+	}
+
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n")
 	b.WriteString("#EXT-X-VERSION:3\n")
-	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", segSeconds)
+	fmt.Fprintf(&b, "#EXT-X-TARGETDURATION:%d\n", target)
 	b.WriteString("#EXT-X-MEDIA-SEQUENCE:0\n")
 	b.WriteString("#EXT-X-PLAYLIST-TYPE:VOD\n")
 	b.WriteString("#EXT-X-INDEPENDENT-SEGMENTS\n")
-	for _, n := range names {
-		fmt.Fprintf(&b, "#EXTINF:%d.000,\n%s\n", segSeconds, n)
+	for i, n := range names {
+		fmt.Fprintf(&b, "#EXTINF:%.3f,\n%s\n", durations[i], n)
 	}
 	b.WriteString("#EXT-X-ENDLIST\n")
 

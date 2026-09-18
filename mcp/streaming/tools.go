@@ -114,6 +114,10 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 	a.commitRunner(id, runner)
 	committed = true
+	// A probe for this id before it existed may have parked a negative
+	// in the playback cache (see playbackMissTTL). Drop it so the new
+	// stream is servable immediately.
+	a.invalidatePlayback(pid, id)
 
 	s, err := a.dbGet(ctx, pid, id)
 	if err != nil {
@@ -429,16 +433,26 @@ func (a *App) toolRotateKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 
-	// Re-spawn ffmpeg with the new key.
+	// Re-spawn ffmpeg with the new key. The directory already holds the
+	// killed session's media, so continue its segment numbering and roll
+	// its recording aside rather than writing over both — see
+	// prepareSessionDir.
+	sessionDir := streamDataDir(ctx, s.StoragePrefix)
+	startNumber, err := prepareSessionDir(sessionDir)
+	if err != nil {
+		rollback(err)
+		return nil, fmt.Errorf("prepare session dir: %w", err)
+	}
 	newRunner, err := a.runnerFactory(runnerOpts{
-		streamID:  id,
-		port:      port,
-		ffmpegBin: a.ffmpegPath(ctx),
-		dataDir:   streamDataDir(ctx, s.StoragePrefix),
-		streamKey: newKey,
-		hlsTime:   a.hlsSegmentSeconds(ctx),
-		hlsWindow: a.hlsWindowSegments(ctx),
-		record:    s.Record,
+		streamID:    id,
+		port:        port,
+		ffmpegBin:   a.ffmpegPath(ctx),
+		dataDir:     sessionDir,
+		streamKey:   newKey,
+		hlsTime:     a.hlsSegmentSeconds(ctx),
+		hlsWindow:   a.hlsWindowSegments(ctx),
+		record:      s.Record,
+		startNumber: startNumber,
 	})
 	if err != nil {
 		rollback(err)
@@ -662,6 +676,19 @@ func (a *App) toolReplayURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if s.Status != "ended" {
 		return map[string]any{"available": false, "reason": "stream is " + s.Status}, nil
 	}
+	// The retention sweeper reclaims media but keeps the row for its
+	// aggregate stats, so status stays "ended" with nothing on disk
+	// behind it. v0.2 reported available:true here and then returned
+	// neither mp4_url nor hls_url, so a consumer branching on
+	// `available` showed a replay button leading nowhere instead of
+	// telling the user the replay had expired.
+	if s.PrunedAt != "" {
+		return map[string]any{
+			"available": false,
+			"reason":    "media pruned by retention policy",
+			"pruned_at": s.PrunedAt,
+		}, nil
+	}
 
 	// A stream under a signed-URL policy has no usable plain URL, so
 	// hand back a signed one with a default lifetime. Callers that
@@ -671,7 +698,7 @@ func (a *App) toolReplayURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err := a.ensureSigningSecret(ctx, s); err != nil {
 			return nil, err
 		}
-		exp = time.Now().Add(replayURLTTL).Unix()
+		exp = time.Now().Add(a.signedURLTTL(ctx, false)).Unix()
 	}
 
 	out := map[string]any{"available": true}
@@ -696,9 +723,17 @@ func (a *App) toolReplayURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return out, nil
 }
 
-// replayURLTTL is the lifetime of the signed URLs streams_replay_url
-// mints for streams that require signatures.
-const replayURLTTL = time.Hour
+// replayURLTTL is the default lifetime of the signed URLs minted for a
+// TERMINAL stream — short on purpose, since expiring is the point.
+//
+// liveURLTTL is the default for a stream still in progress, which has
+// to outlast the broadcast: every segment inherits the manifest's
+// signature, so one expiry ends the session for every viewer at once.
+// Both are overridable per install (see App.signedURLTTL).
+const (
+	replayURLTTL = time.Hour
+	liveURLTTL   = 12 * time.Hour
+)
 
 // ─── DB helpers ───────────────────────────────────────────────────
 
@@ -788,13 +823,18 @@ func (a *App) materializeURLs(ctx *sdk.AppCtx, s *Stream) {
 		playbackFile = replayPlaylistFile
 	}
 	// A stream under a signed-URL policy has no working plain URL, so
-	// don't hand one back.
+	// don't hand one back. A live stream's signature has to outlast the
+	// broadcast — see App.signedURLTTL for why the two cases differ.
 	var exp int64
 	if s.RequireSignedURLs && s.URLSigningSecret != "" {
-		exp = time.Now().Add(replayURLTTL).Unix()
+		terminal := s.Status == "ended" || s.Status == "errored"
+		exp = time.Now().Add(a.signedURLTTL(ctx, !terminal)).Unix()
 	}
 	s.PlaybackURL = a.mediaURL(ctx, s, playbackFile, exp)
 	s.HeartbeatURL = a.heartbeatURL(ctx, s, exp)
+	// Report the expiry so a consumer can refresh before it lands
+	// rather than finding out from a 404 mid-session.
+	s.PlaybackURLExpiresAt = exp
 }
 
 // publicPath returns the URL prefix viewers use to reach this sidecar's

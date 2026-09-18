@@ -33,18 +33,48 @@ import (
 // rotates both the token and the secret, invalidating every URL
 // outstanding for that stream.
 
-// signPlayback computes the hex signature for (streamID, exp).
-func signPlayback(secret string, streamID, exp int64) string {
+// ─── Signature scopes ─────────────────────────────────────────────
+//
+// v0.2 signed only "<stream_id>:<exp>", so the `kind` argument
+// streams_signed_url advertises scoped nothing: the signature minted
+// for kind=heartbeat validated just as well on record.mp4. That
+// mattered because the two have opposite natural lifetimes — a
+// heartbeat URL has to outlive the whole broadcast to keep counting
+// viewers, while an mp4 replay link is exactly the thing a consumer
+// wants to expire quickly. A viewer could lift exp+sig+t off their
+// heartbeat URL and hold the recording open for the heartbeat's
+// lifetime.
+//
+// v0.3 binds the scope into the signed message. Scopes are classes,
+// not filenames: the HLS manifest and its segments share one, because
+// rewriteManifestQuery propagates the manifest's own query onto every
+// segment URI and a per-file signature would 404 every segment.
+const (
+	scopeHLS       = "hls"
+	scopeMP4       = "mp4"
+	scopeHeartbeat = "heartbeat"
+)
+
+// scopeForFile maps a playback filename to its signature scope.
+func scopeForFile(filename string) string {
+	if filename == recordingFile {
+		return scopeMP4
+	}
+	return scopeHLS
+}
+
+// signPlayback computes the hex signature for (streamID, exp, scope).
+func signPlayback(secret string, streamID, exp int64, scope string) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	fmt.Fprintf(mac, "%d:%d", streamID, exp)
+	fmt.Fprintf(mac, "%d:%d:%s", streamID, exp, scope)
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// signatureOK verifies ?exp=&sig= against the stream's secret. Expiry
-// is checked before the MAC so an expired URL never gets a comparison
-// at all. Fails closed on a missing secret — a legacy row whose secret
-// was never generated must not accept a signature over "".
-func signatureOK(secret string, streamID int64, expRaw, sig string, now time.Time) bool {
+// signatureOK verifies ?exp=&sig= against the stream's secret for one
+// scope. Expiry is checked before the MAC so an expired URL never gets
+// a comparison at all. Fails closed on a missing secret — a legacy row
+// whose secret was never generated must not accept a signature over "".
+func signatureOK(secret string, streamID int64, expRaw, sig, scope string, now time.Time) bool {
 	if secret == "" || sig == "" {
 		return false
 	}
@@ -55,15 +85,16 @@ func signatureOK(secret string, streamID int64, expRaw, sig string, now time.Tim
 	if now.Unix() > exp {
 		return false
 	}
-	want := signPlayback(secret, streamID, exp)
+	want := signPlayback(secret, streamID, exp, scope)
 	got := strings.ToLower(strings.TrimSpace(sig))
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 // playbackAuthorized applies the visibility + signing policy to one
-// media or heartbeat request. Every failure mode returns false; the
-// callers turn that into 404 so we never leak which streams exist.
-func playbackAuthorized(rec *playbackRecord, q url.Values, now time.Time) bool {
+// media or heartbeat request, for the scope that request belongs to.
+// Every failure mode returns false; the callers turn that into 404 so
+// we never leak which streams exist.
+func playbackAuthorized(rec *playbackRecord, q url.Values, scope string, now time.Time) bool {
 	if rec == nil {
 		return false
 	}
@@ -74,7 +105,7 @@ func playbackAuthorized(rec *playbackRecord, q url.Values, now time.Time) bool {
 		}
 	}
 	if sig := q.Get("sig"); sig != "" {
-		return signatureOK(rec.SigningSecret, rec.ID, q.Get("exp"), sig, now)
+		return signatureOK(rec.SigningSecret, rec.ID, q.Get("exp"), sig, scope, now)
 	}
 	// No signature presented — fine unless the stream demands one.
 	return !rec.RequireSignedURLs
@@ -112,7 +143,7 @@ func (a *App) mediaURL(ctx *sdk.AppCtx, s *Stream, file string, exp int64) strin
 	}
 	if exp > 0 {
 		q.Set("exp", strconv.FormatInt(exp, 10))
-		q.Set("sig", signPlayback(s.URLSigningSecret, s.ID, exp))
+		q.Set("sig", signPlayback(s.URLSigningSecret, s.ID, exp, scopeForFile(file)))
 	}
 	return fmt.Sprintf("%s/streams/%d/%s?%s", a.publicPath(ctx), s.ID, file, q.Encode())
 }
@@ -128,7 +159,7 @@ func (a *App) heartbeatURL(ctx *sdk.AppCtx, s *Stream, exp int64) string {
 	}
 	if exp > 0 {
 		q.Set("exp", strconv.FormatInt(exp, 10))
-		q.Set("sig", signPlayback(s.URLSigningSecret, s.ID, exp))
+		q.Set("sig", signPlayback(s.URLSigningSecret, s.ID, exp, scopeHeartbeat))
 	}
 	return fmt.Sprintf("%s/heartbeat/%d?%s", a.publicPath(ctx), s.ID, q.Encode())
 }
