@@ -33,6 +33,9 @@ type Collection struct {
 	PrimaryKey []string `json:"primaryKey"`
 	Indexes    []Index  `json:"indexes"`
 	Version    int64    `json:"version"`
+	// StorageVersion is internal SQLite physical-layout metadata. It is not
+	// part of the portable collection schema or cursor hash.
+	StorageVersion int `json:"-"`
 }
 type Filter struct {
 	And   []Filter `json:"and,omitempty"`

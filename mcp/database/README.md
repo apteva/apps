@@ -1,10 +1,11 @@
 # Database
 
-Independent Apteva sidecar app, version 0.1.1. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.2.0. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
 ## Working in this version
 
 - Several named databases per authenticated project or calling-app scope, with SQLite as the default and an explicit adapter for each database.
+- SQLite collections use a typed, `WITHOUT ROWID` storage layout with native composite primary keys. Existing v1 collections remain readable and migrate atomically on their first write through a shadow-table swap.
 - Several independently defined collections in every database.
 - Typed records, UUID defaults, composite primary keys, exact int64 values encoded as decimal strings, and service-owned timestamps/versions.
 - `get`, `find`, `insert`, `update`, `delete`, `upsert`, `count`, `aggregate`, `batch`, and `explain`.

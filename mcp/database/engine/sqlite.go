@@ -19,6 +19,7 @@ type sqliteTx struct {
 	ctx   context.Context
 	tx    *sql.Tx
 	stmts map[string]*sql.Stmt
+	write bool
 }
 
 func openSQL(path string) (*sql.DB, error) {
@@ -47,11 +48,14 @@ func openSQLite(path string) (backend, error) {
 	if e != nil {
 		return nil, e
 	}
-	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS __collections (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL)`)
+	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS __collections (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL, storage_version INTEGER NOT NULL DEFAULT 1)`)
 	if e != nil {
 		db.Close()
 		return nil, e
 	}
+	// v1 databases predate the physical-layout marker. Existing tables remain
+	// readable as v1; new collections use v2 and can be migrated explicitly.
+	_, _ = db.Exec(`ALTER TABLE __collections ADD COLUMN storage_version INTEGER NOT NULL DEFAULT 1`)
 	return &sqliteBackend{db}, nil
 }
 func (b *sqliteBackend) close() error { return b.db.Close() }
@@ -61,7 +65,7 @@ func (b *sqliteBackend) transaction(ctx context.Context, write bool, fn func(tra
 		return e
 	}
 	defer tx.Rollback()
-	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}}); e == nil {
+	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}, write: write}); e == nil {
 		if write {
 			e = tx.Commit()
 		} else {
@@ -84,7 +88,7 @@ func sqlIndex(c Collection, n string) string {
 	return quote(fmt.Sprintf("i_%x", sum[:16]))
 }
 func (t *sqliteTx) collections() ([]Collection, error) {
-	rows, e := t.tx.QueryContext(t.ctx, `SELECT schema_json FROM __collections ORDER BY name`)
+	rows, e := t.tx.QueryContext(t.ctx, `SELECT schema_json,storage_version FROM __collections ORDER BY name`)
 	if e != nil {
 		return nil, e
 	}
@@ -92,13 +96,15 @@ func (t *sqliteTx) collections() ([]Collection, error) {
 	out := []Collection{}
 	for rows.Next() {
 		var b []byte
-		if e := rows.Scan(&b); e != nil {
+		var storage int
+		if e := rows.Scan(&b, &storage); e != nil {
 			return nil, e
 		}
 		var c Collection
 		if e := decode(b, &c); e != nil {
 			return nil, e
 		}
+		c.StorageVersion = storage
 		out = append(out, c)
 	}
 	return out, rows.Err()
@@ -106,14 +112,82 @@ func (t *sqliteTx) collections() ([]Collection, error) {
 func (t *sqliteTx) collection(name string) (Collection, error) {
 	var c Collection
 	var b []byte
-	e := t.tx.QueryRowContext(t.ctx, `SELECT schema_json FROM __collections WHERE name=?`, name).Scan(&b)
+	var storage int
+	e := t.tx.QueryRowContext(t.ctx, `SELECT schema_json,storage_version FROM __collections WHERE name=?`, name).Scan(&b, &storage)
 	if errors.Is(e, sql.ErrNoRows) {
 		return c, fail("not_found", "collection %s does not exist", name)
 	}
 	if e == nil {
 		e = decode(b, &c)
+		c.StorageVersion = storage
+		if c.StorageVersion == 1 && t.write {
+			if e = t.migrateV1(c); e == nil {
+				c.StorageVersion = 2
+			}
+		}
 	}
 	return c, e
+}
+func v2TableDefs(c Collection) []string {
+	defs := []string{}
+	for _, f := range allFields(c) {
+		s := quote(f.Name) + " " + sqlType(f)
+		if !f.Nullable {
+			s += " NOT NULL"
+		}
+		defs = append(defs, s)
+	}
+	pk := make([]string, len(c.PrimaryKey))
+	for i, p := range c.PrimaryKey {
+		pk[i] = quote(p)
+	}
+	return append(defs, "PRIMARY KEY ("+strings.Join(pk, ",")+")")
+}
+func (t *sqliteTx) migrateV1(c Collection) error {
+	tmp := quote("c_" + c.Name + "_v2_migration")
+	if _, e := t.tx.ExecContext(t.ctx, "DROP TABLE IF EXISTS "+tmp); e != nil {
+		return e
+	}
+	if _, e := t.tx.ExecContext(t.ctx, "CREATE TABLE "+tmp+" ("+strings.Join(v2TableDefs(c), ",")+") WITHOUT ROWID"); e != nil {
+		return e
+	}
+	cols := sqlColumns(allFields(c))
+	if _, e := t.tx.ExecContext(t.ctx, "INSERT INTO "+tmp+" ("+cols+") SELECT "+cols+" FROM "+table(c)); e != nil {
+		return e
+	}
+	// Index names are database-global, so remove the v1 indexes before the
+	// atomic table swap and rebuild them on the shadow table.
+	for _, idx := range indexes(c) {
+		if _, e := t.tx.ExecContext(t.ctx, "DROP INDEX IF EXISTS "+sqlIndex(c, idx.Name)); e != nil {
+			return e
+		}
+	}
+	if _, e := t.tx.ExecContext(t.ctx, "DROP TABLE "+table(c)); e != nil {
+		return e
+	}
+	if _, e := t.tx.ExecContext(t.ctx, "ALTER TABLE "+tmp+" RENAME TO "+quote("c_"+c.Name)); e != nil {
+		return e
+	}
+	for _, i := range c.Indexes {
+		parts := []string{}
+		for _, o := range i.Fields {
+			parts = append(parts, quote(o.Field)+" "+strings.ToUpper(o.Direction))
+		}
+		if !i.Unique {
+			for _, p := range c.PrimaryKey {
+				parts = append(parts, quote(p)+" ASC")
+			}
+		}
+		unique := ""
+		if i.Unique {
+			unique = "UNIQUE "
+		}
+		if _, e := t.tx.ExecContext(t.ctx, "CREATE "+unique+"INDEX "+sqlIndex(c, i.Name)+" ON "+table(c)+" ("+strings.Join(parts, ",")+")"); e != nil {
+			return e
+		}
+	}
+	c.StorageVersion = 2
+	return t.save(c)
 }
 func sqlType(f Field) string {
 	switch f.Type {
@@ -124,31 +198,23 @@ func sqlType(f Field) string {
 	}
 	return "TEXT COLLATE BINARY"
 }
+func v2(c Collection) bool { return c.StorageVersion >= 2 }
 func allFields(c Collection) []Field {
 	return append(append([]Field{}, c.Fields...), Field{Name: "_created_at", Type: "datetime"}, Field{Name: "_updated_at", Type: "datetime"}, Field{Name: "_version", Type: "integer"})
 }
 func (t *sqliteTx) save(c Collection) error {
-	_, e := t.tx.ExecContext(t.ctx, `INSERT INTO __collections VALUES(?,?) ON CONFLICT(name) DO UPDATE SET schema_json=excluded.schema_json`, c.Name, string(marshal(c)))
+	storage := c.StorageVersion
+	if storage == 0 {
+		storage = 2
+	}
+	_, e := t.tx.ExecContext(t.ctx, `INSERT INTO __collections(name,schema_json,storage_version) VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET schema_json=excluded.schema_json,storage_version=excluded.storage_version`, c.Name, string(marshal(c)), storage)
 	return e
 }
 func (t *sqliteTx) createCollection(c Collection) error {
-	defs := []string{`"__pk" TEXT PRIMARY KEY NOT NULL`, `"__doc" TEXT NOT NULL`}
-	for _, f := range allFields(c) {
-		s := quote(f.Name) + " " + sqlType(f)
-		if !f.Nullable {
-			s += " NOT NULL"
-		}
-		defs = append(defs, s)
-	}
-	_, e := t.tx.ExecContext(t.ctx, "CREATE TABLE "+table(c)+" ("+strings.Join(defs, ",")+")")
+	c.StorageVersion = 2
+	defs := v2TableDefs(c)
+	_, e := t.tx.ExecContext(t.ctx, "CREATE TABLE "+table(c)+" ("+strings.Join(defs, ",")+") WITHOUT ROWID")
 	if e != nil {
-		return e
-	}
-	pk := []string{}
-	for _, p := range c.PrimaryKey {
-		pk = append(pk, quote(p))
-	}
-	if _, e = t.tx.ExecContext(t.ctx, "CREATE UNIQUE INDEX "+sqlIndex(c, "primary")+" ON "+table(c)+" ("+strings.Join(pk, ",")+")"); e != nil {
 		return e
 	}
 	return t.save(c)
@@ -216,6 +282,25 @@ func (t *sqliteTx) dropIndex(c Collection, name string) error {
 	return t.save(c)
 }
 func (t *sqliteTx) get(c Collection, pk string) (Record, error) {
+	if v2(c) {
+		vals, e := t.pkArgs(c, pk)
+		if e != nil {
+			return nil, e
+		}
+		fields := allFields(c)
+		args := make([]any, len(vals))
+		copy(args, vals)
+		where := make([]string, len(c.PrimaryKey))
+		for i, p := range c.PrimaryKey {
+			where[i] = quote(p) + "=?"
+		}
+		row := t.tx.QueryRowContext(t.ctx, "SELECT "+sqlColumns(fields)+" FROM "+table(c)+" WHERE "+strings.Join(where, " AND "), args...)
+		r, found, e := scanRecord(row, fields)
+		if e != nil || !found {
+			return nil, e
+		}
+		return r, nil
+	}
 	var b []byte
 	e := t.tx.QueryRowContext(t.ctx, "SELECT __doc FROM "+table(c)+" WHERE __pk=?", pk).Scan(&b)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -227,6 +312,50 @@ func (t *sqliteTx) get(c Collection, pk string) (Record, error) {
 	var r Record
 	e = decode(b, &r)
 	return r, e
+}
+func (t *sqliteTx) pkArgs(c Collection, pk string) ([]any, error) {
+	var raw []any
+	if e := decode([]byte(pk), &raw); e != nil || len(raw) != len(c.PrimaryKey) {
+		return nil, fail("storage_error", "invalid primary key encoding")
+	}
+	args := make([]any, len(raw))
+	for i, name := range c.PrimaryKey {
+		f, _ := c.field(name)
+		v, e := normalize(f, raw[i])
+		if e != nil {
+			return nil, e
+		}
+		args[i] = sqlValue(f, v)
+	}
+	return args, nil
+}
+func sqlColumns(fields []Field) string {
+	cols := make([]string, len(fields))
+	for i, f := range fields {
+		cols[i] = quote(f.Name)
+	}
+	return strings.Join(cols, ",")
+}
+
+type rowScanner interface{ Scan(...any) error }
+
+func scanRecord(row rowScanner, fields []Field) (Record, bool, error) {
+	vals := make([]any, len(fields))
+	ptrs := make([]any, len(vals))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if e := row.Scan(ptrs...); e != nil {
+		if errors.Is(e, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, e
+	}
+	r := Record{}
+	for i, f := range fields {
+		r[f.Name] = fromSQL(f, vals[i])
+	}
+	return r, true, nil
 }
 func sqlValue(f Field, v any) any {
 	if v == nil {
@@ -249,15 +378,23 @@ func (t *sqliteTx) writeArgs(c Collection, pk string, r Record) ([]string, []str
 			return nil, nil, nil, nil, err
 		}
 	}
-	fields := []string{"__pk", "__doc"}
-	qs := []string{"?", "?"}
-	updates := []string{"__doc=excluded.__doc"}
-	args := []any{pk, string(marshal(r))}
+	fields := []string{}
+	qs := []string{}
+	updates := []string{}
+	args := []any{}
+	if !v2(c) {
+		fields = append(fields, "__pk", "__doc")
+		qs = append(qs, "?", "?")
+		updates = append(updates, "__doc=excluded.__doc")
+		args = append(args, pk, string(marshal(r)))
+	}
 	for _, f := range allFields(c) {
 		s := quote(f.Name)
 		fields = append(fields, s)
 		qs = append(qs, "?")
-		updates = append(updates, s+"=excluded."+s)
+		if !c.isPK(f.Name) || !v2(c) {
+			updates = append(updates, s+"=excluded."+s)
+		}
 		args = append(args, sqlValue(f, r[f.Name]))
 	}
 	return fields, qs, updates, args, nil
@@ -287,10 +424,30 @@ func (t *sqliteTx) put(c Collection, pk string, r Record) error {
 	if e != nil {
 		return e
 	}
-	e = t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+") ON CONFLICT(__pk) DO UPDATE SET "+strings.Join(updates, ","), args...)
+	conflict := "__pk"
+	if v2(c) {
+		parts := make([]string, len(c.PrimaryKey))
+		for i, p := range c.PrimaryKey {
+			parts[i] = quote(p)
+		}
+		conflict = strings.Join(parts, ",")
+	}
+	e = t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+") ON CONFLICT("+conflict+") DO UPDATE SET "+strings.Join(updates, ","), args...)
 	return e
 }
 func (t *sqliteTx) remove(c Collection, pk string) error {
+	if v2(c) {
+		args, e := t.pkArgs(c, pk)
+		if e != nil {
+			return e
+		}
+		where := make([]string, len(c.PrimaryKey))
+		for i, p := range c.PrimaryKey {
+			where[i] = quote(p) + "=?"
+		}
+		_, e = t.tx.ExecContext(t.ctx, "DELETE FROM "+table(c)+" WHERE "+strings.Join(where, " AND "), args...)
+		return e
+	}
 	_, e := t.tx.ExecContext(t.ctx, "DELETE FROM "+table(c)+" WHERE __pk=?", pk)
 	return e
 }
@@ -373,7 +530,45 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	}
 	where, args := compileFilter(c, q.Where)
 	args = append(args, limit)
-	rows, e := t.tx.QueryContext(t.ctx, "SELECT __doc FROM "+table(c)+" WHERE "+where+orderSQL(q.OrderBy)+" LIMIT ?", args...)
+	selectSQL := "__doc"
+	var fields []Field
+	if v2(c) {
+		wanted := map[string]bool{}
+		for _, f := range q.Select {
+			wanted[f] = true
+		}
+		if len(q.Select) == 0 {
+			for _, f := range allFields(c) {
+				wanted[f.Name] = true
+			}
+		}
+		var visit func(*Filter)
+		visit = func(f *Filter) {
+			if f == nil {
+				return
+			}
+			if f.Field != "" {
+				wanted[f.Field] = true
+			}
+			for i := range f.And {
+				visit(&f.And[i])
+			}
+			for i := range f.Or {
+				visit(&f.Or[i])
+			}
+		}
+		visit(q.Where)
+		for _, o := range q.OrderBy {
+			wanted[o.Field] = true
+		}
+		for _, f := range allFields(c) {
+			if wanted[f.Name] {
+				fields = append(fields, f)
+			}
+		}
+		selectSQL = sqlColumns(fields)
+	}
+	rows, e := t.tx.QueryContext(t.ctx, "SELECT "+selectSQL+" FROM "+table(c)+" WHERE "+where+orderSQL(q.OrderBy)+" LIMIT ?", args...)
 	if e != nil {
 		return nil, e
 	}
@@ -381,17 +576,30 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 	out := []Record{}
 	size := 0
 	for rows.Next() {
-		var b []byte
-		if e := rows.Scan(&b); e != nil {
-			return nil, e
+		var r Record
+		if v2(c) {
+			var ok bool
+			var e error
+			r, ok, e = scanRecord(rows, fields)
+			if e != nil {
+				return nil, e
+			}
+			if !ok {
+				continue
+			}
+			size += len(marshal(r))
+		} else {
+			var b []byte
+			if e := rows.Scan(&b); e != nil {
+				return nil, e
+			}
+			size += len(b)
+			if e := decode(b, &r); e != nil {
+				return nil, e
+			}
 		}
-		size += len(b)
 		if size > MaxQueryWorkBytes {
 			return nil, fail("resource_limit", "query working set exceeds 16 MiB")
-		}
-		var r Record
-		if e := decode(b, &r); e != nil {
-			return nil, e
 		}
 		out = append(out, r)
 	}
@@ -399,7 +607,11 @@ func (t *sqliteTx) find(c Collection, q Query, limit int) ([]Record, error) {
 }
 func (t *sqliteTx) explain(c Collection, q Query) (any, error) {
 	where, args := compileFilter(c, q.Where)
-	rows, e := t.tx.QueryContext(t.ctx, "EXPLAIN QUERY PLAN SELECT __doc FROM "+table(c)+" WHERE "+where+orderSQL(q.OrderBy), args...)
+	selectSQL := "__doc"
+	if v2(c) {
+		selectSQL = "1"
+	}
+	rows, e := t.tx.QueryContext(t.ctx, "EXPLAIN QUERY PLAN SELECT "+selectSQL+" FROM "+table(c)+" WHERE "+where+orderSQL(q.OrderBy), args...)
 	if e != nil {
 		return nil, e
 	}
@@ -438,6 +650,18 @@ func fromSQL(f Field, v any) any {
 	case "text", "datetime":
 		if b, ok := v.([]byte); ok {
 			return string(b)
+		}
+	case "json":
+		var b []byte
+		switch x := v.(type) {
+		case []byte:
+			b = x
+		case string:
+			b = []byte(x)
+		}
+		var out any
+		if len(b) > 0 && decode(b, &out) == nil {
+			return out
 		}
 	}
 	return v
