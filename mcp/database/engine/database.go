@@ -36,13 +36,6 @@ type transaction interface {
 	explain(Collection, Query) (any, error)
 }
 
-// batchInserter is an optional SQLite fast path. Pebble already accumulates
-// record writes in one batch, while SQLite can reduce cgo/SQL statement
-// overhead by binding several rows to one INSERT statement. The transaction
-// contract remains unchanged for adapters that do not implement it.
-type batchInserter interface {
-	insertBatch(Collection, []Record) error
-}
 type DatabaseInfo struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
@@ -464,11 +457,6 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 		if len(r.Records) == 0 || len(r.Records) > MaxRecords {
 			return nil, Invalid("records requires 1–1000 records")
 		}
-		if op == "insert" {
-			if bulk, ok := tx.(batchInserter); ok {
-				return bulkInsert(c, r.Records, now, bulk)
-			}
-		}
 		for _, input := range r.Records {
 			row := Record{}
 			for k, v := range input {
@@ -678,37 +666,6 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 	return map[string]any{"affected": len(keys), "keys": keys}, nil
 }
 
-func bulkInsert(c Collection, inputs []Record, now string, bulk batchInserter) (any, error) {
-	rows := make([]Record, 0, len(inputs))
-	keys := make([]Record, 0, len(inputs))
-	for _, input := range inputs {
-		row := Record{}
-		for k, v := range input {
-			row[k] = v
-		}
-		if _, supplied := row["id"]; len(c.PrimaryKey) == 1 && c.PrimaryKey[0] == "id" && !supplied {
-			f, _ := c.field("id")
-			if f.Type == "text" {
-				row["id"] = uuid.NewString()
-			}
-		}
-		var e error
-		row, e = normalizeRecord(c, row)
-		if e != nil {
-			return nil, e
-		}
-		if _, e := primary(c, row); e != nil {
-			return nil, e
-		}
-		stamp(row, nil, now)
-		rows = append(rows, row)
-		keys = append(keys, keyOf(c, row))
-	}
-	if e := bulk.insertBatch(c, rows); e != nil {
-		return nil, e
-	}
-	return map[string]any{"keys": keys, "affected": len(keys)}, nil
-}
 func stamp(r, old Record, now string) {
 	r["_created_at"] = now
 	r["_updated_at"] = now

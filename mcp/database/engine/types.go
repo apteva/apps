@@ -286,18 +286,60 @@ func normalizeRecord(c Collection, r Record) (Record, error) {
 			return nil, Invalid("metadata is read-only")
 		}
 	}
+	// Avoid marshaling every scalar record just to enforce the 1 MiB limit.
+	// JSON/map values still take the exact path; scalar records use a
+	// conservative escaped-size estimate and only marshal when near the limit.
+	sizeHint := 2
+	exactSize := false
 	for _, f := range c.Fields {
 		v, e := normalize(f, r[f.Name])
 		if e != nil {
 			return nil, e
 		}
 		out[f.Name] = v
+		sizeHint += len(f.Name) + 3 // quotes/colon plus comma slack
+		switch x := v.(type) {
+		case nil:
+			sizeHint += 4
+		case string:
+			sizeHint += jsonStringSize(x)
+		case bool:
+			if x {
+				sizeHint += 4
+			} else {
+				sizeHint += 5
+			}
+		case float64:
+			sizeHint += len(strconv.FormatFloat(x, 'g', -1, 64))
+		default:
+			exactSize = true
+		}
 	}
-	if len(marshal(out)) > 1<<20 {
-		return nil, fail("resource_limit", "record exceeds 1 MiB")
+	if exactSize || sizeHint > 1<<20 {
+		if len(marshal(out)) > 1<<20 {
+			return nil, fail("resource_limit", "record exceeds 1 MiB")
+		}
 	}
 	return out, nil
 }
+
+func jsonStringSize(s string) int {
+	n := 2 // surrounding quotes
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '"', '\\':
+			n += 2
+		case '\b', '\f', '\n', '\r', '\t':
+			n += 2
+		case 0, 1, 2, 3, 4, 5, 6, 7, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31:
+			n += 6 // \\u00XX
+		default:
+			n++
+		}
+	}
+	return n
+}
+
 func primary(c Collection, r Record) (string, error) {
 	vals := []any{}
 	for _, p := range c.PrimaryKey {

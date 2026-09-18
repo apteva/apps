@@ -29,10 +29,6 @@ type sqliteTx struct {
 	prepare func(context.Context, string) (*sql.Stmt, error)
 }
 
-// Keep enough rows per statement to amortize SQLite's bind/step overhead while
-// staying comfortably below SQLite's variable limit for wide collections.
-const sqliteInsertChunk = 32
-
 func openSQL(path string) (*sql.DB, error) {
 	return openSQLPool(path, 5, false, "durable")
 }
@@ -491,35 +487,6 @@ func (t *sqliteTx) insert(c Collection, pk string, r Record) error {
 	return t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+")", args...)
 }
 
-func (t *sqliteTx) insertBatch(c Collection, rows []Record) error {
-	for start := 0; start < len(rows); start += sqliteInsertChunk {
-		end := start + sqliteInsertChunk
-		if end > len(rows) {
-			end = len(rows)
-		}
-		fields, rowPlaceholders, _, firstArgs, e := t.writeArgs(c, "", rows[start])
-		if e != nil {
-			return e
-		}
-		valueTuples := make([]string, end-start)
-		valueTuples[0] = "(" + strings.Join(rowPlaceholders, ",") + ")"
-		args := make([]any, 0, (end-start)*len(firstArgs))
-		args = append(args, firstArgs...)
-		for i := start + 1; i < end; i++ {
-			_, _, _, rowArgs, err := t.writeArgs(c, "", rows[i])
-			if err != nil {
-				return err
-			}
-			valueTuples[i-start] = "(" + strings.Join(rowPlaceholders, ",") + ")"
-			args = append(args, rowArgs...)
-		}
-		query := "INSERT INTO " + table(c) + " (" + strings.Join(fields, ",") + ") VALUES " + strings.Join(valueTuples, ",")
-		if e := t.execPrepared(query, args...); e != nil {
-			return e
-		}
-	}
-	return nil
-}
 func (t *sqliteTx) put(c Collection, pk string, r Record) error {
 	fields, qs, updates, args, e := t.writeArgs(c, pk, r)
 	if e != nil {
