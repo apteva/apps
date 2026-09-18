@@ -72,6 +72,7 @@ var (
 	samples     = flag.Int("samples", 200, "samples for inexpensive operations")
 	slowSamples = flag.Int("slow-samples", 7, "samples for scans and aggregates")
 	output      = flag.String("output", "", "required result JSON path, outside the temporary data directory")
+	durability  = flag.String("durability", "durable", "durable or balanced SQLite commit profile")
 	checks      int
 )
 
@@ -232,7 +233,7 @@ func run() error {
 		return e
 	}
 	defer os.RemoveAll(root)
-	m, e := engine.Open(root)
+	m, e := engine.OpenWithOptions(root, *durability)
 	if e != nil {
 		return e
 	}

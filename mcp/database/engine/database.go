@@ -49,15 +49,26 @@ type database struct {
 	closed  bool
 }
 type Manager struct {
-	mu        sync.Mutex
-	registry  *sql.DB
-	root      string
-	databases map[string]*database
-	secret    string
-	closed    bool
+	mu         sync.Mutex
+	registry   *sql.DB
+	root       string
+	databases  map[string]*database
+	secret     string
+	durability string
+	closed     bool
 }
 
 func Open(root string) (*Manager, error) {
+	return OpenWithOptions(root, "durable")
+}
+
+// OpenWithOptions opens the manager with an explicit SQLite durability profile.
+// durable is the default and uses synchronous=FULL; balanced uses NORMAL and
+// is intended only when the operator accepts the weaker crash-commit window.
+func OpenWithOptions(root, durability string) (*Manager, error) {
+	if durability != "durable" && durability != "balanced" {
+		return nil, Invalid("durability must be durable or balanced")
+	}
 	if e := os.MkdirAll(root, 0700); e != nil {
 		return nil, e
 	}
@@ -79,7 +90,7 @@ func Open(root string) (*Manager, error) {
 		db.Close()
 		return nil, e
 	}
-	m := &Manager{registry: db, root: root, databases: map[string]*database{}}
+	m := &Manager{registry: db, root: root, databases: map[string]*database{}, durability: durability}
 	if e = db.QueryRow(`SELECT value FROM settings WHERE name='secret'`).Scan(&m.secret); e != nil {
 		db.Close()
 		return nil, e
@@ -167,7 +178,7 @@ func (m *Manager) resolve(ctx context.Context, scope, name, adapter string, crea
 	}
 	var b backend
 	if info.Adapter == "sqlite" {
-		b, e = openSQLite(filepath.Join(dir, "data.sqlite"))
+		b, e = openSQLiteWithDurability(filepath.Join(dir, "data.sqlite"), m.durability)
 	} else {
 		b, e = openPebble(filepath.Join(dir, "pebble"))
 	}

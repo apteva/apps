@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -34,11 +35,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if root == "" {
 		return errors.New("APTEVA_DATA_DIR is required")
 	}
-	m, e := engine.Open(filepath.Join(root, "database"))
+	durability := os.Getenv("DATABASE_DURABILITY_PROFILE")
+	if configured := strings.TrimSpace(ctx.Config()["durability_profile"]); configured != "" {
+		durability = configured
+	}
+	if durability == "" {
+		durability = "durable"
+	}
+	m, e := engine.OpenWithOptions(filepath.Join(root, "database"), durability)
 	if e != nil {
 		return e
 	}
 	a.manager = m
+	ctx.Logger().Info("database mounted", "durability_profile", durability, "sqlite_writer_connections", 2, "sqlite_read_connections", 4)
 	return nil
 }
 func (a *App) OnUnmount(*sdk.AppCtx) error {

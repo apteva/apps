@@ -10,22 +10,45 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 
 	sqlite "modernc.org/sqlite"
 )
 
-type sqliteBackend struct{ db *sql.DB }
+type sqliteBackend struct {
+	db     *sql.DB
+	readDB *sql.DB
+	stmtMu sync.Mutex
+	stmts  map[string]*sql.Stmt
+}
 type sqliteTx struct {
-	ctx   context.Context
-	tx    *sql.Tx
-	stmts map[string]*sql.Stmt
-	write bool
+	ctx     context.Context
+	tx      *sql.Tx
+	stmts   map[string]*sql.Stmt
+	write   bool
+	prepare func(context.Context, string) (*sql.Stmt, error)
 }
 
 func openSQL(path string) (*sql.DB, error) {
+	return openSQLPool(path, 5, false, "durable")
+}
+func openSQLPool(path string, maxConns int, readOnly bool, durability string) (*sql.DB, error) {
 	u := url.URL{Scheme: "file", Path: path}
 	q := u.Query()
-	for _, p := range []string{"journal_mode(WAL)", "synchronous(FULL)", "busy_timeout(5000)", "foreign_keys(ON)"} {
+	if readOnly {
+		q.Set("mode", "ro")
+	}
+	synchronous := "FULL"
+	if durability == "balanced" {
+		synchronous = "NORMAL"
+	}
+	pragmas := []string{"busy_timeout(5000)", "foreign_keys(ON)"}
+	if readOnly {
+		pragmas = append(pragmas, "query_only(ON)")
+	} else {
+		pragmas = append(pragmas, "journal_mode(WAL)", "synchronous("+synchronous+")", "wal_autocheckpoint(10000)")
+	}
+	for _, p := range pragmas {
 		q.Add("_pragma", p)
 	}
 	u.RawQuery = q.Encode()
@@ -35,8 +58,8 @@ func openSQL(path string) (*sql.DB, error) {
 	}
 	// Writes are serialized by database.mu. A bounded pool allows independent
 	// read transactions to run concurrently while retaining one writer.
-	db.SetMaxOpenConns(5)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(maxConns)
+	db.SetMaxIdleConns(maxConns)
 	if e = db.Ping(); e != nil {
 		db.Close()
 		return nil, e
@@ -44,28 +67,69 @@ func openSQL(path string) (*sql.DB, error) {
 	return db, nil
 }
 func openSQLite(path string) (backend, error) {
-	db, e := openSQL(path)
+	return openSQLiteWithDurability(path, "durable")
+}
+func openSQLiteWithDurability(path, durability string) (backend, error) {
+	if durability != "durable" && durability != "balanced" {
+		return nil, Invalid("durability must be durable or balanced")
+	}
+	// One connection executes the serialized writer transaction; the second is
+	// reserved for database-level statement preparation. Manager-level locking
+	// still guarantees only one active write transaction.
+	db, e := openSQLPool(path, 2, false, durability)
 	if e != nil {
+		return nil, e
+	}
+	readDB, e := openSQLPool(path, 4, true, durability)
+	if e != nil {
+		db.Close()
 		return nil, e
 	}
 	_, e = db.Exec(`CREATE TABLE IF NOT EXISTS __collections (name TEXT PRIMARY KEY, schema_json TEXT NOT NULL, storage_version INTEGER NOT NULL DEFAULT 1)`)
 	if e != nil {
 		db.Close()
+		readDB.Close()
 		return nil, e
 	}
 	// v1 databases predate the physical-layout marker. Existing tables remain
 	// readable as v1; new collections use v2 and can be migrated explicitly.
 	_, _ = db.Exec(`ALTER TABLE __collections ADD COLUMN storage_version INTEGER NOT NULL DEFAULT 1`)
-	return &sqliteBackend{db}, nil
+	return &sqliteBackend{db: db, readDB: readDB, stmts: map[string]*sql.Stmt{}}, nil
 }
-func (b *sqliteBackend) close() error { return b.db.Close() }
+func (b *sqliteBackend) close() error {
+	b.stmtMu.Lock()
+	for _, s := range b.stmts {
+		_ = s.Close()
+	}
+	b.stmtMu.Unlock()
+	return errors.Join(b.readDB.Close(), b.db.Close())
+}
 func (b *sqliteBackend) transaction(ctx context.Context, write bool, fn func(transaction) error) error {
-	tx, e := b.db.BeginTx(ctx, nil)
+	db := b.readDB
+	if write {
+		db = b.db
+	}
+	tx, e := db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
-	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}, write: write}); e == nil {
+	prepare := func(ctx context.Context, query string) (*sql.Stmt, error) {
+		if !write {
+			return nil, errors.New("prepared writes unavailable in read transaction")
+		}
+		b.stmtMu.Lock()
+		defer b.stmtMu.Unlock()
+		if s := b.stmts[query]; s != nil {
+			return s, nil
+		}
+		s, err := b.db.PrepareContext(ctx, query)
+		if err == nil {
+			b.stmts[query] = s
+		}
+		return s, err
+	}
+	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}, write: write, prepare: prepare}); e == nil {
 		if write {
 			e = tx.Commit()
 		} else {
@@ -403,7 +467,10 @@ func (t *sqliteTx) execPrepared(query string, args ...any) error {
 	stmt := t.stmts[query]
 	if stmt == nil {
 		var e error
-		stmt, e = t.tx.PrepareContext(t.ctx, query)
+		base, e := t.prepare(t.ctx, query)
+		if e == nil {
+			stmt = t.tx.StmtContext(t.ctx, base)
+		}
 		if e != nil {
 			return e
 		}
