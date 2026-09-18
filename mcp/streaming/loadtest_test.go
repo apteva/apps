@@ -42,7 +42,7 @@ func TestLoopbackPlaybackURL_TargetsTheSidecarsOwnRoute(t *testing.T) {
 	out, _ := app.toolCreate(ctx, map[string]any{"name": "lt"})
 	s := out.(map[string]any)["stream"].(*Stream)
 
-	got := app.loopbackPlaybackURL(s, indexPlaylistFile)
+	got := app.loopbackPlaybackURL(s, indexPlaylistFile, 0)
 	want := fmt.Sprintf("http://127.0.0.1:9123/streams/%d/%s", s.ID, indexPlaylistFile)
 	if !strings.HasPrefix(got, want) {
 		t.Errorf("loopbackPlaybackURL=%q, want prefix %q", got, want)

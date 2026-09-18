@@ -60,7 +60,7 @@ func newGlobalTestApp(t *testing.T) (*App, *sdk.AppCtx) {
 	app := &App{
 		runners:       map[int64]*streamRunner{},
 		viewers:       newViewerTracker(),
-		throttle:      newViewerThrottle(),
+		throttle:      newViewerThrottle(defaultMaxViewersPerIP),
 		playback:      newPlaybackCache(playbackCacheTTL),
 		runnerFactory: newFakeRunnerFactory(t),
 	}
@@ -249,7 +249,7 @@ func TestSignedURL_HappyPathTamperAndExpiry(t *testing.T) {
 	past := time.Now().Add(-time.Minute).Unix()
 	expired := fmt.Sprintf("%s/streams/%d/%s?t=%s&exp=%d&sig=%s",
 		srv.URL, s.ID, indexPlaylistFile, s.PlaybackToken, past,
-		signPlayback(s.URLSigningSecret, s.ID, past))
+		signPlayback(s.URLSigningSecret, s.ID, past, scopeHLS))
 	if code, _ := getStatus(t, expired); code != http.StatusNotFound {
 		t.Errorf("expired signed url returned %d, want 404", code)
 	}
