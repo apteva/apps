@@ -101,6 +101,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	} else {
 		a.git = gitService
 		a.syncer = newAutoSyncSupervisor(gitService)
+		a.syncer.setNative(a.native)
 		a.syncer.start(ctx)
 	}
 	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)

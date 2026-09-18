@@ -56,6 +56,7 @@ func saveAutoSync(db *sql.DB, s *AutoSyncState) error {
 // are detected too. Each repository has at most one task and a shared file lock.
 type autoSyncSupervisor struct {
 	git     *gitService
+	native  *nativeVCS
 	ctx     context.Context
 	cancel  context.CancelFunc
 	wg      sync.WaitGroup
@@ -68,6 +69,8 @@ func newAutoSyncSupervisor(g *gitService) *autoSyncSupervisor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &autoSyncSupervisor{git: g, ctx: ctx, cancel: cancel, running: map[int64]bool{}, slots: make(chan struct{}, 4)}
 }
+
+func (s *autoSyncSupervisor) setNative(n *nativeVCS) { s.native = n }
 func (s *autoSyncSupervisor) start(appCtx *sdk.AppCtx) {
 	s.wg.Add(1)
 	go func() {
@@ -296,6 +299,11 @@ func (s *autoSyncSupervisor) tick(ctx *sdk.AppCtx, repo *Repo, now time.Time, fo
 		if err != nil {
 			return s.attention(ctx, repo, state, err)
 		}
+		if s.native != nil {
+			if _, nativeErr := s.native.checkpoint(repo, message, "auto-sync"); nativeErr != nil {
+				return s.attention(ctx, repo, state, nativeErr)
+			}
+		}
 		state.DirtySince = 0
 		state.LastChangeAt = 0
 		state.Fingerprint = ""
@@ -342,6 +350,11 @@ func (s *autoSyncSupervisor) tick(ctx *sdk.AppCtx, repo *Repo, now time.Time, fo
 	if status.Behind > 0 {
 		if err = s.git.engine.fastForward(s.ctx, work, gd, "origin", state.RemoteBranch); err != nil {
 			return s.attention(ctx, repo, state, err)
+		}
+		if s.native != nil {
+			if _, nativeErr := s.native.checkpoint(repo, "Sync remote changes", "auto-sync"); nativeErr != nil {
+				return s.attention(ctx, repo, state, nativeErr)
+			}
 		}
 		ctx.Emit("repo.git.pulled", map[string]any{"id": repo.ID, "slug": repo.Slug, "branch": state.Branch, "head_sha": s.git.engine.head(s.ctx, work, gd)})
 	}
