@@ -522,7 +522,7 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			if e != nil {
 				return nil, e
 			}
-			pk, e := primary(c, row)
+			pk, e := primaryNormalized(c, row)
 			if e != nil {
 				return nil, e
 			}

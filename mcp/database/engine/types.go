@@ -356,6 +356,30 @@ func primary(c Collection, r Record) (string, error) {
 	}
 	return string(b), nil
 }
+
+func primaryNormalized(c Collection, r Record) (string, error) {
+	if len(c.PrimaryKey) == 1 {
+		p := c.PrimaryKey[0]
+		f, _ := c.field(p)
+		if (f.Type == "text" || f.Type == "integer" || f.Type == "datetime") && r[p] != nil {
+			s := r[p].(string)
+			simple := true
+			for i := 0; i < len(s); i++ {
+				if s[i] < 0x20 || s[i] == '"' || s[i] == '\\' {
+					simple = false
+					break
+				}
+			}
+			if simple {
+				if len(s)+4 > 2048 {
+					return "", Invalid("primary key exceeds 2048 bytes")
+				}
+				return `["` + s + `"]`, nil
+			}
+		}
+	}
+	return primary(c, r)
+}
 func keyOf(c Collection, r Record) Record {
 	k := Record{}
 	for _, p := range c.PrimaryKey {

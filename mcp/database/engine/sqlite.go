@@ -438,8 +438,8 @@ func sqlValue(f Field, v any) any {
 }
 func (t *sqliteTx) writeArgs(c Collection, pk string, r Record) ([]string, []string, []string, []any, error) {
 	for _, idx := range indexes(c) {
-		if _, _, err := indexTuple(c, idx, r); err != nil {
-			return nil, nil, nil, nil, err
+		if sqliteIndexTupleSize(c, idx, r) > 4096 {
+			return nil, nil, nil, nil, Invalid("encoded index key exceeds 4096 bytes")
 		}
 	}
 	fields := []string{}
@@ -462,6 +462,36 @@ func (t *sqliteTx) writeArgs(c Collection, pk string, r Record) ([]string, []str
 		args = append(args, sqlValue(f, r[f.Name]))
 	}
 	return fields, qs, updates, args, nil
+}
+
+// SQLite maintains the native index itself, so it only needs the portable
+// contract's encoded-key length check. Computing that length directly avoids
+// allocating Pebble's order-preserving key bytes for every SQLite insert.
+func sqliteIndexTupleSize(c Collection, idx Index, r Record) int {
+	n := 0
+	for _, o := range idx.Fields {
+		f, _ := c.field(o.Field)
+		v := r[o.Field]
+		if v == nil {
+			n++
+			continue
+		}
+		switch f.Type {
+		case "integer", "number":
+			n += 9
+		case "boolean":
+			n += 2
+		default:
+			n += 3
+			for _, b := range []byte(v.(string)) {
+				n++
+				if b == 0 {
+					n++
+				}
+			}
+		}
+	}
+	return n
 }
 func (t *sqliteTx) execPrepared(query string, args ...any) error {
 	stmt := t.stmts[query]
