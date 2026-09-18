@@ -122,6 +122,10 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			writeGitHTTPError(w, err)
 			return
 		}
+		if err := a.ensureNativeRevision(repo); err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
 		httpJSON(w, result)
 	case "fetch", "pull", "push":
 		if r.Method != http.MethodPost {
@@ -145,6 +149,12 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 		if err != nil {
 			writeGitHTTPError(w, err)
 			return
+		}
+		if action == "pull" {
+			if err := a.ensureNativeRevision(repo); err != nil {
+				writeGitHTTPError(w, err)
+				return
+			}
 		}
 		httpJSON(w, status)
 	case "commit":
@@ -223,6 +233,10 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 			writeGitHTTPError(w, err)
 			return
 		}
+		if err := a.ensureNativeRevision(repo); err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
 		httpJSON(w, status)
 	case "switch":
 		if r.Method != http.MethodPost {
@@ -239,6 +253,10 @@ func (a *App) httpRepoGit(w http.ResponseWriter, r *http.Request, slug, action s
 		}
 		status, err := service.withContext(r.Context()).Switch(globalCtx, repo, body.Name, httpActor(r))
 		if err != nil {
+			writeGitHTTPError(w, err)
+			return
+		}
+		if err := a.ensureNativeRevision(repo); err != nil {
 			writeGitHTTPError(w, err)
 			return
 		}

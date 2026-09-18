@@ -161,10 +161,17 @@ func (a *App) toolGitConnect(callCtx context.Context, ctx *sdk.AppCtx, args map[
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Connect(ctx, repo, GitConnectInput{
+	result, err := service.withContext(callCtx).Connect(ctx, repo, GitConnectInput{
 		RemoteURL: strArg(args, "remote_url"), Branch: strArg(args, "branch"),
 		ConnectionID: int64(intArg(args, "connection_id", 0)),
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(repo); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (a *App) toolGitStatus(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -188,7 +195,14 @@ func (a *App) toolGitPull(callCtx context.Context, ctx *sdk.AppCtx, args map[str
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Pull(ctx, repo, strArg(args, "actor"))
+	result, err := service.withContext(callCtx).Pull(ctx, repo, strArg(args, "actor"))
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(repo); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (a *App) toolGitCommit(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -196,8 +210,15 @@ func (a *App) toolGitCommit(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Commit(ctx, repo, strArg(args, "message"), stringSliceArg(args, "paths"),
+	result, err := service.withContext(callCtx).Commit(ctx, repo, strArg(args, "message"), stringSliceArg(args, "paths"),
 		strArg(args, "author_name"), strArg(args, "author_email"), strArg(args, "actor"))
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(repo); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (a *App) toolGitPush(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -257,7 +278,14 @@ func (a *App) toolGitSwitch(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Switch(ctx, repo, strArg(args, "name"), strArg(args, "actor"))
+	result, err := service.withContext(callCtx).Switch(ctx, repo, strArg(args, "name"), strArg(args, "actor"))
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(repo); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func stringSliceArg(args map[string]any, key string) []string {
