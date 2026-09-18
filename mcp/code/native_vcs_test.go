@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func nativeFixture(t *testing.T) (*nativeVCS, *Repo, *LocalFileStore) {
@@ -162,5 +163,39 @@ func TestNativeVCS_InvalidRefsRejected(t *testing.T) {
 	}
 	if err := n.createTag(repo, "v1/", ""); err == nil {
 		t.Fatal("invalid tag accepted")
+	}
+}
+
+func TestNativeVCS_CheckpointWithLockedStoreDoesNotDeadlock(t *testing.T) {
+	root := t.TempDir()
+	raw := NewLocalFileStore(filepath.Join(root, "repos"))
+	repo := &Repo{ID: 42, ProjectID: "p", Slug: "locked", Name: "Locked"}
+	if err := raw.CreateRepo(repoStoreKey(repo)); err != nil {
+		t.Fatal(err)
+	}
+	locks := newRepoLockSet()
+	store := &lockedFileStore{inner: raw, locks: locks}
+	n := newNativeVCS(filepath.Join(root, "data"), store, locks)
+	if _, err := store.Write(repoStoreKey(repo), "README.md", []byte("one\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.ensureRepo(repo); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Write(repoStoreKey(repo), "README.md", []byte("two\n")); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := n.checkpoint(repo, "Change", "test")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkpoint deadlocked while using the app's locked file store")
 	}
 }

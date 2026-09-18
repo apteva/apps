@@ -1,3 +1,16 @@
+# Apteva Code 0.14.1
+
+This patch release fixes native checkpoints when Code is running with its
+normal repository-locking file store. Checkpoints now complete without
+recursively acquiring the write-held repository lock.
+
+## Validation
+
+The locked-store regression, full unit suite, integration suite, `go vet`, and
+production build all pass.
+
+---
+
 # Apteva Code 0.14.0
 
 This release makes version control native to Code. Every repository can now

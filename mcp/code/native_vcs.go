@@ -197,7 +197,16 @@ func (n *nativeVCS) loadTree(repo *Repo, tree string) (map[string]nativeEntry, e
 }
 
 func (n *nativeVCS) snapshot(repo *Repo) (map[string]nativeEntry, string, error) {
-	files, err := n.store.List(nativeStoreKey(repo), "", true)
+	// Native operations hold the repository lock at their public entry points.
+	// The app's normal store is a lockedFileStore, whose methods acquire the
+	// same RWMutex.  Re-entering it while checkpoint holds the write lock would
+	// deadlock (write lock -> snapshot -> read lock).  Read the underlying store
+	// directly here; callers that need consistency already own the repo lock.
+	store := n.store
+	if locked, ok := store.(*lockedFileStore); ok {
+		store = locked.inner
+	}
+	files, err := store.List(nativeStoreKey(repo), "", true)
 	if err != nil {
 		return nil, "", err
 	}
@@ -211,7 +220,7 @@ func (n *nativeVCS) snapshot(repo *Repo) (map[string]nativeEntry, string, error)
 		if err != nil {
 			return nil, "", err
 		}
-		body, err := n.store.Read(nativeStoreKey(repo), path)
+		body, err := store.Read(nativeStoreKey(repo), path)
 		if err != nil {
 			return nil, "", err
 		}
