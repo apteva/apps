@@ -118,10 +118,17 @@ func (t *attendanceTracker) record(key attendanceKey, projectID string, webinarI
 	return credit
 }
 
-// drain snapshots every dirty entry and resets its pending counter. The
-// entries themselves stay resident so LastBeat survives across flushes —
-// that's what makes the elapsed-time clamp meaningful.
-func (t *attendanceTracker) drain() []attendanceFlush {
+// drain snapshots every dirty entry for one project and resets its
+// pending counter. The entries themselves stay resident so LastBeat
+// survives across flushes — that's what makes the elapsed-time clamp
+// meaningful.
+//
+// project == "" drains everything, which is what a single-project
+// install wants. Otherwise the flush worker only takes the viewers
+// belonging to the project this tick was dispatched for; the SDK runs
+// the worker once per project, so the others get theirs on their own
+// pass.
+func (t *attendanceTracker) drain(project string) []attendanceFlush {
 	if t == nil {
 		return nil
 	}
@@ -130,6 +137,9 @@ func (t *attendanceTracker) drain() []attendanceFlush {
 	out := make([]attendanceFlush, 0, len(t.entries))
 	for key, e := range t.entries {
 		if !e.Dirty {
+			continue
+		}
+		if project != "" && e.ProjectID != project {
 			continue
 		}
 		out = append(out, attendanceFlush{
@@ -211,7 +221,7 @@ func (a *App) runAttendanceFlush(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 	a.ensureState()
-	batch := a.attendance.drain()
+	batch := a.attendance.drain(app.CurrentProject())
 	if len(batch) > 0 {
 		if err := a.flushAttendance(app, batch); err != nil {
 			app.Logger().Warn("attendance-flush", "rows", len(batch), "err", err)
@@ -329,6 +339,8 @@ func (a *App) runRetentionPrune(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 	cutoff := formatRFC3339(time.Now().UTC().AddDate(0, 0, -days))
+	scope, scopeArgs := projectFilter(app, "project_id")
+	attScope, _ := projectFilter(app, "att.project_id")
 
 	type pruneSpec struct {
 		name  string
@@ -336,27 +348,31 @@ func (a *App) runRetentionPrune(ctx context.Context, app *sdk.AppCtx) error {
 	}
 	specs := []pruneSpec{
 		{"chat", `DELETE FROM webinar_chat WHERE id IN (
-			SELECT id FROM webinar_chat WHERE created_at < ? LIMIT ?)`},
+			SELECT id FROM webinar_chat WHERE created_at < ?` + scope + ` LIMIT ?)`},
 		{"offer_clicks", `DELETE FROM webinar_offer_clicks WHERE id IN (
-			SELECT id FROM webinar_offer_clicks WHERE clicked_at < ? LIMIT ?)`},
+			SELECT id FROM webinar_offer_clicks WHERE clicked_at < ?` + scope + ` LIMIT ?)`},
 		// Pending reminders are never pruned — a pending row past the
 		// cutoff is a bug to investigate, not garbage to sweep.
 		{"reminders", `DELETE FROM webinar_reminders WHERE id IN (
 			SELECT id FROM webinar_reminders
-			 WHERE status <> 'pending' AND COALESCE(sent_at, scheduled_for) < ? LIMIT ?)`},
+			 WHERE status <> 'pending' AND COALESCE(sent_at, scheduled_for) < ?` + scope + ` LIMIT ?)`},
 		// Attendance only goes once its webinar is finished, so an
 		// in-flight long-running webinar can't lose rows mid-flight.
 		{"attendance", `DELETE FROM webinar_attendance WHERE id IN (
 			SELECT att.id FROM webinar_attendance att
 			  JOIN webinars w ON w.id = att.webinar_id
-			 WHERE att.last_heartbeat < ? AND w.status IN ('ended','cancelled') LIMIT ?)`},
+			 WHERE att.last_heartbeat < ? AND w.status IN ('ended','cancelled')` + attScope + ` LIMIT ?)`},
 	}
 
+	// A tick that fills every batch has more to delete than it removed,
+	// so it re-runs on the next tick rather than being a silent backlog.
 	const batchSize = 2000
 	const maxBatches = 10
 	for _, spec := range specs {
+		args := append([]any{cutoff}, scopeArgs...)
+		args = append(args, batchSize)
 		for i := 0; i < maxBatches; i++ {
-			res, err := app.AppDB().Exec(spec.query, cutoff, batchSize)
+			res, err := app.AppDB().Exec(spec.query, args...)
 			if err != nil {
 				app.Logger().Warn("retention-prune", "table", spec.name, "err", err)
 				break
@@ -364,6 +380,10 @@ func (a *App) runRetentionPrune(ctx context.Context, app *sdk.AppCtx) error {
 			n, _ := res.RowsAffected()
 			if n < batchSize {
 				break
+			}
+			if i == maxBatches-1 {
+				app.Logger().Info("retention-prune hit its per-tick batch ceiling; continuing next tick",
+					"table", spec.name, "removed", maxBatches*batchSize)
 			}
 		}
 	}

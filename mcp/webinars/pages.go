@@ -103,11 +103,14 @@ function startCountdown(el, onElapsed) {
   if (!el) return;
   var target = new Date(el.dataset.until);
   if (isNaN(target.getTime())) return;
-  var fired = false;
+  var fired = false, iv = null;
   function tick() {
     var ms = target.getTime() - Date.now();
     if (ms <= 0) {
       el.textContent = "starting now";
+      // Stop ticking. The interval used to run for the life of the
+      // page, rewriting the same string once a second forever.
+      if (iv) { clearInterval(iv); iv = null; }
       if (!fired) { fired = true; if (onElapsed) onElapsed(); }
       return;
     }
@@ -119,7 +122,7 @@ function startCountdown(el, onElapsed) {
     else             el.textContent = "starts in " + s + "s";
   }
   tick();
-  setInterval(tick, 1000);
+  if (!fired) iv = setInterval(tick, 1000);
 }
 {{end}}
 `
@@ -216,7 +219,7 @@ const statePageHTML = `<!doctype html>
   {{if .WhenISO}}
   <p class="when">
     <time datetime="{{.WhenISO}}">{{.WhenLabel}}</time>
-    {{if .Countdown}}<span class="countdown" id="countdown" data-until="{{.WhenISO}}"></span>{{end}}
+    {{if .Countdown}}<span class="countdown" id="countdown" data-until="{{.WhenISO}}" aria-live="polite"></span>{{end}}
   </p>
   {{end}}
   {{if .ActionURL}}<a class="action" href="{{.ActionURL}}">{{.ActionLabel}}</a>{{end}}
@@ -338,6 +341,37 @@ func replayExpiredPage(rw http.ResponseWriter, w *Webinar) {
 		Body:     "The recording of " + strings.TrimSpace(w.Title) + " is no longer available to watch.",
 		Note:     "If you need access, reply to the email you received and ask the host.",
 	})
+}
+
+// registrationClosedPage — the registration form's own terminal state.
+//
+// v0.2 gave the live room four designed lifecycle states and gave the
+// registration page none: handleRegistrationPage never looked at
+// status, so a cancelled or finished webinar still rendered a full
+// "Save my seat" form, complete with a countdown to a date in the
+// past. Someone arriving from an old link deserves to be told.
+func registrationClosedPage(rw http.ResponseWriter, w *Webinar, replayURL string) {
+	page := statePage{
+		Icon:  iconClock,
+		Title: w.Title,
+	}
+	if w.Status == "cancelled" {
+		page.Headline = "This webinar has been cancelled"
+		page.Body = strings.TrimSpace(w.Title) + " is no longer taking place."
+		page.Note = "If you had already registered, you don’t need to do anything."
+	} else {
+		page.Headline = "Registration has closed"
+		page.Body = strings.TrimSpace(w.Title) + " has already taken place."
+	}
+	if replayURL != "" {
+		page.Icon = iconPlay
+		page.ActionURL = replayURL
+		page.ActionLabel = "Watch the replay"
+		page.Note = ""
+	} else if w.Status != "cancelled" {
+		page.Note = "If a replay is published, the host will share it."
+	}
+	renderStatePage(rw, page)
 }
 
 // replayUnavailablePage — published, but streaming has nothing to serve
