@@ -16,11 +16,23 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("version empty")
 	}
-	if m.Version != "0.12.5" {
+	if m.Version != "0.12.7" {
 		t.Errorf("version=%q", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
+	}
+	transportFound := false
+	for _, field := range m.ConfigSchema {
+		if field.Name == "browser_upload_transport" {
+			transportFound = true
+			if field.Type != "select" || field.Default != "relay" || len(field.Options) != 2 || field.Options[0] != "relay" || field.Options[1] != "direct" {
+				t.Fatalf("unexpected browser upload transport config: %#v", field)
+			}
+		}
+	}
+	if !transportFound {
+		t.Fatal("browser_upload_transport config missing")
 	}
 	if len(m.Provides.MCPTools) != len((&App{}).MCPTools()) {
 		t.Errorf("expected %d MCP tools, got %d", len((&App{}).MCPTools()), len(m.Provides.MCPTools))

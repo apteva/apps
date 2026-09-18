@@ -183,6 +183,32 @@ test('parallel parts report aggregate bytes while PUTs are still in flight',asyn
  expect(values.some(value=>value>0&&value<32*1024**2&&value%(16*1024**2)!==0)).toBe(true);
 });
 
+test('small uploads show live progress, speed, and estimated time remaining',async({page})=>{
+ await page.route('**/api/apps/storage/**',async route=>{
+  const u=new URL(route.request().url());if(u.pathname.includes('/ui/'))return route.continue();
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ await page.evaluate(()=>{
+  class ProgressXHR {
+   upload:{onprogress:((event:{loaded:number,total:number})=>void)|null}={onprogress:null};
+   status=200;responseText=JSON.stringify({id:14,name:'small.bin',folder:'/',size_bytes:4*1024**2,content_type:'application/octet-stream',sha256:'',visibility:'private'});withCredentials=false;
+   onload:(()=>void)|null=null;onerror:(()=>void)|null=null;onabort:(()=>void)|null=null;
+   open(){}setRequestHeader(){}
+   send(){
+    setTimeout(()=>this.upload.onprogress?.({loaded:25,total:100}),250);
+    setTimeout(()=>this.upload.onprogress?.({loaded:50,total:100}),900);
+    setTimeout(()=>this.onload?.(),1600);
+   }
+   abort(){this.onabort?.()}
+  }
+  (window as any).XMLHttpRequest=ProgressXHR;
+ });
+ await page.locator('input[type=file]').setInputFiles({name:'small.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(4*1024**2)});
+ await expect(page.getByText(/1\.0 MB \/ 4\.0 MB · 25% · .*\/s · ~.* left/)).toBeVisible({timeout:800});
+ await expect(page.getByText('uploaded',{exact:true})).toBeVisible({timeout:2500});
+});
+
 test('real 2 GiB body streams directly to a cross-origin backend',async({page,request})=>{
  test.setTimeout(120000);
  const id='STREAMREAL2G';

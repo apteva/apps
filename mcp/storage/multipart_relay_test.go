@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestRelayPartStreamsBeforeBodyFinishes(t *testing.T) {
@@ -97,5 +99,29 @@ func TestCorsFailureNegotiatesRelay(t *testing.T) {
 	app.handleUploadInit(w, r)
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"mode":"s3_relay"`) || !strings.Contains(w.Body.String(), `"relay_supported":true`) {
 		t.Fatal(w.Code, w.Body)
+	}
+}
+
+func TestBrowserUploadTransportDefaultsToRelay(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithConfig(map[string]string{}))
+	if got := configuredBrowserUploadTransport(ctx); got != "relay" {
+		t.Fatalf("default transport=%q want relay", got)
+	}
+	ctx = newTestCtx(t, tk.WithConfig(map[string]string{"browser_upload_transport": "direct"}))
+	if got := configuredBrowserUploadTransport(ctx); got != "direct" {
+		t.Fatalf("configured transport=%q want direct", got)
+	}
+	ctx = newTestCtx(t, tk.WithConfig(map[string]string{"browser_upload_transport": "invalid"}))
+	if got := configuredBrowserUploadTransport(ctx); got != "relay" {
+		t.Fatalf("invalid transport=%q want safe relay fallback", got)
+	}
+
+	newTestCtx(t, tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"max_upload_size_mb": "5120"}))
+	be := &multipartFake{Backend: backend(), size: 32 * 1024 * 1024}
+	globalBackend = be
+	t.Cleanup(func() { globalBackend = nil })
+	out := startUpload(t, &App{}, map[string]any{"filename": "relay-default.bin", "size": be.size, "direct": true})
+	if out["mode"] != "s3_relay" || out["relay_supported"] != true {
+		t.Fatalf("default init response=%#v want relay", out)
 	}
 }
