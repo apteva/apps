@@ -28,6 +28,7 @@ type transaction interface {
 	createIndex(Collection, Index) error
 	dropIndex(Collection, string) error
 	get(Collection, string) (Record, error)
+	insert(Collection, string, Record) error
 	put(Collection, string, Record) error
 	remove(Collection, string) error
 	find(Collection, Query, int) ([]Record, error)
@@ -478,15 +479,14 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				if len(found) > 0 {
 					old = found[0]
 				}
-			} else if _, e := primary(c, row); e == nil {
-				pk, _ := primary(c, row)
-				old, e = tx.get(c, pk)
-				if e != nil {
-					return nil, e
+			} else if op == "upsert" {
+				if _, e := primary(c, row); e == nil {
+					pk, _ := primary(c, row)
+					old, e = tx.get(c, pk)
+					if e != nil {
+						return nil, e
+					}
 				}
-			}
-			if old != nil && op == "insert" {
-				return nil, fail("unique_conflict", "primary key already exists")
 			}
 			if old != nil {
 				merged := Record{}
@@ -514,7 +514,7 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 			if e != nil {
 				return nil, e
 			}
-			if old == nil {
+			if op == "upsert" && old == nil {
 				existing, e := tx.get(c, pk)
 				if e != nil {
 					return nil, e
@@ -524,7 +524,12 @@ func mutate(tx transaction, c Collection, op string, r Request) (any, error) {
 				}
 			}
 			stamp(row, old, now)
-			if e = tx.put(c, pk, row); e != nil {
+			if op == "insert" {
+				e = tx.insert(c, pk, row)
+			} else {
+				e = tx.put(c, pk, row)
+			}
+			if e != nil {
 				return nil, e
 			}
 			keys = append(keys, keyOf(c, row))

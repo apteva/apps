@@ -1,6 +1,6 @@
 # Database
 
-Independent Apteva sidecar app, version 0.1.0. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
+Independent Apteva sidecar app, version 0.1.1. SQLite and Pebble implement one local record API. The app owns its files and does not change CRM, Tables, or other apps' databases.
 
 ## Working in this version
 

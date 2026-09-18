@@ -16,8 +16,9 @@ import (
 
 type sqliteBackend struct{ db *sql.DB }
 type sqliteTx struct {
-	ctx context.Context
-	tx  *sql.Tx
+	ctx   context.Context
+	tx    *sql.Tx
+	stmts map[string]*sql.Stmt
 }
 
 func openSQL(path string) (*sql.DB, error) {
@@ -31,7 +32,10 @@ func openSQL(path string) (*sql.DB, error) {
 	if e != nil {
 		return nil, e
 	}
-	db.SetMaxOpenConns(1)
+	// Writes are serialized by database.mu. A bounded pool allows independent
+	// read transactions to run concurrently while retaining one writer.
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(5)
 	if e = db.Ping(); e != nil {
 		db.Close()
 		return nil, e
@@ -57,7 +61,7 @@ func (b *sqliteBackend) transaction(ctx context.Context, write bool, fn func(tra
 		return e
 	}
 	defer tx.Rollback()
-	if e = fn(&sqliteTx{ctx, tx}); e == nil {
+	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}}); e == nil {
 		if write {
 			e = tx.Commit()
 		} else {
@@ -239,10 +243,10 @@ func sqlValue(f Field, v any) any {
 	}
 	return v
 }
-func (t *sqliteTx) put(c Collection, pk string, r Record) error {
+func (t *sqliteTx) writeArgs(c Collection, pk string, r Record) ([]string, []string, []string, []any, error) {
 	for _, idx := range indexes(c) {
 		if _, _, err := indexTuple(c, idx, r); err != nil {
-			return err
+			return nil, nil, nil, nil, err
 		}
 	}
 	fields := []string{"__pk", "__doc"}
@@ -256,7 +260,34 @@ func (t *sqliteTx) put(c Collection, pk string, r Record) error {
 		updates = append(updates, s+"=excluded."+s)
 		args = append(args, sqlValue(f, r[f.Name]))
 	}
-	_, e := t.tx.ExecContext(t.ctx, "INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+") ON CONFLICT(__pk) DO UPDATE SET "+strings.Join(updates, ","), args...)
+	return fields, qs, updates, args, nil
+}
+func (t *sqliteTx) execPrepared(query string, args ...any) error {
+	stmt := t.stmts[query]
+	if stmt == nil {
+		var e error
+		stmt, e = t.tx.PrepareContext(t.ctx, query)
+		if e != nil {
+			return e
+		}
+		t.stmts[query] = stmt
+	}
+	_, e := stmt.ExecContext(t.ctx, args...)
+	return e
+}
+func (t *sqliteTx) insert(c Collection, pk string, r Record) error {
+	fields, qs, _, args, e := t.writeArgs(c, pk, r)
+	if e != nil {
+		return e
+	}
+	return t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+")", args...)
+}
+func (t *sqliteTx) put(c Collection, pk string, r Record) error {
+	fields, qs, updates, args, e := t.writeArgs(c, pk, r)
+	if e != nil {
+		return e
+	}
+	e = t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+") ON CONFLICT(__pk) DO UPDATE SET "+strings.Join(updates, ","), args...)
 	return e
 }
 func (t *sqliteTx) remove(c Collection, pk string) error {

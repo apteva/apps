@@ -336,6 +336,21 @@ func (t *pebbleTx) put(c Collection, pk string, r Record) error {
 	}
 	return t.batch.Set([]byte("r/"+c.Name+"/"+pk), marshal(r), nil)
 }
+func (t *pebbleTx) insert(c Collection, pk string, r Record) error {
+	old, e := t.get(c, pk)
+	if e != nil {
+		return e
+	}
+	if old != nil {
+		return fail("unique_conflict", "primary key already exists")
+	}
+	for _, i := range indexes(c) {
+		if e := t.entry(c, i, pk, r, false); e != nil {
+			return e
+		}
+	}
+	return t.batch.Set([]byte("r/"+c.Name+"/"+pk), marshal(r), nil)
+}
 func (t *pebbleTx) remove(c Collection, pk string) error {
 	old, e := t.get(c, pk)
 	if e != nil || old == nil {
