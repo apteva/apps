@@ -39,7 +39,7 @@ export interface UploadResumableOptions {
   /** Pre-computed SHA-256 hex string. If supplied AND the server
    *  already holds matching bytes, the upload is skipped entirely. */
   sha256?: string;
-  /** Fired with cumulative bytes confirmed by the upload endpoint. */
+  /** Fired with cumulative bytes observed in flight or confirmed. */
   onProgress?: (bytesUploaded: number, total: number) => void;
   onPhase?: (phase: "checking" | "uploading" | "finalizing") => void;
   /** Override the parallelism. Default 4. */
@@ -97,16 +97,27 @@ async function uploadSimple(
   if (opts.visibility) fd.append("visibility", opts.visibility);
   if (opts.tags?.length) fd.append("tags", JSON.stringify(opts.tags));
 
-  const res = await fetch(`${STORAGE_API}/files${scopeQS(opts)}`, {
-    method: "POST",
-    credentials: "same-origin",
-    body: fd,
-    signal: opts.signal,
-  });
-  if (!res.ok) {
-    throw new Error(`upload failed (HTTP ${res.status}): ${await res.text()}`);
+  const res = await requestWithProgress(
+    "POST",
+    `${STORAGE_API}/files${scopeQS(opts)}`,
+    {},
+    fd,
+    true,
+    opts.signal,
+    (loaded, total) => {
+      // XHR reports the encoded multipart body, which includes boundaries and
+      // form fields. Convert that transport progress back to logical file bytes
+      // so every upload path shows a consistent file-sized progress bar.
+      const bytes = total > 0
+        ? Math.round(file.size * Math.min(1, loaded / total))
+        : Math.min(file.size, loaded);
+      opts.onProgress?.(bytes, file.size);
+    },
+  );
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`upload failed (HTTP ${res.status}): ${res.body}`);
   }
-  const data = (await res.json()) as Record<string, unknown>;
+  const data = JSON.parse(res.body) as Record<string, unknown>;
   opts.onProgress?.(file.size, file.size);
   return (typeof data?.id === "number" ? data : (data?.file as Record<string, unknown>)) as unknown as UploadedFile;
 }
@@ -263,14 +274,15 @@ async function uploadChunked(
             directAttempt = true;
           }
           inFlightBytes.set(part.n, 0);
-          const res = await putWithProgress(
+          const res = await requestWithProgress(
+            "PUT",
             target,
             headers,
             blob,
             !directAttempt,
             signal,
             (loaded) => {
-              inFlightBytes.set(part.n, loaded);
+              inFlightBytes.set(part.n, Math.min(blob.size, loaded));
               reportProgress();
             },
           );
@@ -392,27 +404,27 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-interface PutResponse {
+interface UploadResponse {
   status: number;
   body: string;
 }
 
-/** PUT a single Blob while exposing bytes accepted by the browser's network
- * stack. XHR is intentionally limited to part bodies; metadata, signing, and
- * completion continue to use fetch. */
-function putWithProgress(
+/** Send an upload body while exposing bytes accepted by the browser's network
+ * stack. Metadata, signing, and completion continue to use fetch. */
+function requestWithProgress(
+  method: "POST" | "PUT",
   url: string,
   headers: Record<string, string>,
-  body: Blob,
+  body: XMLHttpRequestBodyInit,
   withCredentials: boolean,
-  signal: AbortSignal,
-  onProgress: (loaded: number) => void,
-): Promise<PutResponse> {
+  signal: AbortSignal | undefined,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<UploadResponse> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     let settled = false;
 
-    const cleanup = () => signal.removeEventListener("abort", abort);
+    const cleanup = () => signal?.removeEventListener("abort", abort);
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
@@ -421,19 +433,19 @@ function putWithProgress(
     };
     const abort = () => xhr.abort();
 
-    xhr.open("PUT", url, true);
+    xhr.open(method, url, true);
     xhr.withCredentials = withCredentials;
     for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
-    xhr.upload.onprogress = (event) => onProgress(Math.min(body.size, event.loaded));
+    xhr.upload.onprogress = (event) => onProgress(event.loaded, event.total);
     xhr.onload = () => finish(() => resolve({ status: xhr.status, body: xhr.responseText }));
     xhr.onerror = () => finish(() => reject(new TypeError("upload network error")));
     xhr.onabort = () => finish(() => reject(
-      signal.reason instanceof Error
+      signal?.reason instanceof Error
         ? signal.reason
         : new DOMException("upload aborted", "AbortError"),
     ));
 
-    if (signal.aborted) {
+    if (signal?.aborted) {
       finish(() => reject(
         signal.reason instanceof Error
           ? signal.reason
@@ -441,7 +453,7 @@ function putWithProgress(
       ));
       return;
     }
-    signal.addEventListener("abort", abort, { once: true });
+    signal?.addEventListener("abort", abort, { once: true });
     xhr.send(body);
   });
 }

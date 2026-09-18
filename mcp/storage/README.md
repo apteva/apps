@@ -1,9 +1,21 @@
-# Storage 0.12.6
+# Storage 0.12.7
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.7: progress, speed, and ETA on every browser upload
+
+The upload strip now shows continuously updated transferred bytes, percentage,
+smoothed transfer speed, and an approximate time remaining. The same UI is used
+for relay and direct multipart uploads, and small single-request uploads now
+report live progress instead of jumping from zero to complete.
+
+Relay remains the default browser transport from 0.12.6, with four concurrent
+multipart workers by default. Selecting direct transport changes only the
+network path; progress, speed, ETA, retries, cancellation, and resumability
+remain available.
 
 ## Version 0.12.6: relay-first browser uploads
 

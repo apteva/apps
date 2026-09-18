@@ -131,6 +131,15 @@ function formatSize(n: number): string {
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
+function formatEta(seconds: number): string {
+  const rounded = Math.max(1, Math.ceil(seconds));
+  if (rounded < 60) return `~${rounded}s left`;
+  if (rounded < 3600) return `~${Math.floor(rounded / 60)}m ${rounded % 60}s left`;
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.ceil((rounded % 3600) / 60);
+  return `~${hours}h${minutes > 0 ? ` ${minutes}m` : ""} left`;
+}
+
 function formatDate(s?: string): string {
   if (!s) return "-";
   const d = new Date(s);
@@ -165,6 +174,8 @@ interface UploadJob {
   name: string;
   total: number;
   loaded: number;
+  speedBps?: number;
+  etaSeconds?: number;
   phase?: "checking" | "uploading" | "finalizing";
   status: "uploading" | "done" | "error" | "cancelled";
   error?: string;
@@ -283,22 +294,57 @@ function StoragePanelContent({ projectId, installId }: NativePanelProps) {
       for (let i = 0; i < fileList.length; i++) {
         const file = fileList[i];
         const job = initialJobs[i];
+        let sampleAt = 0;
+        let sampleBytes = 0;
+        let smoothedSpeed = 0;
         try {
           await uploadResumable(file, {
             folder,
             projectId,
             installId,
             signal: job.controller!.signal,
-            onPhase: (phase) => updateJob(job.id, { phase }),
+            onPhase: (phase) => {
+              if (phase === "uploading" && sampleAt === 0) {
+                sampleAt = performance.now();
+                sampleBytes = 0;
+                smoothedSpeed = 0;
+              }
+              updateJob(job.id, {
+                phase,
+                ...(phase === "uploading" ? { speedBps: undefined, etaSeconds: undefined } : {}),
+              });
+            },
             onUploadIdAssigned: (sid) => {
               job.serverUploadId = sid;
               updateJob(job.id, { serverUploadId: sid });
             },
             onProgress: (bytes, total) => {
-              updateJob(job.id, { loaded: bytes, total });
+              const now = performance.now();
+              if (sampleAt === 0) sampleAt = now;
+              const elapsedSeconds = (now - sampleAt) / 1000;
+              const byteDelta = bytes - sampleBytes;
+              const patch: Partial<UploadJob> = { loaded: bytes, total };
+              if (byteDelta > 0 && elapsedSeconds < 0.1 && sampleBytes === 0) {
+                // A resumed multipart upload reports previously completed bytes
+                // immediately. Treat that as a baseline, not fresh throughput.
+                sampleAt = now;
+                sampleBytes = bytes;
+              } else if (byteDelta > 0 && elapsedSeconds >= 0.1) {
+                const instantaneous = byteDelta / elapsedSeconds;
+                smoothedSpeed = smoothedSpeed === 0
+                  ? instantaneous
+                  : smoothedSpeed * 0.75 + instantaneous * 0.25;
+                sampleAt = now;
+                sampleBytes = bytes;
+                patch.speedBps = smoothedSpeed;
+                patch.etaSeconds = bytes < total
+                  ? Math.max(0, (total - bytes) / smoothedSpeed)
+                  : 0;
+              }
+              updateJob(job.id, patch);
             },
           });
-          updateJob(job.id, { loaded: file.size, status: "done" });
+          updateJob(job.id, { loaded: file.size, etaSeconds: 0, status: "done" });
         } catch (e) {
           // Distinguish user-cancel from genuine failure — the
           // strip styles them differently and a cancel is not a
@@ -1049,7 +1095,12 @@ function UploadProgressRow({
     ? "Checking upload…"
     : job.phase === "finalizing"
     ? "Finishing upload…"
-    : `${formatSize(job.loaded)} / ${formatSize(job.total)} · ${pct}%`;
+    : [
+        `${formatSize(job.loaded)} / ${formatSize(job.total)}`,
+        `${pct}%`,
+        job.speedBps && job.speedBps > 0 ? `${formatSize(job.speedBps)}/s` : "",
+        job.etaSeconds && job.etaSeconds > 0 ? formatEta(job.etaSeconds) : "",
+      ].filter(Boolean).join(" · ");
   return (
     <div className="flex items-center gap-3 text-xs">
       <div className="flex-1 min-w-0">
