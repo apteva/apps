@@ -1,9 +1,23 @@
-# Storage 0.12.5
+# Storage 0.12.6
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.6: relay-first browser uploads
+
+Large browser uploads now default to the parallel streaming relay. Production
+measurements showed the browser-to-Apteva route plus the datacenter-local S3 hop
+substantially outperforming direct browser-to-object-storage PUTs. Relay keeps
+the same provider multipart session, four concurrent workers by default,
+resumability, cancellation, and live in-flight progress from 0.12.5.
+
+Operators can select `direct` with `browser_upload_transport` when reducing
+server bandwidth is more important or a controlled benchmark shows that their
+browser-to-S3 route is faster. Missing and invalid values safely select relay,
+so existing installations switch back to relay on upgrade without configuration
+changes.
 
 ## Version 0.12.5: live multipart upload progress
 

@@ -66,7 +66,7 @@ func (b *multipartFake) OpenObject(context.Context, string, ObjectReadOptions) (
 
 func directFixture(t *testing.T) (*sdk.AppCtx, *App, *multipartFake, string) {
 	t.Helper()
-	ctx := newTestCtx(t, tk.WithEnv("APTEVA_PUBLIC_URL", "https://dashboard.example"), tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"s3_part_size_mb": "5", "max_upload_size_mb": "5120"}))
+	ctx := newTestCtx(t, tk.WithEnv("APTEVA_PUBLIC_URL", "https://dashboard.example"), tk.WithEnv("STORAGE_UPLOADS_DIR", t.TempDir()), tk.WithConfig(map[string]string{"s3_part_size_mb": "5", "max_upload_size_mb": "5120", "browser_upload_transport": "direct"}))
 	be := &multipartFake{Backend: backend(), size: 5*1024*1024 + 3}
 	globalBackend = be
 	t.Cleanup(func() { globalBackend = nil })

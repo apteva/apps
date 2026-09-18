@@ -427,7 +427,7 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 	ctx.Logger().Info("upload initialized", "upload_id", id, "project_id", pid, "filename", meta.Filename, "bytes", meta.DeclaredSize, "direct", meta.Direct != nil)
 	if meta.Direct != nil {
 		mode := "s3_relay"
-		if prepareBrowserUpload(r.Context(), ctx, r.Header.Get("Origin")) {
+		if configuredBrowserUploadTransport(ctx) == "direct" && prepareBrowserUpload(r.Context(), ctx, r.Header.Get("Origin")) {
 			mode = "s3_multipart"
 		}
 		_, relaySupported := backend().(multipartRelayBackend)

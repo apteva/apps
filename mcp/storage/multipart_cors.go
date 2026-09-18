@@ -32,6 +32,19 @@ func configuredUploadOrigin(app *sdk.AppCtx) string {
 	}
 	return uploadOrigin(os.Getenv("APTEVA_PUBLIC_URL"))
 }
+
+// Relay is the browser default because real-world browser-to-object-storage
+// routes can be substantially slower than browser-to-Apteva plus the
+// datacenter-local S3 hop. Direct remains an explicit operator choice for
+// installations where reduced server bandwidth matters more or benchmarks
+// demonstrate that the direct route is faster.
+func configuredBrowserUploadTransport(app *sdk.AppCtx) string {
+	if strings.EqualFold(strings.TrimSpace(app.Config().Get("browser_upload_transport")), "direct") {
+		return "direct"
+	}
+	return "relay"
+}
+
 func prepareBrowserUpload(c context.Context, app *sdk.AppCtx, requestOrigin string) bool {
 	if err := reconcileDashboardUploadOrigin(c, app); err != nil {
 		return false
