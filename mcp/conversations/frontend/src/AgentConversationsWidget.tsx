@@ -16,6 +16,7 @@ import {
   scopedConversationListPath,
   selectedConversationSeenInput,
   showNewConversation,
+  showPageContext,
   singleConversationListPath,
   type AgentConversationWidgetSettings,
 } from "./agentConversations";
@@ -249,6 +250,7 @@ function ConversationBrowser({
             void load();
           }}
           emptyMessage={widgetSettings?.empty_message}
+          showPageContext={showPageContext(widgetSettings)}
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
@@ -429,6 +431,7 @@ function SingleConversation({
           conversation={selected}
           archived={false}
           emptyMessage={widgetSettings?.empty_message}
+          showPageContext={showPageContext(widgetSettings)}
           headerActions={(
             <>
               {showCreate && (

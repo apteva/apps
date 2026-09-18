@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.23.20
+version: 0.23.21
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -112,6 +112,10 @@ provides:
           show_new_conversation:
             type: boolean
             title: Show new conversation
+            default: true
+          show_page_context:
+            type: boolean
+            title: Show shared page context
             default: true
     - name: inbox-overview
       label: Inbox

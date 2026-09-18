@@ -81,7 +81,7 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`} {
+		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`, `"show_page_context"`} {
 			if !strings.Contains(string(schema), required) {
 				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
 			}

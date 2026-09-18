@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.21 — 2026-09-18
+
+- Add the generic `show_page_context` agent-conversation widget setting. It defaults to `true`; setting it to `false` hides the complete context row without changing the page-context snapshot attached to sent messages.
+- Keep transport and presentation independent, with regression coverage proving hidden context is still posted intact. Conversations contains no onboarding- or app-specific display behavior.
+
 ## 0.23.20 — 2026-09-18
 
 - Carry the operator's explicitly shared dashboard page identifiers through the Conversations widget, durable message metadata, retries, and agent events. Context is project-bound, allowlisted, size-limited, and clearly marked as untrusted descriptive data rather than instructions or authorization.

@@ -3,6 +3,7 @@ export type ConversationDisplayMode = "browser" | "single";
 export interface AgentConversationWidgetSettings {
   composer_layout?: "auto" | "compact" | "expanded";
   display_mode?: ConversationDisplayMode;
+  show_page_context?: boolean;
   show_new_conversation?: boolean;
   /** Presentation-only empty transcript text; never persisted as a message. */
   empty_message?: string;
@@ -52,6 +53,12 @@ export function showNewConversation(
   settings?: AgentConversationWidgetSettings,
 ): boolean {
   return settings?.show_new_conversation !== false;
+}
+
+export function showPageContext(
+  settings?: AgentConversationWidgetSettings,
+): boolean {
+  return settings?.show_page_context !== false;
 }
 
 export function fixedAgentConversationInput(instanceId: number, projectId: string, title: string) {

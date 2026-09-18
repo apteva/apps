@@ -7,6 +7,7 @@ import {
   scopedConversationListPath,
   selectedConversationSeenInput,
   showNewConversation,
+  showPageContext,
   singleConversationListPath,
 } from "./agentConversations";
 import {
@@ -62,6 +63,8 @@ describe("AgentConversationsWidget scope", () => {
     expect(conversationDisplayMode({ display_mode: "single" })).toBe("single");
     expect(showNewConversation()).toBe(true);
     expect(showNewConversation({ show_new_conversation: false })).toBe(false);
+    expect(showPageContext()).toBe(true);
+    expect(showPageContext({ show_page_context: false })).toBe(false);
   });
 
   test("owns its responsive geometry instead of depending on host Tailwind output", () => {

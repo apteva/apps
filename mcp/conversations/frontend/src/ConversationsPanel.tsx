@@ -1364,6 +1364,7 @@ export function ConversationChat({
   conversation,
   archived,
   emptyMessage,
+  showPageContext = true,
   onOpenDetails,
   headerActions,
   onActed,
@@ -1372,6 +1373,7 @@ export function ConversationChat({
   conversation: Conversation;
   archived: boolean;
   emptyMessage?: string;
+  showPageContext?: boolean;
   onOpenDetails?: () => void;
   headerActions?: ReactNode;
   onActed: () => void;
@@ -1566,7 +1568,7 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
-      contextChip={<PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} />}
+      contextChip={showPageContext ? <PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} /> : undefined}
       attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
