@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { verifyHistory, verifyMultiAgentTrajectory, verifySequentialWorker } from "./verify-outcomes";
+import {
+  verifyHistory,
+  verifyMultiAgentTrajectory,
+  verifySequentialWorker,
+  verifyOperatorConfirmation,
+  OPERATOR_CONFIRMATION,
+} from "./verify-outcomes";
 function waitingRun() {
   return {
     workflow: true,
@@ -176,4 +182,113 @@ test("sequential verification rejects extra workers, premature done, and missing
   expect(() => verifySequentialWorker(calls, run, [worker, worker])).toThrow("one persisted run worker");
   run.steps[1].events[0].id = 1;
   expect(() => verifySequentialWorker(calls, run, [worker])).toThrow("dependency audit ordering failed");
+});
+
+function confirmedRun() {
+  return {
+    workflow: true,
+    state: "completed",
+    steps: [
+      {
+        key: "draft",
+        id: "step-draft",
+        state: "completed",
+        output: "Golden hour flatters every portrait.",
+        executor: { kind: "agent", agent_id: 7 },
+        updated_by: "agent:7:main",
+        completed_at: "2026-09-18T10:00:00Z",
+        delivered_at: "2026-09-18T09:59:00Z",
+        events: [
+          { actor: "agent:7:main", state: "completed", created_at: "2026-09-18T10:00:00Z" },
+        ],
+      },
+      {
+        key: "confirm",
+        id: "step-confirm",
+        state: "completed",
+        output: OPERATOR_CONFIRMATION,
+        executor: { kind: "human" },
+        updated_by: "operator",
+        decision: "",
+        delivered_at: "",
+        task_id: "",
+        completed_at: "2026-09-18T10:05:00Z",
+        events: [
+          {
+            actor: "operator",
+            state: "completed",
+            output: OPERATOR_CONFIRMATION,
+            created_at: "2026-09-18T10:05:00Z",
+          },
+        ],
+      },
+      {
+        key: "publish",
+        id: "step-publish",
+        state: "completed",
+        output: "Published: Golden hour flatters every portrait.",
+        executor: { kind: "agent", agent_id: 7 },
+        updated_by: "agent:7:main",
+        delivered_at: "2026-09-18T10:05:05Z",
+        completed_at: "2026-09-18T10:06:00Z",
+        events: [
+          { actor: "agent:7:main", state: "completed", created_at: "2026-09-18T10:06:00Z" },
+        ],
+      },
+    ],
+  };
+}
+const confirmReport = (run: any) => ({ step: { id: run.steps[1].id } });
+const verifyConfirm = (run: unknown) =>
+  verifyHistory("processes-operator-confirmation", { direct_runs: [run] });
+
+test("accepts an operator-confirmed run that resumed to publication", () => {
+  const run = confirmedRun();
+  expect(() => verifyConfirm(run)).not.toThrow();
+  expect(() => verifyOperatorConfirmation(run, confirmReport(run))).not.toThrow();
+});
+test("rejects an agent completing the human confirmation step", () => {
+  const run = confirmedRun();
+  run.steps[1].updated_by = "agent:7:main";
+  expect(() => verifyConfirm(run)).toThrow("not the operator");
+});
+test("rejects an agent appearing in the human step's audit", () => {
+  const run = confirmedRun();
+  run.steps[1].events.push({
+    actor: "agent:7:worker",
+    state: "completed",
+    output: OPERATOR_CONFIRMATION,
+    created_at: "2026-09-18T10:05:01Z",
+  });
+  expect(() => verifyOperatorConfirmation(run, confirmReport(run))).toThrow(
+    "An agent acted on the human confirmation step",
+  );
+});
+test("rejects publication released before the operator confirmed", () => {
+  const run = confirmedRun();
+  run.steps[2].delivered_at = "2026-09-18T10:04:00Z";
+  expect(() => verifyConfirm(run)).toThrow("released before the operator confirmed");
+});
+test("rejects a publish step acted on before the confirmation was durable", () => {
+  const run = confirmedRun();
+  run.steps[2].events[0].created_at = "2026-09-18T10:04:30Z";
+  expect(() => verifyOperatorConfirmation(run, confirmReport(run))).toThrow(
+    "acted on before the operator confirmed",
+  );
+});
+test("rejects a confirmation recorded against a different step", () => {
+  const run = confirmedRun();
+  expect(() =>
+    verifyOperatorConfirmation(run, { step: { id: "step-other" } }),
+  ).toThrow("human step is step-confirm");
+});
+test("rejects a work step carrying an approval decision", () => {
+  const run = confirmedRun();
+  run.steps[1].decision = "approved";
+  expect(() => verifyConfirm(run)).toThrow("must not carry an approval decision");
+});
+test("rejects a dispatched human step", () => {
+  const run = confirmedRun();
+  run.steps[1].delivered_at = "2026-09-18T10:01:00Z";
+  expect(() => verifyConfirm(run)).toThrow("never be dispatched");
 });
