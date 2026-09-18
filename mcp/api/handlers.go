@@ -261,7 +261,7 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	logRow := RequestLog{ProjectID: pid, APIID: api.ID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500, RequestID: newRequestID()}
+	logRow := RequestLog{ProjectID: pid, APIID: api.ID, StageID: api.StageID, ConfigurationID: api.ConfigurationID, Hostname: host, Method: r.Method, Path: publicPath, StatusCode: 500, RequestID: newRequestID()}
 	w.Header().Set("X-Request-ID", logRow.RequestID)
 	r = r.Clone(context.WithValue(r.Context(), gatewayRequestIDKey{}, logRow.RequestID))
 	r.Header.Set("X-Request-ID", logRow.RequestID)
@@ -281,7 +281,13 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 	if preflight {
 		requestMethod = strings.ToUpper(strings.TrimSpace(r.Header.Get("Access-Control-Request-Method")))
 	}
-	route, params, err := dbMatchRoute(a.ctx.AppReadDB(), pid, api.ID, requestMethod, publicPath)
+	var route *APIRoute
+	var params map[string]string
+	if api.ConfigurationID != 0 {
+		route, params, err = dbMatchConfigurationRoute(a.ctx.AppReadDB(), pid, api.ID, api.ConfigurationID, requestMethod, publicPath)
+	} else {
+		route, params, err = dbMatchRoute(a.ctx.AppReadDB(), pid, api.ID, requestMethod, publicPath)
+	}
 	if err != nil {
 		logRow.Error = safeUpstreamError(err)
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -324,8 +330,19 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		// Share the mutation lock with revocation so a stream cannot register
 		// after the mutation canceled its older credentials/configuration.
 		a.mutationMu.Lock()
-		freshAPI, loadErr := dbGetPublicAPI(a.ctx.AppReadDB(), pid, "id", api.ID)
-		freshRoute, routeErr := dbGetRouteByID(a.ctx.AppReadDB(), pid, route.ID)
+		var freshAPI *API
+		var loadErr, routeErr error
+		if api.StageID != 0 {
+			freshAPI, loadErr = dbGetPublicStageAPI(a.ctx.AppReadDB(), pid, host)
+		} else {
+			freshAPI, loadErr = dbGetPublicAPI(a.ctx.AppReadDB(), pid, "id", api.ID)
+		}
+		var freshRoute *APIRoute
+		if api.ConfigurationID != 0 {
+			freshRoute, routeErr = dbGetConfigurationRouteByID(a.ctx.AppReadDB(), pid, route.ID)
+		} else {
+			freshRoute, routeErr = dbGetRouteByID(a.ctx.AppReadDB(), pid, route.ID)
+		}
 		if loadErr != nil || routeErr != nil || freshAPI == nil || freshRoute == nil || freshAPI.Status != "active" || !freshRoute.Enabled || *freshAPI != *api || *freshRoute != *route {
 			a.mutationMu.Unlock()
 			httpErr(w, 503, "stream route unavailable")
@@ -369,6 +386,11 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) resolvePublicAPI(r *http.Request, pid, host, path string) (*API, string, error) {
 	if host != "" {
+		if api, err := dbGetPublicStageAPI(a.ctx.AppReadDB(), pid, host); err != nil {
+			return nil, "", err
+		} else if api != nil {
+			return api, path, nil
+		}
 		if api, err := dbGetPublicAPI(a.ctx.AppReadDB(), pid, "hostname", host); err != nil {
 			return nil, "", err
 		} else if api != nil {

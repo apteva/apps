@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.8.1
+version: 0.9.0
 description: |
+  v0.9.0 Adds optional immutable API configurations and stage pointers with
+  atomic promotion and rollback; legacy mutable APIs remain unchanged.
+
   v0.8.1 Allows independent repair of legacy authenticated Function routes while
   preserving edited-route validation, shared CORS checks, and fail-closed calls.
 
@@ -110,6 +113,26 @@ provides:
       description: "Revoke an API key by id."
     - name: api_logs
       description: "List recent request logs for an API."
+    - name: api_config_create
+      description: "Create an immutable configuration snapshot without changing the live API."
+    - name: api_config_clone
+      description: "Clone an immutable API configuration into a new version."
+    - name: api_config_list
+      description: "List immutable API configurations."
+    - name: api_config_diff
+      description: "Compare two immutable API configurations."
+    - name: api_stage_create
+      description: "Create an opt-in stage pointing at an immutable configuration."
+    - name: api_stage_list
+      description: "List stages for an API."
+    - name: api_stage_get
+      description: "Fetch a stage by id."
+    - name: api_stage_update
+      description: "Update stage metadata, hostname, status, or optional defaults."
+    - name: api_stage_promote
+      description: "Atomically point a stage at an immutable configuration."
+    - name: api_stage_rollback
+      description: "Roll a stage back to an earlier immutable configuration."
   ui_panels:
     - slot: project.page
       label: API Gateway
@@ -120,7 +143,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.8.1
+    ref: api/v0.9.0
     entry: mcp/api
   port: 8080
   health_check: /health

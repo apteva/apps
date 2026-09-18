@@ -103,6 +103,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			"limit":      map[string]any{"type": "integer"},
 			"before_id":  map[string]any{"type": "integer", "minimum": 1},
 		}, nil), Handler: a.toolLogs},
+		{Name: "api_config_create", Description: "Create an immutable configuration snapshot of the current API routes and policies.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"},
+		}, nil), Handler: a.toolConfigCreate},
+		{Name: "api_config_clone", Description: "Clone an immutable API configuration into a new version.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}, "configuration_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"},
+		}, []string{"configuration_id"}), Handler: a.toolConfigClone},
+		{Name: "api_config_list", Description: "List immutable API configurations.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}}, nil), Handler: a.toolConfigList},
+		{Name: "api_config_diff", Description: "Compare the routes in two immutable API configurations.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "left_configuration_id": map[string]any{"type": "integer"}, "right_configuration_id": map[string]any{"type": "integer"}}, []string{"left_configuration_id", "right_configuration_id"}), Handler: a.toolConfigDiff},
+		{Name: "api_stage_create", Description: "Create an opt-in stage pointing at an immutable configuration. Existing APIs remain legacy unless a stage is created.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}, "name": map[string]any{"type": "string"}, "configuration_id": map[string]any{"type": "integer"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema(),
+		}, []string{"name"}), Handler: a.toolStageCreate},
+		{Name: "api_stage_list", Description: "List stages for an API.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}}, nil), Handler: a.toolStageList},
+		{Name: "api_stage_get", Description: "Fetch a stage by id.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}}, []string{"stage_id"}), Handler: a.toolStageGet},
+		{Name: "api_stage_update", Description: "Update stage metadata, hostname, enabled state, or optional CORS/auth defaults.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "name": map[string]any{"type": "string"}, "hostname": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "cors": corsPolicySchema(), "auth": authPolicySchema()}, []string{"stage_id"}), Handler: a.toolStageUpdate},
+		{Name: "api_stage_promote", Description: "Atomically point a stage at an immutable configuration.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer"}}, []string{"stage_id", "configuration_id"}), Handler: a.toolStagePromote},
+		{Name: "api_stage_rollback", Description: "Roll a stage back to a prior immutable configuration.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "stage_id": map[string]any{"type": "integer"}, "configuration_id": map[string]any{"type": "integer"}}, []string{"stage_id", "configuration_id"}), Handler: a.toolStagePromote},
 	}
 }
 
@@ -418,6 +434,147 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["next_before_id"] = logs[len(logs)-1].ID
 	}
 	return out, err
+}
+
+func (a *App) toolConfigCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return nil, err
+	}
+	c, err := dbCreateConfiguration(ctx.AppDB(), api.ProjectID, api.ID, 0, stringArg(args, "name", ""))
+	return map[string]any{"configuration": c}, err
+}
+
+func (a *App) toolConfigClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return nil, err
+	}
+	c, err := dbCreateConfiguration(ctx.AppDB(), api.ProjectID, api.ID, int64(intArg(args, "configuration_id", 0)), stringArg(args, "name", ""))
+	return map[string]any{"configuration": c}, err
+}
+
+func (a *App) toolConfigList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return nil, err
+	}
+	rows, err := dbListConfigurations(ctx.AppDB(), api.ProjectID, api.ID)
+	return map[string]any{"configurations": rows, "count": len(rows)}, err
+}
+
+func (a *App) toolConfigDiff(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	left, right := int64(intArg(args, "left_configuration_id", 0)), int64(intArg(args, "right_configuration_id", 0))
+	lc, err := dbGetConfiguration(ctx.AppDB(), pid, left)
+	if err != nil || lc == nil {
+		if err == nil {
+			err = errors.New("left configuration not found")
+		}
+		return nil, err
+	}
+	rc, err := dbGetConfiguration(ctx.AppDB(), pid, right)
+	if err != nil || rc == nil {
+		if err == nil {
+			err = errors.New("right configuration not found")
+		}
+		return nil, err
+	}
+	if lc.APIID != rc.APIID {
+		return nil, errors.New("configurations belong to different APIs")
+	}
+	diff, err := configurationDiff(ctx.AppDB(), pid, left, right)
+	return map[string]any{"diff": diff}, err
+}
+
+func (a *App) toolStageCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return nil, err
+	}
+	configID := int64(intArg(args, "configuration_id", 0))
+	var c *APIConfiguration
+	if configID == 0 {
+		c, err = dbCreateConfiguration(ctx.AppDB(), api.ProjectID, api.ID, 0, "")
+		if err != nil {
+			return nil, err
+		}
+		configID = c.ID
+	}
+	stage := APIStage{ProjectID: api.ProjectID, APIID: api.ID, Name: stringArg(args, "name", ""), ConfigurationID: configID, Hostname: stringArg(args, "hostname", ""), Status: stringArg(args, "status", "active")}
+	if _, ok := args["cors"]; ok {
+		stage.CORSJSON, err = jsonTextArg(args, "cors", "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, ok := args["auth"]; ok {
+		stage.AuthJSON, err = normalizedAuthArg(args, "auth", "")
+		if err != nil {
+			return nil, err
+		}
+	}
+	s, err := dbCreateStage(ctx.AppDB(), stage)
+	return map[string]any{"stage": s}, err
+}
+
+func (a *App) toolStageList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return nil, err
+	}
+	rows, err := dbListStages(ctx.AppDB(), api.ProjectID, api.ID)
+	return map[string]any{"stages": rows, "count": len(rows)}, err
+}
+
+func (a *App) toolStageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	s, err := dbGetStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)))
+	if err == nil && s == nil {
+		err = errors.New("stage not found")
+	}
+	return map[string]any{"stage": s}, err
+}
+
+func (a *App) toolStageUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	s, err := dbGetStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)))
+	if err != nil || s == nil {
+		if err == nil {
+			err = errors.New("stage not found")
+		}
+		return nil, err
+	}
+	updated, err := dbUpdateStage(ctx.AppDB(), s, args)
+	return map[string]any{"stage": updated}, err
+}
+
+func (a *App) toolStagePromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	s, err := dbPromoteStage(ctx.AppDB(), pid, int64(intArg(args, "stage_id", 0)), int64(intArg(args, "configuration_id", 0)))
+	return map[string]any{"stage": s}, err
 }
 
 func (a *App) resolveAPI(ctx *sdk.AppCtx, args map[string]any) (*API, error) {

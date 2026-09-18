@@ -33,6 +33,8 @@ type API struct {
 	AuthJSON              string `json:"auth_json,omitempty"`
 	CreatedAt             string `json:"created_at,omitempty"`
 	UpdatedAt             string `json:"updated_at,omitempty"`
+	StageID               int64  `json:"-"`
+	ConfigurationID       int64  `json:"-"`
 }
 
 type APIRoute struct {
@@ -67,22 +69,24 @@ type APIKey struct {
 }
 
 type RequestLog struct {
-	ID         int64  `json:"id"`
-	ProjectID  string `json:"project_id,omitempty"`
-	APIID      int64  `json:"api_id,omitempty"`
-	RouteID    int64  `json:"route_id,omitempty"`
-	Hostname   string `json:"hostname"`
-	Method     string `json:"method"`
-	Path       string `json:"path"`
-	StatusCode int    `json:"status_code"`
-	TargetKind string `json:"target_kind,omitempty"`
-	TargetRef  string `json:"target_ref,omitempty"`
-	AuthKind   string `json:"auth_kind,omitempty"`
-	Subject    string `json:"subject,omitempty"`
-	DurationMS int64  `json:"duration_ms"`
-	Error      string `json:"error,omitempty"`
-	RequestID  string `json:"request_id,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
+	ID              int64  `json:"id"`
+	ProjectID       string `json:"project_id,omitempty"`
+	APIID           int64  `json:"api_id,omitempty"`
+	RouteID         int64  `json:"route_id,omitempty"`
+	Hostname        string `json:"hostname"`
+	Method          string `json:"method"`
+	Path            string `json:"path"`
+	StatusCode      int    `json:"status_code"`
+	TargetKind      string `json:"target_kind,omitempty"`
+	TargetRef       string `json:"target_ref,omitempty"`
+	AuthKind        string `json:"auth_kind,omitempty"`
+	Subject         string `json:"subject,omitempty"`
+	DurationMS      int64  `json:"duration_ms"`
+	Error           string `json:"error,omitempty"`
+	RequestID       string `json:"request_id,omitempty"`
+	StageID         int64  `json:"stage_id,omitempty"`
+	ConfigurationID int64  `json:"configuration_id,omitempty"`
+	CreatedAt       string `json:"created_at,omitempty"`
 }
 
 type apiInput struct {
@@ -475,7 +479,7 @@ func dbDeleteAPI(db *sql.DB, pid string, id int64) (bool, error) {
 	if _, err = tx.Exec(`UPDATE api_exposures SET cleanup=1 WHERE project_id=? AND api_id=?`, pid, id); err != nil {
 		return false, err
 	}
-	for _, table := range []string{"api_request_logs", "api_keys", "api_routes"} {
+	for _, table := range []string{"api_request_logs", "api_keys", "api_stages", "api_configuration_routes", "api_configurations", "api_routes"} {
 		if _, err = tx.Exec("DELETE FROM "+table+" WHERE project_id=? AND api_id=?", pid, id); err != nil {
 			return false, err
 		}
@@ -656,6 +660,23 @@ func dbMatchRoute(db *sql.DB, pid string, apiID int64, method, path string) (*AP
 	}
 	return nil, nil, nil
 }
+
+func dbMatchConfigurationRoute(db *sql.DB, pid string, apiID, configurationID int64, method, path string) (*APIRoute, map[string]string, error) {
+	routes, err := compiledConfigurationRoutes(db, pid, apiID, configurationID)
+	if err != nil {
+		return nil, nil, err
+	}
+	segments := splitPath(path)
+	for _, candidate := range routes {
+		if candidate.route.Method != "ANY" && candidate.route.Method != method {
+			continue
+		}
+		if params, ok := matchSegments(candidate.segments, segments); ok {
+			return candidate.route, params, nil
+		}
+	}
+	return nil, nil, nil
+}
 func matchPath(pattern, path string) (map[string]string, bool) {
 	return matchSegments(splitPath(pattern), splitPath(path))
 }
@@ -771,10 +792,10 @@ func dbRevokeAPIKey(db *sql.DB, pid string, id int64) (bool, error) {
 
 func dbInsertLog(db *sql.DB, l RequestLog) {
 	_, _ = db.Exec(`INSERT INTO api_request_logs
-		(project_id, api_id, route_id, hostname, method, path, status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(project_id, api_id, route_id, hostname, method, path, status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, stage_id, configuration_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		l.ProjectID, nullableID(l.APIID), nullableID(l.RouteID), l.Hostname, l.Method, l.Path, l.StatusCode,
-		l.TargetKind, l.TargetRef, l.AuthKind, l.Subject, l.DurationMS, l.Error, l.RequestID)
+		l.TargetKind, l.TargetRef, l.AuthKind, l.Subject, l.DurationMS, l.Error, l.RequestID, l.StageID, l.ConfigurationID)
 }
 
 func dbListLogs(db *sql.DB, pid string, apiID int64, limit int) ([]*RequestLog, error) {
@@ -786,7 +807,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 		limit = 100
 	}
 	query := `SELECT id, project_id, COALESCE(api_id,0), COALESCE(route_id,0), hostname, method, path,
-		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, created_at
+		status_code, target_kind, target_ref, auth_kind, subject, duration_ms, error, request_id, COALESCE(stage_id,0), COALESCE(configuration_id,0), created_at
 		FROM api_request_logs WHERE project_id=? AND api_id=?`
 	args := []any{pid, apiID}
 	if beforeID > 0 {
@@ -804,7 +825,7 @@ func dbListLogsBefore(db *sql.DB, pid string, apiID int64, limit int, beforeID i
 	for rows.Next() {
 		var l RequestLog
 		if err := rows.Scan(&l.ID, &l.ProjectID, &l.APIID, &l.RouteID, &l.Hostname, &l.Method, &l.Path,
-			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.CreatedAt); err != nil {
+			&l.StatusCode, &l.TargetKind, &l.TargetRef, &l.AuthKind, &l.Subject, &l.DurationMS, &l.Error, &l.RequestID, &l.StageID, &l.ConfigurationID, &l.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &l)

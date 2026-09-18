@@ -3,6 +3,21 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Optional configurations and stages (0.9.0)
+
+Existing APIs remain mutable and continue to resolve exactly as before. The
+`api_config_create` tool creates an immutable snapshot of the current API and
+its routes; `api_config_clone` creates another immutable version without
+changing the live API. `api_stage_create` then points a named stage at a
+configuration. If the stage has a hostname, requests for that hostname use the
+stage's configuration; otherwise the stage is management-only.
+
+`api_stage_promote` and `api_stage_rollback` atomically move the stage pointer
+between configurations. Stage CORS/auth JSON can override the snapshot's
+defaults, while API keys remain API-scoped. Stages are deliberately opt-in:
+legacy API hostnames, slug URLs, route mutations, keys, and logs retain their
+existing semantics when no stage hostname is configured.
+
 See [AUTHORIZATION.md](AUTHORIZATION.md) for configurable authorizers, normalized
 principals, trusted Function request envelopes, and CORS for resumable streams.
 
