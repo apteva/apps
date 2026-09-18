@@ -16,10 +16,18 @@ import (
 )
 
 type sqliteBackend struct {
-	db     *sql.DB
-	readDB *sql.DB
-	stmtMu sync.Mutex
-	stmts  map[string]*sql.Stmt
+	db      *sql.DB
+	readDB  *sql.DB
+	stmtMu  sync.Mutex
+	stmts   map[string]*sql.Stmt
+	shapeMu sync.Mutex
+	shapes  map[string]sqliteInsertShape
+}
+type sqliteInsertShape struct {
+	fields []string
+	qs     []string
+	all    []Field
+	query  string
 }
 type sqliteTx struct {
 	ctx     context.Context
@@ -27,6 +35,7 @@ type sqliteTx struct {
 	stmts   map[string]*sql.Stmt
 	write   bool
 	prepare func(context.Context, string) (*sql.Stmt, error)
+	shape   func(Collection) sqliteInsertShape
 }
 
 func openSQL(path string) (*sql.DB, error) {
@@ -94,7 +103,7 @@ func openSQLiteWithDurability(path, durability string) (backend, error) {
 	// v1 databases predate the physical-layout marker. Existing tables remain
 	// readable as v1; new collections use v2 and can be migrated explicitly.
 	_, _ = db.Exec(`ALTER TABLE __collections ADD COLUMN storage_version INTEGER NOT NULL DEFAULT 1`)
-	return &sqliteBackend{db: db, readDB: readDB, stmts: map[string]*sql.Stmt{}}, nil
+	return &sqliteBackend{db: db, readDB: readDB, stmts: map[string]*sql.Stmt{}, shapes: map[string]sqliteInsertShape{}}, nil
 }
 func (b *sqliteBackend) close() error {
 	b.stmtMu.Lock()
@@ -129,7 +138,27 @@ func (b *sqliteBackend) transaction(ctx context.Context, write bool, fn func(tra
 		}
 		return s, err
 	}
-	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}, write: write, prepare: prepare}); e == nil {
+	shape := func(c Collection) sqliteInsertShape {
+		key := c.Name + "/" + strconv.Itoa(c.StorageVersion)
+		b.shapeMu.Lock()
+		defer b.shapeMu.Unlock()
+		if s, ok := b.shapes[key]; ok {
+			return s
+		}
+		s := sqliteInsertShape{all: allFields(c)}
+		if !v2(c) {
+			s.fields = append(s.fields, "__pk", "__doc")
+			s.qs = append(s.qs, "?", "?")
+		}
+		for _, f := range s.all {
+			s.fields = append(s.fields, quote(f.Name))
+			s.qs = append(s.qs, "?")
+		}
+		s.query = "INSERT INTO " + table(c) + " (" + strings.Join(s.fields, ",") + ") VALUES (" + strings.Join(s.qs, ",") + ")"
+		b.shapes[key] = s
+		return s
+	}
+	if e = fn(&sqliteTx{ctx: ctx, tx: tx, stmts: map[string]*sql.Stmt{}, write: write, prepare: prepare, shape: shape}); e == nil {
 		if write {
 			e = tx.Commit()
 		} else {
@@ -437,10 +466,8 @@ func sqlValue(f Field, v any) any {
 	return v
 }
 func (t *sqliteTx) writeArgs(c Collection, pk string, r Record) ([]string, []string, []string, []any, error) {
-	for _, idx := range indexes(c) {
-		if sqliteIndexTupleSize(c, idx, r) > 4096 {
-			return nil, nil, nil, nil, Invalid("encoded index key exceeds 4096 bytes")
-		}
+	if e := validateSQLiteIndexKeys(c, r); e != nil {
+		return nil, nil, nil, nil, e
 	}
 	fields := []string{}
 	qs := []string{}
@@ -510,11 +537,27 @@ func (t *sqliteTx) execPrepared(query string, args ...any) error {
 	return e
 }
 func (t *sqliteTx) insert(c Collection, pk string, r Record) error {
-	fields, qs, _, args, e := t.writeArgs(c, pk, r)
-	if e != nil {
+	if e := validateSQLiteIndexKeys(c, r); e != nil {
 		return e
 	}
-	return t.execPrepared("INSERT INTO "+table(c)+" ("+strings.Join(fields, ",")+") VALUES ("+strings.Join(qs, ",")+")", args...)
+	s := t.shape(c)
+	args := make([]any, 0, len(s.all)+2)
+	if !v2(c) {
+		args = append(args, pk, string(marshal(r)))
+	}
+	for _, f := range s.all {
+		args = append(args, sqlValue(f, r[f.Name]))
+	}
+	return t.execPrepared(s.query, args...)
+}
+
+func validateSQLiteIndexKeys(c Collection, r Record) error {
+	for _, idx := range indexes(c) {
+		if sqliteIndexTupleSize(c, idx, r) > 4096 {
+			return Invalid("encoded index key exceeds 4096 bytes")
+		}
+	}
+	return nil
 }
 
 func (t *sqliteTx) put(c Collection, pk string, r Record) error {
