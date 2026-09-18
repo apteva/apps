@@ -1,0 +1,11 @@
+[
+  {
+    "trial": "sqlite-1000000-run1",
+    "reason": "previous attempt did not complete; see preserved log"
+  },
+  {
+    "trial": "pebble-1000000-run2",
+    "exit_code": 1,
+    "reason": "see log"
+  }
+]

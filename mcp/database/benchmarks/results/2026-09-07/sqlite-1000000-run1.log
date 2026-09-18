@@ -1,0 +1,9 @@
+10:09:53 sqlite run 1: loading 1000000 rows with 3 secondary indexes
+10:10:08 loaded 152000/1000000 rows
+10:10:23 loaded 239000/1000000 rows
+10:10:38 loaded 305000/1000000 rows
+10:10:53 loaded 378000/1000000 rows
+10:11:08 loaded 466000/1000000 rows
+10:11:23 loaded 571000/1000000 rows
+10:11:38 loaded 642000/1000000 rows
+load batch 657: context deadline exceeded

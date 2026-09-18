@@ -1,0 +1,18 @@
+2026/09/07 10:07:22 Found 0 WALs
+10:07:22 pebble run 1: loading 10000 rows with 3 secondary indexes
+10:07:23 insert_batch_1000: 10/10 succeeded; p50 100.393 ms; p95 184.062 ms; errors map[]
+10:07:23 get_primary: 200/200 succeeded; p50 0.056 ms; p95 0.205 ms; errors map[]
+10:07:23 find_unique_email: 200/200 succeeded; p50 0.093 ms; p95 0.236 ms; errors map[]
+10:07:23 find_compound_50: 200/200 succeeded; p50 1.389 ms; p95 2.812 ms; errors map[]
+10:07:24 find_second_page_50: 200/200 succeeded; p50 1.370 ms; p95 2.453 ms; errors map[]
+10:07:24 aggregate_one_tenant: 7/7 succeeded; p50 0.282 ms; p95 0.444 ms; errors map[]
+10:07:25 aggregate_all: 7/7 succeeded; p50 228.975 ms; p95 233.948 ms; errors map[]
+10:07:27 count_all: 7/7 succeeded; p50 221.397 ms; p95 226.285 ms; errors map[]
+10:07:28 find_unindexed_last: 7/7 succeeded; p50 223.053 ms; p95 231.528 ms; errors map[]
+10:07:28 get_concurrent_8: 1600/1600 succeeded; p50 0.255 ms; p95 0.989 ms; errors map[]
+10:07:30 update_indexed_record: 200/200 succeeded; p50 6.749 ms; p95 10.881 ms; errors map[]
+10:07:31 insert_single: 200/200 succeeded; p50 5.040 ms; p95 11.701 ms; errors map[]
+10:07:31 index_build_existing: 1/1 succeeded; p50 117.783 ms; p95 117.783 ms; errors map[]
+10:07:31 index_build_existing: 1/1 succeeded; p50 80.458 ms; p95 80.458 ms; errors map[]
+10:07:31 index_build_existing: 1/1 succeeded; p50 114.307 ms; p95 114.307 ms; errors map[]
+10:07:31 complete: 9.8 seconds, 4.4 MiB disk, 47.0 MiB peak RSS; mcp/database/benchmarks/results/2026-09-07/pebble-10000-run1.json

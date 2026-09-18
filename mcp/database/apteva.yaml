@@ -1,0 +1,65 @@
+schema: apteva-app/v1
+name: database
+display_name: Database
+version: 0.1.0
+description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite and Pebble adapters share one contract.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/database
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [database, data, storage]
+scopes: [project, global]
+requires:
+  permissions: [db.write.app]
+provides:
+  http_routes:
+    - prefix: /
+  resources:
+    - name: database
+      label: Database
+      matcher: glob
+  permissions:
+    - {name: database.read, resource: database, description: Read collections and records.}
+    - {name: database.write, resource: database, description: Insert and modify records.}
+    - {name: database.manage, resource: database, description: "Create and delete databases, collections and indexes."}
+  mcp_tools:
+    - {name: db_databases_list, description: List available databases.}
+    - {name: db_database_create, description: Create a local SQLite or Pebble database.}
+    - {name: db_database_describe, description: Describe a database.}
+    - {name: db_database_drop, description: Delete a database with explicit confirmation.}
+    - {name: db_collections_list, description: List collections in a database.}
+    - {name: db_collection_create, description: Create a typed collection.}
+    - {name: db_collection_describe, description: Describe a collection schema.}
+    - {name: db_collection_drop, description: Delete a collection with explicit confirmation.}
+    - {name: db_indexes_list, description: List generic indexes.}
+    - {name: db_index_create, description: Create an ordered compound or unique index.}
+    - {name: db_index_drop, description: Delete a secondary index.}
+    - {name: db_get, description: Get a record by primary key.}
+    - {name: db_find, description: "Filter, order, project and paginate records."}
+    - {name: db_insert, description: Atomically insert records.}
+    - {name: db_update, description: Atomically patch matching records.}
+    - {name: db_delete, description: Atomically delete matching records.}
+    - {name: db_upsert, description: Atomically insert or patch by a unique key.}
+    - {name: db_count, description: Count matching records exactly.}
+    - {name: db_aggregate, description: "Group records and compute count, sum, avg, min and max."}
+    - {name: db_batch, description: Atomic writes across collections within one database.}
+    - {name: db_explain, description: Inspect query index use and sorting.}
+  ui_panels:
+    - slot: project.page
+      label: Database
+      icon: database
+      entry: /ui/DatabasePanel.mjs
+  skills:
+    - name: database
+      description: Use local databases, collections, indexes, records and aggregates.
+      body_file: skills/how-to-use-database.md
+runtime:
+  kind: source
+  source: {repo: github.com/apteva/apps, ref: database/v0.1.0, entry: mcp/database}
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/database-app.db
+  migrations: migrations/
+upgrade_policy: auto-patch

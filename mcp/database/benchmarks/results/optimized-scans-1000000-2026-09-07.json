@@ -1,0 +1,561 @@
+{
+  "arch": "arm64",
+  "created_utc": "2026-09-07T09:35:51.450922Z",
+  "go_version": "go1.25.1",
+  "os": "darwin",
+  "passed": true,
+  "results": [
+    {
+      "adapter": "sqlite",
+      "operation": "load",
+      "rows": 1000000,
+      "seconds": 44.964971416
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 2.124702541,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 1.869168291,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 0.625782625,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 0.969871333,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.041891375,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.216795625,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 0.533335209,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 0.955487708,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.037867417,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.225701209,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 0.54739875,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 0.901985458,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "load",
+      "rows": 1000000,
+      "seconds": 93.567128
+    },
+    {
+      "adapter": "pebble",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.3598935,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.976670375,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 1.160656833,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 3.065570166,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.267041167,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.63627675,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 1.233826334,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 2.499579458,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.303728125,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.992374625,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 1.105485625,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 2.29606225,
+      "success": true
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+10:27:32 sqlite run 3: loading 1000000 rows with 3 secondary indexes
+10:27:47 loaded 130000/1000000 rows
+10:28:02 loaded 228000/1000000 rows
+10:28:17 loaded 325000/1000000 rows
+10:28:32 loaded 402000/1000000 rows
+10:28:47 loaded 488000/1000000 rows
+10:29:02 loaded 571000/1000000 rows
+10:29:18 loaded 658000/1000000 rows
+10:29:33 loaded 732000/1000000 rows
+10:29:48 loaded 820000/1000000 rows
+10:30:03 loaded 890000/1000000 rows
+10:30:18 loaded 972000/1000000 rows
+10:30:23 insert_batch_1000: 1000/1000 succeeded; p50 159.055 ms; p95 254.630 ms; errors map[]
+10:30:23 get_primary: 200/200 succeeded; p50 0.438 ms; p95 2.245 ms; errors map[]
+10:30:23 find_unique_email: 200/200 succeeded; p50 0.292 ms; p95 1.527 ms; errors map[]
+10:30:23 find_compound_50: 200/200 succeeded; p50 0.542 ms; p95 1.011 ms; errors map[]
+10:30:23 find_second_page_50: 200/200 succeeded; p50 0.571 ms; p95 1.020 ms; errors map[]
+10:30:23 aggregate_one_tenant: 7/7 succeeded; p50 3.277 ms; p95 3.760 ms; errors map[]
+10:30:37 aggregate_all: 3/7 succeeded; p50 1039.153 ms; p95 1098.267 ms; errors map[deadline_exceeded:4]
+10:30:37 count_all: 7/7 succeeded; p50 28.936 ms; p95 30.571 ms; errors map[]
+10:30:39 find_unindexed_last: 7/7 succeeded; p50 302.790 ms; p95 305.788 ms; errors map[]
+10:30:39 get_concurrent_8: 1600/1600 succeeded; p50 0.347 ms; p95 1.347 ms; errors map[]
+10:30:40 update_indexed_record: 200/200 succeeded; p50 0.291 ms; p95 5.945 ms; errors map[]
+10:30:40 insert_single: 200/200 succeeded; p50 0.317 ms; p95 6.140 ms; errors map[]
+10:30:40 index_build_existing: 0/1 succeeded; p50 0.000 ms; p95 0.000 ms; errors map[resource_limit:1]
+10:30:40 index_build_existing: 0/1 succeeded; p50 0.000 ms; p95 0.000 ms; errors map[resource_limit:1]
+10:30:40 index_build_existing: 0/1 succeeded; p50 0.000 ms; p95 0.000 ms; errors map[resource_limit:1]
+10:30:40 complete: 188.2 seconds, 1054.8 MiB disk, 53.3 MiB peak RSS; benchmarks/results/2026-09-07-post-restart/sqlite-1000000-run3.json

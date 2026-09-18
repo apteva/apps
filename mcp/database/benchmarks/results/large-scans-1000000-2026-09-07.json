@@ -1,0 +1,201 @@
+{
+  "arch": "arm64",
+  "created_utc": "2026-09-07T09:18:04.990664Z",
+  "go_version": "go1.25.1",
+  "os": "darwin",
+  "passed": true,
+  "results": [
+    {
+      "adapter": "sqlite",
+      "operation": "load",
+      "rows": 1000000,
+      "seconds": 39.935184292
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.241031542,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 0.729726166,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 0.542223084,
+      "success": true
+    },
+    {
+      "adapter": "sqlite",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 0.742354375,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "load",
+      "rows": 1000000,
+      "seconds": 64.446088125
+    },
+    {
+      "adapter": "pebble",
+      "operation": "count",
+      "request": {
+        "database": "scale",
+        "collection": "items"
+      },
+      "rows": 1000000,
+      "seconds": 0.240043083,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "where": {
+          "field": "n",
+          "op": "eq",
+          "value": 999999
+        },
+        "limit": 1
+      },
+      "rows": 1000000,
+      "seconds": 13.60614675,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "find",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "select": [
+          "id",
+          "n"
+        ],
+        "orderBy": [
+          {
+            "field": "n",
+            "direction": "desc"
+          }
+        ],
+        "limit": 10
+      },
+      "rows": 1000000,
+      "seconds": 3.808230208,
+      "success": true
+    },
+    {
+      "adapter": "pebble",
+      "operation": "aggregate",
+      "request": {
+        "database": "scale",
+        "collection": "items",
+        "groupBy": [
+          "bucket"
+        ],
+        "metrics": [
+          {
+            "name": "count",
+            "op": "count"
+          },
+          {
+            "name": "sum",
+            "op": "sum",
+            "field": "n"
+          },
+          {
+            "name": "avg",
+            "op": "avg",
+            "field": "n"
+          },
+          {
+            "name": "min",
+            "op": "min",
+            "field": "n"
+          },
+          {
+            "name": "max",
+            "op": "max",
+            "field": "n"
+          }
+        ]
+      },
+      "rows": 1000000,
+      "seconds": 3.823481458,
+      "success": true
+    }
+  ]
+}

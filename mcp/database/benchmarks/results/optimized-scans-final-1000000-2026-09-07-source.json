@@ -1,0 +1,28 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "cpu": "Apple M1 Pro",
+  "memory_bytes": 17179869184,
+  "cgo_enabled": false,
+  "rows_per_adapter": 1000000,
+  "query_repeats": 3,
+  "query_timeout_ms": 30000,
+  "source_sha256": {
+    "engine/database.go": "b1eb8694da322c76eba5c3885f5d8a7a6d0eb0da72ee59900876ad845fd37764",
+    "engine/engine_test.go": "f9d33c5ee3affcb9af13c7f1fe4c5879f365ee9b2510edaa23ff8180bae0cbac",
+    "engine/insert_diagnostic_test.go": "d251053daa89003f9303d289d1230df55d6c87ad21bdd6134bd7a38fc802c75f",
+    "engine/large_scan_benchmark_test.go": "b71f11cecbf971fa64199d0aa1982b9c3c030fa9767d4d6a4590dfeea9d0a2ed",
+    "engine/pebble.go": "a3fa6722d5b57aa8e9428bbb1595adc6bcb8be5964e65c573b51a21540453d76",
+    "engine/query.go": "2b5f4f723539c7859381d688a48821340090b08dcd9ef41ed44fb551fab81046",
+    "engine/query_work.go": "28743421436afb71251b3d548714e9909e94a0f7984355c3e1392a9c3e524cd0",
+    "engine/query_work_test.go": "c07395ceed3a3fa4cc8f2904ef4c2475274c4a4d7998e2362fb27b756f514111",
+    "engine/scan_decode.go": "4f5f43cbfe030eb200d45372bd60f5e5e20176b9aa2adad833f9f1d46021f359",
+    "engine/scan_decode_test.go": "dec45d3c24bdc733ca1fccfd6973a57926bc7b9ca81955000480287bff353fea",
+    "engine/sqlite.go": "8f2509b97ac1af9b973b623f261aba8a3134456c863087d9feb65b54c606a136",
+    "engine/types.go": "c057e4f61dac2ae308a00e4ca9d15b7a322921e78dbee93a81b50073f54b950b",
+    "engine/write_benchmark_test.go": "5d1958c4d09649d51808545e687b5ab3116c8f5325acf45a24fb36672d34c232",
+    "engine/write_queue.go": "0fc846f22f05cd1d006e45b8c82cdf768d6fb37f42b3883c0a69909ef6e92524",
+    "engine/write_queue_test.go": "05dde0c061a22ccf3604cb21e324862de1a87d0736e1ca697058890ae348270e",
+    "go.mod": "f4762528cbfbbd8d499929560ae1eb94d95f71731338f7d4d90ba5c098f4f6be",
+    "go.sum": "9bf01261e96ad5f36273d72ebd3ad1d3b5ab2d17e5f01fb05476d239284142af"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "cpu": "Apple M1 Pro",
+  "memory_bytes": 17179869184,
+  "cgo_enabled": false,
+  "rows_per_adapter": 1000000,
+  "query_timeout_ms": 30000,
+  "adapter_order": [
+    "sqlite",
+    "pebble"
+  ],
+  "source_sha256": {
+    "engine/database.go": "b1eb8694da322c76eba5c3885f5d8a7a6d0eb0da72ee59900876ad845fd37764",
+    "engine/pebble.go": "01f82eb3047fe000320cf06ae84aea693bc75d0fe61d42fefbafe06777f4f660",
+    "engine/query.go": "2b5f4f723539c7859381d688a48821340090b08dcd9ef41ed44fb551fab81046",
+    "engine/query_work.go": "04c0d473467b884a1ef72d2e22a98a50e9f4bfaf6eadd2ae6915ccdf708e7ca2",
+    "engine/sqlite.go": "8f2509b97ac1af9b973b623f261aba8a3134456c863087d9feb65b54c606a136",
+    "engine/types.go": "c057e4f61dac2ae308a00e4ca9d15b7a322921e78dbee93a81b50073f54b950b",
+    "engine/write_queue.go": "0fc846f22f05cd1d006e45b8c82cdf768d6fb37f42b3883c0a69909ef6e92524",
+    "engine/large_scan_benchmark_test.go": "dce5264df79f7b233a2d4b40deeb12138a0aae91cb6174cda49b9ae195ea51ea",
+    "engine/engine_test.go": "f9d33c5ee3affcb9af13c7f1fe4c5879f365ee9b2510edaa23ff8180bae0cbac",
+    "go.mod": "eb709fceb3f213f56443bba95cdf15be99548a4ee4f3192a8eaadac5a3ef8fbf",
+    "go.sum": "17960c789f9c3d1980ca8afb13991929135acd1f2e0cfc14560aa87256faded7"
+  }
+}
