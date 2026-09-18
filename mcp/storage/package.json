@@ -12,6 +12,7 @@
   "private": true,
   "scripts": {
     "build": "bun scripts/build-ui.ts && bun run verify:bundles",
+    "benchmark:upload-paths": "bun scripts/benchmark-upload-paths.ts",
     "verify:bundles": "bun tests/verify-bundles.ts",
     "test": "bun run verify:bundles && bunx playwright test",
     "typecheck": "bunx tsc --noEmit"

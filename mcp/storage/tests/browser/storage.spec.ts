@@ -148,6 +148,41 @@ test('2 GiB upload uses parallel direct parts, retries with fresh signatures, an
  expect(peak).toBeGreaterThan(1);expect(peak).toBeLessThanOrEqual(4);expect(complete).toBe(1);expect(bytes).toBe(128*1024);expect(signs).toBe(129);
 });
 
+test('parallel parts report aggregate bytes while PUTs are still in flight',async({page})=>{
+ await page.route('**/api/apps/storage/**',async route=>{
+  const r=route.request(),u=new URL(r.url());if(u.pathname.includes('/ui/'))return route.continue();
+  if(u.pathname.endsWith('/uploads'))return route.fulfill({json:r.method()==='GET'?{max_file_bytes:5*1024**3,max_pending_bytes:5*1024**3}:{upload_id:'LIVEPROGRESS',mode:'s3_multipart',part_size:16*1024**2,max_parallel:2,max_parts:10000}});
+  if(u.pathname.includes('/parts/'))return route.fulfill({json:{url:'https://bucket.example/'+u.pathname.split('/').at(-1),headers:{}}});
+  if(u.pathname.endsWith('/complete'))return route.fulfill({json:{file:row(10,'progress.bin')}});
+  return route.fulfill({json:u.pathname.endsWith('/folders')?{folders:[]}:{files:[]}});
+ });
+ await page.goto('/');
+ const values=await page.evaluate(async()=>{
+  const OriginalXHR=window.XMLHttpRequest;
+  class ProgressXHR {
+   upload:{onprogress:((event:{loaded:number})=>void)|null}={onprogress:null};
+   status=200;responseText='';withCredentials=false;
+   onload:(()=>void)|null=null;onerror:(()=>void)|null=null;onabort:(()=>void)|null=null;
+   open(){}setRequestHeader(){}
+   send(body:Blob){
+    setTimeout(()=>this.upload.onprogress?.({loaded:body.size/4}),120);
+    setTimeout(()=>this.upload.onprogress?.({loaded:body.size}),240);
+    setTimeout(()=>this.onload?.(),260);
+   }
+   abort(){this.onabort?.()}
+  }
+  (window as any).XMLHttpRequest=ProgressXHR;
+  const progress:number[]=[];
+  try{
+   const file=new File([new Uint8Array(32*1024**2)],'progress.bin',{type:'application/octet-stream'});
+   await (window as any).uploadResumable(file,{projectId:'p1',installId:42,onProgress:(bytes:number)=>progress.push(bytes)});
+   return progress;
+  }finally{window.XMLHttpRequest=OriginalXHR}
+ });
+ expect(values.at(-1)).toBe(32*1024**2);
+ expect(values.some(value=>value>0&&value<32*1024**2&&value%(16*1024**2)!==0)).toBe(true);
+});
+
 test('real 2 GiB body streams directly to a cross-origin backend',async({page,request})=>{
  test.setTimeout(120000);
  const id='STREAMREAL2G';
@@ -208,9 +243,9 @@ test('cancelling a direct upload does not start the relay',async({page})=>{
  });
  await page.goto('/');
  const result=await page.evaluate(async()=>{
-  const controller=new AbortController();const original=window.fetch;window.fetch=async(input,init)=>{if(String(input).startsWith('https://bucket.example'))setTimeout(()=>controller.abort(),10);return original(input,init)};
+  const controller=new AbortController();setTimeout(()=>controller.abort(),50);
   const file={name:'cancel.mp4',type:'video/mp4',size:32*1024**2,slice(){return new Blob([new Uint8Array(1024)])}};
-  try{await (window as any).uploadResumable(file,{projectId:'p1',installId:42,signal:controller.signal});return 'unexpected success'}catch(e){return (e as Error).name}finally{window.fetch=original}
+  try{await (window as any).uploadResumable(file,{projectId:'p1',installId:42,signal:controller.signal});return 'unexpected success'}catch(e){return (e as Error).name}
  });
  expect(result).toBe('AbortError');expect(relays).toBe(0);expect(aborts).toBe(1);
 });
