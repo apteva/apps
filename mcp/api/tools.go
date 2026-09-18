@@ -255,6 +255,9 @@ func (a *App) toolAPIDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if cleanupErr := a.reconcileExposures(ctx); cleanupErr != nil {
 		out["exposure_error"] = safeUpstreamError(cleanupErr)
 	}
+	if cleanupErr := a.reconcileStageExposures(ctx); cleanupErr != nil {
+		out["stage_exposure_error"] = safeUpstreamError(cleanupErr)
+	}
 	return out, err
 }
 
@@ -524,6 +527,9 @@ func (a *App) toolStageCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	s, err := dbCreateStage(ctx.AppDB(), stage)
+	if err == nil {
+		a.configureStageExposure(ctx, s)
+	}
 	return map[string]any{"stage": s}, err
 }
 
@@ -563,6 +569,9 @@ func (a *App) toolStageUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	updated, err := dbUpdateStage(ctx.AppDB(), s, args)
+	if err == nil {
+		a.configureStageExposure(ctx, updated)
+	}
 	return map[string]any{"stage": updated}, err
 }
 

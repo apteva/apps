@@ -62,5 +62,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_api_stages_project_hostname
   ON api_stages(project_id, hostname)
   WHERE hostname <> '';
 
+CREATE TABLE IF NOT EXISTS api_stage_exposures (
+  hostname   TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  stage_id   INTEGER NOT NULL,
+  cleanup    INTEGER NOT NULL DEFAULT 0,
+  error      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS ix_api_stage_exposures_cleanup
+  ON api_stage_exposures(cleanup, project_id);
+
 ALTER TABLE api_request_logs ADD COLUMN stage_id INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE api_request_logs ADD COLUMN configuration_id INTEGER NOT NULL DEFAULT 0;

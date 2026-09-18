@@ -54,6 +54,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		// the platform policy endpoint is temporarily unavailable.
 		ctx.Logger().Warn("browser-origin reconciliation incomplete", "error", err)
 	}
+	if err := a.reconcileStageExposures(ctx); err != nil {
+		ctx.Logger().Warn("stage exposure reconciliation incomplete", "error", err)
+	}
 	a.startMaintenance(ctx)
 	ctx.Logger().Info("api mounted", "project_id", ctx.CurrentProject())
 	return nil
