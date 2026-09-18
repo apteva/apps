@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -425,5 +426,8 @@ func configurationDiff(db *sql.DB, pid string, leftID, rightID int64) (map[strin
 			removed = append(removed, k)
 		}
 	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(changed)
 	return map[string]any{"left_configuration_id": leftID, "right_configuration_id": rightID, "added": added, "removed": removed, "changed": changed}, nil
 }
