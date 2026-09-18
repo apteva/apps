@@ -211,13 +211,28 @@ async function uploadChunked(
     if (confirmedSizes.get(n) !== end - start) queue.push({ n, start, end });
   }
 
-  // Track per-part status so onProgress aggregates cleanly.
-  // partBytes[n] = bytes the server has confirmed for part n.
+  // Track confirmed and currently transmitting bytes separately. Browser fetch
+  // does not expose upload progress, so part PUTs use XMLHttpRequest below.
+  // This lets the panel move continuously while all workers are active instead
+  // of sitting at zero until one or more complete parts render together.
   const partBytes = new Map<number, number>(confirmed.map(p => [p.n, p.size]));
+  const inFlightBytes = new Map<number, number>();
   let confirmedBytes = [...partBytes.values()].reduce((a,b) => a+b, 0);
-  const reportProgress = () => opts.onProgress?.(confirmedBytes, file.size);
+  let lastReportedBytes = confirmedBytes;
+  let lastReportedAt = 0;
+  const reportProgress = (force = false) => {
+    const observed = confirmedBytes + [...inFlightBytes.values()].reduce((a, b) => a + b, 0);
+    // Retries can discard bytes already sent for a failed part. Keep the visual
+    // progress monotonic while the replacement PUT catches up.
+    const bytes = Math.min(file.size, Math.max(lastReportedBytes, observed));
+    const now = performance.now();
+    if (!force && bytes < file.size && now - lastReportedAt < 100) return;
+    lastReportedBytes = bytes;
+    lastReportedAt = now;
+    opts.onProgress?.(bytes, file.size);
+  };
   opts.onPhase?.("uploading");
-  reportProgress();
+  reportProgress(true);
 
   // Worker drains the queue. On error we retry with exp backoff;
   // after maxRetriesPerPart we let the error bubble up and the
@@ -247,23 +262,31 @@ async function uploadChunked(
             headers = signed.headers;
             directAttempt = true;
           }
-          const res = await fetch(target, {
-            method: "PUT",
-            credentials: directAttempt ? "omit" : "same-origin",
+          inFlightBytes.set(part.n, 0);
+          const res = await putWithProgress(
+            target,
             headers,
-            body: blob,
+            blob,
+            !directAttempt,
             signal,
-          });
-          if (!res.ok) {
+            (loaded) => {
+              inFlightBytes.set(part.n, loaded);
+              reportProgress();
+            },
+          );
+          if (res.status < 200 || res.status >= 300) {
             // Do not include presigned URLs (credentials) in errors.
-            throw new Error(`PUT part ${part.n} → ${res.status}: ${await res.text()}`);
+            throw new Error(`PUT part ${part.n} → ${res.status}: ${res.body}`);
           }
-          const j = directAttempt ? { size: blob.size } : (await res.json()) as { size: number };
+          const j = directAttempt ? { size: blob.size } : JSON.parse(res.body) as { size: number };
+          inFlightBytes.delete(part.n);
           confirmedBytes += j.size - (partBytes.get(part.n) || 0);
           partBytes.set(part.n, j.size);
-          reportProgress();
+          reportProgress(true);
           break;
         } catch (e) {
+          inFlightBytes.delete(part.n);
+          reportProgress(true);
           if (opts.signal?.aborted) return;
           if (directAttempt && init.relay_supported) {
             // Keep the same upload ID and confirmed parts. New work uses the
@@ -367,4 +390,58 @@ async function jsonFetch<T>(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+interface PutResponse {
+  status: number;
+  body: string;
+}
+
+/** PUT a single Blob while exposing bytes accepted by the browser's network
+ * stack. XHR is intentionally limited to part bodies; metadata, signing, and
+ * completion continue to use fetch. */
+function putWithProgress(
+  url: string,
+  headers: Record<string, string>,
+  body: Blob,
+  withCredentials: boolean,
+  signal: AbortSignal,
+  onProgress: (loaded: number) => void,
+): Promise<PutResponse> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+    const abort = () => xhr.abort();
+
+    xhr.open("PUT", url, true);
+    xhr.withCredentials = withCredentials;
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = (event) => onProgress(Math.min(body.size, event.loaded));
+    xhr.onload = () => finish(() => resolve({ status: xhr.status, body: xhr.responseText }));
+    xhr.onerror = () => finish(() => reject(new TypeError("upload network error")));
+    xhr.onabort = () => finish(() => reject(
+      signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("upload aborted", "AbortError"),
+    ));
+
+    if (signal.aborted) {
+      finish(() => reject(
+        signal.reason instanceof Error
+          ? signal.reason
+          : new DOMException("upload aborted", "AbortError"),
+      ));
+      return;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    xhr.send(body);
+  });
 }

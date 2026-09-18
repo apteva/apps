@@ -1,9 +1,39 @@
-# Storage 0.12.4
+# Storage 0.12.5
 
 Storage provides project-scoped file metadata, virtual folders, uploads, search,
 and sharing. Bytes live on disk or in a bound S3-compatible bucket. The Go
 sidecar uses app-sdk v0.79.0; the build requires Go 1.26.8 or newer. The React
 panel, file card, and native mobile surface share the HTTP API.
+
+## Version 0.12.5: live multipart upload progress
+
+Large browser uploads now report bytes from every active PUT instead of waiting
+for complete 16 MiB parts. The progress bar aggregates all concurrent workers,
+updates at a bounded cadence, and remains monotonic while failed parts retry or
+switch from direct S3 transfer to the streaming relay. Upload concurrency,
+cancellation, resumability, and backend verification are unchanged.
+
+`scripts/benchmark-upload-paths.ts` compares direct and relayed multipart
+throughput against a running Storage install. Both runs use provider multipart
+sessions with the server-advertised part size and concurrency. It reports
+per-part and aggregate throughput, verifies that all parts arrived, and aborts
+each session so no completed object or file row remains.
+
+Run it from `mcp/storage` with an API key that can write to the target project:
+
+```sh
+APTEVA_BASE_URL=https://agents.example.com \
+APTEVA_API_KEY=... \
+APTEVA_PROJECT_ID=... \
+APTEVA_INSTALL_ID=16 \
+BENCHMARK_MIB=256 \
+bun run benchmark:upload-paths
+```
+
+`BENCHMARK_CONCURRENCY` defaults to 4. `BENCHMARK_ORDER` defaults to
+`direct,relay`; use `relay,direct,relay,direct` for a longer interleaved run.
+The benchmark temporarily transfers bytes and creates multipart sessions, so it
+is not read-only while running even though cleanup is automatic.
 
 ## Version 0.12.4: Vultr Object Storage
 
