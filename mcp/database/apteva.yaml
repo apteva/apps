@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: database
 display_name: Database
-version: 0.4.0
+version: 0.4.1
 description: Independent local databases with collections, typed records, generic indexes and aggregation. SQLite and Pebble adapters share one contract.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/database
@@ -55,7 +55,7 @@ provides:
       body_file: skills/how-to-use-database.md
 runtime:
   kind: source
-  source: {repo: github.com/apteva/apps, ref: database/v0.4.0, entry: mcp/database}
+  source: {repo: github.com/apteva/apps, ref: database/v0.4.1, entry: mcp/database}
   port: 8080
   health_check: /health
 db:

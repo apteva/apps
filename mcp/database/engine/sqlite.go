@@ -31,7 +31,7 @@ type sqliteTx struct {
 
 // Keep enough rows per statement to amortize SQLite's bind/step overhead while
 // staying comfortably below SQLite's variable limit for wide collections.
-const sqliteInsertChunk = 256
+const sqliteInsertChunk = 32
 
 func openSQL(path string) (*sql.DB, error) {
 	return openSQLPool(path, 5, false, "durable")
