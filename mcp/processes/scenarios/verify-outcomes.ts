@@ -1,6 +1,10 @@
 export function check(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
+
+/** Written by the runner's operator watcher; asserted here from saved state. */
+export const OPERATOR_CONFIRMATION = "Operator confirmed: cleared to publish.";
+const CONFIRMED_DRAFT = "Golden hour flatters every portrait.";
 /** Checks authoritative persisted history, never the model's claim or telemetry preview. */
 export function verifyHistory(scenario: string, history: any) {
   const runs = history.direct_runs;
@@ -79,7 +83,81 @@ export function verifyHistory(scenario: string, history: any) {
       check(s.executor.agent_id === runs[0].assignment.owner_agent_id, "Wrong executor");
       if (i) check(s.delivered_at >= runs[0].steps[i - 1].updated_at, "Dependency released early");
     });
+  } else if (scenario === "processes-operator-confirmation") {
+    check(
+      runs.length === 1 && runs[0].workflow && runs[0].state === "completed",
+      "Expected one completed confirmation workflow",
+    );
+    const steps = runs[0].steps;
+    check(steps.length === 3, "Expected exactly three steps");
+    const byKey = Object.fromEntries(steps.map((s: any) => [s.key, s]));
+    check(
+      byKey.draft.state === "completed" &&
+        byKey.draft.output === CONFIRMED_DRAFT &&
+        byKey.draft.executor.kind === "agent",
+      "Draft was not completed by the agent",
+    );
+    check(
+      byKey.confirm.executor.kind === "human" &&
+        byKey.confirm.state === "completed" &&
+        byKey.confirm.output === OPERATOR_CONFIRMATION,
+      "Confirmation step did not record the operator's evidence",
+    );
+    check(
+      byKey.confirm.updated_by === "operator",
+      `Confirmation was completed by ${byKey.confirm.updated_by}, not the operator`,
+    );
+    check(
+      !byKey.confirm.decision,
+      "A work step must not carry an approval decision",
+    );
+    check(
+      !byKey.confirm.delivered_at && !byKey.confirm.task_id,
+      "A human step must never be dispatched to an executor",
+    );
+    check(
+      byKey.publish.state === "completed" &&
+        byKey.publish.output === `Published: ${CONFIRMED_DRAFT}` &&
+        byKey.publish.executor.kind === "agent",
+      "Publication did not complete after confirmation",
+    );
+    check(
+      byKey.publish.delivered_at && byKey.publish.delivered_at > byKey.confirm.completed_at,
+      "Publisher was released before the operator confirmed",
+    );
   } else throw new Error(`No outcome verifier for ${scenario}`);
+}
+
+/**
+ * The append-only audit is the authority on who released the run: an agent must
+ * never appear on the human step, and the publisher must be delivered only after
+ * the operator's confirmation is durable.
+ */
+export function verifyOperatorConfirmation(run: any, report: any) {
+  const byKey = Object.fromEntries(run.steps.map((s: any) => [s.key, s]));
+  const confirm = byKey.confirm;
+  check(
+    report?.step?.id === confirm.id,
+    `Operator confirmed ${report?.step?.id}, but the run's human step is ${confirm.id}`,
+  );
+  const operatorEvents = confirm.events.filter(
+    (e: any) => e.actor === "operator" && e.state === "completed",
+  );
+  check(
+    operatorEvents.length === 1 && operatorEvents[0].output === OPERATOR_CONFIRMATION,
+    "Expected exactly one operator completion in the step audit",
+  );
+  check(
+    !confirm.events.some((e: any) => e.actor.startsWith("agent:")),
+    "An agent acted on the human confirmation step",
+  );
+  // Ordering is proven from persisted timestamps, not from the watcher's clock.
+  check(
+    byKey.publish.events.every(
+      (e: any) => e.created_at >= operatorEvents[0].created_at,
+    ),
+    "The publish step was acted on before the operator confirmed",
+  );
 }
 
 const teamOutputs: Record<string, string> = {

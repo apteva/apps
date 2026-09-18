@@ -9,7 +9,24 @@ import {
   verifyMultiAgentTrajectory,
   verifyStepWorkers,
   verifySequentialWorker,
+  verifyOperatorConfirmation,
+  OPERATOR_CONFIRMATION,
 } from "./verify-outcomes";
+import { confirmWhenWaiting, type ConfirmationReport } from "./operator-confirm";
+const OPERATOR_SCENARIO = "processes-operator-confirmation";
+// Provider is selectable so the suite can run on a connection-backed provider
+// (opencode-go) as well as the Codex default. Each provider has its own large
+// model, so the model default follows the provider rather than the other way round.
+const DEFAULT_MODELS: Record<string, string> = {
+  "openai-codex": "gpt-5.6-terra",
+  "opencode-go": "kimi-k3",
+};
+const PROVIDER = process.env.APTEVA_TEST_PROVIDER || "openai-codex";
+const MODEL = process.env.APTEVA_TEST_MODEL || DEFAULT_MODELS[PROVIDER] || "";
+check(
+  MODEL !== "",
+  `No default model for provider ${PROVIDER}; set APTEVA_TEST_MODEL`,
+);
 const appDir = resolve(import.meta.dir, "..");
 const outputRoot = resolve(
   process.env.APTEVA_TEST_ARTIFACTS_DIR || "/tmp/processes-tier3",
@@ -56,9 +73,9 @@ const child = Bun.spawn(
     process.env.APTEVA_TEST_CLI || "apteva",
     "test",
     "--provider",
-    "openai-codex",
+    PROVIDER,
     "--model",
-    process.env.APTEVA_TEST_MODEL || "gpt-5.6-terra",
+    MODEL,
     "--max-budget-usd",
     "7.50",
     "--app-dir",
@@ -76,8 +93,22 @@ const child = Bun.spawn(
     stderr: "inherit",
   },
 );
+// The CLI cannot release a parked step mid-run, so the operator acts from here
+// while the child is still running. Failures are captured and asserted below.
+const operatorAbort = new AbortController();
+const operatorDb = databases.get(OPERATOR_SCENARIO);
+const operatorConfirmation: Promise<ConfirmationReport | Error | null> = operatorDb
+  ? confirmWhenWaiting(operatorDb, {
+      stepKey: "confirm",
+      output: OPERATOR_CONFIRMATION,
+      signal: operatorAbort.signal,
+      log: (message) => console.log(message),
+    }).catch((error: Error) => error)
+  : Promise.resolve(null);
 const stdout = await new Response(child.stdout).text();
 const exit = await child.exited;
+operatorAbort.abort();
+const confirmed = await operatorConfirmation;
 await Bun.write(resolve(outputDir, "results.json"), stdout);
 check(exit === 0, `Tier 3 runner failed (${exit}); see ${outputDir}`);
 const report = JSON.parse(stdout);
@@ -137,6 +168,14 @@ for (const scenario of report.results) {
     )
       verifyMultiAgentTrajectory(scenario.tool_calls, runs[0]);
     if (scenario.scenario === "processes-multi-agent-workflow") verifyStepWorkers(scenario.tool_calls, runs[0]);
+    if (scenario.scenario === OPERATOR_SCENARIO) {
+      check(
+        confirmed && !(confirmed instanceof Error),
+        `Operator confirmation failed: ${confirmed instanceof Error ? confirmed.message : "never performed"}`,
+      );
+      verifyOperatorConfirmation(runs[0], confirmed as ConfirmationReport);
+      Object.assign(history, { operator_confirmation: confirmed });
+    }
     if (scenario.scenario === "processes-event-trigger-workflow") {
       const events = db
         .query("SELECT * FROM process_trigger_events")
@@ -174,5 +213,5 @@ await Bun.write(
   JSON.stringify(observed, null, 2),
 );
 console.log(
-  `Codex / ${process.env.APTEVA_TEST_MODEL || "gpt-5.6-terra"} · ${report.results.length} scenarios passed · reports: ${outputDir}`,
+  `${PROVIDER} / ${MODEL} · ${report.results.length} scenarios passed · reports: ${outputDir}`,
 );

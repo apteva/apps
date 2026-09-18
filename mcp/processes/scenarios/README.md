@@ -13,6 +13,7 @@ No Tasks integration is installed and no external publishing service is used.
 | `04-multi-agent-workflow.yaml` | Three distinct agents complete five steps with parallel inputs, a dependency join, explicit agent approval, and a simulated receipt. |
 | `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
 | `06-sequential-worker.yaml` | Three simulated weather/receipt steps complete in order using exactly one persisted worker and one spawn. |
+| `07-operator-confirmation.yaml` | A run parks on a human work step, the operator confirms it mid-run over HTTP, and the agent publishes only afterwards. |
 
 Run from the Processes app directory:
 
@@ -22,8 +23,11 @@ bun run scenarios/run.ts
 bun run scenarios/run.ts scenarios/04-multi-agent-workflow.yaml
 ```
 
-The wrapper invokes `apteva test --provider openai-codex --model gpt-5.6-terra`
-with per-scenario limits and a cumulative cost ceiling of $7.50. Provider usage
+The wrapper invokes `apteva test` with per-scenario limits and a cumulative cost
+ceiling of $7.50. `APTEVA_TEST_PROVIDER` selects the provider (default
+`openai-codex`) and the model default follows it — `gpt-5.6-terra` for
+`openai-codex`, `kimi-k3` for `opencode-go` — with `APTEVA_TEST_MODEL`
+overriding. `opencode-go` is connection-backed and needs `OPENCODE_GO_API_KEY`. Provider usage
 is real; reported dollar cost depends on provider telemetry. Configure the
 runner's existing `OPENAI_CODEX_ACCESS_TOKEN` and optional
 `OPENAI_CODEX_ACCOUNT_ID` environment variables (or `~/.apteva/test.env`). Never
@@ -60,9 +64,11 @@ and requires successful main-thread spawns plus an authoritative read and
 completion from a distinct worker for every step. Main coordinates; focused
 workers read and complete the assigned steps.
 
-This is a starter suite. It does not yet cover operator approval/rejection,
-Tasks-backed execution, scheduled dispatch, or delivery fault injection. Those
-remain covered by deterministic integration tests, not by these live-LLM cases.
+This is a starter suite. Operator confirmation of a human step is covered by
+`07-operator-confirmation.yaml`. It does not yet cover operator *rejection*, the
+`kind: approval` decision path, Tasks-backed execution, scheduled dispatch, or
+delivery fault injection. Those remain covered by deterministic integration
+tests, not by these live-LLM cases.
 
 ## Recorded smoke run
 
@@ -161,3 +167,78 @@ publication worker used dependency evidence without tool discovery or a parent
 clarification. The preceding run stopped at 48 iterations after 242 seconds
 with only four steps complete. These are individual smoke runs, not a latency
 benchmark or reliability estimate.
+
+## Mid-run operator confirmation
+
+`07-operator-confirmation.yaml` is the only scenario in which something other
+than the agent advances the run. The procedure is `draft` → `confirm` →
+`publish`, all `kind: work`; the assignment binds `confirmer` to
+`{"kind":"human"}`. The agent completes the draft and stops. Because
+`deliverStep` never dispatches a human executor, `confirm` parks in `waiting`
+and `publish` stays `pending`. The operator completes `confirm`, the app's own
+reconcile loop releases `publish` to the agent, and the agent finishes.
+
+### Why the confirmation lives in the runner
+
+`apteva test` has no mid-run hook. `seed_mcp_calls` run before the agent starts,
+`cleanup_mcp_calls` after it stops, and `prompt` is delivered at the beginning of
+the run, so none of them can release a step while the run is parked. The
+confirmation therefore runs in `operator-confirm.ts`, beside the CLI child:
+it polls the scenario's own app database until `confirm` reports `waiting`,
+then completes it.
+
+It completes the step over the sidecar's HTTP surface rather than by writing to
+SQLite directly, so the app's real authorization runs. `executorIsActor` accepts
+the `operator` actor only for a human executor, completion still requires output
+evidence, and it is the app — not the test — that delivers the publish step.
+
+The sidecar's port is **discovered, not pinned**. The CLI assigns
+`APTEVA_APP_PORT` from `pickFreePort` and the platform proxies MCP to that port,
+so overriding it through `setup.app.env` would silently desync the proxy. The
+watcher instead lists listening sockets owned by `sidecar` processes and
+identifies the right one by asking each for the run's process ID. The sidecar
+binds `127.0.0.1` and its own routes carry no auth — the platform enforces that
+in front of it — so no credentials are involved.
+
+### What the verifier proves
+
+`verifyHistory` checks the saved run: the human step completed with
+`updated_by=operator`, carrying the operator's evidence, never dispatched
+(`delivered_at` and `task_id` empty) and never holding a decision, since a work
+step has none. `publish` must be delivered strictly after the confirmation's
+`completed_at`.
+
+`verifyOperatorConfirmation` then reads the append-only `process_step_events`
+audit, which is the authority on who released the run: exactly one `operator`
+completion on the human step, no `agent:` actor anywhere in that step's history,
+and no event on `publish` earlier than the operator's. A model claiming to have
+confirmed cannot satisfy these; the agent is not permitted to complete that step
+at all.
+
+### Recorded smoke run
+
+Passed on 2026-09-18 with `opencode-go` / `kimi-k3`, the first scenario in this
+suite run on a provider other than Codex: 93.6 s, 18 iterations, 318,527 reported
+tokens. Reported cost was $0.0000, which reflects this provider's telemetry, not
+a free run. Report: `/tmp/processes-tier3/run-Ycvg3U`. This is one passing smoke
+run, not a measured reliability rate.
+
+The persisted timeline shows the handoff the scenario exists to prove:
+
+| Time | Step | Actor |
+| --- | --- | --- |
+| 07:08:42.607 | `draft` completed | `agent:1:main` |
+| 07:08:42.609 | `confirm` → `waiting` | `workflow` |
+| 07:08:43.143 | `confirm` completed | `operator` |
+| 07:08:43.145 | `publish` → `ready` | `workflow` |
+| 07:08:43.168 | `publish` delivered | — |
+| 07:08:58.839 | `publish` completed | `agent:1:main` |
+
+`confirm` was never dispatched, no `agent:` actor appears in its audit, and the
+reconcile loop released the publisher 2 ms after the operator's write. The agent
+stayed available across the park and completed the publication on the delivery
+event rather than by polling.
+
+```sh
+APTEVA_TEST_PROVIDER=opencode-go bun run scenarios/run.ts scenarios/07-operator-confirmation.yaml
+```
