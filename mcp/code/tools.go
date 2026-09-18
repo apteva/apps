@@ -538,6 +538,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	tools = append(tools, a.gitMCPTools()...)
+	tools = append(tools, a.nativeMCPTools()...)
 	tools = append(tools, a.executionTools()...)
 	return authenticatedTools(append(tools, a.autoSyncTools()...))
 }
@@ -825,6 +826,9 @@ func (a *App) toolReposImportGithub(ctx *sdk.AppCtx, args map[string]any) (any, 
 		ProjectID: pid,
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(res.Repository); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -1324,6 +1328,11 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	_ = dbRecordFork(ctx.AppDB(), r.ID, srcID, parentKind)
 	_ = dbRecordImport(ctx.AppDB(), r.ID, "fork:"+parentKind+":"+srcID)
+	if err := a.ensureNativeRevision(r); err != nil {
+		_ = dstStore.DropRepo(r.Slug)
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, fmt.Errorf("initialize native version control: %w", err)
+	}
 	if ctx != nil {
 		ctx.Emit("repo.added", map[string]any{
 			"id": r.ID, "slug": r.Slug, "name": r.Name,
@@ -1403,6 +1412,11 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if count > 0 {
 		_ = dbRecordImport(ctx.AppDB(), r.ID, "template:"+r.Framework)
+	}
+	if err := a.ensureNativeRevision(r); err != nil {
+		_ = repoStore.DropRepo(r.Slug)
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
+		return nil, fmt.Errorf("initialize native version control: %w", err)
 	}
 	if ctx != nil {
 		ctx.Emit("repo.added", map[string]any{

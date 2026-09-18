@@ -19,8 +19,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 61 {
-		t.Errorf("expected 61 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 71 {
+		t.Errorf("expected 71 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -142,6 +142,8 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		"repos_git_import", "repos_git_connect", "repos_git_status", "repos_git_fetch",
 		"repos_git_pull", "repos_git_commit", "repos_git_push", "repos_git_diff", "repos_git_log",
 		"repos_git_branches", "repos_git_branch_create", "repos_git_switch",
+		"repos_version_status", "repos_checkpoint", "repos_history", "repos_diff", "repos_branch_create",
+		"repos_branch_switch", "repos_tag_create", "repos_tags_list", "repos_restore", "repos_export_ref",
 	}
 	for _, name := range must {
 		if !got[name] {

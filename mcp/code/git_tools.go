@@ -128,12 +128,19 @@ func (a *App) toolGitImport(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
-	return service.withContext(callCtx).Import(ctx, GitImportInput{
+	result, err := service.withContext(callCtx).Import(ctx, GitImportInput{
 		RemoteURL: strArg(args, "remote_url"), Ref: strArg(args, "ref"),
 		Name: strArg(args, "name"), Slug: strArg(args, "slug"),
 		Description: strArg(args, "description"), Framework: strArg(args, "framework"),
 		ProjectID: pid, ConnectionID: int64(intArg(args, "connection_id", 0)),
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.ensureNativeRevision(result.Repository); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func (a *App) gitRepoFromArgs(ctx *sdk.AppCtx, args map[string]any) (*gitService, *Repo, error) {

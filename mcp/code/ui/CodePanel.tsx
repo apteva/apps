@@ -137,6 +137,14 @@ interface GitStatus {
   remote?: GitRemote;
 }
 
+interface NativeVersionStatus {
+  native: boolean;
+  branch: string;
+  head?: string;
+  dirty: boolean;
+  revision_count: number;
+}
+
 interface TemplateEntry {
   kind: "user" | "embedded";
   name: string;
@@ -420,6 +428,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [loadingTree, setLoadingTree] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
   const [gitStatus, setGitStatus] = useState<GitStatus | null>(null);
+  const [nativeStatus, setNativeStatus] = useState<NativeVersionStatus | null>(null);
   const [gitBusy, setGitBusy] = useState(false);
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -449,6 +458,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const fileGate = useRef(new RequestGate());
   const treeGate = useRef(new RequestGate());
   const gitGate = useRef(new RequestGate());
+  const nativeGate = useRef(new RequestGate());
   const draftRef = useRef(draft); draftRef.current = draft;
   const fileRef = useRef(openFile); fileRef.current = openFile;
   const dirty = editing && openFile !== null && draft !== openFile.content;
@@ -569,11 +579,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     [api],
   );
 
+  const loadNativeStatus = useCallback(async (slug: string) => {
+    try {
+      const token = nativeGate.current.next();
+      const status = await api<NativeVersionStatus>("GET", `/repos/${slug}/version/status`);
+      if (nativeGate.current.current(token) && selectionRef.current === slug) setNativeStatus(status);
+    } catch {
+      if (selectionRef.current === slug) setNativeStatus(null);
+    }
+  }, [api]);
+
   const [confirmState, setConfirmState] = useState<ConfirmRequest | null>(null);
   const [markTemplateFor, setMarkTemplateFor] = useState<string | null>(null);
 
   const doSelectRepo = (slug: string) => {
-    selectionRef.current=slug;fileGate.current.invalidate();setTree([]);setGitStatus(null);
+    selectionRef.current=slug;fileGate.current.invalidate();setTree([]);setGitStatus(null);setNativeStatus(null);
     setSelectedSlug(slug);
     setOpenFile(null);
     setEditing(false);
@@ -582,6 +602,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
     loadGitStatus(slug);
+    loadNativeStatus(slug);
   };
   const selectRepo = (slug: string) => {
     if (dirty) {
@@ -635,8 +656,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     initialLinkApplied.current = true;
     loadTree(initialLink.repo);
     loadGitStatus(initialLink.repo);
+    loadNativeStatus(initialLink.repo);
     if (initialLink.path) openPath(initialLink.repo, initialLink.path);
-  }, [initialLink, loadGitStatus, loadTree, openPath]);
+  }, [initialLink, loadGitStatus, loadNativeStatus, loadTree, openPath]);
 
   const initialLineApplied = useRef(false);
   useEffect(() => {
@@ -669,6 +691,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.changed":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadNativeStatus(selectedSlug);
           refreshSelectedTree();
           // Re-fetch the open file when it's the one that changed and
           // the user isn't mid-edit. If they are, leave the buffer
@@ -680,6 +703,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.deleted":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadNativeStatus(selectedSlug);
           refreshSelectedTree();
           if (openFile && ev.data?.path && containsPath(ev.data.path,openFile.path)) {
             if(dirty){setError("This file was deleted externally. Your draft is preserved; copy it or save it as a new file.");break;}
@@ -691,6 +715,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         break;
       case "file.renamed":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
+          loadNativeStatus(selectedSlug);
           refreshSelectedTree();
           if (openFile && ev.data?.from && containsPath(ev.data.from,openFile.path) && ev.data.to) {
             // Follow the rename so the editor stays on the same content.
@@ -707,8 +732,10 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       case "repo.git.committed":
       case "repo.git.pushed":
       case "repo.git.switched":
+      case "repo.revision.created":
         if (selectedSlug && ev.data?.slug === selectedSlug) {
           loadGitStatus(selectedSlug);
+          loadNativeStatus(selectedSlug);
           if(openFile&&!dirty) openPath(selectedSlug,openFile.path);
           refreshSelectedTree();
         }
@@ -743,6 +770,21 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       setGitStatus(await api<GitStatus>("POST", `/repos/${selectedSlug}/git/commit`, { message: message.trim() }));
     } catch (e) {
       setError(`Git commit failed: ${(e as Error).message}`);
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const checkpointNative = async () => {
+    if (!selectedSlug) return;
+    const message = window.prompt("Checkpoint message (optional)") || "Checkpoint";
+    setGitBusy(true);
+    setError("");
+    try {
+      await api("POST", `/repos/${selectedSlug}/version/checkpoint`, { message: message.trim() || "Checkpoint" });
+      await loadNativeStatus(selectedSlug);
+    } catch (e) {
+      setError(`Checkpoint failed: ${(e as Error).message}`);
     } finally {
       setGitBusy(false);
     }
@@ -1138,6 +1180,15 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           </header>
 
           <div className="px-4 py-1.5 border-b border-border flex items-center gap-3 text-[11px] text-text-muted min-h-8">
+            {nativeStatus && (
+              <>
+                <span className={`font-mono truncate ${nativeStatus.dirty ? "text-yellow" : "text-green"}`} title="Native Code version control">
+                  {nativeStatus.branch || "main"}{nativeStatus.dirty ? "*" : ""}
+                </span>
+                <span title="Immutable native revisions">{nativeStatus.revision_count} revisions</span>
+                <button type="button" disabled={gitBusy || !nativeStatus.dirty} onClick={checkpointNative} className="hover:text-text disabled:opacity-40">Checkpoint</button>
+              </>
+            )}
             {gitStatus?.git_backed ? (
               <>
                 <span

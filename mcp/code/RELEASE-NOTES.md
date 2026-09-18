@@ -1,3 +1,28 @@
+# Apteva Code 0.14.0
+
+This release makes version control native to Code. Every repository can now
+have immutable revisions, branches, tags, safe restore, and exact-revision
+exports without a Git installation or external provider. Git remains an
+optional synchronization adapter.
+
+## Changes
+
+- Content-addressed native blobs, trees, revisions, and branch pointers stored
+  outside the editable working tree.
+- New native MCP tools for status, checkpoints, history, diffs, branches, tags,
+  restore, and exact-revision ZIP export.
+- New repositories and forks receive an initial native revision automatically;
+  ordinary editing remains working-tree-first with no checkpoint ceremony.
+- Git adapter startup is optional. Missing Git no longer prevents Code from
+  mounting or serving native version control.
+
+## Validation
+
+Native revision, branch, tag, restore, export, invalid-ref, manifest, and full
+Code test suites pass with the existing provider-neutral Git tests.
+
+---
+
 # Apteva Code 0.9.0
 
 This reliability release addresses the 26 findings from the Code 0.8.2 audit.

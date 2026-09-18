@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.13.1
+version: 0.14.0
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -26,6 +26,8 @@ description: |
   support inputs are transferred independently and only editable paths can be
   applied back to Code.
   v0.13.1 aligns Vite preview host and port with readiness checks and reports early startup errors.
+  v0.14.0 adds native Code revisions, branches, tags, restore, and exact-revision
+  exports without requiring Git. Git provider synchronization remains optional.
   v0.12.0 adds saved repository execution permissions, agent controls and Allow and run in the preview toolbar.
   v0.11.1 reports repeated hard-delete requests as repository-not-found instead of success.
   v0.11.0 adds opt-in automatic commits and origin synchronization with
@@ -103,8 +105,8 @@ requires:
   binaries:
     - name: git
       executables: [git]
-      required: true
-      hint: Git 2.23 or newer is required for provider-neutral repository synchronization.
+      required: false
+      hint: Git 2.23 or newer enables optional external repository synchronization.
       sources: {}
   integrations:
     - role: git
@@ -194,6 +196,26 @@ provides:
       description: Create a local branch without switching to it.
     - name: repos_git_switch
       description: Switch to an existing clean local branch.
+    - name: repos_version_status
+      description: Get native Code version-control status without requiring Git.
+    - name: repos_checkpoint
+      description: Create an immutable native Code revision from the working tree.
+    - name: repos_history
+      description: List immutable native Code revisions on the current branch.
+    - name: repos_diff
+      description: Compare native Code revisions and return changed paths.
+    - name: repos_branch_create
+      description: Create a native Code branch.
+    - name: repos_branch_switch
+      description: Switch the native working tree to a clean branch.
+    - name: repos_tag_create
+      description: Create an immutable native Code tag.
+    - name: repos_tags_list
+      description: List native Code tags.
+    - name: repos_restore
+      description: Restore selected paths from a native Code revision.
+    - name: repos_export_ref
+      description: Export the exact source tree at a native Code revision.
     - name: repos_dev_start
       description: Start a dev/test preview process for a repo; production deploys belong in the Deploy app. Auto-installs JS dependencies when needed, auto-detects nextjs / node / go / static, and accepts run_cmd override.
     - name: repos_run_command
@@ -299,7 +321,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.13.1
+    ref: code/v0.14.0
     entry: mcp/code
   port: 8080
   health_check: /health

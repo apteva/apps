@@ -33,6 +33,7 @@ type App struct {
 	commands  commandCoordinator
 	git       *gitService
 	syncer    *autoSyncSupervisor
+	native    *nativeVCS
 	locks     *repoLockSet
 	summaries summaryCache
 }
@@ -88,13 +89,20 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		dataDir = filepath.Dir(root)
 	}
 	a.dataDir = dataDir
+	a.native = newNativeVCS(dataDir, a.store, a.locks)
+	if err := a.native.backfill(ctx.AppDB()); err != nil {
+		ctx.Logger().Warn("native version-control backfill incomplete", "err", err)
+	}
 	gitService, err := newGitService(dataDir, localStore, a.locks)
 	if err != nil {
-		return fmt.Errorf("initialize Git service: %w", err)
+		// Native Code version control does not require Git. Git remains an
+		// optional interoperability adapter for external remotes.
+		ctx.Logger().Warn("Git adapter unavailable; continuing with native version control", "err", err)
+	} else {
+		a.git = gitService
+		a.syncer = newAutoSyncSupervisor(gitService)
+		a.syncer.start(ctx)
 	}
-	a.git = gitService
-	a.syncer = newAutoSyncSupervisor(gitService)
-	a.syncer.start(ctx)
 	portStart := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_START"), 6100)
 	portEnd := atoiOr(os.Getenv("CODE_DEV_PORT_RANGE_END"), 6199)
 	a.dev = newDevSupervisor(dataDir, a.store, a, portStart, portEnd)
@@ -161,6 +169,13 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // because both the create-repo paths still call it by name.
 func applyTemplate(store FileStore, slug, framework string) (int, error) {
 	return fork(embeddedReader{}, framework, store, slug)
+}
+
+func (a *App) ensureNativeRevision(repo *Repo) error {
+	if a.native == nil {
+		return nil
+	}
+	return a.native.ensureRepo(repo)
 }
 
 // ─── HTTP routes ────────────────────────────────────────────────────

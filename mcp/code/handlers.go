@@ -93,6 +93,8 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
 	case strings.HasPrefix(tail, "git/") || tail == "git":
 		a.httpRepoGit(w, r, slug, strings.TrimPrefix(tail, "git/"))
+	case strings.HasPrefix(tail, "version/") || tail == "version":
+		a.httpRepoVersion(w, r, slug, strings.TrimPrefix(tail, "version/"))
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -159,6 +161,12 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 	}
 	if count > 0 {
 		_ = dbRecordImport(globalCtx.AppDB(), repo.ID, "template:"+repo.Framework)
+	}
+	if err := a.ensureNativeRevision(repo); err != nil {
+		_ = repoStore.DropRepo(repo.Slug)
+		_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, repo.Slug)
+		httpErr(w, http.StatusInternalServerError, "initialize native version control: "+err.Error())
+		return
 	}
 	if globalCtx != nil {
 		globalCtx.Emit("repo.added", map[string]any{

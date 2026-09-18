@@ -79,13 +79,21 @@ into relocation and reports `relocated_hunks`. Dry-run IDs retain expected
 file hashes/absence and reject later drift. They expire after 30 minutes and
 are bounded to 128 entries / 32 MiB of patch text.
 
-## Git and templates
+## Native version control, Git, and templates
 
-Native Git supports clone, status, diff, commit, history, branches, fetch,
-fast-forward pull and push, including platform provider connections. Selected
-commits preserve unrelated staged changes, including additions/deletions.
-Failed commits restore the original index. Clone has admission/size limits;
-Git subprocesses use the caller's cancellation context.
+Every new Code repository receives a native initial revision. Code stores
+content-addressed blobs, canonical trees, immutable revisions, branches and
+tags outside the editable working tree. Editing, running and deploying remain
+working-tree-first; users do not need to create checkpoints or manage branches
+for simple coding. Native history, restore and exact-revision export work with
+no external provider and no Git installation.
+
+Git is an optional interoperability adapter. When available it supports clone,
+status, diff, commit, history, branches, fetch, fast-forward pull and push,
+including platform provider connections. Selected commits preserve unrelated
+staged changes, including additions/deletions. Failed commits restore the
+original index. Clone has admission/size limits; Git subprocesses use the
+caller's cancellation context.
 
 Starters include `blank`, `nextjs`, `static`, `go` and `python`. Missing starter
 files fail creation. Embedded `go.mod.tmpl` materializes as `go.mod`, avoiding

@@ -211,6 +211,9 @@ func (a *App) hardDeleteRepo(db *sql.DB, projectID, slug string) (err error) {
 	if a.git != nil {
 		paths = append(paths, a.git.gitDir(repo.ID))
 	}
+	if a.native != nil {
+		paths = append(paths, a.native.repoDir(repo))
+	}
 	moved := map[string]string{}
 	defer func() {
 		if err != nil {
