@@ -187,6 +187,26 @@ func TestTablesBatch_ReadSnapshotUsesSharedReadTransaction(t *testing.T) {
 	}
 }
 
+func TestPreparedPlanCache_InvalidatesOnSchemaChange(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_search", map[string]any{"table": "books", "include_total": false, "where": []any{map[string]any{"col": "rating", "op": "gt", "value": 1}}})
+	app.plans.mu.Lock()
+	cached := len(app.plans.entries)
+	app.plans.mu.Unlock()
+	if cached == 0 {
+		t.Fatal("expected prepared search plan to be cached")
+	}
+	mustCall(t, app, ctx, "indexes_create", map[string]any{"table": "books", "name": "books_rating_idx", "columns": []any{"rating"}})
+	app.plans.mu.Lock()
+	remaining := len(app.plans.entries)
+	app.plans.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("schema change left %d prepared plans cached", remaining)
+	}
+}
+
 func TestTablesCreate_RejectsReservedColumn(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}

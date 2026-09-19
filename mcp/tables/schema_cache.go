@@ -278,9 +278,31 @@ func acquireReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
 	return &readQueryConn{ctx: ctx, conn: conn}, nil
 }
 
+// acquirePreparedReadConn leaves connection selection to the cached
+// database-level statement. This matters for single-connection pools: holding
+// a *sql.Conn while calling *sql.DB.PrepareContext would otherwise deadlock.
+// Snapshot batches still return their shared transaction connection.
+func acquirePreparedReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil {
+		readPhase(ctx, "connection_setup")
+		return &readQueryConn{ctx: ctx, conn: state.conn, tx: state.tx, shared: true}, nil
+	}
+	read, err := acquireReadConn(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+	// Retain the queue admission check, then release the connection before
+	// preparing through *sql.DB so a one-connection pool cannot deadlock.
+	if read.conn != nil {
+		_ = read.conn.Close()
+		read.conn = nil
+	}
+	return read, nil
+}
+
 func (r *readQueryConn) close() error {
 	readPhase(r.ctx, "cleanup")
-	if r.shared {
+	if r.shared || r.conn == nil {
 		return nil
 	}
 	return r.conn.Close()

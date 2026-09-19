@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.23
+version: 0.1.24
 description: |
+  v0.1.24 Adds bounded prepared-statement caching for searches, counts, and
+  aggregations with schema invalidation, upgrades the SDK transport for
+  structured internal app results, and preserves normal MCP compatibility.
   v0.1.23 Optimizes generic tables_batch reads with shared metadata, bounded
   query-plan caching, consistent SQLite read snapshots, optional totals, and
   adaptive handling for large payloads while preserving per-operation limits
@@ -146,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.23
+    ref: tables/v0.1.24
     entry: mcp/tables
   port: 8080
   health_check: /health

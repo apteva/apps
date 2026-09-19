@@ -72,7 +72,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return a.plans.close() }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
