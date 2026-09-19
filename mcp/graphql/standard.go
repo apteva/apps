@@ -381,6 +381,11 @@ func mappedTablesInput(config, args map[string]any) (map[string]any, error) {
 		if !exists || value == nil {
 			return nil, invalid("parent relationship key %q is missing", local)
 		}
+		var err error
+		value, err = coerceRelationValue(value, relation["value_type"])
+		if err != nil {
+			return nil, err
+		}
 		where := []any{}
 		for _, raw := range []any{config["where"], args["where"]} {
 			if raw == nil {
@@ -399,6 +404,45 @@ func mappedTablesInput(config, args map[string]any) (map[string]any, error) {
 	return input, nil
 }
 
+// Tables columns are typed, while internal row IDs arrive from JSON as numbers.
+// Some schemas intentionally store those IDs as text foreign keys. Explicit
+// adapter coercion keeps this mapping generic and avoids guessing from values.
+func coerceRelationValue(value, rawType any) (any, error) {
+	kind, _ := rawType.(string)
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "":
+		return value, nil
+	case "string":
+		return fmt.Sprint(value), nil
+	case "number":
+		switch n := value.(type) {
+		case float64, float32, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, json.Number:
+			return n, nil
+		case string:
+			parsed, err := strconv.ParseFloat(n, 64)
+			if err != nil {
+				return nil, invalid("relationship value cannot be coerced to number")
+			}
+			return parsed, nil
+		default:
+			return nil, invalid("relationship value cannot be coerced to number")
+		}
+	case "boolean":
+		if b, ok := value.(bool); ok {
+			return b, nil
+		}
+		if s, ok := value.(string); ok {
+			parsed, err := strconv.ParseBool(s)
+			if err == nil {
+				return parsed, nil
+			}
+		}
+		return nil, invalid("relationship value cannot be coerced to boolean")
+	default:
+		return nil, invalid("relation value_type must be string, number, or boolean")
+	}
+}
+
 func validateTableRelation(operation string, config map[string]any) error {
 	raw, exists := config["relation"]
 	if !exists {
@@ -414,6 +458,12 @@ func validateTableRelation(operation string, config map[string]any) error {
 	for _, key := range []string{"parent_key", "foreign_key"} {
 		if value, ok := r[key].(string); !ok || strings.TrimSpace(value) == "" {
 			return invalid("relation requires %s", key)
+		}
+	}
+	if rawType, exists := r["value_type"]; exists {
+		valueType, ok := rawType.(string)
+		if !ok || (valueType != "string" && valueType != "number" && valueType != "boolean") {
+			return invalid("relation value_type must be string, number, or boolean")
 		}
 	}
 	return nil

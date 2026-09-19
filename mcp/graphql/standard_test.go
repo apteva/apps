@@ -272,6 +272,24 @@ func TestRelationshipConstraintsCannotBeOverridden(t *testing.T) {
 	if validateTableRelation("get", config) == nil {
 		t.Fatal("unfiltered get must reject relation")
 	}
+	config["parent"] = map[string]any{"id": json.Number("42")}
+	config["relation"] = map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}
+	input, err = mappedTablesInput(config, nil)
+	if err != nil || input["where"].([]any)[1].(map[string]any)["value"] != "42" {
+		t.Fatalf("string relation coercion: %v %v", input, err)
+	}
+	config["parent"] = map[string]any{"id": "42"}
+	config["relation"] = map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "number"}
+	input, err = mappedTablesInput(config, nil)
+	if err != nil || input["where"].([]any)[1].(map[string]any)["value"] != float64(42) {
+		t.Fatalf("number relation coercion: %v %v", input, err)
+	}
+	for _, bad := range []any{"object", 1} {
+		config["relation"].(map[string]any)["value_type"] = bad
+		if validateTableRelation("find", config) == nil {
+			t.Fatalf("accepted relation value_type %v", bad)
+		}
+	}
 }
 
 func TestStandardNullOmissionDefaultsAndStrictVariables(t *testing.T) {

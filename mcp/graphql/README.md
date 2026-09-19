@@ -60,6 +60,10 @@ cannot replace the fixed table or this relationship predicate. Configured and
 client filters are combined for relationships. Include parent join keys in any
 source `select` configuration; missing keys fail closed. Relationships support
 `find`, `list`, `search`, `count`, and `aggregate`, not unfiltered `get` or writes.
+When the Tables foreign-key column deliberately uses a different primitive type
+than its parent value, set `value_type` to `string`, `number`, or `boolean` in
+the relation mapping. Coercion is explicit so the adapter never guesses from
+identifiers or silently changes ordinary same-type relationships.
 
 ```graphql
 query CustomerOrders($limit: Int = 10) {

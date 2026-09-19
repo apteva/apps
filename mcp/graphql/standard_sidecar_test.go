@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,12 +25,12 @@ func TestRealStandardGraphQLTables(t *testing.T) {
 	const project = "graphql-standard-test"
 	tables := tk.SpawnSidecar(t, dir, tk.WithProjectID(project), tk.WithEnv("APTEVA_GATEWAY_URL", ""), tk.WithEnv("APTEVA_OUTBOUND_TOKEN", ""))
 	tables.MCP("tables_create", map[string]any{"name": "customers", "columns": []any{map[string]any{"name": "name", "type": "text"}}})
-	tables.MCP("tables_create", map[string]any{"name": "orders", "columns": []any{map[string]any{"name": "customer_id", "type": "number"}, map[string]any{"name": "amount", "type": "number"}}})
+	tables.MCP("tables_create", map[string]any{"name": "orders", "columns": []any{map[string]any{"name": "customer_id", "type": "text"}, map[string]any{"name": "amount", "type": "number"}}})
 	insert := tables.MCP("rows_insert", map[string]any{"table": "customers", "rows": []any{map[string]any{"name": "Ada"}, map[string]any{"name": "Grace"}}})
 	ids := insert["ids"].([]any)
 	rows := []any{}
 	for i := 0; i < 1000; i++ {
-		rows = append(rows, map[string]any{"customer_id": ids[i%2], "amount": i})
+		rows = append(rows, map[string]any{"customer_id": fmt.Sprint(ids[i%2]), "amount": i})
 	}
 	tables.MCP("rows_insert", map[string]any{"table": "orders", "rows": rows})
 	var batches, reads atomic.Int32
@@ -73,10 +74,10 @@ func TestRealStandardGraphQLTables(t *testing.T) {
 	}
 	for _, r := range []map[string]any{
 		{"parent_type": "Query", "field_name": "customers", "source": "customers", "operation": "find", "config": map[string]any{"order_by": "id asc"}},
-		{"parent_type": "Customer", "field_name": "orders", "source": "orders", "operation": "search", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id"}, "include_total": true, "order_by": "id asc"}},
+		{"parent_type": "Customer", "field_name": "orders", "source": "orders", "operation": "search", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}, "include_total": true, "order_by": "id asc"}},
 		{"parent_type": "Query", "field_name": "stats", "source": "orders", "operation": "aggregate"},
 		{"parent_type": "Query", "field_name": "count", "source": "orders", "operation": "count"},
-		{"parent_type": "Customer", "field_name": "stats", "source": "orders", "operation": "aggregate", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id"}}},
+		{"parent_type": "Customer", "field_name": "stats", "source": "orders", "operation": "aggregate", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}}},
 	} {
 		graph.MCP("graphql_resolver_set", r)
 	}
