@@ -615,6 +615,18 @@ func calculateModuleNumber(op string, values []any) (any, error) {
 }
 
 func compareModuleValues(left, right any) (int, error) {
+	// Null sorts below every concrete value and equals only null. This makes
+	// conventional guards such as `total > 0` false for absent data instead of
+	// accidentally comparing the strings "<nil>" and "0".
+	if left == nil {
+		if right == nil {
+			return 0, nil
+		}
+		return -1, nil
+	}
+	if right == nil {
+		return 1, nil
+	}
 	if l, err := moduleNumber(left); err == nil {
 		r, err := moduleNumber(right)
 		if err == nil {

@@ -54,6 +54,17 @@ func TestResolverModuleRejectsUnknownInputsAndCycles(t *testing.T) {
 	}
 }
 
+func TestResolverModuleNullGuardSkipsNumericBranch(t *testing.T) {
+	module := resolverModule{Name: "common.percentage", Version: 1, Status: "published", Inputs: map[string]any{"part": "Decimal", "total": "Decimal"}, Definition: map[string]any{
+		"op": "if", "condition": map[string]any{"op": "gt", "args": []any{map[string]any{"input": "total"}, map[string]any{"const": 0}}},
+		"then": map[string]any{"op": "divide", "args": []any{map[string]any{"input": "part"}, map[string]any{"input": "total"}}}, "else": map[string]any{"const": 0},
+	}}
+	value, err := (moduleRuntime{modules: map[string]resolverModule{}}).evaluate(module, map[string]any{"part": nil, "total": nil})
+	if err != nil || value != 0 {
+		t.Fatalf("value=%#v err=%v", value, err)
+	}
+}
+
 func TestComputedFieldUsesHiddenProjectionDependenciesAndFastPath(t *testing.T) {
 	p := &standardTables{}
 	module := displayNameModule()
