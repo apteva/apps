@@ -140,7 +140,11 @@ export function layoutProject(
 ): MapLayout[] {
   if (!processes.length) return [];
   const choices = [...processes]
-    .sort((a, b) => a.id.localeCompare(b.id))
+    .sort((a, b) =>
+      (a.category || "Uncategorized").localeCompare(b.category || "Uncategorized") ||
+      a.name.localeCompare(b.name) ||
+      a.id.localeCompare(b.id),
+    )
     .map((p) => [
       shape(p, runs[p.id] || [], false),
       shape(p, runs[p.id] || [], true),
@@ -151,7 +155,9 @@ export function layoutProject(
   );
   let best: MapLayout[] = [],
     score = Infinity;
-  for (const factor of [0.7, 0.9, 1.1, 1.3, 1.6, 2]) {
+  // Project maps are shown in a wide dashboard canvas. Prefer two or more
+  // horizontal shelves so fitView does not shrink a tall single column.
+  for (const factor of [1.25, 1.6, 2, 2.4, 2.8]) {
     const target = Math.sqrt(area) * factor;
     let x = 0,
       y = 0,
@@ -173,7 +179,7 @@ export function layoutProject(
             cost:
               Math.max(0, px + s.width - target) * 4000 +
               w * h +
-              Math.abs(w - h) * 120,
+              Math.abs(w - h) * 35,
           };
         }),
       );
@@ -190,7 +196,7 @@ export function layoutProject(
     }
     const height = y + rowHeight;
     const candidate =
-      width * height * (1 + Math.abs(Math.log(width / height)) * 0.8);
+      width * height * (1 + Math.abs(Math.log(width / height)) * 0.15);
     if (candidate < score) {
       score = candidate;
       best = result;
