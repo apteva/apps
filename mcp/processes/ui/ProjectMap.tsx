@@ -469,7 +469,7 @@ export default function ProjectMap(props: Props) {
                 flow.current = instance;
               }}
               fitView
-              fitViewOptions={{ padding: 0.08 }}
+              fitViewOptions={{ padding: 0.035 }}
               minZoom={0.08}
               maxZoom={1.6}
               nodesDraggable={false}
