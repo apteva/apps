@@ -14,6 +14,7 @@ No Tasks integration is installed and no external publishing service is used.
 | `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
 | `06-sequential-worker.yaml` | Three simulated weather/receipt steps complete in order using exactly one persisted worker and one spawn. |
 | `07-operator-confirmation.yaml` | A run parks on a human work step, the operator confirms it mid-run over HTTP, and the agent publishes only afterwards. |
+| `07-browser-continuity.yaml` | One local browser page stays open across three steps; the final real page submission proves the same session and worker were reused. |
 
 Run from the Processes app directory:
 

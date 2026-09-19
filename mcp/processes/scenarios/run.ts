@@ -3,6 +3,9 @@ import { resolve, basename } from "node:path";
 import { mkdir, mkdtemp, readdir, cp } from "node:fs/promises";
 import { Database } from "bun:sqlite";
 import YAML from "yaml";
+import { startBrowserFixture, verifyBrowserContinuity } from "./browser-fixture";
+let browserFixture: ReturnType<typeof startBrowserFixture> | undefined;
+process.on("exit", () => browserFixture?.stop());
 import {
   check,
   verifyHistory,
@@ -46,6 +49,11 @@ for (const file of files) {
   const scenario = YAML.parse(await Bun.file(file).text());
   const dbPath = resolve(outputDir, `${basename(file, ".yaml")}.db`);
   scenario.setup.app.path = appDir;
+  if (scenario.name === "processes-browser-continuity") {
+    browserFixture = startBrowserFixture();
+    scenario.directive = scenario.directive.replaceAll("__BROWSER_FIXTURE_URL__", browserFixture.url);
+    scenario.setup.apps = [{path: resolve(appDir, "../computer"), spawnable: true}];
+  }
   if (scenario.name === "processes-event-trigger-workflow") {
     const fixtureRoot = resolve(outputDir, "event-fixture");
     const processCopy = resolve(fixtureRoot, "processes");
@@ -159,6 +167,14 @@ for (const scenario of report.results) {
     if (scenario.scenario === "processes-sequential-worker") {
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
       verifySequentialWorker(scenario.tool_calls, runs[0], workers);
+    }
+    if (scenario.scenario === "processes-browser-continuity") {
+      check(runs.length === 1 && history.runs.length === 0, "Expected one direct browser run");
+      const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
+      verifySequentialWorker(scenario.tool_calls, runs[0], workers);
+      verifyBrowserContinuity(scenario.tool_calls, runs[0], workers, browserFixture!);
+      await Bun.write(resolve(outputDir, "browser-evidence.json"), JSON.stringify({visits: browserFixture!.visits, receipts: browserFixture!.receipts}, null, 2));
+      browserFixture!.stop();
     }
     if (
       [

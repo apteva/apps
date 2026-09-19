@@ -36,6 +36,8 @@ type Definition = {
   default_inputs: string;
   completion_criteria: string;
   approval_requirements: string;
+  category?: string;
+  tags?: string[];
   owner_agent_id?: number;
   schedule?: Schedule;
 };
@@ -88,6 +90,8 @@ const empty: Definition = {
   default_inputs: "",
   completion_criteria: "",
   approval_requirements: "",
+  category: "",
+  tags: [],
 };
 type History = {
   runs?: {
@@ -182,6 +186,7 @@ function Panel(props: Props) {
     [more, setMore] = useState(false),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState(""),
+    [category, setCategory] = useState(""),
     [owner, setOwner] = useState(0),
     [loading, setLoading] = useState(true),
     [busy, setBusy] = useState(false),
@@ -192,6 +197,7 @@ function Panel(props: Props) {
     [assignmentFilter, setAssignmentFilter] = useState(""),
     [runStateFilter, setRunStateFilter] = useState(""),
     [runOwnerFilter, setRunOwnerFilter] = useState(0);
+  const categories = Array.from(new Set(items.map((p) => p.category).filter(Boolean) as string[])).sort();
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("run_id");
     if (id && tab === "runs") document.getElementById(`run-${id}`)?.scrollIntoView?.({ block: "start" });
@@ -367,6 +373,7 @@ function Panel(props: Props) {
   const visible = items.filter(
     (p) =>
       (!filter || p.status === filter) &&
+      (!category || (category === "uncategorized" ? !p.category : p.category === category)) &&
       (!owner ||
         (p.assignments || []).some((x) => x.owner_agent_id === owner) ||
         (!p.assignments?.length && p.owner_agent_id === owner)) &&
@@ -545,6 +552,15 @@ function Panel(props: Props) {
                 placeholder="What does this process achieve?"
               />
             </div>
+            <div className="field">
+              <label htmlFor="pc-category">Category</label>
+              <input id="pc-category" maxLength={80} value={draft.category || ""} onChange={(e) => setField("category", e.target.value)} placeholder="Finance" />
+            </div>
+            <div className="field">
+              <label htmlFor="pc-tags">Tags</label>
+              <input id="pc-tags" value={(draft.tags || []).join(", ")} onChange={(e) => setField("tags", e.target.value.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean))} placeholder="monthly-close, approval-required" />
+              <div className="small muted">Comma-separated organization tags.</div>
+            </div>
           </section>
           <StepEditor
             steps={draft.steps || []}
@@ -680,6 +696,15 @@ function Panel(props: Props) {
               ))}
             </select>
             <select
+              aria-label="Filter category"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="">All categories</option>
+              <option value="uncategorized">Uncategorized</option>
+              {categories.map((x) => <option key={x}>{x}</option>)}
+            </select>
+            <select
               aria-label="Filter owner"
               value={owner}
               onChange={(e) => setOwner(Number(e.target.value))}
@@ -713,6 +738,10 @@ function Panel(props: Props) {
                       <td>
                         <button onClick={() => open(p)}>{p.name}</button>
                         <div className="sub">{p.description}</div>
+                        <div className="row small" style={{ marginTop: 7 }}>
+                          <span className="pill">{p.category || "Uncategorized"}</span>
+                          {(p.tags || []).map((tag) => <span className="pill" key={tag}>#{tag}</span>)}
+                        </div>
                       </td>
                       <td>
                         {Array.from(

@@ -1,0 +1,50 @@
+name: processes-browser-continuity
+description: One real browser page and one persistent worker across three process steps.
+timeout: 8m
+settle_for: 5s
+max_iterations: 65
+setup:
+  mode: autonomous
+  app:
+    path: ./
+    spawnable: true
+directive: |
+  In this isolated test project, create exactly one procedure named Browser continuity.
+  Your agent ID is ${APTEVA_TEST_AGENT_ID}. Use Processes, Core thread tools, and
+  the Computer app only. The local fixture URL is __BROWSER_FIXTURE_URL__.
+  Create three work steps with role browser_agent, no delays, in this exact order:
+  1. key=open, no dependencies: Open one Computer browser session using backend=local
+     at the fixture URL. Take a screenshot and read the page token. Keep this session
+     and page open for the entire run. Output its session ID and page token.
+  2. key=prepare, depends_on=[open]: Using that same live session and page, take a
+     screenshot, enter exactly "Continuity verified" in Draft and click Prepare draft.
+     Verify the prepared status. Do not submit yet. Output the session ID and evidence.
+  3. key=submit, depends_on=[prepare]: Using the same session and page, take a fresh
+     screenshot, verify the prepared draft remains, click Submit draft exactly once,
+     and verify Receipt accepted. Close the browser and complete this step with evidence.
+  Each step needs a name, instructions and expected_output. Shared instructions:
+  follow the Processes worker contract; retain the live browser across steps,
+  never reload or navigate away, and never use a script, HTTP client or another tool
+  to manufacture a receipt. The browser fixture is the only authorized write target.
+  Create one assignment with yourself as owner, execution_mode=agent, follow_latest=true,
+  no schedule. Activate procedure and assignment; start once with idempotency_key=browser-1.
+  Allow the run worker access to Processes and Computer for all three steps.
+  Follow the app execution contract and do not manually forward downstream steps.
+  After the final result, read runs once and stop. Do not create another run.
+assert:
+  - tool_called: processes_runs
+  - tool_called: computer_computer_use
+  - tool_called_with:
+      tool: computer_browser_session
+      args: {action: open}
+      count: 1
+      success: true
+  - tool_called_with:
+      tool: computer_browser_session
+      args: {action: close}
+      count: 1
+      success: true
+  - tool_not_called: processes_run_update
+budget:
+  total_tokens: 900000
+  cost_usd: 7.50

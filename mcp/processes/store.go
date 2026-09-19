@@ -31,6 +31,8 @@ type Definition struct {
 	DefaultInputs        string      `json:"default_inputs"`
 	CompletionCriteria   string      `json:"completion_criteria"`
 	ApprovalRequirements string      `json:"approval_requirements"`
+	Category             string      `json:"category,omitempty"`
+	Tags                 []string    `json:"tags,omitempty"`
 	OwnerAgentID         int64       `json:"owner_agent_id,omitempty"`
 	Schedule             *Schedule   `json:"schedule,omitempty"`
 }
@@ -107,6 +109,27 @@ func (d *Definition) validate() error {
 		return e
 	}
 	d.Name = strings.TrimSpace(d.Name)
+	d.Category = strings.TrimSpace(d.Category)
+	if len(d.Category) > 80 {
+		return errors.New("category must contain at most 80 characters")
+	}
+	seenTags := map[string]bool{}
+	cleanTags := make([]string, 0, len(d.Tags))
+	for _, tag := range d.Tags {
+		tag = strings.ToLower(strings.TrimSpace(tag))
+		if tag == "" || seenTags[tag] {
+			continue
+		}
+		if len(tag) > 40 {
+			return errors.New("tags must contain at most 40 characters")
+		}
+		seenTags[tag] = true
+		cleanTags = append(cleanTags, tag)
+	}
+	if len(cleanTags) > 20 {
+		return errors.New("a procedure may have at most 20 tags")
+	}
+	d.Tags = cleanTags
 	d.Instructions = strings.TrimSpace(d.Instructions)
 	if d.Name == "" || len(d.Name) > 160 {
 		return errors.New("name must contain 1–160 characters")
