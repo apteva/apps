@@ -74,12 +74,19 @@ func TestRealStandardGraphQLTables(t *testing.T) {
 	for _, r := range []map[string]any{
 		{"parent_type": "Query", "field_name": "customers", "source": "customers", "operation": "find", "config": map[string]any{"order_by": "id asc"}},
 		{"parent_type": "Customer", "field_name": "orders", "source": "orders", "operation": "search", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id"}, "include_total": true, "order_by": "id asc"}},
+		{"parent_type": "Query", "field_name": "stats", "source": "orders", "operation": "aggregate"},
+		{"parent_type": "Query", "field_name": "count", "source": "orders", "operation": "count"},
+		{"parent_type": "Customer", "field_name": "stats", "source": "orders", "operation": "aggregate", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id"}}},
 	} {
 		graph.MCP("graphql_resolver_set", r)
 	}
-	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! }
+	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! stats(metrics: [Metric!]!, groupBy: [String!], order_by: String, where: [Filter!]): [Stats!]! count: Int! }
+enum MetricOp { count sum avg min max }
+input Metric { name: String! op: MetricOp! col: String }
+input Filter { col: String! op: String! value: Float! }
+type Stats { customer_id: ID total: Int! sum: Float! avg: Float! min: Float! max: Float! }
 type Mutation { change: String }
-type Customer { id: ID! name: String! orders(limit: Int = 3, cursor: String): OrderPage! }
+type Customer { id: ID! name: String! orders(limit: Int = 3, cursor: String): OrderPage! stats(metrics: [Metric!]!): [Stats!]! }
 type OrderPage { rows: [Order!]! total: Int! has_more: Boolean! next_cursor: String }
 type Order { id: ID! customer_id: ID! amount: Float! }`})
 	graph.MCP("graphql_schema_publish", map[string]any{"environment": "development", "version": schema["schema"].(map[string]any)["version"]})
@@ -135,5 +142,51 @@ type Order { id: ID! customer_id: ID! amount: Float! }`})
 	resp = graph.POST("/graphql", map[string]any{"query": `query($n:Int){ customers(limit:$n){id} }`, "variables": map[string]any{"n": 1.5}, "extensions": map[string]any{}}, &out)
 	if resp.Status != 400 || reads.Load() != before {
 		t.Fatalf("invalid variables reached Tables: %d %v", resp.Status, out)
+	}
+	// Typed GraphQL inputs, grouping, aliases and relationship-scoped native
+	// aggregation must survive both the standard engine and fast completion.
+	metrics := []any{map[string]any{"name": "total", "op": "count"}}
+	for _, op := range []string{"sum", "avg", "min", "max"} {
+		metrics = append(metrics, map[string]any{"name": op, "op": op, "col": "amount"})
+	}
+	out = map[string]any{}
+	resp = graph.POST("/graphql", map[string]any{"query": `query($metrics:[Metric!]!) {
+ count
+ grouped:stats(metrics:$metrics,groupBy:["customer_id"],order_by:"customer_id asc") { customer_id ...S }
+ filtered:stats(metrics:$metrics,where:[{col:"amount",op:"gte",value:500}]) { ...S }
+ customers { id stats(metrics:$metrics) { ...S } }
+} fragment S on Stats { total sum avg min max }`, "variables": map[string]any{"metrics": metrics}}, &out)
+	if resp.Status != 200 || out["errors"] != nil {
+		t.Fatalf("aggregation: %d %v", resp.Status, out)
+	}
+	data := out["data"].(map[string]any)
+	if data["count"] != float64(1000) {
+		t.Fatalf("count lost: %v", data)
+	}
+	native := tables.MCP("rows_aggregate", map[string]any{"table": "orders", "metrics": metrics, "group_by": []any{"customer_id"}, "order_by": "customer_id asc"})["rows"].([]any)
+	for i, raw := range data["grouped"].([]any) {
+		row := raw.(map[string]any)
+		for _, key := range []string{"total", "sum", "avg", "min", "max"} {
+			if row[key] != native[i].(map[string]any)[key] {
+				t.Fatalf("native aggregate mismatch: %s %v != %v", key, row, native[i])
+			}
+		}
+		if row["total"] != float64(500) || row["avg"] != float64(499+i) || row["sum"] != float64(249500+500*i) {
+			t.Fatalf("incorrect grouped metrics: %v", row)
+		}
+		parent := data["customers"].([]any)[i].(map[string]any)
+		if parent["id"] != row["customer_id"] {
+			t.Fatal("group ID serialization changed")
+		}
+		stats := parent["stats"].([]any)[0].(map[string]any)
+		for _, key := range []string{"total", "sum", "avg", "min", "max"} {
+			if stats[key] != row[key] {
+				t.Fatalf("relationship aggregate leaked across parents: %v != %v", stats, row)
+			}
+		}
+	}
+	filtered := data["filtered"].([]any)[0].(map[string]any)
+	if filtered["total"] != float64(500) || filtered["sum"] != float64(374750) || filtered["avg"] != 749.5 || filtered["min"] != float64(500) || filtered["max"] != float64(999) {
+		t.Fatalf("filtered aggregation: %v", filtered)
 	}
 }

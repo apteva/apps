@@ -10,7 +10,7 @@ Schemas and client requests use ordinary GraphQL SDL and operations. There are
 no special `me`, workspace, pipeline, expression, or SQL constructs in this
 release. API authors choose their own field names and input/output types.
 
-The execution layer now uses graphql-go for field collection and result
+The execution layer uses graphql-go for general field collection and result
 completion, with gqlparser validation and an explicit input-coercion boundary
 to preserve modern null/default semantics. It supports named/inline fragments,
 aliases and merged fields, `@skip`/`@include`, strict variables, input objects,
@@ -120,6 +120,38 @@ and relation validation. No server, SDK, or Tables changes are needed; Tables
 Real-process integration tests are opt-in with `GRAPHQL_TEST_TABLES_DIR`,
 `GRAPHQL_TEST_AUTH_DIR`, and `GRAPHQL_TEST_FUNCTIONS_DIR`. Tests create isolated
 databases and never alter an installed project.
+
+### Guarded fast completion (0.4.1)
+
+Ordinary GraphQL inputs and validation are unchanged. Concrete Tables query
+selections now use a compiled projection plan for built-in scalar fields,
+including aliases, merged selections, fragments, directives, nested
+relationships, page envelopes, counts and aggregates. It calls the same scalar
+serializers as the standard engine and retains field permission checks.
+
+Unsupported selections (including abstract output types, enums, custom scalars,
+introspection and non-Tables sources) use the standard engine. Failed source
+reads, invalid output values and non-null failures also fall back to standard
+error completion, sharing the same request-local read cache so completed reads
+are not repeated. Mutations always use the standard ordered executor. A query
+does not lose a capability just because it is ineligible for fast completion.
+
+An isolated Apple M1 Pro real-process test stored 10,000 rows in each of three
+Tables tables and returned 1,000 rows per table, five scalar fields each.
+After five warmups, 30 rotating trials with exact data parity measured:
+
+| Path | Median | p95 |
+| --- | ---: | ---: |
+| GraphQL 0.4.0 | 29.71 ms | 33.94 ms |
+| GraphQL 0.4.1 | 14.44 ms | 16.78 ms |
+| Direct parallel Tables calls | 5.67 ms | 8.63 ms |
+
+This uses a forwarding test gateway, not the installed management server, and
+does **not** establish native-call parity or predict production latency. A
+separate preloaded-row microbenchmark isolates projection/execution overhead:
+about 1.4–1.5 ms versus 15.4–19.6 ms, with roughly 94% fewer allocated bytes.
+Reproduce real-process timings by also setting `GRAPHQL_BENCH_BASELINE_DIR` to
+the v0.4.0 GraphQL source and running `go test -run TestRealThreeTablePerformance -v`.
 
 ## Minimal setup
 
@@ -266,7 +298,20 @@ Use `operation: "aggregate"` with a Database or Tables source and configure
 `groupBy`/`group_by` and `metrics`. The adapter delegates aggregation to the
 native source instead of scanning records in the GraphQL process.
 
-## Execution performance (0.2.2)
+This remains available through standard typed GraphQL input objects and enums,
+not custom query syntax. Counts, sums, averages, minima/maxima, grouping,
+filtering and ordering are retained. Tables aggregates can also be scoped to
+each parent with the same `relation` mapping as row reads. Define the result
+fields and metric names in your schema; GraphQL itself does not standardize
+aggregation field names. Aggregate queries return native aggregate rows, while
+the `count` operation returns the scalar count.
+
+Regression tests exercise real Tables grouped/filtered and per-parent metrics
+against direct native results; Database adapter forwarding/result mapping;
+mixed Tables/Database/HTTP/Function queries; pagination; API/project/environment
+isolation; realtime hub scoping; Auth and trusted Function invocation.
+
+## Execution performance
 
 Independent root query fields execute concurrently (up to eight); mutation
 fields remain ordered. Compiled schemas and validated documents are cached,
@@ -274,8 +319,9 @@ and resolver/source bindings are loaded once per request with a bounded
 one-second metadata cache. Scalar row projections avoid per-cell metadata
 lookups. Query results themselves are not cached.
 
-Small Tables read fan-outs use `tables_batch` (requires Tables 0.1.22 or newer).
-Reads whose summed requested limits exceed 500 use parallel individual calls.
+Small Tables read fan-outs use `tables_batch` (requires Tables 0.1.22 or newer),
+in groups of at most five operations with individual requested limits up to 100.
+Larger reads use parallel individual calls, bounded to eight source tasks.
 Rows-only queries skip total counts unless explicitly configured otherwise.
 Batching uses `best_effort`, not cross-table snapshot consistency.
 
@@ -284,7 +330,9 @@ negotiated inner JSON results. Platform-only read optimizations are preserved.
 
 ## Realtime transport
 
-`/realtime` speaks the `graphql-transport-ws` framing. A subscription resolver
+`/realtime` retains its existing platform-only event transport with
+`graphql-transport-ws`-style frames, not full protocol/spec compliance.
+Protected subscriptions remain disabled. A subscription resolver
 can set `config.topic`; Tables row events are bridged automatically and trusted
 source adapters or the `graphql_event_publish` tool can publish matching
 events. Database-native change-feed integration is the next step for full

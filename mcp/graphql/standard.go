@@ -17,14 +17,15 @@ import (
 
 type standardRequestKey struct{}
 type standardRequest struct {
-	project, api string
-	bindings     *executionBindings
-	policy       securityPolicy
-	loader       *resolverLoader
-	mutation     bool
-	synchronous  bool
-	errorMu      sync.Mutex
-	errorCodes   map[string]string
+	project, api       string
+	bindings           *executionBindings
+	policy             securityPolicy
+	loader             *resolverLoader
+	mutation           bool
+	synchronous        bool
+	fastProjectionUsed bool
+	errorMu            sync.Mutex
+	errorCodes         map[string]string
 }
 
 func (a *App) executeStandard(ctx context.Context, project, api, key string, schema *ast.Schema, req graphqlRequest, op *ast.OperationDefinition, doc *ast.QueryDocument, policy securityPolicy) (executeResult, error) {

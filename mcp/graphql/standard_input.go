@@ -287,6 +287,9 @@ func executeRuntime(ctx context.Context, runtime *gql.Schema, schema *ast.Schema
 		}
 	}
 	ctx = context.WithValue(ctx, argumentValuesKey{}, args)
+	if result, ok := tryFastProjection(ctx, runtime, document, operation); ok {
+		return result, nil
+	}
 	params := gql.ExecuteParams{Schema: *runtime, AST: document, OperationName: op.Name, Context: ctx}
 	result := gql.Execute(params)
 	// The completion engine cannot retain nullable ancestors across deferred
