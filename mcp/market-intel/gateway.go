@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -270,6 +271,7 @@ type NewsItem struct {
 	Title  string `json:"title"`
 	URL    string `json:"url,omitempty"`
 	Source string `json:"source,omitempty"`
+	Date   string `json:"date,omitempty"`
 }
 
 type ContextResult struct {
@@ -282,6 +284,11 @@ type ContextResult struct {
 // + dedups by normalized title. v0.1 dedup is title-prefix based;
 // sentiment scoring is v0.2.
 func gwContext(sc sourceClient, topic string) ContextResult {
+	return gwContextParams(sc, map[string]any{"topic": topic})
+}
+
+func gwContextParams(sc sourceClient, params map[string]any) ContextResult {
+	topic := strArgM(params, "topic")
 	out := ContextResult{Topic: topic, Items: []NewsItem{}, Sources: []string{}}
 	seenTitle := map[string]bool{}
 	// SEC EDGAR is a two-step source: resolve the ticker to a CIK, then
@@ -299,7 +306,7 @@ func gwContext(sc sourceClient, topic string) ContextResult {
 						secItems = append(secItems, parseSECSubmissions(archived, cik)...)
 					}
 				}
-				for _, it := range secItems {
+				for _, it := range filterNewsDates(secItems, strArgM(params, "from"), strArgM(params, "to")) {
 					key := normTitle(it.Title)
 					if key == "" || seenTitle[key] {
 						continue
@@ -317,7 +324,7 @@ func gwContext(sc sourceClient, topic string) ContextResult {
 		if spec.slug == "sec-edgar" {
 			continue // handled above as a two-step filings query
 		}
-		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(map[string]any{"topic": topic}))
+		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(params))
 		if !ok {
 			continue
 		}
@@ -338,6 +345,9 @@ func gwContext(sc sourceClient, topic string) ContextResult {
 	// Stable-ish ordering: alphabetical by title so output is
 	// deterministic for tests.
 	sort.SliceStable(out.Items, func(i, j int) bool { return out.Items[i].Title < out.Items[j].Title })
+	if n := intArg(params, "limit"); n > 0 && len(out.Items) > n {
+		out.Items = out.Items[:n]
+	}
 	return out
 }
 
@@ -461,9 +471,23 @@ func parseSECSubmissions(raw json.RawMessage, cik string) []NewsItem {
 		if doc != "" {
 			url += "/" + doc
 		}
-		items = append(items, NewsItem{Title: title, URL: url, Source: "SEC EDGAR"})
+		items = append(items, NewsItem{Title: title, URL: url, Source: "SEC EDGAR", Date: date})
 	}
 	return items
+}
+
+func filterNewsDates(items []NewsItem, from, to string) []NewsItem {
+	if from == "" && to == "" {
+		return items
+	}
+	out := make([]NewsItem, 0, len(items))
+	for _, it := range items {
+		if it.Date == "" || (from != "" && it.Date < from) || (to != "" && it.Date > to) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 func secArchiveFiles(raw json.RawMessage) []string {
@@ -492,6 +516,15 @@ func normTitle(t string) string {
 		t = t[:60]
 	}
 	return t
+}
+
+func intArg(params map[string]any, key string) int {
+	v := strArgM(params, key)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
 }
 
 // ─── sources_status ────────────────────────────────────────────────

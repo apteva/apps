@@ -445,7 +445,7 @@ func (a *App) toolContext(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, err := resolveProjectFromArgs(args); err != nil {
 		return nil, err
 	}
-	return gwContext(a.client(), strArg(args, "topic")), nil
+	return gwContextParams(a.client(), args), nil
 }
 
 func (a *App) toolResolveEntity(ctx *sdk.AppCtx, args map[string]any) (any, error) {

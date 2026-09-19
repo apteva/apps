@@ -135,7 +135,14 @@ var registry = map[string]map[queryType][]sourceSpec{
 				return map[string]any{"q": p["topic"], "max": 8}
 			}},
 			{slug: "gdelt", tool: "doc_search", argFn: func(p map[string]any) map[string]any {
-				return map[string]any{"query": p["topic"], "maxrecords": 8}
+				a := map[string]any{"query": p["topic"], "maxrecords": 50}
+				if p["from"] != nil {
+					a["startdatetime"] = p["from"]
+				}
+				if p["to"] != nil {
+					a["enddatetime"] = p["to"]
+				}
+				return a
 			}},
 			{slug: "sec-edgar", tool: "ticker_to_cik", argFn: func(p map[string]any) map[string]any {
 				return map[string]any{"ticker": p["topic"]}
