@@ -130,9 +130,11 @@ func TestDueEventsCarryBrandAndIdentity(t *testing.T) {
 	a, ctx, rec := dueApp(t, &at)
 	scan(t, a, ctx)
 	settingsFor(t, a, ctx, map[string]any{
-		"brands": []any{map[string]any{"id": "acme", "name": "Acme", "color": "#e0533f"}}})
+		"formats": []string{"idea", "preview"},
+		"brands":  []any{map[string]any{"id": "acme", "name": "Acme", "color": "#e0533f"}}})
 
 	branded := create(t, a, ctx, map[string]any{"title": "Acme launch", "brand_id": "acme",
+		"format": "preview", "approval": "approved", "reviewer": "Sam",
 		"planned_at": "2026-10-15", "deadline": "2026-10-15", "owner": "Dana"})
 	create(t, a, ctx, map[string]any{"title": "House post", "planned_at": "2026-10-15"})
 	if _, e := a.dispatch(ctx, "releases_create", map[string]any{"item_id": branded.ID,
@@ -179,8 +181,9 @@ func TestDueEventsCarryBrandAndIdentity(t *testing.T) {
 	if len(release) != 1 {
 		t.Fatalf("expected one release.due, got %v", release)
 	}
-	// A release inherits its parent's brand and identity, and names its channel.
+	// A release carries its parent's routing fields, including custom formats.
 	if release[0]["brand"] != "Acme" || release[0]["channel"] != "Newsletter" ||
+		release[0]["format"] != "preview" || release[0]["approval"] != "approved" ||
 		release[0]["title"] != "Acme launch" || release[0]["item_id"] != branded.ID {
 		t.Fatalf("release event wrong: %v", release[0])
 	}

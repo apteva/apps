@@ -96,6 +96,13 @@ The check now lives in `dispatch`, the one place both doors pass through, so an 
 Behaviour change: an MCP caller — including an agent — that passed an argument no tool declares now gets a tool error instead of a silently unfiltered result. That is the intent, and it is the same break v0.3.2 made for HTTP callers.
 
 
+## v0.4.1 release routing
+
+Validated on 2026-09-19. `release.due` now includes the parent content's `format`, so Processes can filter by channel, content type, brand and approval directly. Publishing remains in Processes. The SDK pin advances to v0.82.0, verified as a descendant of v0.81.0.
+
+- The existing due-event regression test now verifies a custom `preview` format and approved parent alongside channel, brand and content identity.
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...` and `GOWORK=off GOTOOLCHAIN=local go vet ./...` passed.
+
 ## v0.4.0 due events
 
 Validated on 2026-09-17 on a worktree branched from `main` at editorial/v0.3.3.
