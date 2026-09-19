@@ -176,14 +176,23 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 			b, err := jsonSize(item.value, maxBatchResultBytes(ctx)-resultJSONBytes)
 			if err != nil {
+				if shared != nil {
+					_ = shared.Rollback()
+				}
 				return nil, err
 			}
 			resultJSONBytes += b
 			resultRows += countBatchRows(item.value)
 			if resultJSONBytes > maxBatchResultBytes(ctx) {
+				if shared != nil {
+					_ = shared.Rollback()
+				}
 				return nil, errf("batch result exceeds max_batch_result_bytes")
 			}
 			if resultRows > maxBatchResultRows(ctx) {
+				if shared != nil {
+					_ = shared.Rollback()
+				}
 				return nil, errf("batch result exceeds max_batch_result_rows")
 			}
 			counted[id] = true
