@@ -127,9 +127,12 @@ type Filter struct {
 	App       string
 	Topic     string
 	ProjectID string
-	Source    string
-	Since     int64 // unix ms; 0 = no lower bound
-	Until     int64 // unix ms; 0 = no upper bound
+	// ProjectIDs is used only by explicitly global, read-only evaluations.
+	// ProjectID remains the normal project-scoped path.
+	ProjectIDs []string
+	Source     string
+	Since      int64 // unix ms; 0 = no lower bound
+	Until      int64 // unix ms; 0 = no upper bound
 
 	// Where keys must be of the form "props.<jsonkey>" — equality only.
 	// Other keys are silently ignored to keep the surface small.
@@ -152,6 +155,13 @@ func (f Filter) buildWhere() (string, []any, error) {
 	if f.ProjectID != "" {
 		conds = append(conds, "project_id = ?")
 		args = append(args, f.ProjectID)
+	} else if len(f.ProjectIDs) > 0 {
+		marks := make([]string, len(f.ProjectIDs))
+		for i, project := range f.ProjectIDs {
+			marks[i] = "?"
+			args = append(args, project)
+		}
+		conds = append(conds, "project_id IN ("+strings.Join(marks, ",")+")")
 	}
 	if f.Source != "" {
 		conds = append(conds, "source = ?")

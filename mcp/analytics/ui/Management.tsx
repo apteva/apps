@@ -65,6 +65,11 @@ export function MetricFields({
         value={config.topic}
         set={(v) => update("topic", v)}
       />
+      <Field
+        name="Calculated metric key (optional)"
+        value={config.metric}
+        set={(v) => update("metric", v)}
+      />
       <label className="flex flex-col gap-1 text-xs">
         Aggregation
         <select
@@ -384,7 +389,7 @@ export function WidgetEditor({
             </select>
           </label>
         )}
-        {["top", "breakdown"].includes(draft.type) && (
+        {["top", "breakdown", "table"].includes(draft.type) && (
           <Field
             name="Group field"
             value={draft.config.by}

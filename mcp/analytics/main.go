@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.15.1
+version: 0.16.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -70,9 +70,12 @@ description: |
   v0.13 adds generic project-scoped reference sets for governed dimensions,
   active-value validation and discovery, and safe patch semantics for event
   specifications.
+  v0.16 adds persisted calculated metrics with validated arithmetic,
+  weighted sources, period context, grouped metric tables, and read-only
+  global evaluation over projects visible to a global install.
 author: Apteva
 tags: [analytics, events, observability]
-scopes: [global]
+scopes: [project, global]
 min_apteva_version: "0.10.0"
 requires:
   permissions:
@@ -203,6 +206,7 @@ provides:
       description: Live saved metrics, trends, and project activity from any Analytics dashboard.
       entry: /ui/AnalyticsDashboardWidget.mjs
       slots: [dashboard.home]
+      dashboard_scopes: [project, global]
       suggested: true
       visibility: project
       supported_sizes: [half, full]
@@ -235,7 +239,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.15.1
+    ref: analytics/v0.16.0
     entry: mcp/analytics
   port: 8080
   health_check: /health
@@ -296,6 +300,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/archive/restore", Handler: a.handleArchiveRestore},
 		{Pattern: "/diagnostics", Handler: a.handleHealth},
 		{Pattern: "/summary", Handler: a.handleSummary},
+		{Pattern: "/global-summary", Handler: a.handleGlobalSummary},
 		{Pattern: "/series", Handler: a.handleSeries},
 		{Pattern: "/top", Handler: a.handleTop},
 		// NOT "/events": the app-sdk reserves /events for platform event
@@ -327,6 +332,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/query-widget", Handler: a.handleWidgetQuery},
 		{Pattern: "/query-dashboard", Handler: a.handleDashboardQuery},
 		{Pattern: "/dashboard-filter-options", Handler: a.handleDashboardFilterOptions},
+		{Pattern: "/metrics", Handler: a.handleMetrics},
+		{Method: "GET", Pattern: "/global-metric", Handler: a.handleGlobalMetric},
+		{Method: "POST", Pattern: "/global-query-widget", Handler: a.handleGlobalQueryWidget},
 
 		// Objectives and target progress over already-ingested Analytics data.
 		{Pattern: "/objectives", Handler: a.handleObjectives},

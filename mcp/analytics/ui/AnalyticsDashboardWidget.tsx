@@ -18,6 +18,7 @@ import {
 interface HostProps {
   appName?: string;
   projectId?: string;
+  dashboardScope?: "project" | "global";
   eventRevision?: number;
   preview?: boolean;
   widgetId?: string;
@@ -27,7 +28,7 @@ interface HostProps {
 
 interface DashboardWidget {
   id: number;
-  type: "stat" | "timeseries" | "top" | "breakdown" | "feed";
+  type: "stat" | "timeseries" | "top" | "breakdown" | "feed" | "table";
   title: string;
   position: number;
   config: Record<string, unknown>;
@@ -66,6 +67,10 @@ interface ActivitySummary {
     count: number;
     last_ts: number;
   }>;
+}
+interface GlobalSummary extends ActivitySummary {
+  projects: Array<{ id: string; name: string }>;
+  selected_project_id?: string;
 }
 
 const PREVIEW_SUMMARY: ActivitySummary = {
@@ -416,6 +421,8 @@ function DetailCard({
             <Empty>No recent events.</Empty>
           )}
         </div>
+      ) : widget.type === "table" ? (
+        <div className="mt-2 overflow-x-auto"><table className="w-full text-[10px]"><thead><tr className="text-left text-text-dim"><th className="pb-1">{String(data?.by ?? "Group")}</th><th className="pb-1 text-right">{String(data?.aggregation ?? "value")}</th></tr></thead><tbody>{(data?.rows ?? []).slice(0, 10).map((row: any) => <tr key={String(row.group)} className="border-t border-border"><td className="py-1.5 text-text-muted">{row.group}</td><td className="py-1.5 text-right tabular-nums text-text">{formatMetric(Number(row.value), config)}</td></tr>)}</tbody></table></div>
       ) : (
         <div className="mt-2 space-y-1.5">
           {(data?.top ?? [])
@@ -498,10 +505,11 @@ function ActivityFallback({ summary }: { summary: ActivitySummary | null }) {
 }
 
 export default function AnalyticsDashboardWidget(props: HostProps) {
-  return <DashboardWidgetContent key={props.projectId} {...props} />;
+  return <DashboardWidgetContent key={`${props.dashboardScope || "project"}:${props.projectId || "global"}`} {...props} />;
 }
 function DashboardWidgetContent(props: HostProps) {
   const appName = props.appName || "analytics";
+  const globalMode = props.dashboardScope === "global";
   const projectID = props.projectId || "";
   const full = props.widgetSize === "full";
   const showTrends = settingBoolean(props.widgetSettings, "show_trends", true);
@@ -534,23 +542,42 @@ function DashboardWidgetContent(props: HostProps) {
   const [fallback, setFallback] = useState<ActivitySummary | null>(
     props.preview ? PREVIEW_SUMMARY : null,
   );
+  const [globalSummary, setGlobalSummary] = useState<GlobalSummary | null>(null);
+  const [selectedGlobalProject, setSelectedGlobalProject] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const getJSON = useCallback(
     async <T,>(path: string): Promise<T> => {
-      const response = await fetch(scopedAppURL(`${api}${path}`, projectID), {
+      const scopedPath = globalMode ? `${api}${path}` : scopedAppURL(`${api}${path}`, projectID);
+      const response = await fetch(scopedPath, {
         credentials: "same-origin",
       });
       if (!response.ok)
         throw new Error((await response.text()).trim() || response.statusText);
       return response.json();
     },
-    [api, projectID],
+    [api, globalMode, projectID],
   );
 
+  useEffect(() => {
+    if (!globalMode || props.preview) return;
+    let cancelled = false;
+    const since = Date.now() - 24 * 3600_000;
+    void getJSON<GlobalSummary>(
+      `/global-summary?since=${since}&limit=6${selectedGlobalProject ? `&project_id=${encodeURIComponent(selectedGlobalProject)}` : ""}`,
+    ).then((summary) => {
+      if (cancelled) return;
+      setGlobalSummary(summary);
+      setFallback(summary);
+    }).catch((reason) => {
+      if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { cancelled = true; };
+  }, [getJSON, globalMode, props.preview, selectedGlobalProject]);
+
   const loadDashboards = useCallback(async () => {
-    if (!projectID || props.preview) return;
+    if (globalMode || !projectID || props.preview) return;
     const sequence = ++listSequence.current;
     try {
       const result = await getJSON<{ dashboards: Dashboard[] }>("/dashboards");
@@ -579,14 +606,14 @@ function DashboardWidgetContent(props: HostProps) {
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     }
-  }, [getJSON, preferredDashboardID, projectID, props.preview, storageKey]);
+  }, [getJSON, globalMode, preferredDashboardID, projectID, props.preview, storageKey]);
 
   useEffect(() => {
     void loadDashboards();
   }, [loadDashboards]);
 
   useEffect(() => {
-    if (!dashboardID || !projectID || props.preview) return;
+    if (globalMode || !dashboardID || !projectID || props.preview) return;
     const sequence = ++dashboardSequence.current;
     querySequence.current++;
     try {
@@ -610,7 +637,7 @@ function DashboardWidgetContent(props: HostProps) {
       .finally(() => {
         if (sequence === dashboardSequence.current) setLoading(false);
       });
-  }, [dashboardID, getJSON, projectID, props.preview, storageKey]);
+  }, [dashboardID, getJSON, globalMode, projectID, props.preview, storageKey]);
 
   const filters = dashboard?.config?.filters ?? [];
   useEffect(() => {
@@ -666,7 +693,7 @@ function DashboardWidgetContent(props: HostProps) {
   );
 
   const refresh = useCallback(async () => {
-    if (!dashboard || !projectID || props.preview) return;
+    if (globalMode || !dashboard || !projectID || props.preview) return;
     const sequence = ++querySequence.current;
     try {
       const payload = await getJSON<{
@@ -689,6 +716,7 @@ function DashboardWidgetContent(props: HostProps) {
     dashboard,
     filterValues,
     getJSON,
+    globalMode,
     projectID,
     props.preview,
     showGoals,
@@ -706,7 +734,7 @@ function DashboardWidgetContent(props: HostProps) {
     queuedRefresh();
   }, [props.eventRevision, queuedRefresh]);
   useEffect(() => {
-    if (props.preview) return;
+    if (globalMode || props.preview) return;
     const timer = window.setInterval(async () => {
       if (document.visibilityState === "hidden") return;
       await loadDashboards();
@@ -728,12 +756,12 @@ function DashboardWidgetContent(props: HostProps) {
       dashboardSequence.current++;
       listSequence.current++;
     };
-  }, [props.preview, dashboardID, getJSON, loadDashboards]);
+  }, [globalMode, props.preview, dashboardID, getJSON, loadDashboards]);
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded border border-border bg-bg-card">
       <header className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-3">
-        <div className="min-w-0">
+          <div className="min-w-0">
           <div className="flex items-center gap-2">
             <h2 className="truncate text-sm font-bold text-text">
               {dashboard?.name || "Analytics"}
@@ -745,8 +773,21 @@ function DashboardWidgetContent(props: HostProps) {
           <p className="mt-0.5 truncate text-[10px] text-text-dim">
             {dashboard?.description || "Project activity and saved metrics"}
           </p>
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-2">
+          </div>
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+          {globalMode && globalSummary?.projects?.length ? (
+            <select
+              aria-label="Analytics project"
+              value={selectedGlobalProject}
+              onChange={(event) => setSelectedGlobalProject(event.target.value)}
+              className="max-w-40 rounded border border-border bg-bg-input px-2 py-1 text-[10px] text-text"
+            >
+              <option value="">All projects</option>
+              {globalSummary.projects.map((project) => (
+                <option key={project.id} value={project.id}>{project.name || project.id}</option>
+              ))}
+            </select>
+          ) : null}
           {dashboards.length > 1 && (
             <select
               aria-label="Analytics dashboard"

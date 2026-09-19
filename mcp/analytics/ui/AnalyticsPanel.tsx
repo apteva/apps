@@ -99,7 +99,7 @@ interface Dimensions {
 interface DashboardWidget {
   id: number;
   dashboard_id?: number;
-  type: "stat" | "timeseries" | "top" | "breakdown" | "feed";
+  type: "stat" | "timeseries" | "top" | "breakdown" | "feed" | "table";
   title: string;
   position: number;
   config: Record<string, unknown>;
@@ -1884,6 +1884,10 @@ function WidgetView({
         value: p.value,
       }))}
     />
+  ) : widget.type === "table" ? (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm"><thead><tr className="text-left text-text-dim"><th className="pb-2">{data.by}</th><th className="pb-2 text-right">{data.aggregation}</th><th className="pb-2 text-right">Rows</th></tr></thead><tbody>{(data.rows ?? []).map((row: any) => <tr key={String(row.group)} className="border-t border-border"><td className="py-2 text-text">{row.group}</td><td className="py-2 text-right tabular-nums text-text">{formatMetric(row.value, metricConfig)}</td><td className="py-2 text-right tabular-nums text-text-dim">{row.count}</td></tr>)}</tbody></table>
+    </div>
   ) : widget.type === "feed" ? (
     <EventFeed rows={data.events ?? []} />
   ) : (
@@ -2347,6 +2351,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
                 <option value="top">Top values</option>
                 <option value="breakdown">Breakdown</option>
                 <option value="feed">Feed</option>
+                <option value="table">Metric table</option>
               </select>
             </div>
             {filterList(selected).length > 0 && (

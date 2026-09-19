@@ -659,6 +659,30 @@ func evaluateWidgetUncached(db sqlRunner, projectID string, w DashboardWidget, s
 		}
 	}
 	limit := intConfig(cfg, "limit", 10)
+	if metric, ok, err := metricFromConfig(db, projectID, cfg); err != nil {
+		return nil, err
+	} else if ok {
+		switch w.Type {
+		case "stat":
+			value, err := evaluateMetric(db, projectID, metric, f, map[string]bool{})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"type": w.Type, "value": value, "aggregation": "calculated", "metric": metric.Key, "unit": metric.Unit, "format": metric.Format, "currency": metric.Currency}, nil
+		case "timeseries":
+			rows, err := metricSeries(db, projectID, metric, f, stringConfig(cfg, "interval", "day"))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"type": w.Type, "series": rows, "aggregation": "calculated", "metric": metric.Key, "unit": metric.Unit, "format": metric.Format, "currency": metric.Currency}, nil
+		case "table":
+			rows, err := groupedCalculatedMetricRows(db, projectID, metric, f, stringConfig(cfg, "by", "project_id"), limit)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"type": w.Type, "rows": rows, "by": stringConfig(cfg, "by", "project_id"), "aggregation": "calculated", "metric": metric.Key, "unit": metric.Unit, "format": metric.Format, "currency": metric.Currency}, nil
+		}
+	}
 	switch w.Type {
 	case "stat":
 		aggregation, err := widgetAggregation(cfg)
@@ -711,6 +735,18 @@ func evaluateWidgetUncached(db sqlRunner, projectID string, w DashboardWidget, s
 			return nil, err
 		}
 		return map[string]any{"type": w.Type, "top": rows, "by": by}, nil
+	case "table":
+		by := stringConfig(cfg, "by", "")
+		value := stringConfig(cfg, "value", "")
+		aggregation, err := widgetAggregation(cfg)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := groupedMetricRows(db, f, by, value, aggregation, limit)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"type": w.Type, "rows": rows, "by": by, "value": value, "aggregation": aggregation}, nil
 	case "feed":
 		rows, err := queryRows(db, f, intConfig(cfg, "limit", 25))
 		if err != nil {
@@ -720,6 +756,61 @@ func evaluateWidgetUncached(db sqlRunner, projectID string, w DashboardWidget, s
 	default:
 		return nil, fmt.Errorf("unsupported widget type %q", w.Type)
 	}
+}
+
+// groupedMetricRows evaluates a numeric metric once per dimension. It is
+// read-only and supports project_id, standard event fields, and props.X.
+func groupedMetricRows(db sqlRunner, f Filter, by, value, aggregation string, limit int) ([]map[string]any, error) {
+	groupExpr, ok := dashboardGroupExpr(by)
+	if !ok || by == "" {
+		return nil, fmt.Errorf("table grouping requires a valid by field")
+	}
+	valueExpr, numericPredicate, ok := numericValueExtract(value)
+	if !ok || value == "" {
+		return nil, fmt.Errorf("table aggregation requires a numeric event field or props.X")
+	}
+	if aggregation != "sum" && aggregation != "average" && aggregation != "latest" {
+		return nil, fmt.Errorf("table supports sum, average, or latest aggregation")
+	}
+	where, args, err := f.buildWhere()
+	if err != nil {
+		return nil, err
+	}
+	base := " FROM events WHERE " + numericPredicate + " AND " + valueExpr + " IS NOT NULL"
+	if where != "" {
+		base += " AND " + where
+	}
+	var query string
+	if aggregation == "latest" {
+		query = "WITH ranked AS (SELECT " + groupExpr + " AS group_value, CAST(" + valueExpr + " AS REAL) AS value, ts, id, ROW_NUMBER() OVER (PARTITION BY " + groupExpr + " ORDER BY ts DESC, id DESC) AS rn" + base + ") SELECT group_value, value, 1 AS count FROM ranked WHERE rn=1 ORDER BY value DESC LIMIT ?"
+	} else {
+		fn := "SUM"
+		if aggregation == "average" {
+			fn = "AVG"
+		}
+		query = "SELECT " + groupExpr + " AS group_value, " + fn + "(CAST(" + valueExpr + " AS REAL)) AS value, COUNT(*) AS count" + base + " GROUP BY group_value ORDER BY value DESC LIMIT ?"
+	}
+	args = append(args, limit)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var group sql.NullString
+		var number sql.NullFloat64
+		var count int64
+		if err := rows.Scan(&group, &number, &count); err != nil {
+			return nil, err
+		}
+		label := "(none)"
+		if group.Valid && group.String != "" {
+			label = group.String
+		}
+		out = append(out, map[string]any{"group": label, "value": number.Float64, "count": count})
+	}
+	return out, rows.Err()
 }
 
 // addPreviousPeriodComparison enriches a stat without changing its primary
@@ -1454,6 +1545,8 @@ func defaultWidgetTitle(typ string) string {
 		return "Top Values"
 	case "breakdown":
 		return "Breakdown"
+	case "table":
+		return "Metric Table"
 	case "feed":
 		return "Live Feed"
 	default:

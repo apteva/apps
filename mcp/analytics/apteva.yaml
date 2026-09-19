@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.15.1
+version: 0.16.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -99,13 +99,17 @@ description: |
   allowed values, and event-spec updates preserve omitted policies and
   properties unless clearing is explicit.
 
+  v0.16 adds persisted calculated metrics with validated arithmetic,
+  weighted sources, period context, grouped metric tables, and read-only
+  global evaluation over projects visible to a global install.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
 icon: /ui/icon.svg
 icon_style: monochrome
 tags: [analytics, events, observability]
 
-scopes: [global]
+scopes: [project, global]
 min_apteva_version: "0.10.0"
 
 requires:
@@ -238,6 +242,7 @@ provides:
       description: Live saved metrics, trends, and project activity from any Analytics dashboard.
       entry: /ui/AnalyticsDashboardWidget.mjs
       slots: [dashboard.home]
+      dashboard_scopes: [project, global]
       suggested: true
       visibility: project
       supported_sizes: [half, full]
@@ -271,7 +276,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.15.1
+    ref: analytics/v0.16.0
     entry: mcp/analytics
   port: 8080
   health_check: /health

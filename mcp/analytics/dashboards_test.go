@@ -52,6 +52,27 @@ func TestDashboardNumericAggregationRejectsTextValues(t *testing.T) {
 	}
 }
 
+func TestGroupedMetricTableAggregatesByProjectAndSupportsLatest(t *testing.T) {
+	db := testDashboardDB(t)
+	for _, event := range []EventInsert{
+		{TS: 1000, App: "finance", Topic: "revenue", ProjectID: "p1", Source: "test", Props: `{"amount":10}`},
+		{TS: 2000, App: "finance", Topic: "revenue", ProjectID: "p1", Source: "test", Props: `{"amount":30}`},
+		{TS: 1500, App: "finance", Topic: "revenue", ProjectID: "p2", Source: "test", Props: `{"amount":20}`},
+	} {
+		if _, err := insertEvent(db, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := groupedMetricRows(db, Filter{App: "finance", Topic: "revenue"}, "project_id", "props.amount", "sum", 10)
+	if err != nil || len(rows) != 2 || rows[0]["value"] != 40.0 {
+		t.Fatalf("sum rows=%#v err=%v", rows, err)
+	}
+	rows, err = groupedMetricRows(db, Filter{App: "finance", Topic: "revenue"}, "project_id", "props.amount", "latest", 10)
+	if err != nil || len(rows) != 2 || rows[0]["value"] != 30.0 {
+		t.Fatalf("latest rows=%#v err=%v", rows, err)
+	}
+}
+
 func TestDashboardCompositeIndexMigration(t *testing.T) {
 	db := testDashboardDB(t)
 	var name string
