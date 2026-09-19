@@ -9,6 +9,13 @@ export type MapAssignment = {
   schedule?: { kind: string };
   owner_agent_id?: number;
 };
+export type MapTrigger = {
+  id: string;
+  status: string;
+  config?: { name?: string; topic?: string };
+  sync_pending?: boolean;
+  subscription_enabled?: boolean;
+};
 export type MapProcess = {
   id: string;
   name: string;
@@ -19,6 +26,7 @@ export type MapProcess = {
   version: number;
   steps?: Step[];
   assignments?: MapAssignment[];
+  triggers?: MapTrigger[];
 };
 export type MapRun = {
   id: string;
@@ -103,11 +111,11 @@ function shape(
     const lane = (breadth - group.length) / 2 + group.indexOf(s);
     positions[s.key] = {
       x: 22 + (vertical ? lane : rank) * (STEP_WIDTH + 64),
-      y: 108 + (vertical ? rank : lane) * (stepHeight + 64),
+      y: 130 + (vertical ? rank : lane) * (stepHeight + 64),
     };
   }
   const width = 44 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64;
-  let height = 130 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
+  let height = 152 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
   const other = supplementalRuns(process, runs);
   const columns = Math.max(1, Math.floor((width - 40) / (STEP_WIDTH + 16)));
   const runWidth = (width - 44 - (columns - 1) * 16) / columns;
