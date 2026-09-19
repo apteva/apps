@@ -354,6 +354,22 @@ func maxBatchRows(ctx *sdk.AppCtx) int {
 	return int(cfgInt64Range(ctx, "max_batch_rows", 1000, 1, 10_000))
 }
 
+func maxBatchOperations(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_operations", 32, 1, 256))
+}
+
+func maxBatchMs(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_ms", 10_000, 1, 300_000))
+}
+
+func maxBatchResultRows(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_result_rows", 10_000, 1, 1_000_000))
+}
+
+func maxBatchResultBytes(ctx *sdk.AppCtx) int64 {
+	return cfgInt64Range(ctx, "max_batch_result_bytes", 16<<20, 1024, 256<<20)
+}
+
 func cfgInt64Range(ctx *sdk.AppCtx, key string, def, min, max int64) int64 {
 	v := ctx.Config().Get(key)
 	if v == "" {

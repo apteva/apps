@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -73,6 +74,93 @@ func TestTablesCreate_AndDescribe(t *testing.T) {
 	}
 	if cols[0].Name != "title" || cols[0].Nullable {
 		t.Errorf("first column should be non-nullable title, got %+v", cols[0])
+	}
+}
+
+func TestTablesBatch_DependentReadsAndBestEffortErrors(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "customers",
+		"columns": []any{map[string]any{"name": "name", "type": "text", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "orders",
+		"columns": []any{map[string]any{"name": "customer_id", "type": "number", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "customers", "rows": []any{map[string]any{"name": "Ada"}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "orders", "rows": []any{
+			map[string]any{"customer_id": 1.0}, map[string]any{"customer_id": 2.0},
+		},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "best_effort",
+		"operations": []any{
+			map[string]any{"id": "customer", "operation": "rows_get", "args": map[string]any{"table": "customers", "id": 1}},
+			map[string]any{"id": "orders", "operation": "rows_search", "args": map[string]any{
+				"table": "orders", "where": []any{map[string]any{"col": "customer_id", "op": "eq", "value": map[string]any{"$ref": "customer.row.id"}}},
+			}},
+			map[string]any{"id": "missing", "operation": "rows_count", "args": map[string]any{"table": "does_not_exist"}},
+		},
+	})
+	if out["mode"] != "best_effort" {
+		t.Fatalf("mode=%v", out["mode"])
+	}
+	results := out["results"].(map[string]any)
+	if results["customer"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("customer result=%v", results["customer"])
+	}
+	orders := results["orders"].(map[string]any)
+	if orders["status"] != "ok" || len(orders["result"].(map[string]any)["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("orders result=%v", orders)
+	}
+	if results["missing"].(map[string]any)["status"] != "error" {
+		t.Fatalf("missing result=%v", results["missing"])
+	}
+}
+
+func TestTablesBatch_WriteTransactionRollsBackAllOperations(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "events",
+		"columns": []any{map[string]any{"name": "title", "type": "text", "nullable": false}},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "write_transaction",
+		"operations": []any{
+			map[string]any{"id": "first", "operation": "rows_insert", "args": map[string]any{"table": "events", "rows": []any{map[string]any{"title": "one"}}}},
+			map[string]any{"id": "second", "operation": "rows_insert", "args": map[string]any{"table": "events", "rows": []any{map[string]any{"unknown": "fails"}}}},
+		},
+	})
+	results := out["results"].(map[string]any)
+	t.Logf("transaction results: %#v", results)
+	if results["second"].(map[string]any)["status"] != "error" {
+		t.Fatalf("expected failing operation, got %v", results["second"])
+	}
+	if results["first"].(map[string]any)["status"] != "rolled_back" {
+		t.Fatalf("expected rollback status, got %v", results["first"])
+	}
+	count := mustCall(t, app, ctx, "rows_count", map[string]any{"table": "events"})
+	if count["count"].(int64) != 0 {
+		t.Fatalf("transaction leaked rows: %v", count)
+	}
+}
+
+func TestTablesBatch_RejectsCycles(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	_, err := callTool(app, ctx, "tables_batch", map[string]any{
+		"operations": []any{
+			map[string]any{"id": "a", "operation": "tables_list", "args": map[string]any{"summary": map[string]any{"$ref": "b.tables"}}},
+			map[string]any{"id": "b", "operation": "tables_list", "args": map[string]any{"summary": map[string]any{"$ref": "a.tables"}}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected dependency cycle error, got %v", err)
 	}
 }
 

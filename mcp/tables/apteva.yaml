@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.21
+version: 0.1.22
 description: |
+  v0.1.22 Adds a generic bounded batch executor with typed operation
+  validation, dependency references, best-effort reads, and atomic row-write
+  transactions.
   v0.1.21 Accepts legacy unquoted text defaults during schema loading and resumable upgrades, preserving row data and existing metadata. Non-text invalid defaults retain actionable errors.
 
   v0.1.20 Adds correlated read diagnostics, query fingerprints, pool and phase timings, and deadline-overrun reporting without changing SQL timeouts or read concurrency.
@@ -75,6 +78,8 @@ provides:
       description: 'Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.'
     - name: tables_query
       description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced.'
+    - name: tables_batch
+      description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports dependency references with {$ref: operation.path}; returns per-operation status and errors.'
   ui_panels:
     - slot: project.page
       label: Tables
@@ -137,7 +142,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.21
+    ref: tables/v0.1.22
     entry: mcp/tables
   port: 8080
   health_check: /health
@@ -202,6 +207,10 @@ config_schema:
     default: "1000"
     label: Max rows per write batch
     description: Maximum rows accepted by rows_insert or rows_upsert in one atomic call.
+  - { name: max_batch_operations, type: text, default: "32", label: Maximum operations per batch }
+  - { name: max_batch_ms, type: text, default: "10000", label: Maximum batch execution time (ms) }
+  - { name: max_batch_result_rows, type: text, default: "10000", label: Maximum rows returned by one batch }
+  - { name: max_batch_result_bytes, type: text, default: "16777216", label: Maximum serialized batch result bytes }
 
 imports:
   sources:
