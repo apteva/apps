@@ -87,8 +87,112 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/admin/")
+	environment := normalizeEnvironment(r.URL.Query().Get("environment"))
+	if path == "schemas" && r.Method == http.MethodGet {
+		rows, err := listSchemas(a.ctx.AppReadDB(), project, environment)
+		if err != nil {
+			writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
+			return
+		}
+		out := make([]map[string]any, 0, len(rows))
+		for i := range rows {
+			out = append(out, publicSchema(&rows[i]))
+		}
+		writeJSON(w, map[string]any{"schemas": out, "count": len(out)})
+		return
+	}
+	if path == "schema/validate" && r.Method == http.MethodPost {
+		var body struct {
+			SDL string `json:"sdl"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+			return
+		}
+		_, validationErrors := validateSDL(body.SDL)
+		writeJSON(w, map[string]any{"valid": len(validationErrors) == 0, "validation_errors": validationErrors})
+		return
+	}
+	if path == "sources" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		if r.Method == http.MethodGet {
+			rows, err := listSources(a.ctx.AppReadDB(), project)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
+				return
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, row := range rows {
+				out = append(out, publicSource(row))
+			}
+			writeJSON(w, map[string]any{"sources": out, "count": len(out)})
+			return
+		}
+		var body struct {
+			Name   string         `json:"name"`
+			Kind   string         `json:"kind"`
+			Config map[string]any `json:"config"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+			return
+		}
+		row, err := createSource(a.ctx.AppDB(), project, body.Name, body.Kind, body.Config)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, map[string]any{"source": publicSource(*row)})
+		return
+	}
+	if path == "resolvers" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		if r.Method == http.MethodGet {
+			rows, err := listResolvers(a.ctx.AppReadDB(), project)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
+				return
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, row := range rows {
+				source, _ := getSource(a.ctx.AppReadDB(), project, row.SourceID, "")
+				out = append(out, publicResolver(row, source))
+			}
+			writeJSON(w, map[string]any{"resolvers": out, "count": len(out)})
+			return
+		}
+		var body struct {
+			ParentType string         `json:"parent_type"`
+			FieldName  string         `json:"field_name"`
+			SourceID   int64          `json:"source_id"`
+			Source     string         `json:"source"`
+			Operation  string         `json:"operation"`
+			Config     map[string]any `json:"config"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+			return
+		}
+		if body.SourceID == 0 && strings.TrimSpace(body.Source) != "" {
+			source, findErr := getSource(a.ctx.AppReadDB(), project, 0, strings.TrimSpace(body.Source))
+			if findErr != nil {
+				writeJSONError(w, http.StatusInternalServerError, findErr.Error(), "storage_error")
+				return
+			}
+			if source == nil {
+				writeJSONError(w, http.StatusBadRequest, "source not found", "invalid_request")
+				return
+			}
+			body.SourceID = source.ID
+		}
+		row, err := upsertResolver(a.ctx.AppDB(), project, body.ParentType, body.FieldName, body.Operation, body.SourceID, body.Config)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
+			return
+		}
+		source, _ := getSource(a.ctx.AppReadDB(), project, row.SourceID, "")
+		writeJSON(w, map[string]any{"resolver": publicResolver(*row, source)})
+		return
+	}
 	if path == "schema" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
-		environment := normalizeEnvironment(r.URL.Query().Get("environment"))
 		if r.Method == http.MethodGet {
 			row, err := getSchema(a.ctx.AppReadDB(), project, environment, 0, false)
 			if err != nil {
