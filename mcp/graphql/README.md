@@ -48,7 +48,23 @@ Use `operation: "aggregate"` with a Database or Tables source and configure
 `groupBy`/`group_by` and `metrics`. The adapter delegates aggregation to the
 native source instead of scanning records in the GraphQL process.
 
-## Realtime
+## Execution performance (0.2.2)
+
+Independent root query fields execute concurrently (up to eight); mutation
+fields remain ordered. Compiled schemas and validated documents are cached,
+and resolver/source bindings are loaded once per request with a bounded
+one-second metadata cache. Scalar row projections avoid per-cell metadata
+lookups. Query results themselves are not cached.
+
+Small Tables read fan-outs use `tables_batch` (requires Tables 0.1.22 or newer).
+Reads whose summed requested limits exceed 500 use parallel individual calls.
+Rows-only queries skip total counts unless explicitly configured otherwise.
+Batching uses `best_effort`, not cross-table snapshot consistency.
+
+The release pins the latest published SDK, v0.81.0. Unreleased SDK app-call
+batch/inner-result changes are not required or included.
+
+## Realtime transport
 
 `/realtime` speaks the `graphql-transport-ws` framing. A subscription resolver
 can set `config.topic`; Tables row events are bridged automatically and trusted

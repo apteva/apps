@@ -5,8 +5,10 @@ import (
 	_ "embed"
 	"errors"
 	"net/http"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/vektah/gqlparser/v2/ast"
 )
 
 //go:embed apteva.yaml
@@ -15,9 +17,13 @@ var manifestYAML []byte
 // App is deliberately independent from the API gateway app. It owns the
 // GraphQL HTTP/WebSocket surface and calls source apps through PlatformAPI.
 type App struct {
-	httpClient *http.Client
-	hub        *subscriptionHub
-	ctx        *sdk.AppCtx
+	httpClient  *http.Client
+	hub         *subscriptionHub
+	ctx         *sdk.AppCtx
+	cacheMu     sync.RWMutex
+	schemaCache map[string]*ast.Schema
+	queryCache  map[string]*ast.QueryDocument
+	planCache   map[string]planCacheEntry
 }
 
 func main() { sdk.Run(&App{}) }
@@ -39,6 +45,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.ctx = ctx
 	a.hub = newSubscriptionHub()
+	a.schemaCache = make(map[string]*ast.Schema)
+	a.queryCache = make(map[string]*ast.QueryDocument)
+	a.planCache = make(map[string]planCacheEntry)
 	if project := ctx.CurrentProject(); project != "" {
 		if _, err := ensureDefaultGraphQLAPI(ctx.AppDB(), project); err != nil {
 			return err

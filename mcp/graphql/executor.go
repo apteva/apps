@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/vektah/gqlparser/v2/ast"
@@ -27,6 +29,55 @@ type executeResult struct {
 	OperationType string
 }
 
+const compiledCacheLimit = 256
+
+func (a *App) compiledSchema(key, sdl string) (*ast.Schema, []string) {
+	a.cacheMu.RLock()
+	schema := a.schemaCache[key]
+	a.cacheMu.RUnlock()
+	if schema != nil {
+		return schema, nil
+	}
+	compiled, validationErrors := validateSDL(sdl)
+	if len(validationErrors) != 0 {
+		return nil, validationErrors
+	}
+	a.cacheMu.Lock()
+	if a.schemaCache == nil {
+		a.schemaCache = make(map[string]*ast.Schema)
+	}
+	if a.queryCache == nil {
+		a.queryCache = make(map[string]*ast.QueryDocument)
+	}
+	if len(a.schemaCache) >= compiledCacheLimit {
+		a.schemaCache = make(map[string]*ast.Schema)
+		a.queryCache = make(map[string]*ast.QueryDocument)
+	}
+	a.schemaCache[key] = compiled
+	a.cacheMu.Unlock()
+	return compiled, nil
+}
+
+func (a *App) parsedQuery(key, query string, schema *ast.Schema) (*ast.QueryDocument, []string) {
+	a.cacheMu.RLock()
+	doc := a.queryCache[key]
+	a.cacheMu.RUnlock()
+	if doc != nil {
+		return doc, nil
+	}
+	parsed, validationErrors := parseAndValidateQuery(schema, query)
+	if len(validationErrors) != 0 {
+		return nil, validationErrors
+	}
+	a.cacheMu.Lock()
+	if a.queryCache == nil || len(a.queryCache) >= compiledCacheLimit*4 {
+		a.queryCache = make(map[string]*ast.QueryDocument)
+	}
+	a.queryCache[key] = parsed
+	a.cacheMu.Unlock()
+	return parsed, nil
+}
+
 func (a *App) execute(ctx context.Context, project, apiSlug, environment string, req graphqlRequest) (executeResult, error) {
 	if strings.TrimSpace(req.Query) == "" {
 		return executeResult{}, invalid("query is required")
@@ -41,11 +92,13 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if schemaRow == nil {
 		return executeResult{}, invalid("no published schema for environment %q", normalizeEnvironment(environment))
 	}
-	schema, schemaErrors := validateSDL(schemaRow.SDL)
+	schemaKey := project + "\x00" + apiSlug + "\x00" + normalizeEnvironment(environment) + "\x00" + fmt.Sprint(schemaRow.Version) + "\x00" + schemaRow.Hash
+	schema, schemaErrors := a.compiledSchema(schemaKey, schemaRow.SDL)
 	if len(schemaErrors) > 0 {
 		return executeResult{}, internal("published schema is invalid")
 	}
-	doc, queryErrors := parseAndValidateQuery(schema, req.Query)
+	queryKey := schemaKey + "\x00" + req.OperationName + "\x00" + req.Query
+	doc, queryErrors := a.parsedQuery(queryKey, req.Query, schema)
 	if len(queryErrors) > 0 {
 		return executeResult{Errors: errorObjects(queryErrors)}, nil
 	}
@@ -61,11 +114,60 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 		return executeResult{}, invalid("query depth %d exceeds limit %d", depth, maxQueryDepth(a.ctx))
 	}
 	rootType := operationType(op)
+	bindings, err := a.executionPlan(project, apiSlug)
+	if err != nil {
+		return executeResult{}, err
+	}
+	ctx = context.WithValue(ctx, executionBindingsKey{}, bindings)
 	data, err := a.executeSelection(ctx, project, apiSlug, rootType, nil, op.SelectionSet, req.Variables)
 	if err != nil {
 		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Errors: []map[string]any{{"message": err.Error(), "extensions": map[string]any{"code": errorCode(err)}}}}, nil
 	}
 	return executeResult{Data: data.(map[string]any), OperationName: op.Name, OperationType: string(op.Operation)}, nil
+}
+
+type executionBindingsKey struct{}
+type executionBindings struct {
+	resolvers map[string]resolverRecord
+	sources   map[int64]sourceRecord
+}
+
+type planCacheEntry struct {
+	bindings *executionBindings
+	expires  time.Time
+}
+
+func (a *App) executionPlan(project, apiSlug string) (*executionBindings, error) {
+	key := project + "\x00" + apiSlug
+	now := time.Now()
+	a.cacheMu.RLock()
+	entry, found := a.planCache[key]
+	a.cacheMu.RUnlock()
+	if found && entry.bindings != nil && now.Before(entry.expires) {
+		return entry.bindings, nil
+	}
+	resolvers, err := listResolversForAPI(a.ctx.AppReadDB(), project, apiSlug)
+	if err != nil {
+		return nil, err
+	}
+	sources, err := listSourcesForAPI(a.ctx.AppReadDB(), project, apiSlug)
+	if err != nil {
+		return nil, err
+	}
+	bindings := &executionBindings{resolvers: make(map[string]resolverRecord), sources: make(map[int64]sourceRecord)}
+	for _, resolver := range resolvers {
+		bindings.resolvers[resolver.ParentType+"."+resolver.FieldName] = resolver
+	}
+	for _, source := range sources {
+		bindings.sources[source.ID] = source
+	}
+	a.cacheMu.Lock()
+	if a.planCache == nil || len(a.planCache) >= compiledCacheLimit {
+		a.planCache = make(map[string]planCacheEntry)
+	}
+	a.planCache[key] = planCacheEntry{bindings: bindings, expires: now.Add(time.Second)}
+	a.cacheMu.Unlock()
+	return bindings, nil
 }
 
 func errorObjects(messages []string) []map[string]any {
@@ -106,7 +208,52 @@ func maxQueryComplexity(ctx *sdk.AppCtx) int {
 }
 
 func (a *App) executeSelection(ctx context.Context, project, apiSlug, parentType string, parentValue any, selection ast.SelectionSet, vars map[string]any) (any, error) {
+	// Only independent query roots run concurrently. Mutations retain order.
+	if parentValue == nil && parentType == "Query" && len(selection) > 1 {
+		if batched, remaining, ok, err := a.executeBatchedTableRoots(ctx, project, apiSlug, selection, vars); err != nil {
+			return nil, err
+		} else if ok {
+			if len(remaining) == 0 {
+				return batched, nil
+			}
+			other, err := a.executeSelection(ctx, project, apiSlug, parentType, nil, remaining, vars)
+			if err != nil {
+				return nil, err
+			}
+			for key, value := range other.(map[string]any) {
+				batched[key] = value
+			}
+			return batched, nil
+		}
+		values := make([]any, len(selection))
+		errors := make([]error, len(selection))
+		sem := make(chan struct{}, 8)
+		var wg sync.WaitGroup
+		for i, item := range selection {
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(i int, item ast.Selection) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				values[i], errors[i] = a.executeSelection(ctx, project, apiSlug, parentType, nil, ast.SelectionSet{item}, vars)
+			}(i, item)
+		}
+		wg.Wait()
+		result := map[string]any{}
+		for i, value := range values {
+			if errors[i] != nil {
+				return nil, errors[i]
+			}
+			for key, fieldValue := range value.(map[string]any) {
+				result[key] = fieldValue
+			}
+		}
+		return result, nil
+	}
 	if list, ok := parentValue.([]any); ok {
+		if projected, ok := projectScalarRows(ctx, parentType, list, selection); ok {
+			return projected, nil
+		}
 		out := make([]any, 0, len(list))
 		for _, item := range list {
 			value, err := a.executeSelection(ctx, project, apiSlug, parentType, item, selection, vars)
@@ -119,6 +266,13 @@ func (a *App) executeSelection(ctx context.Context, project, apiSlug, parentType
 	}
 	if parentValue != nil {
 		if records, ok := parentValue.([]map[string]any); ok {
+			rows := make([]any, len(records))
+			for i := range records {
+				rows[i] = records[i]
+			}
+			if projected, ok := projectScalarRows(ctx, parentType, rows, selection); ok {
+				return projected, nil
+			}
 			out := make([]any, 0, len(records))
 			for _, item := range records {
 				value, err := a.executeSelection(ctx, project, apiSlug, parentType, item, selection, vars)
@@ -149,7 +303,15 @@ func (a *App) executeSelection(ctx context.Context, project, apiSlug, parentType
 		if parentMap, ok := parentValue.(map[string]any); ok {
 			value = parentMap[field.Name]
 		}
-		resolver, resolverErr := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, parentType, field.Name)
+		var resolver *resolverRecord
+		var resolverErr error
+		if bindings, ok := ctx.Value(executionBindingsKey{}).(*executionBindings); ok {
+			if found, exists := bindings.resolvers[parentType+"."+field.Name]; exists {
+				resolver = &found
+			}
+		} else {
+			resolver, resolverErr = getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, parentType, field.Name)
+		}
 		if resolverErr != nil {
 			return nil, resolverErr
 		}
@@ -173,8 +335,176 @@ func (a *App) executeSelection(ctx context.Context, project, apiSlug, parentType
 	return result, nil
 }
 
+// projectScalarRows is the hot path for Tables results. Tables has already
+// materialized row maps, so walking the GraphQL selection once per row is
+// unnecessary when the selection contains only scalar fields. Resolver-backed
+// or nested fields deliberately fall back to the general executor.
+func projectScalarRows(ctx context.Context, parentType string, rows []any, selection ast.SelectionSet) ([]any, bool) {
+	bindings, hasBindings := ctx.Value(executionBindingsKey{}).(*executionBindings)
+	if !hasBindings {
+		return nil, false
+	}
+	fields := make([]*ast.Field, 0, len(selection))
+	for _, item := range selection {
+		field, ok := item.(*ast.Field)
+		if !ok || len(field.SelectionSet) > 0 {
+			return nil, false
+		}
+		if field.Name != "__typename" {
+			if _, hasResolver := bindings.resolvers[parentType+"."+field.Name]; hasResolver {
+				return nil, false
+			}
+		}
+		fields = append(fields, field)
+	}
+	out := make([]any, len(rows))
+	for i, raw := range rows {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		projected := make(map[string]any, len(fields))
+		for _, field := range fields {
+			key := field.Name
+			if field.Alias != "" {
+				key = field.Alias
+			}
+			if field.Name == "__typename" {
+				projected[key] = parentType
+			} else {
+				projected[key] = row[field.Name]
+			}
+		}
+		out[i] = projected
+	}
+	return out, true
+}
+
+// executeBatchedTableRoots combines independent Tables-backed root fields
+// into one tables_batch call. Fields backed by other source kinds are left for
+// the normal concurrent executor. This keeps the optimization transparent to
+// mixed-source queries and preserves the existing resolver semantics.
+func (a *App) executeBatchedTableRoots(ctx context.Context, project, apiSlug string, selection ast.SelectionSet, vars map[string]any) (map[string]any, ast.SelectionSet, bool, error) {
+	bindings, ok := ctx.Value(executionBindingsKey{}).(*executionBindings)
+	if !ok {
+		return nil, selection, false, nil
+	}
+	operations := make([]map[string]any, 0, len(selection))
+	fields := make([]*ast.Field, 0, len(selection))
+	remaining := make(ast.SelectionSet, 0, len(selection))
+	for _, item := range selection {
+		field, isField := item.(*ast.Field)
+		if !isField {
+			remaining = append(remaining, item)
+			continue
+		}
+		resolver, hasResolver := bindings.resolvers["Query."+field.Name]
+		source, hasSource := bindings.sources[resolver.SourceID]
+		if !hasResolver || !hasSource || source.Kind != "tables" {
+			remaining = append(remaining, item)
+			continue
+		}
+		operation, args, supported := tablesBatchInput(source, resolver, field, vars)
+		if !supported {
+			remaining = append(remaining, item)
+			continue
+		}
+		opID := fmt.Sprintf("op%d", len(operations))
+		operations = append(operations, map[string]any{"id": opID, "operation": operation, "args": args})
+		fields = append(fields, field)
+	}
+	if len(operations) < 2 {
+		return nil, selection, false, nil
+	}
+	// For large result sets, independent calls are faster than the current
+	// batch envelope because they stream and decode concurrently. Reserve the
+	// batch path for small fan-outs where envelope overhead is negligible.
+	totalLimit := 0
+	for _, operation := range operations {
+		args, _ := operation["args"].(map[string]any)
+		limit := 100
+		switch value := args["limit"].(type) {
+		case int:
+			limit = value
+		case int64:
+			limit = int(value)
+		case float64:
+			limit = int(value)
+		}
+		if limit > 0 {
+			totalLimit += limit
+		}
+	}
+	if totalLimit > 500 {
+		return nil, selection, false, nil
+	}
+	input := map[string]any{"mode": "best_effort", "operations": operations, "_project_id": project}
+	var out map[string]any
+	if err := a.ctx.WithProject(project).PlatformAPI().CallAppResult("tables", "tables_batch", input, &out); err != nil {
+		return nil, nil, true, err
+	}
+	results, _ := out["results"].(map[string]any)
+	data := make(map[string]any, len(fields))
+	for i, field := range fields {
+		opID := fmt.Sprintf("op%d", i)
+		id := field.Name
+		if field.Alias != "" {
+			id = field.Alias
+		}
+		entry, _ := results[opID].(map[string]any)
+		if status, _ := entry["status"].(string); status != "ok" {
+			if detail, ok := entry["error"].(map[string]any); ok {
+				if message, _ := detail["message"].(string); message != "" {
+					return nil, nil, true, fmt.Errorf("tables batch operation %s: %s", id, message)
+				}
+			}
+			if message, _ := entry["error"].(string); message != "" {
+				return nil, nil, true, fmt.Errorf("tables batch operation %s: %s", id, message)
+			}
+			return nil, nil, true, fmt.Errorf("tables batch operation %s failed", id)
+		}
+		value := unwrapSourceResult(bindings.resolvers["Query."+field.Name].Operation, entry["result"])
+		if len(field.SelectionSet) > 0 && value != nil {
+			var err error
+			value, err = a.executeSelection(ctx, project, apiSlug, field.Definition.Type.NamedType, value, field.SelectionSet, vars)
+			if err != nil {
+				return nil, nil, true, err
+			}
+		}
+		data[id] = value
+	}
+	return data, remaining, true, nil
+}
+
+func tablesBatchInput(source sourceRecord, resolver resolverRecord, field *ast.Field, vars map[string]any) (string, map[string]any, bool) {
+	args := field.ArgumentMap(vars)
+	config := mergeMaps(source.Config, resolver.Config)
+	input := tablesReadInput(config, args)
+	operation := strings.ToLower(resolver.Operation)
+	switch operation {
+	case "find", "list":
+		return "rows_search", input, true
+	case "count":
+		return "rows_count", input, true
+	case "aggregate":
+		return "rows_aggregate", input, true
+	case "get":
+		return "rows_get", input, true
+	default:
+		return "", nil, false
+	}
+}
+
 func (a *App) resolveField(ctx context.Context, project, apiSlug string, resolver resolverRecord, parent any, field *ast.Field, vars map[string]any) (any, error) {
-	source, err := getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
+	var source *sourceRecord
+	var err error
+	if bindings, ok := ctx.Value(executionBindingsKey{}).(*executionBindings); ok {
+		if found, exists := bindings.sources[resolver.SourceID]; exists {
+			source = &found
+		}
+	} else {
+		source, err = getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -258,8 +588,26 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 
 func (a *App) callTables(ctx context.Context, operation string, config map[string]any) (any, error) {
 	args := resolverArgs(config)
-	input := sourceInput(config, args, "table", "where", "select", "order_by", "limit", "offset", "metrics", "group_by", "orderBy", "groupBy")
+	input := tablesReadInput(config, args)
 	input["_project_id"] = config["_project_id"]
+	tool := "rows_" + strings.ToLower(operation)
+	if operation == "find" || operation == "list" {
+		tool = "rows_search"
+	}
+	var out any
+	if err := a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI().CallAppResult("tables", tool, input, &out); err != nil {
+		return nil, err
+	}
+	return unwrapSourceResult(operation, out), nil
+}
+
+// Both dispatch paths must use identical filter, ordering and projection inputs.
+// GraphQL list fields return rows, not pagination totals, so counting is opt-in.
+func tablesReadInput(config, args map[string]any) map[string]any {
+	input := sourceInput(config, args, "table", "where", "select", "order_by", "limit", "offset", "metrics", "group_by", "orderBy", "groupBy", "id", "key", "include_total", "cursor", "hydrate_files")
+	if _, exists := input["include_total"]; !exists {
+		input["include_total"] = false
+	}
 	if _, ok := input["group_by"]; !ok {
 		if value, exists := input["groupBy"]; exists {
 			input["group_by"] = value
@@ -270,15 +618,7 @@ func (a *App) callTables(ctx context.Context, operation string, config map[strin
 			input["order_by"] = value
 		}
 	}
-	tool := "rows_" + strings.ToLower(operation)
-	if operation == "find" || operation == "list" {
-		tool = "rows_search"
-	}
-	var out any
-	if err := a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI().CallAppResult("tables", tool, input, &out); err != nil {
-		return nil, err
-	}
-	return unwrapSourceResult(operation, out), nil
+	return input
 }
 
 func (a *App) callFunction(ctx context.Context, config map[string]any, args map[string]any) (any, error) {
