@@ -777,10 +777,11 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, msg)
 }
 
-// appCtx recovers the mounted AppCtx for HTTP handlers. The SDK routes
-// carry it via closure at mount time in richer setups; keeping a single
-// accessor makes the seam explicit and testable.
-func (a *App) appCtx(_ *http.Request) *sdk.AppCtx { return mountedCtx }
+// appCtx derives request-scoped platform credentials for signed-in browser
+// requests while preserving the mounted service context for every other
+// caller. Request-scoped contexts must never replace mountedCtx because
+// background work continues to use the app's service identity.
+func (a *App) appCtx(r *http.Request) *sdk.AppCtx { return mountedCtx.WithUserSession(r) }
 
 var mountedCtx *sdk.AppCtx
 

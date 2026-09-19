@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.23 — 2026-09-19
+
+- Preserve the mounted app service identity for background and cookieless HTTP work while deriving request-scoped platform credentials for signed-in browser requests.
+- Restore browser-session propagation through the generic artifact pipeline, with regression coverage proving the mounted context is never replaced.
+
 ## 0.23.22 — 2026-09-18
 
 - Rebuild the manifest-loaded `AgentConversationsWidget.mjs` so the generic `show_page_context: false` presentation setting shipped in 0.23.21 is honored at runtime.
