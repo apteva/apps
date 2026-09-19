@@ -24,6 +24,8 @@ import {
   runColor,
   runLabel,
   STEP_WIDTH,
+  ENDPOINT_WIDTH,
+  ENDPOINT_HEIGHT,
   type MapProcess,
   type MapRun,
   type MapTrigger,
@@ -152,6 +154,32 @@ function MapStep({ data }: NodeProps<Node<StepData>>) {
     </div>
   );
 }
+function MapEndpoint({ data }: NodeProps<Node<{ label: string; end?: boolean; title?: string; vertical?: boolean }>>) {
+  const vertical = !!data.vertical;
+  return (
+    <div
+      className={`pm-endpoint ${data.end ? "end" : ""}`}
+      title={data.title || data.label}
+    >
+      {data.end && (
+        <Handle
+          type="target"
+          position={vertical ? Position.Top : Position.Left}
+          isConnectable={false}
+        />
+      )}
+      <span>{data.end ? "✓" : "▶"}</span>
+      <strong>{data.label}</strong>
+      {!data.end && (
+        <Handle
+          type="source"
+          position={vertical ? Position.Bottom : Position.Right}
+          isConnectable={false}
+        />
+      )}
+    </div>
+  );
+}
 type RunCardData = {
   run: MapRun;
   process: MapProcess;
@@ -181,7 +209,12 @@ function RunCard({ data }: NodeProps<Node<RunCardData>>) {
     </button>
   );
 }
-const nodeTypes = { sop: Boundary, sopStep: MapStep, sopRun: RunCard };
+const nodeTypes = {
+  sop: Boundary,
+  sopStep: MapStep,
+  sopRun: RunCard,
+  sopEndpoint: MapEndpoint,
+};
 function apiURL(props: Props, path: string) {
   const q = new URLSearchParams();
   if (props.projectId) q.set("project_id", props.projectId);
@@ -351,6 +384,74 @@ export default function ProjectMap(props: Props) {
         },
         selectable: false,
       });
+      const steps = p.steps || [];
+      if (steps.length) {
+        const byKey = new Set(steps.map((step) => step.key));
+        const used = new Set(
+          steps.flatMap((step) => step.depends_on.filter((key) => byKey.has(key))),
+        );
+        const roots = steps.filter(
+          (step) => !step.depends_on.some((key) => byKey.has(key)),
+        );
+        const terminals = steps.filter((step) => !used.has(step.key));
+        const triggerTopics = (p.triggers || [])
+          .map((trigger) => trigger.config?.topic || trigger.config?.name)
+          .filter(Boolean) as string[];
+        const startLabel =
+          triggerTopics.length === 1
+            ? triggerTopics[0]
+            : triggerTopics.length
+              ? `${triggerTopics.length} event triggers`
+              : "Run starts";
+        const startID = `${parentId}:start`;
+        const endID = `${parentId}:end`;
+        nodes.push(
+          {
+            id: startID,
+            parentId,
+            extent: "parent",
+            type: "sopEndpoint",
+            position: box.endpointPositions.start,
+            style: { width: ENDPOINT_WIDTH, height: ENDPOINT_HEIGHT },
+            zIndex: 2,
+            data: {
+              label: startLabel,
+              title: triggerTopics.join(" · ") || "A manual or scheduled run starts here",
+              vertical: box.vertical,
+            },
+          },
+          {
+            id: endID,
+            parentId,
+            extent: "parent",
+            type: "sopEndpoint",
+            position: box.endpointPositions.end,
+            style: { width: ENDPOINT_WIDTH, height: ENDPOINT_HEIGHT },
+            zIndex: 2,
+            data: { label: "Run complete", end: true, vertical: box.vertical },
+          },
+        );
+        for (const root of roots)
+          edges.push({
+            id: `${startID}:${root.key}`,
+            source: startID,
+            target: `${parentId}:${root.key}`,
+            type: "smoothstep",
+            zIndex: 1,
+            markerEnd: { type: MarkerType.ArrowClosed, color: "var(--pf-edge)" },
+            style: { stroke: "var(--pf-edge)", strokeWidth: 1.5, strokeDasharray: "5 5" },
+          });
+        for (const terminal of terminals)
+          edges.push({
+            id: `${parentId}:${terminal.key}:${endID}`,
+            source: `${parentId}:${terminal.key}`,
+            target: endID,
+            type: "smoothstep",
+            zIndex: 1,
+            markerEnd: { type: MarkerType.ArrowClosed, color: "var(--pf-edge)" },
+            style: { stroke: "var(--pf-edge)", strokeWidth: 1.5, strokeDasharray: "5 5" },
+          });
+      }
       for (const step of p.steps || []) {
         const id = `${parentId}:${step.key}`;
         nodes.push({
@@ -645,6 +746,7 @@ const styles = `
 .pm .pm-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--pc-muted,#9aa8b9);margin:12px 0}
 .pm-workspace{position:relative;min-width:0}.pm-canvas{height:clamp(480px,72vh,1000px);border:1px solid var(--pf-border);border-radius:12px;overflow:hidden;background:var(--pc-bg,#10151d)}
 .pm .react-flow__node-sop{border:none;background:none;border-radius:14px;z-index:0}.pm-boundary{height:100%;border:1.25px solid var(--pf-border);border-radius:14px;background:color-mix(in srgb,var(--pc-panel,#1b2430) 88%,var(--pc-bg));overflow:hidden}
+.pm .pm-endpoint{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;height:100%;border:1px solid var(--pf-border);border-radius:24px;padding:8px 10px;background:var(--pc-bg,#10151d);color:var(--pc-muted,#9aa8b9);font-size:10px;white-space:nowrap;overflow:visible}.pm .pm-endpoint span{color:var(--pc-accent,#ff8000)}.pm .pm-endpoint.end span{color:var(--pf-success,#62ccaa)}.pm .pm-endpoint strong{max-width:88px;overflow:hidden;text-overflow:ellipsis}.pm .pm-endpoint .react-flow__handle{opacity:0}
 .pm button.pm-boundary-head{display:flex;flex-direction:column;gap:3px;width:100%;height:126px;text-align:left;padding:10px 22px;border:0;border-bottom:1px solid var(--pf-divider);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
 .pm-boundary-head strong{font-size:16px;line-height:20px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.pm-boundary-head span{font-size:11px;line-height:14px;flex-shrink:0;color:var(--pc-muted,#9aa8b9)}
 .pm .pm-trigger-summary{display:flex;align-items:center;gap:6px;min-width:0;overflow:hidden;white-space:nowrap;color:var(--pc-muted,#9aa8b9);font-size:10px}.pm .pm-trigger-summary>b{color:var(--pc-accent,#ff8000);font-weight:600;flex:none}.pm .pm-trigger-chip{min-width:0;overflow:hidden;text-overflow:ellipsis;color:var(--pc-text,#e7edf5);font-size:10px}
