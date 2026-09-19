@@ -145,62 +145,32 @@ export function layoutProject(
       a.name.localeCompare(b.name) ||
       a.id.localeCompare(b.id),
     )
-    .map((p) => [
-      shape(p, runs[p.id] || [], false),
-      shape(p, runs[p.id] || [], true),
-    ]);
-  const area = choices.reduce(
-    (sum, c) => sum + Math.min(...c.map((s) => s.width * s.height)),
-    0,
+    .map((p) => [shape(p, runs[p.id] || [], false), shape(p, runs[p.id] || [], true)]);
+  // Use a predictable wide shelf layout. The previous area optimizer favored a
+  // square canvas, which made a five-process project become a tall, tiny column
+  // even on a wide dashboard. Three or four columns keeps cards readable while
+  // still allowing large projects to wrap into additional rows.
+  const selected = choices.map((pair) =>
+    pair.slice().sort((a, b) =>
+      a.height - b.height || a.width * a.height - b.width * b.height,
+    )[0],
   );
-  let best: MapLayout[] = [],
-    score = Infinity;
-  // Project maps are shown in a wide dashboard canvas. Prefer two or more
-  // horizontal shelves so fitView does not shrink a tall single column.
-  for (const factor of [1.25, 1.6, 2, 2.4, 2.8]) {
-    const target = Math.sqrt(area) * factor;
-    let x = 0,
-      y = 0,
-      rowHeight = 0,
-      width = 0;
-    const result: MapLayout[] = [];
-    for (const pair of choices) {
-      const options = pair.flatMap((s) =>
-        [false, true].map((newRow) => {
-          const px = newRow ? 0 : x,
-            py = newRow && x ? y + rowHeight + 36 : y;
-          const w = Math.max(width, px + s.width),
-            h = py + Math.max(newRow ? 0 : rowHeight, s.height);
-          return {
-            s,
-            px,
-            py,
-            newRow,
-            cost:
-              Math.max(0, px + s.width - target) * 4000 +
-              w * h +
-              Math.abs(w - h) * 35,
-          };
-        }),
-      );
-      options.sort((a, b) => a.cost - b.cost);
-      const pick = options[0];
-      if (pick.newRow && x) {
-        y = pick.py;
-        rowHeight = 0;
-      }
-      result.push({ ...pick.s, x: pick.px, y: pick.py });
-      x = pick.px + pick.s.width + 36;
-      rowHeight = Math.max(rowHeight, pick.s.height);
-      width = Math.max(width, x - 36);
-    }
-    const height = y + rowHeight;
-    const candidate =
-      width * height * (1 + Math.abs(Math.log(width / height)) * 0.15);
-    if (candidate < score) {
-      score = candidate;
-      best = result;
-    }
+  const columns = Math.max(1, Math.min(5, Math.ceil(Math.sqrt(selected.length * 1.7))));
+  const rowHeights: number[] = [];
+  for (let i = 0; i < selected.length; i++) {
+    const row = Math.floor(i / columns);
+    rowHeights[row] = Math.max(rowHeights[row] || 0, selected[i].height);
   }
-  return best;
+  const rowY: number[] = [];
+  rowHeights.forEach((height, i) => {
+    rowY[i] = (rowY[i - 1] || 0) + (i ? rowHeights[i - 1] + 48 : 0);
+  });
+  return selected.map((layout, i) => {
+    const row = Math.floor(i / columns);
+    const col = i % columns;
+    const x = selected
+      .slice(row * columns, row * columns + col)
+      .reduce((sum, item) => sum + item.width + 48, 0);
+    return { ...layout, x, y: rowY[row] };
+  });
 }
