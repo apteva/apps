@@ -317,7 +317,11 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 		return nil, invalid("operation is required")
 	}
 	if source.Kind == "tables" {
-		if err := validateTableRelation(operation, mergeMaps(source.Config, config)); err != nil {
+		merged := mergeMaps(source.Config, config)
+		if err := validateTableRelation(operation, merged); err != nil {
+			return nil, err
+		}
+		if _, err := tablesDistinct(operation, merged, map[string]any{}); err != nil {
 			return nil, err
 		}
 	}

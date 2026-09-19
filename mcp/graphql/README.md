@@ -4,7 +4,7 @@ The standalone `graphql` app owns GraphQL schemas, resolver bindings,
 aggregation-aware source adapters, and realtime subscriptions. It is
 deliberately independent from the REST/API gateway app.
 
-## Typed filtering, identity row policies and selection pushdown (0.5.0)
+## Typed filtering, identity row policies and selection pushdown (0.5.x)
 
 Tables resolvers accept typed GraphQL input objects as `where` arguments. API
 authors define the input types in ordinary SDL; the adapter lowers scalar
@@ -48,6 +48,24 @@ is automatically pushed down as the native `select` list. Aliases and fragments
 are resolved first, configured select allowlists are retained, and hidden parent
 keys needed by selected relationships are added. This reduces inter-app JSON
 encoding without changing the GraphQL response or completion rules.
+
+Version 0.5.1 adds bounded ordered distinct selection for Tables `find`/`list`
+resolvers. Configure `distinct_by` with up to eight columns, optionally
+`distinct_defaults` for null/empty key normalization, and
+`distinct_scan_limit` (maximum 1,000). Tables applies fixed/client filters and
+ordering first; GraphQL keeps the first row for each key tuple and then applies
+the schema's `first`/`limit`. Distinct keys are automatically included as hidden
+source projections when the client does not select them. This supports standard
+GraphQL fields for “latest row per group” without returning all candidates.
+
+```json
+{
+  "order_by": "starts_at desc",
+  "distinct_by": ["offer_id", "sale_type"],
+  "distinct_defaults": {"sale_type": "standard"},
+  "distinct_scan_limit": 1000
+}
+```
 
 ## Standard execution and direct Tables fields (0.4.0)
 

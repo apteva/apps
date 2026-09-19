@@ -39,6 +39,13 @@ func applyTablesProjection(p gql.ResolveParams, state *standardRequest, operatio
 		return
 	}
 	columns := map[string]bool{}
+	if values, ok := config["distinct_by"].([]any); ok {
+		for _, value := range values {
+			if key, ok := value.(string); ok && graphqlName(key) {
+				columns[key] = true
+			}
+		}
+	}
 	for _, group := range groups {
 		if group.name == "__typename" {
 			continue

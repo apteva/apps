@@ -78,11 +78,12 @@ func TestRealStandardGraphQLTables(t *testing.T) {
 		{"parent_type": "Query", "field_name": "stats", "source": "orders", "operation": "aggregate"},
 		{"parent_type": "Query", "field_name": "count", "source": "orders", "operation": "count"},
 		{"parent_type": "Query", "field_name": "orderPage", "source": "orders", "operation": "search", "config": map[string]any{"filter_columns": map[string]any{"customerId": "customer_id"}, "order_by": "id asc"}},
+		{"parent_type": "Query", "field_name": "latestOrders", "source": "orders", "operation": "find", "config": map[string]any{"distinct_by": []any{"customer_id"}, "distinct_scan_limit": 1000, "order_by": "amount desc"}},
 		{"parent_type": "Customer", "field_name": "stats", "source": "orders", "operation": "aggregate", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}}},
 	} {
 		graph.MCP("graphql_resolver_set", r)
 	}
-	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! orderPage(where: OrderWhere, first: Int = 5, after: String, includeTotal: Boolean = true): OrderPage! stats(metrics: [Metric!]!, groupBy: [String!], order_by: String, where: [Filter!]): [Stats!]! count: Int! }
+	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! orderPage(where: OrderWhere, first: Int = 5, after: String, includeTotal: Boolean = true): OrderPage! latestOrders(first: Int = 2): [Order!]! stats(metrics: [Metric!]!, groupBy: [String!], order_by: String, where: [Filter!]): [Stats!]! count: Int! }
 enum MetricOp { count sum avg min max }
 input Metric { name: String! op: MetricOp! col: String }
 input Filter { col: String! op: String! value: Float! }
@@ -134,6 +135,15 @@ type Order { id: ID! customer_id: ID! amount: Float! }`})
 	typedPage := out["data"].(map[string]any)["orderPage"].(map[string]any)
 	if typedPage["total"] != float64(2) || len(typedPage["rows"].([]any)) != 2 {
 		t.Fatalf("typed filter result: %v", typedPage)
+	}
+	out = map[string]any{}
+	resp = graph.POST("/graphql", map[string]any{"query": `{ latestOrders { id customer_id amount } }`}, &out)
+	if resp.Status != 200 || out["errors"] != nil {
+		t.Fatalf("ordered distinct query: %d %v", resp.Status, out)
+	}
+	latest := out["data"].(map[string]any)["latestOrders"].([]any)
+	if len(latest) != 2 || latest[0].(map[string]any)["amount"] != float64(999) || latest[1].(map[string]any)["amount"] != float64(998) || latest[0].(map[string]any)["customer_id"] == latest[1].(map[string]any)["customer_id"] {
+		t.Fatalf("ordered distinct rows: %v", latest)
 	}
 	before := reads.Load()
 	out = map[string]any{}

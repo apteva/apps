@@ -332,8 +332,22 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 			tool = "rows_search"
 		}
 		if tool == "rows_search" || tool == "rows_get" || tool == "rows_count" || tool == "rows_aggregate" {
+			distinct, err := tablesDistinct(r.Operation, config, p.Args)
+			if err != nil {
+				return nil, resolverError{err}
+			}
+			if distinct != nil {
+				input["limit"] = distinct.scanLimit
+			}
 			input["_project_id"] = state.project
-			read := trackResolverError(state, p, state.loader.load(tool, input, r.Operation))
+			baseRead := state.loader.load(tool, input, r.Operation)
+			read := trackResolverError(state, p, func() (any, error) {
+				value, err := baseRead()
+				if err != nil {
+					return nil, err
+				}
+				return distinct.apply(value)
+			})
 			if state.synchronous {
 				return read()
 			}

@@ -149,7 +149,7 @@ func (p *standardTables) CallAppResult(app, tool string, input map[string]any, o
 	read := func(args map[string]any) (any, error) {
 		switch args["table"] {
 		case "customers":
-			return map[string]any{"rows": []any{map[string]any{"id": 1}, map[string]any{"id": 2}}, "total": 2}, nil
+			return map[string]any{"rows": []any{map[string]any{"id": 1, "name": "Ada"}, map[string]any{"id": 2, "name": "Grace"}}, "total": 2}, nil
 		case "orders":
 			where := args["where"].([]any)
 			constraint := where[len(where)-1].(map[string]any)
