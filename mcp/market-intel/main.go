@@ -1,8 +1,6 @@
-// market-intel — cross-source market intelligence gateway for trading
-// agents. v0.1 ships the gateway face: unified, normalized queries over
-// every bound data source (prediction markets, sports, macro, news,
-// crypto). The signal engine (background scanners + arbitrage events)
-// lands in v0.2.
+// market-intel combines a cross-source research gateway with an audited,
+// provider-neutral signal pipeline. Signals are read-only recommendations;
+// execution authority remains in the trading app.
 //
 // Read-only by design — market-intel reads prices, depth, stats, and
 // history; the agent decides; the trading app executes. No order-placing
@@ -11,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -25,8 +24,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.3
-description: Cross-source market-intelligence gateway for trading agents (unified data queries; signals in v0.2).
+version: 0.3.0
+description: Generic temporal intelligence platform with market and trading domain packs.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -36,7 +35,6 @@ requires:
     - net.egress
     - platform.connections.execute
     - platform.connections.read
-    - platform.apps.call
   integrations:
     - role: prediction_market_polymarket
       kind: integration
@@ -62,6 +60,10 @@ requires:
       kind: integration
       required: false
       compatible_slugs: [coingecko, etherscan, polygonscan, whale-alert, defillama]
+    - role: market_data_paid
+      kind: integration
+      required: false
+      compatible_slugs: [alpaca-market-data, finnhub, alpha-vantage, yahoo-finance]
     - role: llm
       kind: integration
       required: false
@@ -73,6 +75,14 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: search
+      description: "Generic bitemporal search across recorded evidence with date and as-of filters."
+    - name: evidence_record
+      description: "Record immutable source-attributed evidence."
+    - name: timeline
+      description: "Chronological evidence timeline for a topic or entity."
+    - name: replay
+      description: "Deterministic point-in-time snapshot for analysis and backtesting."
     - name: markets
       description: "Live volume-ranked markets across public prediction venues (Polymarket, Kalshi, Manifold)."
     - name: enrich
@@ -83,18 +93,22 @@ provides:
       description: "Head-to-head between two entities, or one entity's time series."
     - name: context
       description: "Deduped news + sentiment + event-volume for a topic or entity."
-    - name: indicators
-      description: "Latest technical indicators for a symbol."
-    - name: indicator_series
-      description: "Time series for one scalar technical indicator."
-    - name: indicator_presets
-      description: "Named technical-indicator bundles."
     - name: probability
       description: "Best ground-truth probability for an event."
     - name: resolve_entity
       description: "Resolve a name to a canonical entity id across sources."
     - name: sources_status
       description: "Which data sources are bound + healthy right now, by domain."
+    - name: signals_list
+      description: "List normalized, cost-adjusted trading signals with provenance and outcomes."
+    - name: signal_feeds
+      description: "List signal products/feeds and their quality gates."
+    - name: signal_metrics
+      description: "Audited performance metrics from matured signals."
+    - name: signal_scan_now
+      description: "Run signal discovery now."
+    - name: signal_backtest
+      description: "Walk-forward historical replay with explicit cost assumptions."
   ui_panels:
     - slot: project.page
       label: Market Intel
@@ -138,6 +152,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	globalCtx = ctx
 	ctx.Logger().Info("market-intel mounted",
 		"project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	if pid := scanProjectID(); pid != "" {
+		if _, err := ensureDefaultFeed(ctx.AppDB(), pid); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -145,9 +164,17 @@ func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
-// Workers — none in v0.1. The signal-engine scanners (venue_sync,
-// signal_scan, discovery, resolution_watch) land in v0.2.
-func (a *App) Workers() []sdk.Worker { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{Name: "signal_scan", Schedule: "@every 5m", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+		pid := scanProjectID()
+		if pid == "" {
+			app.Logger().Info("signal scan skipped for global install without project context")
+			return nil
+		}
+		_, err := a.runSignalScan(ctx, app, pid)
+		return err
+	}}}
+}
 
 // ─── HTTP routes (panel + REST mirror) ─────────────────────────────
 
@@ -155,9 +182,131 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/sources", Handler: a.handleHTTPSources},
 		{Pattern: "/markets", Handler: a.handleHTTPMarkets},
+		{Pattern: "/search", Handler: a.handleHTTPSearch},
+		{Pattern: "/timeline", Handler: a.handleHTTPTimeline},
+		{Pattern: "/replay", Handler: a.handleHTTPReplay},
+		{Pattern: "/evidence", Handler: a.handleHTTPEvidence},
 		{Pattern: "/enrich/", Handler: a.handleHTTPEnrich},
 		{Pattern: "/query/", Handler: a.handleHTTPQuery},
+		{Pattern: "/signals", Handler: a.handleHTTPSignals},
+		{Pattern: "/signal-feeds", Handler: a.handleHTTPFeeds},
+		{Pattern: "/signal-metrics", Handler: a.handleHTTPMetrics},
+		{Pattern: "/signal-scan", Handler: a.handleHTTPScan},
 	}
+}
+
+func intelligenceArgs(r *http.Request) map[string]any {
+	args := map[string]any{"_project_id": r.URL.Query().Get("project_id")}
+	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit"} {
+		if v := r.URL.Query().Get(key); v != "" {
+			args[key] = v
+		}
+	}
+	return args
+}
+func (a *App) handleHTTPSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, err := a.toolSearch(globalCtx, intelligenceArgs(r))
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, err := a.toolTimeline(globalCtx, intelligenceArgs(r))
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPReplay(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, err := a.toolReplay(globalCtx, intelligenceArgs(r))
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPEvidence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "POST only")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, 400, "invalid JSON body")
+		return
+	}
+	body["_project_id"] = r.URL.Query().Get("project_id")
+	out, err := a.toolEvidenceRecord(globalCtx, body)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 201, out)
+}
+
+func (a *App) handleHTTPSignals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	args := map[string]any{"_project_id": r.URL.Query().Get("project_id"), "feed": r.URL.Query().Get("feed"), "status": r.URL.Query().Get("status"), "limit": r.URL.Query().Get("limit")}
+	out, err := a.toolSignalsList(globalCtx, args)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPFeeds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, err := a.toolSignalFeeds(globalCtx, map[string]any{"_project_id": r.URL.Query().Get("project_id")})
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	out, err := a.toolSignalMetrics(globalCtx, map[string]any{"_project_id": r.URL.Query().Get("project_id"), "feed": r.URL.Query().Get("feed")})
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
+}
+func (a *App) handleHTTPScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "POST only")
+		return
+	}
+	out, err := a.toolSignalScan(globalCtx, map[string]any{"_project_id": r.URL.Query().Get("project_id")})
+	if err != nil {
+		httpErr(w, 502, err.Error())
+		return
+	}
+	httpJSON(w, 200, out)
 }
 
 func (a *App) handleHTTPMarkets(w http.ResponseWriter, r *http.Request) {
@@ -207,12 +356,6 @@ func (a *App) handleHTTPQuery(w http.ResponseWriter, r *http.Request) {
 		out, err = a.toolContext(globalCtx, args)
 	case "history":
 		out, err = a.toolHistory(globalCtx, args)
-	case "indicators":
-		out, err = a.toolIndicators(globalCtx, args)
-	case "indicator_series":
-		out, err = a.toolIndicatorSeries(globalCtx, args)
-	case "indicator_presets":
-		out, err = a.toolIndicatorPresets(globalCtx, args)
 	default:
 		httpErr(w, 404, "unknown query tool: "+tool)
 		return
@@ -247,7 +390,7 @@ func (a *App) handleHTTPEnrich(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "market id required")
 		return
 	}
-	out, err := a.toolEnrich(globalCtx, map[string]any{"market": market})
+	out, err := a.toolEnrich(globalCtx, map[string]any{"market": market, "_project_id": r.URL.Query().Get("project_id")})
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return

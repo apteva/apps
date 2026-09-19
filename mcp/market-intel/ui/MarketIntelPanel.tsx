@@ -1,7 +1,6 @@
-// MarketIntelPanel — v0.1.3 console for the market-intel gateway.
-// Tabs:
-//   Markets — browse the normalized market catalog
-//   Indicators — technical indicator snapshots for agents and operators
+// MarketIntelPanel — v0.1 console for the market-intel gateway.
+// Product console:
+//   Signals — cost-adjusted opportunities and audited performance
 //   Sources — which data integrations are bound (what the gateway can answer)
 //   Query   — a test harness: run enrich / probability / context and see
 //             the normalized result
@@ -40,6 +39,7 @@ const SOURCE_DOMAINS: Record<string, string> = {
   tavily: "News", perplexity: "News", exa: "News", newsapi: "News", gnews: "News", gdelt: "News", wikipedia: "News",
   coingecko: "Crypto", etherscan: "Crypto", polygonscan: "Crypto", "whale-alert": "Crypto", defillama: "Crypto",
   "anthropic-api": "LLM", "openai-api": "LLM",
+  "alpaca-market-data": "Market data", "alpha-vantage": "Market data", "yahoo-finance": "Market data",
 };
 
 const Icon = {
@@ -47,10 +47,10 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "markets" | "indicators" | "sources" | "query";
+type TabId = "research" | "signals" | "markets" | "sources" | "query";
 
 export default function MarketIntelPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<TabId>("markets");
+  const [tab, setTab] = useState<TabId>("research");
   const [error, setError] = useState<string | null>(null);
 
   const withParams = useCallback((extra: Record<string, string> = {}) =>
@@ -69,12 +69,12 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
     <div className="h-full flex flex-col bg-bg text-text text-sm">
       <header className="px-4 py-2 flex items-center gap-3 border-b border-border">
         <h1 className="text-sm font-semibold m-0">Market Intelligence</h1>
-        <span className="text-xs text-text-dim">gateway · v0.1.3</span>
+        <span className="text-xs text-text-dim">research · signals · v0.3</span>
         <span className="flex-1" />
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["markets", "indicators", "sources", "query"] as TabId[]).map((id) => (
+        {(["research", "signals", "markets", "sources", "query"] as TabId[]).map((id) => (
           <button key={id} onClick={() => setTab(id)}
             className={`px-3 py-2 capitalize ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
             {id}
@@ -90,14 +90,117 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
       )}
 
       <div className="flex-1 overflow-auto p-4">
+        {tab === "research" && <ResearchTab api={api} setError={setError} />}
+        {tab === "signals" && <SignalsTab api={api} projectId={projectId} setError={setError} />}
         {tab === "markets" && <MarketsTab api={api} setError={setError} />}
-        {tab === "indicators" && <IndicatorsTab api={api} setError={setError} />}
         {tab === "sources" && <SourcesTab api={api} setError={setError} />}
         {tab === "query" && <QueryTab api={api} setError={setError} />}
       </div>
     </div>
   );
 }
+
+interface EvidenceRow { id: number; kind: string; title: string; body: string; source: string; source_ref?: string; event_time?: string; published_time?: string; observed_at?: string; payload?: unknown }
+
+function ResearchTab({ api, setError }: { api: <T>(p: string, q?: Record<string, string>) => Promise<T>; setError: (e: string | null) => void }) {
+  const [query, setQuery] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [asOf, setAsOf] = useState("");
+  const [rows, setRows] = useState<EvidenceRow[]>([]);
+  const [busy, setBusy] = useState(false);
+  const search = useCallback(async () => {
+    setBusy(true);
+    try {
+      const params: Record<string, string> = { query, limit: "100" };
+      if (from) params.event_from = `${from}T00:00:00Z`;
+      if (to) params.event_to = `${to}T00:00:00Z`;
+      if (asOf) params.as_of = `${asOf}T23:59:59Z`;
+      const r = await api<{ results: EvidenceRow[] }>("/search", params);
+      setRows(r.results || []); setError(null);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }, [api, asOf, from, query, setError, to]);
+  useEffect(() => { search(); }, []); // intentional initial load; filters submit explicitly
+  const input = "text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
+  return <>
+    <div className="p-3 border border-border rounded bg-bg-card mb-4">
+      <div className="flex items-center gap-2 mb-3"><div><div className="font-semibold">Research timeline</div><div className="text-xs text-text-muted">Search evidence across sources with event dates and point-in-time cutoffs.</div></div><span className="flex-1" /><button onClick={search} disabled={busy} className="px-3 py-1 rounded bg-accent text-bg font-medium disabled:opacity-50">{busy ? "Searching…" : "Search"}</button></div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: "minmax(180px,2fr) repeat(3,minmax(130px,1fr))" }}>
+        <input className={input} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") search(); }} placeholder="Topic, claim, entity, or keyword" />
+        <label className="text-xs text-text-dim">Event from<input type="date" className={`${input} block w-full mt-1`} value={from} onChange={e => setFrom(e.target.value)} /></label>
+        <label className="text-xs text-text-dim">Event before<input type="date" className={`${input} block w-full mt-1`} value={to} onChange={e => setTo(e.target.value)} /></label>
+        <label className="text-xs text-text-dim">Known as of<input type="date" className={`${input} block w-full mt-1`} value={asOf} onChange={e => setAsOf(e.target.value)} /></label>
+      </div>
+    </div>
+    <div className="space-y-2">{rows.map(r => <article key={r.id} className="border border-border rounded bg-bg-card p-3">
+      <div className="flex gap-2 items-center text-xs text-text-dim"><span className="uppercase tracking-wide">{r.kind}</span><span>·</span><span>{r.source}</span><span className="flex-1" /><span>{r.event_time ? new Date(r.event_time).toLocaleDateString() : r.observed_at ? `observed ${new Date(r.observed_at).toLocaleDateString()}` : "undated"}</span></div>
+      <div className="font-semibold mt-1">{r.title || "Untitled evidence"}</div><div className="text-sm text-text-muted mt-1 whitespace-pre-wrap">{r.body}</div>
+    </article>)}{!busy && rows.length === 0 && <div className="p-10 text-center text-text-muted">No evidence matches yet. Record evidence through the generic <code>evidence_record</code> tool, then search it here.</div>}</div>
+  </>;
+}
+
+interface SignalRow {
+  public_id: string; canonical_symbol: string; provider: string; strategy: string;
+  direction: "BUY" | "SELL"; generated_at: string; valid_until: string; status: string;
+  entry_price: number; stop_loss: number; target_1: number; target_2: number;
+  confidence: number; net_edge_bps: number; cost_bps: number; spread_bps: number;
+  rationale: string[]; outcome?: string; realized_return_bps?: number;
+}
+interface SignalMetrics { evaluated: number; wins: number; losses: number; hit_rate: number; avg_return_bps: number }
+
+function SignalsTab({ api, projectId, setError }: {
+  api: <T>(p: string, q?: Record<string, string>) => Promise<T>;
+  projectId: string;
+  setError: (e: string | null) => void;
+}) {
+  const [rows, setRows] = useState<SignalRow[]>([]);
+  const [metrics, setMetrics] = useState<SignalMetrics | null>(null);
+  const [status, setStatus] = useState("open");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const [signals, stats] = await Promise.all([
+        api<{ signals: SignalRow[] }>("/signals", { status, limit: "100" }),
+        api<SignalMetrics>("/signal-metrics", { feed: "crypto-momentum" }),
+      ]);
+      setRows(signals.signals || []); setMetrics(stats); setError(null);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }, [api, setError, status]);
+  useEffect(() => { load(); }, [load]);
+  const scan = async () => {
+    setBusy(true);
+    try {
+      const res = await fetch(`${API}/signal-scan?project_id=${encodeURIComponent(projectId)}`, { method: "POST", credentials: "same-origin" });
+      if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`); await load();
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+  const num = (v: number, digits = 2) => Number.isFinite(v) ? v.toLocaleString(undefined, { maximumFractionDigits: digits }) : "—";
+  return <>
+    <div className="grid gap-3 mb-4" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))" }}>
+      <Metric label="Evaluated" value={String(metrics?.evaluated || 0)} />
+      <Metric label="Hit rate" value={metrics?.evaluated ? `${((metrics.hit_rate || 0) * 100).toFixed(1)}%` : "—"} />
+      <Metric label="Avg return" value={metrics?.evaluated ? `${num(metrics.avg_return_bps, 1)} bps` : "—"} />
+      <div className="border border-border rounded bg-bg-card p-3 flex gap-2 items-center">
+        <select className="bg-bg-input border border-border rounded px-2 py-1 text-xs flex-1" value={status} onChange={(e) => setStatus(e.target.value)}><option value="open">Open</option><option value="evaluated">Evaluated</option><option value="all">All</option></select>
+        <button onClick={scan} disabled={busy} className="px-3 py-1 rounded bg-accent text-bg font-medium disabled:opacity-50">{busy ? "Scanning…" : "Scan now"}</button>
+      </div>
+    </div>
+    <div className="border border-border rounded overflow-auto bg-bg-card">
+      <table className="w-full text-xs border-collapse"><thead className="bg-bg-input text-text-dim"><tr>{["Signal","Strategy","Entry / Risk","Confidence","Net edge","Status"].map(h=><th key={h} className="px-3 py-2 text-left uppercase tracking-wide">{h}</th>)}</tr></thead>
+      <tbody>{rows.map(s=><tr key={s.public_id} className="border-t border-border align-top">
+        <td className="px-3 py-2"><div className="font-semibold">{s.canonical_symbol}</div><div className={s.direction === "BUY" ? "text-green" : "text-red"}>{s.direction} · {s.provider}</div></td>
+        <td className="px-3 py-2"><div>{s.strategy.replaceAll("_", " ")}</div><div className="text-text-dim max-w-xs">{(s.rationale || []).join(" · ")}</div></td>
+        <td className="px-3 py-2 tabular-nums"><div>{num(s.entry_price, 6)}</div><div className="text-text-dim">stop {num(s.stop_loss,6)} · target {num(s.target_1,6)}</div></td>
+        <td className="px-3 py-2 tabular-nums">{(s.confidence*100).toFixed(0)}%</td>
+        <td className="px-3 py-2 tabular-nums"><div className="text-green">+{num(s.net_edge_bps,1)} bps</div><div className="text-text-dim">cost {num(s.cost_bps,1)}</div></td>
+        <td className="px-3 py-2"><div>{s.outcome || s.status}</div>{s.realized_return_bps != null && <div className={s.realized_return_bps >= 0 ? "text-green" : "text-red"}>{num(s.realized_return_bps,1)} bps</div>}</td>
+      </tr>)}</tbody></table>
+      {!busy && rows.length===0 && <div className="p-8 text-center text-text-muted">No signals passed the quality gates yet.</div>}
+    </div>
+  </>;
+}
+function Metric({label,value}:{label:string;value:string}) { return <div className="border border-border rounded bg-bg-card p-3"><div className="text-xs uppercase tracking-wide text-text-dim">{label}</div><div className="text-xl font-semibold mt-1">{value}</div></div>; }
 
 // ─── Markets tab (auto-loads on mount) ─────────────────────────────
 
@@ -181,133 +284,6 @@ function MarketsTab({ api, setError }: {
               ))}
             </tbody>
           </table>
-        </div>
-      )}
-    </>
-  );
-}
-
-// ─── Indicators tab ────────────────────────────────────────────────
-
-interface IndicatorResult {
-  symbol: string;
-  interval: string;
-  range: string;
-  as_of?: string;
-  source: string;
-  bar_count: number;
-  values: Record<string, unknown>;
-  summary?: { bias?: string; confidence?: number; score?: number; reasons?: string[]; warnings?: string[] };
-  warnings?: string[];
-}
-
-const INTERVALS = ["5m", "15m", "1h", "4h", "1d", "1w"];
-const RANGES = ["1D", "5D", "1M", "3M", "6M", "1Y", "ALL"];
-const PRESETS = ["trend", "momentum", "mean_reversion", "volatility", "breakout", "risk"];
-
-function fmtNum(v: unknown): string {
-  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
-  const abs = Math.abs(v);
-  if (abs >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 1 });
-  if (abs >= 10) return v.toFixed(2);
-  return v.toFixed(4).replace(/\.?0+$/, "");
-}
-
-function indicatorValueText(v: unknown): string {
-  if (typeof v === "number") return fmtNum(v);
-  if (v && typeof v === "object") {
-    return Object.entries(v as Record<string, unknown>)
-      .map(([k, val]) => `${k} ${fmtNum(val)}`)
-      .join(" · ");
-  }
-  return "—";
-}
-
-function biasClass(bias?: string): string {
-  if (bias === "bullish") return "text-green";
-  if (bias === "bearish") return "text-red";
-  return "text-text-muted";
-}
-
-function IndicatorsTab({ api, setError }: {
-  api: <T>(p: string, q?: Record<string, string>) => Promise<T>;
-  setError: (e: string | null) => void;
-}) {
-  const [symbol, setSymbol] = useState("BTC-USD");
-  const [interval, setIntervalValue] = useState("1h");
-  const [range, setRange] = useState("3M");
-  const [preset, setPreset] = useState("trend");
-  const [result, setResult] = useState<IndicatorResult | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const load = useCallback(async () => {
-    setBusy(true);
-    try {
-      const r = await api<IndicatorResult>("/query/indicators", { symbol, interval, range, preset });
-      setResult(r);
-      setError(null);
-    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
-  }, [api, symbol, interval, range, preset, setError]);
-
-  useEffect(() => { load(); }, []);
-
-  const inputCls = "w-full text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
-  const labelCls = "block text-xs uppercase tracking-wide font-medium text-text-dim mb-1";
-  const summary = result?.summary;
-  const entries = result ? Object.entries(result.values || {}) : [];
-
-  return (
-    <>
-      <div className="p-3 border border-border rounded bg-bg-card mb-4">
-        <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
-          <div><label className={labelCls}>Symbol</label><input className={inputCls} value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} /></div>
-          <div><label className={labelCls}>Interval</label><select className={inputCls} value={interval} onChange={(e) => setIntervalValue(e.target.value)}>{INTERVALS.map((x) => <option key={x} value={x}>{x}</option>)}</select></div>
-          <div><label className={labelCls}>Range</label><select className={inputCls} value={range} onChange={(e) => setRange(e.target.value)}>{RANGES.map((x) => <option key={x} value={x}>{x}</option>)}</select></div>
-          <div><label className={labelCls}>Preset</label><select className={inputCls} value={preset} onChange={(e) => setPreset(e.target.value)}>{PRESETS.map((x) => <option key={x} value={x}>{x.replace("_", " ")}</option>)}</select></div>
-          <div className="flex items-end"><button disabled={busy || !symbol.trim()} onClick={load} className="w-full px-3 py-1.5 text-sm rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50">{busy ? "Running…" : "Run"}</button></div>
-        </div>
-        {result && (
-          <div className="flex flex-wrap gap-3 text-xs text-text-muted">
-            <span>{result.source}</span>
-            <span>{result.bar_count} bars</span>
-            {result.as_of && <span>{new Date(result.as_of).toLocaleString()}</span>}
-          </div>
-        )}
-      </div>
-
-      {result && (
-        <div className="space-y-4">
-          <div className="border border-border rounded bg-bg-card p-3">
-            <div className="flex items-center gap-3">
-              <div className="text-xs uppercase tracking-wide text-text-dim">Bias</div>
-              <div className={`text-lg font-semibold capitalize ${biasClass(summary?.bias)}`}>{summary?.bias || "neutral"}</div>
-              <div className="text-xs text-text-muted">confidence {fmtNum(summary?.confidence)}</div>
-              <div className="flex-1" />
-              <div className="text-xs text-text-muted">{result.symbol} · {result.interval} · {result.range}</div>
-            </div>
-            {(summary?.reasons || []).length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1">
-                {(summary?.reasons || []).map((reason) => <span key={reason} className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">{reason}</span>)}
-              </div>
-            )}
-            {((summary?.warnings || []).length > 0 || (result.warnings || []).length > 0) && (
-              <div className="mt-2 text-xs text-amber">{[...(summary?.warnings || []), ...(result.warnings || [])].join(" · ")}</div>
-            )}
-          </div>
-
-          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))" }}>
-            {entries.map(([key, value]) => (
-              <div key={key} className="border border-border rounded bg-bg-card p-3">
-                <div className="text-xs uppercase tracking-wide text-text-dim mb-1">{key}</div>
-                <div className="text-sm font-semibold tabular-nums">{indicatorValueText(value)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-      {!result && !busy && (
-        <div className="p-8 text-center text-text-muted text-sm">
-          <div className="font-medium text-text mb-1">No indicator result</div>
         </div>
       )}
     </>

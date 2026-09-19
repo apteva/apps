@@ -6,11 +6,32 @@ package main
 // for testability).
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	"strconv"
+	"time"
 )
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "search", Description: "Generic bitemporal intelligence search across recorded evidence. Args: query?, kind?, source?, entity?, event_from?, event_to?, published_from?, published_to?, as_of?, limit?. Dates accept RFC3339 or YYYY-MM-DD; as_of returns only facts known and valid at that time.",
+			InputSchema: schemaObject(map[string]any{
+				"query": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "source": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"},
+				"event_from": map[string]any{"type": "string"}, "event_to": map[string]any{"type": "string"}, "published_from": map[string]any{"type": "string"}, "published_to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
+			}, nil), Handler: a.toolSearch},
+		{Name: "evidence_record", Description: "Record an immutable, source-attributed evidence item for later search, timelines, monitoring, and point-in-time replay. Duplicate content is idempotent.",
+			InputSchema: schemaObject(map[string]any{
+				"kind": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "body": map[string]any{"type": "string"}, "payload": map[string]any{"type": "object"}, "entity_refs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "source": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "event_time": map[string]any{"type": "string"}, "published_time": map[string]any{"type": "string"}, "observed_at": map[string]any{"type": "string"}, "valid_from": map[string]any{"type": "string"}, "valid_to": map[string]any{"type": "string"}, "supersedes_id": map[string]any{"type": "integer"},
+			}, []string{"source"}), Handler: a.toolEvidenceRecord},
+		{Name: "timeline", Description: "Return a chronological evidence timeline for a topic or entity, with optional point-in-time cutoff. Alias for search ordered by temporal evidence.",
+			InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "from": map[string]any{"type": "string"}, "to": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolTimeline},
+		{Name: "replay", Description: "Build a deterministic point-in-time evidence snapshot for analysis or backtesting. Returns the matched records plus the cutoff and stable snapshot hash.",
+			InputSchema: schemaObject(map[string]any{"query": map[string]any{"type": "string"}, "entity": map[string]any{"type": "string"}, "as_of": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"as_of"}), Handler: a.toolReplay},
 		{Name: "enrich", Description: "Everything relevant to a prediction market in one normalized blob: cross-venue prices, ground-truth probability, entities, their stats + H2H, news, computed edge. Args: market (id/slug), entity_a + entity_b (optional — the outcome principals, e.g. two players), domain (optional — tennis/sports/macro/crypto), sport (optional — the-odds-api sport_key), topic (optional — news query override).",
 			InputSchema: schemaObject(map[string]any{
 				"market":   map[string]any{"type": "string"},
@@ -51,29 +72,6 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"topic"}),
 			Handler: a.toolContext},
 
-		{Name: "indicators", Description: "Latest technical indicators for a symbol. Args: symbol, interval (5m|15m|1h|4h|1d|1w), range (1D|5D|1M|3M|6M|1Y|ALL), preset, indicators (comma string or array).",
-			InputSchema: schemaObject(map[string]any{
-				"symbol":     map[string]any{"type": "string"},
-				"interval":   map[string]any{"type": "string"},
-				"range":      map[string]any{"type": "string"},
-				"preset":     map[string]any{"type": "string"},
-				"indicators": map[string]any{"oneOf": []map[string]any{{"type": "string"}, {"type": "array", "items": map[string]any{"type": "string"}}}},
-			}, []string{"symbol"}),
-			Handler: a.toolIndicators},
-
-		{Name: "indicator_series", Description: "Time series for one scalar indicator. Args: symbol, indicator, interval, range. MACD returns histogram; Bollinger Bands returns middle band.",
-			InputSchema: schemaObject(map[string]any{
-				"symbol":    map[string]any{"type": "string"},
-				"indicator": map[string]any{"type": "string"},
-				"interval":  map[string]any{"type": "string"},
-				"range":     map[string]any{"type": "string"},
-			}, []string{"symbol", "indicator"}),
-			Handler: a.toolIndicatorSeries},
-
-		{Name: "indicator_presets", Description: "Named indicator bundles for trend, momentum, mean_reversion, volatility, breakout, and risk.",
-			InputSchema: schemaObject(nil, nil),
-			Handler:     a.toolIndicatorPresets},
-
 		{Name: "resolve_entity", Description: "Resolve a name to a canonical entity record (cached cross-source ids). Args: name, domain.",
 			InputSchema: schemaObject(map[string]any{
 				"name":   map[string]any{"type": "string"},
@@ -90,7 +88,216 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "sources_status", Description: "Which data sources are bound right now (by slug). Use to see what the gateway can answer.",
 			InputSchema: schemaObject(nil, nil),
 			Handler:     a.toolSourcesStatus},
+
+		{Name: "signals_list", Description: "List auditable trading signals. Args: feed?, status? (open/evaluated/all), limit?.",
+			InputSchema: schemaObject(map[string]any{"feed": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, nil), Handler: a.toolSignalsList},
+		{Name: "signal_feeds", Description: "List configured signal products and quality gates.", InputSchema: schemaObject(nil, nil), Handler: a.toolSignalFeeds},
+		{Name: "signal_metrics", Description: "Audited performance for evaluated signals. Args: feed?.", InputSchema: schemaObject(map[string]any{"feed": map[string]any{"type": "string"}}, nil), Handler: a.toolSignalMetrics},
+		{Name: "signal_scan_now", Description: "Run provider discovery and signal generation now.", InputSchema: schemaObject(nil, nil), Handler: a.toolSignalScan},
+		{Name: "signal_backtest", Description: "Walk-forward replay with no look-ahead. Args: symbol (Binance form, e.g. BTCUSDT), interval?, strategy?, limit?.",
+			InputSchema: schemaObject(map[string]any{"symbol": map[string]any{"type": "string"}, "interval": map[string]any{"type": "string"}, "strategy": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"symbol"}), Handler: a.toolSignalBacktest},
 	}
+}
+
+func evidenceQueryFromArgs(args map[string]any, projectID string) (EvidenceQuery, error) {
+	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50}
+	if v := strArg(args, "limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q.Limit = n
+		}
+	} else if n, ok := args["limit"].(float64); ok {
+		q.Limit = int(n)
+	}
+	var err error
+	for key, dst := range map[string]**time.Time{"event_from": &q.EventFrom, "event_to": &q.EventTo, "published_from": &q.PublishedFrom, "published_to": &q.PublishedTo, "as_of": &q.AsOf} {
+		if v := strArg(args, key); v != "" {
+			*dst, err = parseOptionalTime(v)
+			if err != nil {
+				return q, fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
+	return q, nil
+}
+
+func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	q, err := evidenceQueryFromArgs(args, pid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := searchEvidence(ctx.AppDB(), q)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"results": rows, "count": len(rows), "query": q.Text, "as_of": timeString(q.AsOf)}, nil
+}
+
+func (a *App) toolTimeline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if v := strArg(args, "from"); v != "" {
+		args["event_from"] = v
+	}
+	if v := strArg(args, "to"); v != "" {
+		args["event_to"] = v
+	}
+	q, err := evidenceQueryFromArgs(args, pid)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := searchEvidence(ctx.AppDB(), q)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"timeline": rows, "count": len(rows), "as_of": timeString(q.AsOf)}, nil
+}
+
+func (a *App) toolReplay(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	q, err := evidenceQueryFromArgs(args, pid)
+	if err != nil {
+		return nil, err
+	}
+	if q.AsOf == nil {
+		return nil, errors.New("as_of is required")
+	}
+	rows, err := searchEvidence(ctx.AppDB(), q)
+	if err != nil {
+		return nil, err
+	}
+	b, _ := json.Marshal(rows)
+	sum := sha256.Sum256(b)
+	return map[string]any{"snapshot": hex.EncodeToString(sum[:]), "as_of": q.AsOf.UTC().Format(time.RFC3339), "records": rows, "count": len(rows), "lookahead_safe": true}, nil
+}
+
+func (a *App) toolEvidenceRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	e := Evidence{Kind: strArg(args, "kind"), Title: strArg(args, "title"), Body: strArg(args, "body"), Source: strArg(args, "source"), SourceRef: strArg(args, "source_ref")}
+	if raw, ok := args["payload"]; ok {
+		b, e2 := json.Marshal(raw)
+		if e2 != nil {
+			return nil, e2
+		}
+		e.Payload = b
+	}
+	if refs, ok := args["entity_refs"].([]any); ok {
+		for _, r := range refs {
+			if s, ok := r.(string); ok {
+				e.EntityRefs = append(e.EntityRefs, s)
+			}
+		}
+	}
+	if refs, ok := args["entity_refs"].([]string); ok {
+		e.EntityRefs = append(e.EntityRefs, refs...)
+	}
+	for key, dst := range map[string]**time.Time{"event_time": &e.EventTime, "published_time": &e.PublishedTime, "observed_at": &e.ObservedAt, "valid_from": &e.ValidFrom, "valid_to": &e.ValidTo} {
+		if v := strArg(args, key); v != "" {
+			*dst, err = parseOptionalTime(v)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	}
+	if n, ok := args["supersedes_id"].(float64); ok {
+		id := int64(n)
+		e.SupersedesID = &id
+	}
+	return recordEvidence(ctx.AppDB(), e, pid)
+}
+
+func (a *App) toolSignalsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	limit := 50
+	switch v := args["limit"].(type) {
+	case float64:
+		limit = int(v)
+	case int:
+		limit = v
+	case string:
+		if n, e := strconv.Atoi(v); e == nil {
+			limit = n
+		}
+	}
+	rows, err := listSignals(ctx.AppDB(), pid, strArg(args, "feed"), strArg(args, "status"), limit)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"signals": rows, "count": len(rows)}, nil
+}
+func (a *App) toolSignalFeeds(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = ensureDefaultFeed(ctx.AppDB(), pid); err != nil {
+		return nil, err
+	}
+	rows, err := listFeeds(ctx.AppDB(), pid)
+	return map[string]any{"feeds": rows}, err
+}
+func (a *App) toolSignalMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	return signalMetrics(ctx.AppDB(), pid, strArg(args, "feed"))
+}
+func (a *App) toolSignalScan(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	summaries, err := a.runSignalScan(context.Background(), ctx, pid)
+	return map[string]any{"runs": summaries}, err
+}
+func (a *App) toolSignalBacktest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	symbol := strArg(args, "symbol")
+	if symbol == "" {
+		return nil, errors.New("symbol required")
+	}
+	interval := strArg(args, "interval")
+	if interval == "" {
+		interval = "1h"
+	}
+	strategy := strArg(args, "strategy")
+	limit := 500
+	if v, ok := args["limit"].(float64); ok {
+		limit = int(v)
+	}
+	if limit < 70 {
+		limit = 70
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	providerName := strArg(args, "provider")
+	var provider MarketDataProvider
+	for _, p := range a.signalProviders(ctx) {
+		if providerName == "" || p.Name() == providerName {
+			provider = p
+			break
+		}
+	}
+	if provider == nil {
+		return nil, errors.New("provider unavailable")
+	}
+	cost := configFloat(ctx, "round_trip_fee_bps", 20, 0, 500) + configFloat(ctx, "slippage_bps", 5, 0, 500)
+	return a.runBacktest(context.Background(), provider, symbol, interval, strategy, limit, cost)
 }
 
 func (a *App) toolMarkets(ctx *sdk.AppCtx, args map[string]any) (any, error) {

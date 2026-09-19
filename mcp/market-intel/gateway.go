@@ -19,8 +19,8 @@ import (
 
 type ProbabilityResult struct {
 	FairProb float64  `json:"fair_prob"`
-	Method   string   `json:"method"`             // odds_devig | cross_venue | macro_implied | unavailable
-	Books    int      `json:"books,omitempty"`    // for odds_devig: how many bookmakers contributed
+	Method   string   `json:"method"`          // odds_devig | cross_venue | macro_implied | unavailable
+	Books    int      `json:"books,omitempty"` // for odds_devig: how many bookmakers contributed
 	Sources  []string `json:"sources"`
 	Detail   string   `json:"detail,omitempty"`
 }
@@ -94,17 +94,22 @@ func fairProbFromOddsAPI(raw json.RawMessage, target string) (float64, int) {
 				if mk.Key != "h2h" {
 					continue
 				}
-				prices := make([]float64, 0, len(mk.Outcomes))
-				idx := -1
-				for i, o := range mk.Outcomes {
-					prices = append(prices, o.Price)
+				// Vendor outcome order is not stable across bookmakers. Put the
+				// requested outcome first for every book before taking consensus;
+				// reusing one book's index can silently invert a trading signal.
+				var targetPrice float64
+				others := make([]float64, 0, len(mk.Outcomes)-1)
+				for _, o := range mk.Outcomes {
 					if strings.Contains(strings.ToLower(o.Name), tl) {
-						idx = i
+						targetPrice = o.Price
+					} else {
+						others = append(others, o.Price)
 					}
 				}
-				if idx >= 0 && len(prices) >= 2 {
+				if targetPrice > 0 && len(others) >= 1 {
+					prices := append([]float64{targetPrice}, others...)
 					bookOutcomes = append(bookOutcomes, prices)
-					targetIdxAcross = idx
+					targetIdxAcross = 0
 				}
 			}
 		}
@@ -208,7 +213,7 @@ func (e jsonErr) Error() string { return string(e) }
 type StatsResult struct {
 	Entity  string                     `json:"entity"`
 	Domain  string                     `json:"domain"`
-	Data    map[string]json.RawMessage `json:"data"`    // queryType → raw normalized payload
+	Data    map[string]json.RawMessage `json:"data"` // queryType → raw normalized payload
 	Sources []string                   `json:"sources"`
 }
 
