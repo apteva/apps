@@ -26,6 +26,8 @@ type standardRequest struct {
 	fastProjectionUsed bool
 	errorMu            sync.Mutex
 	errorCodes         map[string]string
+	moduleMu           sync.Mutex
+	moduleMemo         map[string]any
 }
 
 func (a *App) executeStandard(ctx context.Context, project, api, key string, schema *ast.Schema, req graphqlRequest, op *ast.OperationDefinition, doc *ast.QueryDocument, policy securityPolicy) (executeResult, error) {
@@ -294,6 +296,7 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		if len(mandatory) > 0 {
 			config["identity_where"] = mandatory
 		}
+		applyTablesEnvelopeSelection(p, r.Operation, config)
 		applyTablesProjection(p, state, r.Operation, config)
 	}
 	config["_project_id"] = state.project
@@ -311,6 +314,8 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 			value, err = a.callFunction(p.Context, config, p.Args)
 		case "http":
 			value, err = a.callHTTP(p.Context, config, p.Args)
+		case "module":
+			value, err = resolveModuleValue(p.Context, source.Config, r.Config, p.Source, p.Args, state.bindings)
 		default:
 			err = invalid("unsupported source kind %q", source.Kind)
 		}

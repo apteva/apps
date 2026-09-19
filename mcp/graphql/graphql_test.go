@@ -38,6 +38,13 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
+	migration, err = os.ReadFile("migrations/004_resolver_modules.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 
@@ -71,6 +78,31 @@ func TestNamedAPIsIsolateSchemasSourcesAndResolvers(t *testing.T) {
 	}
 	if got, err := listResolversForAPI(db, "p1", "analytics"); err != nil || len(got) != 0 {
 		t.Fatalf("resolver leaked across api: %#v %v", got, err)
+	}
+}
+
+func TestCreateSourceUpsertReturnsUpdatedSource(t *testing.T) {
+	db := testDB(t)
+	first, err := createSourceForAPI(db, "p1", "commerce", "items", "tables", map[string]any{
+		"table": "items_v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := createSourceForAPI(db, "p1", "commerce", "items", "tables", map[string]any{
+		"table": "items_v2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated == nil {
+		t.Fatal("updated source is nil")
+	}
+	if updated.ID != first.ID {
+		t.Fatalf("updated source id = %d, want %d", updated.ID, first.ID)
+	}
+	if got := updated.Config["table"]; got != "items_v2" {
+		t.Fatalf("updated table = %v, want items_v2", got)
 	}
 }
 

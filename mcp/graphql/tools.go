@@ -34,9 +34,17 @@ func graphqlTools(a *App) []sdk.Tool {
 		{Name: "graphql_schema_list", Description: "List GraphQL schema versions for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment}), HandlerCtx: a.toolSchemaList},
 		{Name: "graphql_schema_validate", Description: "Validate GraphQL SDL without storing it.", InputSchema: object(map[string]any{"sdl": stringType("GraphQL SDL")}, "sdl"), HandlerCtx: a.toolSchemaValidate},
 		{Name: "graphql_schema_publish", Description: "Publish a validated GraphQL schema version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolSchemaPublish},
-		{Name: "graphql_source_add", Description: "Bind a database, tables, function, or HTTP source to an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Stable source name"), "kind": map[string]any{"type": "string", "enum": []string{"database", "tables", "function", "http"}}, "config": map[string]any{"type": "object"}}, "name", "kind"), HandlerCtx: a.toolSourceAdd},
+		{Name: "graphql_module_create", Description: "Create or replace a draft version of a reusable resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Dot-separated module name"), "version": map[string]any{"type": "integer"}, "description": stringType("Description"), "inputs": map[string]any{"type": "object"}, "output_type": stringType("String, ID, Int, Float, Boolean, JSON, or Decimal"), "definition": map[string]any{"type": "object"}, "deterministic": map[string]any{"type": "boolean"}}, "name", "inputs", "output_type", "definition"), HandlerCtx: a.toolModuleCreate},
+		{Name: "graphql_module_get", Description: "Get a resolver module version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name"), HandlerCtx: a.toolModuleGet},
+		{Name: "graphql_module_list", Description: "List resolver modules and versions for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolModuleList},
+		{Name: "graphql_module_versions", Description: "List all versions of one resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name")}, "name"), HandlerCtx: a.toolModuleVersions},
+		{Name: "graphql_module_validate", Description: "Validate a typed resolver module definition without saving it.", InputSchema: object(map[string]any{"inputs": map[string]any{"type": "object"}, "definition": map[string]any{"type": "object"}}, "inputs", "definition"), HandlerCtx: a.toolModuleValidate},
+		{Name: "graphql_module_test", Description: "Evaluate a saved resolver module with test inputs.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}, "inputs": map[string]any{"type": "object"}}, "name", "version", "inputs"), HandlerCtx: a.toolModuleTest},
+		{Name: "graphql_module_publish", Description: "Validate and immutably publish a resolver module version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name", "version"), HandlerCtx: a.toolModulePublish},
+		{Name: "graphql_module_usages", Description: "List module sources and field bindings using a resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name"), HandlerCtx: a.toolModuleUsages},
+		{Name: "graphql_source_add", Description: "Bind a database, tables, function, HTTP, or resolver-module source to an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Stable source name"), "kind": map[string]any{"type": "string", "enum": []string{"database", "tables", "function", "http", "module"}}, "config": map[string]any{"type": "object"}}, "name", "kind"), HandlerCtx: a.toolSourceAdd},
 		{Name: "graphql_source_list", Description: "List configured GraphQL API sources.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolSourceList},
-		{Name: "graphql_resolver_set", Description: "Bind a GraphQL field to a source operation. Tables search preserves pagination; relation maps parent_key to foreign_key for nested filtered reads.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "parent_type": stringType("GraphQL parent type"), "field_name": stringType("GraphQL field"), "source_id": map[string]any{"type": "integer"}, "source": stringType("Source name"), "operation": stringType("find, search, get, count, aggregate, function, or request"), "config": map[string]any{"type": "object"}}, "parent_type", "field_name", "operation"), HandlerCtx: a.toolResolverSet},
+		{Name: "graphql_resolver_set", Description: "Bind a GraphQL field to a source operation. Module fields use resolve; Tables search preserves pagination.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "parent_type": stringType("GraphQL parent type"), "field_name": stringType("GraphQL field"), "source_id": map[string]any{"type": "integer"}, "source": stringType("Source name"), "operation": stringType("find, search, get, count, aggregate, function, request, or resolve"), "config": map[string]any{"type": "object"}}, "parent_type", "field_name", "operation"), HandlerCtx: a.toolResolverSet},
 		{Name: "graphql_resolver_list", Description: "List GraphQL resolver bindings for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolResolverList},
 		{Name: "graphql_deploy", Description: "Promote a schema version to active in an environment.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolSchemaPublish},
 		{Name: "graphql_logs", Description: "List recent GraphQL request logs.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "limit": map[string]any{"type": "integer"}}), HandlerCtx: a.toolLogs},
@@ -148,6 +156,172 @@ func (a *App) toolSchemaPublish(callCtx context.Context, ctx *sdk.AppCtx, args m
 		return nil, err
 	}
 	return map[string]any{"schema": publicSchema(row), "deployed": true}, nil
+}
+
+func (a *App) toolModuleCreate(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	inputs, err := jsonObject(args["inputs"])
+	if err != nil {
+		return nil, err
+	}
+	definition, err := jsonObject(args["definition"])
+	if err != nil {
+		return nil, err
+	}
+	deterministic := true
+	if value, ok := args["deterministic"].(bool); ok {
+		deterministic = value
+	}
+	row, err := createResolverModuleForAPI(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "name", ""), stringArg(args, "description", ""), stringArg(args, "output_type", ""), inputs, definition, intArg(args, "version", 0), deterministic)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"module": publicResolverModule(*row)}, nil
+}
+
+func (a *App) toolModuleGet(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := getResolverModuleForAPI(ctx.AppReadDB(), project, apiSlugArg(args), stringArg(args, "name", ""), intArg(args, "version", 0), false)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, invalid("resolver module not found")
+	}
+	return map[string]any{"module": publicResolverModule(*row)}, nil
+}
+
+func (a *App) toolModuleList(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listResolverModulesForAPI(ctx.AppReadDB(), project, apiSlugArg(args))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, publicResolverModule(row))
+	}
+	return map[string]any{"modules": out, "count": len(out)}, nil
+}
+
+func (a *App) toolModuleVersions(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	result, err := a.toolModuleList(callCtx, ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	name := stringArg(args, "name", "")
+	all := result.(map[string]any)["modules"].([]map[string]any)
+	out := []map[string]any{}
+	for _, row := range all {
+		if row["name"] == name {
+			out = append(out, row)
+		}
+	}
+	return map[string]any{"modules": out, "count": len(out)}, nil
+}
+
+func (a *App) toolModuleValidate(_ context.Context, _ *sdk.AppCtx, args map[string]any) (any, error) {
+	inputs, err := jsonObject(args["inputs"])
+	if err != nil {
+		return nil, err
+	}
+	definition, err := jsonObject(args["definition"])
+	if err != nil {
+		return nil, err
+	}
+	problems := validateResolverModuleDefinition(inputs, definition)
+	return map[string]any{"valid": len(problems) == 0, "validation_errors": problems, "dependencies": moduleCallDependencies(definition)}, nil
+}
+
+func (a *App) toolModuleTest(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := getResolverModuleForAPI(ctx.AppReadDB(), project, apiSlugArg(args), stringArg(args, "name", ""), intArg(args, "version", 0), false)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, invalid("resolver module not found")
+	}
+	inputs, err := jsonObject(args["inputs"])
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listResolverModulesForAPI(ctx.AppReadDB(), project, apiSlugArg(args))
+	if err != nil {
+		return nil, err
+	}
+	modules := map[string]resolverModule{}
+	for _, module := range rows {
+		modules[moduleKey(module.Name, module.Version)] = module
+	}
+	value, err := (moduleRuntime{modules: modules}).evaluate(*row, inputs)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"value": value, "module": row.Name, "version": row.Version}, nil
+}
+
+func (a *App) toolModulePublish(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := publishResolverModuleForAPI(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "name", ""), intArg(args, "version", 0))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"module": publicResolverModule(*row), "published": true}, nil
+}
+
+func (a *App) toolModuleUsages(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	name := stringArg(args, "name", "")
+	version := intArg(args, "version", 0)
+	sources, err := listSourcesForAPI(ctx.AppReadDB(), project, apiSlugArg(args))
+	if err != nil {
+		return nil, err
+	}
+	resolvers, err := listResolversForAPI(ctx.AppReadDB(), project, apiSlugArg(args))
+	if err != nil {
+		return nil, err
+	}
+	sourceIDs := map[int64]bool{}
+	sourceRows := []map[string]any{}
+	for _, source := range sources {
+		if source.Kind == "module" && source.Config["module"] == name && (version == 0 || moduleInt(source.Config["version"]) == version) {
+			sourceIDs[source.ID] = true
+			sourceRows = append(sourceRows, publicSource(source))
+		}
+	}
+	resolverRows := []map[string]any{}
+	for _, resolver := range resolvers {
+		if sourceIDs[resolver.SourceID] {
+			var source *sourceRecord
+			for i := range sources {
+				if sources[i].ID == resolver.SourceID {
+					source = &sources[i]
+					break
+				}
+			}
+			resolverRows = append(resolverRows, publicResolver(resolver, source))
+		}
+	}
+	return map[string]any{"sources": sourceRows, "resolvers": resolverRows, "count": len(resolverRows)}, nil
 }
 
 func (a *App) toolSourceAdd(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

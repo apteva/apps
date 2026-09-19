@@ -7,6 +7,58 @@ import (
 	gast "github.com/graphql-go/graphql/language/ast"
 )
 
+// applyTablesEnvelopeSelection avoids exact filtered counts when the GraphQL
+// result does not select them. An explicit includeTotal argument remains
+// authoritative; otherwise resolver defaults are narrowed by the validated
+// selection. Cursor and has_more values do not require a count in Tables.
+func applyTablesEnvelopeSelection(p gql.ResolveParams, operation string, config map[string]any) {
+	if operation != "search" {
+		return
+	}
+	if _, explicit := p.Args["includeTotal"]; explicit {
+		return
+	}
+	if _, explicit := p.Args["include_total"]; explicit {
+		return
+	}
+	page, ok := outputObject(p.Info.ReturnType)
+	if !ok {
+		return
+	}
+	fragments := map[string]*gast.FragmentDefinition{}
+	for name, definition := range p.Info.Fragments {
+		if fragment, ok := definition.(*gast.FragmentDefinition); ok {
+			fragments[name] = fragment
+		}
+	}
+	sets := make([]*gast.SelectionSet, 0, len(p.Info.FieldASTs))
+	for _, field := range p.Info.FieldASTs {
+		sets = append(sets, field.SelectionSet)
+	}
+	groups, ok := fastCollect(&p.Info.Schema, page, sets, fragments)
+	if !ok {
+		return
+	}
+	for _, group := range groups {
+		if group.name == "total" {
+			return
+		}
+	}
+	config["include_total"] = false
+}
+
+func outputObject(output gql.Output) (*gql.Object, bool) {
+	for {
+		switch value := output.(type) {
+		case *gql.NonNull:
+			output = value.OfType
+		default:
+			object, ok := output.(*gql.Object)
+			return object, ok
+		}
+	}
+}
+
 // applyTablesProjection derives the Tables select list from the validated
 // GraphQL selection. It is an internal source optimization: result completion,
 // aliases, fragments and all public GraphQL behavior stay unchanged.
@@ -57,6 +109,13 @@ func applyTablesProjection(p gql.ResolveParams, state *standardRequest, operatio
 				if relation, ok := childConfig["relation"].(map[string]any); ok {
 					if parentKey, ok := relation["parent_key"].(string); ok && graphqlName(parentKey) {
 						columns[parentKey] = true
+					}
+				}
+			} else if found && source.Kind == "module" {
+				module, mapping, ok := configuredResolverModule(source.Config, resolver.Config, state.bindings)
+				if ok {
+					for _, column := range moduleParentDependencies(module, mapping, state.bindings.modules) {
+						columns[column] = true
 					}
 				}
 			}

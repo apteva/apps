@@ -49,7 +49,11 @@ are resolved first, configured select allowlists are retained, and hidden parent
 keys needed by selected relationships are added. This reduces inter-app JSON
 encoding without changing the GraphQL response or completion rules.
 
-Version 0.5.1 adds bounded ordered distinct selection for Tables `find`/`list`
+Version 0.6.0 adds reusable, versioned Resolver Modules behind ordinary
+GraphQL fields. Modules use a validated typed expression tree rather than
+scripts, can compose pinned module versions, map parent/argument/identity
+inputs, and remain compatible with Tables selection pushdown and fast
+projection. Version 0.5.1 added bounded ordered distinct selection for Tables `find`/`list`
 resolvers. Configure `distinct_by` with up to eight columns, optionally
 `distinct_defaults` for null/empty key normalization, and
 `distinct_scan_limit` (maximum 1,000). Tables applies fixed/client filters and

@@ -257,6 +257,109 @@ func TestTablesSelectionPushdownUsesValidatedGraphQLSelection(t *testing.T) {
 	}
 }
 
+func TestSearchTotalIsSelectionAware(t *testing.T) {
+	run := func(t *testing.T, query string) map[string]any {
+		t.Helper()
+		p := &standardTables{}
+		bindings := &executionBindings{sources: map[int64]sourceRecord{
+			1: {Kind: "tables", Config: map[string]any{"table": "other"}},
+		}, resolvers: map[string]resolverRecord{
+			"Query.page": {SourceID: 1, Operation: "search", Config: map[string]any{"include_total": true}},
+		}}
+		_, schema, ctx := standardApp(t, `type Query { page(includeTotal: Boolean): Page! }
+type Page { rows: [Row!]! total: Int } type Row { id: ID! }`, p, bindings)
+		result := runStandard(schema, gql.Params{Context: ctx, RequestString: query})
+		if len(result.Errors) > 0 || len(p.inputs) != 1 {
+			t.Fatalf("result=%+v calls=%v inputs=%v", result, p.calls, p.inputs)
+		}
+		return p.inputs[0]
+	}
+	if input := run(t, `{ page { rows { id } } }`); input["include_total"] != false {
+		t.Fatalf("unselected total was not disabled: %#v", input)
+	}
+	if input := run(t, `{ page { total rows { id } } }`); input["include_total"] != true {
+		t.Fatalf("selected total was disabled: %#v", input)
+	}
+	if input := run(t, `{ page(includeTotal:true) { rows { id } } }`); input["include_total"] != true {
+		t.Fatalf("explicit includeTotal was ignored: %#v", input)
+	}
+}
+
+type fusionPlatform struct {
+	sdk.PlatformClient
+	sdk.AppContextClient
+	mu    sync.Mutex
+	calls []string
+	input map[string]any
+}
+
+func (p *fusionPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if app != "tables" || tool != "tables_batch" {
+		return fmt.Errorf("unexpected dispatch %s.%s", app, tool)
+	}
+	p.calls = append(p.calls, tool)
+	p.input = input
+	results := map[string]any{}
+	for _, operation := range input["operations"].([]map[string]any) {
+		args := operation["args"].(map[string]any)
+		var result any
+		switch operation["operation"] {
+		case "rows_search":
+			if args["include_total"] != false {
+				return fmt.Errorf("fused search retained count: %#v", args)
+			}
+			result = map[string]any{"rows": []any{map[string]any{"id": 1}}}
+		case "rows_aggregate":
+			countName := ""
+			for _, raw := range args["metrics"].([]any) {
+				metric := raw.(map[string]any)
+				if metric["op"] == "count" {
+					countName, _ = metric["name"].(string)
+				}
+			}
+			if countName == "" {
+				return fmt.Errorf("aggregate count was not fused: %#v", args)
+			}
+			result = map[string]any{"rows": []any{map[string]any{"value": "2026-09-19", countName: 42}}}
+		default:
+			return fmt.Errorf("unexpected operation %v", operation["operation"])
+		}
+		results[operation["id"].(string)] = map[string]any{"status": "ok", "result": result}
+	}
+	encoded, _ := json.Marshal(map[string]any{"results": results})
+	return json.Unmarshal(encoded, out)
+}
+
+func (p *fusionPlatform) CallAppResultContext(_ context.Context, app, tool string, input map[string]any, out any) error {
+	return p.CallAppResult(app, tool, input, out)
+}
+
+func TestSearchCountFusesWithSameSourceAggregate(t *testing.T) {
+	p := &fusionPlatform{}
+	where := []any{map[string]any{"col": "owner_id", "op": "eq", "value": "42"}}
+	bindings := &executionBindings{sources: map[int64]sourceRecord{
+		1: {Kind: "tables", Config: map[string]any{"table": "events", "where": where}},
+	}, resolvers: map[string]resolverRecord{
+		"Query.page":    {SourceID: 1, Operation: "search", Config: map[string]any{"include_total": true}},
+		"Query.version": {SourceID: 1, Operation: "aggregate", Config: map[string]any{"metrics": []any{map[string]any{"name": "value", "op": "max", "col": "updated_at"}}}},
+	}}
+	_, schema, ctx := standardApp(t, `type Query { page: Page! version: [Version!]! }
+type Page { rows: [Row!]! total: Int! } type Row { id: ID! } type Version { value: String! }`, p, bindings)
+	result := runStandard(schema, gql.Params{Context: ctx, RequestString: `{ page { total rows { id } } version { value } }`})
+	if len(result.Errors) > 0 {
+		t.Fatal(result.Errors)
+	}
+	data := result.Data.(map[string]any)
+	if data["page"].(map[string]any)["total"] != 42 || data["version"].([]any)[0].(map[string]any)["value"] != "2026-09-19" {
+		t.Fatalf("fused result changed: %#v", data)
+	}
+	if fmt.Sprint(p.calls) != "[tables_batch]" {
+		t.Fatalf("calls=%v input=%#v", p.calls, p.input)
+	}
+}
+
 func TestStandardLoaderDedupAndPartialErrors(t *testing.T) {
 	p := &standardTables{}
 	bindings := &executionBindings{sources: map[int64]sourceRecord{1: {Kind: "tables", Config: map[string]any{"table": "other"}}, 2: {Kind: "tables", Config: map[string]any{"table": "failure"}}}, resolvers: map[string]resolverRecord{

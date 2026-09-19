@@ -213,10 +213,10 @@ func publishSchema(db *sql.DB, project, environment string, version int) (*schem
 
 func validateSourceKind(kind string) error {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "database", "tables", "function", "http":
+	case "database", "tables", "function", "http", "module":
 		return nil
 	default:
-		return invalid("source kind must be database, tables, function, or http")
+		return invalid("source kind must be database, tables, function, HTTP, or module")
 	}
 }
 
@@ -238,19 +238,38 @@ func createSource(db *sql.DB, project, name, kind string, config map[string]any)
 			return nil, err
 		}
 	}
+	if strings.EqualFold(kind, "module") {
+		moduleName, _ := config["module"].(string)
+		version := moduleInt(config["version"])
+		if !validModuleName(moduleName) || version <= 0 {
+			return nil, invalid("module source requires module and a pinned positive version")
+		}
+		module, findErr := getResolverModule(db, project, moduleName, version, true)
+		if findErr != nil {
+			return nil, findErr
+		}
+		if module == nil {
+			return nil, invalid("published resolver module %s@%d not found", moduleName, version)
+		}
+		if _, err := moduleInputMapping(config); err != nil {
+			return nil, err
+		}
+	}
 	encoded, err := encodeJSON(config)
 	if err != nil {
 		return nil, err
 	}
 	now := nowUTC()
-	res, err := db.Exec(`INSERT INTO graphql_sources(project_id,name,kind,config_json,status,created_at,updated_at)
+	_, err = db.Exec(`INSERT INTO graphql_sources(project_id,name,kind,config_json,status,created_at,updated_at)
         VALUES(?,?,?,?,?,?,?) ON CONFLICT(project_id,name) DO UPDATE SET kind=excluded.kind, config_json=excluded.config_json, updated_at=excluded.updated_at`,
 		project, name, strings.ToLower(kind), encoded, "active", now, now)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return getSource(db, project, id, name)
+	// LastInsertId is not reliable for the UPDATE arm of an SQLite upsert: it
+	// may be zero or refer to an earlier insert on the connection. Name is the
+	// conflict key and identifies inserts and updates deterministically.
+	return getSource(db, project, 0, name)
 }
 
 func getSource(db *sql.DB, project string, id int64, name string) (*sourceRecord, error) {
@@ -322,6 +341,14 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 			return nil, err
 		}
 		if _, err := tablesDistinct(operation, merged, map[string]any{}); err != nil {
+			return nil, err
+		}
+	}
+	if source.Kind == "module" {
+		if operation != "resolve" && operation != "computed" {
+			return nil, invalid("module resolver operation must be resolve")
+		}
+		if _, err := moduleInputMapping(mergeMaps(source.Config, config)); err != nil {
 			return nil, err
 		}
 	}

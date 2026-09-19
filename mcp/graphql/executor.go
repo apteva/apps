@@ -146,6 +146,7 @@ type executionBindingsKey struct{}
 type executionBindings struct {
 	resolvers map[string]resolverRecord
 	sources   map[int64]sourceRecord
+	modules   map[string]resolverModule
 }
 
 type planCacheEntry struct {
@@ -171,12 +172,19 @@ func (a *App) executionPlan(project, apiSlug string, fresh ...bool) (*executionB
 	if err != nil {
 		return nil, err
 	}
-	bindings := &executionBindings{resolvers: make(map[string]resolverRecord), sources: make(map[int64]sourceRecord)}
+	modules, err := listResolverModulesForAPI(a.ctx.AppReadDB(), project, apiSlug)
+	if err != nil {
+		return nil, err
+	}
+	bindings := &executionBindings{resolvers: make(map[string]resolverRecord), sources: make(map[int64]sourceRecord), modules: make(map[string]resolverModule)}
 	for _, resolver := range resolvers {
 		bindings.resolvers[resolver.ParentType+"."+resolver.FieldName] = resolver
 	}
 	for _, source := range sources {
 		bindings.sources[source.ID] = source
+	}
+	for _, module := range modules {
+		bindings.modules[moduleKey(module.Name, module.Version)] = module
 	}
 	if !cacheable {
 		return bindings, nil
@@ -503,7 +511,7 @@ func tablesBatchInput(source sourceRecord, resolver resolverRecord, field *ast.F
 	input := tablesReadInput(config, args)
 	operation := strings.ToLower(resolver.Operation)
 	switch operation {
-	case "find", "list":
+	case "find", "list", "search":
 		return "rows_search", input, true
 	case "count":
 		return "rows_count", input, true
@@ -548,6 +556,8 @@ func (a *App) resolveField(ctx context.Context, project, apiSlug string, resolve
 		return a.callFunction(ctx, config, args)
 	case "http":
 		return a.callHTTP(ctx, config, args)
+	case "module":
+		return resolveModuleValue(ctx, source.Config, resolver.Config, parent, args, bindingsFromContext(ctx))
 	default:
 		return nil, invalid("unsupported source kind %q", source.Kind)
 	}

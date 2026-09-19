@@ -30,6 +30,11 @@ type resolverLoader struct {
 	count   int
 }
 
+type countAggregateFusion struct {
+	search, aggregate *resolverJob
+	metric            string
+}
+
 func newResolverLoader(a *App, ctx context.Context, project string) *resolverLoader {
 	return &resolverLoader{app: a, ctx: ctx, project: project, cache: map[string]*resolverJob{}}
 }
@@ -79,6 +84,7 @@ func (l *resolverLoader) flush() {
 	if len(jobs) == 0 {
 		return
 	}
+	fusions := fuseCountAggregates(jobs)
 	var small, singles []*resolverJob
 	for _, j := range jobs {
 		limit := 100
@@ -138,8 +144,191 @@ func (l *resolverLoader) flush() {
 		go func() { defer wg.Done(); defer func() { <-sem }(); task() }()
 	}
 	wg.Wait()
+	for _, fusion := range fusions {
+		fusion.finish()
+	}
 }
+
+// fuseCountAggregates combines an exact page total and an ungrouped aggregate
+// over the same Tables source/filter. The page read skips its count and the
+// aggregate computes COUNT together with its existing metrics, so SQLite scans
+// the filtered rows once instead of twice. GraphQL fields and result envelopes
+// are unchanged.
+func fuseCountAggregates(jobs []*resolverJob) []countAggregateFusion {
+	aggregates := map[string]*resolverJob{}
+	for _, job := range jobs {
+		if job.call != nil || job.tool != "rows_aggregate" || hasAggregateGroups(job.input) {
+			continue
+		}
+		if key := fusionKey(job.input); key != "" {
+			aggregates[key] = job
+		}
+	}
+	used := map[*resolverJob]bool{}
+	out := []countAggregateFusion{}
+	for _, search := range jobs {
+		if search.call != nil || search.tool != "rows_search" || search.input["include_total"] != true {
+			continue
+		}
+		aggregate := aggregates[fusionKey(search.input)]
+		if aggregate == nil || used[aggregate] {
+			continue
+		}
+		metric, ok := appendAggregateCount(aggregate.input)
+		if !ok {
+			continue
+		}
+		search.input["include_total"] = false
+		used[aggregate] = true
+		out = append(out, countAggregateFusion{search: search, aggregate: aggregate, metric: metric})
+	}
+	return out
+}
+
+func fusionKey(input map[string]any) string {
+	table, _ := input["table"].(string)
+	if table == "" {
+		return ""
+	}
+	encoded, err := json.Marshal([]any{input["_project_id"], table, input["where"]})
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func hasAggregateGroups(input map[string]any) bool {
+	switch groups := input["group_by"].(type) {
+	case []any:
+		return len(groups) > 0
+	case []string:
+		return len(groups) > 0
+	default:
+		return groups != nil
+	}
+}
+
+func appendAggregateCount(input map[string]any) (string, bool) {
+	raw, ok := input["metrics"]
+	if !ok {
+		return "", false
+	}
+	metrics := []any{}
+	switch values := raw.(type) {
+	case []any:
+		metrics = append(metrics, values...)
+	case []map[string]any:
+		for _, value := range values {
+			metrics = append(metrics, value)
+		}
+	default:
+		return "", false
+	}
+	used := map[string]bool{}
+	for _, rawMetric := range metrics {
+		metric, _ := rawMetric.(map[string]any)
+		name, _ := metric["name"].(string)
+		if name != "" {
+			used[name] = true
+		}
+		if metric["op"] == "count" && (metric["col"] == nil || metric["col"] == "") && name != "" {
+			input["metrics"] = metrics
+			return name, true
+		}
+	}
+	name := "graphql_total_count"
+	for suffix := 2; used[name]; suffix++ {
+		name = fmt.Sprintf("graphql_total_count_%d", suffix)
+	}
+	metrics = append(metrics, map[string]any{"name": name, "op": "count"})
+	input["metrics"] = metrics
+	return name, true
+}
+
+func (f countAggregateFusion) finish() {
+	if f.search.err != nil || f.aggregate.err != nil {
+		return
+	}
+	aggregate, ok := f.aggregate.value.(map[string]any)
+	if !ok {
+		return
+	}
+	rows, ok := aggregate["rows"].([]any)
+	if !ok || len(rows) == 0 {
+		return
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok {
+		return
+	}
+	total, exists := row[f.metric]
+	if !exists {
+		return
+	}
+	search, ok := f.search.value.(map[string]any)
+	if !ok {
+		return
+	}
+	search["total"] = total
+}
+
+// batch prefers the server/SDK batch transport added in SDK v0.82. It makes
+// one authorization decision, negotiates direct JSON results, and dispatches
+// explicitly independent Tables reads with bounded parallelism. The Tables
+// native batch remains a safe compatibility fallback: query loaders contain
+// reads only, so an outer transport/capability failure can be retried without
+// duplicating mutations.
 func (l *resolverLoader) batch(jobs []*resolverJob) {
+	if err := l.serverBatch(jobs); err == nil {
+		return
+	}
+	l.tablesBatch(jobs)
+}
+
+func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
+	calls := make([]sdk.AppCall, len(jobs))
+	for i, job := range jobs {
+		calls[i] = sdk.AppCall{ID: fmt.Sprintf("op%d", i), Tool: job.tool, Input: job.input}
+	}
+	// Some older test doubles embed the optional context interface without an
+	// implementation. Treat that promoted-nil panic like an unavailable batch
+	// capability and exercise the native Tables fallback.
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("server app batch unavailable: %v", recovered)
+		}
+	}()
+	results, err := sdk.CallAppBatchContext(
+		l.ctx,
+		l.app.ctx.WithProject(l.project).PlatformAPI(),
+		"tables",
+		calls,
+		sdk.AppBatchOptions{
+			Execution:   sdk.ParallelIndependent,
+			Concurrency: min(4, len(calls)),
+			ResultMode:  "json",
+		},
+	)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]sdk.AppCallResult, len(results))
+	for _, result := range results {
+		byID[result.ID] = result
+	}
+	for i, job := range jobs {
+		result, ok := byID[fmt.Sprintf("op%d", i)]
+		if !ok {
+			job.err = fmt.Errorf("server app batch omitted operation op%d", i)
+		} else {
+			job.err = result.Decode(&job.value)
+		}
+		close(job.done)
+	}
+	return nil
+}
+
+func (l *resolverLoader) tablesBatch(jobs []*resolverJob) {
 	defer func() {
 		if recover() != nil {
 			for _, j := range jobs {

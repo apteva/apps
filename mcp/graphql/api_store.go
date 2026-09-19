@@ -226,6 +226,22 @@ func listResolversForAPI(db *sql.DB, project, apiSlug string) ([]resolverRecord,
 	return listResolvers(db, storageProject(project, apiSlug))
 }
 
+func createResolverModuleForAPI(db *sql.DB, project, apiSlug, name, description, outputType string, inputs, definition map[string]any, version int, deterministic bool) (*resolverModule, error) {
+	return createResolverModule(db, storageProject(project, apiSlug), name, description, outputType, inputs, definition, version, deterministic)
+}
+
+func getResolverModuleForAPI(db *sql.DB, project, apiSlug, name string, version int, publishedOnly bool) (*resolverModule, error) {
+	return getResolverModule(db, storageProject(project, apiSlug), name, version, publishedOnly)
+}
+
+func listResolverModulesForAPI(db *sql.DB, project, apiSlug string) ([]resolverModule, error) {
+	return listResolverModules(db, storageProject(project, apiSlug))
+}
+
+func publishResolverModuleForAPI(db *sql.DB, project, apiSlug, name string, version int) (*resolverModule, error) {
+	return publishResolverModule(db, storageProject(project, apiSlug), name, version)
+}
+
 func publicProjectID(value string) string {
 	if index := strings.Index(value, "\x00graphql_api:"); index >= 0 {
 		return value[:index]

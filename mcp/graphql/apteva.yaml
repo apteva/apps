@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.5.1
+version: 0.6.0
 description: |
   Standalone multi-API GraphQL and realtime runtime. Define multiple named
   endpoints with independent schemas, resolver bindings, environments,
@@ -75,13 +75,29 @@ provides:
     - name: graphql_schema_publish
       description: Publish a validated schema version.
     - name: graphql_source_add
-      description: Bind a resolver source such as database, tables, function or HTTP.
+      description: Bind a resolver source such as database, tables, function, HTTP, or resolver module.
     - name: graphql_source_list
       description: List configured GraphQL sources.
     - name: graphql_resolver_set
       description: Bind a GraphQL field to a source operation, including aggregation.
     - name: graphql_resolver_list
       description: List resolver bindings.
+    - name: graphql_module_create
+      description: Create a versioned reusable resolver module draft.
+    - name: graphql_module_get
+      description: Fetch a resolver module version.
+    - name: graphql_module_list
+      description: List resolver modules.
+    - name: graphql_module_validate
+      description: Validate a typed resolver module definition.
+    - name: graphql_module_test
+      description: Evaluate a resolver module with test inputs.
+    - name: graphql_module_publish
+      description: Publish an immutable resolver module version.
+    - name: graphql_module_versions
+      description: List resolver module versions.
+    - name: graphql_module_usages
+      description: List sources and fields using a resolver module.
     - name: graphql_deploy
       description: Promote an environment schema and resolver set to active.
     - name: graphql_logs
@@ -96,7 +112,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.5.1
+    ref: graphql/v0.6.0
     entry: mcp/graphql
   port: 8080
   health_check: /health

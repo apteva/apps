@@ -259,6 +259,107 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"valid": len(validationErrors) == 0, "validation_errors": validationErrors})
 		return
 	}
+	if path == "modules" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		if r.Method == http.MethodGet {
+			rows, err := listResolverModulesForAPI(a.ctx.AppReadDB(), project, api.Slug)
+			if err != nil {
+				writeJSONError(w, 500, err.Error(), "storage_error")
+				return
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, row := range rows {
+				out = append(out, publicResolverModule(row))
+			}
+			writeJSON(w, map[string]any{"modules": out, "count": len(out)})
+			return
+		}
+		var body struct {
+			Name          string         `json:"name"`
+			Version       int            `json:"version"`
+			Description   string         `json:"description"`
+			Inputs        map[string]any `json:"inputs"`
+			OutputType    string         `json:"output_type"`
+			Definition    map[string]any `json:"definition"`
+			Deterministic *bool          `json:"deterministic"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
+			writeJSONError(w, 400, err.Error(), "invalid_request")
+			return
+		}
+		deterministic := true
+		if body.Deterministic != nil {
+			deterministic = *body.Deterministic
+		}
+		row, err := createResolverModuleForAPI(a.ctx.AppDB(), project, api.Slug, body.Name, body.Description, body.OutputType, body.Inputs, body.Definition, body.Version, deterministic)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, map[string]any{"module": publicResolverModule(*row)})
+		return
+	}
+	if path == "modules/validate" && r.Method == http.MethodPost {
+		var body struct {
+			Inputs     map[string]any `json:"inputs"`
+			Definition map[string]any `json:"definition"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
+			writeJSONError(w, 400, err.Error(), "invalid_request")
+			return
+		}
+		problems := validateResolverModuleDefinition(body.Inputs, body.Definition)
+		writeJSON(w, map[string]any{"valid": len(problems) == 0, "validation_errors": problems, "dependencies": moduleCallDependencies(body.Definition)})
+		return
+	}
+	if path == "modules/test" && r.Method == http.MethodPost {
+		var body struct {
+			Name    string         `json:"name"`
+			Version int            `json:"version"`
+			Inputs  map[string]any `json:"inputs"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
+			writeJSONError(w, 400, err.Error(), "invalid_request")
+			return
+		}
+		row, err := getResolverModuleForAPI(a.ctx.AppReadDB(), project, api.Slug, body.Name, body.Version, false)
+		if err != nil || row == nil {
+			writeJSONError(w, 404, "resolver module not found", "not_found")
+			return
+		}
+		rows, err := listResolverModulesForAPI(a.ctx.AppReadDB(), project, api.Slug)
+		if err != nil {
+			writeJSONError(w, 500, err.Error(), "storage_error")
+			return
+		}
+		modules := map[string]resolverModule{}
+		for _, module := range rows {
+			modules[moduleKey(module.Name, module.Version)] = module
+		}
+		value, err := (moduleRuntime{modules: modules}).evaluate(*row, body.Inputs)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, map[string]any{"value": value, "module": row.Name, "version": row.Version})
+		return
+	}
+	if path == "modules/publish" && r.Method == http.MethodPost {
+		var body struct {
+			Name    string `json:"name"`
+			Version int    `json:"version"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+			writeJSONError(w, 400, err.Error(), "invalid_request")
+			return
+		}
+		row, err := publishResolverModuleForAPI(a.ctx.AppDB(), project, api.Slug, body.Name, body.Version)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, map[string]any{"module": publicResolverModule(*row), "published": true})
+		return
+	}
 	if path == "sources" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		if r.Method == http.MethodGet {
 			rows, err := listSourcesForAPI(a.ctx.AppReadDB(), project, api.Slug)
