@@ -39,6 +39,12 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeGraphQLError(w, http.StatusBadRequest, err)
 		return
 	}
+	apiSlug := apiSlugFromPath(r.URL.Path)
+	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, apiSlug)
+	if err != nil {
+		writeGraphQLError(w, http.StatusNotFound, err)
+		return
+	}
 	var req graphqlRequest
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(maxRequestBytes(a.ctx))))
 	decoder.DisallowUnknownFields()
@@ -58,7 +64,7 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		environment = normalizeEnvironment(headerEnv)
 	}
 	start := time.Now()
-	result, executeErr := a.execute(r.Context(), project, environment, req)
+	result, executeErr := a.execute(r.Context(), project, api.Slug, environment, req)
 	status := http.StatusOK
 	if executeErr != nil {
 		status = http.StatusBadRequest
@@ -67,7 +73,7 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if len(result.Errors) > 0 && status == http.StatusOK {
 		status = http.StatusBadRequest
 	}
-	_ = a.logRequest(project, result.OperationName, result.OperationType, status, time.Since(start), result.Errors)
+	_ = a.logRequest(project, api.Slug, result.OperationName, result.OperationType, status, time.Since(start), result.Errors)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	response := map[string]any{}
@@ -88,8 +94,48 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/admin/")
 	environment := normalizeEnvironment(r.URL.Query().Get("environment"))
+	if path == "apis" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
+		if r.Method == http.MethodGet {
+			rows, err := listGraphQLAPIs(a.ctx.AppReadDB(), project)
+			if err != nil {
+				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
+				return
+			}
+			out := make([]map[string]any, 0, len(rows))
+			for _, row := range rows {
+				out = append(out, publicAPI(row))
+			}
+			writeJSON(w, map[string]any{"apis": out, "count": len(out)})
+			return
+		}
+		var body struct {
+			Slug        string `json:"slug"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+			return
+		}
+		row, err := createGraphQLAPI(a.ctx.AppDB(), project, body.Slug, body.Name, body.Description)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, map[string]any{"api": publicAPI(*row)})
+		return
+	}
+	apiSlug := r.URL.Query().Get("api_slug")
+	if apiSlug == "" {
+		apiSlug = r.URL.Query().Get("api")
+	}
+	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, apiSlug)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error(), errorCode(err))
+		return
+	}
 	if path == "schemas" && r.Method == http.MethodGet {
-		rows, err := listSchemas(a.ctx.AppReadDB(), project, environment)
+		rows, err := listSchemasForAPI(a.ctx.AppReadDB(), project, api.Slug, environment)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 			return
@@ -115,7 +161,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "sources" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		if r.Method == http.MethodGet {
-			rows, err := listSources(a.ctx.AppReadDB(), project)
+			rows, err := listSourcesForAPI(a.ctx.AppReadDB(), project, api.Slug)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 				return
@@ -136,7 +182,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
 			return
 		}
-		row, err := createSource(a.ctx.AppDB(), project, body.Name, body.Kind, body.Config)
+		row, err := createSourceForAPI(a.ctx.AppDB(), project, api.Slug, body.Name, body.Kind, body.Config)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
@@ -146,14 +192,14 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "resolvers" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		if r.Method == http.MethodGet {
-			rows, err := listResolvers(a.ctx.AppReadDB(), project)
+			rows, err := listResolversForAPI(a.ctx.AppReadDB(), project, api.Slug)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 				return
 			}
 			out := make([]map[string]any, 0, len(rows))
 			for _, row := range rows {
-				source, _ := getSource(a.ctx.AppReadDB(), project, row.SourceID, "")
+				source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, api.Slug, row.SourceID, "")
 				out = append(out, publicResolver(row, source))
 			}
 			writeJSON(w, map[string]any{"resolvers": out, "count": len(out)})
@@ -172,7 +218,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.SourceID == 0 && strings.TrimSpace(body.Source) != "" {
-			source, findErr := getSource(a.ctx.AppReadDB(), project, 0, strings.TrimSpace(body.Source))
+			source, findErr := getSourceForAPI(a.ctx.AppReadDB(), project, api.Slug, 0, strings.TrimSpace(body.Source))
 			if findErr != nil {
 				writeJSONError(w, http.StatusInternalServerError, findErr.Error(), "storage_error")
 				return
@@ -183,18 +229,18 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			body.SourceID = source.ID
 		}
-		row, err := upsertResolver(a.ctx.AppDB(), project, body.ParentType, body.FieldName, body.Operation, body.SourceID, body.Config)
+		row, err := upsertResolverForAPI(a.ctx.AppDB(), project, api.Slug, body.ParentType, body.FieldName, body.Operation, body.SourceID, body.Config)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
-		source, _ := getSource(a.ctx.AppReadDB(), project, row.SourceID, "")
+		source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, api.Slug, row.SourceID, "")
 		writeJSON(w, map[string]any{"resolver": publicResolver(*row, source)})
 		return
 	}
 	if path == "schema" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		if r.Method == http.MethodGet {
-			row, err := getSchema(a.ctx.AppReadDB(), project, environment, 0, false)
+			row, err := getSchemaForAPI(a.ctx.AppReadDB(), project, api.Slug, environment, 0, false)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 				return
@@ -213,7 +259,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
 			return
 		}
-		row, validationErrors, createErr := createSchema(a.ctx.AppDB(), project, environment, body.SDL, 0)
+		row, validationErrors, createErr := createSchemaForAPI(a.ctx.AppDB(), project, api.Slug, environment, body.SDL, 0)
 		if createErr != nil && row == nil && len(validationErrors) == 0 {
 			writeJSONError(w, http.StatusBadRequest, createErr.Error(), errorCode(createErr))
 			return
@@ -229,7 +275,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
 			return
 		}
-		row, err := publishSchema(a.ctx.AppDB(), project, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version)
+		row, err := publishSchemaForAPI(a.ctx.AppDB(), project, api.Slug, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
@@ -239,7 +285,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "logs" && r.Method == http.MethodGet {
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		rows, err := publicLogs(a.ctx.AppReadDB(), project, limit)
+		rows, err := publicLogs(a.ctx.AppReadDB(), storageProject(project, api.Slug), limit)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 			return
@@ -260,21 +306,21 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "topic is required", "invalid_request")
 			return
 		}
-		count := a.hub.publish(project, body.Topic, body.Payload)
+		count := a.hub.publishForAPI(project, api.Slug, body.Topic, body.Payload)
 		writeJSON(w, map[string]any{"published": true, "topic": body.Topic, "delivered": count})
 		return
 	}
 	writeJSONError(w, http.StatusNotFound, "not found", "not_found")
 }
 
-func (a *App) logRequest(project, operationName, operationType string, status int, duration time.Duration, errors []map[string]any) error {
+func (a *App) logRequest(project, apiSlug, operationName, operationType string, status int, duration time.Duration, errors []map[string]any) error {
 	message := ""
 	if len(errors) > 0 {
 		if value, ok := errors[0]["message"].(string); ok {
 			message = value
 		}
 	}
-	_, err := a.ctx.AppDB().Exec(`INSERT INTO graphql_request_logs(project_id,operation_name,operation_type,status_code,duration_ms,error,created_at) VALUES(?,?,?,?,?,?,?)`, project, operationName, operationType, status, duration.Milliseconds(), message, nowUTC())
+	_, err := a.ctx.AppDB().Exec(`INSERT INTO graphql_request_logs(project_id,operation_name,operation_type,status_code,duration_ms,error,created_at) VALUES(?,?,?,?,?,?,?)`, storageProject(project, apiSlug), operationName, operationType, status, duration.Milliseconds(), message, nowUTC())
 	return err
 }
 

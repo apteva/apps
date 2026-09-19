@@ -27,14 +27,14 @@ type executeResult struct {
 	OperationType string
 }
 
-func (a *App) execute(ctx context.Context, project, environment string, req graphqlRequest) (executeResult, error) {
+func (a *App) execute(ctx context.Context, project, apiSlug, environment string, req graphqlRequest) (executeResult, error) {
 	if strings.TrimSpace(req.Query) == "" {
 		return executeResult{}, invalid("query is required")
 	}
 	if req.Variables == nil {
 		req.Variables = map[string]any{}
 	}
-	schemaRow, err := getSchema(a.ctx.AppReadDB(), project, environment, 0, true)
+	schemaRow, err := getSchemaForAPI(a.ctx.AppReadDB(), project, apiSlug, environment, 0, true)
 	if err != nil {
 		return executeResult{}, err
 	}
@@ -61,7 +61,7 @@ func (a *App) execute(ctx context.Context, project, environment string, req grap
 		return executeResult{}, invalid("query depth %d exceeds limit %d", depth, maxQueryDepth(a.ctx))
 	}
 	rootType := operationType(op)
-	data, err := a.executeSelection(ctx, project, rootType, nil, op.SelectionSet, req.Variables)
+	data, err := a.executeSelection(ctx, project, apiSlug, rootType, nil, op.SelectionSet, req.Variables)
 	if err != nil {
 		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Errors: []map[string]any{{"message": err.Error(), "extensions": map[string]any{"code": errorCode(err)}}}}, nil
 	}
@@ -105,11 +105,11 @@ func maxQueryComplexity(ctx *sdk.AppCtx) int {
 	return 1000
 }
 
-func (a *App) executeSelection(ctx context.Context, project, parentType string, parentValue any, selection ast.SelectionSet, vars map[string]any) (any, error) {
+func (a *App) executeSelection(ctx context.Context, project, apiSlug, parentType string, parentValue any, selection ast.SelectionSet, vars map[string]any) (any, error) {
 	if list, ok := parentValue.([]any); ok {
 		out := make([]any, 0, len(list))
 		for _, item := range list {
-			value, err := a.executeSelection(ctx, project, parentType, item, selection, vars)
+			value, err := a.executeSelection(ctx, project, apiSlug, parentType, item, selection, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -121,7 +121,7 @@ func (a *App) executeSelection(ctx context.Context, project, parentType string, 
 		if records, ok := parentValue.([]map[string]any); ok {
 			out := make([]any, 0, len(records))
 			for _, item := range records {
-				value, err := a.executeSelection(ctx, project, parentType, item, selection, vars)
+				value, err := a.executeSelection(ctx, project, apiSlug, parentType, item, selection, vars)
 				if err != nil {
 					return nil, err
 				}
@@ -149,12 +149,12 @@ func (a *App) executeSelection(ctx context.Context, project, parentType string, 
 		if parentMap, ok := parentValue.(map[string]any); ok {
 			value = parentMap[field.Name]
 		}
-		resolver, resolverErr := getResolver(a.ctx.AppReadDB(), project, parentType, field.Name)
+		resolver, resolverErr := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, parentType, field.Name)
 		if resolverErr != nil {
 			return nil, resolverErr
 		}
 		if resolver != nil {
-			value, err = a.resolveField(ctx, project, *resolver, parentValue, field, vars)
+			value, err = a.resolveField(ctx, project, apiSlug, *resolver, parentValue, field, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -163,7 +163,7 @@ func (a *App) executeSelection(ctx context.Context, project, parentType string, 
 		}
 		if len(field.SelectionSet) > 0 && value != nil {
 			nextType := field.Definition.Type.NamedType
-			value, err = a.executeSelection(ctx, project, nextType, value, field.SelectionSet, vars)
+			value, err = a.executeSelection(ctx, project, apiSlug, nextType, value, field.SelectionSet, vars)
 			if err != nil {
 				return nil, err
 			}
@@ -173,8 +173,8 @@ func (a *App) executeSelection(ctx context.Context, project, parentType string, 
 	return result, nil
 }
 
-func (a *App) resolveField(ctx context.Context, project string, resolver resolverRecord, parent any, field *ast.Field, vars map[string]any) (any, error) {
-	source, err := getSource(a.ctx.AppReadDB(), project, resolver.SourceID, "")
+func (a *App) resolveField(ctx context.Context, project, apiSlug string, resolver resolverRecord, parent any, field *ast.Field, vars map[string]any) (any, error) {
+	source, err := getSourceForAPI(a.ctx.AppReadDB(), project, apiSlug, resolver.SourceID, "")
 	if err != nil {
 		return nil, err
 	}

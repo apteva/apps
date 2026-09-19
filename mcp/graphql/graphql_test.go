@@ -23,8 +23,48 @@ func testDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec(string(migration)); err != nil {
 		t.Fatal(err)
 	}
+	migration, err = os.ReadFile("migrations/002_multi_api.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
+}
+
+func TestNamedAPIsIsolateSchemasSourcesAndResolvers(t *testing.T) {
+	db := testDB(t)
+	first, err := createGraphQLAPI(db, "p1", "commerce", "Commerce", "")
+	if err != nil || first == nil {
+		t.Fatalf("create first api: %#v %v", first, err)
+	}
+	second, err := createGraphQLAPI(db, "p1", "analytics", "Analytics", "")
+	if err != nil || second == nil {
+		t.Fatalf("create second api: %#v %v", second, err)
+	}
+	row, _, err := createSchemaForAPI(db, "p1", "commerce", "production", "type Query { products: String! }", 0)
+	if err != nil || row == nil {
+		t.Fatal(err)
+	}
+	other, _, err := createSchemaForAPI(db, "p1", "analytics", "production", "type Query { reports: String! }", 0)
+	if err != nil || other == nil || other.Version != 1 {
+		t.Fatalf("isolated schema: %#v %v", other, err)
+	}
+	source, err := createSourceForAPI(db, "p1", "commerce", "items", "tables", map[string]any{"table": "items"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := createSourceForAPI(db, "p1", "analytics", "items", "tables", map[string]any{"table": "reports"}); err != nil {
+		t.Fatalf("same source name should be allowed per api: %v", err)
+	}
+	if _, err := upsertResolverForAPI(db, "p1", "commerce", "Query", "items", "find", source.ID, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := listResolversForAPI(db, "p1", "analytics"); err != nil || len(got) != 0 {
+		t.Fatalf("resolver leaked across api: %#v %v", got, err)
+	}
 }
 
 func TestSchemaLifecycleAndResolverStorage(t *testing.T) {

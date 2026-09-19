@@ -358,15 +358,15 @@ func publicSchema(row *schemaRecord) map[string]any {
 	if row == nil {
 		return nil
 	}
-	return map[string]any{"id": row.ID, "project_id": row.ProjectID, "environment": row.Environment, "version": row.Version, "sdl": row.SDL, "status": row.Status, "hash": row.Hash, "validation_errors": row.ValidationError, "created_at": row.CreatedAt, "published_at": row.PublishedAt}
+	return map[string]any{"id": row.ID, "project_id": publicProjectID(row.ProjectID), "environment": row.Environment, "version": row.Version, "sdl": row.SDL, "status": row.Status, "hash": row.Hash, "validation_errors": row.ValidationError, "created_at": row.CreatedAt, "published_at": row.PublishedAt}
 }
 
 func publicSource(row sourceRecord) map[string]any {
-	return map[string]any{"id": row.ID, "project_id": row.ProjectID, "name": row.Name, "kind": row.Kind, "config": row.Config, "status": row.Status}
+	return map[string]any{"id": row.ID, "project_id": publicProjectID(row.ProjectID), "name": row.Name, "kind": row.Kind, "config": row.Config, "status": row.Status}
 }
 
 func publicResolver(row resolverRecord, source *sourceRecord) map[string]any {
-	result := map[string]any{"id": row.ID, "project_id": row.ProjectID, "parent_type": row.ParentType, "field_name": row.FieldName, "source_id": row.SourceID, "operation": row.Operation, "config": row.Config}
+	result := map[string]any{"id": row.ID, "project_id": publicProjectID(row.ProjectID), "parent_type": row.ParentType, "field_name": row.FieldName, "source_id": row.SourceID, "operation": row.Operation, "config": row.Config}
 	if source != nil {
 		result["source"] = source.Name
 	}

@@ -2,11 +2,12 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.1.4
+version: 0.2.0
 description: |
-  Standalone GraphQL and realtime API runtime. Owns schemas, resolver
-  bindings, aggregation, source adapters and GraphQL subscriptions without
-  depending on the API gateway app.
+  Standalone multi-API GraphQL and realtime runtime. Define multiple named
+  endpoints with independent schemas, resolver bindings, environments,
+  aggregation, source adapters and subscriptions without depending on the API
+  gateway app.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/graphql
 icon: /ui/icon.svg
@@ -42,9 +43,16 @@ requires:
 provides:
   http_routes:
     - prefix: /graphql
+    - prefix: /graphql/{api_slug}
     - prefix: /admin/
-    - prefix: /health
+    - prefix: /realtime/{api_slug}
   mcp_tools:
+    - name: graphql_api_create
+      description: Create a named GraphQL API endpoint.
+    - name: graphql_api_list
+      description: List named GraphQL API endpoints.
+    - name: graphql_api_get
+      description: Fetch a named GraphQL API endpoint.
     - name: graphql_schema_create
       description: Create or replace a draft GraphQL schema for a project and environment.
     - name: graphql_schema_get
@@ -77,7 +85,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.1.4
+    ref: graphql/v0.2.0
     entry: mcp/graphql
   port: 8080
   health_check: /health

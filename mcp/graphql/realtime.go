@@ -15,6 +15,7 @@ import (
 
 type subscription struct {
 	project string
+	api     string
 	topic   string
 	events  chan map[string]any
 	done    chan struct{}
@@ -32,15 +33,23 @@ func newSubscriptionHub() *subscriptionHub {
 
 func (h *subscriptionHub) key(project, topic string) string { return project + "\x00" + topic }
 
+func (h *subscriptionHub) apiKey(project, api, topic string) string {
+	return project + "\x00" + normalizeAPISlug(api) + "\x00" + topic
+}
+
 func (h *subscriptionHub) subscribe(project, topic string) (*subscription, func()) {
-	s := &subscription{project: project, topic: topic, events: make(chan map[string]any, 16), done: make(chan struct{})}
+	return h.subscribeForAPI(project, "default", topic)
+}
+
+func (h *subscriptionHub) subscribeForAPI(project, api, topic string) (*subscription, func()) {
+	s := &subscription{project: project, api: normalizeAPISlug(api), topic: topic, events: make(chan map[string]any, 16), done: make(chan struct{})}
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
 		close(s.done)
 		return s, func() {}
 	}
-	key := h.key(project, topic)
+	key := h.apiKey(project, api, topic)
 	if h.subs[key] == nil {
 		h.subs[key] = map[*subscription]struct{}{}
 	}
@@ -51,7 +60,7 @@ func (h *subscriptionHub) subscribe(project, topic string) (*subscription, func(
 
 func (h *subscriptionHub) unsubscribe(s *subscription) {
 	h.mu.Lock()
-	key := h.key(s.project, s.topic)
+	key := h.apiKey(s.project, s.api, s.topic)
 	if group := h.subs[key]; group != nil {
 		delete(group, s)
 		if len(group) == 0 {
@@ -67,18 +76,46 @@ func (h *subscriptionHub) unsubscribe(s *subscription) {
 }
 
 func (h *subscriptionHub) publish(project, topic string, payload map[string]any) int {
+	return h.publishForAPI(project, "default", topic, payload)
+}
+
+func (h *subscriptionHub) publishForAPI(project, api, topic string, payload map[string]any) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.closed {
 		return 0
 	}
 	count := 0
-	for sub := range h.subs[h.key(project, topic)] {
+	for sub := range h.subs[h.apiKey(project, api, topic)] {
 		select {
 		case sub.events <- payload:
 			count++
 		default:
 			// A slow client must not block unrelated realtime subscribers.
+		}
+	}
+	return count
+}
+
+func (h *subscriptionHub) publishAllAPIs(project, topic string, payload map[string]any) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed {
+		return 0
+	}
+	prefix := project + "\x00"
+	suffix := "\x00" + topic
+	count := 0
+	for key, group := range h.subs {
+		if !strings.HasPrefix(key, prefix) || !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		for sub := range group {
+			select {
+			case sub.events <- payload:
+				count++
+			default:
+			}
 		}
 	}
 	return count
@@ -124,6 +161,11 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 		return
 	}
+	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, realtimeAPISlugFromPath(r.URL.Path))
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error(), errorCode(err))
+		return
+	}
 	conn, err := websocketUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -164,18 +206,18 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 				_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": "invalid subscribe payload"}})})
 				continue
 			}
-			result, execErr := a.execute(r.Context(), project, normalizeEnvironment(req.Environment), req)
+			result, execErr := a.execute(r.Context(), project, api.Slug, normalizeEnvironment(req.Environment), req)
 			if execErr != nil {
 				_ = write(wsMessage{ID: message.ID, Type: "error", Payload: mustJSON([]map[string]any{{"message": execErr.Error()}})})
 				continue
 			}
 			_ = write(wsMessage{ID: message.ID, Type: "next", Payload: mustJSON(map[string]any{"data": result.Data, "errors": result.Errors})})
-			topic := subscriptionTopic(a, project, req.Query, message.Payload)
+			topic := subscriptionTopic(a, project, api.Slug, req.Query, message.Payload)
 			if topic == "" {
 				_ = write(wsMessage{ID: message.ID, Type: "complete"})
 				continue
 			}
-			sub, cancel := a.hub.subscribe(project, topic)
+			sub, cancel := a.hub.subscribeForAPI(project, api.Slug, topic)
 			activeCancel = cancel
 			go func(id, topic string, sub *subscription, request graphqlRequest) {
 				for {
@@ -185,7 +227,7 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 					case <-r.Context().Done():
 						return
 					case <-sub.events:
-						next, err := a.execute(r.Context(), project, normalizeEnvironment(request.Environment), request)
+						next, err := a.execute(r.Context(), project, api.Slug, normalizeEnvironment(request.Environment), request)
 						if err != nil {
 							_ = write(wsMessage{ID: id, Type: "error", Payload: mustJSON([]map[string]any{{"message": err.Error()}})})
 							continue
@@ -213,12 +255,12 @@ func (a *App) handleSourceEvent(_ *sdk.AppCtx, event sdk.Event) error {
 	if table, ok := event.Data["table"].(string); ok && strings.TrimSpace(table) != "" {
 		topic = "tables." + table + "." + topic
 	}
-	a.hub.publish(event.ProjectID, topic, event.Data)
-	a.hub.publish(event.ProjectID, event.Name(), event.Data)
+	a.hub.publishAllAPIs(event.ProjectID, topic, event.Data)
+	a.hub.publishAllAPIs(event.ProjectID, event.Name(), event.Data)
 	return nil
 }
 
-func subscriptionTopic(a *App, project, query string, payload json.RawMessage) string {
+func subscriptionTopic(a *App, project, apiSlug, query string, payload json.RawMessage) string {
 	// The protocol permits an explicit topic for source adapters and tests.
 	var envelope map[string]any
 	if json.Unmarshal(payload, &envelope) == nil {
@@ -235,7 +277,7 @@ func subscriptionTopic(a *App, project, query string, payload json.RawMessage) s
 	if !ok {
 		return ""
 	}
-	resolver, _ := getResolver(a.ctx.AppReadDB(), project, "Subscription", field.Name)
+	resolver, _ := getResolverForAPI(a.ctx.AppReadDB(), project, apiSlug, "Subscription", field.Name)
 	if resolver == nil {
 		return ""
 	}
