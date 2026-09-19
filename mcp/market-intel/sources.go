@@ -25,14 +25,14 @@ import (
 type queryType string
 
 const (
-	qOdds        queryType = "odds"          // sportsbook odds for an event → de-vig → fair prob
-	qH2H         queryType = "h2h"           // head-to-head record between two entities
-	qRanking     queryType = "ranking"       // current ranking / standing for an entity
-	qForm        queryType = "form"          // recent form / results for an entity
-	qIndicator   queryType = "indicator"     // macro indicator time series
-	qMarketPrice queryType = "market_price"  // current price of a prediction market on a venue
-	qNews        queryType = "news"          // news + sentiment for a topic/entity
-	qCryptoPrice queryType = "crypto_price"  // spot price for a crypto asset
+	qOdds        queryType = "odds"         // sportsbook odds for an event → de-vig → fair prob
+	qH2H         queryType = "h2h"          // head-to-head record between two entities
+	qRanking     queryType = "ranking"      // current ranking / standing for an entity
+	qForm        queryType = "form"         // recent form / results for an entity
+	qIndicator   queryType = "indicator"    // macro indicator time series
+	qMarketPrice queryType = "market_price" // current price of a prediction market on a venue
+	qNews        queryType = "news"         // news + sentiment for a topic/entity
+	qCryptoPrice queryType = "crypto_price" // spot price for a crypto asset
 )
 
 // sourceSpec — one way to answer a query type. argFn turns the gateway's
@@ -136,6 +136,9 @@ var registry = map[string]map[queryType][]sourceSpec{
 			}},
 			{slug: "gdelt", tool: "doc_search", argFn: func(p map[string]any) map[string]any {
 				return map[string]any{"query": p["topic"], "maxrecords": 8}
+			}},
+			{slug: "sec-edgar", tool: "ticker_to_cik", argFn: func(p map[string]any) map[string]any {
+				return map[string]any{"ticker": p["topic"]}
 			}},
 		},
 	},

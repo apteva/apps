@@ -11,6 +11,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -283,7 +284,30 @@ type ContextResult struct {
 func gwContext(sc sourceClient, topic string) ContextResult {
 	out := ContextResult{Topic: topic, Items: []NewsItem{}, Sources: []string{}}
 	seenTitle := map[string]bool{}
+	// SEC EDGAR is a two-step source: resolve the ticker to a CIK, then
+	// retrieve the company's recent filings. Keep this special case here so
+	// the generic news fan-out remains compatible with search-style sources.
+	if raw, ok := sc.call("sec-edgar", "ticker_to_cik", map[string]any{"ticker": topic}); ok {
+		if cik, ok := secCIKForTicker(raw, topic); ok {
+			if filings, ok := sc.call("sec-edgar", "company_submissions", map[string]any{"cik": cik}); ok {
+				for _, it := range parseSECSubmissions(filings, cik) {
+					key := normTitle(it.Title)
+					if key == "" || seenTitle[key] {
+						continue
+					}
+					seenTitle[key] = true
+					out.Items = append(out.Items, it)
+				}
+				if len(out.Items) > 0 {
+					out.Sources = append(out.Sources, "sec-edgar")
+				}
+			}
+		}
+	}
 	for _, spec := range specsFor("*", qNews) {
+		if spec.slug == "sec-edgar" {
+			continue // handled above as a two-step filings query
+		}
 		raw, ok := sc.call(spec.slug, spec.tool, spec.argFn(map[string]any{"topic": topic}))
 		if !ok {
 			continue
@@ -348,6 +372,74 @@ func parseNews(raw json.RawMessage, slug string) []NewsItem {
 		out = append(out, NewsItem{Title: a.Title, URL: a.URL, Source: src})
 	}
 	return out
+}
+
+// secCIKForTicker accepts the SEC's company_tickers.json map. The endpoint
+// has used both numeric and string cik_str values, so decode flexibly.
+func secCIKForTicker(raw json.RawMessage, ticker string) (string, bool) {
+	target := strings.ToUpper(strings.TrimSpace(ticker))
+	var rows map[string]struct {
+		CIKStr json.RawMessage `json:"cik_str"`
+		Ticker string          `json:"ticker"`
+		Title  string          `json:"title"`
+	}
+	if json.Unmarshal(raw, &rows) != nil {
+		return "", false
+	}
+	for _, row := range rows {
+		if strings.ToUpper(row.Ticker) != target {
+			continue
+		}
+		var n int64
+		if json.Unmarshal(row.CIKStr, &n) == nil {
+			return fmt.Sprintf("%010d", n), true
+		}
+		var s string
+		if json.Unmarshal(row.CIKStr, &s) == nil && s != "" {
+			return fmt.Sprintf("%010s", strings.TrimSpace(s)), true
+		}
+	}
+	return "", false
+}
+
+func parseSECSubmissions(raw json.RawMessage, cik string) []NewsItem {
+	var payload struct {
+		Filings struct {
+			Recent struct {
+				Accession  []string `json:"accessionNumber"`
+				FilingDate []string `json:"filingDate"`
+				ReportDate []string `json:"reportDate"`
+				Form       []string `json:"form"`
+				Primary    []string `json:"primaryDocument"`
+			} `json:"recent"`
+		} `json:"filings"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	r := payload.Filings.Recent
+	items := make([]NewsItem, 0, len(r.Form))
+	for i, form := range r.Form {
+		if form == "" || i >= len(r.Accession) || i >= len(r.FilingDate) {
+			continue
+		}
+		date := r.FilingDate[i]
+		title := fmt.Sprintf("SEC %s filing (%s)", form, date)
+		if i < len(r.ReportDate) && r.ReportDate[i] != "" && r.ReportDate[i] != date {
+			title += " — period " + r.ReportDate[i]
+		}
+		acc := strings.ReplaceAll(r.Accession[i], "-", "")
+		doc := ""
+		if i < len(r.Primary) {
+			doc = r.Primary[i]
+		}
+		url := fmt.Sprintf("https://www.sec.gov/Archives/edgar/data/%s/%s", strings.TrimLeft(cik, "0"), acc)
+		if doc != "" {
+			url += "/" + doc
+		}
+		items = append(items, NewsItem{Title: title, URL: url, Source: "SEC EDGAR"})
+	}
+	return items
 }
 
 func normTitle(t string) string {

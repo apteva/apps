@@ -36,7 +36,7 @@ const SOURCE_DOMAINS: Record<string, string> = {
   kalshi: "Prediction markets", "manifold-markets": "Prediction markets",
   "the-odds-api": "Sports", "the-sports-db": "Sports", "api-sports": "Sports", "tennis-abstract": "Sports",
   fred: "Macro", bls: "Macro", eia: "Macro", finnhub: "Macro",
-  tavily: "News", perplexity: "News", exa: "News", newsapi: "News", gnews: "News", gdelt: "News", wikipedia: "News",
+  tavily: "News", perplexity: "News", exa: "News", newsapi: "News", gnews: "News", gdelt: "News", "sec-edgar": "Financial filings", wikipedia: "News",
   coingecko: "Crypto", etherscan: "Crypto", polygonscan: "Crypto", "whale-alert": "Crypto", defillama: "Crypto",
   "anthropic-api": "LLM", "openai-api": "LLM",
   "alpaca-market-data": "Market data", "alpha-vantage": "Market data", "yahoo-finance": "Market data",

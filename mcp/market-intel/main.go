@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.3.0
+version: 0.3.1
 description: Generic temporal intelligence platform with market and trading domain packs.
 author: Apteva
 scopes: [project, global]
@@ -55,7 +55,7 @@ requires:
     - role: news_data
       kind: integration
       required: false
-      compatible_slugs: [tavily, perplexity, exa, newsapi, gnews, gdelt, wikipedia]
+      compatible_slugs: [tavily, perplexity, exa, newsapi, gnews, gdelt, sec-edgar, wikipedia]
     - role: crypto_data
       kind: integration
       required: false
