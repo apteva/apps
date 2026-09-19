@@ -76,6 +76,9 @@ export function currentRunSteps(run: MapRun) {
         (run.steps?.length ? "Awaiting next step" : "No step tracking");
 }
 export const STEP_WIDTH = 248;
+export const ENDPOINT_WIDTH = 112;
+export const ENDPOINT_HEIGHT = 40;
+export const ENDPOINT_GAP = 18;
 export type MapLayout = {
   process: MapProcess;
   x: number;
@@ -86,6 +89,10 @@ export type MapLayout = {
   stepHeight: number;
   runWidth: number;
   runPositions: Record<string, { x: number; y: number }>;
+  endpointPositions: {
+    start: { x: number; y: number };
+    end: { x: number; y: number };
+  };
   positions: Record<string, { x: number; y: number }>;
 };
 function shape(
@@ -104,18 +111,32 @@ function shape(
   const depth = Math.max(1, ...[...ranks.values()].map((r) => r + 1));
   const breadth = Math.max(1, ...[...groups.values()].map((g) => g.length));
   const stepHeight = 100 + overlayRuns(process, runs).length * 48;
+  const flowX = vertical ? 22 : 22 + ENDPOINT_WIDTH + ENDPOINT_GAP;
+  const flowY = vertical ? 130 + ENDPOINT_HEIGHT + ENDPOINT_GAP : 130;
   const positions: MapLayout["positions"] = {};
   for (const s of steps) {
     const rank = ranks.get(s.key)!,
       group = groups.get(rank)!;
     const lane = (breadth - group.length) / 2 + group.indexOf(s);
     positions[s.key] = {
-      x: 22 + (vertical ? lane : rank) * (STEP_WIDTH + 64),
-      y: 130 + (vertical ? rank : lane) * (stepHeight + 64),
+      x: flowX + (vertical ? lane : rank) * (STEP_WIDTH + 64),
+      y: flowY + (vertical ? rank : lane) * (stepHeight + 64),
     };
   }
-  const width = 44 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64;
-  let height = 152 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
+  const stepRight =
+    flowX + (vertical ? breadth - 1 : depth - 1) * (STEP_WIDTH + 64) + STEP_WIDTH;
+  const stepBottom =
+    flowY + (vertical ? depth - 1 : breadth - 1) * (stepHeight + 64) + stepHeight;
+  const endpointY =
+    flowY + Math.max(0, (stepBottom - flowY - ENDPOINT_HEIGHT) / 2);
+  const endpointX =
+    flowX + (stepRight - flowX - ENDPOINT_WIDTH) / 2;
+  const width = vertical
+    ? 44 + breadth * (STEP_WIDTH + 64) - 64
+    : stepRight + ENDPOINT_GAP + ENDPOINT_WIDTH + 22;
+  let height = vertical
+    ? stepBottom + ENDPOINT_GAP + ENDPOINT_HEIGHT + 22
+    : stepBottom + 22;
   const other = supplementalRuns(process, runs);
   const columns = Math.max(1, Math.floor((width - 40) / (STEP_WIDTH + 16)));
   const runWidth = (width - 44 - (columns - 1) * 16) / columns;
@@ -138,6 +159,15 @@ function shape(
     height,
     runWidth,
     runPositions,
+    endpointPositions: vertical
+      ? {
+          start: { x: endpointX, y: 130 },
+          end: { x: endpointX, y: stepBottom + ENDPOINT_GAP },
+        }
+      : {
+          start: { x: 22, y: endpointY },
+          end: { x: stepRight + ENDPOINT_GAP, y: endpointY },
+        },
   };
 }
 // Try shelf widths and both dependency directions. Penalize elongated canvases,
