@@ -4,6 +4,51 @@ The standalone `graphql` app owns GraphQL schemas, resolver bindings,
 aggregation-aware source adapters, and realtime subscriptions. It is
 deliberately independent from the REST/API gateway app.
 
+## Typed filtering, identity row policies and selection pushdown (0.5.0)
+
+Tables resolvers accept typed GraphQL input objects as `where` arguments. API
+authors define the input types in ordinary SDL; the adapter lowers scalar
+operators (`eq`, `neq`, comparisons, `contains`, `in`, `notIn`, `between` and
+null checks), nested `and`, invertible `not`, and same-column equality `or` to
+native Tables predicates. Existing `[{col,op,value}]` inputs remain compatible.
+Use source/resolver `filter_columns` to map GraphQL input field names to table
+columns. Unsupported disjunctions fail closed because Tables' native predicate
+list is conjunctive; the adapter never broadens a query or filters a truncated
+page in memory.
+
+GraphQL pagination conventions map without changing the schema: `first` maps to
+Tables `limit`, `after` to `cursor`, and `includeTotal` to `include_total`.
+`limit`, `cursor`, and snake-case names remain compatible.
+
+Auth policies can enforce non-overridable identity-derived predicates before a
+Tables read:
+
+```json
+{
+  "mode": "auth",
+  "tenant_id": "default",
+  "environment": "production",
+  "claims": ["centre_ids"],
+  "row_filters": {
+    "Query.prospects": [
+      {"column":"commercial_id", "identity":"subject", "value_type":"string"},
+      {"column":"centre_id", "op":"in", "identity":"claim.centre_ids", "value_type":"string"}
+    ]
+  }
+}
+```
+
+Identity sources are `subject`, `tenant`, or an explicitly requested safe
+`claim.<name>`. Configured source filters, identity filters, client filters and
+relationship keys are always ANDed. Query arguments can no longer replace a
+source's fixed `where` scope.
+
+For Tables `find`, `list`, `search`, and `get`, the validated GraphQL selection
+is automatically pushed down as the native `select` list. Aliases and fragments
+are resolved first, configured select allowlists are retained, and hidden parent
+keys needed by selected relationships are added. This reduces inter-app JSON
+encoding without changing the GraphQL response or completion rules.
+
 ## Standard execution and direct Tables fields (0.4.0)
 
 Schemas and client requests use ordinary GraphQL SDL and operations. There are
@@ -107,10 +152,10 @@ and relation validation. No server, SDK, or Tables changes are needed; Tables
   executable directive behavior are not implemented. Unsupported `@oneOf` and
   interface inheritance schemas are rejected at publication. Custom scalars
   retain JSON passthrough semantics, not automatic DateTime/UUID validation.
-- Existing Auth admission and field permissions remain. Relationships are
-  **not row-level authorization**: API authors must expose only appropriate
-  roots/fields. This release does not automatically infer owner/team/centre
-  permissions, create an identity-bound root, or replace the Flexylead Function.
+- Existing Auth admission and field permissions remain. Relationships alone
+  are not authorization; authenticated Tables roots can now declare explicit
+  identity-derived row filters. The app does not infer an application's
+  owner/team/centre model or invent identity-to-entity joins.
 - Field permissions are conservatively preflighted before execution, including
   fields behind conditional directives, and checked again at resolution.
 - Built-in scalar completion now follows the execution engine, including ID
@@ -279,10 +324,11 @@ as user identities.
 - Public authenticated execution requires a project-scoped installation.
 - Protected subscriptions are denied, including through internal entry points,
   until subscription/event-level authorization is available.
-- Authentication and field permissions are not row-level authorization. Keep
-  domain/team/centre filtering in Functions. Direct Tables/HTTP sources execute
-  using installation permissions and must not expose unrestricted resource
-  selectors to untrusted users.
+- Authentication and field permissions alone are not row-level authorization.
+  Configure `row_filters` for authenticated Tables fields. Multi-hop identity
+  mapping and business authorization still require an appropriate schema field,
+  trusted resolver, or source-side model. HTTP sources execute using installation
+  permissions and must not expose unrestricted resource selectors to users.
 - Cross-origin access still requires platform-managed CORS configuration.
 - This release does not change any existing Function trust policy, Flexylead
   endpoint, or installed app. A GraphQL Function wrapper is not a speedup by itself.

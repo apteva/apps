@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -229,6 +230,30 @@ type Page { rows: [Order!]! total: Int! }`, p, bindings)
 		if row["id"] != order["customer_id"] {
 			t.Fatalf("relationship leak: %v", data)
 		}
+	}
+}
+
+func TestTablesSelectionPushdownUsesValidatedGraphQLSelection(t *testing.T) {
+	p := &standardTables{}
+	bindings := &executionBindings{sources: map[int64]sourceRecord{
+		1: {Kind: "tables", Config: map[string]any{"table": "customers", "select": []any{"id", "name", "secret"}}},
+	}, resolvers: map[string]resolverRecord{
+		"Query.customers": {SourceID: 1, Operation: "find"},
+	}}
+	_, schema, ctx := standardApp(t, `type Query { customers: [Customer!]! } type Customer { id: ID! name: String secret: String }`, p, bindings)
+	result := runStandard(schema, gql.Params{Context: ctx, RequestString: `{ customers { ...CustomerID } } fragment CustomerID on Customer { id }`})
+	if len(result.Errors) > 0 {
+		t.Fatal(result.Errors)
+	}
+	if len(p.inputs) != 1 {
+		t.Fatalf("calls: %v", p.calls)
+	}
+	args := p.inputs[0]
+	if raw, ok := args["operations"].([]map[string]any); ok {
+		args = raw[0]["args"].(map[string]any)
+	}
+	if !reflect.DeepEqual(args["select"], []any{"id"}) {
+		t.Fatalf("selection was not pushed down: %#v", args)
 	}
 }
 

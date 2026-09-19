@@ -61,8 +61,8 @@ function SchemaTab({ projectId, apiSlug, environment, schema, schemas, sdl, setS
 }
 
 function SourcesTab({ projectId, apiSlug, environment, sources, onRefresh, onError }) {
-  const [name, setName] = useState(""); const [kind, setKind] = useState("tables"); const [config, setConfig] = useState('{\n  "table": ""\n}'); const [busy, setBusy] = useState(false);
-  const defaults = { database: '{\n  "database": "",\n  "collection": ""\n}', tables: '{\n  "table": "",\n  "select": [],\n  "filters": {}\n}', function: '{\n  "name": ""\n}', http: '{\n  "url": "https://",\n  "method": "GET",\n  "headers": {},\n  "query": {}\n}' };
+  const [name, setName] = useState(""); const [kind, setKind] = useState("tables"); const [config, setConfig] = useState('{\n  "table": "",\n  "filter_columns": {}\n}'); const [busy, setBusy] = useState(false);
+  const defaults = { database: '{\n  "database": "",\n  "collection": ""\n}', tables: '{\n  "table": "",\n  "filter_columns": {}\n}', function: '{\n  "name": ""\n}', http: '{\n  "url": "https://",\n  "method": "GET",\n  "headers": {},\n  "query": {}\n}' };
   async function addSource(event) { event.preventDefault(); setBusy(true); onError(null); try { await apiFetch("sources", projectId, environment, { apiSlug, method: "POST", body: JSON.stringify({ name, kind, config: JSON.parse(config || "{}") }) }); setName(""); await onRefresh(); } catch (error) { onError(error); } finally { setBusy(false); } }
   return jsxs("div", { className: "grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-4 p-5", children: [jsxs("section", { className: panelClass, children: [jsx("h2", { className: "font-semibold mb-3", children: "Configured sources" }), sources.length === 0 ? jsx(Empty, { children: "No sources configured." }) : jsx("div", { className: "space-y-2", children: sources.map((source) => jsxs("div", { className: "rounded border border-border p-3 flex items-start justify-between gap-3", children: [jsxs("div", { children: [jsx("div", { className: "font-medium", children: source.name }), jsx("div", { className: "text-xs text-text-dim mt-1", children: `${source.kind} · ${JSON.stringify(source.config || {})}` })] }), jsx(StatusPill, { status: source.status })] }, source.id)) })] }), jsxs("form", { className: `${panelClass} space-y-3`, onSubmit: addSource, children: [jsx("h2", { className: "font-semibold", children: "Add or update source" }), jsx(Field, { label: "Name", children: jsx("input", { className: inputClass, value: name, onChange: (event) => setName(event.target.value), placeholder: "orders" }) }), jsx(Field, { label: "Kind", children: jsx("select", { className: inputClass, value: kind, onChange: (event) => { setKind(event.target.value); setConfig(defaults[event.target.value]); }, children: ["database", "tables", "function", "http"].map((value) => jsx("option", { value, children: value }, value)) }) }), jsx(Field, { label: "Configuration", hint: "JSON passed to the source adapter.", children: jsx("textarea", { className: `${inputClass} min-h-[230px] font-mono text-xs`, value: config, onChange: (event) => setConfig(event.target.value), spellCheck: false }) }), jsx(Button, { primary: true, type: "submit", disabled: busy || !name.trim(), children: busy ? "Saving…" : "Save source" })] })] });
 }
@@ -80,6 +80,7 @@ function AuthenticationTab({ projectId, apiSlug, onError }) {
   const [claims, setClaims] = useState("");
   const [permissions, setPermissions] = useState("");
   const [fields, setFields] = useState("{}");
+  const [rowFilters, setRowFilters] = useState("{}");
   const [busy, setBusy] = useState(true);
   const [notice, setNotice] = useState("");
   const [validation, setValidation] = useState(null);
@@ -90,6 +91,7 @@ function AuthenticationTab({ projectId, apiSlug, onError }) {
       setMode(p.mode); setTenant(p.tenant_id || "default"); setEnvironment(p.environment || "production");
       setClaims((p.claims || []).join(", ")); setPermissions((p.permissions || []).join(", "));
       setFields(JSON.stringify(p.fields || {}, null, 2));
+      setRowFilters(JSON.stringify(p.row_filters || {}, null, 2));
     }).catch((err) => { if (active) onError(err); }).finally(() => { if (active) setBusy(false); });
     return () => { active = false; };
   }, [projectId, apiSlug]);
@@ -97,7 +99,7 @@ function AuthenticationTab({ projectId, apiSlug, onError }) {
   async function save(event) {
     event.preventDefault(); setBusy(true); setNotice(""); setValidation(null); onError(null);
     try {
-      const security = mode === "platform" ? { mode } : { mode, tenant_id: tenant, environment, claims: list(claims), permissions: list(permissions), fields: JSON.parse(fields) };
+      const security = mode === "platform" ? { mode } : { mode, tenant_id: tenant, environment, claims: list(claims), permissions: list(permissions), fields: JSON.parse(fields), row_filters: JSON.parse(rowFilters) };
       await apiFetch("security", projectId, "", { apiSlug, method: "PUT", body: JSON.stringify({ security }) });
       setNotice("Security policy saved. Applies immediately; Function trust policies were not changed.");
     } catch (err) { onError(err); } finally { setBusy(false); }
@@ -109,7 +111,7 @@ function AuthenticationTab({ projectId, apiSlug, onError }) {
   }
   return jsxs("form", { onSubmit: save, className: "p-5 space-y-4 max-w-3xl", children: [
     jsx("h2", { className: "font-semibold", children: "API authentication" }),
-    jsx("p", { className: "text-sm text-text-dim", children: "Apteva Auth verifies the user for this API. Field permissions tighten access; they do not provide row-level commercial/team filtering. Keep business authorization in your Functions." }),
+    jsx("p", { className: "text-sm text-text-dim", children: "Apteva Auth verifies the user for this API. Field permissions and identity-derived row filters are enforced before Tables reads." }),
     jsx(Field, { label: "Access mode", children: jsx("select", { className: inputClass, value: mode, disabled: busy, onChange: (e) => setMode(e.target.value), children: [jsx("option", { value: "platform", children: "Platform only (existing internal endpoints)" }, "platform"), jsx("option", { value: "auth", children: "Authenticated users — Apteva Auth" }, "auth")] }) }),
     mode === "auth" && jsxs("div", { className: `${panelClass} space-y-4`, children: [
       jsx(Field, { label: "Required Auth tenant / organization slug", children: jsx("input", { className: inputClass, value: tenant, onChange: (e) => setTenant(e.target.value), required: true }) }),
@@ -117,6 +119,7 @@ function AuthenticationTab({ projectId, apiSlug, onError }) {
       jsx(Field, { label: "Claims to forward (comma-separated)", hint: "Only server-managed authorization claims, never user metadata or credentials.", children: jsx("input", { className: inputClass, value: claims, placeholder: "roles, permissions, authorization_version", onChange: (e) => setClaims(e.target.value) }) }),
       jsx(Field, { label: "Required API permissions (all, comma-separated)", children: jsx("input", { className: inputClass, value: permissions, onChange: (e) => setPermissions(e.target.value) }) }),
       jsx(Field, { label: "Additional field permissions (JSON)", hint: 'Example: {"Query.reports":["reports:read"]}. Nested fields are checked too.', children: jsx("textarea", { className: `${inputClass} font-mono min-h-[130px]`, value: fields, onChange: (e) => setFields(e.target.value), spellCheck: false }) }),
+      jsx(Field, { label: "Identity-derived Tables row filters (JSON)", hint: 'Example: {"Query.prospects":[{"column":"commercial_id","identity":"subject","value_type":"string"}]}. identity may be subject, tenant, or claim.<name>; configured predicates cannot be overridden by query arguments.', children: jsx("textarea", { className: `${inputClass} font-mono min-h-[160px]`, value: rowFilters, onChange: (e) => setRowFilters(e.target.value), spellCheck: false }) }),
       jsx("code", { className: "block text-xs break-all", children: `${API}/public/graphql/${apiSlug}?project_id=${encodeURIComponent(projectId)}` }),
       jsx("p", { className: "text-sm text-text-dim", children: "Send the user's Auth bearer token to this endpoint. Project-scoped installations only. Protected subscriptions are disabled in this release. Cross-origin deployment requires platform CORS configuration." }),
     ] }),

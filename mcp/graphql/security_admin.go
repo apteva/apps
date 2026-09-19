@@ -45,6 +45,9 @@ func validateSecurityBindings(db *sql.DB, project, api string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateRowFilterTargets(db, project, api, p); err != nil {
+		return err
+	}
 	resolvers, err := listResolversForAPI(db, project, api)
 	if err != nil {
 		return err

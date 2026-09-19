@@ -231,6 +231,12 @@ func tryFastProjection(ctx context.Context, runtime *gql.Schema, document *gast.
 		return nil, false
 	}
 	args, _ := ctx.Value(argumentValuesKey{}).(argumentValues)
+	fragments := map[string]gast.Definition{}
+	for _, definition := range document.Definitions {
+		if fragment, ok := definition.(*gast.FragmentDefinition); ok {
+			fragments[fragment.Name.Value] = fragment
+		}
+	}
 	pending := []*fastPendingRead{}
 	var project func(*fastValuePlan, any, *gql.ResponsePath, bool) (any, bool)
 	project = func(p *fastValuePlan, raw any, path *gql.ResponsePath, root bool) (any, bool) {
@@ -292,7 +298,7 @@ func tryFastProjection(ctx context.Context, runtime *gql.Schema, document *gast.
 				next = path.WithKey(f.key)
 			}
 			if f.read {
-				params := gql.ResolveParams{Source: raw, Args: args[f.asts[0]], Context: ctx, Info: gql.ResolveInfo{FieldName: f.name, FieldASTs: f.asts, Path: next, ParentType: p.object, ReturnType: f.definition.Type, Schema: *runtime, Operation: operation}}
+				params := gql.ResolveParams{Source: raw, Args: args[f.asts[0]], Context: ctx, Info: gql.ResolveInfo{FieldName: f.name, FieldASTs: f.asts, Path: next, ParentType: p.object, ReturnType: f.definition.Type, Schema: *runtime, Fragments: fragments, Operation: operation}}
 				value, err := state.loader.app.standardResolve(params)
 				if err != nil {
 					return nil, false

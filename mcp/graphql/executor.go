@@ -628,7 +628,19 @@ func (a *App) callTables(ctx context.Context, operation string, config map[strin
 // Both dispatch paths must use identical filter, ordering and projection inputs.
 // GraphQL list fields return rows, not pagination totals, so counting is opt-in.
 func tablesReadInput(config, args map[string]any) map[string]any {
-	input := sourceInput(config, args, "table", "where", "select", "order_by", "limit", "offset", "metrics", "group_by", "orderBy", "groupBy", "id", "key", "include_total", "cursor", "hydrate_files")
+	input := sourceInput(config, args, "table", "where", "select", "order_by", "limit", "offset", "metrics", "group_by", "orderBy", "groupBy", "id", "key", "include_total", "includeTotal", "cursor", "first", "after", "hydrate_files")
+	if value, exists := input["first"]; exists {
+		input["limit"] = value
+		delete(input, "first")
+	}
+	if value, exists := input["after"]; exists {
+		input["cursor"] = value
+		delete(input, "after")
+	}
+	if value, exists := input["includeTotal"]; exists {
+		input["include_total"] = value
+		delete(input, "includeTotal")
+	}
 	if _, exists := input["include_total"]; !exists {
 		input["include_total"] = false
 	}

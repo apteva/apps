@@ -77,14 +77,18 @@ func TestRealStandardGraphQLTables(t *testing.T) {
 		{"parent_type": "Customer", "field_name": "orders", "source": "orders", "operation": "search", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}, "include_total": true, "order_by": "id asc"}},
 		{"parent_type": "Query", "field_name": "stats", "source": "orders", "operation": "aggregate"},
 		{"parent_type": "Query", "field_name": "count", "source": "orders", "operation": "count"},
+		{"parent_type": "Query", "field_name": "orderPage", "source": "orders", "operation": "search", "config": map[string]any{"filter_columns": map[string]any{"customerId": "customer_id"}, "order_by": "id asc"}},
 		{"parent_type": "Customer", "field_name": "stats", "source": "orders", "operation": "aggregate", "config": map[string]any{"relation": map[string]any{"parent_key": "id", "foreign_key": "customer_id", "value_type": "string"}}},
 	} {
 		graph.MCP("graphql_resolver_set", r)
 	}
-	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! stats(metrics: [Metric!]!, groupBy: [String!], order_by: String, where: [Filter!]): [Stats!]! count: Int! }
+	schema := graph.MCP("graphql_schema_create", map[string]any{"environment": "development", "sdl": `type Query { customers(limit: Int = 2): [Customer!]! orderPage(where: OrderWhere, first: Int = 5, after: String, includeTotal: Boolean = true): OrderPage! stats(metrics: [Metric!]!, groupBy: [String!], order_by: String, where: [Filter!]): [Stats!]! count: Int! }
 enum MetricOp { count sum avg min max }
 input Metric { name: String! op: MetricOp! col: String }
 input Filter { col: String! op: String! value: Float! }
+input NumberFilter { eq: Float neq: Float gt: Float gte: Float lt: Float lte: Float in: [Float!] between: [Float!] }
+input IDFilter { eq: ID in: [ID!] }
+input OrderWhere { amount: NumberFilter customerId: IDFilter and: [OrderWhere!] or: [OrderWhere!] not: OrderWhere }
 type Stats { customer_id: ID total: Int! sum: Float! avg: Float! min: Float! max: Float! }
 type Mutation { change: String }
 type Customer { id: ID! name: String! orders(limit: Int = 3, cursor: String): OrderPage! stats(metrics: [Metric!]!): [Stats!]! }
@@ -121,6 +125,15 @@ type Order { id: ID! customer_id: ID! amount: Float! }`})
 	next := out["data"].(map[string]any)["customers"].([]any)[0].(map[string]any)["orders"].(map[string]any)
 	if next["rows"].([]any)[0].(map[string]any)["id"] == first["rows"].([]any)[0].(map[string]any)["id"] {
 		t.Fatal("cursor repeated first page")
+	}
+	out = map[string]any{}
+	resp = graph.POST("/graphql", map[string]any{"query": `query($where:OrderWhere!){ orderPage(where:$where,first:2,includeTotal:true){ total has_more rows { id amount } } }`, "variables": map[string]any{"where": map[string]any{"amount": map[string]any{"gte": 998}}}}, &out)
+	if resp.Status != 200 || out["errors"] != nil {
+		t.Fatalf("typed filter query: %d %v", resp.Status, out)
+	}
+	typedPage := out["data"].(map[string]any)["orderPage"].(map[string]any)
+	if typedPage["total"] != float64(2) || len(typedPage["rows"].([]any)) != 2 {
+		t.Fatalf("typed filter result: %v", typedPage)
 	}
 	before := reads.Load()
 	out = map[string]any{}

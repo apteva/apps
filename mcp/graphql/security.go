@@ -23,12 +23,19 @@ import (
 // Security is API-owned, never read from GraphQL variables or provider claims.
 // Existing APIs remain platform-only. Public execution requires explicit Auth.
 type securityPolicy struct {
-	Mode        string              `json:"mode"`
-	TenantID    string              `json:"tenant_id,omitempty"`
-	Environment string              `json:"environment,omitempty"`
-	Claims      []string            `json:"claims,omitempty"`
-	Permissions []string            `json:"permissions,omitempty"`
-	Fields      map[string][]string `json:"fields,omitempty"`
+	Mode        string                         `json:"mode"`
+	TenantID    string                         `json:"tenant_id,omitempty"`
+	Environment string                         `json:"environment,omitempty"`
+	Claims      []string                       `json:"claims,omitempty"`
+	Permissions []string                       `json:"permissions,omitempty"`
+	Fields      map[string][]string            `json:"fields,omitempty"`
+	RowFilters  map[string][]identityRowFilter `json:"row_filters,omitempty"`
+}
+type identityRowFilter struct {
+	Column    string `json:"column"`
+	Operator  string `json:"op,omitempty"`
+	Identity  string `json:"identity"`
+	ValueType string `json:"value_type,omitempty"`
 }
 type requestIdentity struct {
 	Subject     string
@@ -69,7 +76,7 @@ func parseSecurity(raw any) (securityPolicy, error) {
 		return p, invalid("security.mode must be platform or auth")
 	}
 	if p.Mode == "platform" {
-		if p.TenantID != "" || p.Environment != "" || len(p.Claims)+len(p.Permissions)+len(p.Fields) > 0 {
+		if p.TenantID != "" || p.Environment != "" || len(p.Claims)+len(p.Permissions)+len(p.Fields)+len(p.RowFilters) > 0 {
 			return p, invalid("platform mode cannot configure user policies")
 		}
 		return p, nil
@@ -80,7 +87,7 @@ func parseSecurity(raw any) (securityPolicy, error) {
 	if p.Environment != "development" && p.Environment != "staging" && p.Environment != "production" {
 		return p, invalid("a fixed environment is required")
 	}
-	if len(p.Claims) > 32 || len(p.Permissions) > 64 || len(p.Fields) > 256 {
+	if len(p.Claims) > 32 || len(p.Permissions) > 64 || len(p.Fields) > 256 || len(p.RowFilters) > 256 {
 		return p, invalid("security policy exceeds limits")
 	}
 	for _, claim := range p.Claims {
@@ -103,7 +110,48 @@ func parseSecurity(raw any) (securityPolicy, error) {
 			return p, invalid("invalid permission")
 		}
 	}
+	for field, filters := range p.RowFilters {
+		if !securityFieldPattern.MatchString(field) || len(filters) == 0 || len(filters) > 32 {
+			return p, invalid("invalid row filter policy")
+		}
+		for _, filter := range filters {
+			if !graphqlName(filter.Column) {
+				return p, invalid("invalid row filter column")
+			}
+			op := strings.ToLower(strings.TrimSpace(filter.Operator))
+			if op == "" {
+				op = "eq"
+			}
+			if op != "eq" && op != "neq" && op != "in" {
+				return p, invalid("row filter op must be eq, neq, or in")
+			}
+			identity := strings.TrimSpace(filter.Identity)
+			if identity != "subject" && identity != "tenant" && !strings.HasPrefix(identity, "claim.") {
+				return p, invalid("row filter identity must be subject, tenant, or claim.<name>")
+			}
+			if strings.HasPrefix(identity, "claim.") {
+				claim := strings.TrimPrefix(identity, "claim.")
+				if !safeIdentityClaim(claim) || !slices.Contains(p.Claims, claim) {
+					return p, invalid("row filter claim must be included in security.claims")
+				}
+			}
+			if filter.ValueType != "" && filter.ValueType != "string" && filter.ValueType != "number" && filter.ValueType != "boolean" {
+				return p, invalid("row filter value_type must be string, number, or boolean")
+			}
+		}
+	}
 	return p, nil
+}
+func graphqlName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 func identityText(s string) bool {
 	return s != "" && len(s) <= 512 && strings.TrimSpace(s) == s && !strings.ContainsAny(s, "\x00\r\n")
@@ -168,9 +216,40 @@ func setSecurity(db *sql.DB, project, api string, raw any) (securityPolicy, erro
 	if _, err = resolveGraphQLAPI(db, project, api); err != nil {
 		return p, err
 	}
+	if err = validateRowFilterTargets(db, project, api, p); err != nil {
+		return p, err
+	}
 	b, _ := json.Marshal(p)
 	_, err = db.Exec(`INSERT INTO graphql_security(project_id,api_slug,policy_json,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id,api_slug) DO UPDATE SET policy_json=excluded.policy_json,updated_at=excluded.updated_at`, project, normalizeAPISlug(api), string(b), nowUTC())
 	return p, err
+}
+
+func validateRowFilterTargets(db *sql.DB, project, api string, p securityPolicy) error {
+	if len(p.RowFilters) == 0 {
+		return nil
+	}
+	resolvers, err := listResolversForAPI(db, project, api)
+	if err != nil {
+		return err
+	}
+	byField := map[string]resolverRecord{}
+	for _, resolver := range resolvers {
+		byField[resolver.ParentType+"."+resolver.FieldName] = resolver
+	}
+	for field := range p.RowFilters {
+		resolver, ok := byField[field]
+		if !ok {
+			return invalid("row filter target %s has no resolver", field)
+		}
+		source, err := getSourceForAPI(db, project, api, resolver.SourceID, "")
+		if err != nil {
+			return err
+		}
+		if source == nil || source.Kind != "tables" {
+			return invalid("row filter target %s must use a Tables source", field)
+		}
+	}
+	return nil
 }
 
 // Auth /me validates the session signature, project, and revocation. Only its
@@ -299,6 +378,74 @@ func requirePermissions(i *requestIdentity, perms []string) error {
 		}
 	}
 	return nil
+}
+
+// identityWhere turns trusted request identity into mandatory Tables
+// predicates. It is adapter configuration, never GraphQL input, so a caller
+// cannot weaken or replace it with variables or field arguments.
+func identityWhere(ctx context.Context, p securityPolicy, field string) ([]any, error) {
+	filters := p.RowFilters[field]
+	if len(filters) == 0 {
+		return nil, nil
+	}
+	i := securityIdentity(ctx)
+	if i == nil {
+		return nil, unauthenticated()
+	}
+	out := make([]any, 0, len(filters))
+	for _, filter := range filters {
+		var value any
+		switch {
+		case filter.Identity == "subject":
+			value = i.Subject
+		case filter.Identity == "tenant":
+			value = i.Tenant
+		case strings.HasPrefix(filter.Identity, "claim."):
+			var found bool
+			value, found = i.Claims[strings.TrimPrefix(filter.Identity, "claim.")]
+			if !found {
+				return nil, forbidden("required authorization claim is missing")
+			}
+		default:
+			return nil, internal("invalid stored row filter")
+		}
+		if !safeIdentityValue(value) {
+			return nil, forbidden("invalid authorization claim value")
+		}
+		var err error
+		if values, ok := value.([]any); ok {
+			coerced := make([]any, len(values))
+			for index := range values {
+				coerced[index], err = coerceRelationValue(values[index], filter.ValueType)
+				if err != nil {
+					return nil, forbidden("authorization claim cannot be applied")
+				}
+			}
+			value = coerced
+		} else {
+			value, err = coerceRelationValue(value, filter.ValueType)
+			if err != nil {
+				return nil, forbidden("authorization claim cannot be applied")
+			}
+		}
+		op := strings.ToLower(strings.TrimSpace(filter.Operator))
+		if op == "" {
+			op = "eq"
+		}
+		if _, list := value.([]any); list && op == "eq" {
+			op = "in"
+		}
+		if _, list := value.([]any); list && op != "in" {
+			return nil, forbidden("authorization claim cannot be applied")
+		}
+		if op == "in" {
+			if values, ok := value.([]any); !ok || len(values) == 0 {
+				return nil, forbidden("authorization claim cannot be applied")
+			}
+		}
+		out = append(out, map[string]any{"col": filter.Column, "op": op, "value": value})
+	}
+	return out, nil
 }
 
 // Preflight the whole operation before any resolver or mutation runs. This

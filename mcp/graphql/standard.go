@@ -287,6 +287,14 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		if err := validateTableRelation(r.Operation, config); err != nil {
 			return nil, resolverError{err}
 		}
+		mandatory, err := identityWhere(p.Context, state.policy, fieldKey)
+		if err != nil {
+			return nil, resolverError{err}
+		}
+		if len(mandatory) > 0 {
+			config["identity_where"] = mandatory
+		}
+		applyTablesProjection(p, state, r.Operation, config)
 	}
 	config["_project_id"] = state.project
 	config["graphql_args"] = p.Args
@@ -360,8 +368,20 @@ func trackResolverError(state *standardRequest, p gql.ResolveParams, read func()
 // No client value can replace the configured table or relationship predicate.
 func mappedTablesInput(config, args map[string]any) (map[string]any, error) {
 	input := tablesReadInput(config, args)
+	delete(input, "where")
 	if table, ok := config["table"].(string); ok && table != "" {
 		input["table"] = table
+	}
+	columns := filterColumnMap(config["filter_columns"])
+	where := []any{}
+	// Source/resolver and identity predicates are mandatory. Client filters
+	// are appended, never allowed to replace configured scope.
+	for _, raw := range []any{config["where"], config["identity_where"], args["where"]} {
+		predicates, err := graphqlWhere(raw, columns)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, predicates...)
 	}
 	if raw, exists := config["relation"]; exists {
 		relation, ok := raw.(map[string]any)
@@ -386,19 +406,12 @@ func mappedTablesInput(config, args map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		where := []any{}
-		for _, raw := range []any{config["where"], args["where"]} {
-			if raw == nil {
-				continue
-			}
-			b, _ := json.Marshal(raw)
-			var filters []any
-			if json.Unmarshal(b, &filters) != nil {
-				return nil, invalid("relationship filters must be a list")
-			}
-			where = append(where, filters...)
-		}
 		where = append(where, map[string]any{"col": foreign, "op": "eq", "value": value})
+	}
+	if len(where) > 0 {
+		if len(where) > 100 {
+			return nil, invalid("where exceeds maximum of 100 predicates")
+		}
 		input["where"] = where
 	}
 	return input, nil
