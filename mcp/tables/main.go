@@ -33,6 +33,7 @@ type App struct {
 	locksMu    sync.Mutex
 	tableLocks map[schemaCacheKey]*tableLockRef
 	cache      schemaCache
+	plans      queryPlanCache
 }
 
 func (a *App) Manifest() sdk.Manifest {

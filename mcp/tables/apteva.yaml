@@ -2,8 +2,12 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.22
+version: 0.1.23
 description: |
+  v0.1.23 Optimizes generic tables_batch reads with shared metadata, bounded
+  query-plan caching, consistent SQLite read snapshots, optional totals, and
+  adaptive handling for large payloads while preserving per-operation limits
+  and error isolation.
   v0.1.22 Adds a generic bounded batch executor with typed operation
   validation, dependency references, best-effort reads, and atomic row-write
   transactions.
@@ -142,7 +146,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.22
+    ref: tables/v0.1.23
     entry: mcp/tables
   port: 8080
   health_check: /health
@@ -211,6 +215,8 @@ config_schema:
   - { name: max_batch_ms, type: text, default: "10000", label: Maximum batch execution time (ms) }
   - { name: max_batch_result_rows, type: text, default: "10000", label: Maximum rows returned by one batch }
   - { name: max_batch_result_bytes, type: text, default: "16777216", label: Maximum serialized batch result bytes }
+  - { name: max_batch_optimized_rows, type: text, default: "2000", label: Maximum rows for optimized batch reads }
+  - { name: max_batch_optimized_bytes, type: text, default: "4194304", label: Maximum bytes for optimized batch reads }
 
 imports:
   sources:

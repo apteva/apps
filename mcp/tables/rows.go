@@ -480,7 +480,7 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (resultValue any
 	}
 	qctx, cancel := queryTimeoutContext(ctx)
 	readPhase(ctx, "select")
-	row, found, err := fetchRowByIDBudget(qctx, read.conn, t, id, selectClause, maxQueryBytes(ctx))
+	row, found, err := fetchRowByIDBudget(qctx, read.queryer(), t, id, selectClause, maxQueryBytes(ctx))
 	cancel()
 	closeErr := read.close()
 	if err != nil {
@@ -772,9 +772,9 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	var query searchQueryer = read.conn
+	var query searchQueryer = read.queryer()
 	var snapshot *sql.Tx
-	if includeTotal {
+	if includeTotal && read.tx == nil {
 		snapshot, err = read.conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
 		if err != nil {
 			return nil, queryStageErr("select", tableName, err)
@@ -834,12 +834,19 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 		}
 		vals = append(vals, seekValues...)
 	}
-	stmt := selectClause + " FROM " + quote(t.PhysicalName)
+	planShape := selectClause + " FROM " + quote(t.PhysicalName)
 	if clause != "" {
-		stmt += " " + clause
+		planShape += " " + clause
 	}
-	stmt += " " + orderBy
-	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit+1, offset)
+	planShape += " " + orderBy + " LIMIT ? OFFSET ?"
+	planDigest := sha256.Sum256([]byte(planShape))
+	planKey := tablePlanPrefix(t.ID) + fmt.Sprintf("%x", planDigest[:])
+	stmt, cachedPlan := a.plans.get(planKey)
+	if !cachedPlan {
+		stmt = planShape
+		a.plans.put(planKey, stmt)
+	}
+	vals = append(vals, limit+1, offset)
 	readPhase(ctx, "select")
 	rows, err := query.QueryContext(qctx, stmt, vals...)
 	if err != nil {
@@ -927,7 +934,7 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue a
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	readPhase(ctx, "count")
-	if err := read.conn.QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
+	if err := read.queryer().QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
 		return nil, queryStageErr("count", tableName, err)
 	}
 	return map[string]any{"count": n}, nil
@@ -1017,7 +1024,7 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultVal
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	readPhase(ctx, "select")
-	rows, err := read.conn.QueryContext(qctx, stmt, vals...)
+	rows, err := read.queryer().QueryContext(qctx, stmt, vals...)
 	if err != nil {
 		return nil, queryStageErr("select", tableName, err)
 	}

@@ -164,6 +164,29 @@ func TestTablesBatch_RejectsCycles(t *testing.T) {
 	}
 }
 
+func TestTablesBatch_ReadSnapshotUsesSharedReadTransaction(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "books", "rows": []any{map[string]any{"title": "A"}, map[string]any{"title": "B"}},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "read_snapshot",
+		"operations": []any{
+			map[string]any{"id": "search", "operation": "rows_search", "args": map[string]any{"table": "books", "include_total": true}},
+			map[string]any{"id": "count", "operation": "rows_count", "args": map[string]any{"table": "books"}},
+		},
+	})
+	results := out["results"].(map[string]any)
+	if results["search"].(map[string]any)["status"] != "ok" || results["count"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("snapshot results=%v", results)
+	}
+	if results["search"].(map[string]any)["result"].(map[string]any)["total"].(int64) != 2 {
+		t.Fatalf("snapshot total=%v", results["search"])
+	}
+}
+
 func TestTablesCreate_RejectsReservedColumn(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}

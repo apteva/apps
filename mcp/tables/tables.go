@@ -115,6 +115,7 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(id)
 
 	emit(ctx, topicTableCreated, map[string]any{
 		"id":      id,
@@ -238,7 +239,7 @@ func (a *App) toolTablesList(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 	}
 	offset := intArg(args, "offset", 0)
 	readPhase(ctx, "metadata")
-	tables, err := loadTablesPage(qctx, ctx.AppReadDB(), pid, limit+1, offset, maxQueryBytes(ctx))
+	tables, err := loadTablesPage(qctx, metadataReaderFor(ctx), pid, limit+1, offset, maxQueryBytes(ctx))
 	if err != nil {
 		return nil, queryStageErr("metadata", "<tables>", err)
 	}
@@ -470,6 +471,7 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(t.ID)
 
 	updated := t
 	emit(ctx, topicTableAltered, map[string]any{
@@ -658,6 +660,7 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	a.cache.invalidate(pid, name)
+	a.plans.invalidateTable(t.ID)
 	emit(ctx, topicTableDropped, map[string]any{
 		"id":   t.ID,
 		"name": name,
@@ -704,7 +707,11 @@ func loadTablesContext(ctx context.Context, db *sql.DB, projectID string) ([]Tab
 }
 
 // One statement gives the table list and its columns the same SQLite snapshot.
-func loadTablesPage(ctx context.Context, db *sql.DB, projectID string, limit, offset int, byteCap int64) ([]Table, error) {
+type metadataReader interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func loadTablesPage(ctx context.Context, db metadataReader, projectID string, limit, offset int, byteCap int64) ([]Table, error) {
 	rows, err := db.QueryContext(ctx, `WITH chosen AS (
  SELECT * FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?)
  SELECT t.id,t.name,t.scope,t.physical_name,t.created_at,t.row_count,c.name,c.type,c.nullable,c.default_value
@@ -812,7 +819,7 @@ func listTableSummaries(ctx *sdk.AppCtx, pid string, args map[string]any) (any, 
 	offset := intArg(args, "offset", 0)
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	rows, err := ctx.AppReadDB().QueryContext(qctx, `SELECT id,name,scope,COALESCE(row_count,0),created_at FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?`, pid, limit+1, offset)
+	rows, err := metadataReaderFor(ctx).QueryContext(qctx, `SELECT id,name,scope,COALESCE(row_count,0),created_at FROM tables_meta WHERE project_id=? ORDER BY name LIMIT ? OFFSET ?`, pid, limit+1, offset)
 	if err != nil {
 		return nil, err
 	}

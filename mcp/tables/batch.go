@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -31,6 +32,8 @@ var batchHandlers = map[string]func(*App, *sdk.AppCtx, map[string]any) (any, err
 var batchWriteOperations = map[string]bool{
 	"rows_insert": true, "rows_update": true, "rows_upsert": true, "rows_delete": true,
 }
+
+type batchSchemaCacheKey struct{}
 
 type batchOperation struct {
 	id       string
@@ -79,19 +82,6 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 				return nil, errf("write_transaction only accepts row write operations; %q is read-only or unsupported", op.name)
 			}
 		}
-		// Prime metadata before opening SQLite's shared writer transaction.
-		// The normal handlers retain their own validation, but doing this first
-		// avoids a read connection waiting behind the transaction on SQLite
-		// builds that do not enable WAL mode.
-		for _, op := range ops {
-			tableName, _ := op.args["table"].(string)
-			if err := validateIdentifier("table", tableName); err != nil {
-				return nil, err
-			}
-			if _, err := a.loadTableSchema(ctx.WithProject(projectID), projectID, tableName); err != nil {
-				return nil, err
-			}
-		}
 	}
 	if err := validateBatchGraph(ops); err != nil {
 		return nil, err
@@ -99,6 +89,11 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	batchCtx, cancel := context.WithTimeout(parent, time.Duration(maxBatchMs(ctx))*time.Millisecond)
 	defer cancel()
+	preloaded, err := a.preloadBatchSchemas(ctx, projectID, ops)
+	if err != nil {
+		return nil, err
+	}
+	batchCtx = context.WithValue(batchCtx, batchSchemaCacheKey{}, preloaded)
 	var releaseSnapshot func()
 	if mode == "read_snapshot" {
 		releaseSnapshot, err = a.acquireBatchReadLocks(batchCtx, ops)
@@ -106,6 +101,24 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, queryStageErr("schema_queue", "tables_batch", err)
 		}
 		defer releaseSnapshot()
+	}
+	var readState *batchReadState
+	if mode == "read_snapshot" {
+		conn, err := ctx.AppReadDB().Conn(batchCtx)
+		if err != nil {
+			return nil, queryStageErr("read_queue", "tables_batch", err)
+		}
+		tx, err := conn.BeginTx(batchCtx, &sql.TxOptions{ReadOnly: true})
+		if err != nil {
+			_ = conn.Close()
+			return nil, queryStageErr("select", "tables_batch", err)
+		}
+		readState = &batchReadState{conn: conn, tx: tx}
+		batchCtx = context.WithValue(batchCtx, batchReadStateKey{}, readState)
+		defer func() {
+			_ = readState.tx.Rollback()
+			_ = readState.conn.Close()
+		}()
 	}
 	results := make(map[string]batchResult, len(ops))
 	resultJSONBytes := int64(0)
@@ -130,7 +143,7 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if len(ready) == 0 {
 			break
 		}
-		parallel := mode == "best_effort" && allBatchReads(ready)
+		parallel := mode == "best_effort" && allBatchReads(ready) && batchReadEstimateLarge(ctx, ready)
 		if parallel && len(ready) > 1 {
 			var wg sync.WaitGroup
 			out := make(chan struct {
@@ -221,6 +234,69 @@ func (a *App) toolTablesBatch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	return formatBatchResults(mode, ops, results), nil
+}
+
+// Small independent reads use the shared metadata/plan path. Once the
+// estimated result is large, keep the existing pooled parallel behavior so a
+// batch cannot turn several fast native reads into one serialized response.
+func batchReadEstimateLarge(ctx *sdk.AppCtx, ops []batchOperation) bool {
+	rows := 0
+	bytes := int64(0)
+	for _, op := range ops {
+		limit := 50
+		if raw, ok := op.args["limit"]; ok {
+			if n, err := exactInteger(raw); err == nil && n > 0 {
+				limit = int(n)
+			}
+		}
+		if op.name == "rows_get" {
+			limit = 1
+		}
+		if op.name == "rows_count" {
+			limit = 1
+		}
+		rows += limit
+		bytes += int64(limit) * 512
+	}
+	return rows > maxBatchOptimizedRows(ctx) || bytes > maxBatchOptimizedBytes(ctx)
+}
+
+func (a *App) preloadBatchSchemas(ctx *sdk.AppCtx, projectID string, ops []batchOperation) (map[schemaCacheKey]*Table, error) {
+	names := map[string]bool{}
+	for _, op := range ops {
+		if table, ok := op.args["table"].(string); ok && table != "" {
+			names[table] = true
+		}
+		if op.name == "tables_describe" {
+			if name, ok := op.args["name"].(string); ok && name != "" {
+				names[name] = true
+			}
+		}
+		if op.name == "tables_query" {
+			placeholders, err := placeholderNames(strArg(op.args, "sql"))
+			if err != nil {
+				continue
+			}
+			for _, name := range placeholders {
+				names[name] = true
+			}
+		}
+	}
+	cache := make(map[schemaCacheKey]*Table, len(names))
+	scoped := ctx.WithProject(projectID)
+	for name := range names {
+		if err := validateIdentifier("table", name); err != nil {
+			continue
+		}
+		table, err := a.loadTableSchema(scoped, projectID, name)
+		if err != nil {
+			// Preserve per-operation isolation. A missing or malformed table
+			// is reported by its nested handler rather than aborting siblings.
+			continue
+		}
+		cache[schemaCacheKey{projectID: projectID, tableName: name}] = table
+	}
+	return cache, nil
 }
 
 // SQLite connections in the current deployment do not all share one
@@ -335,6 +411,13 @@ func parseBatchOperations(raw []any, projectID string) ([]batchOperation, error)
 		}
 		args := cloneBatchMap(rawArgs)
 		args["_project_id"] = projectID
+		if name == "rows_search" {
+			if _, requested := args["include_total"]; !requested {
+				// A batch commonly combines several reads; avoid an implicit
+				// COUNT(*) for every search unless the caller asks for total.
+				args["include_total"] = false
+			}
+		}
 		deps := map[string]bool{}
 		collectBatchRefs(args, deps)
 		ops = append(ops, batchOperation{id: id, name: name, args: args, deps: deps, position: i})
