@@ -192,6 +192,15 @@ test("assignment run sends its ID and opens parameter fields", async () => {
   expect(payload.assignment_id).toBe("cooking");
   expect(payload.idempotency_key).toBeTruthy();
 });
+test("process detail exposes event triggers per assignment", async () => {
+  await mount({}, { assignments: [assignment] });
+  await click("Weekly review");
+  await click("Triggers");
+  expect(document.body.textContent).toContain("Event triggers");
+  expect(document.body.textContent).toContain("Photography Patreon");
+  await click("Event triggers");
+  expect(document.body.textContent).toContain("No event triggers yet.");
+});
 test("run history filters independent assignments", async () => {
   const runs = [
     {

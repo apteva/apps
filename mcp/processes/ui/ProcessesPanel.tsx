@@ -11,6 +11,7 @@ import Assignments, {
   type Parameter,
   type Assignment,
 } from "./Assignments";
+import Triggers from "./Triggers";
 type Props = {
   appName?: string;
   projectId?: string;
@@ -811,7 +812,7 @@ function Panel(props: Props) {
             </div>
           )}
           <nav className="tabs" aria-label="Process detail">
-            {["overview", "procedure", "assignments", "runs"].map((t) => (
+            {["overview", "procedure", "assignments", "triggers", "runs"].map((t) => (
               <button
                 className={tab === t ? "on" : ""}
                 key={t}
@@ -980,6 +981,53 @@ function Panel(props: Props) {
               }}
               onRun={prepareRun}
             />
+          ) : tab === "triggers" ? (
+            <section className="card">
+              <div className="row between head">
+                <div>
+                  <h2 style={{ margin: 0 }}>Event triggers</h2>
+                  <p className="small muted">
+                    App events start an assignment with mapped parameters. Triggers are configured per assignment.
+                  </p>
+                </div>
+                <span className="small muted">
+                  {(p.assignments || []).length} assignment{(p.assignments || []).length === 1 ? "" : "s"}
+                </span>
+              </div>
+              {(p.assignments || []).length ? (
+                (p.assignments || []).map((assignment) => (
+                  <section className="card" key={assignment.id} style={{ marginTop: 16 }}>
+                    <div className="row between">
+                      <div>
+                        <h2 style={{ marginBottom: 4 }}>{assignment.name}</h2>
+                        <p className="small muted">
+                          {assignment.target || "No target label"} · Procedure v{assignment.procedure_version}
+                        </p>
+                      </div>
+                      <Pill state={assignment.status} />
+                    </div>
+                    <Triggers
+                      assignment={assignment}
+                      parameters={
+                        detail.versions.find(
+                          (v) => v.version === assignment.procedure_version,
+                        )?.definition.parameters || []
+                      }
+                      api={(path, method, body) =>
+                        api(`/${p.id}${path}`, method, body)
+                      }
+                      processStatus={p.status}
+                    />
+                  </section>
+                ))
+              ) : (
+                <div className="empty">
+                  <h2>No assignments yet</h2>
+                  <p>Create an assignment before configuring an event trigger.</p>
+                  <button onClick={() => setTab("assignments")}>Manage assignments</button>
+                </div>
+              )}
+            </section>
           ) : tab === "procedure" ? (
             <section className="card">
               <div className="row between head">
