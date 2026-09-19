@@ -29,6 +29,8 @@ var publicSlugs = map[string]bool{
 	"wikipedia":        true,
 	"kalshi":           true, // public market reads
 	"manifold-markets": true,
+	"bls":              true, // public labor statistics API
+	"yahoo-finance":    true, // public chart/search endpoints
 }
 
 func isPublicSource(slug string) bool { return publicSlugs[slug] }
@@ -56,8 +58,36 @@ func directPublicCall(slug, tool string, args map[string]any) (json.RawMessage, 
 		return kalshiCall(tool, args)
 	case "manifold-markets":
 		return manifoldCall(tool, args)
+	case "bls":
+		return blsCall(tool, args)
+	case "yahoo-finance":
+		return yahooCall(tool, args)
 	}
 	return nil, false
+}
+
+func blsCall(tool string, args map[string]any) (json.RawMessage, bool) {
+	if tool != "get_series_single" {
+		return nil, false
+	}
+	id := strArgM(args, "seriesid")
+	if id == "" {
+		return nil, false
+	}
+	return getJSON("https://api.bls.gov/publicAPI/v2/timeseries/data/" + url.PathEscape(id))
+}
+
+func yahooCall(tool string, args map[string]any) (json.RawMessage, bool) {
+	symbol := strArgM(args, "symbol")
+	if tool == "stock_search" {
+		q := url.Values{"q": {strArgM(args, "query")}}
+		return getJSON("https://query1.finance.yahoo.com/v1/finance/search?" + q.Encode())
+	}
+	if tool != "stock_chart" || symbol == "" {
+		return nil, false
+	}
+	q := url.Values{"range": {orStr(args["range"], "10y")}, "interval": {orStr(args["interval"], "1d")}}
+	return getJSON("https://query1.finance.yahoo.com/v8/finance/chart/" + url.PathEscape(symbol) + "?" + q.Encode())
 }
 
 // ─── Polymarket gamma-api (prices / metadata) ──────────────────────
