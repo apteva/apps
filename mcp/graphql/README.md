@@ -4,6 +4,123 @@ The standalone `graphql` app owns GraphQL schemas, resolver bindings,
 aggregation-aware source adapters, and realtime subscriptions. It is
 deliberately independent from the REST/API gateway app.
 
+## Standard execution and direct Tables fields (0.4.0)
+
+Schemas and client requests use ordinary GraphQL SDL and operations. There are
+no special `me`, workspace, pipeline, expression, or SQL constructs in this
+release. API authors choose their own field names and input/output types.
+
+The execution layer now uses graphql-go for field collection and result
+completion, with gqlparser validation and an explicit input-coercion boundary
+to preserve modern null/default semantics. It supports named/inline fragments,
+aliases and merged fields, `@skip`/`@include`, strict variables, input objects,
+enums, lists, introspection, interfaces/unions (source rows must provide
+`__typename`), and serial mutation roots. Errors contain field paths and source
+locations; nullable field failures preserve successful sibling data, while
+non-null failures propagate to the appropriate parent.
+
+HTTP supports POST and query-only GET. GET mutations are rejected before any
+resolver runs. Request `extensions` metadata is accepted but does not enable
+persisted queries or affect trusted identity. Execution errors with partial
+data normally return HTTP 200; admission/authentication failures retain their
+4xx responses. Clients must inspect `errors`, not just the HTTP status.
+
+### Example: ordinary fields backed directly by Tables
+
+```graphql
+type Query { customers(limit: Int = 10): [Customer!]! }
+type Customer {
+  id: ID!
+  name: String!
+  orders(limit: Int = 10, cursor: String, include_total: Boolean = false): OrderPage!
+}
+type OrderPage {
+  rows: [Order!]!
+  total: Int
+  has_more: Boolean!
+  next_cursor: String
+}
+type Order { id: ID! customer_id: ID! amount: Float! }
+```
+
+Create Tables sources with fixed `table` configuration, then bind
+`Query.customers` to the customers source with operation `find`. Bind
+`Customer.orders` to the orders source with operation `search` and:
+
+```json
+{
+  "order_by": "id asc",
+  "relation": {"parent_key": "id", "foreign_key": "customer_id"}
+}
+```
+
+`relation` is an adapter column mapping, not part of GraphQL syntax. It adds a
+mandatory equality filter from the actual parent record. Client arguments
+cannot replace the fixed table or this relationship predicate. Configured and
+client filters are combined for relationships. Include parent join keys in any
+source `select` configuration; missing keys fail closed. Relationships support
+`find`, `list`, `search`, `count`, and `aggregate`, not unfiltered `get` or writes.
+
+```graphql
+query CustomerOrders($limit: Int = 10) {
+  customers(limit: $limit) {
+    id
+    name
+    orders(limit: 5, include_total: true) {
+      rows { id amount }
+      total
+      has_more
+      next_cursor
+    }
+  }
+}
+```
+
+`find`/`list` return row lists; `search` preserves the native Tables result
+envelope, including its opaque scoped cursor. Pass `next_cursor` back as
+`cursor` on the same relationship. Counts are opt-in via `include_total`, not
+inferred from field selection. Relay connections are an API design convention,
+not a GraphQL requirement; this adapter does not impose them or remap page keys.
+
+All reads go directly to Tables, with no Function invocation. A request-local
+loader deduplicates identical reads and batches small independent reads across
+siblings and list parents through `tables_batch`; larger reads run concurrently
+with a bound of eight source tasks. A relationship batch still contains one
+filtered operation per distinct parent; it is not a single SQL join. Per-parent
+pagination stays independent. Unselected/skipped fields do not load data.
+The loader permits at most 1,000 source jobs per request and never shares row
+results across users or requests. Mutation source calls are never deduplicated.
+
+Use the existing Resolvers UI (operation and JSON configuration), MCP
+`graphql_resolver_set`, or HTTP `/admin/resolvers`; they share the same storage
+and relation validation. No server, SDK, or Tables changes are needed; Tables
+0.1.22+ is required for batching.
+
+### Boundaries and upgrade notes
+
+- This is not a claim of complete support for every GraphQL specification
+  revision: `@oneOf`, interface inheritance, incremental delivery, and custom
+  executable directive behavior are not implemented. Unsupported `@oneOf` and
+  interface inheritance schemas are rejected at publication. Custom scalars
+  retain JSON passthrough semantics, not automatic DateTime/UUID validation.
+- Existing Auth admission and field permissions remain. Relationships are
+  **not row-level authorization**: API authors must expose only appropriate
+  roots/fields. This release does not automatically infer owner/team/centre
+  permissions, create an identity-bound root, or replace the Flexylead Function.
+- Field permissions are conservatively preflighted before execution, including
+  fields behind conditional directives, and checked again at resolution.
+- Built-in scalar completion now follows the execution engine, including ID
+  serialization as strings. Schemas that previously relied on omitted required
+  fields may now produce non-null errors. Nullable errors may return partial
+  data rather than failing the entire operation.
+- Existing platform-only WebSocket event transport is unchanged; protected
+  subscriptions remain disabled. This release does not claim graphql-transport-ws
+  protocol compliance.
+
+Real-process integration tests are opt-in with `GRAPHQL_TEST_TABLES_DIR`,
+`GRAPHQL_TEST_AUTH_DIR`, and `GRAPHQL_TEST_FUNCTIONS_DIR`. Tests create isolated
+databases and never alter an installed project.
+
 ## Minimal setup
 
 Create and publish a schema:

@@ -186,6 +186,13 @@ func publishSchema(db *sql.DB, project, environment string, version int) (*schem
 	if len(row.ValidationError) > 0 || row.Status == "invalid" {
 		return nil, invalid("schema has validation errors")
 	}
+	parsed, problems := validateSDL(row.SDL)
+	if len(problems) > 0 {
+		return nil, invalid("schema has validation errors")
+	}
+	if _, err := buildStandardSchema(parsed, nil); err != nil {
+		return nil, invalid("schema is not executable: %s", err)
+	}
 	now := nowUTC()
 	tx, err := db.Begin()
 	if err != nil {
@@ -308,6 +315,11 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 	}
 	if strings.TrimSpace(operation) == "" {
 		return nil, invalid("operation is required")
+	}
+	if source.Kind == "tables" {
+		if err := validateTableRelation(operation, mergeMaps(source.Config, config)); err != nil {
+			return nil, err
+		}
 	}
 	encoded, err := encodeJSON(config)
 	if err != nil {

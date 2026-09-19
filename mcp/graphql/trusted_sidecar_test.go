@@ -178,14 +178,14 @@ func TestRealTrustedGraphQLSidecars(t *testing.T) {
 		t.Fatal("denied requests reached Functions")
 	}
 	caller.Store(99)
-	if code, out, _ := invoke(token, "/public/graphql/default"); code < 400 || out["data"] != nil {
+	if code, out, _ := invoke(token, "/public/graphql/default"); code < 400 || out["errors"] == nil || out["data"].(map[string]any)["workspace"] != nil {
 		t.Fatal("untrusted installation admitted", code, out)
 	}
 	caller.Store(42)
 	// Protected APIs must observe scope changes immediately, without a metadata
 	// cache grace period. The nested child is now outside the explicit scope.
 	configure([]int64{root})
-	if code, out, _ := invoke(token, "/public/graphql/default"); code < 400 || out["data"] != nil {
+	if code, out, _ := invoke(token, "/public/graphql/default"); out["errors"] == nil || out["data"].(map[string]any)["workspace"] != nil {
 		t.Fatal("nested Function escaped scope", code, out)
 	}
 }

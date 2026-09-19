@@ -344,8 +344,9 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeGraphQLError(w, 404, invalid("API not found"))
 		return
 	}
-	if r.Method != http.MethodPost {
-		writeGraphQLError(w, 405, invalid("POST required"))
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, POST")
+		writeGraphQLError(w, 405, invalid("GET or POST required"))
 		return
 	}
 	if _, err := resolveGraphQLAPI(a.ctx.AppDB(), project, slug); err != nil {

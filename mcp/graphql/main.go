@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	sdk "github.com/apteva/app-sdk"
+	gql "github.com/graphql-go/graphql"
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
@@ -17,13 +18,14 @@ var manifestYAML []byte
 // App is deliberately independent from the API gateway app. It owns the
 // GraphQL HTTP/WebSocket surface and calls source apps through PlatformAPI.
 type App struct {
-	httpClient  *http.Client
-	hub         *subscriptionHub
-	ctx         *sdk.AppCtx
-	cacheMu     sync.RWMutex
-	schemaCache map[string]*ast.Schema
-	queryCache  map[string]*ast.QueryDocument
-	planCache   map[string]planCacheEntry
+	httpClient   *http.Client
+	hub          *subscriptionHub
+	ctx          *sdk.AppCtx
+	cacheMu      sync.RWMutex
+	schemaCache  map[string]*ast.Schema
+	queryCache   map[string]*ast.QueryDocument
+	planCache    map[string]planCacheEntry
+	runtimeCache map[string]*gql.Schema
 }
 
 func main() { sdk.Run(&App{}) }

@@ -31,6 +31,19 @@ func parseAndValidateQuery(schema *ast.Schema, query string) (*ast.QueryDocument
 	return doc, nil
 }
 
+func queryErrorObjects(schema *ast.Schema, query string) []map[string]any {
+	_, errors := gqlparser.LoadQuery(schema, query)
+	out := []map[string]any{}
+	for _, err := range errors {
+		item := map[string]any{"message": err.Message, "extensions": map[string]any{"code": "query_validation_failed"}}
+		if len(err.Locations) > 0 {
+			item["locations"] = err.Locations
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func gqlErrors(err any) []string {
 	switch e := err.(type) {
 	case gqlerror.List:
@@ -80,8 +93,25 @@ func operationType(op *ast.OperationDefinition) string {
 func queryCost(set ast.SelectionSet, depth int) (fields, maxDepth int) {
 	maxDepth = depth
 	for _, selection := range set {
-		field, ok := selection.(*ast.Field)
-		if !ok {
+		var field *ast.Field
+		switch item := selection.(type) {
+		case *ast.Field:
+			field = item
+		case *ast.FragmentSpread:
+			if item.Definition != nil {
+				n, d := queryCost(item.Definition.SelectionSet, depth)
+				fields += n
+				maxDepth = max(maxDepth, d)
+			}
+		case *ast.InlineFragment:
+			n, d := queryCost(item.SelectionSet, depth)
+			fields += n
+			maxDepth = max(maxDepth, d)
+		}
+		if fields > 10000 {
+			return fields, maxDepth
+		}
+		if field == nil {
 			continue
 		}
 		fields++

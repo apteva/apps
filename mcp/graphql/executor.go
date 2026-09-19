@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,10 +21,14 @@ type graphqlRequest struct {
 	OperationName string         `json:"operationName,omitempty"`
 	Variables     map[string]any `json:"variables,omitempty"`
 	Environment   string         `json:"environment,omitempty"`
+	Extensions    map[string]any `json:"extensions,omitempty"`
 }
+
+type requestMethodKey struct{}
 
 type executeResult struct {
 	Data          map[string]any
+	HasData       bool
 	Errors        []map[string]any
 	OperationName string
 	OperationType string
@@ -107,17 +112,17 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	queryKey := schemaKey + "\x00" + req.OperationName + "\x00" + req.Query
 	doc, queryErrors := a.parsedQuery(queryKey, req.Query, schema)
 	if len(queryErrors) > 0 {
-		return executeResult{Errors: errorObjects(queryErrors)}, nil
+		return executeResult{Errors: queryErrorObjects(schema, req.Query)}, nil
 	}
 	op, err := operationFor(doc, req.OperationName)
 	if err != nil {
 		return executeResult{}, err
 	}
+	if ctx.Value(requestMethodKey{}) == http.MethodGet && op.Operation != ast.Query {
+		return executeResult{}, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
+	}
 	if policy.Mode == "auth" && op.Operation == ast.Subscription {
 		return executeResult{}, forbidden("authenticated subscriptions are not supported yet")
-	}
-	if err := authorizeSelection(ctx, policy, op.SelectionSet); err != nil {
-		return executeResult{}, err
 	}
 	fields, depth := queryCost(op.SelectionSet, 0)
 	if fields > maxQueryComplexity(a.ctx) {
@@ -126,17 +131,15 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if depth > maxQueryDepth(a.ctx) {
 		return executeResult{}, invalid("query depth %d exceeds limit %d", depth, maxQueryDepth(a.ctx))
 	}
-	rootType := operationType(op)
+	if err := authorizeSelection(ctx, policy, op.SelectionSet); err != nil {
+		return executeResult{}, err
+	}
 	bindings, err := a.executionPlan(project, apiSlug, policy.Mode == "auth")
 	if err != nil {
 		return executeResult{}, err
 	}
 	ctx = context.WithValue(ctx, executionBindingsKey{}, bindings)
-	data, err := a.executeSelection(ctx, project, apiSlug, rootType, nil, op.SelectionSet, req.Variables)
-	if err != nil {
-		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Errors: []map[string]any{{"message": err.Error(), "extensions": map[string]any{"code": errorCode(err)}}}}, nil
-	}
-	return executeResult{Data: data.(map[string]any), OperationName: op.Name, OperationType: string(op.Operation)}, nil
+	return a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, doc, policy)
 }
 
 type executionBindingsKey struct{}
@@ -196,7 +199,8 @@ func errorObjects(messages []string) []map[string]any {
 }
 
 func errorCode(err error) string {
-	if e, ok := err.(*graphqlError); ok {
+	var e *graphqlError
+	if errors.As(err, &e) {
 		return e.Code
 	}
 	return "execution_error"
@@ -605,14 +609,17 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 
 func (a *App) callTables(ctx context.Context, operation string, config map[string]any) (any, error) {
 	args := resolverArgs(config)
-	input := tablesReadInput(config, args)
+	input, err := mappedTablesInput(config, args)
+	if err != nil {
+		return nil, err
+	}
 	input["_project_id"] = config["_project_id"]
 	tool := "rows_" + strings.ToLower(operation)
 	if operation == "find" || operation == "list" {
 		tool = "rows_search"
 	}
 	var out any
-	if err := a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI().CallAppResult("tables", tool, input, &out); err != nil {
+	if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "tables", tool, input, &out); err != nil {
 		return nil, err
 	}
 	return unwrapSourceResult(operation, out), nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,8 +31,9 @@ func (a *App) projectFromRequest(r *http.Request) (string, error) {
 }
 
 func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeJSONError(w, http.StatusMethodNotAllowed, "POST required", "method_not_allowed")
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, POST")
+		writeJSONError(w, http.StatusMethodNotAllowed, "GET or POST required", "method_not_allowed")
 		return
 	}
 	project, err := a.projectFromRequest(r)
@@ -46,10 +48,44 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req graphqlRequest
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, int64(maxRequestBytes(a.ctx))))
+	reader := io.Reader(http.MaxBytesReader(w, r.Body, int64(maxRequestBytes(a.ctx))))
+	if r.Method == http.MethodGet {
+		if len(r.URL.RawQuery) > maxRequestBytes(a.ctx) {
+			writeGraphQLError(w, 400, invalid("request exceeds size limit"))
+			return
+		}
+		params := r.URL.Query()
+		body := map[string]any{"query": params.Get("query"), "operationName": params.Get("operationName")}
+		for _, key := range []string{"variables", "extensions"} {
+			if value := params.Get(key); value != "" {
+				var v map[string]any
+				d := json.NewDecoder(strings.NewReader(value))
+				d.UseNumber()
+				if err := d.Decode(&v); err != nil {
+					writeGraphQLError(w, 400, invalid("invalid %s", key))
+					return
+				}
+				var trailing any
+				if err := d.Decode(&trailing); err != io.EOF {
+					writeGraphQLError(w, 400, invalid("invalid %s", key))
+					return
+				}
+				body[key] = v
+			}
+		}
+		raw, _ := json.Marshal(body)
+		reader = strings.NewReader(string(raw))
+	}
+	decoder := json.NewDecoder(reader)
+	decoder.UseNumber()
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&req); err != nil {
 		writeGraphQLError(w, http.StatusBadRequest, invalid("invalid GraphQL request: %v", err))
+		return
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		writeGraphQLError(w, 400, invalid("request must contain one JSON object"))
 		return
 	}
 	if queryProject := strings.TrimSpace(r.URL.Query().Get("project_id")); queryProject != "" && queryProject != project {
@@ -64,7 +100,7 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		environment = normalizeEnvironment(headerEnv)
 	}
 	start := time.Now()
-	result, executeErr := a.execute(r.Context(), project, api.Slug, environment, req)
+	result, executeErr := a.execute(context.WithValue(r.Context(), requestMethodKey{}, r.Method), project, api.Slug, environment, req)
 	status := http.StatusOK
 	if executeErr != nil {
 		status = http.StatusBadRequest
@@ -74,10 +110,16 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		if errorCode(executeErr) == "permission_denied" {
 			status = http.StatusForbidden
 		}
+		if errorCode(executeErr) == "method_not_allowed" {
+			status = http.StatusMethodNotAllowed
+			w.Header().Set("Allow", "POST")
+		}
 		result.Errors = []map[string]any{{"message": executeErr.Error(), "extensions": map[string]any{"code": errorCode(executeErr)}}}
 	}
 	if len(result.Errors) > 0 && status == http.StatusOK {
-		status = http.StatusBadRequest
+		if !result.HasData {
+			status = http.StatusBadRequest
+		}
 		for _, item := range result.Errors {
 			extensions, _ := item["extensions"].(map[string]any)
 			if extensions["code"] == "unauthenticated" {
@@ -93,7 +135,7 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	response := map[string]any{}
-	if result.Data != nil {
+	if result.HasData || result.Data != nil {
 		response["data"] = result.Data
 	}
 	if len(result.Errors) > 0 {
