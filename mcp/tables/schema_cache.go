@@ -82,6 +82,11 @@ func (a *App) loadTableSchema(ctx *sdk.AppCtx, projectID, name string) (*Table, 
 		defer d.setPhase(previous)
 	}
 	key := schemaCacheKey{projectID: projectID, tableName: name}
+	if schemas, ok := requestContext(ctx).Value(batchSchemaCacheKey{}).(map[schemaCacheKey]*Table); ok {
+		if table, found := schemas[key]; found {
+			return cloneTable(table), nil
+		}
+	}
 	generation := ctx.AppDBGeneration()
 	if table, ok := a.cache.get(generation, key); ok {
 		return table, nil
@@ -166,11 +171,24 @@ func currentRowCount(ctx *sdk.AppCtx, table *Table) (int64, error) {
 	qctx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxQueryMs(ctx))*time.Millisecond, errReadMetadataDeadline)
 	defer func() { observeReadCancellation(ctx, qctx); cancel() }()
 	var cached sql.NullInt64
-	if err := ctx.AppReadDB().QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, table.ID).Scan(&cached); err != nil {
+	var err error
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil {
+		err = state.tx.QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, table.ID).Scan(&cached)
+	} else {
+		err = ctx.AppReadDB().QueryRowContext(qctx, `SELECT row_count FROM tables_meta WHERE id = ?`, table.ID).Scan(&cached)
+	}
+	if err != nil {
 		return 0, queryStageErr("metadata", table.Name, err)
 	}
 	if cached.Valid {
 		return cached.Int64, nil
+	}
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil {
+		var count int64
+		if err := state.tx.QueryRowContext(qctx, "SELECT COUNT(*) FROM "+quote(table.PhysicalName)).Scan(&count); err != nil {
+			return 0, queryStageErr("metadata", table.Name, err)
+		}
+		return count, nil
 	}
 	tx, err := beginWrite(ctx)
 	if err != nil {
@@ -207,11 +225,43 @@ func queryStageErr(stage, table string, err error) error {
 }
 
 type readQueryConn struct {
-	ctx  *sdk.AppCtx
+	ctx    *sdk.AppCtx
+	conn   *sql.Conn
+	tx     *sql.Tx
+	shared bool
+}
+
+type batchReadStateKey struct{}
+
+type batchReadState struct {
 	conn *sql.Conn
+	tx   *sql.Tx
+}
+
+// metadataReaderFor returns the request's shared read transaction when a
+// read_snapshot batch is active. Outside a batch it falls back to the app's
+// read pool. Both *sql.Tx and *sql.DB implement QueryContext, allowing table
+// metadata reads to participate in the same SQLite snapshot without changing
+// the existing call sites.
+func metadataReaderFor(ctx *sdk.AppCtx) metadataReader {
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil && state.tx != nil {
+		return state.tx
+	}
+	return ctx.AppReadDB()
+}
+
+func (r *readQueryConn) queryer() searchQueryer {
+	if r.tx != nil {
+		return r.tx
+	}
+	return r.conn
 }
 
 func acquireReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil {
+		readPhase(ctx, "connection_setup")
+		return &readQueryConn{ctx: ctx, conn: state.conn, tx: state.tx, shared: true}, nil
+	}
 	readPhase(ctx, "read_queue")
 	queueCtx, cancel := context.WithTimeoutCause(requestContext(ctx), time.Duration(maxReadQueueMs(ctx))*time.Millisecond, errReadQueueDeadline)
 	defer cancel()
@@ -228,7 +278,32 @@ func acquireReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
 	return &readQueryConn{ctx: ctx, conn: conn}, nil
 }
 
+// acquirePreparedReadConn leaves connection selection to the cached
+// database-level statement. This matters for single-connection pools: holding
+// a *sql.Conn while calling *sql.DB.PrepareContext would otherwise deadlock.
+// Snapshot batches still return their shared transaction connection.
+func acquirePreparedReadConn(ctx *sdk.AppCtx, table string) (*readQueryConn, error) {
+	if state, ok := requestContext(ctx).Value(batchReadStateKey{}).(*batchReadState); ok && state != nil {
+		readPhase(ctx, "connection_setup")
+		return &readQueryConn{ctx: ctx, conn: state.conn, tx: state.tx, shared: true}, nil
+	}
+	read, err := acquireReadConn(ctx, table)
+	if err != nil {
+		return nil, err
+	}
+	// Retain the queue admission check, then release the connection before
+	// preparing through *sql.DB so a one-connection pool cannot deadlock.
+	if read.conn != nil {
+		_ = read.conn.Close()
+		read.conn = nil
+	}
+	return read, nil
+}
+
 func (r *readQueryConn) close() error {
 	readPhase(r.ctx, "cleanup")
+	if r.shared || r.conn == nil {
+		return nil
+	}
 	return r.conn.Close()
 }

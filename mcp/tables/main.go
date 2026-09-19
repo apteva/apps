@@ -33,6 +33,7 @@ type App struct {
 	locksMu    sync.Mutex
 	tableLocks map[schemaCacheKey]*tableLockRef
 	cache      schemaCache
+	plans      queryPlanCache
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -71,7 +72,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return a.plans.close() }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -325,6 +326,23 @@ func (a *App) MCPTools() []sdk.Tool {
 				"params": map[string]any{"type": "array"},
 			}, []string{"sql"}),
 			Handler: a.toolTablesQuery,
+		},
+		{
+			Name:        "tables_batch",
+			Description: "Execute a bounded list of validated Tables operations. Args: mode (read_snapshot, write_transaction, or best_effort), operations ([{id, operation, args}]). Operations may reference prior results with {\"$ref\":\"operation.path\"}. Returns per-operation status, result, and error.",
+			InputSchema: schemaObject(map[string]any{
+				"mode": map[string]any{"type": "string", "enum": []string{"read_snapshot", "write_transaction", "best_effort"}},
+				"operations": map[string]any{"type": "array", "maxItems": 256, "items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"id":        map[string]any{"type": "string"},
+						"operation": map[string]any{"type": "string"},
+						"args":      map[string]any{"type": "object"},
+					},
+					"required": []string{"id", "operation", "args"},
+				}},
+			}, []string{"operations"}),
+			Handler: a.toolTablesBatch,
 		},
 	}
 	for i := range tools {

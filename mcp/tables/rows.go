@@ -480,7 +480,7 @@ func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (resultValue any
 	}
 	qctx, cancel := queryTimeoutContext(ctx)
 	readPhase(ctx, "select")
-	row, found, err := fetchRowByIDBudget(qctx, read.conn, t, id, selectClause, maxQueryBytes(ctx))
+	row, found, err := fetchRowByIDBudget(qctx, read.queryer(), t, id, selectClause, maxQueryBytes(ctx))
 	cancel()
 	closeErr := read.close()
 	if err != nil {
@@ -765,21 +765,26 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 		}
 		includeTotal = value
 	}
-	read, err := acquireReadConn(ctx, tableName)
+	read, err := acquirePreparedReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
 	defer read.close()
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
-	var query searchQueryer = read.conn
+	var query searchQueryer = read.queryer()
 	var snapshot *sql.Tx
-	if includeTotal {
-		snapshot, err = read.conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
+	if includeTotal && read.tx == nil {
+		if read.conn != nil {
+			snapshot, err = read.conn.BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
+		} else {
+			snapshot, err = ctx.AppReadDB().BeginTx(qctx, &sql.TxOptions{ReadOnly: true})
+		}
 		if err != nil {
 			return nil, queryStageErr("select", tableName, err)
 		}
 		defer snapshot.Rollback()
+		read.tx = snapshot
 		query = snapshot
 	}
 	var total int64
@@ -796,7 +801,14 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 			}
 		} else {
 			totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
-			err = query.QueryRowContext(qctx, totalSQL, vals...).Scan(&total)
+			countStmt, prepErr := a.bindPreparedRead(qctx, read, tablePlanKey(t.ID, "count", totalSQL), totalSQL)
+			if prepErr != nil {
+				return nil, queryStageErr("prepare", tableName, prepErr)
+			}
+			if read.tx != nil {
+				defer countStmt.Close()
+			}
+			err = countStmt.QueryRowContext(qctx, vals...).Scan(&total)
 		}
 		if err != nil {
 			return nil, queryStageErr("count", tableName, err)
@@ -834,14 +846,22 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 		}
 		vals = append(vals, seekValues...)
 	}
-	stmt := selectClause + " FROM " + quote(t.PhysicalName)
+	planShape := selectClause + " FROM " + quote(t.PhysicalName)
 	if clause != "" {
-		stmt += " " + clause
+		planShape += " " + clause
 	}
-	stmt += " " + orderBy
-	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit+1, offset)
+	planShape += " " + orderBy + " LIMIT ? OFFSET ?"
+	planKey := tablePlanKey(t.ID, "search", planShape)
+	prepared, prepErr := a.bindPreparedRead(qctx, read, planKey, planShape)
+	if prepErr != nil {
+		return nil, queryStageErr("prepare", tableName, prepErr)
+	}
+	if read.tx != nil {
+		defer prepared.Close()
+	}
+	vals = append(vals, limit+1, offset)
 	readPhase(ctx, "select")
-	rows, err := query.QueryContext(qctx, stmt, vals...)
+	rows, err := prepared.QueryContext(qctx, vals...)
 	if err != nil {
 		return nil, queryStageErr("select", tableName, err)
 	}
@@ -919,7 +939,7 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue a
 		stmt += " " + clause
 	}
 	var n int64
-	read, err := acquireReadConn(ctx, tableName)
+	read, err := acquirePreparedReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -927,7 +947,14 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue a
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	readPhase(ctx, "count")
-	if err := read.conn.QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
+	prepared, err := a.bindPreparedRead(qctx, read, tablePlanKey(t.ID, "count", stmt), stmt)
+	if err != nil {
+		return nil, queryStageErr("prepare", tableName, err)
+	}
+	if read.tx != nil {
+		defer prepared.Close()
+	}
+	if err := prepared.QueryRowContext(qctx, vals...).Scan(&n); err != nil {
 		return nil, queryStageErr("count", tableName, err)
 	}
 	return map[string]any{"count": n}, nil
@@ -1007,9 +1034,9 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultVal
 	if max := maxQueryRows(ctx); limit > max {
 		limit = max
 	}
-	stmt += fmt.Sprintf(" LIMIT %d", limit+1)
+	stmt += " LIMIT ?"
 
-	read, err := acquireReadConn(ctx, tableName)
+	read, err := acquirePreparedReadConn(ctx, tableName)
 	if err != nil {
 		return nil, err
 	}
@@ -1017,7 +1044,15 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultVal
 	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 	readPhase(ctx, "select")
-	rows, err := read.conn.QueryContext(qctx, stmt, vals...)
+	vals = append(vals, limit+1)
+	prepared, err := a.bindPreparedRead(qctx, read, tablePlanKey(t.ID, "aggregate", stmt), stmt)
+	if err != nil {
+		return nil, queryStageErr("prepare", tableName, err)
+	}
+	if read.tx != nil {
+		defer prepared.Close()
+	}
+	rows, err := prepared.QueryContext(qctx, vals...)
 	if err != nil {
 		return nil, queryStageErr("select", tableName, err)
 	}
