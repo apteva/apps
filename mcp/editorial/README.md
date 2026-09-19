@@ -73,7 +73,7 @@ Project-scoped installs stay pinned to their project. Global HTTP calls use the 
 
 A `due_scanner` worker turns planning dates into app-bus events. It emits `content.due` when an item reaches its planned publication date, `content.deadline` when it reaches its editorial deadline, and `release.due` when a channel release reaches its planned date. Editorial still publishes nothing itself — the event is the product, and a Workflow, agent or person decides what to do with it.
 
-Every due payload carries the brand: `brand_id` and the human `brand` name, both empty strings for unassigned content so the shape never varies. Items also carry title, format, status, approval, owner, which `date_field` fired and the resolved `due_at` instant; releases add `item_id`, `channel`, `url` and their parent's title, brand and approval.
+Every due payload carries the brand: `brand_id` and the human `brand` name, both empty strings for unassigned content so the shape never varies. Items also carry title, format, status, approval, owner, which `date_field` fired and the resolved `due_at` instant; releases add `item_id`, `channel`, `url` and their parent's title, format, brand and approval. Processes can route `release.due` directly using `channel`, `format`, `brand_id` and `approval`.
 
 A bare `YYYY-MM-DD` names a day, not an instant, so **Settings** carries a `timezone` (IANA name, default UTC) and a `due_time` (`HH:MM`, default `09:00`) that decide when that day falls due. A stored RFC3339 timestamp already carries its own offset and is used as written, ignoring both.
 

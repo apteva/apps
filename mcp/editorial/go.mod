@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/editorial
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.81.0
+	github.com/apteva/app-sdk v0.82.0
 	modernc.org/sqlite v1.50.0
 )
 
