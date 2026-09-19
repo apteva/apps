@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.3.10
+version: 0.4.0
 description: Generic temporal intelligence platform with market and trading domain packs.
 author: Apteva
 scopes: [project, global]
@@ -118,7 +118,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: market-intel/v0.3.10
+    ref: market-intel/v0.4.0
     entry: mcp/market-intel
   port: 8080
   health_check: /health
@@ -197,7 +197,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func intelligenceArgs(r *http.Request) map[string]any {
 	args := map[string]any{"_project_id": r.URL.Query().Get("project_id")}
-	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit"} {
+	for _, key := range []string{"query", "kind", "source", "entity", "event_from", "event_to", "published_from", "published_to", "as_of", "from", "to", "limit", "offset"} {
 		if v := r.URL.Query().Get(key); v != "" {
 			args[key] = v
 		}

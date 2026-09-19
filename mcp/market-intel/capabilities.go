@@ -27,16 +27,17 @@ const (
 // so no connector data is lost; normalized consumers use the temporal and
 // provenance fields when available.
 type EvidenceEnvelope struct {
-	Source     string          `json:"source"`
-	Connector  string          `json:"connector"`
-	Kind       string          `json:"kind"`
-	Entity     string          `json:"entity,omitempty"`
-	ObservedAt time.Time       `json:"observed_at"`
-	EventTime  *time.Time      `json:"event_time,omitempty"`
-	ValidFrom  *time.Time      `json:"valid_from,omitempty"`
-	ValidTo    *time.Time      `json:"valid_to,omitempty"`
-	Payload    json.RawMessage `json:"payload"`
-	Provenance map[string]any  `json:"provenance,omitempty"`
+	Locations  []EvidenceLocation `json:"locations,omitempty"`
+	Source     string             `json:"source"`
+	Connector  string             `json:"connector"`
+	Kind       string             `json:"kind"`
+	Entity     string             `json:"entity,omitempty"`
+	ObservedAt time.Time          `json:"observed_at"`
+	EventTime  *time.Time         `json:"event_time,omitempty"`
+	ValidFrom  *time.Time         `json:"valid_from,omitempty"`
+	ValidTo    *time.Time         `json:"valid_to,omitempty"`
+	Payload    json.RawMessage    `json:"payload"`
+	Provenance map[string]any     `json:"provenance,omitempty"`
 }
 
 func capabilitiesForQuery(q queryType) []Capability {

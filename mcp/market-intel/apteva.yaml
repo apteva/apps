@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: market-intel
 display_name: Market Intelligence
-version: 0.3.10
+version: 0.4.0
 description: |
   Generic temporal intelligence platform with market and trading domain packs.
   It records source-attributed evidence, supports date-aware and point-in-time
@@ -145,7 +145,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: market-intel/v0.3.10
+    ref: market-intel/v0.4.0
     entry: mcp/market-intel
   port: 8080
   health_check: /health

@@ -101,6 +101,13 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func evidenceQueryFromArgs(args map[string]any, projectID string) (EvidenceQuery, error) {
 	q := EvidenceQuery{ProjectID: projectID, Text: strArg(args, "query"), Kind: strArg(args, "kind"), Source: strArg(args, "source"), Entity: strArg(args, "entity"), Limit: 50}
+	if raw, ok := args["offset"]; ok {
+		n, err := strconv.Atoi(fmt.Sprint(raw))
+		if err != nil || n < 0 {
+			return q, errors.New("offset must be a nonnegative integer")
+		}
+		q.Offset = n
+	}
 	if v := strArg(args, "limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			q.Limit = n

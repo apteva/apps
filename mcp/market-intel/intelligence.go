@@ -24,7 +24,8 @@ type Evidence struct {
 }
 
 func (e Evidence) Map() map[string]any {
-	return map[string]any{"id": e.ID, "kind": e.Kind, "title": e.Title, "body": e.Body,
+	locations, _ := evidenceLocations(e.Payload)
+	return map[string]any{"id": e.ID, "kind": e.Kind, "title": e.Title, "body": e.Body, "locations": locations,
 		"payload": e.Payload, "entity_refs": e.EntityRefs, "source": e.Source, "source_ref": e.SourceRef,
 		"event_time": timeString(e.EventTime), "published_time": timeString(e.PublishedTime),
 		"observed_at": timeString(e.ObservedAt), "valid_from": timeString(e.ValidFrom), "valid_to": timeString(e.ValidTo),
@@ -34,7 +35,7 @@ func (e Evidence) Map() map[string]any {
 type EvidenceQuery struct {
 	ProjectID, Text, Kind, Source, Entity                string
 	EventFrom, EventTo, PublishedFrom, PublishedTo, AsOf *time.Time
-	Limit                                                int
+	Limit, Offset                                        int
 }
 
 func parseOptionalTime(value string) (*time.Time, error) {
@@ -83,6 +84,9 @@ func recordEvidence(db *sql.DB, e Evidence, projectID string) (map[string]any, e
 	if !json.Valid(e.Payload) {
 		return nil, errors.New("payload must be valid JSON")
 	}
+	if _, err := evidenceLocations(e.Payload); err != nil {
+		return nil, err
+	}
 	if e.ContentHash == "" {
 		e.ContentHash = evidenceHash(projectID, e.Kind, e.Title, e.Body, e.Source, e.SourceRef, e.Payload, e.ObservedAt)
 	}
@@ -109,6 +113,9 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 	}
 	if q.Limit > 200 {
 		q.Limit = 200
+	}
+	if q.Offset < 0 {
+		return nil, errors.New("offset cannot be negative")
 	}
 	where := []string{"project_id = ?"}
 	args := []any{q.ProjectID}
@@ -154,7 +161,7 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 		where = append(where, "observed_at <= ? AND (valid_from IS NULL OR valid_from <= ?) AND (valid_to IS NULL OR valid_to > ?)")
 		args = append(args, q.AsOf.UTC(), q.AsOf.UTC(), q.AsOf.UTC())
 	}
-	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ?`, append(args, q.Limit)...)
+	rows, err := db.Query(`SELECT id,kind,title,body,payload,entity_refs,source,source_ref,event_time,published_time,observed_at,valid_from,valid_to,supersedes_id,content_hash FROM intelligence_evidence WHERE `+strings.Join(where, " AND ")+` ORDER BY COALESCE(event_time,published_time,observed_at) DESC, id DESC LIMIT ? OFFSET ?`, append(args, q.Limit, q.Offset)...)
 	if err != nil {
 		return nil, err
 	}

@@ -9,6 +9,7 @@
 // border-border, …) so it matches the trading / crm / storage panels.
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import GeographyView from "./GeographyView";
 
 // ─── Inlined SDK app-event hook (forward-compat; v0.2 emits signals) ──
 interface AppEventEnvelope<T = unknown> {
@@ -47,7 +48,7 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "research" | "signals" | "markets" | "sources" | "query";
+type TabId = "research" | "map" | "signals" | "markets" | "sources" | "query";
 
 export default function MarketIntelPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("research");
@@ -69,12 +70,12 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
     <div className="h-full flex flex-col bg-bg text-text text-sm">
       <header className="px-4 py-2 flex items-center gap-3 border-b border-border">
         <h1 className="text-sm font-semibold m-0">Market Intelligence</h1>
-        <span className="text-xs text-text-dim">research · signals · v0.3</span>
+        <span className="text-xs text-text-dim">research · geography · v0.4</span>
         <span className="flex-1" />
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["research", "signals", "markets", "sources", "query"] as TabId[]).map((id) => (
+        {(["research", "map", "signals", "markets", "sources", "query"] as TabId[]).map((id) => (
           <button key={id} onClick={() => setTab(id)}
             className={`px-3 py-2 capitalize ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
             {id}
@@ -91,6 +92,7 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
 
       <div className="flex-1 overflow-auto p-4">
         {tab === "research" && <ResearchTab api={api} setError={setError} />}
+        {tab === "map" && <GeographyView api={api} />}
         {tab === "signals" && <SignalsTab api={api} projectId={projectId} setError={setError} />}
         {tab === "markets" && <MarketsTab api={api} setError={setError} />}
         {tab === "sources" && <SourcesTab api={api} setError={setError} />}
