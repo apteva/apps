@@ -43,6 +43,20 @@ test("packing contains every step and never overlaps boundaries for large projec
         ).toBe(true);
   }
 });
+test("project shelves mix orientations for linear procedures instead of forcing every flow wide", () => {
+  const processes: MapProcess[] = Array.from({ length: 5 }, (_, i) => ({
+    id: `linear-${i}`,
+    name: `Linear ${i}`,
+    status: "draft",
+    version: 1,
+    steps: Array.from({ length: 3 }, (_, j) =>
+      step(`s${j}`, j ? [`s${j - 1}`] : []),
+    ),
+  }));
+  const boxes = layoutProject(processes, {});
+  expect(boxes.some((box) => box.vertical)).toBe(true);
+  expect(boxes.some((box) => !box.vertical)).toBe(true);
+});
 test("recurring definitions and historical/unknown versions do not become current step overlays", () => {
   expect(
     liveRun({ id: "schedule", state: "pending", schedule_kind: "cron" }),

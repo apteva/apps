@@ -170,8 +170,11 @@ function shape(
         },
   };
 }
-// Try shelf widths and both dependency directions. Penalize elongated canvases,
-// keeping SOP boundaries disjoint without duplicating a graph for each run.
+// Pack the process boundaries into a few shelves while considering both
+// dependency directions. A fixed "always wide" shelf makes every short SOP a
+// very thin horizontal strip and forces long SOPs to be shrunk by fitView. The
+// area target below lets compact flows stay horizontal while turning longer
+// flows vertical when that gives the project map a better overall shape.
 export function layoutProject(
   processes: MapProcess[],
   runs: Record<string, MapRun[]>,
@@ -184,31 +187,62 @@ export function layoutProject(
       a.id.localeCompare(b.id),
     )
     .map((p) => [shape(p, runs[p.id] || [], false), shape(p, runs[p.id] || [], true)]);
-  // Use a predictable wide shelf layout. The previous area optimizer favored a
-  // square canvas, which made a five-process project become a tall, tiny column
-  // even on a wide dashboard. Three or four columns keeps cards readable while
-  // still allowing large projects to wrap into additional rows.
-  const selected = choices.map((pair) =>
-    pair.slice().sort((a, b) =>
-      a.height - b.height || a.width * a.height - b.width * b.height,
-    )[0],
+  const area = choices.reduce(
+    (sum, pair) => sum + Math.min(...pair.map((shape) => shape.width * shape.height)),
+    0,
   );
-  const columns = Math.max(1, Math.min(5, Math.ceil(Math.sqrt(selected.length * 1.7))));
-  const rowHeights: number[] = [];
-  for (let i = 0; i < selected.length; i++) {
-    const row = Math.floor(i / columns);
-    rowHeights[row] = Math.max(rowHeights[row] || 0, selected[i].height);
+  let best: MapLayout[] = [];
+  let bestScore = Infinity;
+  // The canvas is normally wider than it is tall. Trying several target widths
+  // keeps the packing stable as the number and size of SOPs changes, without
+  // hard-coding the viewport width into this pure layout function.
+  for (const factor of [0.7, 0.9, 1.1, 1.3, 1.6, 2]) {
+    const targetWidth = Math.max(
+      Math.sqrt(area) * factor,
+      Math.min(2400, processes.length * 360),
+    );
+    let x = 0;
+    let y = 0;
+    let rowHeight = 0;
+    let packedWidth = 0;
+    let rowCount = 1;
+    const result: MapLayout[] = [];
+    for (const pair of choices) {
+      const horizontal = pair.find((candidate) => !candidate.vertical)!;
+      const vertical = pair.find((candidate) => candidate.vertical)!;
+      // Keep a process horizontal whenever it fits on the current shelf. If
+      // only the vertical shape fits, rotate that process instead of creating
+      // another shelf; otherwise start a new shelf with the readable
+      // horizontal shape. This gives the project map a deliberate mix rather
+      // than making every process share one orientation.
+      let selected = horizontal;
+      if (x && x + horizontal.width > targetWidth && x + vertical.width <= targetWidth)
+        selected = vertical;
+      const needsNewRow = x > 0 && x + selected.width > targetWidth;
+      if (needsNewRow) {
+        y += rowHeight + 48;
+        x = 0;
+        rowHeight = 0;
+        rowCount++;
+        selected = horizontal.width <= targetWidth ? horizontal : vertical;
+      }
+      result.push({ ...selected, x, y });
+      x += selected.width + 48;
+      rowHeight = Math.max(rowHeight, selected.height);
+      packedWidth = Math.max(packedWidth, x - 48);
+    }
+    const packedHeight = y + rowHeight;
+    const score =
+      packedWidth * packedHeight +
+      Math.abs(Math.log(Math.max(packedWidth, 1) / Math.max(packedHeight, 1))) *
+        packedWidth *
+        packedHeight *
+        0.35 +
+      rowCount * targetWidth * 120;
+    if (score < bestScore) {
+      bestScore = score;
+      best = result;
+    }
   }
-  const rowY: number[] = [];
-  rowHeights.forEach((height, i) => {
-    rowY[i] = (rowY[i - 1] || 0) + (i ? rowHeights[i - 1] + 48 : 0);
-  });
-  return selected.map((layout, i) => {
-    const row = Math.floor(i / columns);
-    const col = i % columns;
-    const x = selected
-      .slice(row * columns, row * columns + col)
-      .reduce((sum, item) => sum + item.width + 48, 0);
-    return { ...layout, x, y: rowY[row] };
-  });
+  return best;
 }
