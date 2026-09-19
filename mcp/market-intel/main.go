@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.3.7
+version: 0.3.8
 description: Generic temporal intelligence platform with market and trading domain packs.
 author: Apteva
 scopes: [project, global]
@@ -118,7 +118,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: market-intel/v0.3.7
+    ref: market-intel/v0.3.8
     entry: mcp/market-intel
   port: 8080
   health_check: /health

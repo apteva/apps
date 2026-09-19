@@ -516,14 +516,16 @@ func allRegistrySlugs() []string {
 func gwSourcesStatus(sc sourceClient) map[string]any {
 	slugs := allRegistrySlugs()
 	bound := sc.boundSlugs(slugs)
+	caps := sourceCapabilities()
 	rows := make([]map[string]any, 0, len(slugs))
 	for _, s := range slugs {
 		pub := isPublicSource(s)
 		rows = append(rows, map[string]any{
-			"slug":      s,
-			"bound":     bound[s],
-			"public":    pub,
-			"available": pub || bound[s], // public works without binding
+			"slug":         s,
+			"bound":        bound[s],
+			"public":       pub,
+			"available":    pub || bound[s], // public works without binding
+			"capabilities": caps[s],
 		})
 	}
 	return map[string]any{"sources": rows}
