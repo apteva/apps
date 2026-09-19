@@ -23,6 +23,9 @@ func graphqlTools(a *App) []sdk.Tool {
 	environment := stringType("Environment, for example development, staging, or production.")
 	api := stringType("GraphQL API slug, for example commerce or analytics. Defaults to default.")
 	return []sdk.Tool{
+		{Name: "graphql_security_get", Description: "Get API authentication and field policies.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolSecurityGet},
+		{Name: "graphql_security_set", Description: "Replace API security policy; does not modify Function trust settings.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "security": map[string]any{"type": "object"}}, "security"), HandlerCtx: a.toolSecuritySet},
+		{Name: "graphql_security_validate", Description: "Validate security configuration and check Function caller trust without changing it.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolSecurityValidate},
 		{Name: "graphql_api_create", Description: "Create a named GraphQL API endpoint.", InputSchema: object(map[string]any{"project_id": project, "slug": stringType("URL-safe API slug"), "name": stringType("Display name"), "description": stringType("Description")}, "slug"), HandlerCtx: a.toolAPICreate},
 		{Name: "graphql_api_list", Description: "List named GraphQL APIs and endpoints.", InputSchema: object(map[string]any{"project_id": project}), HandlerCtx: a.toolAPIList},
 		{Name: "graphql_api_get", Description: "Fetch a named GraphQL API endpoint.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolAPIGet},
@@ -135,6 +138,9 @@ func (a *App) toolSchemaValidate(_ context.Context, _ *sdk.AppCtx, args map[stri
 func (a *App) toolSchemaPublish(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	project, err := appProject(ctx, callCtx, args)
 	if err != nil {
+		return nil, err
+	}
+	if err := a.verifyPublishSecurity(callCtx, project, apiSlugArg(args)); err != nil {
 		return nil, err
 	}
 	row, err := publishSchemaForAPI(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "version", 0))

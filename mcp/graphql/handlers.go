@@ -68,10 +68,26 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	if executeErr != nil {
 		status = http.StatusBadRequest
+		if errorCode(executeErr) == "unauthenticated" {
+			status = http.StatusUnauthorized
+		}
+		if errorCode(executeErr) == "permission_denied" {
+			status = http.StatusForbidden
+		}
 		result.Errors = []map[string]any{{"message": executeErr.Error(), "extensions": map[string]any{"code": errorCode(executeErr)}}}
 	}
 	if len(result.Errors) > 0 && status == http.StatusOK {
 		status = http.StatusBadRequest
+		for _, item := range result.Errors {
+			extensions, _ := item["extensions"].(map[string]any)
+			if extensions["code"] == "unauthenticated" {
+				status = http.StatusUnauthorized
+				break
+			}
+			if extensions["code"] == "permission_denied" {
+				status = http.StatusForbidden
+			}
+		}
 	}
 	_ = a.logRequest(project, api.Slug, result.OperationName, result.OperationType, status, time.Since(start), result.Errors)
 	w.Header().Set("Content-Type", "application/json")
@@ -132,6 +148,48 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, apiSlug)
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, err.Error(), errorCode(err))
+		return
+	}
+	if path == "security/validate" && r.Method == http.MethodPost {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		result, err := a.validateSecurity(ctx, project, api.Slug)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		writeJSON(w, result)
+		return
+	}
+	if path == "security" {
+		if r.Method == http.MethodGet {
+			policy, err := getSecurity(a.ctx.AppReadDB(), project, api.Slug)
+			if err != nil {
+				writeJSONError(w, 500, "security unavailable", "storage_error")
+				return
+			}
+			writeJSON(w, map[string]any{"security": policy, "endpoint": "/public/graphql/" + api.Slug})
+			return
+		}
+		if r.Method == http.MethodPut {
+			var body struct {
+				Security json.RawMessage `json:"security"`
+			}
+			d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+			d.DisallowUnknownFields()
+			if d.Decode(&body) != nil {
+				writeJSONError(w, 400, "invalid security request", "invalid_request")
+				return
+			}
+			policy, err := setSecurity(a.ctx.AppDB(), project, api.Slug, body.Security)
+			if err != nil {
+				writeJSONError(w, 400, err.Error(), errorCode(err))
+				return
+			}
+			writeJSON(w, map[string]any{"security": policy})
+			return
+		}
+		writeJSONError(w, 405, "GET or PUT required", "method_not_allowed")
 		return
 	}
 	if path == "schemas" && r.Method == http.MethodGet {
@@ -273,6 +331,10 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
+			return
+		}
+		if err := a.verifyPublishSecurity(r.Context(), project, api.Slug); err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
 		row, err := publishSchemaForAPI(a.ctx.AppDB(), project, api.Slug, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version)

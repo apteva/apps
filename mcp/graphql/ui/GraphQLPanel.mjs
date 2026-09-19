@@ -3,7 +3,7 @@ import { jsx, jsxs } from "react/jsx-runtime";
 
 const API = "/api/apps/graphql";
 const ENVIRONMENTS = ["development", "staging", "production"];
-const TABS = ["Schema", "Sources", "Resolvers", "Deploy", "Logs", "Realtime"];
+const TABS = ["Schema", "Sources", "Resolvers", "Authentication", "Function security", "Deploy", "Logs", "Realtime"];
 const OPERATIONS = ["find", "get", "count", "aggregate", "function", "request"];
 
 function requestURL(path, projectId, environment, apiSlug) {
@@ -73,6 +73,98 @@ function ResolversTab({ projectId, apiSlug, environment, sources, resolvers, onR
   return jsxs("div", { className: "grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_430px] gap-4 p-5", children: [jsxs("section", { className: panelClass, children: [jsx("h2", { className: "font-semibold mb-3", children: "Resolver bindings" }), resolvers.length === 0 ? jsx(Empty, { children: "No resolvers configured." }) : jsx("div", { className: "overflow-x-auto", children: jsxs("table", { className: "w-full text-sm", children: [jsx("thead", { className: "text-left text-text-dim", children: jsx("tr", { children: ["Field", "Source", "Operation", "Config"].map((label) => jsx("th", { className: "pb-2 pr-3 font-normal", children: label }, label)) }) }), jsx("tbody", { children: resolvers.map((item) => jsx("tr", { className: "border-t border-border", children: [jsx("td", { className: "py-2 pr-3 font-mono", children: `${item.parent_type}.${item.field_name}` }), jsx("td", { className: "py-2 pr-3", children: item.source || `#${item.source_id}` }), jsx("td", { className: "py-2 pr-3", children: item.operation }), jsx("td", { className: "py-2 text-xs text-text-dim max-w-[260px] truncate", children: JSON.stringify(item.config || {}) })] }, item.id)) })] }) })] }), jsxs("form", { className: `${panelClass} space-y-3`, onSubmit: saveResolver, children: [jsx("h2", { className: "font-semibold", children: "Bind a field" }), jsxs("div", { className: "grid grid-cols-2 gap-3", children: [jsx(Field, { label: "Parent type", children: jsx("input", { className: inputClass, value: parentType, onChange: (event) => setParentType(event.target.value), placeholder: "Query" }) }), jsx(Field, { label: "Field name", children: jsx("input", { className: inputClass, value: fieldName, onChange: (event) => setFieldName(event.target.value), placeholder: "orders" }) })] }), jsx(Field, { label: "Source", children: jsx("select", { className: inputClass, value: source, onChange: (event) => setSource(event.target.value), children: [jsx("option", { value: "", children: "Select source" }), sources.map((item) => jsx("option", { value: item.name, children: `${item.name} (${item.kind})` }, item.id))] }) }), jsx(Field, { label: "Operation", children: jsx("select", { className: inputClass, value: operation, onChange: (event) => setOperation(event.target.value), children: OPERATIONS.map((item) => jsx("option", { value: item, children: item }, item)) }) }), jsx(Field, { label: "Operation config", hint: "For aggregate: metrics, group_by, where, order, limit.", children: jsx("textarea", { className: `${inputClass} min-h-[190px] font-mono text-xs`, value: config, onChange: (event) => setConfig(event.target.value), spellCheck: false }) }), jsx(Button, { primary: true, type: "submit", disabled: busy || !fieldName.trim() || !source, children: busy ? "Saving…" : "Save resolver" })] })] });
 }
 
+function AuthenticationTab({ projectId, apiSlug, onError }) {
+  const [mode, setMode] = useState("platform");
+  const [tenant, setTenant] = useState("default");
+  const [environment, setEnvironment] = useState("production");
+  const [claims, setClaims] = useState("");
+  const [permissions, setPermissions] = useState("");
+  const [fields, setFields] = useState("{}");
+  const [busy, setBusy] = useState(true);
+  const [notice, setNotice] = useState("");
+  const [validation, setValidation] = useState(null);
+  useEffect(() => {
+    let active = true; setBusy(true); setNotice(""); setValidation(null);
+    apiFetch("security", projectId, "", { apiSlug }).then(({ security: p }) => {
+      if (!active) return;
+      setMode(p.mode); setTenant(p.tenant_id || "default"); setEnvironment(p.environment || "production");
+      setClaims((p.claims || []).join(", ")); setPermissions((p.permissions || []).join(", "));
+      setFields(JSON.stringify(p.fields || {}, null, 2));
+    }).catch((err) => { if (active) onError(err); }).finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, [projectId, apiSlug]);
+  const list = (text) => text.split(",").map((x) => x.trim()).filter(Boolean);
+  async function save(event) {
+    event.preventDefault(); setBusy(true); setNotice(""); setValidation(null); onError(null);
+    try {
+      const security = mode === "platform" ? { mode } : { mode, tenant_id: tenant, environment, claims: list(claims), permissions: list(permissions), fields: JSON.parse(fields) };
+      await apiFetch("security", projectId, "", { apiSlug, method: "PUT", body: JSON.stringify({ security }) });
+      setNotice("Security policy saved. Applies immediately; Function trust policies were not changed.");
+    } catch (err) { onError(err); } finally { setBusy(false); }
+  }
+  async function validate() {
+    setBusy(true); onError(null);
+    try { setValidation(await apiFetch("security/validate", projectId, "", { apiSlug, method: "POST" })); }
+    catch (err) { onError(err); } finally { setBusy(false); }
+  }
+  return jsxs("form", { onSubmit: save, className: "p-5 space-y-4 max-w-3xl", children: [
+    jsx("h2", { className: "font-semibold", children: "API authentication" }),
+    jsx("p", { className: "text-sm text-text-dim", children: "Apteva Auth verifies the user for this API. Field permissions tighten access; they do not provide row-level commercial/team filtering. Keep business authorization in your Functions." }),
+    jsx(Field, { label: "Access mode", children: jsx("select", { className: inputClass, value: mode, disabled: busy, onChange: (e) => setMode(e.target.value), children: [jsx("option", { value: "platform", children: "Platform only (existing internal endpoints)" }, "platform"), jsx("option", { value: "auth", children: "Authenticated users — Apteva Auth" }, "auth")] }) }),
+    mode === "auth" && jsxs("div", { className: `${panelClass} space-y-4`, children: [
+      jsx(Field, { label: "Required Auth tenant / organization slug", children: jsx("input", { className: inputClass, value: tenant, onChange: (e) => setTenant(e.target.value), required: true }) }),
+      jsx(Field, { label: "Published environment exposed to users", hint: "Clients cannot override this environment.", children: jsx("select", { className: inputClass, value: environment, onChange: (e) => setEnvironment(e.target.value), children: ENVIRONMENTS.map((value) => jsx("option", { value, children: value }, value)) }) }),
+      jsx(Field, { label: "Claims to forward (comma-separated)", hint: "Only server-managed authorization claims, never user metadata or credentials.", children: jsx("input", { className: inputClass, value: claims, placeholder: "roles, permissions, authorization_version", onChange: (e) => setClaims(e.target.value) }) }),
+      jsx(Field, { label: "Required API permissions (all, comma-separated)", children: jsx("input", { className: inputClass, value: permissions, onChange: (e) => setPermissions(e.target.value) }) }),
+      jsx(Field, { label: "Additional field permissions (JSON)", hint: 'Example: {"Query.reports":["reports:read"]}. Nested fields are checked too.', children: jsx("textarea", { className: `${inputClass} font-mono min-h-[130px]`, value: fields, onChange: (e) => setFields(e.target.value), spellCheck: false }) }),
+      jsx("code", { className: "block text-xs break-all", children: `${API}/public/graphql/${apiSlug}?project_id=${encodeURIComponent(projectId)}` }),
+      jsx("p", { className: "text-sm text-text-dim", children: "Send the user's Auth bearer token to this endpoint. Project-scoped installations only. Protected subscriptions are disabled in this release. Cross-origin deployment requires platform CORS configuration." }),
+    ] }),
+    jsxs("div", { className: "flex gap-2", children: [jsx(Button, { primary: true, type: "submit", disabled: busy, children: busy ? "Working…" : "Save security policy" }), jsx(Button, { type: "button", disabled: busy, onClick: validate, children: "Check saved policy & Function trust" })] }),
+    notice && jsx("p", { className: "text-sm text-green-300", children: notice }),
+    validation && jsxs("div", { className: panelClass, children: [jsx("p", { children: validation.valid ? "Configuration and Function trust checks passed." : "Configuration needs attention:" }), jsx("ul", { className: "list-disc pl-5 text-sm", children: (validation.issues || []).map((issue, index) => jsx("li", { children: issue }, index)) })] }),
+  ] });
+}
+
+function FunctionSecurityTab({ projectId, apiSlug, sources, resolvers, onRefresh, onError }) {
+  const [source, setSource] = useState(""); const [parent, setParent] = useState("Query"); const [field, setField] = useState("");
+  const [trusted, setTrusted] = useState(true); const [id, setId] = useState(""); const [ids, setIds] = useState("");
+  const [contract, setContract] = useState("http"); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState("");
+  const functions = sources.filter((s) => s.kind === "function");
+  const bindings = resolvers.filter((r) => functions.some((s) => s.id === r.source_id));
+  function edit(r) {
+    const s = functions.find((s) => s.id === r.source_id); const c = { ...s?.config, ...r.config };
+    setSource(s?.name || ""); setParent(r.parent_type); setField(r.field_name); setTrusted(!!c.authenticated);
+    setId(String(c.function_id || "")); setIds((c.function_ids || []).join(", ")); setContract(c.contract || "graphql"); setNotice("");
+  }
+  async function save(e) {
+    e.preventDefault(); setBusy(true); onError(null); setNotice("");
+    try {
+      const existing = resolvers.find((r) => r.parent_type === parent && r.field_name === field);
+      const allowed = ids.split(",").map((x) => x.trim()).filter(Boolean).map(Number);
+      if (trusted && (!Number.isSafeInteger(Number(id)) || Number(id) <= 0 || !allowed.length || allowed.some((x) => !Number.isSafeInteger(x) || x <= 0))) throw new Error("Enter positive integer Function IDs and an explicit allowlist.");
+      await apiFetch("resolvers", projectId, "", { apiSlug, method: "POST", body: JSON.stringify({ parent_type: parent, field_name: field, source, operation: "function", config: { ...(existing?.config || {}), authenticated: trusted, function_id: Number(id) || 0, function_ids: allowed, contract } }) });
+      await onRefresh(); setNotice("Resolver saved. Use Authentication → Check saved policy & Function trust before publishing. Function trust is never granted automatically.");
+    } catch (err) { onError(err); } finally { setBusy(false); }
+  }
+  return jsxs("div", { className: "p-5 space-y-4 max-w-3xl", children: [
+    jsx("h2", { className: "font-semibold", children: "Trusted Function resolvers" }),
+    jsx("p", { className: "text-sm text-text-dim", children: "Create a Function source in Sources first. Trusted mode requires API Auth and an explicit caller/issuer allowlist in each target Function. Browser input cannot supply the identity or change these IDs." }),
+    jsxs("div", { className: "flex flex-wrap gap-2", children: bindings.map((r) => jsx(Button, { onClick: () => edit(r), children: `Edit ${r.parent_type}.${r.field_name}` }, r.id)) }),
+    jsxs("form", { className: `${panelClass} space-y-3`, onSubmit: save, children: [
+      jsx(Field, { label: "Function source", children: jsx("select", { className: inputClass, value: source, onChange: (e) => setSource(e.target.value), required: true, children: [jsx("option", { value: "", children: "Select Function source" }, "empty"), functions.map((s) => jsx("option", { value: s.name, children: s.name }, s.id))] }) }),
+      jsx(Field, { label: "Parent type", children: jsx("input", { className: inputClass, value: parent, required: true, onChange: (e) => setParent(e.target.value) }) }),
+      jsx(Field, { label: "Field name", children: jsx("input", { className: inputClass, value: field, required: true, onChange: (e) => setField(e.target.value) }) }),
+      jsxs("label", { className: "flex gap-2 text-sm", children: [jsx("input", { type: "checkbox", checked: trusted, onChange: (e) => { setTrusted(e.target.checked); if (!e.target.checked) setContract("graphql"); } }), "Invoke as authenticated user"] }),
+      jsx(Field, { label: "Root Function ID", children: jsx("input", { className: inputClass, type: "number", min: 1, value: id, required: trusted, onChange: (e) => setId(e.target.value) }) }),
+      jsx(Field, { label: "Allowed Function IDs (comma-separated)", hint: "Include the root and only the nested Functions it needs.", children: jsx("input", { className: inputClass, value: ids, required: trusted, onChange: (e) => setIds(e.target.value) }) }),
+      jsx(Field, { label: "Input/output contract", children: jsx("select", { className: inputClass, value: contract, onChange: (e) => setContract(e.target.value), children: [jsx("option", { value: "http", disabled: !trusted, children: "HTTP-compatible: event.body → response.body" }, "http"), jsx("option", { value: "graphql", children: "GraphQL-native: arguments / parent → field data" }, "graphql")] }) }),
+      jsx(Button, { primary: true, type: "submit", disabled: busy || !source, children: busy ? "Saving…" : "Save Function resolver" }),
+    ] }),
+    notice && jsx("p", { className: "text-sm text-green-300", children: notice }),
+  ] });
+}
+
 function DeployTab({ projectId, apiSlug, environment, schema, schemas, onRefresh, onError }) {
   const [busy, setBusy] = useState(false);
   async function publish(version) { setBusy(true); onError(null); try { await apiFetch("schema/publish", projectId, environment, { apiSlug, method: "POST", body: JSON.stringify({ version }) }); await onRefresh(); } catch (error) { onError(error); } finally { setBusy(false); } }
@@ -106,6 +198,8 @@ export default function GraphQLPanel({ projectId }) {
     const common = { projectId, environment, onRefresh: load, onError: (value) => setError(value?.message || "") };
     if (tab === "Sources") return jsx(SourcesTab, { ...common, apiSlug, sources });
     if (tab === "Resolvers") return jsx(ResolversTab, { ...common, apiSlug, sources, resolvers });
+    if (tab === "Authentication") return jsx(AuthenticationTab, { ...common, apiSlug }, `${projectId}:${apiSlug}`);
+    if (tab === "Function security") return jsx(FunctionSecurityTab, { ...common, apiSlug, sources, resolvers }, `${projectId}:${apiSlug}`);
     if (tab === "Deploy") return jsx(DeployTab, { ...common, apiSlug, schema, schemas });
     if (tab === "Logs") return jsx(LogsTab, { logs, onRefresh: load, busy: loading });
     if (tab === "Realtime") return jsx(RealtimeTab, { projectId, apiSlug, environment, onError: common.onError });

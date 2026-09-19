@@ -172,6 +172,33 @@ func createSchemaForAPI(db *sql.DB, project, apiSlug, environment, sdl string, v
 }
 
 func publishSchemaForAPI(db *sql.DB, project, apiSlug, environment string, version int) (*schemaRecord, error) {
+	if err := validateSecurityBindings(db, project, apiSlug); err != nil {
+		return nil, err
+	}
+	policy, err := getSecurity(db, project, apiSlug)
+	if err != nil {
+		return nil, err
+	}
+	if len(policy.Fields) > 0 {
+		row, err := getSchemaForAPI(db, project, apiSlug, environment, version, false)
+		if err != nil {
+			return nil, err
+		}
+		if row == nil {
+			return nil, invalid("schema not found")
+		}
+		schema, errs := validateSDL(row.SDL)
+		if len(errs) > 0 {
+			return nil, invalid("schema invalid")
+		}
+		for field := range policy.Fields {
+			parts := strings.SplitN(field, ".", 2)
+			typ := schema.Types[parts[0]]
+			if typ == nil || typ.Fields.ForName(parts[1]) == nil {
+				return nil, invalid("security policy field %s is not in the schema", field)
+			}
+		}
+	}
 	return publishSchema(db, storageProject(project, apiSlug), environment, version)
 }
 

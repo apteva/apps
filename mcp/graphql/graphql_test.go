@@ -31,6 +31,13 @@ func testDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	migration, err = os.ReadFile("migrations/003_security.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatal(err)
+	}
 	return db
 }
 

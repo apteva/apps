@@ -78,6 +78,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/graphql", Handler: a.handleGraphQL},
 		{Pattern: "/graphql/", Handler: a.handleGraphQL},
+		{Pattern: "/public/graphql/", Handler: a.handlePublicGraphQL, NoAuth: true},
 		{Pattern: "/realtime", Handler: a.handleRealtime},
 		{Pattern: "/admin/", Handler: a.handleAdminHTTP},
 	}

@@ -221,6 +221,11 @@ func createSource(db *sql.DB, project, name, kind string, config map[string]any)
 	if err := validateSourceKind(kind); err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(kind, "function") {
+		if _, err := functionSecurity(config); err != nil {
+			return nil, err
+		}
+	}
 	if strings.EqualFold(kind, "http") {
 		if err := validateHTTPSource(config); err != nil {
 			return nil, err
@@ -288,6 +293,18 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 	}
 	if sourceID <= 0 {
 		return nil, invalid("source_id is required")
+	}
+	source, err := getSource(db, project, sourceID, "")
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, invalid("source not found in this API")
+	}
+	if source.Kind == "function" {
+		if _, err := functionSecurity(mergeMaps(source.Config, config)); err != nil {
+			return nil, err
+		}
 	}
 	if strings.TrimSpace(operation) == "" {
 		return nil, invalid("operation is required")

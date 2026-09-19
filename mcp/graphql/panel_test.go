@@ -22,3 +22,15 @@ func TestPanelImportsUseEffectUnderItsRuntimeName(t *testing.T) {
 		t.Fatal("GraphQLPanel must treat an empty project schema as an editable state")
 	}
 }
+
+func TestPanelExposesTrustedSecurityConfiguration(t *testing.T) {
+	body, err := os.ReadFile("ui/GraphQLPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Authentication", "Function security", "security/validate", "function_ids", "Invoke as authenticated user", "Function trust policies were not changed", "Protected subscriptions are disabled"} {
+		if !strings.Contains(string(body), required) {
+			t.Fatalf("missing panel capability: %s", required)
+		}
+	}
+}

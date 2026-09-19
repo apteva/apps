@@ -79,6 +79,13 @@ func (a *App) parsedQuery(key, query string, schema *ast.Schema) (*ast.QueryDocu
 }
 
 func (a *App) execute(ctx context.Context, project, apiSlug, environment string, req graphqlRequest) (executeResult, error) {
+	policy, err := getSecurity(a.ctx.AppReadDB(), project, apiSlug)
+	if err != nil {
+		return executeResult{}, err
+	}
+	if err := authorizeIdentity(ctx, project, apiSlug, policy, environment); err != nil {
+		return executeResult{}, err
+	}
 	if strings.TrimSpace(req.Query) == "" {
 		return executeResult{}, invalid("query is required")
 	}
@@ -106,6 +113,12 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if err != nil {
 		return executeResult{}, err
 	}
+	if policy.Mode == "auth" && op.Operation == ast.Subscription {
+		return executeResult{}, forbidden("authenticated subscriptions are not supported yet")
+	}
+	if err := authorizeSelection(ctx, policy, op.SelectionSet); err != nil {
+		return executeResult{}, err
+	}
 	fields, depth := queryCost(op.SelectionSet, 0)
 	if fields > maxQueryComplexity(a.ctx) {
 		return executeResult{}, invalid("query complexity %d exceeds limit %d", fields, maxQueryComplexity(a.ctx))
@@ -114,7 +127,7 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 		return executeResult{}, invalid("query depth %d exceeds limit %d", depth, maxQueryDepth(a.ctx))
 	}
 	rootType := operationType(op)
-	bindings, err := a.executionPlan(project, apiSlug)
+	bindings, err := a.executionPlan(project, apiSlug, policy.Mode == "auth")
 	if err != nil {
 		return executeResult{}, err
 	}
@@ -137,13 +150,14 @@ type planCacheEntry struct {
 	expires  time.Time
 }
 
-func (a *App) executionPlan(project, apiSlug string) (*executionBindings, error) {
+func (a *App) executionPlan(project, apiSlug string, fresh ...bool) (*executionBindings, error) {
+	cacheable := len(fresh) == 0 || !fresh[0]
 	key := project + "\x00" + apiSlug
 	now := time.Now()
 	a.cacheMu.RLock()
 	entry, found := a.planCache[key]
 	a.cacheMu.RUnlock()
-	if found && entry.bindings != nil && now.Before(entry.expires) {
+	if cacheable && found && entry.bindings != nil && now.Before(entry.expires) {
 		return entry.bindings, nil
 	}
 	resolvers, err := listResolversForAPI(a.ctx.AppReadDB(), project, apiSlug)
@@ -160,6 +174,9 @@ func (a *App) executionPlan(project, apiSlug string) (*executionBindings, error)
 	}
 	for _, source := range sources {
 		bindings.sources[source.ID] = source
+	}
+	if !cacheable {
+		return bindings, nil
 	}
 	a.cacheMu.Lock()
 	if a.planCache == nil || len(a.planCache) >= compiledCacheLimit {
@@ -622,6 +639,13 @@ func tablesReadInput(config, args map[string]any) map[string]any {
 }
 
 func (a *App) callFunction(ctx context.Context, config map[string]any, args map[string]any) (any, error) {
+	security, err := functionSecurity(config)
+	if err != nil {
+		return nil, err
+	}
+	if security.Authenticated {
+		return a.callTrustedFunction(ctx, config, args, security)
+	}
 	name, _ := config["name"].(string)
 	if name == "" {
 		return nil, invalid("function source requires config.name")

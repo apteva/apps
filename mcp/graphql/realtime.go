@@ -166,6 +166,11 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, err.Error(), errorCode(err))
 		return
 	}
+	policy, err := getSecurity(a.ctx.AppReadDB(), project, api.Slug)
+	if err != nil || policy.Mode != "platform" {
+		writeJSONError(w, 403, "authenticated subscriptions are not supported yet", "permission_denied")
+		return
+	}
 	conn, err := websocketUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return

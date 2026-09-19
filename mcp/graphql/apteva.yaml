@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: graphql
 display_name: GraphQL
-version: 0.2.2
+version: 0.3.0
 description: |
   Standalone multi-API GraphQL and realtime runtime. Define multiple named
   endpoints with independent schemas, resolver bindings, environments,
@@ -14,7 +14,7 @@ icon: /ui/icon.svg
 icon_style: monochrome
 tags: [graphql, realtime, subscriptions, aggregation, api]
 scopes: [project, global]
-min_apteva_version: "0.11.0"
+min_apteva_version: "0.50.2"
 
 requires:
   permissions:
@@ -24,6 +24,7 @@ requires:
     - platform.ingress.write
   apps:
     - name: auth
+      version: ">=0.12.0"
       optional: true
       reason: Used to verify JWT/OIDC identities when configured.
     - name: domains
@@ -37,6 +38,7 @@ requires:
       reason: Provides typed table rows and aggregation.
       events: [row.inserted, row.updated, row.deleted]
     - name: functions
+      version: ">=1.14.1"
       optional: true
       reason: Provides custom GraphQL resolvers and event publishers.
 
@@ -44,9 +46,17 @@ provides:
   http_routes:
     - prefix: /graphql
     - prefix: /graphql/{api_slug}
+    - prefix: /public/graphql/
+      no_auth: true
     - prefix: /admin/
     - prefix: /realtime/{api_slug}
   mcp_tools:
+    - name: graphql_security_get
+      description: Get API authentication and field policies.
+    - name: graphql_security_set
+      description: Configure API authentication and field policies.
+    - name: graphql_security_validate
+      description: Check security configuration and Function caller trust.
     - name: graphql_api_create
       description: Create a named GraphQL API endpoint.
     - name: graphql_api_list
@@ -85,7 +95,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: graphql/v0.2.2
+    ref: graphql/v0.3.0
     entry: mcp/graphql
   port: 8080
   health_check: /health

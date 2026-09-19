@@ -3,7 +3,8 @@ module github.com/apteva/apps/mcp/graphql
 go 1.25.1
 
 require (
-	github.com/apteva/app-sdk v0.81.0
+	github.com/apteva/app-sdk v0.82.0
+	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/vektah/gqlparser/v2 v2.5.37
 	modernc.org/sqlite v1.50.0
@@ -12,7 +13,6 @@ require (
 require (
 	github.com/agnivade/levenshtein v1.2.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
