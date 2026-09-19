@@ -290,7 +290,16 @@ func gwContext(sc sourceClient, topic string) ContextResult {
 	if raw, ok := sc.call("sec-edgar", "ticker_to_cik", map[string]any{"ticker": topic}); ok {
 		if cik, ok := secCIKForTicker(raw, topic); ok {
 			if filings, ok := sc.call("sec-edgar", "company_submissions", map[string]any{"cik": cik}); ok {
-				for _, it := range parseSECSubmissions(filings, cik) {
+				secItems := parseSECSubmissions(filings, cik)
+				// SEC keeps older filings in archive files listed by the
+				// submissions response. Fetch those through the adapter too;
+				// the gateway remains source-agnostic.
+				for _, file := range secArchiveFiles(filings) {
+					if archived, ok := sc.call("sec-edgar", "submission_archive", map[string]any{"file": file}); ok {
+						secItems = append(secItems, parseSECSubmissions(archived, cik)...)
+					}
+				}
+				for _, it := range secItems {
 					key := normTitle(it.Title)
 					if key == "" || seenTitle[key] {
 						continue
@@ -440,6 +449,26 @@ func parseSECSubmissions(raw json.RawMessage, cik string) []NewsItem {
 		items = append(items, NewsItem{Title: title, URL: url, Source: "SEC EDGAR"})
 	}
 	return items
+}
+
+func secArchiveFiles(raw json.RawMessage) []string {
+	var payload struct {
+		Filings struct {
+			Files []struct {
+				Name string `json:"name"`
+			} `json:"files"`
+		} `json:"filings"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	out := make([]string, 0, len(payload.Filings.Files))
+	for _, f := range payload.Filings.Files {
+		if strings.HasPrefix(f.Name, "CIK") && strings.HasSuffix(f.Name, ".json") {
+			out = append(out, f.Name)
+		}
+	}
+	return out
 }
 
 func normTitle(t string) string {
