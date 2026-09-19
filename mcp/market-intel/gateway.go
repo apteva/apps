@@ -427,6 +427,21 @@ func parseSECSubmissions(raw json.RawMessage, cik string) []NewsItem {
 		return nil
 	}
 	r := payload.Filings.Recent
+	// Archived submission files flatten the same parallel arrays at the
+	// top level rather than nesting them under filings.recent.
+	if len(r.Form) == 0 {
+		var archive struct {
+			Accession  []string `json:"accessionNumber"`
+			FilingDate []string `json:"filingDate"`
+			ReportDate []string `json:"reportDate"`
+			Form       []string `json:"form"`
+			Primary    []string `json:"primaryDocument"`
+		}
+		if json.Unmarshal(raw, &archive) != nil {
+			return nil
+		}
+		r.Accession, r.FilingDate, r.ReportDate, r.Form, r.Primary = archive.Accession, archive.FilingDate, archive.ReportDate, archive.Form, archive.Primary
+	}
 	items := make([]NewsItem, 0, len(r.Form))
 	for i, form := range r.Form {
 		if form == "" || i >= len(r.Accession) || i >= len(r.FilingDate) {
