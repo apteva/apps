@@ -66,8 +66,10 @@ function Boundary({ data }: NodeProps<Node<BoundaryData>>) {
           {data.process.name}
         </strong>
         <span>
-          v{data.process.version} · {data.process.status} ·{" "}
-          {data.process.steps?.length || 0} steps
+          {data.process.category || "Uncategorized"} · {data.process.steps?.length || 0} steps
+        </span>
+        <span>
+          v{data.process.version} · {data.process.status}
         </span>
         <span>
           <b className="pm-live-count">
@@ -174,6 +176,7 @@ export default function ProjectMap(props: Props) {
     [runs, setRuns] = useState<Record<string, MapRun[]>>({});
   const [search, setSearch] = useState(""),
     [status, setStatus] = useState(""),
+    [category, setCategory] = useState(""),
     [liveOnly, setLiveOnly] = useState(false);
   const [loaded, setLoaded] = useState(false),
     [busy, setBusy] = useState(false),
@@ -261,13 +264,14 @@ export default function ProjectMap(props: Props) {
       processes.filter(
         (p) =>
           (!search ||
-            `${p.name} ${p.description || ""}`
+            `${p.name} ${p.description || ""} ${p.category || ""} ${(p.tags || []).join(" ")}`
               .toLowerCase()
               .includes(search.toLowerCase())) &&
           (!status || p.status === status) &&
+          (!category || (category === "uncategorized" ? !p.category : p.category === category)) &&
           (!liveOnly || (runs[p.id] || []).some(liveRun)),
       ),
-    [processes, runs, search, status, liveOnly],
+    [processes, runs, search, status, category, liveOnly],
   );
   const graph = useMemo(() => {
     const nodes: Node[] = [],
@@ -402,6 +406,15 @@ export default function ProjectMap(props: Props) {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        <select
+          aria-label="Filter SOP category"
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+        >
+          <option value="">All categories</option>
+          <option value="uncategorized">Uncategorized</option>
+          {Array.from(new Set(processes.map((p) => p.category).filter(Boolean) as string[])).sort().map((x) => <option key={x}>{x}</option>)}
+        </select>
         <select
           aria-label="Filter SOP status"
           value={status}

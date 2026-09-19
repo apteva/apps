@@ -13,6 +13,8 @@ export type MapProcess = {
   id: string;
   name: string;
   description?: string;
+  category?: string;
+  tags?: string[];
   status: string;
   version: number;
   steps?: Step[];

@@ -6,7 +6,9 @@ optional execution backend; direct agent runs do not need or create Tasks.
 Processes also owns native tasks: procedure step tasks, standalone work, and
 required or optional tasks added to an existing run. All share the Work view.
 
-Create defines only the procedure: steps, instructions, roles, and input schema.
+Create defines only the procedure: steps, instructions, roles, input schema, and
+optional organization metadata (`category` and `tags`). The Processes list and
+project map can filter by this metadata; uncategorized procedures remain supported.
 It requires no agent and creates no assignment. Keep owner_agent_id, schedule,
 execution_mode and parameter values in assignment_create/update. You can define
 a process before agents exist; it cannot execute until an assignment is configured

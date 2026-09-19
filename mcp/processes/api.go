@@ -24,7 +24,7 @@ func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
 		"steps":      map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
 		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
-		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval instructions; use approval steps for enforced gates"),
+		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval instructions; use approval steps for enforced gates"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
@@ -63,6 +63,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["search"] = textField("Search name and purpose")
 			props["status"] = textField("draft, active, paused, or archived")
 			props["owner_agent_id"] = map[string]any{"type": "integer"}
+			props["category"] = textField("Exact category; use uncategorized for procedures without one")
+			props["tag"] = textField("Tag to match")
 		case "get":
 			props["version"] = map[string]any{"type": "integer", "minimum": 1}
 		case "create", "update":
@@ -155,8 +157,28 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 					continue
 				}
 			}
-			if q != "" && !strings.Contains(strings.ToLower(p.Name+" "+p.Description), q) {
+			if q != "" && !strings.Contains(strings.ToLower(p.Name+" "+p.Description+" "+p.Category+" "+strings.Join(p.Tags, " ")), q) {
 				continue
+			}
+			if category := strings.TrimSpace(str(args, "category")); category != "" {
+				if category == "uncategorized" && p.Category != "" {
+					continue
+				}
+				if category != "uncategorized" && !strings.EqualFold(p.Category, category) {
+					continue
+				}
+			}
+			if tag := strings.ToLower(strings.TrimSpace(str(args, "tag"))); tag != "" {
+				found := false
+				for _, t := range p.Tags {
+					if strings.EqualFold(t, tag) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					continue
+				}
 			}
 			out = append(out, p)
 		}
