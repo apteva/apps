@@ -39,6 +39,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.ctx = ctx
 	a.hub = newSubscriptionHub()
+	if project := ctx.CurrentProject(); project != "" {
+		if _, err := ensureDefaultGraphQLAPI(ctx.AppDB(), project); err != nil {
+			return err
+		}
+	}
 	ctx.Logger().Info("graphql mounted", "project_id", ctx.CurrentProject())
 	return nil
 }

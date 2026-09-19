@@ -47,7 +47,11 @@ func storageProject(project, slug string) string {
 }
 
 func publicAPI(row graphqlAPI) map[string]any {
-	return map[string]any{"id": row.ID, "project_id": row.ProjectID, "slug": row.Slug, "name": row.Name, "description": row.Description, "base_path": row.BasePath, "hostname": row.Hostname, "status": row.Status, "default": row.Default, "created_at": row.CreatedAt, "updated_at": row.UpdatedAt, "endpoint": "/graphql/" + row.Slug}
+	endpoint := "/graphql/" + row.Slug
+	if row.Default {
+		endpoint = "/graphql"
+	}
+	return map[string]any{"id": row.ID, "project_id": row.ProjectID, "slug": row.Slug, "name": row.Name, "description": row.Description, "base_path": row.BasePath, "hostname": row.Hostname, "status": row.Status, "default": row.Default, "created_at": row.CreatedAt, "updated_at": row.UpdatedAt, "endpoint": endpoint}
 }
 
 func getGraphQLAPI(db *sql.DB, project, slug string) (*graphqlAPI, error) {

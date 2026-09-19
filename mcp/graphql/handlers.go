@@ -96,7 +96,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	environment := normalizeEnvironment(r.URL.Query().Get("environment"))
 	if path == "apis" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		if r.Method == http.MethodGet {
-			rows, err := listGraphQLAPIs(a.ctx.AppReadDB(), project)
+			rows, err := listGraphQLAPIs(a.ctx.AppDB(), project)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error(), "storage_error")
 				return
