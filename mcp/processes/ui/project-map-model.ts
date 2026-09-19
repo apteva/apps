@@ -102,19 +102,19 @@ function shape(
       group = groups.get(rank)!;
     const lane = (breadth - group.length) / 2 + group.indexOf(s);
     positions[s.key] = {
-      x: 28 + (vertical ? lane : rank) * (STEP_WIDTH + 64),
+      x: 22 + (vertical ? lane : rank) * (STEP_WIDTH + 64),
       y: 108 + (vertical ? rank : lane) * (stepHeight + 64),
     };
   }
-  const width = 56 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64;
-  let height = 136 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
+  const width = 44 + (vertical ? breadth : depth) * (STEP_WIDTH + 64) - 64;
+  let height = 130 + (vertical ? depth : breadth) * (stepHeight + 64) - 64;
   const other = supplementalRuns(process, runs);
   const columns = Math.max(1, Math.floor((width - 40) / (STEP_WIDTH + 16)));
-  const runWidth = (width - 56 - (columns - 1) * 16) / columns;
+  const runWidth = (width - 44 - (columns - 1) * 16) / columns;
   const runPositions: MapLayout["runPositions"] = {};
   other.forEach((run, i) => {
     runPositions[run.id] = {
-      x: 28 + (i % columns) * (runWidth + 16),
+      x: 22 + (i % columns) * (runWidth + 16),
       y: height + Math.floor(i / columns) * 126,
     };
   });

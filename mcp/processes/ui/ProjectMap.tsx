@@ -438,7 +438,7 @@ export default function ProjectMap(props: Props) {
         </button>
         <button
           onClick={() =>
-            flow.current?.fitView({ padding: 0.08, duration: 250 })
+            flow.current?.fitView({ padding: 0.035, duration: 250 })
           }
         >
           Fit all SOPs
@@ -594,7 +594,7 @@ const styles = `
 .pm .pm-summary{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--pc-muted,#9aa8b9);margin:12px 0}
 .pm-workspace{position:relative;min-width:0}.pm-canvas{height:clamp(480px,72vh,1000px);border:1px solid var(--pf-border);border-radius:12px;overflow:hidden;background:var(--pc-bg,#10151d)}
 .pm .react-flow__node-sop{border:none;background:none;border-radius:14px;z-index:0}.pm-boundary{height:100%;border:1.25px solid var(--pf-border);border-radius:14px;background:color-mix(in srgb,var(--pc-panel,#1b2430) 88%,var(--pc-bg));overflow:hidden}
-.pm button.pm-boundary-head{display:flex;flex-direction:column;gap:5px;width:100%;height:88px;text-align:left;padding:15px 22px;border:0;border-bottom:1px solid var(--pf-divider);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
+.pm button.pm-boundary-head{display:flex;flex-direction:column;gap:3px;width:100%;height:104px;text-align:left;padding:12px 22px;border:0;border-bottom:1px solid var(--pf-divider);border-radius:0;background:var(--pc-panel,#1b2430);color:inherit;cursor:pointer;font:inherit}
 .pm-boundary-head strong{font-size:16px;line-height:20px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}.pm-boundary-head span{font-size:11px;line-height:14px;flex-shrink:0;color:var(--pc-muted,#9aa8b9)}
 .pm-step{height:100%;border:1px solid var(--pf-border);border-radius:10px;background:var(--pf-surface);box-shadow:0 4px 14px #0002;overflow:hidden}
 .pm button.pm-step-title{display:flex;flex-direction:column;gap:7px;width:100%;height:90px;border:0;border-radius:0;background:none;color:inherit;text-align:left;padding:12px 15px;font:inherit;cursor:pointer}.pm-step-title strong{font-size:14px;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.pm-step-title small{font-size:10px;color:var(--pc-muted,#9aa8b9);text-transform:uppercase;letter-spacing:.07em;max-width:100%;overflow:hidden;white-space:nowrap}
