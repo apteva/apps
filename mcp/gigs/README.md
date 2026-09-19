@@ -265,6 +265,11 @@ assignment tools may pass `public_domain_id` to select a non-default hostname.
    submission row, emits `gig.submitted`. The agent's waiting branch
    wakes.
 
+`gig.submitted` fires for both initial submissions and later revisions. Its
+payload includes `gig_id`, `assignment_id`, `worker_id`, `submission_id`,
+`submission_number`, `is_revision`, and `channel`. Accepting the work emits
+`gig.reviewed` with `gig_id`, `worker_id`, and the accepted `submission_id`.
+
 Lightweight gigs (yes/no, short text) also accept thread replies via the
 `crm.contact.message_received` event handler.
 

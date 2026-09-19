@@ -1760,6 +1760,13 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	var workerID, priorSubmissionCount int64
+	if err := tx.QueryRow(`SELECT a.worker_id,
+		(SELECT COUNT(*) FROM gig_submissions s WHERE s.assignment_id=a.id)
+		FROM gig_assignments a WHERE a.id=?`, assignID).Scan(&workerID, &priorSubmissionCount); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if mode == "first-come" {
 		var other int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
@@ -1773,11 +1780,17 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 			return
 		}
 	}
-	if _, err := tx.Exec(
+	submissionResult, err := tx.Exec(
 		`INSERT INTO gig_submissions (assignment_id, payload_json, attachment_file_ids_json, channel)
 		 VALUES (?, ?, ?, 'web')`,
 		assignID, mustJSON(body.Payload), mustJSON(body.Attachments),
-	); err != nil {
+	)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	submissionID, err := submissionResult.LastInsertId()
+	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -1828,9 +1841,13 @@ func (a *App) handleWorkerSubmit(w http.ResponseWriter, r *http.Request, token s
 		ctx.Logger().Warn("sync contract milestone after web submission failed", "gig_id", gigID, "err", err.Error())
 	}
 	ctx.EmitWithProject("gig.submitted", pid, map[string]any{
-		"gig_id":        gigID,
-		"assignment_id": assignID,
-		"channel":       "web",
+		"gig_id":            gigID,
+		"assignment_id":     assignID,
+		"worker_id":         workerID,
+		"submission_id":     submissionID,
+		"submission_number": priorSubmissionCount + 1,
+		"is_revision":       priorSubmissionCount > 0,
+		"channel":           "web",
 	})
 	if markedOverdue {
 		ctx.EmitWithProject("gig.overdue", pid, map[string]any{"gig_id": gigID, "reason": "late_submission"})
@@ -2323,9 +2340,9 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 
 	// Find an open assignment for this contact, optionally narrowed
 	// to the inbound conversation thread.
-	var assignID, gigID int64
+	var assignID, gigID, workerID int64
 	var mode string
-	q := `SELECT a.id, a.gig_id, COALESCE(a.mode,'direct')
+	q := `SELECT a.id, a.gig_id, a.worker_id, COALESCE(a.mode,'direct')
 	      FROM gig_assignments a
 	      JOIN workers w ON w.id = a.worker_id
 	      JOIN gigs g ON g.id=a.gig_id
@@ -2340,7 +2357,7 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		args = append(args, convoID)
 	}
 	q += ` ORDER BY a.offered_at DESC LIMIT 1`
-	if err := ctx.AppDB().QueryRow(q, args...).Scan(&assignID, &gigID, &mode); errors.Is(err, sql.ErrNoRows) {
+	if err := ctx.AppDB().QueryRow(q, args...).Scan(&assignID, &gigID, &workerID, &mode); errors.Is(err, sql.ErrNoRows) {
 		return nil
 	} else if err != nil {
 		return err
@@ -2383,6 +2400,10 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 	if err != nil {
 		return err
 	}
+	var priorSubmissionCount int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions WHERE assignment_id=?`, assignID).Scan(&priorSubmissionCount); err != nil {
+		return err
+	}
 	if mode == "first-come" {
 		var other int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM gig_submissions s
@@ -2394,10 +2415,15 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 			return nil
 		}
 	}
-	if _, err := tx.Exec(
+	submissionResult, err := tx.Exec(
 		`INSERT INTO gig_submissions (assignment_id, payload_json, channel) VALUES (?, ?, ?)`,
 		assignID, mustJSON(payload), "channel_reply",
-	); err != nil {
+	)
+	if err != nil {
+		return err
+	}
+	submissionID, err := submissionResult.LastInsertId()
+	if err != nil {
 		return err
 	}
 	res, err := tx.Exec(
@@ -2438,9 +2464,13 @@ func (a *App) handleContactMessageReceived(ctx *sdk.AppCtx, evt sdk.Event) error
 		ctx.Logger().Warn("sync contract milestone after channel submission failed", "gig_id", gigID, "err", err.Error())
 	}
 	ctx.EmitWithProject("gig.submitted", pid, map[string]any{
-		"gig_id":        gigID,
-		"assignment_id": assignID,
-		"channel":       "channel_reply",
+		"gig_id":            gigID,
+		"assignment_id":     assignID,
+		"worker_id":         workerID,
+		"submission_id":     submissionID,
+		"submission_number": priorSubmissionCount + 1,
+		"is_revision":       priorSubmissionCount > 0,
+		"channel":           "channel_reply",
 	})
 	if markedOverdue {
 		ctx.EmitWithProject("gig.overdue", pid, map[string]any{"gig_id": gigID, "reason": "late_submission"})

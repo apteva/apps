@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.6.1
+version: 0.6.2
 description: |
   Generic work marketplace and execution engine. Define standard offers,
   service packages, worker pay grades and effective rate cards; negotiate
@@ -82,6 +82,21 @@ provides:
     - prefix: /worker/
       no_auth: true
     - prefix: /
+  publishes:
+    - { name: gig.created, description: "A gig was created." }
+    - { name: gig.offered, description: "A gig was offered to a worker." }
+    - { name: gig.accepted, description: "A worker accepted a gig assignment." }
+    - { name: gig.declined, description: "A worker declined a gig assignment." }
+    - { name: gig.submitted, description: "A worker submitted or revised work for review." }
+    - { name: gig.reviewed, description: "A submitted result was accepted by the reviewer." }
+    - { name: gig.rejected, description: "A submitted result was rejected by the reviewer." }
+    - { name: gig.cancelled, description: "A live gig was cancelled." }
+    - { name: gig.schedule_updated, description: "A gig's schedule or deadline changed." }
+    - { name: gig.overdue, description: "A gig passed its soft due date." }
+    - { name: gig.access_expired, description: "A worker assignment's access window expired." }
+    - { name: gig.compensation_approved, description: "Compensation for accepted gig work was approved." }
+    - { name: gig.public_domain_attached, description: "A public worker-link domain was attached." }
+    - { name: gig.public_domain_detached, description: "A public worker-link domain was detached." }
   mcp_tools:
     - name: gigs_financials_get
       description: Read generic financial agreements, approvals and optional Bills payment status.
@@ -300,7 +315,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: gigs/v0.6.1
+    ref: gigs/v0.6.2
     entry: mcp/gigs
   port: 8080
   health_check: /health
