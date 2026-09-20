@@ -437,7 +437,7 @@ func publicLogs(db *sql.DB, project string, limit int) ([]map[string]any, error)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	rows, err := db.Query(`SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at
+	rows, err := db.Query(`SELECT id, operation_name, operation_type, status_code, duration_ms, error, created_at,operation_hash,api_release,response_bytes,row_count,resolver_count,source_timings_json,error_codes_json,authorization_scope,request_id
         FROM graphql_request_logs WHERE project_id=? ORDER BY id DESC LIMIT ?`, project, limit)
 	if err != nil {
 		return nil, err
@@ -446,12 +446,17 @@ func publicLogs(db *sql.DB, project string, limit int) ([]map[string]any, error)
 	var out []map[string]any
 	for rows.Next() {
 		var id, duration int64
-		var operationName, operationType, message, created string
+		var operationName, operationType, message, created, operationHash, sourceTimings, errorCodes, authScope, requestID string
 		var status int
-		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created); err != nil {
+		var release, responseBytes, rowCount, resolverCount int
+		if err := rows.Scan(&id, &operationName, &operationType, &status, &duration, &message, &created, &operationHash, &release, &responseBytes, &rowCount, &resolverCount, &sourceTimings, &errorCodes, &authScope, &requestID); err != nil {
 			return nil, err
 		}
-		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created})
+		var timings any
+		_ = json.Unmarshal([]byte(sourceTimings), &timings)
+		var codes any
+		_ = json.Unmarshal([]byte(errorCodes), &codes)
+		out = append(out, map[string]any{"id": id, "operation_name": operationName, "operation_type": operationType, "status_code": status, "duration_ms": duration, "error": message, "created_at": created, "operation_hash": operationHash, "api_release": release, "response_bytes": responseBytes, "row_count": rowCount, "resolver_count": resolverCount, "source_timings": timings, "error_codes": codes, "authorization_scope": authScope, "request_id": requestID})
 	}
 	return out, rows.Err()
 }

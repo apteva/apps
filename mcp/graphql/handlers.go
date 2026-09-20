@@ -135,9 +135,6 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_ = a.logRequest(project, api.Slug, result.OperationName, result.OperationType, status, time.Since(start), result.Errors)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
 	response := map[string]any{}
 	if result.HasData || result.Data != nil {
 		response["data"] = result.Data
@@ -145,7 +142,25 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	if len(result.Errors) > 0 {
 		response["errors"] = result.Errors
 	}
-	_ = json.NewEncoder(w).Encode(response)
+	encoded, _ := json.Marshal(response)
+	limits := defaultReleaseLimits()
+	if release, _ := a.cachedActiveRelease(project, api.Slug, environment); release != nil {
+		limits = release.Limits
+	}
+	if len(encoded) > limits.MaxResponseBytes {
+		status = http.StatusRequestEntityTooLarge
+		result.Errors = []map[string]any{{"message": "response exceeds configured size limit", "extensions": map[string]any{"code": "response_size_exceeded"}}}
+		response = map[string]any{"errors": result.Errors}
+		encoded, _ = json.Marshal(response)
+	}
+	requestID := r.Header.Get("X-Request-ID")
+	if identity := securityIdentity(r.Context()); identity != nil {
+		requestID = identity.RequestID
+	}
+	_ = a.logRequest(project, api.Slug, result, requestID, status, time.Since(start), len(encoded))
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(append(encoded, '\n'))
 }
 
 func milliseconds(duration time.Duration) float64 {
@@ -284,13 +299,19 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Name          string         `json:"name"`
-			Version       int            `json:"version"`
-			Description   string         `json:"description"`
-			Inputs        map[string]any `json:"inputs"`
-			OutputType    string         `json:"output_type"`
-			Definition    map[string]any `json:"definition"`
-			Deterministic *bool          `json:"deterministic"`
+			Name             string         `json:"name"`
+			Version          int            `json:"version"`
+			Description      string         `json:"description"`
+			Inputs           map[string]any `json:"inputs"`
+			OutputType       string         `json:"output_type"`
+			Definition       map[string]any `json:"definition"`
+			Deterministic    *bool          `json:"deterministic"`
+			NullBehavior     string         `json:"null_behavior"`
+			DecimalPrecision int            `json:"decimal_precision"`
+			DecimalScale     int            `json:"decimal_scale"`
+			RoundingMode     string         `json:"rounding_mode"`
+			Timezone         string         `json:"timezone"`
+			Completeness     string         `json:"completeness"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&body); err != nil {
 			writeJSONError(w, 400, err.Error(), "invalid_request")
@@ -305,6 +326,35 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
+		metadataArgs := map[string]any{}
+		if body.NullBehavior != "" {
+			metadataArgs["null_behavior"] = body.NullBehavior
+		}
+		if body.DecimalPrecision != 0 {
+			metadataArgs["decimal_precision"] = body.DecimalPrecision
+		}
+		if body.DecimalScale != 0 {
+			metadataArgs["decimal_scale"] = body.DecimalScale
+		}
+		if body.RoundingMode != "" {
+			metadataArgs["rounding_mode"] = body.RoundingMode
+		}
+		if body.Timezone != "" {
+			metadataArgs["timezone"] = body.Timezone
+		}
+		if body.Completeness != "" {
+			metadataArgs["completeness"] = body.Completeness
+		}
+		metadata, err := parseModuleMetadata(metadataArgs)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		if err := setResolverModuleMetadata(a.ctx.AppDB(), row.ID, metadata); err != nil {
+			writeJSONError(w, 500, err.Error(), "storage_error")
+			return
+		}
+		row, _ = getResolverModuleForAPI(a.ctx.AppReadDB(), project, api.Slug, row.Name, row.Version, false)
 		a.invalidateRuntime(project, api.Slug)
 		writeJSON(w, map[string]any{"module": publicResolverModule(*row)})
 		return
@@ -352,6 +402,42 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]any{"value": value, "module": row.Name, "version": row.Version})
+		return
+	}
+	if path == "modules/test-batch" && r.Method == http.MethodPost {
+		var body struct {
+			Name    string           `json:"name"`
+			Version int              `json:"version"`
+			Batch   []map[string]any `json:"batch"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<20)).Decode(&body); err != nil || len(body.Batch) > 10000 {
+			writeJSONError(w, 400, "invalid module batch", "invalid_request")
+			return
+		}
+		row, err := getResolverModuleForAPI(a.ctx.AppReadDB(), project, api.Slug, body.Name, body.Version, false)
+		if err != nil || row == nil {
+			writeJSONError(w, 404, "resolver module not found", "not_found")
+			return
+		}
+		rows, err := listResolverModulesForAPI(a.ctx.AppReadDB(), project, api.Slug)
+		if err != nil {
+			writeJSONError(w, 500, err.Error(), "storage_error")
+			return
+		}
+		modules := map[string]resolverModule{}
+		for _, module := range rows {
+			modules[moduleKey(module.Name, module.Version)] = module
+		}
+		values := make([]any, len(body.Batch))
+		runtime := moduleRuntime{modules: modules}
+		for i, input := range body.Batch {
+			values[i], err = runtime.evaluate(*row, input)
+			if err != nil {
+				writeJSONError(w, 400, err.Error(), errorCode(err))
+				return
+			}
+		}
+		writeJSON(w, map[string]any{"values": values, "count": len(values), "module": publicResolverModule(*row)})
 		return
 	}
 	if path == "modules/publish" && r.Method == http.MethodPost {
@@ -485,6 +571,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	if path == "schema/publish" && r.Method == http.MethodPost {
 		var body struct {
 			Version int `json:"version"`
+			Limits  any `json:"limits"`
 		}
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), "invalid_request")
@@ -494,13 +581,57 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
-		row, err := publishSchemaForAPI(a.ctx.AppDB(), project, api.Slug, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version)
+		row, err := publishAPIRelease(a.ctx.AppDB(), project, api.Slug, normalizeEnvironment(r.URL.Query().Get("environment")), body.Version, body.Limits)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
 		a.invalidateRuntime(project, api.Slug)
-		writeJSON(w, map[string]any{"schema": publicSchema(row), "deployed": true})
+		writeJSON(w, map[string]any{"release": publicAPIRelease(row, true), "deployed": true})
+		return
+	}
+	if path == "releases" && r.Method == http.MethodGet {
+		rows, err := listAPIReleases(a.ctx.AppReadDB(), project, api.Slug, environment)
+		if err != nil {
+			writeJSONError(w, 500, err.Error(), "storage_error")
+			return
+		}
+		out := make([]map[string]any, 0, len(rows))
+		for i := range rows {
+			out = append(out, publicAPIRelease(&rows[i], false))
+		}
+		writeJSON(w, map[string]any{"releases": out, "count": len(out)})
+		return
+	}
+	if path == "release" && r.Method == http.MethodGet {
+		version, _ := strconv.Atoi(r.URL.Query().Get("version"))
+		row, err := getAPIRelease(a.ctx.AppReadDB(), project, api.Slug, environment, version, version == 0)
+		if err != nil || row == nil {
+			writeJSONError(w, 404, "release not found", "not_found")
+			return
+		}
+		writeJSON(w, map[string]any{"release": publicAPIRelease(row, true)})
+		return
+	}
+	if path == "release/rollback" && r.Method == http.MethodPost {
+		var body struct {
+			Version int `json:"version"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body) != nil {
+			writeJSONError(w, 400, "invalid rollback request", "invalid_request")
+			return
+		}
+		if err := a.verifyPublishSecurity(r.Context(), project, api.Slug); err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		row, err := rollbackAPIRelease(a.ctx.AppDB(), project, api.Slug, environment, body.Version)
+		if err != nil {
+			writeJSONError(w, 400, err.Error(), errorCode(err))
+			return
+		}
+		a.invalidateRuntime(project, api.Slug)
+		writeJSON(w, map[string]any{"release": publicAPIRelease(row, true), "rolled_back": true})
 		return
 	}
 	if path == "logs" && r.Method == http.MethodGet {
@@ -533,21 +664,32 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	writeJSONError(w, http.StatusNotFound, "not found", "not_found")
 }
 
-func (a *App) logRequest(project, apiSlug, operationName, operationType string, status int, duration time.Duration, errors []map[string]any) error {
+func (a *App) logRequest(project, apiSlug string, result executeResult, requestID string, status int, duration time.Duration, responseBytes int) error {
 	message := ""
-	if len(errors) > 0 {
-		if value, ok := errors[0]["message"].(string); ok {
+	codes := []string{}
+	if len(result.Errors) > 0 {
+		if value, ok := result.Errors[0]["message"].(string); ok {
 			message = value
 		}
+		for _, item := range result.Errors {
+			if ext, ok := item["extensions"].(map[string]any); ok {
+				if code, ok := ext["code"].(string); ok {
+					codes = append(codes, code)
+				}
+			}
+		}
 	}
+	timings, _ := json.Marshal(result.SourceTimings)
+	encodedCodes, _ := json.Marshal(uniqueStrings(codes))
 	a.enqueueRequestLog(requestLogEntry{
 		projectID:     storageProject(project, apiSlug),
-		operationName: operationName,
-		operationType: operationType,
+		operationName: result.OperationName,
+		operationType: result.OperationType,
 		status:        status,
 		durationMS:    duration.Milliseconds(),
 		errorMessage:  message,
 		createdAt:     nowUTC(),
+		operationHash: result.OperationHash, apiRelease: result.Release, responseBytes: responseBytes, rowCount: result.Rows, resolverCount: result.Resolvers, sourceTimings: string(timings), errorCodes: string(encodedCodes), authorizationScope: result.AuthScope, requestID: requestID,
 	})
 	return nil
 }

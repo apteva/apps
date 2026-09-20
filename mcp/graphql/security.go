@@ -545,7 +545,14 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeGraphQLError(w, 404, invalid("API not found"))
 		return
 	}
+	release, releaseErr := getActiveAPIRelease(a.ctx.AppReadDB(), project, slug)
 	p, err := a.cachedSecurity(project, slug)
+	if releaseErr != nil {
+		err = releaseErr
+	}
+	if release != nil {
+		p = release.Security
+	}
 	if err != nil || p.Mode != "auth" {
 		writeGraphQLError(w, 403, forbidden("user-authenticated API is not enabled"))
 		return

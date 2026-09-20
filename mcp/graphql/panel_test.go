@@ -28,7 +28,7 @@ func TestPanelExposesTrustedSecurityConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"Authentication", "Function security", "security/validate", "row_filters", "Identity-derived Tables row filters", "function_ids", "Invoke as authenticated user", "Function trust policies were not changed", "Protected subscriptions are disabled"} {
+	for _, required := range []string{"Authentication", "Function security", "security/validate", "row_filters", "Identity-derived Tables row filters", "function_ids", "Invoke as authenticated user", "Function trust policies were not changed", "Authenticated subscriptions", "Atomic environment release", "Execution limits"} {
 		if !strings.Contains(string(body), required) {
 			t.Fatalf("missing panel capability: %s", required)
 		}

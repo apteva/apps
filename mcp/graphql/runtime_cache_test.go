@@ -130,7 +130,7 @@ func TestPreparedOperationCachesCostAndPermissionFields(t *testing.T) {
 
 func TestRequestLoggerFlushesOnUnmount(t *testing.T) {
 	a := secureTestApp(t, &trustedPlatform{})
-	a.logRequest("p1", "default", "Workspace", "query", 200, 12*time.Millisecond, nil)
+	a.logRequest("p1", "default", executeResult{OperationName: "Workspace", OperationType: "query"}, "request-1", 200, 12*time.Millisecond, 2)
 	a.stopRequestLogger()
 	var count int
 	if err := a.ctx.AppReadDB().QueryRow(`SELECT COUNT(*) FROM graphql_request_logs WHERE project_id='p1' AND operation_name='Workspace'`).Scan(&count); err != nil {

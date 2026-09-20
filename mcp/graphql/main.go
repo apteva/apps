@@ -25,6 +25,7 @@ type App struct {
 	cacheGeneration map[string]uint64
 	apiCache        map[string]*graphqlAPI
 	securityCache   map[string]securityPolicy
+	releaseCache    map[string]*apiRelease
 	schemaRowCache  map[string]*schemaRecord
 	schemaCache     map[string]*ast.Schema
 	queryCache      map[string]*ast.QueryDocument
@@ -59,6 +60,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.cacheGeneration = make(map[string]uint64)
 	a.apiCache = make(map[string]*graphqlAPI)
 	a.securityCache = make(map[string]securityPolicy)
+	a.releaseCache = make(map[string]*apiRelease)
 	a.schemaRowCache = make(map[string]*schemaRecord)
 	a.schemaCache = make(map[string]*ast.Schema)
 	a.queryCache = make(map[string]*ast.QueryDocument)
@@ -99,6 +101,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/graphql/", Handler: a.handleGraphQL},
 		{Pattern: "/public/graphql/", Handler: a.handlePublicGraphQL, NoAuth: true},
 		{Pattern: "/realtime", Handler: a.handleRealtime},
+		{Pattern: "/public/realtime/", Handler: a.handleRealtime, NoAuth: true},
 		{Pattern: "/admin/", Handler: a.handleAdminHTTP},
 	}
 }

@@ -9,22 +9,29 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type resolverModule struct {
-	ID            int64
-	ProjectID     string
-	Name          string
-	Version       int
-	Status        string
-	Description   string
-	Inputs        map[string]any
-	OutputType    string
-	Definition    map[string]any
-	Dependencies  []string
-	Deterministic bool
-	CreatedAt     string
-	PublishedAt   string
+	ID               int64
+	ProjectID        string
+	Name             string
+	Version          int
+	Status           string
+	Description      string
+	Inputs           map[string]any
+	OutputType       string
+	Definition       map[string]any
+	Dependencies     []string
+	Deterministic    bool
+	CreatedAt        string
+	PublishedAt      string
+	NullBehavior     string
+	DecimalPrecision int
+	DecimalScale     int
+	RoundingMode     string
+	Timezone         string
+	Completeness     string
 }
 
 func moduleKey(name string, version int) string {
@@ -46,7 +53,7 @@ func validModuleName(name string) bool {
 
 func validModuleType(value string) bool {
 	switch value {
-	case "String", "ID", "Int", "Float", "Boolean", "JSON", "Decimal":
+	case "String", "ID", "Int", "Float", "Boolean", "JSON", "Decimal", "Date", "DateTime", "Duration":
 		return true
 	default:
 		return false
@@ -60,7 +67,7 @@ func createResolverModule(db *sql.DB, project, name, description, outputType str
 	}
 	outputType = strings.TrimSpace(outputType)
 	if !validModuleType(outputType) {
-		return nil, invalid("output_type must be String, ID, Int, Float, Boolean, JSON, or Decimal")
+		return nil, invalid("unsupported resolver module output_type")
 	}
 	if inputs == nil {
 		inputs = map[string]any{}
@@ -113,7 +120,7 @@ func scanResolverModule(scanner interface{ Scan(...any) error }) (*resolverModul
 	var row resolverModule
 	var inputs, definition, dependencies string
 	var deterministic int
-	err := scanner.Scan(&row.ID, &row.ProjectID, &row.Name, &row.Version, &row.Status, &row.Description, &inputs, &row.OutputType, &definition, &dependencies, &deterministic, &row.CreatedAt, &row.PublishedAt)
+	err := scanner.Scan(&row.ID, &row.ProjectID, &row.Name, &row.Version, &row.Status, &row.Description, &inputs, &row.OutputType, &definition, &dependencies, &deterministic, &row.CreatedAt, &row.PublishedAt, &row.NullBehavior, &row.DecimalPrecision, &row.DecimalScale, &row.RoundingMode, &row.Timezone, &row.Completeness)
 	if err != nil {
 		return nil, err
 	}
@@ -124,7 +131,7 @@ func scanResolverModule(scanner interface{ Scan(...any) error }) (*resolverModul
 	return &row, nil
 }
 
-const moduleColumns = `id,project_id,name,version,status,description,inputs_json,output_type,definition_json,dependencies_json,deterministic,created_at,COALESCE(published_at,'')`
+const moduleColumns = `id,project_id,name,version,status,description,inputs_json,output_type,definition_json,dependencies_json,deterministic,created_at,COALESCE(published_at,''),null_behavior,decimal_precision,decimal_scale,rounding_mode,timezone,completeness`
 
 func getResolverModule(db *sql.DB, project, name string, version int, publishedOnly bool) (*resolverModule, error) {
 	query := `SELECT ` + moduleColumns + ` FROM graphql_resolver_modules WHERE project_id=? AND name=?`
@@ -189,7 +196,41 @@ func publishResolverModule(db *sql.DB, project, name string, version int) (*reso
 }
 
 func publicResolverModule(row resolverModule) map[string]any {
-	return map[string]any{"id": row.ID, "project_id": publicProjectID(row.ProjectID), "name": row.Name, "version": row.Version, "status": row.Status, "description": row.Description, "inputs": row.Inputs, "output_type": row.OutputType, "definition": row.Definition, "dependencies": row.Dependencies, "deterministic": row.Deterministic, "created_at": row.CreatedAt, "published_at": row.PublishedAt}
+	return map[string]any{"id": row.ID, "project_id": publicProjectID(row.ProjectID), "name": row.Name, "version": row.Version, "status": row.Status, "description": row.Description, "inputs": row.Inputs, "output_type": row.OutputType, "definition": row.Definition, "dependencies": row.Dependencies, "deterministic": row.Deterministic, "null_behavior": row.NullBehavior, "decimal_precision": row.DecimalPrecision, "decimal_scale": row.DecimalScale, "rounding_mode": row.RoundingMode, "timezone": row.Timezone, "completeness": row.Completeness, "created_at": row.CreatedAt, "published_at": row.PublishedAt}
+}
+
+type moduleMetadata struct {
+	NullBehavior     string
+	DecimalPrecision int
+	DecimalScale     int
+	RoundingMode     string
+	Timezone         string
+	Completeness     string
+}
+
+func parseModuleMetadata(args map[string]any) (moduleMetadata, error) {
+	m := moduleMetadata{NullBehavior: stringArg(args, "null_behavior", "propagate"), DecimalPrecision: intArg(args, "decimal_precision", 34), DecimalScale: intArg(args, "decimal_scale", 12), RoundingMode: stringArg(args, "rounding_mode", "half_even"), Timezone: stringArg(args, "timezone", "UTC"), Completeness: stringArg(args, "completeness", "complete")}
+	if m.NullBehavior != "propagate" && m.NullBehavior != "strict" {
+		return m, invalid("null_behavior must be propagate or strict")
+	}
+	if m.DecimalPrecision < 1 || m.DecimalPrecision > 100 || m.DecimalScale < 0 || m.DecimalScale > m.DecimalPrecision {
+		return m, invalid("invalid decimal precision or scale")
+	}
+	if m.RoundingMode != "half_even" && m.RoundingMode != "half_up" && m.RoundingMode != "down" {
+		return m, invalid("unsupported rounding_mode")
+	}
+	if _, err := time.LoadLocation(m.Timezone); err != nil {
+		return m, invalid("invalid timezone")
+	}
+	if m.Completeness != "complete" && m.Completeness != "partial" {
+		return m, invalid("completeness must be complete or partial")
+	}
+	return m, nil
+}
+
+func setResolverModuleMetadata(db *sql.DB, id int64, m moduleMetadata) error {
+	_, err := db.Exec(`UPDATE graphql_resolver_modules SET null_behavior=?,decimal_precision=?,decimal_scale=?,rounding_mode=?,timezone=?,completeness=? WHERE id=? AND status='draft'`, m.NullBehavior, m.DecimalPrecision, m.DecimalScale, m.RoundingMode, m.Timezone, m.Completeness, id)
+	return err
 }
 
 func validateResolverModuleDefinition(inputs, definition map[string]any) []string {
@@ -230,7 +271,7 @@ func validateResolverModuleDefinition(inputs, definition map[string]any) []strin
 			return
 		}
 		op, _ := node["op"].(string)
-		supported := map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true}
+		supported := map[string]bool{"input": true, "call": true, "add": true, "subtract": true, "multiply": true, "divide": true, "round": true, "eq": true, "neq": true, "lt": true, "lte": true, "gt": true, "gte": true, "and": true, "or": true, "not": true, "if": true, "coalesce": true, "concat": true, "sum": true, "min": true, "max": true, "length": true, "lower": true, "upper": true, "trim": true, "date_add": true, "datetime_add": true, "date_diff_days": true, "format_datetime": true}
 		if !supported[op] {
 			problems = append(problems, path+" has unsupported op "+op)
 			return
@@ -360,7 +401,35 @@ func validateModuleGraph(root resolverModule, modules map[string]resolverModule)
 type moduleRuntime struct{ modules map[string]resolverModule }
 
 func (runtime moduleRuntime) evaluate(module resolverModule, inputs map[string]any) (any, error) {
-	return runtime.eval(module.Definition, inputs, 0)
+	if module.NullBehavior == "strict" {
+		for name, definition := range module.Inputs {
+			typeName, _ := definition.(string)
+			if object, ok := definition.(map[string]any); ok {
+				typeName, _ = object["type"].(string)
+			}
+			if strings.HasSuffix(typeName, "!") && inputs[name] == nil {
+				return nil, invalid("required module input %s is null", name)
+			}
+		}
+	}
+	value, err := runtime.eval(module.Definition, inputs, 0)
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, nil
+	}
+	if module.OutputType == "Decimal" {
+		n, err := moduleNumber(value)
+		if err != nil {
+			return nil, err
+		}
+		return formatDecimal(n, module.DecimalPrecision, module.DecimalScale, module.RoundingMode)
+	}
+	if module.OutputType == "Date" || module.OutputType == "DateTime" {
+		return normalizeModuleTime(value, module.OutputType, module.Timezone)
+	}
+	return value, nil
 }
 
 func (runtime moduleRuntime) eval(raw any, inputs map[string]any, depth int) (any, error) {
@@ -520,9 +589,146 @@ func (runtime moduleRuntime) eval(raw any, inputs map[string]any, depth int) (an
 		f, _ := number.Float64()
 		scale := math.Pow10(places)
 		return math.Round(f*scale) / scale, nil
+	case "date_add", "datetime_add":
+		if len(values) != 2 {
+			return nil, invalid("%s requires a time and duration", op)
+		}
+		t, err := parseModuleTime(values[0], "UTC")
+		if err != nil {
+			return nil, err
+		}
+		d, err := parseModuleDuration(values[1])
+		if err != nil {
+			return nil, err
+		}
+		value := t.Add(d)
+		if op == "date_add" {
+			return value.Format("2006-01-02"), nil
+		}
+		return value.Format(time.RFC3339Nano), nil
+	case "date_diff_days":
+		if len(values) != 2 {
+			return nil, invalid("date_diff_days requires two times")
+		}
+		left, err := parseModuleTime(values[0], "UTC")
+		if err != nil {
+			return nil, err
+		}
+		right, err := parseModuleTime(values[1], "UTC")
+		if err != nil {
+			return nil, err
+		}
+		return int64(left.Sub(right) / (24 * time.Hour)), nil
+	case "format_datetime":
+		if len(values) < 1 || len(values) > 2 {
+			return nil, invalid("format_datetime requires a time and optional layout")
+		}
+		t, err := parseModuleTime(values[0], "UTC")
+		if err != nil {
+			return nil, err
+		}
+		layout := time.RFC3339
+		if len(values) == 2 {
+			layout = fmt.Sprint(values[1])
+		}
+		return t.Format(layout), nil
 	default:
 		return nil, invalid("unsupported resolver module operation %q", op)
 	}
+}
+
+func formatDecimal(value *big.Rat, precision, scale int, mode string) (string, error) {
+	if precision <= 0 {
+		precision = 34
+	}
+	if scale < 0 {
+		scale = 0
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(scale)), nil)
+	scaledNum := new(big.Int).Mul(value.Num(), factor)
+	q, rem := new(big.Int), new(big.Int)
+	q.QuoRem(scaledNum, value.Denom(), rem)
+	absRem := new(big.Int).Abs(rem)
+	absDen := new(big.Int).Abs(value.Denom())
+	increment := false
+	switch mode {
+	case "half_up":
+		increment = new(big.Int).Lsh(absRem, 1).Cmp(absDen) >= 0
+	case "half_even":
+		cmp := new(big.Int).Lsh(absRem, 1).Cmp(absDen)
+		increment = cmp > 0 || (cmp == 0 && new(big.Int).Abs(q).Bit(0) == 1)
+	case "down":
+	default:
+		return "", invalid("unsupported rounding mode")
+	}
+	if increment {
+		if value.Sign() < 0 {
+			q.Sub(q, big.NewInt(1))
+		} else {
+			q.Add(q, big.NewInt(1))
+		}
+	}
+	digits := new(big.Int).Abs(q).String()
+	if len(digits) > precision {
+		return "", invalid("decimal exceeds precision %d", precision)
+	}
+	for len(digits) <= scale {
+		digits = "0" + digits
+	}
+	if scale > 0 {
+		digits = digits[:len(digits)-scale] + "." + digits[len(digits)-scale:]
+	}
+	if q.Sign() < 0 {
+		digits = "-" + digits
+	}
+	return digits, nil
+}
+
+func parseModuleTime(value any, timezone string) (time.Time, error) {
+	text, ok := value.(string)
+	if !ok {
+		return time.Time{}, invalid("time value must be a string")
+	}
+	if t, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return t, nil
+	}
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.Time{}, invalid("invalid timezone")
+	}
+	for _, layout := range []string{"2006-01-02", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, text, loc); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, invalid("invalid date/time %q", text)
+}
+
+func parseModuleDuration(value any) (time.Duration, error) {
+	if text, ok := value.(string); ok {
+		d, err := time.ParseDuration(text)
+		if err == nil {
+			return d, nil
+		}
+	}
+	if number, err := moduleNumber(value); err == nil {
+		f, _ := number.Float64()
+		return time.Duration(f * float64(time.Second)), nil
+	}
+	return 0, invalid("invalid duration")
+}
+
+func normalizeModuleTime(value any, outputType, timezone string) (string, error) {
+	t, err := parseModuleTime(value, timezone)
+	if err != nil {
+		return "", err
+	}
+	loc, _ := time.LoadLocation(timezone)
+	t = t.In(loc)
+	if outputType == "Date" {
+		return t.Format("2006-01-02"), nil
+	}
+	return t.Format(time.RFC3339Nano), nil
 }
 
 func truthy(value any) bool {

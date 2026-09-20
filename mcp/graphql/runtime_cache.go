@@ -86,6 +86,31 @@ func (a *App) cachedPublishedSchema(project, api, environment string) (*schemaRe
 	return row, nil
 }
 
+func (a *App) cachedActiveRelease(project, api, environment string) (*apiRelease, error) {
+	key := schemaRuntimeKey(project, api, environment)
+	apiKey := apiRuntimeKey(project, api)
+	a.cacheMu.RLock()
+	row, found := a.releaseCache[key]
+	generation := a.cacheGeneration[apiKey]
+	a.cacheMu.RUnlock()
+	if found {
+		return row, nil
+	}
+	row, err := getAPIRelease(a.ctx.AppReadDB(), project, api, environment, 0, true)
+	if err != nil {
+		return nil, err
+	}
+	a.cacheMu.Lock()
+	if a.releaseCache == nil {
+		a.releaseCache = make(map[string]*apiRelease)
+	}
+	if a.cacheGeneration[apiKey] == generation {
+		a.releaseCache[key] = row
+	}
+	a.cacheMu.Unlock()
+	return row, nil
+}
+
 // invalidateRuntime is called after every successful configuration write.
 // Published execution state is immutable between these explicit invalidations,
 // so authenticated requests do not need TTL-based database refreshes.
@@ -100,6 +125,11 @@ func (a *App) invalidateRuntime(project, api string) {
 	delete(a.apiCache, prefix)
 	delete(a.securityCache, prefix)
 	delete(a.planCache, prefix)
+	for key := range a.releaseCache {
+		if key == prefix || strings.HasPrefix(key, prefix+"\x00") {
+			delete(a.releaseCache, key)
+		}
+	}
 	for key := range a.schemaRowCache {
 		if key == prefix || strings.HasPrefix(key, prefix+"\x00") {
 			delete(a.schemaRowCache, key)

@@ -34,12 +34,17 @@ func graphqlTools(a *App) []sdk.Tool {
 		{Name: "graphql_schema_list", Description: "List GraphQL schema versions for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment}), HandlerCtx: a.toolSchemaList},
 		{Name: "graphql_schema_validate", Description: "Validate GraphQL SDL without storing it.", InputSchema: object(map[string]any{"sdl": stringType("GraphQL SDL")}, "sdl"), HandlerCtx: a.toolSchemaValidate},
 		{Name: "graphql_schema_publish", Description: "Publish a validated GraphQL schema version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolSchemaPublish},
-		{Name: "graphql_module_create", Description: "Create or replace a draft version of a reusable resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Dot-separated module name"), "version": map[string]any{"type": "integer"}, "description": stringType("Description"), "inputs": map[string]any{"type": "object"}, "output_type": stringType("String, ID, Int, Float, Boolean, JSON, or Decimal"), "definition": map[string]any{"type": "object"}, "deterministic": map[string]any{"type": "boolean"}}, "name", "inputs", "output_type", "definition"), HandlerCtx: a.toolModuleCreate},
+		{Name: "graphql_release_publish", Description: "Atomically publish schema, sources, resolver bindings, security, limits, and pinned modules.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "schema_version": map[string]any{"type": "integer"}, "limits": map[string]any{"type": "object"}}, "schema_version"), HandlerCtx: a.toolReleasePublish},
+		{Name: "graphql_release_list", Description: "List immutable API releases.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment}), HandlerCtx: a.toolReleaseList},
+		{Name: "graphql_release_get", Description: "Get an API release and its complete snapshot.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolReleaseGet},
+		{Name: "graphql_release_rollback", Description: "Atomically reactivate a previous API release.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "environment": environment, "version": map[string]any{"type": "integer"}}, "version"), HandlerCtx: a.toolReleaseRollback},
+		{Name: "graphql_module_create", Description: "Create or replace a typed, versioned reusable resolver module draft.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Dot-separated module name"), "version": map[string]any{"type": "integer"}, "description": stringType("Description"), "inputs": map[string]any{"type": "object"}, "output_type": stringType("String, ID, Int, Float, Boolean, JSON, Decimal, Date, DateTime, or Duration"), "definition": map[string]any{"type": "object"}, "deterministic": map[string]any{"type": "boolean"}, "null_behavior": map[string]any{"type": "string", "enum": []string{"propagate", "strict"}}, "decimal_precision": map[string]any{"type": "integer"}, "decimal_scale": map[string]any{"type": "integer"}, "rounding_mode": map[string]any{"type": "string", "enum": []string{"half_even", "half_up", "down"}}, "timezone": stringType("IANA timezone"), "completeness": map[string]any{"type": "string", "enum": []string{"complete", "partial"}}}, "name", "inputs", "output_type", "definition"), HandlerCtx: a.toolModuleCreate},
 		{Name: "graphql_module_get", Description: "Get a resolver module version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name"), HandlerCtx: a.toolModuleGet},
 		{Name: "graphql_module_list", Description: "List resolver modules and versions for an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api}), HandlerCtx: a.toolModuleList},
 		{Name: "graphql_module_versions", Description: "List all versions of one resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name")}, "name"), HandlerCtx: a.toolModuleVersions},
 		{Name: "graphql_module_validate", Description: "Validate a typed resolver module definition without saving it.", InputSchema: object(map[string]any{"inputs": map[string]any{"type": "object"}, "definition": map[string]any{"type": "object"}}, "inputs", "definition"), HandlerCtx: a.toolModuleValidate},
 		{Name: "graphql_module_test", Description: "Evaluate a saved resolver module with test inputs.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}, "inputs": map[string]any{"type": "object"}}, "name", "version", "inputs"), HandlerCtx: a.toolModuleTest},
+		{Name: "graphql_module_test_batch", Description: "Evaluate a saved resolver module over a batch of input objects.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}, "batch": map[string]any{"type": "array", "items": map[string]any{"type": "object"}, "maxItems": 10000}}, "name", "version", "batch"), HandlerCtx: a.toolModuleTestBatch},
 		{Name: "graphql_module_publish", Description: "Validate and immutably publish a resolver module version.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name", "version"), HandlerCtx: a.toolModulePublish},
 		{Name: "graphql_module_usages", Description: "List module sources and field bindings using a resolver module.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Module name"), "version": map[string]any{"type": "integer"}}, "name"), HandlerCtx: a.toolModuleUsages},
 		{Name: "graphql_source_add", Description: "Bind a database, tables, function, HTTP, or resolver-module source to an API.", InputSchema: object(map[string]any{"project_id": project, "api_slug": api, "name": stringType("Stable source name"), "kind": map[string]any{"type": "string", "enum": []string{"database", "tables", "function", "http", "module"}}, "config": map[string]any{"type": "object"}}, "name", "kind"), HandlerCtx: a.toolSourceAdd},
@@ -145,6 +150,11 @@ func (a *App) toolSchemaValidate(_ context.Context, _ *sdk.AppCtx, args map[stri
 }
 
 func (a *App) toolSchemaPublish(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	args["schema_version"] = args["version"]
+	return a.toolReleasePublish(callCtx, ctx, args)
+}
+
+func (a *App) toolReleasePublish(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	project, err := appProject(ctx, callCtx, args)
 	if err != nil {
 		return nil, err
@@ -152,12 +162,59 @@ func (a *App) toolSchemaPublish(callCtx context.Context, ctx *sdk.AppCtx, args m
 	if err := a.verifyPublishSecurity(callCtx, project, apiSlugArg(args)); err != nil {
 		return nil, err
 	}
-	row, err := publishSchemaForAPI(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "version", 0))
+	row, err := publishAPIRelease(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "schema_version", intArg(args, "version", 0)), args["limits"])
 	if err != nil {
 		return nil, err
 	}
 	a.invalidateRuntime(project, apiSlugArg(args))
-	return map[string]any{"schema": publicSchema(row), "deployed": true}, nil
+	return map[string]any{"release": publicAPIRelease(row, true), "deployed": true}, nil
+}
+
+func (a *App) toolReleaseList(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listAPIReleases(ctx.AppReadDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for i := range rows {
+		out = append(out, publicAPIRelease(&rows[i], false))
+	}
+	return map[string]any{"releases": out, "count": len(out)}, nil
+}
+
+func (a *App) toolReleaseGet(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := getAPIRelease(ctx.AppReadDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "version", 0), false)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, invalid("release not found")
+	}
+	return map[string]any{"release": publicAPIRelease(row, true)}, nil
+}
+
+func (a *App) toolReleaseRollback(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.verifyPublishSecurity(callCtx, project, apiSlugArg(args)); err != nil {
+		return nil, err
+	}
+	row, err := rollbackAPIRelease(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "environment", "development"), intArg(args, "version", 0))
+	if err != nil {
+		return nil, err
+	}
+	a.invalidateRuntime(project, apiSlugArg(args))
+	return map[string]any{"release": publicAPIRelease(row, true), "rolled_back": true}, nil
 }
 
 func (a *App) toolModuleCreate(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -178,6 +235,17 @@ func (a *App) toolModuleCreate(callCtx context.Context, ctx *sdk.AppCtx, args ma
 		deterministic = value
 	}
 	row, err := createResolverModuleForAPI(ctx.AppDB(), project, apiSlugArg(args), stringArg(args, "name", ""), stringArg(args, "description", ""), stringArg(args, "output_type", ""), inputs, definition, intArg(args, "version", 0), deterministic)
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := parseModuleMetadata(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := setResolverModuleMetadata(ctx.AppDB(), row.ID, metadata); err != nil {
+		return nil, err
+	}
+	row, err = getResolverModuleForAPI(ctx.AppReadDB(), project, apiSlugArg(args), row.Name, row.Version, false)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +341,46 @@ func (a *App) toolModuleTest(callCtx context.Context, ctx *sdk.AppCtx, args map[
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"value": value, "module": row.Name, "version": row.Version}, nil
+	return map[string]any{"value": value, "module": publicResolverModule(*row)}, nil
+}
+
+func (a *App) toolModuleTestBatch(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	project, err := appProject(ctx, callCtx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := getResolverModuleForAPI(ctx.AppReadDB(), project, apiSlugArg(args), stringArg(args, "name", ""), intArg(args, "version", 0), false)
+	if err != nil || row == nil {
+		return nil, invalid("resolver module not found")
+	}
+	all, err := listResolverModulesForAPI(ctx.AppReadDB(), project, apiSlugArg(args))
+	if err != nil {
+		return nil, err
+	}
+	modules := map[string]resolverModule{}
+	for _, module := range all {
+		modules[moduleKey(module.Name, module.Version)] = module
+	}
+	raw, ok := args["batch"].([]any)
+	if !ok {
+		return nil, invalid("batch must be an array")
+	}
+	if len(raw) > 10000 {
+		return nil, invalid("batch exceeds 10000 inputs")
+	}
+	values := make([]any, len(raw))
+	runtime := moduleRuntime{modules: modules}
+	for i, item := range raw {
+		input, ok := item.(map[string]any)
+		if !ok {
+			return nil, invalid("batch item %d must be an object", i)
+		}
+		values[i], err = runtime.evaluate(*row, input)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"values": values, "count": len(values), "module": publicResolverModule(*row)}, nil
 }
 
 func (a *App) toolModulePublish(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

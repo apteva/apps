@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	gql "github.com/graphql-go/graphql"
@@ -31,6 +32,14 @@ type standardRequest struct {
 	errorCodes         map[string]string
 	moduleMu           sync.Mutex
 	moduleMemo         map[string]any
+	limits             releaseLimits
+	resolverCount      atomic.Int64
+	rowCount           int
+	tablesNanos        atomic.Int64
+	databaseNanos      atomic.Int64
+	functionNanos      atomic.Int64
+	httpNanos          atomic.Int64
+	moduleNanos        atomic.Int64
 }
 
 func (a *App) executeStandard(ctx context.Context, project, api, key string, schema *ast.Schema, req graphqlRequest, op *ast.OperationDefinition, doc *ast.QueryDocument, policy securityPolicy) (executeResult, error) {
@@ -39,7 +48,11 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 		return executeResult{}, internal(fmt.Sprintf("cannot build executable schema: %s", err))
 	}
 	bindings, _ := ctx.Value(executionBindingsKey{}).(*executionBindings)
-	state := &standardRequest{project: project, api: api, bindings: bindings, policy: policy, mutation: op.Operation == ast.Mutation}
+	limits, _ := ctx.Value(executionLimitsKey{}).(releaseLimits)
+	if limits.MaxNestedResolvers == 0 {
+		limits = defaultReleaseLimits()
+	}
+	state := &standardRequest{project: project, api: api, bindings: bindings, policy: policy, mutation: op.Operation == ast.Mutation, limits: limits}
 	ctx = context.WithValue(ctx, standardRequestKey{}, state)
 	state.loader = newResolverLoader(a, ctx, project)
 	result, inputErr := executeRuntime(ctx, runtime, schema, doc, op, req.Variables)
@@ -51,6 +64,13 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 	out.Timings.Source = state.sourceDuration
 	state.timingMu.Unlock()
 	out.Timings.Fast = state.fastProjectionUsed
+	out.Resolvers = int(state.resolverCount.Load())
+	out.SourceTimings = map[string]float64{}
+	for name, nanos := range map[string]int64{"tables": state.tablesNanos.Load(), "database": state.databaseNanos.Load(), "function": state.functionNanos.Load(), "http": state.httpNanos.Load(), "module": state.moduleNanos.Load()} {
+		if nanos > 0 {
+			out.SourceTimings[name] = milliseconds(time.Duration(nanos))
+		}
+	}
 	out.Data, _ = result.Data.(map[string]any)
 	out.HasData = result.Data != nil
 	for _, e := range result.Errors {
@@ -71,7 +91,30 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 		}
 		out.Errors = append(out.Errors, item)
 	}
+	out.Rows = countResultRows(result.Data)
+	if out.Rows > limits.MaxRows {
+		return executeResult{}, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("result rows %d exceeds limit %d", out.Rows, limits.MaxRows)}
+	}
 	return out, nil
+}
+
+func countResultRows(value any) int {
+	switch value := value.(type) {
+	case []any:
+		total := len(value)
+		for _, item := range value {
+			total += countResultRows(item)
+		}
+		return total
+	case map[string]any:
+		total := 0
+		for _, item := range value {
+			total += countResultRows(item)
+		}
+		return total
+	default:
+		return 0
+	}
 }
 
 func (a *App) standardSchema(key string, schema *ast.Schema) (*gql.Schema, error) {
@@ -280,6 +323,10 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		return gql.DefaultResolveFn(p)
 	}
 	fieldKey := p.Info.ParentType.Name() + "." + p.Info.FieldName
+	resolverCount := int(state.resolverCount.Add(1))
+	if state.limits.MaxNestedResolvers > 0 && resolverCount > state.limits.MaxNestedResolvers {
+		return nil, resolverError{&graphqlError{Code: "resolver_limit_exceeded", Message: "resolver call limit exceeded"}}
+	}
 	if err := requirePermissions(securityIdentity(p.Context), state.policy.Fields[fieldKey]); err != nil {
 		return nil, resolverError{err}
 	}
@@ -310,6 +357,22 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 	config["graphql_args"] = p.Args
 	config["parent"] = p.Source
 	call := func() (any, error) {
+		started := time.Now()
+		defer func() {
+			nanos := time.Since(started).Nanoseconds()
+			switch source.Kind {
+			case "tables":
+				state.tablesNanos.Add(nanos)
+			case "database":
+				state.databaseNanos.Add(nanos)
+			case "function":
+				state.functionNanos.Add(nanos)
+			case "http":
+				state.httpNanos.Add(nanos)
+			case "module":
+				state.moduleNanos.Add(nanos)
+			}
+		}()
 		var value any
 		var err error
 		switch source.Kind {

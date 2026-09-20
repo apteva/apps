@@ -46,8 +46,12 @@ func (l *resolverLoader) enqueue(j *resolverJob, key string) func() (any, error)
 	} else {
 		j.done = make(chan struct{})
 		l.count++
-		if l.count > 1000 {
-			j.err = invalid("source read budget exceeded")
+		maxResolvers := 1000
+		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok && state.limits.MaxNestedResolvers > 0 {
+			maxResolvers = state.limits.MaxNestedResolvers
+		}
+		if l.count > maxResolvers {
+			j.err = &graphqlError{Code: "resolver_limit_exceeded", Message: "source read budget exceeded"}
 			close(j.done)
 		} else {
 			l.pending = append(l.pending, j)
@@ -89,8 +93,10 @@ func (l *resolverLoader) flush() {
 	defer func() {
 		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok {
 			state.timingMu.Lock()
-			state.sourceDuration += time.Since(sourceStart)
+			duration := time.Since(sourceStart)
+			state.sourceDuration += duration
 			state.timingMu.Unlock()
+			state.tablesNanos.Add(duration.Nanoseconds())
 		}
 	}()
 	fusions := fuseCountAggregates(jobs)
@@ -145,7 +151,11 @@ func (l *resolverLoader) flush() {
 			j.err = sdk.CallAppResultContext(l.ctx, l.app.ctx.WithProject(l.project).PlatformAPI(), "tables", j.tool, j.input, &j.value)
 		})
 	}
-	sem := make(chan struct{}, 8)
+	parallelism := 8
+	if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok && state.limits.MaxParallelism > 0 {
+		parallelism = state.limits.MaxParallelism
+	}
+	sem := make(chan struct{}, parallelism)
 	var wg sync.WaitGroup
 	for _, task := range tasks {
 		sem <- struct{}{}

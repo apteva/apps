@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,6 +35,12 @@ type executeResult struct {
 	OperationName string
 	OperationType string
 	Timings       executionTimings
+	Release       int
+	OperationHash string
+	Rows          int
+	Resolvers     int
+	SourceTimings map[string]float64
+	AuthScope     string
 }
 
 type executionTimings struct {
@@ -137,9 +145,28 @@ func (a *App) prepareOperation(key, query, operationName string, schema *ast.Sch
 
 func (a *App) execute(ctx context.Context, project, apiSlug, environment string, req graphqlRequest) (executeResult, error) {
 	configStart := time.Now()
-	policy, err := a.cachedSecurity(project, apiSlug)
+	release, err := a.cachedActiveRelease(project, apiSlug, environment)
 	if err != nil {
 		return executeResult{}, err
+	}
+	policy := securityPolicy{}
+	limits := defaultReleaseLimits()
+	var schemaRow *schemaRecord
+	var bindings *executionBindings
+	if release != nil {
+		policy = release.Security
+		limits = release.Limits
+		schemaRow = &schemaRecord{Version: release.SchemaVersion, Hash: release.SchemaHash, SDL: release.SchemaSDL, Status: "published"}
+		bindings = bindingsFromRelease(release)
+	} else {
+		policy, err = a.cachedSecurity(project, apiSlug)
+		if err != nil {
+			return executeResult{}, err
+		}
+		schemaRow, err = a.cachedPublishedSchema(project, apiSlug, environment)
+		if err != nil {
+			return executeResult{}, err
+		}
 	}
 	if err := authorizeIdentity(ctx, project, apiSlug, policy, environment); err != nil {
 		return executeResult{}, err
@@ -150,14 +177,13 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if req.Variables == nil {
 		req.Variables = map[string]any{}
 	}
-	schemaRow, err := a.cachedPublishedSchema(project, apiSlug, environment)
-	if err != nil {
-		return executeResult{}, err
-	}
 	if schemaRow == nil {
 		return executeResult{}, invalid("no published schema for environment %q", normalizeEnvironment(environment))
 	}
 	schemaKey := project + "\x00" + apiSlug + "\x00" + normalizeEnvironment(environment) + "\x00" + fmt.Sprint(schemaRow.Version) + "\x00" + schemaRow.Hash
+	if release != nil {
+		schemaKey = releaseRuntimeKey(project, apiSlug, environment, release.ID) + "\x00" + release.SchemaHash
+	}
 	schema, schemaErrors := a.compiledSchema(schemaKey, schemaRow.SDL)
 	if len(schemaErrors) > 0 {
 		return executeResult{}, internal("published schema is invalid")
@@ -176,40 +202,129 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if ctx.Value(requestMethodKey{}) == http.MethodGet && op.Operation != ast.Query {
 		return executeResult{}, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
 	}
-	if policy.Mode == "auth" && op.Operation == ast.Subscription {
-		return executeResult{}, forbidden("authenticated subscriptions are not supported yet")
+	cost, estimatedRows, estimatedResolvers := cardinalityCost(op.SelectionSet, req.Variables, limits.DefaultListSize)
+	if cost > limits.MaxCost {
+		return executeResult{}, &graphqlError{Code: "query_cost_exceeded", Message: fmt.Sprintf("query cost %d exceeds limit %d", cost, limits.MaxCost)}
 	}
-	if prepared.fields > maxQueryComplexity(a.ctx) {
-		return executeResult{}, invalid("query complexity %d exceeds limit %d", prepared.fields, maxQueryComplexity(a.ctx))
+	if prepared.depth > limits.MaxDepth {
+		return executeResult{}, &graphqlError{Code: "query_depth_exceeded", Message: fmt.Sprintf("query depth %d exceeds limit %d", prepared.depth, limits.MaxDepth)}
 	}
-	if prepared.depth > maxQueryDepth(a.ctx) {
-		return executeResult{}, invalid("query depth %d exceeds limit %d", prepared.depth, maxQueryDepth(a.ctx))
+	if estimatedRows > limits.MaxRows {
+		return executeResult{}, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("estimated rows %d exceeds limit %d", estimatedRows, limits.MaxRows)}
+	}
+	if estimatedResolvers > limits.MaxNestedResolvers {
+		return executeResult{}, &graphqlError{Code: "resolver_limit_exceeded", Message: fmt.Sprintf("estimated resolver calls %d exceeds limit %d", estimatedResolvers, limits.MaxNestedResolvers)}
 	}
 	if err := authorizePermissionFields(ctx, policy, prepared.permissionFields); err != nil {
 		return executeResult{}, err
 	}
 	timings.Prepare = time.Since(prepareStart)
 	planStart := time.Now()
-	bindings, err := a.executionPlan(project, apiSlug)
-	if err != nil {
-		return executeResult{}, err
+	if bindings == nil {
+		bindings, err = a.executionPlan(project, apiSlug)
+		if err != nil {
+			return executeResult{}, err
+		}
 	}
 	timings.Plan = time.Since(planStart)
+	deadline := releaseDeadline(deadlineFromContext(ctx), limits)
+	ctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	ctx = context.WithValue(ctx, executionBindingsKey{}, bindings)
+	ctx = context.WithValue(ctx, executionLimitsKey{}, limits)
 	executeStart := time.Now()
 	result, err := a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
 	timings.Execute = time.Since(executeStart)
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Timings: timings}, &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
+	}
 	timings.Source = result.Timings.Source
 	timings.Fast = result.Timings.Fast
 	result.Timings = timings
+	if release != nil {
+		result.Release = release.Version
+	}
+	hash := sha256.Sum256([]byte(req.Query + "\x00" + req.OperationName))
+	result.OperationHash = hex.EncodeToString(hash[:])
+	if identity := securityIdentity(ctx); identity != nil {
+		result.AuthScope = identity.Issuer + ":" + identity.Subject
+	} else {
+		result.AuthScope = "platform:" + project
+	}
 	return result, err
 }
 
 type executionBindingsKey struct{}
+type executionLimitsKey struct{}
 type executionBindings struct {
 	resolvers map[string]resolverRecord
 	sources   map[int64]sourceRecord
 	modules   map[string]resolverModule
+}
+
+func bindingsFromRelease(release *apiRelease) *executionBindings {
+	bindings := &executionBindings{resolvers: map[string]resolverRecord{}, sources: map[int64]sourceRecord{}, modules: map[string]resolverModule{}}
+	for _, resolver := range release.Resolvers {
+		bindings.resolvers[resolver.ParentType+"."+resolver.FieldName] = resolver
+	}
+	for _, source := range release.Sources {
+		bindings.sources[source.ID] = source
+	}
+	for _, module := range release.Modules {
+		bindings.modules[moduleKey(module.Name, module.Version)] = module
+	}
+	return bindings
+}
+
+func deadlineFromContext(ctx context.Context) time.Time {
+	deadline, _ := ctx.Deadline()
+	return deadline
+}
+
+func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultList int) (cost, rows, resolvers int) {
+	var walk func(ast.SelectionSet, int)
+	walk = func(set ast.SelectionSet, fanout int) {
+		if fanout < 1 {
+			fanout = 1
+		}
+		for _, item := range set {
+			field, ok := item.(*ast.Field)
+			if !ok {
+				switch fragment := item.(type) {
+				case *ast.FragmentSpread:
+					if fragment.Definition != nil {
+						walk(fragment.Definition.SelectionSet, fanout)
+					}
+				case *ast.InlineFragment:
+					walk(fragment.SelectionSet, fanout)
+				}
+				continue
+			}
+			resolvers += fanout
+			cost += fanout
+			next := fanout
+			if field.Definition != nil && field.Definition.Type.Elem != nil {
+				size := defaultList
+				args := field.ArgumentMap(vars)
+				for _, key := range []string{"first", "limit"} {
+					if n := moduleInt(args[key]); n > 0 {
+						size = n
+					}
+				}
+				if fanout > 1_000_000_001/max(1, size) {
+					next = 1_000_000_001
+				} else {
+					next *= size
+				}
+				rows = min(1_000_000_001, rows+next)
+			}
+			walk(field.SelectionSet, next)
+			cost = min(1_000_000_001, cost)
+			resolvers = min(1_000_000_001, resolvers)
+		}
+	}
+	walk(selection, 1)
+	return
 }
 
 type planCacheEntry struct {
