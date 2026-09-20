@@ -92,6 +92,89 @@ func TestStandaloneManifestAndPlanning(t *testing.T) {
 		t.Fatal("history missing")
 	}
 }
+
+func TestToolSchemasExplainWorkflowAndApproval(t *testing.T) {
+	specs := map[string]toolSpec{}
+	for _, spec := range toolSpecs() {
+		specs[spec.name] = spec
+	}
+
+	create := specs["items_create"]
+	props := create.schema["properties"].(map[string]any)
+	status := props["status"].(map[string]any)
+	if description, _ := status["description"].(string); !strings.Contains(description, "editorial_settings_get") || !strings.Contains(description, "omit") || !strings.Contains(description, "separate from release status") {
+		t.Fatalf("item status schema does not explain the dynamic workflow: %q", description)
+	}
+	format := props["format"].(map[string]any)
+	if description, _ := format["description"].(string); !strings.Contains(description, "editorial_settings_get") || !strings.Contains(description, "first configured format") {
+		t.Fatalf("format schema does not explain the project default: %q", description)
+	}
+	approval := props["approval"].(map[string]any)
+	if got, ok := approval["enum"].([]string); !ok || strings.Join(got, ",") != strings.Join(approvalStates, ",") {
+		t.Fatalf("approval enum = %#v", approval["enum"])
+	}
+	reviewer := props["reviewer"].(map[string]any)
+	if description, _ := reviewer["description"].(string); !strings.Contains(description, "Required when approval is approved") {
+		t.Fatalf("reviewer requirement missing: %q", description)
+	}
+	if !strings.Contains(create.description, "Only title is required") || !strings.Contains(create.description, "later content changes reset approval to pending") {
+		t.Fatalf("create guidance missing: %q", create.description)
+	}
+
+	release := specs["releases_create"]
+	releaseProps := release.schema["properties"].(map[string]any)
+	releaseStatus := releaseProps["status"].(map[string]any)
+	if got, ok := releaseStatus["enum"].([]string); !ok || strings.Join(got, ",") != strings.Join(releaseStatuses, ",") {
+		t.Fatalf("release status enum = %#v", releaseStatus["enum"])
+	}
+	if description, _ := releaseStatus["description"].(string); !strings.Contains(description, "separate from the content item") || !strings.Contains(description, "planned") {
+		t.Fatalf("release status distinction missing: %q", description)
+	}
+	if description := specs["settings_get"].description; !strings.Contains(description, "first status and format") || !strings.Contains(description, "defaults") {
+		t.Fatalf("settings guidance missing: %q", description)
+	}
+}
+
+func TestWorkflowDefaultsAndApprovalGuidance(t *testing.T) {
+	a, c := testApp(t, nil)
+	s, e := getSettings(c.AppDB(), "alpha")
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, e = a.dispatch(c, "settings_update", map[string]any{
+		"revision": s.Revision,
+		"statuses": []string{"pitch", "draft", "published"},
+		"formats":  []string{"essay", "video"},
+		"channels": s.Channels,
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+
+	approved := create(t, a, c, map[string]any{"title": "Finished essay", "approval": "approved", "reviewer": "Alex"})
+	if approved.Status != "pitch" || approved.Format != "essay" || approved.Approval != "approved" {
+		t.Fatalf("create did not use configured defaults: %+v", approved)
+	}
+	if _, e = a.dispatch(c, "items_create", map[string]any{"title": "Missing reviewer", "approval": "approved"}); e == nil || !strings.Contains(e.Error(), `reviewer is required when approval is "approved"`) {
+		t.Fatalf("approved item returned an unhelpful reviewer error: %v", e)
+	}
+	if _, e = a.dispatch(c, "items_create", map[string]any{"title": "Wrong status", "status": "planned"}); e == nil ||
+		!strings.Contains(e.Error(), `unknown content workflow status "planned"`) ||
+		!strings.Contains(e.Error(), "Allowed: pitch, draft, published") ||
+		!strings.Contains(e.Error(), `Omit status to use "pitch"`) ||
+		!strings.Contains(e.Error(), `"planned" is a release status`) {
+		t.Fatalf("item status returned an unhelpful distinction: %v", e)
+	}
+
+	v, e := a.dispatch(c, "releases_create", map[string]any{"item_id": approved.ID, "channel": "Website"})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if got := v.(Release).Status; got != "planned" {
+		t.Fatalf("release status default = %q", got)
+	}
+}
+
 func TestProjectIsolationAndHTTPPrecedence(t *testing.T) {
 	a, c := testApp(t, nil)
 	i := create(t, a, c, map[string]any{"title": "Private", "project_id": "beta", "_project_id": "beta"})

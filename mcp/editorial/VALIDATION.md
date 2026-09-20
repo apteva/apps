@@ -1,5 +1,13 @@
 # Validation
 
+## v0.4.2 agent guidance
+
+The live MCP schemas now distinguish project-configured content workflow statuses from fixed release statuses, publish the fixed approval and release-status enums, explain create defaults, and state that approved items require a reviewer. Validation errors include the project's allowed values and default, with a specific release-status hint when a release value such as `planned` is mistakenly supplied as an item status. The settings response and stored data are unchanged, and approval invalidation remains intact.
+
+Focused regression tests cover a one-call approved item with a reviewer, rejection without a reviewer, customized first-status and first-format defaults, the actionable `planned` diagnostic, the default release status, schema descriptions, and both fixed enums.
+
+Validated on 2026-09-20 with the standalone race suite, `go vet`, and a standalone binary build.
+
 Validated locally on 2026-09-14 against the published app-sdk v0.81.0 with no workspace overlay.
 
 - `GOWORK=off GOTOOLCHAIN=local go test -race ./...` — passed.
