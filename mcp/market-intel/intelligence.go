@@ -170,18 +170,21 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 	for rows.Next() {
 		var e Evidence
 		var payload, refs string
-		var event, published, observed, from, to sql.NullTime
+		// SQLite may return DATETIME values as either time.Time or strings
+		// depending on the driver/schema affinity. Scan as flexible values so
+		// historical databases created by older releases remain readable.
+		var event, published, observed, from, to flexibleTime
 		var supersedes sql.NullInt64
 		if err := rows.Scan(&e.ID, &e.Kind, &e.Title, &e.Body, &payload, &refs, &e.Source, &e.SourceRef, &event, &published, &observed, &from, &to, &supersedes, &e.ContentHash); err != nil {
 			return nil, err
 		}
 		e.Payload = json.RawMessage(payload)
 		_ = json.Unmarshal([]byte(refs), &e.EntityRefs)
-		e.EventTime = nullTime(event)
-		e.PublishedTime = nullTime(published)
-		e.ObservedAt = nullTime(observed)
-		e.ValidFrom = nullTime(from)
-		e.ValidTo = nullTime(to)
+		e.EventTime = event.Time()
+		e.PublishedTime = published.Time()
+		e.ObservedAt = observed.Time()
+		e.ValidFrom = from.Time()
+		e.ValidTo = to.Time()
 		if supersedes.Valid {
 			v := supersedes.Int64
 			e.SupersedesID = &v
@@ -191,11 +194,29 @@ func searchEvidence(db *sql.DB, q EvidenceQuery) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 
-func nullTime(v sql.NullTime) *time.Time {
-	if !v.Valid {
+type flexibleTime struct{ raw any }
+
+func (v *flexibleTime) Scan(src any) error { v.raw = src; return nil }
+
+func (v flexibleTime) Time() *time.Time {
+	var t time.Time
+	switch x := v.raw.(type) {
+	case time.Time:
+		t = x
+	case string:
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05"} {
+			if parsed, err := time.Parse(layout, x); err == nil {
+				t = parsed
+				break
+			}
+		}
+	case []byte:
+		return flexibleTime{raw: string(x)}.Time()
+	}
+	if t.IsZero() {
 		return nil
 	}
-	t := v.Time.UTC()
+	t = t.UTC()
 	return &t
 }
 func fallback(v, d string) string {
