@@ -269,6 +269,29 @@ func TestReliabilityRepeatedHardDeleteReportsNotFound(t *testing.T) {
 		t.Fatalf("second delete error = %v, want repository not found", err)
 	}
 }
+
+func TestReliabilityHardDeleteDoesNotPoisonNextRepository(t *testing.T) {
+	a, ctx, deleted := reliabilityApp(t)
+	if err := a.hardDeleteRepo(ctx.AppDB(), "p", deleted.Slug); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := dbCreateRepo(ctx.AppDB(), "p", CreateRepoInput{Name: "Replacement"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.ID <= deleted.ID {
+		t.Fatalf("repository id was reused: deleted=%d replacement=%d", deleted.ID, replacement.ID)
+	}
+	if _, err := a.commands.acquire(context.Background(), deleted.ID); err == nil {
+		t.Fatal("stale operation for deleted repository was accepted")
+	}
+	release, err := a.commands.acquire(context.Background(), replacement.ID)
+	if err != nil {
+		t.Fatalf("replacement repository was poisoned by deletion tombstone: %v", err)
+	}
+	release()
+}
+
 func TestReliabilityCoordinatorDoesNotStarveOtherRepositories(t *testing.T) {
 	t.Setenv("CODE_MAX_COMMANDS", "2")
 	c := commandCoordinator{}

@@ -1,3 +1,18 @@
+# Apteva Code 0.14.2
+
+This patch release makes repository identities permanently monotonic. Deleting
+the highest-numbered repository can no longer let SQLite reuse its identity for
+a newly created repository, preventing stale deletion guards from blocking
+commands and Workspaces operations on the replacement.
+
+## Validation
+
+Regression coverage verifies that stale operations remain rejected while a
+replacement repository receives a new identity and remains usable. The full
+unit suite, integration suite, `go vet`, and production build all pass.
+
+---
+
 # Apteva Code 0.14.1
 
 This patch release fixes native checkpoints when Code is running with its

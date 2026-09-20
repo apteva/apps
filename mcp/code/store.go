@@ -113,14 +113,29 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 	if err != nil {
 		return nil, err
 	}
-	// The final root includes the row id and is filled immediately after
-	// insert. Keeping this column populated preserves the existing API shape.
-	storageRoot := "/repos/pending/"
-
-	res, err := db.Exec(`
-		INSERT INTO repositories (project_id, slug, name, description, framework, storage_root, owner, workspace_image)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, projectID, slug, in.Name, in.Description, in.Framework, storageRoot, in.Owner, workspaceImage)
+	// Repository ids are also durable storage, lock, native-revision, and
+	// workspace-link identities. Allocate them independently from the
+	// repositories table so deleting the highest row can never make SQLite
+	// reuse its id for a different repository lifecycle.
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var id int64
+	if err := tx.QueryRow(`
+		UPDATE repository_id_allocator
+		SET next_id = next_id + 1
+		WHERE singleton = 1
+		RETURNING next_id - 1
+	`).Scan(&id); err != nil {
+		return nil, fmt.Errorf("allocate repository id: %w", err)
+	}
+	storageRoot := repoStorageRoot(id)
+	_, err = tx.Exec(`
+		INSERT INTO repositories (id, project_id, slug, name, description, framework, storage_root, owner, workspace_image)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, id, projectID, slug, in.Name, in.Description, in.Framework, storageRoot, in.Owner, workspaceImage)
 	if err != nil {
 		// SQLite unique constraint name varies by version — match on the
 		// stable substring so collisions surface as a friendly error.
@@ -129,10 +144,7 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 		}
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	storageRoot = repoStorageRoot(id)
-	if _, err := db.Exec(`UPDATE repositories SET storage_root = ? WHERE id = ?`, storageRoot, id); err != nil {
-		_, _ = db.Exec(`DELETE FROM repositories WHERE id = ?`, id)
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbGetRepoByID(db, projectID, id)
