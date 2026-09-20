@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.3.2
+version: 0.4.0
 description: Reproducible, publishable benchmarks for agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; admission control keeps harness failures out of the record; leaderboards compare targets across runs and over time. Execution is delegated to Evals inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
@@ -34,15 +34,26 @@ provides:
     - { name: bench_run_create, description: "Run a sealed pack against agent, provider, and model targets for N trials." }
     - { name: bench_run_list, description: "List benchmark runs." }
     - { name: bench_run_get, description: "Get one benchmark run with its scored results." }
+    - { name: bench_run_search, description: "Search and paginate benchmark runs with pack, status, profile, and text filters." }
     - { name: bench_run_cancel, description: "Cancel a queued or running benchmark run." }
+    - { name: bench_result_list, description: "Search and paginate raw scored results across runs and packs." }
+    - { name: bench_result_get, description: "Get one raw scored result by id." }
     - { name: bench_leaderboard, description: "Rank targets across every run of one sealed pack." }
     - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack under one scoring contract." }
     - { name: bench_baseline_set, description: "Pin a run's result as the baseline for a pack scenario." }
     - { name: bench_baseline_compare, description: "Compare a run against pinned baselines." }
+    - { name: bench_baseline_list, description: "List and paginate pinned baselines." }
+    - { name: bench_baseline_get, description: "Get one pinned baseline by id." }
     - { name: bench_evidence_export, description: "Export a run's full provenance and scoring evidence bundle." }
+    - { name: bench_profile_list, description: "List built-in and custom scoring profiles." }
+    - { name: bench_profile_get, description: "Get one scoring profile by id or digest." }
+    - { name: bench_scoring_get, description: "Read one scoring profile and the complete supported scoring vocabulary." }
+    - { name: bench_pack_suite_list, description: "List materialized Evals suites and case-to-scenario mappings." }
+    - { name: bench_data_export, description: "Export every persisted Bench record in one snapshot." }
     - { name: bench_catalog, description: "List agents, models, and Environments available as targets." }
   publishes:
     - { name: bench.pack.sealed, description: "A pack was sealed into an immutable version." }
+    - { name: bench.profile.sealed, description: "A scoring profile was sealed into an immutable contract." }
     - { name: bench.run.started, description: "A benchmark run started executing." }
     - { name: bench.run.completed, description: "A benchmark run finished and was scored." }
     - { name: bench.run.failed, description: "A benchmark run failed to execute." }
@@ -57,7 +68,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.3.2
+    ref: bench/v0.4.0
     entry: mcp/bench
   port: 8080
   health_check: /health

@@ -248,8 +248,123 @@ func (a *App) handleRun(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleProfiles(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		profiles, err := a.svc.db.listProfiles()
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, profiles)
+	case http.MethodPost:
+		var p Profile
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		saved, err := a.svc.saveProfile(&p, true)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, saved)
+	default:
+		httpError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
+}
+
+// handleProfile serves /api/profiles/<id> plus seal, fork and preview.
+func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/profiles/"), "/"), "/")
+	id := parts[0]
+	if id == "" {
+		httpError(w, http.StatusBadRequest, errors.New("profile id required"))
+		return
+	}
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+	switch {
+	case action == "seal" && r.Method == http.MethodPost:
+		var body struct {
+			Version string `json:"version"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		sealed, err := a.svc.sealProfile(id, body.Version)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, sealed)
+	case action == "fork" && r.Method == http.MethodPost:
+		var body struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		draft, err := a.svc.forkProfile(id, body.Name)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, draft)
+	case action == "preview" && r.Method == http.MethodPost:
+		var body struct {
+			PackDigest string `json:"pack_digest"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		candidate, err := a.svc.db.getProfile(id)
+		if err != nil || candidate == nil {
+			httpError(w, http.StatusNotFound, errors.New("profile not found"))
+			return
+		}
+		preview, err := a.svc.previewProfile(body.PackDigest, candidate)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, preview)
+	case action == "" && r.Method == http.MethodGet:
+		p, err := a.svc.db.getProfile(id)
+		if err != nil {
+			httpError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if p == nil {
+			httpError(w, http.StatusNotFound, errors.New("profile not found"))
+			return
+		}
+		writeJSON(w, http.StatusOK, p)
+	case action == "" && r.Method == http.MethodPut:
+		var p Profile
+		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		p.ID = id
+		saved, err := a.svc.saveProfile(&p, false)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, saved)
+	case action == "" && r.Method == http.MethodDelete:
+		if err := a.svc.deleteProfile(id); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	default:
+		httpError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+	}
+}
+
 func (a *App) handleGlobalLeaderboard(w http.ResponseWriter, r *http.Request) {
-	board, err := a.svc.globalLeaderboard(r.URL.Query().Get("scoring_version"))
+	board, err := a.svc.globalLeaderboard(r.URL.Query().Get("profile_digest"))
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return

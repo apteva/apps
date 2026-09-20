@@ -50,7 +50,8 @@ func (s *service) createRun(packID, name string, targets []Target, trials int) (
 	now := time.Now().UTC()
 	run := &Run{
 		ID: newID("run"), PackID: pack.ID, PackName: pack.Name, PackVersion: pack.Version,
-		PackDigest: pack.Digest, ScoringVersion: pack.ScoringVersion, Name: name,
+		PackDigest: pack.Digest, ScoringVersion: pack.ScoringVersion,
+		ScoringProfileDigest: pack.ProfileDigest, Name: name,
 		Targets: targets, Trials: trials, Status: RunStatusQueued,
 		Provenance: s.captureProvenance(pack), CreatedAt: now,
 	}
@@ -249,6 +250,11 @@ func (s *service) collectRun(_ context.Context, run *Run) error {
 		return s.failRun(run, errors.New("suite mapping missing; cannot attribute runs to scenarios"))
 	}
 
+	// Score under the contract the pack pinned, not whatever the default is now.
+	profile, err := s.resolveProfile(run.ScoringProfileDigest)
+	if err != nil {
+		return err
+	}
 	results := make([]Result, 0, len(experiment.Runs))
 	rejected := 0
 	for _, evaluated := range experiment.Runs {
@@ -258,7 +264,7 @@ func (s *service) collectRun(_ context.Context, run *Run) error {
 			// A case we cannot attribute is not evidence about anything.
 			continue
 		}
-		result := s.scoreOne(run, *scenario, evaluated)
+		result := s.scoreOne(run, *scenario, evaluated, profile)
 		if result.Admission == AdmissionInvalid {
 			rejected++
 			s.ctx.Emit("bench.result.rejected", map[string]any{
@@ -299,7 +305,7 @@ func (s *service) collectRun(_ context.Context, run *Run) error {
 // scoreOne turns one Evals run into a scored bench result. The admission
 // decision comes first: a run whose agent never executed says nothing about the
 // target and is withheld rather than scored zero.
-func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun) Result {
+func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profile *Profile) Result {
 	result := Result{
 		ID:           newID("result"),
 		BenchRunID:   run.ID,
@@ -352,7 +358,7 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun) Resul
 		result.Admission = AdmissionVerified
 	}
 
-	result.Score = computeScore(result.Passed, result.Metrics, scenario.Budget)
+	result.Score = scoreWithProfile(result.Passed, result.Metrics, scenario.Budget, profile)
 	return result
 }
 
@@ -463,13 +469,23 @@ func (s *service) evidence(runID string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	profile, err := s.resolveProfile(run.ScoringProfileDigest)
+	if err != nil {
+		return nil, err
+	}
 	bundle := map[string]any{
-		"run":             run,
-		"provenance":      run.Provenance,
-		"scoring_version": run.ScoringVersion,
-		"scoring_formula": ScoringFormula,
-		"scoring_weights": ScoreWeights,
-		"exported_at":     time.Now().UTC(),
+		"run":               run,
+		"provenance":        run.Provenance,
+		"scoring_version":   run.ScoringVersion,
+		"scoring_profile":   profile,
+		"scoring_max_score": profile.maxScore(),
+		"exported_at":       time.Now().UTC(),
+	}
+	// Preserve the legacy verified-v1 fields for existing evidence consumers,
+	// but never claim that they describe a custom scoring profile.
+	if profile.Version == ScoringVersion {
+		bundle["scoring_formula"] = ScoringFormula
+		bundle["scoring_weights"] = ScoreWeights
 	}
 	if pack != nil {
 		bundle["pack"] = pack

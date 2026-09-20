@@ -64,6 +64,20 @@ comparable.
 Changing any weight or curve above means minting a new scoring version, not
 editing this one.
 
+## Scoring profiles
+
+Scoring is represented by immutable, content-hashed profiles. Bench ships
+Verified v1, Graded v1, and Correctness only. Custom profiles are authored as
+drafts through `/api/profiles`, previewed against an existing sealed pack, and
+then sealed. A draft pack selects a sealed profile by `profile_digest`; sealing
+the pack pins that digest permanently, and every resulting run and evidence
+bundle carries the same contract.
+
+Profile components can be success gates, budgeted metrics, or thresholds.
+Supported efficiency metrics and curves are discoverable through
+`bench_scoring_get`; profile definitions themselves are available through
+`bench_profile_list` and `bench_profile_get`.
+
 ## Admission control
 
 A provider or environment failure before the agent ever ran says nothing about
@@ -88,6 +102,31 @@ naming the same snapshot are *asserted* — not proven — to have seen the same
 world. Closing this needs a digest on the Environments snapshot model; until
 then, treat cross-time comparisons on the same digest as trustworthy only insofar
 as the underlying snapshot was not re-created.
+
+## Reading all benchmark data
+
+Bench exposes its complete persisted record over MCP. `bench_data_export` is the
+convenient one-call snapshot for backups and small datasets. For larger records,
+use the paginated tools so responses stay bounded:
+
+| Data | MCP tools |
+|---|---|
+| Packs and scenarios | `bench_pack_list`, `bench_pack_get` |
+| Runs | `bench_run_list`, `bench_run_get`, `bench_run_search` |
+| Individual scored results | `bench_result_list`, `bench_result_get` |
+| Baselines | `bench_baseline_list`, `bench_baseline_get`, `bench_baseline_compare` |
+| Scoring contracts | `bench_profile_list`, `bench_profile_get`, `bench_scoring_get` |
+| Evals materialization links | `bench_pack_suite_list` |
+| Reproduction bundles | `bench_evidence_export` |
+
+`bench_run_search`, `bench_result_list`, and `bench_baseline_list` return a
+`page` object with `limit`, `offset`, `total`, and `has_more`. Page sizes are
+capped at 500. Raw results include invalid harness outcomes as well as admitted
+results so an auditor can account for every attempted trial.
+
+Evidence bundles include the exact sealed scoring profile used by the run. The
+legacy verified-v1 formula fields remain present for verified-v1 consumers, but
+are not attached to runs scored under a custom profile.
 
 ## Development
 

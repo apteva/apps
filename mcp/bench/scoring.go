@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math"
+	"strings"
 )
 
 // ScoringVersion names the frozen scoring contract. Scores are only ever
@@ -30,42 +32,52 @@ const ScoringFormula = "Verified-v1: successful runs earn 70 points for determin
 	"5 turns, and 5 zero tool-error points. Failed runs score 0. " +
 	"Tool-call count is reported but not rewarded or penalized."
 
+// ScoreComponent is one profile component's contribution to a run's score.
+type ScoreComponent struct {
+	Key     string   `json:"key"`
+	Label   string   `json:"label,omitempty"`
+	Kind    string   `json:"kind"`
+	Weight  float64  `json:"weight"`
+	Earned  float64  `json:"earned"`
+	Metric  string   `json:"metric,omitempty"`
+	Actual  *float64 `json:"actual,omitempty"`
+	Budget  *float64 `json:"budget,omitempty"`
+	Ratio   *float64 `json:"ratio,omitempty"`
+	Curve   string   `json:"curve,omitempty"`
+	Basis   string   `json:"basis,omitempty"`
+	Skipped bool     `json:"skipped,omitempty"`
+}
+
 type Score struct {
-	Score           float64             `json:"score"`
+	Score          float64          `json:"score"`
+	MaxScore       float64          `json:"max_score"`
+	ProfileVersion string           `json:"profile_version,omitempty"`
+	ProfileDigest  string           `json:"profile_digest,omitempty"`
+	ProfileName    string           `json:"profile_name,omitempty"`
+	Components     []ScoreComponent `json:"components"`
+
+	// Legacy mirrors. Results stored before profiles existed carry these, and
+	// the panel still reads them, so a profile using the verified-v1 keys keeps
+	// populating them rather than breaking every historical row.
 	SuccessPoints   float64             `json:"success_points"`
 	DurationPoints  float64             `json:"duration_points"`
 	CostPoints      float64             `json:"cost_points"`
 	TurnPoints      float64             `json:"turn_points"`
 	ToolErrorPoints float64             `json:"tool_error_points"`
-	MaxScore        float64             `json:"max_score"`
 	CostBasis       string              `json:"cost_basis"`
 	Formula         string              `json:"formula"`
 	Ratios          map[string]*float64 `json:"ratios"`
 	Weights         map[string]float64  `json:"weights"`
 }
 
-// efficiencyPoints awards full points at or under budget, then decays linearly
-// to zero at twice budget. A non-positive or non-finite actual means the metric
-// was never reported, which cannot be held against the target.
-func efficiencyPoints(actual, budget, maxPoints float64) float64 {
-	if math.IsNaN(actual) || math.IsInf(actual, 0) || actual <= 0 {
-		return maxPoints
-	}
-	if budget <= 0 {
-		return maxPoints
-	}
-	if actual <= budget {
-		return maxPoints
-	}
-	return maxPoints * clamp(1-(actual-budget)/budget, 0, 1)
-}
+func ptr(v float64) *float64 { return &v }
+
+func round1(value float64) float64 { return math.Round(value*10) / 10 }
+func round3(value float64) float64 { return math.Round(value*1000) / 1000 }
 
 func clamp(value, low, high float64) float64 {
 	return math.Min(math.Max(value, low), high)
 }
-
-func round1(value float64) float64 { return math.Round(value*10) / 10 }
-func round3(value float64) float64 { return math.Round(value*1000) / 1000 }
 
 func metricRatio(actual, budget float64) *float64 {
 	if budget <= 0 || math.IsNaN(actual) || math.IsInf(actual, 0) {
@@ -75,57 +87,120 @@ func metricRatio(actual, budget float64) *float64 {
 	return &ratio
 }
 
-// computeScore applies the verified-v1 contract. A failed run scores zero
-// outright: efficiency is only meaningful on work that actually succeeded.
-func computeScore(passed bool, m Metrics, budget Budget) Score {
-	weights := map[string]float64{
-		"success":     ScoreWeights.Success,
-		"duration_ms": ScoreWeights.DurationMS,
-		"cost_tokens": ScoreWeights.CostTokens,
-		"turns":       ScoreWeights.Turns,
-		"tool_errors": ScoreWeights.ToolErrors,
+// scoreWithProfile applies one scoring profile to a run. The gate component
+// decides whether the rest counts at all: with on_failure=zero a failed run
+// earns nothing, because efficiency is only meaningful on work that succeeded.
+func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
+	if p == nil {
+		p = verifiedV1()
 	}
-	ratios := map[string]*float64{
-		"duration":     metricRatio(float64(m.DurationMS), float64(budget.DurationMS)),
-		"turns":        metricRatio(float64(m.TurnsUsed), float64(budget.Turns)),
-		"tokens_total": metricRatio(float64(m.TokensTotal), float64(budget.TokensTotal)),
-		"cost_usd":     metricRatio(m.CostUSD, budget.CostUSD),
-	}
-
 	score := Score{
-		MaxScore: ScoreWeights.Success + ScoreWeights.DurationMS + ScoreWeights.CostTokens +
-			ScoreWeights.Turns + ScoreWeights.ToolErrors,
-		Formula: ScoringFormula,
-		Ratios:  ratios,
-		Weights: weights,
+		MaxScore:       p.maxScore(),
+		ProfileVersion: p.Version,
+		ProfileDigest:  p.Digest,
+		ProfileName:    p.Name,
+		Components:     make([]ScoreComponent, 0, len(p.Components)),
+		Ratios:         map[string]*float64{},
+		Weights:        map[string]float64{},
+		Formula:        profileFormula(p),
 	}
+	gated := !passed && p.OnFailure == OnFailureZero
 
-	// Cost is the preferred efficiency basis, but providers do not all report
-	// it. Falling back to tokens keeps the run scoreable; the basis is recorded
-	// so a leaderboard can flag cross-provider comparisons made on mixed bases.
-	score.CostBasis = "cost_usd"
-	if m.CostUSD <= 0 || budget.CostUSD <= 0 {
-		score.CostBasis = "tokens_total"
-	}
+	total := 0.0
+	for _, c := range p.Components {
+		out := ScoreComponent{Key: c.Key, Label: c.Label, Kind: c.Kind, Weight: c.Weight, Metric: c.Metric, Curve: c.Curve}
+		score.Weights[c.Key] = c.Weight
 
-	if !passed {
-		return score
+		switch c.Kind {
+		case KindGate:
+			if passed {
+				out.Earned = c.Weight
+			}
+		case KindThreshold:
+			if gated {
+				out.Skipped = true
+				break
+			}
+			actual, _ := metricValue(m, c.Metric)
+			out.Actual = ptr(actual)
+			if actual <= c.At {
+				out.Earned = c.Weight
+			}
+		case KindBudget:
+			if gated {
+				out.Skipped = true
+				break
+			}
+			metric := c.Metric
+			actual, _ := metricValue(m, metric)
+			allowance, _ := budgetValue(budget, metric)
+			// Not every provider reports cost. Falling back keeps the run
+			// scoreable, and the basis is recorded so a leaderboard can flag a
+			// comparison made on mixed bases.
+			if (actual <= 0 || allowance <= 0) && c.FallbackMetric != "" {
+				metric = c.FallbackMetric
+				actual, _ = metricValue(m, metric)
+				allowance, _ = budgetValue(budget, metric)
+			}
+			out.Basis, out.Metric = metric, metric
+			out.Actual, out.Budget = ptr(actual), ptr(allowance)
+			out.Ratio = metricRatio(actual, allowance)
+			score.Ratios[c.Key] = out.Ratio
+			out.Earned = round1(c.Weight * curveScore(c.Curve, actual, allowance, c.ZeroAt))
+		}
+		total += out.Earned
+		score.Components = append(score.Components, out)
+		switch c.Key {
+		case "success":
+			score.SuccessPoints = out.Earned
+		case "duration":
+			score.DurationPoints = out.Earned
+		case "cost":
+			score.CostPoints, score.CostBasis = out.Earned, out.Basis
+		case "turns":
+			score.TurnPoints = out.Earned
+		case "tool_errors":
+			score.ToolErrorPoints = out.Earned
+		}
 	}
-
-	score.SuccessPoints = ScoreWeights.Success
-	score.DurationPoints = efficiencyPoints(float64(m.DurationMS), float64(budget.DurationMS), ScoreWeights.DurationMS)
-	if score.CostBasis == "cost_usd" {
-		score.CostPoints = efficiencyPoints(m.CostUSD, budget.CostUSD, ScoreWeights.CostTokens)
-	} else {
-		score.CostPoints = efficiencyPoints(float64(m.TokensTotal), float64(budget.TokensTotal), ScoreWeights.CostTokens)
-	}
-	score.TurnPoints = efficiencyPoints(float64(m.TurnsUsed), float64(budget.Turns), ScoreWeights.Turns)
-	if m.Errors == 0 {
-		score.ToolErrorPoints = ScoreWeights.ToolErrors
-	}
-	score.Score = round1(score.SuccessPoints + score.DurationPoints + score.CostPoints +
-		score.TurnPoints + score.ToolErrorPoints)
+	// Legacy consumers read ratios by metric name, not component key.
+	score.Ratios["duration"] = metricRatio(float64(m.DurationMS), float64(budget.DurationMS))
+	score.Ratios["turns"] = metricRatio(float64(m.TurnsUsed), float64(budget.Turns))
+	score.Ratios["tokens_total"] = metricRatio(float64(m.TokensTotal), float64(budget.TokensTotal))
+	score.Score = round1(total)
 	return score
+}
+
+func profileFormula(p *Profile) string {
+	parts := make([]string, 0, len(p.Components))
+	for _, c := range p.Components {
+		switch c.Kind {
+		case KindGate:
+			parts = append(parts, fmt.Sprintf("%g for %s", c.Weight, orKey(c.Label, c.Key)))
+		case KindThreshold:
+			parts = append(parts, fmt.Sprintf("%g for %s at or below %g", c.Weight, c.Metric, c.At))
+		default:
+			parts = append(parts, fmt.Sprintf("%g for %s (%s)", c.Weight, c.Metric, orKey(c.Curve, CurveCliff)))
+		}
+	}
+	tail := "Failed runs score zero."
+	if p.OnFailure == OnFailureComponents {
+		tail = "Failed runs still earn efficiency credit."
+	}
+	return fmt.Sprintf("%s: %s. %s", p.Name, strings.Join(parts, ", "), tail)
+}
+
+func orKey(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}
+
+// computeScore scores under the original frozen contract. Kept so callers and
+// tests that predate profiles keep the exact behaviour they asserted.
+func computeScore(passed bool, m Metrics, budget Budget) Score {
+	return scoreWithProfile(passed, m, budget, verifiedV1())
 }
 
 // canonicalDigest hashes a value through its canonical JSON encoding. Go's

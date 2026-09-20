@@ -67,13 +67,13 @@ func boolInt(value bool) int {
 
 // ---- packs ----
 
-const packColumns = `id,name,description,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at`
+const packColumns = `id,name,description,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at,profile_digest`
 
 func scanPack(row interface{ Scan(...any) error }) (*Pack, error) {
 	var pack Pack
 	var scenarios, created, updated string
 	err := row.Scan(&pack.ID, &pack.Name, &pack.Description, &pack.State, &pack.Version, &pack.Digest,
-		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated)
+		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated, &pack.ProfileDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -120,15 +120,16 @@ func (s store) getPackByDigest(digest string) (*Pack, error) {
 
 func (s store) savePack(pack *Pack) error {
 	_, err := s.db.Exec(`INSERT INTO bench_packs(`+packColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, description=excluded.description, state=excluded.state,
 			version=excluded.version, digest=excluded.digest, scoring_version=excluded.scoring_version,
 			source_pack_id=excluded.source_pack_id, scenarios_json=excluded.scenarios_json,
+			profile_digest=excluded.profile_digest,
 			revision=bench_packs.revision+1, updated_at=excluded.updated_at`,
 		pack.ID, pack.Name, pack.Description, pack.State, pack.Version, pack.Digest,
 		pack.ScoringVersion, pack.SourcePackID, encodeJSON(pack.Scenarios), pack.Revision,
-		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt))
+		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt), pack.ProfileDigest)
 	return err
 }
 
@@ -182,10 +183,106 @@ func (s store) savePackSuite(digest string, suite packSuite) error {
 	return err
 }
 
+// ---- scoring profiles ----
+
+const profileColumns = `id,name,description,state,version,digest,source_id,builtin,on_failure,components_json,revision,created_at,updated_at`
+
+func scanProfile(row interface{ Scan(...any) error }) (*Profile, error) {
+	var p Profile
+	var components, created, updated string
+	var builtin int
+	err := row.Scan(&p.ID, &p.Name, &p.Description, &p.State, &p.Version, &p.Digest,
+		&p.SourceID, &builtin, &p.OnFailure, &components, &p.Revision, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	decodeJSON(components, &p.Components)
+	if p.Components == nil {
+		p.Components = []ProfileComponent{}
+	}
+	p.Builtin = builtin == 1
+	p.CreatedAt, p.UpdatedAt = parseTime(created), parseTime(updated)
+	return &p, nil
+}
+
+func (s store) listProfiles() ([]Profile, error) {
+	rows, err := s.db.Query(`SELECT ` + profileColumns + ` FROM bench_profiles ORDER BY builtin DESC, updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Profile{}
+	for rows.Next() {
+		p, err := scanProfile(rows)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			out = append(out, *p)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s store) getProfile(id string) (*Profile, error) {
+	return scanProfile(s.db.QueryRow(`SELECT `+profileColumns+` FROM bench_profiles WHERE id=?`, id))
+}
+
+func (s store) getProfileByDigest(digest string) (*Profile, error) {
+	if digest == "" {
+		return nil, nil
+	}
+	return scanProfile(s.db.QueryRow(`SELECT `+profileColumns+` FROM bench_profiles WHERE digest=?`, digest))
+}
+
+func (s store) saveProfile(p *Profile) error {
+	_, err := s.db.Exec(`INSERT INTO bench_profiles(`+profileColumns+`)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, description=excluded.description, state=excluded.state,
+			version=excluded.version, digest=excluded.digest, source_id=excluded.source_id,
+			builtin=excluded.builtin, on_failure=excluded.on_failure,
+			components_json=excluded.components_json,
+			revision=bench_profiles.revision+1, updated_at=excluded.updated_at`,
+		p.ID, p.Name, p.Description, p.State, p.Version, p.Digest, p.SourceID,
+		boolInt(p.Builtin), p.OnFailure, encodeJSON(p.Components), p.Revision,
+		formatTime(p.CreatedAt), formatTime(p.UpdatedAt))
+	return err
+}
+
+func (s store) deleteProfile(id string) error {
+	_, err := s.db.Exec(`DELETE FROM bench_profiles WHERE id=? AND builtin=0`, id)
+	return err
+}
+
+func (s store) countPacksUsingProfile(digest string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM bench_packs WHERE profile_digest=?`, digest).Scan(&n)
+	return n, err
+}
+
+// backfillRunProfiles stamps rows written before profiles existed with the
+// contract they were actually scored under, so the leaderboard's join does not
+// silently drop the entire history.
+func (s store) backfillRunProfiles(digest string) (int64, error) {
+	res, err := s.db.Exec(`UPDATE bench_runs SET scoring_profile_digest=? WHERE scoring_profile_digest=''`, digest)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if _, err := s.db.Exec(`UPDATE bench_packs SET profile_digest=? WHERE profile_digest='' AND state=?`, digest, PackStateSealed); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
 // ---- runs ----
 
 const runColumns = `id,pack_id,pack_name,pack_version,pack_digest,scoring_version,name,targets_json,trials,` +
-	`suite_id,experiment_id,status,provenance_json,summary_json,error,created_at,started_at,finished_at`
+	`suite_id,experiment_id,status,provenance_json,summary_json,error,created_at,started_at,finished_at,scoring_profile_digest`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
@@ -193,7 +290,7 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var started, finished sql.NullString
 	err := row.Scan(&run.ID, &run.PackID, &run.PackName, &run.PackVersion, &run.PackDigest,
 		&run.ScoringVersion, &run.Name, &targets, &run.Trials, &run.SuiteID, &run.ExperimentID,
-		&run.Status, &provenance, &summary, &run.Error, &created, &started, &finished)
+		&run.Status, &provenance, &summary, &run.Error, &created, &started, &finished, &run.ScoringProfileDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -213,7 +310,7 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 
 func (s store) saveRun(run *Run) error {
 	_, err := s.db.Exec(`INSERT INTO bench_runs(`+runColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			suite_id=excluded.suite_id, experiment_id=excluded.experiment_id, status=excluded.status,
 			provenance_json=excluded.provenance_json, summary_json=excluded.summary_json,
@@ -221,7 +318,7 @@ func (s store) saveRun(run *Run) error {
 		run.ID, run.PackID, run.PackName, run.PackVersion, run.PackDigest, run.ScoringVersion,
 		run.Name, encodeJSON(run.Targets), run.Trials, run.SuiteID, run.ExperimentID, run.Status,
 		encodeJSON(run.Provenance), encodeJSON(run.Summary), run.Error,
-		formatTime(run.CreatedAt), nullableTime(run.StartedAt), nullableTime(run.FinishedAt))
+		formatTime(run.CreatedAt), nullableTime(run.StartedAt), nullableTime(run.FinishedAt), run.ScoringProfileDigest)
 	return err
 }
 
@@ -325,12 +422,12 @@ type resultWithPack struct {
 // listAdmittedResults gathers every admitted result under one scoring version
 // across all sealed packs. Comparability is enforced by the scoring-version
 // filter; coverage differences are reported rather than hidden.
-func (s store) listAdmittedResults(scoringVersion string) ([]resultWithPack, error) {
+func (s store) listAdmittedResults(profileDigest string) ([]resultWithPack, error) {
 	rows, err := s.db.Query(`SELECT r.`+strings.ReplaceAll(resultColumns, ",", ",r.")+`,
 		b.pack_digest, b.pack_name, b.pack_version
 		FROM bench_results r JOIN bench_runs b ON b.id = r.bench_run_id
-		WHERE b.scoring_version=? AND r.admission<>? AND b.pack_digest<>''
-		ORDER BY b.pack_digest, r.scenario_id, r.target_index, r.trial`, scoringVersion, AdmissionInvalid)
+		WHERE b.scoring_profile_digest=? AND r.admission<>? AND b.pack_digest<>''
+		ORDER BY b.pack_digest, r.scenario_id, r.target_index, r.trial`, profileDigest, AdmissionInvalid)
 	if err != nil {
 		return nil, err
 	}
@@ -359,8 +456,8 @@ func (s store) listAdmittedResults(scoringVersion string) ([]resultWithPack, err
 // scoringVersions lists every scoring version with recorded results, so a
 // caller can tell when the record spans more than one incomparable contract.
 func (s store) scoringVersions() ([]string, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT scoring_version FROM bench_runs
-		WHERE scoring_version<>'' ORDER BY scoring_version DESC`)
+	rows, err := s.db.Query(`SELECT DISTINCT scoring_profile_digest FROM bench_runs
+		WHERE scoring_profile_digest<>'' ORDER BY scoring_profile_digest`)
 	if err != nil {
 		return nil, err
 	}

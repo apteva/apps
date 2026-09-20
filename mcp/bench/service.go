@@ -27,8 +27,17 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 	if creating {
 		pack := &Pack{
 			ID: newID("pack"), Name: input.Name, Description: input.Description,
-			State: PackStateDraft, Scenarios: input.Scenarios, Revision: 1,
+			State: PackStateDraft, Scenarios: input.Scenarios, ProfileDigest: input.ProfileDigest, Revision: 1,
 			CreatedAt: now, UpdatedAt: now,
+		}
+		if pack.ProfileDigest != "" {
+			profile, err := s.db.getProfileByDigest(pack.ProfileDigest)
+			if err != nil {
+				return nil, err
+			}
+			if profile == nil || profile.State != ProfileStateSealed {
+				return nil, errors.New("no sealed scoring profile with that digest")
+			}
 		}
 		if pack.Scenarios == nil {
 			pack.Scenarios = []Scenario{}
@@ -46,6 +55,14 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 	existing.Name, existing.Description, existing.UpdatedAt = input.Name, input.Description, now
 	if input.Scenarios != nil {
 		existing.Scenarios = input.Scenarios
+	}
+	if input.ProfileDigest != "" {
+		if p, err := s.db.getProfileByDigest(input.ProfileDigest); err != nil {
+			return nil, err
+		} else if p == nil {
+			return nil, errors.New("no sealed scoring profile with that digest")
+		}
+		existing.ProfileDigest = input.ProfileDigest
 	}
 	if err := s.db.savePack(existing); err != nil {
 		return nil, err
@@ -169,11 +186,24 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 		version = fmt.Sprintf("%d.0.0", sealed+1)
 	}
 
+	// Pin the scoring contract at seal time: a sealed pack's results must keep
+	// meaning the same thing even if the default profile later changes.
+	profileDigest := draft.ProfileDigest
+	if profileDigest == "" {
+		if profileDigest, err = s.defaultProfileDigest(); err != nil {
+			return nil, err
+		}
+	}
+	profile, err := s.resolveProfile(profileDigest)
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC()
 	pack := &Pack{
 		ID: newID("pack"), Name: draft.Name, Description: draft.Description,
-		State: PackStateSealed, Version: version, ScoringVersion: ScoringVersion,
-		SourcePackID: draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
+		State: PackStateSealed, Version: version, ScoringVersion: profile.Version,
+		ProfileDigest: profile.Digest,
+		SourcePackID:  draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
 		Revision: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	digest, err := packDigest(pack)
@@ -298,6 +328,275 @@ func slugify(value string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+// ---- scoring profiles ----
+
+// ensureBuiltinProfiles installs the shipped contracts and stamps any history
+// written before profiles existed. Built-ins are re-derived on every mount so a
+// corrected default reaches existing installs; their digests are stable, so
+// re-deriving never orphans results.
+func (s *service) ensureBuiltinProfiles() error {
+	var verified string
+	for _, p := range builtinProfiles() {
+		digest, err := profileDigest(p)
+		if err != nil {
+			return err
+		}
+		p.Digest = digest
+		if p.Version == ScoringVersion {
+			verified = digest
+		}
+		existing, err := s.db.getProfileByDigest(digest)
+		if err != nil {
+			return err
+		}
+		if existing != nil {
+			continue
+		}
+		now := time.Now().UTC()
+		p.ID = "profile_builtin_" + slugify(p.Name)
+		p.Revision, p.CreatedAt, p.UpdatedAt = 1, now, now
+		if err := s.db.saveProfile(p); err != nil {
+			return err
+		}
+	}
+	if verified == "" {
+		return errors.New("built-in verified profile missing a digest")
+	}
+	n, err := s.db.backfillRunProfiles(verified)
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		s.ctx.Logger().Info("bench: stamped pre-profile history", "runs", n, "profile", short(verified))
+	}
+	return nil
+}
+
+func (s *service) defaultProfileDigest() (string, error) {
+	p := verifiedV1()
+	return profileDigest(p)
+}
+
+// resolveProfile returns the contract a pack is scored under, falling back to
+// verified-v1 for packs sealed before profiles existed.
+func (s *service) resolveProfile(digest string) (*Profile, error) {
+	if digest != "" {
+		if p, err := s.db.getProfileByDigest(digest); err != nil {
+			return nil, err
+		} else if p != nil {
+			return p, nil
+		}
+	}
+	p := verifiedV1()
+	d, err := profileDigest(p)
+	if err != nil {
+		return nil, err
+	}
+	p.Digest = d
+	return p, nil
+}
+
+func (s *service) saveProfile(input *Profile, creating bool) (*Profile, error) {
+	now := time.Now().UTC()
+	if creating {
+		p := &Profile{
+			ID: newID("profile"), Name: input.Name, Description: input.Description,
+			State: ProfileStateDraft, OnFailure: orKey(input.OnFailure, OnFailureZero),
+			Components: input.Components, Revision: 1, CreatedAt: now, UpdatedAt: now,
+		}
+		if p.Components == nil {
+			p.Components = []ProfileComponent{}
+		}
+		if strings.TrimSpace(p.Name) == "" {
+			return nil, errors.New("name is required")
+		}
+		if err := s.db.saveProfile(p); err != nil {
+			return nil, err
+		}
+		return p, nil
+	}
+	existing, err := s.requireDraftProfile(input.ID)
+	if err != nil {
+		return nil, err
+	}
+	existing.Name, existing.Description, existing.UpdatedAt = input.Name, input.Description, now
+	if input.OnFailure != "" {
+		existing.OnFailure = input.OnFailure
+	}
+	if input.Components != nil {
+		existing.Components = input.Components
+	}
+	if err := s.db.saveProfile(existing); err != nil {
+		return nil, err
+	}
+	return s.db.getProfile(existing.ID)
+}
+
+func (s *service) requireDraftProfile(id string) (*Profile, error) {
+	p, err := s.db.getProfile(id)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil {
+		return nil, errors.New("profile not found")
+	}
+	if p.Builtin {
+		return nil, errors.New("built-in profiles are immutable: fork one to change it")
+	}
+	if p.State != ProfileStateDraft {
+		return nil, errors.New("sealed profiles are immutable: fork it, or seal a new version")
+	}
+	return p, nil
+}
+
+// sealProfile freezes a draft into a content-hashed contract. Identical
+// contracts resolve to one row, so the same scoring means the same digest.
+func (s *service) sealProfile(draftID, version string) (*Profile, error) {
+	draft, err := s.requireDraftProfile(draftID)
+	if err != nil {
+		return nil, err
+	}
+	sealed := &Profile{
+		ID: newID("profile"), Name: draft.Name, Description: draft.Description,
+		State: ProfileStateSealed, SourceID: draft.ID, OnFailure: draft.OnFailure,
+		Components: draft.Components, Revision: 1,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if err := validateProfile(sealed); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(version) == "" {
+		version = time.Now().UTC().Format("2006-01") + "." + slugify(draft.Name)
+	}
+	sealed.Version = version
+	digest, err := profileDigest(sealed)
+	if err != nil {
+		return nil, err
+	}
+	sealed.Digest = digest
+	if existing, err := s.db.getProfileByDigest(digest); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
+	if err := s.db.saveProfile(sealed); err != nil {
+		return nil, err
+	}
+	s.ctx.Emit("bench.profile.sealed", map[string]any{
+		"profile_id": sealed.ID, "name": sealed.Name, "version": sealed.Version,
+		"digest": sealed.Digest, "max_score": sealed.maxScore(),
+	})
+	return sealed, nil
+}
+
+func (s *service) forkProfile(sourceID, name string) (*Profile, error) {
+	src, err := s.db.getProfile(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if src == nil {
+		return nil, errors.New("profile not found")
+	}
+	if strings.TrimSpace(name) == "" {
+		name = src.Name + " (draft)"
+	}
+	now := time.Now().UTC()
+	draft := &Profile{
+		ID: newID("profile"), Name: name, Description: src.Description,
+		State: ProfileStateDraft, OnFailure: src.OnFailure, Components: src.Components,
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.db.saveProfile(draft); err != nil {
+		return nil, err
+	}
+	return draft, nil
+}
+
+func (s *service) deleteProfile(id string) error {
+	p, err := s.db.getProfile(id)
+	if err != nil {
+		return err
+	}
+	if p == nil {
+		return errors.New("profile not found")
+	}
+	if p.Builtin {
+		return errors.New("built-in profiles cannot be deleted")
+	}
+	n, err := s.db.countPacksUsingProfile(p.Digest)
+	if err != nil {
+		return err
+	}
+	// A profile with packs is the contract their scores refer to.
+	if n > 0 {
+		return fmt.Errorf("%d pack(s) are scored under this profile; its definition must outlive them", n)
+	}
+	return s.db.deleteProfile(id)
+}
+
+// previewProfile rescores a pack's existing admitted results under a candidate
+// contract, so the effect of a change is visible before it is sealed.
+func (s *service) previewProfile(packDigest string, candidate *Profile) (map[string]any, error) {
+	pack, err := s.db.getPackByDigest(packDigest)
+	if err != nil {
+		return nil, err
+	}
+	if pack == nil {
+		return nil, errors.New("no sealed pack with that digest")
+	}
+	if err := validateProfile(candidate); err != nil {
+		return nil, err
+	}
+	results, err := s.db.listAdmittedResults(pack.ProfileDigest)
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		Label    string  `json:"label"`
+		Runs     int     `json:"runs"`
+		Current  float64 `json:"current_average"`
+		Proposed float64 `json:"proposed_average"`
+		Delta    float64 `json:"delta"`
+	}
+	acc := map[string]*row{}
+	order := []string{}
+	for _, r := range results {
+		if r.PackDigest != packDigest {
+			continue
+		}
+		scenario := pack.scenario(r.ScenarioID)
+		if scenario == nil {
+			continue
+		}
+		key := r.Target.label()
+		if acc[key] == nil {
+			acc[key] = &row{Label: key}
+			order = append(order, key)
+		}
+		a := acc[key]
+		a.Runs++
+		a.Current += r.Score.Score
+		a.Proposed += scoreWithProfile(r.Passed, r.Metrics, scenario.Budget, candidate).Score
+	}
+	rows := make([]row, 0, len(acc))
+	for _, k := range order {
+		a := acc[k]
+		if a.Runs == 0 {
+			continue
+		}
+		a.Current = round1(a.Current / float64(a.Runs))
+		a.Proposed = round1(a.Proposed / float64(a.Runs))
+		a.Delta = round1(a.Proposed - a.Current)
+		rows = append(rows, *a)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Proposed > rows[j].Proposed })
+	return map[string]any{
+		"pack":      map[string]any{"name": pack.Name, "version": pack.Version, "digest": pack.Digest},
+		"max_score": candidate.maxScore(),
+		"rows":      rows,
+	}, nil
 }
 
 // ---- catalog ----
@@ -626,7 +925,7 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 	if pack == nil {
 		return nil, errors.New("no sealed pack with that digest")
 	}
-	all, err := s.db.listAdmittedResults(pack.ScoringVersion)
+	all, err := s.db.listAdmittedResults(pack.ProfileDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -639,6 +938,7 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 	return map[string]any{
 		"pack":            map[string]any{"id": pack.ID, "name": pack.Name, "version": pack.Version, "digest": pack.Digest},
 		"scoring_version": pack.ScoringVersion,
+		"profile_digest":  pack.ProfileDigest,
 		"rows":            aggregate(scoped),
 		"by_scenario":     byScenario(scoped),
 		"scenarios":       len(pack.Scenarios),
@@ -649,18 +949,27 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 // version. Targets that ran different packs are still listed, with their
 // coverage reported and comparable=false, rather than being averaged together
 // as though they had faced the same work.
-func (s *service) globalLeaderboard(scoringVersion string) (map[string]any, error) {
+func (s *service) globalLeaderboard(profileDigest string) (map[string]any, error) {
 	versions, err := s.db.scoringVersions()
 	if err != nil {
 		return nil, err
 	}
-	if scoringVersion == "" {
-		scoringVersion = ScoringVersion
-		if len(versions) > 0 {
-			scoringVersion = versions[0]
+	var profile *Profile
+	if profileDigest == "" {
+		if profileDigest, err = s.defaultProfileDigest(); err != nil {
+			return nil, err
 		}
+		profile, err = s.resolveProfile(profileDigest)
+	} else {
+		profile, err = s.db.getProfileByDigest(profileDigest)
 	}
-	results, err := s.db.listAdmittedResults(scoringVersion)
+	if err != nil {
+		return nil, err
+	}
+	if profile == nil {
+		return nil, errors.New("scoring profile not found")
+	}
+	results, err := s.db.listAdmittedResults(profileDigest)
 	if err != nil {
 		return nil, err
 	}
@@ -693,7 +1002,10 @@ func (s *service) globalLeaderboard(scoringVersion string) (map[string]any, erro
 	}
 
 	return map[string]any{
-		"scoring_version":  scoringVersion,
+		"scoring_version":  profile.Version,
+		"profile_digest":   profileDigest,
+		"profile_name":     profile.Name,
+		"max_score":        profile.maxScore(),
 		"scoring_versions": versions,
 		"packs":            packList,
 		"rows":             rows,

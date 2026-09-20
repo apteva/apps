@@ -161,6 +161,76 @@ func TestCostBasisPrefersRealCostWhenReported(t *testing.T) {
 	}
 }
 
+func TestScoringProfilesAreSealedPinnedAndReproducible(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := svc.db.listProfiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(profiles) != len(builtinProfiles()) {
+		t.Fatalf("installed profiles = %d, want %d", len(profiles), len(builtinProfiles()))
+	}
+
+	draftProfile, err := svc.saveProfile(&Profile{
+		Name: "Latency first", OnFailure: OnFailureZero,
+		Components: []ProfileComponent{
+			{Key: "success", Kind: KindGate, Weight: 80},
+			{Key: "duration", Kind: KindBudget, Metric: "duration_ms", Curve: CurveRatio, Weight: 20},
+		},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedProfile, err := svc.sealProfile(draftProfile.ID, "2026-09.latency-first")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealedProfile.Digest == "" || sealedProfile.State != ProfileStateSealed {
+		t.Fatalf("profile was not sealed: %+v", sealedProfile)
+	}
+	if _, err := svc.saveProfile(&Profile{ID: sealedProfile.ID, Name: "mutated"}, false); err == nil {
+		t.Fatal("sealed scoring profiles must be immutable")
+	}
+
+	draftPack, err := svc.savePack(&Pack{
+		Name: "Profile pin", ProfileDigest: sealedProfile.Digest, Scenarios: []Scenario{crmScenario()},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedPack, err := svc.seal(draftPack.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealedPack.ProfileDigest != sealedProfile.Digest || sealedPack.ScoringVersion != sealedProfile.Version {
+		t.Fatalf("pack did not pin the selected profile: %+v", sealedPack)
+	}
+	run, err := svc.createRun(sealedPack.ID, "", []Target{{Model: "gpt-5.5"}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ScoringProfileDigest != sealedProfile.Digest {
+		t.Fatalf("run profile = %q, want %q", run.ScoringProfileDigest, sealedProfile.Digest)
+	}
+	score := scoreWithProfile(true, Metrics{DurationMS: 150_000}, crmScenario().Budget, sealedProfile)
+	if score.Score != 90 || score.ProfileDigest != sealedProfile.Digest {
+		t.Fatalf("custom profile score is not reproducible: %+v", score)
+	}
+	bundle, err := svc.evidence(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bundle["scoring_profile"].(*Profile).Digest != sealedProfile.Digest {
+		t.Fatal("evidence did not carry the pinned custom profile")
+	}
+	if bundle["scoring_formula"] != nil || bundle["scoring_weights"] != nil {
+		t.Fatal("custom-profile evidence must not claim the legacy verified-v1 contract")
+	}
+}
+
 // ---- admission ----
 
 func TestAdmissionWithholdsRunsWhereTheAgentNeverStarted(t *testing.T) {
@@ -170,7 +240,7 @@ func TestAdmissionWithholdsRunsWhereTheAgentNeverStarted(t *testing.T) {
 	result := svc.scoreOne(run, crmScenario(), evalRun{
 		ID: "eval-1", Status: "error", Execution: nil,
 		Error: "provider configuration failed before the agent started",
-	})
+	}, verifiedV1())
 
 	if result.Admission != AdmissionInvalid {
 		t.Fatalf("admission = %q, want invalid", result.Admission)
@@ -191,7 +261,7 @@ func TestAdmissionScoresGenuineTaskFailuresAsZero(t *testing.T) {
 	// evidence about the target, so it is admitted and scores zero.
 	result := svc.scoreOne(run, crmScenario(), evalRun{
 		ID: "eval-2", Status: "fail", Execution: execution(40_000, 5, 10_000, 5_000, 0, 0.2),
-	})
+	}, verifiedV1())
 
 	if result.Admission != AdmissionVerified {
 		t.Fatalf("admission = %q, want verified", result.Admission)
@@ -208,7 +278,7 @@ func TestAdmissionMarksChecklessScenariosDiagnostic(t *testing.T) {
 
 	result := svc.scoreOne(&Run{ID: "run-1"}, scenario, evalRun{
 		ID: "eval-3", Status: "pass", Execution: execution(10_000, 2, 1_000, 500, 0, 0.1),
-	})
+	}, verifiedV1())
 
 	if result.Admission != AdmissionDiagnostic {
 		t.Fatalf("admission = %q, want diagnostic without deterministic checks", result.Admission)
@@ -575,6 +645,151 @@ func TestEvidenceBundleStatesTheSnapshotCaveat(t *testing.T) {
 	}
 	if bundle["pack"] == nil {
 		t.Fatal("the bundle must carry the sealed definition it scored against")
+	}
+}
+
+// ---- complete read surface ----
+
+func TestDataExportIncludesEveryPersistedBenchRecordType(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	draft, err := svc.savePack(&Pack{Name: "Readable", Scenarios: []Scenario{crmScenario()}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := Target{Provider: "openai-codex", Model: "gpt-5.5"}
+	run, err := svc.createRun(sealed.ID, "export me", []Target{target}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = RunStatusCompleted
+	if err := svc.db.saveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	result := Result{
+		ID: newID("result"), BenchRunID: run.ID, ScenarioID: sealed.Scenarios[0].ID,
+		ScenarioName: sealed.Scenarios[0].Name, Target: target, Passed: true,
+		Admission: AdmissionVerified, Score: Score{Score: 100}, CreatedAt: time.Now().UTC(),
+	}
+	if err := svc.db.saveResult(&result); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.setBaseline(run.ID, result.ScenarioID, 0, "release baseline"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.db.savePackSuite(sealed.Digest, packSuite{SuiteID: "suite-1", CaseMap: map[string]string{"case-1": result.ScenarioID}}); err != nil {
+		t.Fatal(err)
+	}
+
+	exported, err := svc.dataExport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := exported["counts"].(map[string]int)
+	for name, minimum := range map[string]int{
+		"packs": 2, "profiles": 2, "runs": 1, "results": 1, "baselines": 1, "pack_suites": 1,
+	} {
+		if counts[name] < minimum {
+			t.Errorf("export count %s = %d, want at least %d", name, counts[name], minimum)
+		}
+	}
+	if exported["scoring"] == nil {
+		t.Fatal("complete export omitted the scoring contract")
+	}
+
+	bundle, err := svc.evidence(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile, ok := bundle["scoring_profile"].(*Profile)
+	if !ok || profile.Digest != run.ScoringProfileDigest {
+		t.Fatalf("evidence did not include the exact scoring profile: %#v", bundle["scoring_profile"])
+	}
+}
+
+func TestReadSearchesFilterAndPaginateWithoutDroppingResults(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	draft, _ := svc.savePack(&Pack{Name: "Searchable", Scenarios: []Scenario{crmScenario()}}, true)
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := Target{Provider: "opencode-go", Model: "kimi-k3"}
+	for i := 0; i < 3; i++ {
+		run, err := svc.createRun(sealed.ID, fmt.Sprintf("run-%d", i), []Target{target}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Status = RunStatusCompleted
+		if err := svc.db.saveRun(run); err != nil {
+			t.Fatal(err)
+		}
+		result := Result{
+			ID: newID("result"), BenchRunID: run.ID, ScenarioID: sealed.Scenarios[0].ID,
+			ScenarioName: sealed.Scenarios[0].Name, Target: target, Passed: i != 1,
+			Admission: AdmissionVerified, CreatedAt: time.Now().UTC().Add(time.Duration(i) * time.Second),
+		}
+		if err := svc.db.saveResult(&result); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	runs, err := svc.db.searchRuns(runQuery{PackDigest: sealed.Digest, Status: RunStatusCompleted, Limit: 1, Offset: 1, IncludeResults: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs.Page.Total != 3 || !runs.Page.HasMore || len(runs.Runs) != 1 || len(runs.Runs[0].Results) != 1 {
+		t.Fatalf("unexpected paginated runs: %+v", runs)
+	}
+	failed := false
+	results, err := svc.db.searchResults(resultQuery{PackID: sealed.ID, Provider: target.Provider, Model: target.Model, Passed: &failed, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Page.Total != 1 || len(results.Results) != 1 || results.Results[0].Passed {
+		t.Fatalf("unexpected filtered results: %+v", results)
+	}
+}
+
+func TestReadToolsUseExplicitDiscoverableSchemas(t *testing.T) {
+	app := &App{}
+	wanted := map[string]bool{
+		"bench_run_search": false, "bench_result_list": false, "bench_result_get": false,
+		"bench_baseline_list": false, "bench_baseline_get": false,
+		"bench_profile_list": false, "bench_profile_get": false, "bench_scoring_get": false,
+		"bench_pack_suite_list": false, "bench_data_export": false,
+	}
+	for _, tool := range app.MCPTools() {
+		if _, ok := wanted[tool.Name]; !ok {
+			continue
+		}
+		wanted[tool.Name] = true
+		if additional, ok := tool.InputSchema["additionalProperties"].(bool); !ok || additional {
+			t.Errorf("read tool %s does not reject undocumented inputs", tool.Name)
+		}
+	}
+	for name, found := range wanted {
+		if !found {
+			t.Errorf("missing read tool %s", name)
+		}
+	}
+	for _, tool := range app.MCPTools() {
+		if tool.Name != "bench_leaderboard_global" {
+			continue
+		}
+		properties := tool.InputSchema["properties"].(map[string]any)
+		if properties["profile_digest"] == nil || properties["scoring_version"] != nil {
+			t.Fatalf("global leaderboard schema must select the scoring contract by profile_digest: %#v", properties)
+		}
 	}
 }
 

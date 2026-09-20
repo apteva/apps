@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 
 	sdk "github.com/apteva/app-sdk"
@@ -29,6 +30,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("bench requires a database")
 	}
 	a.svc = &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	// Install the shipped scoring contracts and stamp any pre-profile history
+	// before anything can read a leaderboard.
+	if err := a.svc.ensureBuiltinProfiles(); err != nil {
+		return fmt.Errorf("install built-in scoring profiles: %w", err)
+	}
 	ctx.Logger().Info("bench mounted",
 		"project_id", ctx.CurrentProject(), "scoring_version", ScoringVersion)
 	return nil
@@ -54,6 +60,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/runs", Handler: a.handleRuns},
 		{Pattern: "/api/runs/", Handler: a.handleRun},
 		{Pattern: "/api/leaderboard", Handler: a.handleGlobalLeaderboard},
+		{Pattern: "/api/profiles", Handler: a.handleProfiles},
+		{Pattern: "/api/profiles/", Handler: a.handleProfile},
 		{Pattern: "/api/catalog", Handler: a.handleCatalog},
 		{Pattern: "/api/scoring", Handler: a.handleScoring},
 	}

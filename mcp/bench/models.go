@@ -33,18 +33,21 @@ const (
 )
 
 type Pack struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Description    string     `json:"description"`
-	State          string     `json:"state"`
-	Version        string     `json:"version,omitempty"`
-	Digest         string     `json:"digest,omitempty"`
-	ScoringVersion string     `json:"scoring_version,omitempty"`
-	SourcePackID   string     `json:"source_pack_id,omitempty"`
-	Scenarios      []Scenario `json:"scenarios"`
-	Revision       int        `json:"revision"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	State          string `json:"state"`
+	Version        string `json:"version,omitempty"`
+	Digest         string `json:"digest,omitempty"`
+	ScoringVersion string `json:"scoring_version,omitempty"`
+	// ProfileDigest pins the scoring contract this pack is scored under. A
+	// sealed pack carries one so its results always mean the same thing.
+	ProfileDigest string     `json:"profile_digest,omitempty"`
+	SourcePackID  string     `json:"source_pack_id,omitempty"`
+	Scenarios     []Scenario `json:"scenarios"`
+	Revision      int        `json:"revision"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
 func (p *Pack) scenario(id string) *Scenario {
@@ -135,25 +138,29 @@ type Provenance struct {
 }
 
 type Run struct {
-	ID             string     `json:"id"`
-	PackID         string     `json:"pack_id"`
-	PackName       string     `json:"pack_name"`
-	PackVersion    string     `json:"pack_version"`
-	PackDigest     string     `json:"pack_digest"`
-	ScoringVersion string     `json:"scoring_version"`
-	Name           string     `json:"name"`
-	Targets        []Target   `json:"targets"`
-	Trials         int        `json:"trials"`
-	SuiteID        string     `json:"suite_id,omitempty"`
-	ExperimentID   string     `json:"experiment_id,omitempty"`
-	Status         string     `json:"status"`
-	Provenance     Provenance `json:"provenance"`
-	Summary        Summary    `json:"summary"`
-	Results        []Result   `json:"results,omitempty"`
-	Error          string     `json:"error,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	FinishedAt     *time.Time `json:"finished_at,omitempty"`
+	ID             string `json:"id"`
+	PackID         string `json:"pack_id"`
+	PackName       string `json:"pack_name"`
+	PackVersion    string `json:"pack_version"`
+	PackDigest     string `json:"pack_digest"`
+	ScoringVersion string `json:"scoring_version"`
+	// ScoringProfileDigest is the contract this run was actually scored under.
+	// The leaderboard joins on it, so a run scored under a different profile is
+	// never averaged with this one.
+	ScoringProfileDigest string     `json:"scoring_profile_digest"`
+	Name                 string     `json:"name"`
+	Targets              []Target   `json:"targets"`
+	Trials               int        `json:"trials"`
+	SuiteID              string     `json:"suite_id,omitempty"`
+	ExperimentID         string     `json:"experiment_id,omitempty"`
+	Status               string     `json:"status"`
+	Provenance           Provenance `json:"provenance"`
+	Summary              Summary    `json:"summary"`
+	Results              []Result   `json:"results,omitempty"`
+	Error                string     `json:"error,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	StartedAt            *time.Time `json:"started_at,omitempty"`
+	FinishedAt           *time.Time `json:"finished_at,omitempty"`
 }
 
 type Result struct {
