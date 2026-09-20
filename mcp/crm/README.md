@@ -1,13 +1,14 @@
-# CRM v0.9.3
+# CRM v0.9.4
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.3` adds deterministic list context to contact, conversation,
-activity, opportunity and segment events. It builds on the correctness,
-concurrency and performance repairs shipped in `crm/v0.9.2`.
+Release `crm/v0.9.4` makes the segment predicate contract self-describing for
+agents. It documents every supported definition shape, supplies copyable MCP
+examples and returns the supported predicate list after invalid guesses. It
+builds on the list-aware events shipped in `crm/v0.9.3`.
 
 ## Capabilities
 
@@ -52,6 +53,28 @@ Static evaluation returns frozen membership IDs; resolve an audience to filter
 those IDs by current active/contact/delivery eligibility. `not_in_segment`
 requires an active static segment from the same project. Dynamic references are
 rejected, including when evaluating legacy definitions.
+
+## Segment definitions
+
+`segments_create.definition` and `segments_update.patch.definition` are arrays
+whose conditions are AND-ed. For example:
+
+```json
+{
+  "name": "Recent VIP contacts",
+  "kind": "dynamic",
+  "definition": [
+    {"predicate": "tag_in", "tags": ["vip"]},
+    {"predicate": "last_activity_within", "days": 30}
+  ]
+}
+```
+
+Synthetic predicates are `tag_in`, `tag_not_in`, `attribute`,
+`last_activity_within`, `channel_present`, `in_list`, `not_in_list` and
+`not_in_segment`. Core contact fields use `{"field":"company","op":"eq",
+"value":"Acme"}`. The MCP input schema contains copyable examples for every
+shape and their required arguments.
 
 ## Paging
 

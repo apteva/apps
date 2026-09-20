@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.3
+version: 0.9.4
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -167,13 +167,13 @@ provides:
       description: Return the active contact_ids in a list (paged) — campaigns audience source.
     # Segments — saved filters (dynamic or static snapshot).
     - name: segments_create
-      description: Create a segment with a JSON predicate definition.
+      description: Create a segment from an AND-ed definition array. Supported predicates are tag_in, tag_not_in, attribute, last_activity_within, channel_present, in_list, not_in_list, and not_in_segment; core-field filters use field/op/value. The executable MCP schema includes copyable examples for every shape.
     - name: segments_list
       description: List segments in this project.
     - name: segments_get
       description: Fetch one segment.
     - name: segments_update
-      description: Partial-patch a segment (definition mutation busts cached count).
+      description: Partial-patch a segment using the same documented definition contract as segments_create; definition mutation busts cached count.
     - name: segments_delete
       description: Archive a segment.
     - name: segments_eval

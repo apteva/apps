@@ -53,6 +53,110 @@ type Segment struct {
 	UpdatedAt   string          `json:"updated_at,omitempty"`
 }
 
+var supportedSegmentPredicates = []string{
+	"tag_in",
+	"tag_not_in",
+	"attribute",
+	"last_activity_within",
+	"channel_present",
+	"in_list",
+	"not_in_list",
+	"not_in_segment",
+}
+
+const segmentDefinitionContract = `Conditions in definition are AND-ed. Supported synthetic shapes: {"predicate":"tag_in","tags":["vip"]}; {"predicate":"tag_not_in","tags":["suppressed"]}; {"predicate":"attribute","key":"score","op":"gte","value":80} (ops: eq, neq, gt, gte, lt, lte, contains, starts_with, is_null, is_not_null; multi-select arrays support eq/neq); {"predicate":"last_activity_within","days":30,"kind":"email"} (kind optional); {"predicate":"channel_present","kind":"email"}; {"predicate":"in_list","list_id":123}; {"predicate":"not_in_list","list_id":123}; {"predicate":"not_in_segment","segment_id":456} (referenced segment must be active and static). Core-field filters use {"field":"company","op":"eq","value":"Acme"}; fields: first_name, last_name, display_name, company, job_title, primary_email, primary_phone, status, owner_user_id, source, first_contact_at, last_contact_at, created_at, updated_at; ops: eq, neq, gt, gte, lt, lte, contains, starts_with, is_null, in. An empty definition matches all active contacts.`
+
+func supportedSegmentPredicateHint() string {
+	return "supported predicates: " + strings.Join(supportedSegmentPredicates, ", ") +
+		`; or use a core-field filter such as {"field":"company","op":"eq","value":"Acme"}`
+}
+
+func segmentDefinitionExamples() []any {
+	return []any{
+		[]any{map[string]any{"predicate": "tag_in", "tags": []any{"vip"}}},
+		[]any{map[string]any{"predicate": "tag_not_in", "tags": []any{"suppressed"}}},
+		[]any{map[string]any{"predicate": "attribute", "key": "score", "op": "gte", "value": 80}},
+		[]any{map[string]any{"predicate": "last_activity_within", "days": 30, "kind": "email"}},
+		[]any{map[string]any{"predicate": "channel_present", "kind": "email"}},
+		[]any{map[string]any{"predicate": "in_list", "list_id": 123}},
+		[]any{map[string]any{"predicate": "not_in_list", "list_id": 123}},
+		[]any{map[string]any{"predicate": "not_in_segment", "segment_id": 456}},
+		[]any{map[string]any{"field": "company", "op": "eq", "value": "Acme"}},
+	}
+}
+
+func segmentDefinitionInputSchema() map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": segmentDefinitionContract,
+		"items": map[string]any{
+			"type":        "object",
+			"description": `One synthetic {"predicate":...} condition or one core-field {"field":...,"op":...,"value":...} condition.`,
+		},
+		"maxItems": 100,
+		"examples": segmentDefinitionExamples(),
+	}
+}
+
+func segmentCreateInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":        map[string]any{"type": "string"},
+			"kind":        map[string]any{"type": "string", "enum": []any{"dynamic", "static"}},
+			"description": map[string]any{"type": "string"},
+			"list_id":     map[string]any{"type": "integer", "description": "Optional list scope; implicitly AND-ed with in_list."},
+			"definition":  segmentDefinitionInputSchema(),
+		},
+		"required": []string{"name"},
+		"examples": []any{
+			map[string]any{
+				"name": "VIP contacts",
+				"kind": "dynamic",
+				"definition": []any{
+					map[string]any{"predicate": "tag_in", "tags": []any{"vip"}},
+				},
+			},
+			map[string]any{
+				"name": "Recently active enterprise contacts",
+				"definition": []any{
+					map[string]any{"field": "company", "op": "contains", "value": "Enterprise"},
+					map[string]any{"predicate": "last_activity_within", "days": 30},
+				},
+			},
+		},
+	}
+}
+
+func segmentUpdateInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "integer"},
+			"patch": map[string]any{
+				"type":        "object",
+				"description": "Partial segment update. definition uses the same documented predicate contract as segments_create.",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"description": map[string]any{"type": "string"},
+					"kind":        map[string]any{"type": "string", "enum": []any{"dynamic", "static"}},
+					"list_id":     map[string]any{"type": []any{"integer", "null"}},
+					"definition":  segmentDefinitionInputSchema(),
+				},
+			},
+		},
+		"required": []string{"id", "patch"},
+		"examples": []any{
+			map[string]any{
+				"id": 12,
+				"patch": map[string]any{
+					"definition": []any{map[string]any{"predicate": "tag_in", "tags": []any{"vip"}}},
+				},
+			},
+		},
+	}
+}
+
 func segmentEventPayload(s *Segment, payload map[string]any) map[string]any {
 	if payload == nil {
 		payload = map[string]any{}
@@ -132,7 +236,7 @@ func compilePredicate(cf *compiledFilter, pid string, e map[string]any) error {
 	field, _ := e["field"].(string)
 	op, _ := e["op"].(string)
 	if field == "" {
-		return errors.New("predicate or field required")
+		return fmt.Errorf("predicate or field required; %s", supportedSegmentPredicateHint())
 	}
 	clause, args, err := buildFilterClause(field, op, e["value"])
 	if err != nil {
@@ -273,7 +377,7 @@ func compileSyntheticPredicate(cf *compiledFilter, pid, pred string, e map[strin
 			pid, segID)
 		return nil
 	}
-	return fmt.Errorf("unknown predicate %q", pred)
+	return fmt.Errorf("unknown predicate %q; %s", pred, supportedSegmentPredicateHint())
 }
 
 // attrColumnForOp picks which value_* column to compare against

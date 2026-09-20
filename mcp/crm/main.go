@@ -880,14 +880,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		// call), static (frozen snapshot via segments_materialise).
 		{
 			Name:        "segments_create",
-			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (scopes the segment to a list — definition is implicitly AND-ed with in_list), definition (predicate array).",
-			InputSchema: schemaObject(map[string]any{
-				"name":        map[string]any{"type": "string"},
-				"kind":        map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"list_id":     map[string]any{"type": "integer"},
-				"definition":  map[string]any{"type": "array"},
-			}, []string{"name"}),
+			Description: "Create a segment. Args: name, kind (dynamic|static, default dynamic), description?, list_id? (optional list scope), definition. " + segmentDefinitionContract,
+			InputSchema: segmentCreateInputSchema(),
 			Handler: a.toolSegmentsCreate,
 		},
 		{
@@ -908,11 +902,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "segments_update",
-			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count.",
-			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "integer"},
-				"patch": map[string]any{"type": "object"},
-			}, []string{"id", "patch"}),
+			Description: "Partial-patch a segment (name, description, kind, list_id, definition). Mutating definition busts the cached count. " + segmentDefinitionContract,
+			InputSchema: segmentUpdateInputSchema(),
 			Handler: a.toolSegmentsUpdate,
 		},
 		{
