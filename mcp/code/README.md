@@ -72,12 +72,35 @@ outlines, glob and streaming literal/regex grep are supported. A bounded page
 cache validates inode, size, mtime and ctime. Tree summaries invalidate on Code
 mutations and expire after 15 seconds for external process writes.
 
-Unified patches validate counts, positions, quoted/spaced paths and EOF newline
-markers. Unsupported binary/mode-only patches, renames and duplicate file
-sections fail explicitly. Use the rename tool for renames. `fuzzy=true` opts
-into relocation and reports `relocated_hunks`. Dry-run IDs retain expected
-file hashes/absence and reject later drift. They expire after 30 minutes and
-are bounded to 128 entries / 32 MiB of patch text.
+`code_apply_patch` accepts unified diffs and Codex-style `*** Begin Patch`
+patches. Structurally bounded unified hunks safely recalculate inaccurate
+old/new counts while file positions and context remain strict. Parser errors
+identify the file, hunk header, malformed line, and declared versus observed
+counts. Unsupported binary/mode-only patches, renames and duplicate file
+sections fail explicitly. Use the rename tool for renames. `allow_fuzzy=true`
+opts into relocation and reports `relocated_hunks`.
+
+```diff
+--- a/file.txt
++++ b/file.txt
+@@ -1 +1 @@
+-old
++new
+```
+
+```text
+*** Begin Patch
+*** Update File: file.txt
+@@
+-old
++new
+*** End Patch
+```
+
+Dry-run IDs retain the exact submitted patch plus expected file hashes/absence,
+so applying a `patch_id` produces the reviewed bytes or rejects later drift.
+They expire after 30 minutes and are bounded to 128 entries / 32 MiB of patch
+text.
 
 ## Native version control, Git, and templates
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -168,6 +169,30 @@ func TestMCPTools_AllHaveSchemas(t *testing.T) {
 		}
 		if tool.Handler == nil && tool.HandlerCtx == nil {
 			t.Errorf("tool %q has no handler", tool.Name)
+		}
+	}
+}
+
+func TestApplyPatchToolDocumentsEverySupportedFormat(t *testing.T) {
+	var apply sdk.Tool
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "code_apply_patch" {
+			apply = tool
+			break
+		}
+	}
+	props, ok := apply.InputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("code_apply_patch properties missing")
+	}
+	patchSchema, ok := props["patch"].(map[string]any)
+	if !ok {
+		t.Fatal("code_apply_patch patch schema missing")
+	}
+	description, _ := patchSchema["description"].(string)
+	for _, text := range []string{"--- a/file.txt", "+++ b/file.txt", "*** Begin Patch", "*** Update File: file.txt", "*** End Patch"} {
+		if !strings.Contains(apply.Description, text) || !strings.Contains(description, text) {
+			t.Errorf("copyable example %q must appear in both tool and patch-parameter descriptions", text)
 		}
 	}
 }

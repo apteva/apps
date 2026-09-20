@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.2
+version: 0.14.3
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.3 accepts both unified diffs and Codex-style patches, safely
+  normalizes bounded hunk counts, and reports actionable parser diagnostics.
   v0.6.2 adds atomic human and agent issue claims so collaborators can
   reserve work without path locks or workspace coupling.
   v0.7.0 optionally links repositories to isolated Workspaces environments,
@@ -272,7 +274,21 @@ provides:
     - name: code_write_file
       description: Write or overwrite a file with full content; prefer code_apply_patch for large existing-file rewrites.
     - name: code_apply_patch
-      description: Apply a unified diff across files, with dry_run preview support.
+      description: |
+        Apply a unified diff or Codex-style patch across files, with dry_run preview support.
+        Unified example:
+          --- a/file.txt
+          +++ b/file.txt
+          @@ -1 +1 @@
+          -old
+          +new
+        Codex example:
+          *** Begin Patch
+          *** Update File: file.txt
+          @@
+          -old
+          +new
+          *** End Patch
     - name: code_edit_file
       description: Exact-string replacement. Fails if old_string is not unique unless replace_all is true.
     - name: code_multi_edit
@@ -324,7 +340,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.2
+    ref: code/v0.14.3
     entry: mcp/code
   port: 8080
   health_check: /health

@@ -223,3 +223,159 @@ func TestApplyUnifiedPatch_RejectsSecondFileWithoutWritingFirst(t *testing.T) {
 		t.Errorf("first file changed despite second-file rejection: %q", got)
 	}
 }
+
+func TestApplyCodexPatch_ModifyCreateDelete(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("one\ntwo\nthree\n"))
+	store.Write("r", "remove.txt", []byte("obsolete\n"))
+	patch := `*** Begin Patch
+*** Update File: a.txt
+@@
+ one
+-two
++TWO
+ three
+*** Add File: new.txt
++alpha
++beta
+*** Delete File: remove.txt
+*** End Patch`
+	dry, err := applyUnifiedPatch(store, "r", patch, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.Applied || dry.PatchID == "" || len(dry.ChangedFiles) != 3 {
+		t.Fatalf("unexpected preview: %+v", dry)
+	}
+	stored, err := loadPatchPreview(dry.PatchID, "r")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored != patch {
+		t.Fatal("preview did not retain the exact reviewed patch bytes")
+	}
+	applied, err := applyPatchPreview(store, "r", dry.PatchID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied.Applied || len(applied.ChangedFiles) != 3 {
+		t.Fatalf("unexpected apply: %+v", applied)
+	}
+	if got, _ := store.Read("r", "a.txt"); string(got) != "one\nTWO\nthree\n" {
+		t.Fatalf("modified file = %q", got)
+	}
+	if got, _ := store.Read("r", "new.txt"); string(got) != "alpha\nbeta\n" {
+		t.Fatalf("created file = %q", got)
+	}
+	if _, err := store.Read("r", "remove.txt"); err == nil {
+		t.Fatal("deleted file still exists")
+	}
+	for i := range dry.ChangedFiles {
+		if dry.ChangedFiles[i].NewSHA256 != applied.ChangedFiles[i].NewSHA256 || dry.ChangedFiles[i].NewSize != applied.ChangedFiles[i].NewSize {
+			t.Fatalf("preview/apply mismatch for %s: preview=%+v apply=%+v", dry.ChangedFiles[i].Path, dry.ChangedFiles[i], applied.ChangedFiles[i])
+		}
+	}
+}
+
+func TestApplyPatch_NormalizesStructurallyBoundedHunkCounts(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("one\ntwo\nthree\n"))
+	patch := `--- a/a.txt
++++ b/a.txt
+@@ -1,99 +1,42 @@
+ one
+-two
++TWO
+ three
+`
+	res, err := applyUnifiedPatch(store, "r", patch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied {
+		t.Fatalf("count-normalized patch rejected: %+v", res)
+	}
+	if got, _ := store.Read("r", "a.txt"); string(got) != "one\nTWO\nthree\n" {
+		t.Fatalf("normalized patch wrote %q", got)
+	}
+}
+
+func TestApplyPatch_MalformedHunkDiagnosticAndAtomicity(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("one\ntwo\n"))
+	patch := "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\ntwo\n"
+	_, err := applyUnifiedPatch(store, "r", patch, false)
+	if err == nil {
+		t.Fatal("want malformed-prefix error")
+	}
+	message := err.Error()
+	for _, want := range []string{"file a.txt", `hunk "@@ -1,2 +1,2 @@"`, "line 5", "declared old/new 2/2", "actual old/new 1/1", "invalid hunk prefix"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("diagnostic %q missing %q", message, want)
+		}
+	}
+	if got, _ := store.Read("r", "a.txt"); string(got) != "one\ntwo\n" {
+		t.Fatalf("failed parse modified file: %q", got)
+	}
+}
+
+func TestApplyCodexPatch_ContextMismatchIsNonDestructive(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("one\ntwo\n"))
+	patch := `*** Begin Patch
+*** Update File: a.txt
+@@
+ one
+-missing
++TWO
+*** End Patch`
+	res, err := applyUnifiedPatch(store, "r", patch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Applied || len(res.RejectedContext) != 1 {
+		t.Fatalf("context mismatch accepted: %+v", res)
+	}
+	if got, _ := store.Read("r", "a.txt"); string(got) != "one\ntwo\n" {
+		t.Fatalf("rejected Codex patch modified file: %q", got)
+	}
+}
+
+func TestApplyPatch_BenchmarkModelRegressions(t *testing.T) {
+	tests := []struct {
+		name  string
+		patch string
+	}{
+		{
+			name:  "terra-codex-envelope",
+			patch: "*** Begin Patch\n*** Update File: pricing/cart.go\n@@\n \tsubtotal := 0\n-\t\tsubtotal += line.UnitPriceCents\n+\t\tsubtotal += line.UnitPriceCents * line.Quantity\n*** End Patch",
+		},
+		{
+			name:  "sol-inaccurate-old-count",
+			patch: "--- a/pricing/cart.go\n+++ b/pricing/cart.go\n@@ -1,8 +1,1 @@\n \tsubtotal := 0\n-\t\tsubtotal += line.UnitPriceCents\n+\t\tsubtotal += line.UnitPriceCents * line.Quantity\n",
+		},
+		{
+			name:  "luna-inaccurate-new-count",
+			patch: "--- a/pricing/cart.go\n+++ b/pricing/cart.go\n@@ -1,2 +1,9 @@\n \tsubtotal := 0\n-\t\tsubtotal += line.UnitPriceCents\n+\t\tsubtotal += line.UnitPriceCents * line.Quantity\n",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMemFileStore()
+			store.CreateRepo("r")
+			store.Write("r", "pricing/cart.go", []byte("\tsubtotal := 0\n\t\tsubtotal += line.UnitPriceCents\n"))
+			res, err := applyUnifiedPatch(store, "r", tc.patch, false)
+			if err != nil || !res.Applied {
+				t.Fatalf("regression patch failed: err=%v result=%+v", err, res)
+			}
+			got, _ := store.Read("r", "pricing/cart.go")
+			if !strings.Contains(string(got), "line.UnitPriceCents * line.Quantity") {
+				t.Fatalf("patch result = %q", got)
+			}
+		})
+	}
+}

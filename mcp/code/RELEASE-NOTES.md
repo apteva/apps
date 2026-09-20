@@ -1,3 +1,22 @@
+# Apteva Code 0.14.3
+
+This patch release makes agent patching compatible with both unified diffs and
+Codex-style `*** Begin Patch` envelopes. Structurally bounded hunks with
+inaccurate counts are normalized safely, while malformed patches now report the
+file, hunk header, line, and declared versus actual counts.
+
+Dry-run previews still retain the exact submitted patch and expected source
+hashes. Applying by `patch_id` therefore applies precisely the reviewed result,
+and parser or context failures remain atomic and non-destructive.
+
+## Validation
+
+Regression coverage includes Codex modify/create/delete patches, valid unified
+diffs, malformed Terra/Sol/Luna benchmark patterns, safe count normalization,
+strict context rejection, multi-file atomicity, and preview/apply identity.
+
+---
+
 # Apteva Code 0.14.2
 
 This patch release makes repository identities permanently monotonic. Deleting

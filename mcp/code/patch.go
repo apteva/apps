@@ -41,9 +41,10 @@ type PatchRejectDetail struct {
 }
 
 type patchFile struct {
-	oldPath string
-	newPath string
-	hunks   []patchHunk
+	oldPath     string
+	newPath     string
+	hunks       []patchHunk
+	deleteWhole bool
 }
 
 type patchHunk struct {
@@ -55,11 +56,41 @@ type patchHunk struct {
 	oldNoNL    bool
 	newNoNL    bool
 	allowFuzzy bool
+	locate     bool
 }
 
 var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
-const patchFormatHint = "expected unified diff format: --- a/path, +++ b/path, then @@ -old,count +new,count @@ hunks with lines prefixed by space, -, or +"
+const patchFormatHint = "expected unified diff format (--- a/path, +++ b/path, @@ -old,count +new,count @@) or Codex patch format (*** Begin Patch, *** Update File: path, @@, *** End Patch); hunk lines must start with space, -, or +"
+
+type patchParseError struct {
+	Path        string
+	Header      string
+	Line        int
+	DeclaredOld int
+	DeclaredNew int
+	ActualOld   int
+	ActualNew   int
+	Reason      string
+}
+
+func (e patchParseError) Error() string {
+	parts := []string{}
+	if e.Path != "" {
+		parts = append(parts, "file "+e.Path)
+	}
+	if e.Header != "" {
+		parts = append(parts, fmt.Sprintf("hunk %q", e.Header))
+	}
+	if e.Line > 0 {
+		parts = append(parts, fmt.Sprintf("line %d", e.Line))
+	}
+	if e.DeclaredOld >= 0 && e.DeclaredNew >= 0 {
+		parts = append(parts, fmt.Sprintf("declared old/new %d/%d, actual old/new %d/%d", e.DeclaredOld, e.DeclaredNew, e.ActualOld, e.ActualNew))
+	}
+	parts = append(parts, e.Reason)
+	return strings.Join(parts, ": ")
+}
 
 type patchPreview struct {
 	Slug      string
@@ -86,7 +117,7 @@ func applyUnifiedPatchUnlocked(store FileStore, slug, patch string, dryRun, fuzz
 	if int64(len(patch)) > maxFileBytes()*2 {
 		return nil, errors.New("patch exceeds configured size limit")
 	}
-	files, err := parseUnifiedPatch(patch)
+	files, err := parsePatch(patch)
 	if err != nil {
 		return nil, err
 	}
@@ -113,7 +144,7 @@ func applyUnifiedPatchUnlocked(store FileStore, slug, patch string, dryRun, fuzz
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		if len(pf.hunks) == 0 {
+		if len(pf.hunks) == 0 && !pf.deleteWhole {
 			return nil, errors.New("file section has no hunks; binary or mode-only patches are unsupported")
 		}
 		if seen[clean] {
@@ -146,11 +177,15 @@ func applyUnifiedPatchUnlocked(store FileStore, slug, patch string, dryRun, fuzz
 			oldSHA = sha
 		}
 		relocated := []int{}
-		nextBody, err := applyFilePatchReport(oldBody, pf.hunks, &relocated)
-		if err != nil {
+		nextBody := []byte{}
+		var applyErr error
+		if !pf.deleteWhole {
+			nextBody, applyErr = applyFilePatchReport(oldBody, pf.hunks, &relocated)
+		}
+		if applyErr != nil {
 			result.Applied = false
-			result.RejectedHunks = append(result.RejectedHunks, fmt.Sprintf("%s: %v", clean, err))
-			result.RejectedContext = append(result.RejectedContext, patchRejectDetail(clean, oldBody, err))
+			result.RejectedHunks = append(result.RejectedHunks, fmt.Sprintf("%s: %v", clean, applyErr))
+			result.RejectedContext = append(result.RejectedContext, patchRejectDetail(clean, oldBody, applyErr))
 			result.Hint = "patch was not applied; use rejected_context to rebuild the hunk with current file context"
 			return result, nil
 		}
@@ -290,72 +325,266 @@ func patchContextExcerpt(body []byte, around, radius int) string {
 	return b.String()
 }
 
+func parsePatch(patch string) ([]patchFile, error) {
+	normalized := strings.ReplaceAll(patch, "\r\n", "\n")
+	if strings.HasPrefix(strings.TrimSpace(normalized), "*** Begin Patch") {
+		return parseCodexPatch(normalized)
+	}
+	return parseUnifiedPatch(normalized)
+}
+
 func parseUnifiedPatch(patch string) ([]patchFile, error) {
-	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	lines := strings.Split(patch, "\n")
 	var files []patchFile
 	var cur *patchFile
-	for i := 0; i < len(lines); i++ {
+	for i := 0; i < len(lines); {
 		line := lines[i]
 		if strings.HasPrefix(line, "--- ") {
 			if i+1 >= len(lines) || !strings.HasPrefix(lines[i+1], "+++ ") {
-				return nil, fmt.Errorf("line %d: --- without +++", i+1)
+				return nil, patchParseError{Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "--- file header is not followed by +++"}
 			}
-			files = append(files, patchFile{
-				oldPath: patchPath(line[4:]),
-				newPath: patchPath(lines[i+1][4:]),
-			})
+			files = append(files, patchFile{oldPath: patchPath(line[4:]), newPath: patchPath(lines[i+1][4:])})
 			cur = &files[len(files)-1]
-			i++
+			i += 2
 			continue
 		}
-		if cur == nil || !strings.HasPrefix(line, "@@ ") {
+		if cur != nil && strings.HasPrefix(line, "@@ ") {
+			h, next, err := parseUnifiedHunk(lines, i, displayPatchPath(*cur))
+			if err != nil {
+				return nil, err
+			}
+			cur.hunks = append(cur.hunks, h)
+			i = next
 			continue
 		}
-		h, err := parseHunkHeader(line)
-		if err != nil {
-			return nil, fmt.Errorf("line %d: %w", i+1, err)
-		}
-		oldN, newN := 0, 0
-		for oldN < h.oldCount || newN < h.newCount {
-			i++
-			if i >= len(lines) || lines[i] == "" {
-				return nil, fmt.Errorf("line %d: hunk shorter than declared counts", i+1)
-			}
-			row := lines[i]
-			if row == `\ No newline at end of file` {
-				return nil, fmt.Errorf("line %d: misplaced newline marker", i+1)
-			}
-			switch row[0] {
-			case ' ':
-				oldN++
-				newN++
-			case '-':
-				oldN++
-			case '+':
-				newN++
-			default:
-				return nil, fmt.Errorf("line %d: invalid hunk prefix", i+1)
-			}
-			if oldN > h.oldCount || newN > h.newCount {
-				return nil, fmt.Errorf("line %d: hunk exceeds declared counts", i+1)
-			}
-			h.lines = append(h.lines, row)
-			if i+1 < len(lines) && lines[i+1] == `\ No newline at end of file` {
-				if row[0] != '+' {
-					h.oldNoNL = true
-				}
-				if row[0] != '-' {
-					h.newNoNL = true
-				}
-				i++
-			}
-		}
-		if i+1 < len(lines) && len(lines[i+1]) > 0 && (lines[i+1][0] == ' ' || lines[i+1][0] == '+' || lines[i+1][0] == '-') && !strings.HasPrefix(lines[i+1], "--- ") {
-			return nil, fmt.Errorf("line %d: hunk exceeds declared counts", i+2)
-		}
-		cur.hunks = append(cur.hunks, h)
+		i++
 	}
 	return files, nil
+}
+
+func parseUnifiedHunk(lines []string, index int, path string) (patchHunk, int, error) {
+	header := lines[index]
+	h, err := parseHunkHeader(header)
+	if err != nil {
+		return patchHunk{}, index, patchParseError{Path: path, Header: header, Line: index + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: err.Error()}
+	}
+	declaredOld, declaredNew := h.oldCount, h.newCount
+	oldN, newN := 0, 0
+	i := index + 1
+	for i < len(lines) {
+		row := lines[i]
+		if strings.HasPrefix(row, "@@ ") || strings.HasPrefix(row, "diff --git ") || (strings.HasPrefix(row, "--- ") && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "+++ ")) {
+			break
+		}
+		if row == "" && i == len(lines)-1 {
+			break
+		}
+		if row == `\ No newline at end of file` {
+			return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: i + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: oldN, ActualNew: newN, Reason: "misplaced newline marker"}
+		}
+		if row == "" || (row[0] != ' ' && row[0] != '-' && row[0] != '+') {
+			return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: i + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: oldN, ActualNew: newN, Reason: "invalid hunk prefix; every hunk line must start with space, -, or +"}
+		}
+		countPatchRow(row, &oldN, &newN)
+		h.lines = append(h.lines, row)
+		if i+1 < len(lines) && lines[i+1] == `\ No newline at end of file` {
+			if row[0] != '+' {
+				h.oldNoNL = true
+			}
+			if row[0] != '-' {
+				h.newNoNL = true
+			}
+			i++
+		}
+		i++
+	}
+	if len(h.lines) == 0 {
+		return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: index + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: oldN, ActualNew: newN, Reason: "hunk has no body"}
+	}
+	// A structural boundary makes the body authoritative. Recalculate bad model-
+	// supplied counts while retaining line positions and strict context matching.
+	h.oldCount, h.newCount = oldN, newN
+	return h, i, nil
+}
+
+func parseCodexPatch(patch string) ([]patchFile, error) {
+	lines := strings.Split(patch, "\n")
+	first := firstNonBlank(lines)
+	if first < 0 || strings.TrimSpace(lines[first]) != "*** Begin Patch" {
+		return nil, fmt.Errorf("invalid Codex patch: missing *** Begin Patch")
+	}
+	var files []patchFile
+	i := first + 1
+	foundEnd := false
+	for i < len(lines) {
+		line := lines[i]
+		if strings.TrimSpace(line) == "" {
+			i++
+			continue
+		}
+		if line == "*** End Patch" {
+			foundEnd = true
+			i++
+			break
+		}
+		const update = "*** Update File: "
+		const add = "*** Add File: "
+		const deleteFile = "*** Delete File: "
+		var pf patchFile
+		switch {
+		case strings.HasPrefix(line, update):
+			path := strings.TrimSpace(strings.TrimPrefix(line, update))
+			pf = patchFile{oldPath: path, newPath: path}
+		case strings.HasPrefix(line, add):
+			path := strings.TrimSpace(strings.TrimPrefix(line, add))
+			pf = patchFile{oldPath: "/dev/null", newPath: path}
+		case strings.HasPrefix(line, deleteFile):
+			path := strings.TrimSpace(strings.TrimPrefix(line, deleteFile))
+			pf = patchFile{oldPath: path, newPath: "/dev/null", deleteWhole: true}
+		default:
+			return nil, patchParseError{Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "expected *** Update File, *** Add File, *** Delete File, or *** End Patch"}
+		}
+		if pf.oldPath == "" || pf.newPath == "" {
+			return nil, patchParseError{Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "file path required"}
+		}
+		i++
+		if pf.deleteWhole {
+			files = append(files, pf)
+			continue
+		}
+		if pf.oldPath == "/dev/null" {
+			h := patchHunk{oldStart: 0, newStart: 1, locate: true}
+			start := i
+			for i < len(lines) && !strings.HasPrefix(lines[i], "*** ") {
+				row := lines[i]
+				if row == "" && i == len(lines)-1 {
+					break
+				}
+				if row == "" || row[0] != '+' {
+					return nil, patchParseError{Path: pf.newPath, Line: i + 1, DeclaredOld: 0, DeclaredNew: h.newCount, ActualOld: 0, ActualNew: h.newCount, Reason: "added-file lines must start with +"}
+				}
+				h.lines = append(h.lines, row)
+				h.newCount++
+				i++
+			}
+			if i == start {
+				return nil, patchParseError{Path: pf.newPath, Line: i + 1, DeclaredOld: 0, DeclaredNew: 0, ActualOld: 0, ActualNew: 0, Reason: "added file has no content lines"}
+			}
+			pf.hunks = append(pf.hunks, h)
+			files = append(files, pf)
+			continue
+		}
+		for i < len(lines) && !strings.HasPrefix(lines[i], "*** ") {
+			if strings.TrimSpace(lines[i]) == "" {
+				i++
+				continue
+			}
+			if !strings.HasPrefix(lines[i], "@@") {
+				return nil, patchParseError{Path: pf.newPath, Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "expected @@ before update hunk"}
+			}
+			h, next, err := parseCodexHunk(lines, i, pf.newPath)
+			if err != nil {
+				return nil, err
+			}
+			pf.hunks = append(pf.hunks, h)
+			i = next
+		}
+		if len(pf.hunks) == 0 {
+			return nil, patchParseError{Path: pf.newPath, Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "updated file has no hunks"}
+		}
+		files = append(files, pf)
+	}
+	if !foundEnd {
+		return nil, fmt.Errorf("invalid Codex patch: missing *** End Patch")
+	}
+	for ; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return nil, patchParseError{Line: i + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "content after *** End Patch"}
+		}
+	}
+	return files, nil
+}
+
+func parseCodexHunk(lines []string, index int, path string) (patchHunk, int, error) {
+	header := lines[index]
+	h := patchHunk{locate: true}
+	declaredOld, declaredNew := -1, -1
+	if strings.HasPrefix(header, "@@ ") && hunkHeaderRe.MatchString(header) {
+		parsed, err := parseHunkHeader(header)
+		if err != nil {
+			return patchHunk{}, index, patchParseError{Path: path, Header: header, Line: index + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: err.Error()}
+		}
+		h = parsed
+		h.locate = false
+		declaredOld, declaredNew = h.oldCount, h.newCount
+	} else if strings.HasPrefix(header, "@@ -") {
+		return patchHunk{}, index, patchParseError{Path: path, Header: header, Line: index + 1, DeclaredOld: -1, DeclaredNew: -1, Reason: "invalid numeric hunk header"}
+	}
+	oldN, newN := 0, 0
+	i := index + 1
+	for i < len(lines) {
+		row := lines[i]
+		if strings.HasPrefix(row, "*** ") || strings.HasPrefix(row, "@@") {
+			break
+		}
+		if row == "" && i == len(lines)-1 {
+			break
+		}
+		if row == `\ No newline at end of file` {
+			return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: i + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: oldN, ActualNew: newN, Reason: "misplaced newline marker"}
+		}
+		if row == "" || (row[0] != ' ' && row[0] != '-' && row[0] != '+') {
+			return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: i + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: oldN, ActualNew: newN, Reason: "invalid hunk prefix; every hunk line must start with space, -, or +"}
+		}
+		countPatchRow(row, &oldN, &newN)
+		h.lines = append(h.lines, row)
+		if i+1 < len(lines) && lines[i+1] == `\ No newline at end of file` {
+			if row[0] != '+' {
+				h.oldNoNL = true
+			}
+			if row[0] != '-' {
+				h.newNoNL = true
+			}
+			i++
+		}
+		i++
+	}
+	if len(h.lines) == 0 {
+		return patchHunk{}, i, patchParseError{Path: path, Header: header, Line: index + 1, DeclaredOld: declaredOld, DeclaredNew: declaredNew, ActualOld: 0, ActualNew: 0, Reason: "hunk has no body"}
+	}
+	h.oldCount, h.newCount = oldN, newN
+	if h.locate {
+		h.oldStart, h.newStart = 1, 1
+	}
+	return h, i, nil
+}
+
+func countPatchRow(row string, oldN, newN *int) {
+	switch row[0] {
+	case ' ':
+		(*oldN)++
+		(*newN)++
+	case '-':
+		(*oldN)++
+	case '+':
+		(*newN)++
+	}
+}
+
+func firstNonBlank(lines []string) int {
+	for i, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			return i
+		}
+	}
+	return -1
+}
+
+func displayPatchPath(pf patchFile) string {
+	if pf.newPath != "" && pf.newPath != "/dev/null" {
+		return pf.newPath
+	}
+	return pf.oldPath
 }
 
 func parseHunkHeader(line string) (patchHunk, error) {
@@ -420,6 +649,32 @@ func applyFilePatchReport(body []byte, hunks []patchHunk, relocated *[]int) ([]b
 		if h.oldCount == 0 {
 			start = h.oldStart
 		}
+		if h.locate {
+			applied, matches := findExactHunkLocation(lines, cursor, h)
+			if matches == 0 {
+				return nil, patchApplyError{Hunk: idx + 1, OldLine: cursor + 1, Reason: "context mismatch; Codex hunk was not found"}
+			}
+			if matches > 1 {
+				return nil, patchApplyError{Hunk: idx + 1, OldLine: cursor + 1, Reason: "context is ambiguous; Codex hunk matched multiple locations"}
+			}
+			start = applied.start
+			out = append(out, lines[cursor:start]...)
+			out = append(out, applied.lines...)
+			if h.oldNoNL && (applied.next != len(lines) || trailingNL) {
+				return nil, fmt.Errorf("hunk #%d: invalid old newline marker", idx+1)
+			}
+			if applied.next == len(lines) {
+				trailingNL = !h.newNoNL
+			}
+			if h.newNoNL && applied.next != len(lines) {
+				return nil, fmt.Errorf("hunk #%d: new newline marker must be at EOF", idx+1)
+			}
+			cursor = applied.next
+			if relocated != nil {
+				*relocated = append(*relocated, idx+1)
+			}
+			continue
+		}
 		if start < cursor || start > len(lines) {
 			return nil, patchApplyError{Hunk: idx + 1, OldLine: start + 1, Reason: "starts outside file"}
 		}
@@ -457,6 +712,23 @@ func applyFilePatchReport(body []byte, hunks []patchHunk, relocated *[]int) ([]b
 		joined += "\n"
 	}
 	return []byte(joined), nil
+}
+
+func findExactHunkLocation(lines []string, cursor int, h patchHunk) (hunkApplyResult, int) {
+	var found hunkApplyResult
+	matches := 0
+	for start := cursor; start <= len(lines); start++ {
+		res, err := applyHunkAt(lines, start, h, false)
+		if err != nil {
+			continue
+		}
+		found = res
+		matches++
+		if matches > 1 {
+			return hunkApplyResult{}, matches
+		}
+	}
+	return found, matches
 }
 
 type hunkApplyResult struct {

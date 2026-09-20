@@ -194,12 +194,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "code_apply_patch",
-			Description: "Apply a unified diff patch across one or more files. Use dry_run=true to preview. " +
+			Description: "Apply a unified diff or Codex-style patch across one or more files. Use dry_run=true to preview. " +
 				"Dry runs return patch_id; pass patch_id later to apply the exact reviewed patch without resending it. " +
-				"Preferred for large existing-file rewrites instead of code_write_file full-content overwrites.",
+				"Preferred for large existing-file rewrites instead of code_write_file full-content overwrites. " +
+				"Unified example: --- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n" +
+				"Codex example: *** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch",
 			InputSchema: schemaObject(map[string]any{
-				"slug":        map[string]any{"type": "string"},
-				"patch":       map[string]any{"type": "string"},
+				"slug": map[string]any{"type": "string"},
+				"patch": map[string]any{
+					"type":        "string",
+					"description": "Unified diff or Codex-style patch. Unified example:\n--- a/file.txt\n+++ b/file.txt\n@@ -1 +1 @@\n-old\n+new\n\nCodex example:\n*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End Patch",
+				},
 				"patch_id":    map[string]any{"type": "string"},
 				"allow_fuzzy": map[string]any{"type": "boolean", "description": "Allow unique relocation and limited context drift; defaults to false."},
 				"dry_run":     map[string]any{"type": "boolean"},

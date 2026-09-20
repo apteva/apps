@@ -99,7 +99,7 @@ func TestReliabilityPatchStrictFixtures(t *testing.T) {
 		{"spaces", "a b", "one\n", "--- a/a b\n+++ b/a b\n@@ -1 +1 @@\n-one\n+two\n", "two\n", false},
 		{"quoted", "a b", "one\n", "--- \"a/a b\"\n+++ \"b/a b\"\n@@ -1 +1 @@\n-one\n+two\n", "two\n", false},
 		{"header-like-removal", "f", "-- old\n", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n--- old\n+new\n", "new\n", false},
-		{"bad-count", "f", "one\n", "--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n-one\n+two\n", "", true},
+		{"bad-count-normalized", "f", "one\n", "--- a/f\n+++ b/f\n@@ -1,2 +1,1 @@\n-one\n+two\n", "two\n", false},
 		{"duplicate", "f", "one\n", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-one\n+two\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-one\n+three\n", "", true},
 		{"rename", "f", "one\n", "--- a/f\n+++ b/g\n@@ -1 +1 @@\n-one\n+two\n", "", true},
 		{"strict-position", "f", "other\none\n", "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-one\n+two\n", "", true},
