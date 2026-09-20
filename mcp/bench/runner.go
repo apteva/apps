@@ -55,7 +55,7 @@ func (s *service) createRun(packID, name string, targets []Target, trials int) (
 
 	now := time.Now().UTC()
 	run := &Run{
-		ID: newID("run"), PackID: pack.ID, PackName: pack.Name, PackVersion: pack.Version,
+		ID: newID("run"), PackID: pack.ID, PackName: pack.Name, PackCategory: pack.Category, PackVersion: pack.Version,
 		PackDigest: pack.Digest, ScoringVersion: pack.ScoringVersion,
 		ScoringProfileDigest: pack.ProfileDigest, Name: name,
 		Targets: targets, Trials: trials, Status: RunStatusQueued,
@@ -74,11 +74,16 @@ func (s *service) createRun(packID, name string, targets []Target, trials int) (
 func (s *service) captureProvenance(pack *Pack) Provenance {
 	provenance := Provenance{
 		ScoringVersion: pack.ScoringVersion, PackDigest: pack.Digest, PackVersion: pack.Version,
+		Category:        pack.Category,
 		ScenarioDigests: scenarioDigests(pack.Scenarios),
+		ScenarioTags:    map[string][]string{},
 		SnapshotIDs:     map[string]string{}, EnvironmentIDs: map[string]string{},
 		SnapshotsVerified: false, CapturedAt: time.Now().UTC(),
 	}
 	for _, scenario := range pack.Scenarios {
+		if len(scenario.Tags) > 0 {
+			provenance.ScenarioTags[scenario.ID] = append([]string(nil), scenario.Tags...)
+		}
 		if scenario.SnapshotID != "" {
 			provenance.SnapshotIDs[scenario.ID] = scenario.SnapshotID
 		}
@@ -133,6 +138,7 @@ func (s *service) startRun(_ context.Context, run *Run) error {
 	}
 	s.ctx.Emit("bench.run.started", map[string]any{
 		"run_id": run.ID, "pack_digest": run.PackDigest, "pack_version": run.PackVersion,
+		"category":      run.PackCategory,
 		"experiment_id": experiment.ID, "targets": len(run.Targets), "trials": run.Trials,
 	})
 	return nil
@@ -342,7 +348,7 @@ func (s *service) collectRun(_ context.Context, run *Run) error {
 	}
 	s.ctx.Emit("bench.run.completed", map[string]any{
 		"run_id": run.ID, "pack_digest": run.PackDigest, "pack_version": run.PackVersion,
-		"scoring_version": run.ScoringVersion, "total": run.Summary.Total,
+		"category": run.PackCategory, "scoring_version": run.ScoringVersion, "total": run.Summary.Total,
 		"verified": run.Summary.Verified, "invalid": run.Summary.Invalid,
 		"pass_rate": run.Summary.PassRate, "average_score": run.Summary.AverageScore,
 	})
@@ -359,6 +365,7 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profi
 		BenchRunID:   run.ID,
 		ScenarioID:   scenario.ID,
 		ScenarioName: scenario.Name,
+		ScenarioTags: append([]string(nil), scenario.Tags...),
 		TargetIndex:  evaluated.TargetIndex,
 		Target:       evaluated.TargetSnap,
 		Trial:        evaluated.Repetition,

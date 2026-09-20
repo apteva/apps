@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.5.0
-description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; v0.5.0 compares multiple hidden setups without adding agents to the project.
+version: 0.6.0
+description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. v0.6.0 adds sealed benchmark categories, scenario tags, category-scoped discovery, result search, and cross-pack leaderboards.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -22,24 +22,25 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: bench_pack_list, description: "List benchmark packs, draft and sealed." }
+    - { name: bench_pack_list, description: "List benchmark packs, optionally filtered by category, state, scoring profile, or text." }
+    - { name: bench_category_list, description: "List benchmark categories with pack, scenario, and tag counts." }
     - { name: bench_pack_get, description: "Get one benchmark pack and its scenarios." }
-    - { name: bench_pack_create, description: "Create a draft benchmark pack." }
-    - { name: bench_pack_update, description: "Update a draft benchmark pack. Sealed packs are immutable." }
+    - { name: bench_pack_create, description: "Create a categorized draft benchmark pack." }
+    - { name: bench_pack_update, description: "Update a draft benchmark pack and its category. Sealed packs are immutable." }
     - { name: bench_pack_delete, description: "Delete a draft pack, or a sealed pack that has no runs." }
-    - { name: bench_scenario_put, description: "Add or replace one scenario in a draft pack." }
+    - { name: bench_scenario_put, description: "Add or replace one tagged scenario in a draft pack." }
     - { name: bench_scenario_delete, description: "Remove a scenario from a draft pack." }
     - { name: bench_pack_seal, description: "Seal a draft into a new immutable, content-hashed version." }
     - { name: bench_pack_fork, description: "Fork any pack into a fresh editable draft." }
     - { name: bench_run_create, description: "Run a sealed pack against one or more persistent agent_id or hidden draft targets for N trials." }
     - { name: bench_run_list, description: "List benchmark runs." }
     - { name: bench_run_get, description: "Get one benchmark run with its scored results." }
-    - { name: bench_run_search, description: "Search and paginate benchmark runs with pack, status, profile, and text filters." }
+    - { name: bench_run_search, description: "Search and paginate benchmark runs with category, pack, status, profile, and text filters." }
     - { name: bench_run_cancel, description: "Cancel a queued or running benchmark run." }
-    - { name: bench_result_list, description: "Search and paginate raw scored results across runs and packs." }
+    - { name: bench_result_list, description: "Search and paginate raw scored results by category, scenario tag, run, pack, target, and outcome." }
     - { name: bench_result_get, description: "Get one raw scored result by id." }
     - { name: bench_leaderboard, description: "Rank targets across every run of one sealed pack." }
-    - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack under one scoring contract." }
+    - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack, optionally scoped to one category, under one scoring contract." }
     - { name: bench_baseline_set, description: "Pin a run's result as the baseline for a pack scenario." }
     - { name: bench_baseline_compare, description: "Compare a run against pinned baselines." }
     - { name: bench_baseline_list, description: "List and paginate pinned baselines." }
@@ -68,7 +69,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.5.0
+    ref: bench/v0.6.0
     entry: mcp/bench
   port: 8080
   health_check: /health

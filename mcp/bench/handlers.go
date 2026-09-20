@@ -16,6 +16,16 @@ func (a *App) handlePacks(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusInternalServerError, err)
 			return
 		}
+		category := normalizeTaxonomyValue(r.URL.Query().Get("category"))
+		if category != "" {
+			filtered := make([]Pack, 0, len(packs))
+			for _, pack := range packs {
+				if pack.Category == category {
+					filtered = append(filtered, pack)
+				}
+			}
+			packs = filtered
+		}
 		writeJSON(w, http.StatusOK, packs)
 	case http.MethodPost:
 		var pack Pack
@@ -364,7 +374,7 @@ func (a *App) handleProfile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleGlobalLeaderboard(w http.ResponseWriter, r *http.Request) {
-	board, err := a.svc.globalLeaderboard(r.URL.Query().Get("profile_digest"))
+	board, err := a.svc.globalLeaderboard(r.URL.Query().Get("profile_digest"), r.URL.Query().Get("category"))
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, err)
 		return

@@ -36,6 +36,7 @@ type Pack struct {
 	ID             string `json:"id"`
 	Name           string `json:"name"`
 	Description    string `json:"description"`
+	Category       string `json:"category,omitempty"`
 	State          string `json:"state"`
 	Version        string `json:"version,omitempty"`
 	Digest         string `json:"digest,omitempty"`
@@ -64,6 +65,7 @@ func (p *Pack) scenario(id string) *Scenario {
 type Scenario struct {
 	ID             string   `json:"id"`
 	Name           string   `json:"name"`
+	Tags           []string `json:"tags,omitempty"`
 	Prompt         string   `json:"prompt"`
 	Goals          []string `json:"goals,omitempty"`
 	EnvironmentID  string   `json:"environment_id,omitempty"`
@@ -152,21 +154,24 @@ func (t Target) key() string {
 // the snapshot ids they pinned and callers must treat world-identity as
 // asserted rather than proven until that lands.
 type Provenance struct {
-	ScoringVersion    string            `json:"scoring_version"`
-	PackDigest        string            `json:"pack_digest"`
-	PackVersion       string            `json:"pack_version"`
-	ScenarioDigests   map[string]string `json:"scenario_digests"`
-	SnapshotIDs       map[string]string `json:"snapshot_ids,omitempty"`
-	EnvironmentIDs    map[string]string `json:"environment_ids,omitempty"`
-	PlatformVersion   string            `json:"platform_version,omitempty"`
-	SnapshotsVerified bool              `json:"snapshots_verified"`
-	CapturedAt        time.Time         `json:"captured_at"`
+	ScoringVersion    string              `json:"scoring_version"`
+	PackDigest        string              `json:"pack_digest"`
+	PackVersion       string              `json:"pack_version"`
+	Category          string              `json:"category,omitempty"`
+	ScenarioDigests   map[string]string   `json:"scenario_digests"`
+	ScenarioTags      map[string][]string `json:"scenario_tags,omitempty"`
+	SnapshotIDs       map[string]string   `json:"snapshot_ids,omitempty"`
+	EnvironmentIDs    map[string]string   `json:"environment_ids,omitempty"`
+	PlatformVersion   string              `json:"platform_version,omitempty"`
+	SnapshotsVerified bool                `json:"snapshots_verified"`
+	CapturedAt        time.Time           `json:"captured_at"`
 }
 
 type Run struct {
 	ID             string `json:"id"`
 	PackID         string `json:"pack_id"`
 	PackName       string `json:"pack_name"`
+	PackCategory   string `json:"pack_category,omitempty"`
 	PackVersion    string `json:"pack_version"`
 	PackDigest     string `json:"pack_digest"`
 	ScoringVersion string `json:"scoring_version"`
@@ -194,6 +199,7 @@ type Result struct {
 	BenchRunID    string    `json:"bench_run_id"`
 	ScenarioID    string    `json:"scenario_id"`
 	ScenarioName  string    `json:"scenario_name"`
+	ScenarioTags  []string  `json:"scenario_tags,omitempty"`
 	TargetIndex   int       `json:"target_index"`
 	Target        Target    `json:"target"`
 	Trial         int       `json:"trial"`

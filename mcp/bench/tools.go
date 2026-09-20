@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -71,6 +72,25 @@ var benchRunCreateSchema = map[string]any{
 	"additionalProperties": false,
 }
 
+func packWriteSchema(fields ...string) map[string]any {
+	schema := requiredSchema(fields...)
+	properties := schema["properties"].(map[string]any)
+	properties["description"] = stringField("Benchmark pack description")
+	properties["category"] = stringField("Stable category slug such as coding; human-readable input is normalized")
+	properties["profile_digest"] = stringField("Optional sealed scoring profile digest")
+	return schema
+}
+
+func scenarioPutSchema() map[string]any {
+	schema := requiredSchema("pack_id", "name", "prompt")
+	properties := schema["properties"].(map[string]any)
+	properties["tags"] = map[string]any{
+		"type": "array", "items": stringField("Scenario tag such as bug-fix or typescript"),
+		"description": "Searchable scenario tags; values are normalized, deduplicated, and sealed into the pack digest",
+	}
+	return schema
+}
+
 func requiredSchema(fields ...string) map[string]any {
 	props := map[string]any{}
 	for _, field := range fields {
@@ -107,17 +127,20 @@ func intArg(args map[string]any, key string) int {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "bench_pack_list", Description: "List benchmark packs and their scenarios, optionally filtering by state, scoring profile, or text.",
+		{Name: "bench_pack_list", Description: "List benchmark packs and their scenarios, optionally filtering by category, state, scoring profile, or text.",
 			InputSchema: readSchema(map[string]any{
 				"state": stringField("draft or sealed"), "profile_digest": stringField("Scoring profile digest"),
-				"query": stringField("Case-insensitive text matched against pack name and description"),
+				"category": stringField("Category slug such as coding"),
+				"query":    stringField("Case-insensitive text matched against pack, category, scenario names, and tags"),
 			}), Handler: a.toolListPacks},
+		{Name: "bench_category_list", Description: "List benchmark categories with pack, scenario, and tag counts.",
+			InputSchema: readSchema(map[string]any{}), Handler: a.toolListCategories},
 		{Name: "bench_pack_get", Description: "Get one benchmark pack and its scenarios by id or content digest.",
 			InputSchema: readSchema(map[string]any{"id": stringField("Pack id"), "digest": stringField("Sealed pack content digest")}),
 			Handler:     a.toolGetPack},
-		{Name: "bench_pack_create", Description: "Create a draft benchmark pack.", InputSchema: requiredSchema("name"),
+		{Name: "bench_pack_create", Description: "Create a categorized draft benchmark pack.", InputSchema: packWriteSchema("name"),
 			Handler: a.toolSavePack(true)},
-		{Name: "bench_pack_update", Description: "Update a draft benchmark pack. Sealed packs are immutable.", InputSchema: requiredSchema("id", "name"),
+		{Name: "bench_pack_update", Description: "Update a draft benchmark pack and its category. Sealed packs are immutable.", InputSchema: packWriteSchema("id", "name"),
 			Handler: a.toolSavePack(false)},
 		{Name: "bench_pack_delete", Description: "Delete a draft pack, or a sealed pack that has no runs.", InputSchema: requiredSchema("id"),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -125,7 +148,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				return map[string]bool{"ok": err == nil}, err
 			}},
 
-		{Name: "bench_scenario_put", Description: "Add or replace one scenario in a draft pack.", InputSchema: requiredSchema("pack_id", "name", "prompt"),
+		{Name: "bench_scenario_put", Description: "Add or replace one tagged scenario in a draft pack.", InputSchema: scenarioPutSchema(),
 			Handler: a.toolPutScenario},
 		{Name: "bench_scenario_delete", Description: "Remove a scenario from a draft pack.", InputSchema: requiredSchema("pack_id", "scenario_id"),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -151,6 +174,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "bench_run_search", Description: "Search and paginate benchmark runs with optional pack, status, profile, and text filters.",
 			InputSchema: readSchema(map[string]any{
 				"pack_id": stringField("Pack id"), "pack_digest": stringField("Sealed pack digest"),
+				"category":       stringField("Pack category slug"),
 				"profile_digest": stringField("Scoring profile digest"), "status": stringField("Run status"),
 				"query": stringField("Text matched against run name, pack name, and error"),
 				"limit": integerField("Page size, 1-500; defaults to 100", 1), "offset": integerField("Zero-based result offset", 0),
@@ -161,7 +185,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "bench_result_list", Description: "Search and paginate raw scored results across runs and packs, including invalid harness results.",
 			InputSchema: readSchema(map[string]any{
 				"run_id": stringField("Bench run id"), "pack_id": stringField("Pack id"), "pack_digest": stringField("Sealed pack digest"),
-				"scenario_id": stringField("Scenario id"), "admission": stringField("verified, diagnostic, or invalid"),
+				"category": stringField("Pack category slug"), "scenario_id": stringField("Scenario id"),
+				"tag": stringField("Scenario tag"), "admission": stringField("verified, diagnostic, or invalid"),
 				"provider": stringField("Target provider"), "model": stringField("Target model"),
 				"passed": boolField("Filter by task pass/fail"), "limit": integerField("Page size, 1-500; defaults to 100", 1),
 				"offset": integerField("Zero-based result offset", 0),
@@ -172,10 +197,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "bench_leaderboard", Description: "Rank targets across every run of one sealed pack, selected by id or digest.",
 			InputSchema: readSchema(map[string]any{"pack_id": stringField("Sealed pack id"), "pack_digest": stringField("Sealed pack digest")}),
 			Handler:     a.toolLeaderboard},
-		{Name: "bench_leaderboard_global", Description: "Rank targets across every sealed pack under one scoring profile.",
-			InputSchema: readSchema(map[string]any{"profile_digest": stringField("Scoring profile digest; defaults to Verified v1")}),
+		{Name: "bench_leaderboard_global", Description: "Rank targets across every sealed pack, optionally scoped to one category, under one scoring profile.",
+			InputSchema: readSchema(map[string]any{
+				"profile_digest": stringField("Scoring profile digest; defaults to Verified v1"),
+				"category":       stringField("Optional category slug; when set, aggregate only packs in that category"),
+			}),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
-				return a.svc.globalLeaderboard(str(args, "profile_digest"))
+				return a.svc.globalLeaderboard(str(args, "profile_digest"), str(args, "category"))
 			}},
 		{Name: "bench_baseline_set", Description: "Pin a run's result as the baseline for a pack scenario.", InputSchema: requiredSchema("run_id", "scenario_id"),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -223,7 +251,9 @@ func (a *App) toolListPacks(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	state, digest, query := str(args, "state"), str(args, "profile_digest"), strings.ToLower(strings.TrimSpace(str(args, "query")))
+	state, digest := str(args, "state"), str(args, "profile_digest")
+	category := normalizeTaxonomyValue(str(args, "category"))
+	query := strings.ToLower(strings.TrimSpace(str(args, "query")))
 	out := make([]Pack, 0, len(packs))
 	for _, pack := range packs {
 		if state != "" && pack.State != state {
@@ -232,11 +262,67 @@ func (a *App) toolListPacks(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		if digest != "" && pack.ProfileDigest != digest {
 			continue
 		}
-		if query != "" && !strings.Contains(strings.ToLower(pack.Name+"\n"+pack.Description), query) {
+		if category != "" && pack.Category != category {
+			continue
+		}
+		searchable := pack.Name + "\n" + pack.Description + "\n" + pack.Category
+		for _, scenario := range pack.Scenarios {
+			searchable += "\n" + scenario.Name + "\n" + strings.Join(scenario.Tags, " ")
+		}
+		if query != "" && !strings.Contains(strings.ToLower(searchable), query) {
 			continue
 		}
 		out = append(out, pack)
 	}
+	return out, nil
+}
+
+type categorySummary struct {
+	Category  string   `json:"category"`
+	Drafts    int      `json:"drafts"`
+	Sealed    int      `json:"sealed"`
+	Scenarios int      `json:"scenarios"`
+	Tags      []string `json:"tags"`
+}
+
+func (a *App) toolListCategories(_ *sdk.AppCtx, _ map[string]any) (any, error) {
+	packs, err := a.svc.db.listPacks()
+	if err != nil {
+		return nil, err
+	}
+	byCategory := map[string]*categorySummary{}
+	tagSets := map[string]map[string]struct{}{}
+	for _, pack := range packs {
+		if pack.Category == "" {
+			continue
+		}
+		item := byCategory[pack.Category]
+		if item == nil {
+			item = &categorySummary{Category: pack.Category, Tags: []string{}}
+			byCategory[pack.Category] = item
+			tagSets[pack.Category] = map[string]struct{}{}
+		}
+		if pack.State == PackStateSealed {
+			item.Sealed++
+		} else {
+			item.Drafts++
+		}
+		item.Scenarios += len(pack.Scenarios)
+		for _, scenario := range pack.Scenarios {
+			for _, tag := range scenario.Tags {
+				tagSets[pack.Category][tag] = struct{}{}
+			}
+		}
+	}
+	out := make([]categorySummary, 0, len(byCategory))
+	for category, item := range byCategory {
+		for tag := range tagSets[category] {
+			item.Tags = append(item.Tags, tag)
+		}
+		sort.Strings(item.Tags)
+		out = append(out, *item)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Category < out[j].Category })
 	return out, nil
 }
 

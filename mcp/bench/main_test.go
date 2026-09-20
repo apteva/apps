@@ -340,6 +340,100 @@ func TestSealDigestIgnoresScenarioAuthoringOrder(t *testing.T) {
 	}
 }
 
+func TestCategoriesAndTagsAreNormalizedSealedAndSnapshotted(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	scenario := crmScenario()
+	scenario.Tags = []string{"TypeScript", "bug fix", "typescript", "  Backend  "}
+	draft, err := svc.savePack(&Pack{
+		Name: "Coding Core", Category: " Coding & Software ", Scenarios: []Scenario{scenario},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Category != "coding-software" {
+		t.Fatalf("category = %q, want coding-software", draft.Category)
+	}
+	draft, err = svc.savePack(&Pack{ID: draft.ID, Name: draft.Name, Description: "updated by an older client"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Category != "coding-software" {
+		t.Fatal("an update that omitted the v0.6 category erased it")
+	}
+	replacement := draft.Scenarios[0]
+	replacement.Tags = nil
+	draft, err = svc.putScenario(draft.ID, replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(draft.Scenarios[0].Tags) != 3 {
+		t.Fatal("an older scenario update that omitted tags erased them")
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTags := []string{"backend", "bug-fix", "typescript"}
+	if got := sealed.Scenarios[0].Tags; fmt.Sprint(got) != fmt.Sprint(wantTags) {
+		t.Fatalf("tags = %#v, want %#v", got, wantTags)
+	}
+
+	run, err := svc.createRun(sealed.ID, "", []Target{{AgentID: 1}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PackCategory != "coding-software" || run.Provenance.Category != "coding-software" {
+		t.Fatalf("run did not snapshot category: %+v", run)
+	}
+	if got := run.Provenance.ScenarioTags[scenario.ID]; fmt.Sprint(got) != fmt.Sprint(wantTags) {
+		t.Fatalf("provenance tags = %#v, want %#v", got, wantTags)
+	}
+	result := svc.scoreOne(run, sealed.Scenarios[0], evalRun{
+		ID: "eval-1", TargetIndex: 0, Repetition: 1, Status: "pass", Execution: execution(1000, 1, 20, 10, 0, 0.01),
+	}, verifiedV1())
+	if err := svc.db.saveResult(&result); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.db.getResult(result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(stored.ScenarioTags) != fmt.Sprint(wantTags) {
+		t.Fatalf("stored result tags = %#v, want %#v", stored.ScenarioTags, wantTags)
+	}
+
+	forked, err := svc.fork(sealed.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if forked.Category != sealed.Category || forked.ProfileDigest != sealed.ProfileDigest {
+		t.Fatalf("fork lost sealed metadata: %+v", forked)
+	}
+}
+
+func TestEmptyTaxonomyPreservesLegacyPackDigest(t *testing.T) {
+	pack := &Pack{
+		Name: "Legacy", Description: "Existing definition", ScoringVersion: ScoringVersion,
+		Scenarios: []Scenario{crmScenario()},
+	}
+	legacy, err := canonicalDigest(struct {
+		Name           string     `json:"name"`
+		Description    string     `json:"description"`
+		ScoringVersion string     `json:"scoring_version"`
+		Scenarios      []Scenario `json:"scenarios"`
+	}{pack.Name, pack.Description, pack.ScoringVersion, normalizeScenarios(pack.Scenarios)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := packDigest(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != legacy {
+		t.Fatalf("empty taxonomy changed the legacy digest: current=%s legacy=%s", current, legacy)
+	}
+}
+
 func TestSealedPacksRejectEdits(t *testing.T) {
 	svc, _ := newTestService(t, &fakePlatform{})
 	draft, err := svc.savePack(&Pack{Name: "Core", Scenarios: []Scenario{crmScenario()}}, true)
@@ -790,6 +884,80 @@ func TestReadSearchesFilterAndPaginateWithoutDroppingResults(t *testing.T) {
 	}
 }
 
+func TestCategoryAndTagFiltersScopeDiscoveryResultsAndLeaderboards(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	target := Target{AgentID: 1, Provider: "openai-codex", Model: "gpt-test"}
+	makePack := func(name, category, tag string) (*Pack, *Run) {
+		t.Helper()
+		scenario := crmScenario()
+		scenario.ID = slugify(name)
+		scenario.Name = name
+		scenario.Tags = []string{tag}
+		draft, err := svc.savePack(&Pack{Name: name, Category: category, Scenarios: []Scenario{scenario}}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sealed, err := svc.seal(draft.ID, "1.0.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		run, err := svc.createRun(sealed.ID, name+" run", []Target{target}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		run.Status = RunStatusCompleted
+		if err := svc.db.saveRun(run); err != nil {
+			t.Fatal(err)
+		}
+		result := Result{
+			ID: newID("result"), BenchRunID: run.ID, ScenarioID: scenario.ID, ScenarioName: scenario.Name,
+			ScenarioTags: normalizeTaxonomyValues(scenario.Tags), Target: target, Trial: 1, Passed: true,
+			Admission: AdmissionVerified, Score: Score{Score: 100}, CreatedAt: time.Now().UTC(),
+		}
+		if err := svc.db.saveResult(&result); err != nil {
+			t.Fatal(err)
+		}
+		return sealed, run
+	}
+	coding, _ := makePack("Coding Fix", "Coding", "Bug Fix")
+	makePack("Research Sources", "Research", "Citation")
+
+	runs, err := svc.db.searchRuns(runQuery{Category: "CODING"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runs.Page.Total != 1 || runs.Runs[0].PackCategory != "coding" {
+		t.Fatalf("category run filter returned %#v", runs)
+	}
+	results, err := svc.db.searchResults(resultQuery{Category: "coding", Tag: "bug fix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results.Page.Total != 1 || results.Results[0].ScenarioID != coding.Scenarios[0].ID {
+		t.Fatalf("category/tag result filter returned %#v", results)
+	}
+	board, err := svc.globalLeaderboard("", "Coding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if board["category"] != "coding" || len(board["packs"].([]map[string]any)) != 1 {
+		t.Fatalf("category leaderboard was not scoped: %#v", board)
+	}
+
+	app := &App{svc: svc}
+	categories, err := app.toolListCategories(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := categories.([]categorySummary)
+	if len(items) != 2 || items[0].Category != "coding" || fmt.Sprint(items[0].Tags) != "[bug-fix]" {
+		t.Fatalf("category discovery returned %#v", items)
+	}
+}
+
 func TestReadToolsUseExplicitDiscoverableSchemas(t *testing.T) {
 	app := &App{}
 	wanted := map[string]bool{
@@ -996,7 +1164,7 @@ func TestGlobalLeaderboardFlagsUnequalCoverage(t *testing.T) {
 	// deepseek only ever faced one of the two packs.
 	seedResult(t, svc, runA.ID, packA.Scenarios[0].ID, narrow, true, full, Metrics{DurationMS: 1000})
 
-	board, err := svc.globalLeaderboard("")
+	board, err := svc.globalLeaderboard("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1028,7 +1196,7 @@ func TestGlobalLeaderboardIsComparableWhenCoverageMatches(t *testing.T) {
 	seedResult(t, svc, run.ID, pack.Scenarios[0].ID, a, true, full, Metrics{DurationMS: 1000})
 	seedResult(t, svc, run.ID, pack.Scenarios[0].ID, b, false, Score{CostBasis: "cost_usd"}, Metrics{DurationMS: 1000})
 
-	board, err := svc.globalLeaderboard("")
+	board, err := svc.globalLeaderboard("", "")
 	if err != nil {
 		t.Fatal(err)
 	}

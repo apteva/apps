@@ -27,7 +27,9 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 	if creating {
 		pack := &Pack{
 			ID: newID("pack"), Name: input.Name, Description: input.Description,
-			State: PackStateDraft, Scenarios: input.Scenarios, ProfileDigest: input.ProfileDigest, Revision: 1,
+			Category: normalizeTaxonomyValue(input.Category),
+			State:    PackStateDraft, Scenarios: normalizeScenarioTaxonomy(input.Scenarios),
+			ProfileDigest: input.ProfileDigest, Revision: 1,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		if pack.ProfileDigest != "" {
@@ -53,8 +55,13 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 		return nil, err
 	}
 	existing.Name, existing.Description, existing.UpdatedAt = input.Name, input.Description, now
+	// Category did not exist before v0.6.0. Preserve it when an older client
+	// updates another field without sending category at all.
+	if input.Category != "" || existing.Category == "" {
+		existing.Category = normalizeTaxonomyValue(input.Category)
+	}
 	if input.Scenarios != nil {
-		existing.Scenarios = input.Scenarios
+		existing.Scenarios = normalizeScenarioTaxonomy(input.Scenarios)
 	}
 	if input.ProfileDigest != "" {
 		if p, err := s.db.getProfileByDigest(input.ProfileDigest); err != nil {
@@ -104,9 +111,16 @@ func (s *service) putScenario(packID string, scenario Scenario) (*Pack, error) {
 	if scenario.Checks == nil {
 		scenario.Checks = []Check{}
 	}
+	tagsProvided := scenario.Tags != nil
+	scenario.Tags = normalizeTaxonomyValues(scenario.Tags)
 	replaced := false
 	for i := range pack.Scenarios {
 		if pack.Scenarios[i].ID == scenario.ID {
+			// Tags are new in v0.6.0. An older client replacing a scenario does
+			// not know to echo them; an explicit [] still clears them.
+			if !tagsProvided {
+				scenario.Tags = pack.Scenarios[i].Tags
+			}
 			pack.Scenarios[i], replaced = scenario, true
 			break
 		}
@@ -200,7 +214,7 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	}
 	now := time.Now().UTC()
 	pack := &Pack{
-		ID: newID("pack"), Name: draft.Name, Description: draft.Description,
+		ID: newID("pack"), Name: draft.Name, Description: draft.Description, Category: draft.Category,
 		State: PackStateSealed, Version: version, ScoringVersion: profile.Version,
 		ProfileDigest: profile.Digest,
 		SourcePackID:  draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
@@ -226,7 +240,7 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	s.ctx.Emit("bench.pack.sealed", map[string]any{
 		"pack_id": pack.ID, "name": pack.Name, "version": pack.Version,
 		"digest": pack.Digest, "scoring_version": pack.ScoringVersion,
-		"scenarios": len(pack.Scenarios),
+		"category": pack.Category, "scenarios": len(pack.Scenarios),
 	})
 	return pack, nil
 }
@@ -244,8 +258,8 @@ func (s *service) fork(sourceID, name string) (*Pack, error) {
 	}
 	now := time.Now().UTC()
 	draft := &Pack{
-		ID: newID("pack"), Name: name, Description: source.Description,
-		State: PackStateDraft, Scenarios: source.Scenarios, Revision: 1,
+		ID: newID("pack"), Name: name, Description: source.Description, Category: source.Category,
+		State: PackStateDraft, Scenarios: source.Scenarios, ProfileDigest: source.ProfileDigest, Revision: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.db.savePack(draft); err != nil {
@@ -286,6 +300,7 @@ func normalizeScenarios(scenarios []Scenario) []Scenario {
 		if out[i].Goals == nil {
 			out[i].Goals = []string{}
 		}
+		out[i].Tags = normalizeTaxonomyValues(out[i].Tags)
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
 	return out
@@ -297,9 +312,10 @@ func packDigest(pack *Pack) (string, error) {
 	return canonicalDigest(struct {
 		Name           string     `json:"name"`
 		Description    string     `json:"description"`
+		Category       string     `json:"category,omitempty"`
 		ScoringVersion string     `json:"scoring_version"`
 		Scenarios      []Scenario `json:"scenarios"`
-	}{pack.Name, pack.Description, pack.ScoringVersion, normalizeScenarios(pack.Scenarios)})
+	}{pack.Name, pack.Description, pack.Category, pack.ScoringVersion, normalizeScenarios(pack.Scenarios)})
 }
 
 func scenarioDigests(scenarios []Scenario) map[string]string {
@@ -328,6 +344,44 @@ func slugify(value string) string {
 		}
 	}
 	return strings.Trim(b.String(), "-")
+}
+
+func normalizeTaxonomyValue(value string) string { return slugify(value) }
+
+func normalizeTaxonomyValues(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		normalized := normalizeTaxonomyValue(value)
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeScenarioTaxonomy(scenarios []Scenario) []Scenario {
+	if scenarios == nil {
+		return nil
+	}
+	out := make([]Scenario, len(scenarios))
+	copy(out, scenarios)
+	for i := range out {
+		out[i].Tags = normalizeTaxonomyValues(out[i].Tags)
+	}
+	return out
 }
 
 // ---- scoring profiles ----
@@ -549,7 +603,7 @@ func (s *service) previewProfile(packDigest string, candidate *Profile) (map[str
 	if err := validateProfile(candidate); err != nil {
 		return nil, err
 	}
-	results, err := s.db.listAdmittedResults(pack.ProfileDigest)
+	results, err := s.db.listAdmittedResults(pack.ProfileDigest, "")
 	if err != nil {
 		return nil, err
 	}
@@ -792,13 +846,14 @@ type leaderboardRow struct {
 // scenarioRow is one target's record on one scenario, for the per-scenario
 // breakdown under a pack's leaderboard.
 type scenarioRow struct {
-	ScenarioID   string  `json:"scenario_id"`
-	ScenarioName string  `json:"scenario_name"`
-	Label        string  `json:"label"`
-	Runs         int     `json:"runs"`
-	Passed       int     `json:"passed"`
-	PassRate     float64 `json:"pass_rate"`
-	AverageScore float64 `json:"average_score"`
+	ScenarioID   string   `json:"scenario_id"`
+	ScenarioName string   `json:"scenario_name"`
+	ScenarioTags []string `json:"scenario_tags,omitempty"`
+	Label        string   `json:"label"`
+	Runs         int      `json:"runs"`
+	Passed       int      `json:"passed"`
+	PassRate     float64  `json:"pass_rate"`
+	AverageScore float64  `json:"average_score"`
 }
 
 // aggregate folds admitted results into ranked rows keyed by the complete
@@ -889,7 +944,8 @@ func byScenario(results []resultWithPack) []scenarioRow {
 	for _, result := range results {
 		k := key{result.ScenarioID, result.Target.key()}
 		if acc[k] == nil {
-			acc[k] = &scenarioRow{ScenarioID: result.ScenarioID, ScenarioName: result.ScenarioName, Label: result.Target.label()}
+			acc[k] = &scenarioRow{ScenarioID: result.ScenarioID, ScenarioName: result.ScenarioName,
+				ScenarioTags: result.ScenarioTags, Label: result.Target.label()}
 			order = append(order, k)
 		}
 		row := acc[k]
@@ -925,7 +981,7 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 	if pack == nil {
 		return nil, errors.New("no sealed pack with that digest")
 	}
-	all, err := s.db.listAdmittedResults(pack.ProfileDigest)
+	all, err := s.db.listAdmittedResults(pack.ProfileDigest, "")
 	if err != nil {
 		return nil, err
 	}
@@ -936,7 +992,7 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 		}
 	}
 	return map[string]any{
-		"pack":            map[string]any{"id": pack.ID, "name": pack.Name, "version": pack.Version, "digest": pack.Digest},
+		"pack":            map[string]any{"id": pack.ID, "name": pack.Name, "category": pack.Category, "version": pack.Version, "digest": pack.Digest},
 		"scoring_version": pack.ScoringVersion,
 		"profile_digest":  pack.ProfileDigest,
 		"rows":            aggregate(scoped),
@@ -949,8 +1005,9 @@ func (s *service) leaderboard(packDigest string) (map[string]any, error) {
 // version. Targets that ran different packs are still listed, with their
 // coverage reported and comparable=false, rather than being averaged together
 // as though they had faced the same work.
-func (s *service) globalLeaderboard(profileDigest string) (map[string]any, error) {
-	versions, err := s.db.scoringVersions()
+func (s *service) globalLeaderboard(profileDigest, category string) (map[string]any, error) {
+	category = normalizeTaxonomyValue(category)
+	versions, err := s.db.scoringVersions(category)
 	if err != nil {
 		return nil, err
 	}
@@ -969,7 +1026,7 @@ func (s *service) globalLeaderboard(profileDigest string) (map[string]any, error
 	if profile == nil {
 		return nil, errors.New("scoring profile not found")
 	}
-	results, err := s.db.listAdmittedResults(profileDigest)
+	results, err := s.db.listAdmittedResults(profileDigest, category)
 	if err != nil {
 		return nil, err
 	}
@@ -978,7 +1035,8 @@ func (s *service) globalLeaderboard(profileDigest string) (map[string]any, error
 	for _, result := range results {
 		if packs[result.PackDigest] == nil {
 			packs[result.PackDigest] = map[string]any{
-				"digest": result.PackDigest, "name": result.PackName, "version": result.PackVersion,
+				"digest": result.PackDigest, "name": result.PackName,
+				"category": result.PackCategory, "version": result.PackVersion,
 			}
 		}
 	}
@@ -1002,6 +1060,7 @@ func (s *service) globalLeaderboard(profileDigest string) (map[string]any, error
 	}
 
 	return map[string]any{
+		"category":         category,
 		"scoring_version":  profile.Version,
 		"profile_digest":   profileDigest,
 		"profile_name":     profile.Name,

@@ -33,6 +33,7 @@ interface Check {
 interface Scenario {
   id: string;
   name: string;
+  tags?: string[];
   prompt: string;
   goals?: string[];
   environment_id?: string;
@@ -48,6 +49,7 @@ interface Pack {
   id: string;
   name: string;
   description: string;
+  category?: string;
   state: "draft" | "sealed";
   version?: string;
   digest?: string;
@@ -112,6 +114,7 @@ interface Run {
   id: string;
   pack_id: string;
   pack_name: string;
+  pack_category?: string;
   pack_version: string;
   pack_digest: string;
   name: string;
@@ -139,6 +142,7 @@ interface LeaderboardRow {
 interface ScenarioRow {
   scenario_id: string;
   scenario_name: string;
+  scenario_tags?: string[];
   label: string;
   runs: number;
   pass_rate: number;
@@ -146,9 +150,10 @@ interface ScenarioRow {
 }
 
 interface GlobalBoard {
+  category?: string;
   scoring_version: string;
   scoring_versions?: string[];
-  packs: { digest: string; name: string; version: string }[];
+  packs: { digest: string; name: string; category?: string; version: string }[];
   rows: LeaderboardRow[];
   by_scenario?: ScenarioRow[];
   comparable: boolean;
@@ -189,6 +194,9 @@ async function call<T>(path: string, scope: Scope, init?: RequestInit): Promise<
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 const secs = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.round(ms)}ms`);
 const short = (d?: string) => (d ? d.slice(0, 12) : "");
+const categoryLabel = (value?: string) => value
+  ? value.split("-").map((part) => part ? part[0].toUpperCase() + part.slice(1) : part).join(" ")
+  : "Uncategorized";
 const modelLabel = (m: Catalog["models"] extends (infer T)[] | undefined ? T : never) =>
   m.gateway_model || `${m.provider || ""}/${m.model_id || ""}`.replace(/^\//, "");
 const targetLabel = (target?: Target) => {
@@ -203,7 +211,7 @@ const labelCls = "text-xs text-text-dim";
 
 function emptyScenario(): Scenario {
   return {
-    id: "", name: "", prompt: "", goals: [], environment_id: "", snapshot_id: "",
+    id: "", name: "", tags: [], prompt: "", goals: [], environment_id: "", snapshot_id: "",
     checks: [{ name: "", app: "", tool: "", path: "", equals: "" }],
     budget: { duration_ms: 120000, cost_usd: 1, tokens_total: 80000, turns: 12 },
     timeout_seconds: 600, max_turns: 12, weight: 1,
@@ -219,16 +227,23 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   const [board, setBoard] = useState<LeaderboardRow[]>([]);
   const [boardScenarios, setBoardScenarios] = useState<ScenarioRow[]>([]);
   const [globalBoard, setGlobalBoard] = useState<GlobalBoard | null>(null);
+  const [globalCategory, setGlobalCategory] = useState("");
+  const [packCategory, setPackCategory] = useState("");
   const [view, setView] = useState<"pack" | "global">("pack");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [editing, setEditing] = useState<Scenario | null>(null);
+  const [editingPack, setEditingPack] = useState<Pack | null>(null);
   const [newPackOpen, setNewPackOpen] = useState(false);
   const [runFormOpen, setRunFormOpen] = useState(false);
   const [openRun, setOpenRun] = useState<Run | null>(null);
 
   const scope = useMemo<Scope>(() => ({ projectId, installId }), [projectId, installId]);
   const selected = useMemo(() => packs.find((p) => p.id === selectedId), [packs, selectedId]);
+  const categories = useMemo(
+    () => [...new Set(packs.map((p) => p.category || "").filter(Boolean))].sort(),
+    [packs],
+  );
   const packRuns = useMemo(
     () => (selected ? runs.filter((r) => r.pack_digest === selected.digest || r.pack_id === selected.id) : runs),
     [runs, selected],
@@ -271,11 +286,12 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
 
   useEffect(() => {
     if (view !== "global" || !projectId) return;
-    const load = () => call<GlobalBoard>("/api/leaderboard", scope).then(setGlobalBoard).catch((e) => setStatus(String(e)));
+    const query = globalCategory ? `?category=${encodeURIComponent(globalCategory)}` : "";
+    const load = () => call<GlobalBoard>(`/api/leaderboard${query}`, scope).then(setGlobalBoard).catch((e) => setStatus(String(e)));
     void load();
     const timer = setInterval(load, 10000);
     return () => clearInterval(timer);
-  }, [view, projectId, scope]);
+  }, [view, projectId, scope, globalCategory]);
 
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -299,15 +315,18 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
     );
   }
 
-  const drafts = packs.filter((p) => p.state === "draft");
-  const sealed = packs.filter((p) => p.state === "sealed");
+  const visiblePacks = packCategory ? packs.filter((p) => p.category === packCategory) : packs;
+  const drafts = visiblePacks.filter((p) => p.state === "draft");
+  const sealed = visiblePacks.filter((p) => p.state === "sealed");
   const isDraft = selected?.state === "draft";
 
   return (
     <div className="h-full flex flex-col bg-bg text-text">
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
         <span className="font-medium">Bench</span>
-        {view === "global" && <span className="text-xs text-text-dim">every sealed benchmark</span>}
+        {view === "global" && <span className="text-xs text-text-dim">
+          {globalCategory ? `${categoryLabel(globalCategory)} benchmarks` : "every sealed benchmark"}
+        </span>}
         {view === "pack" && selected && (
           <span className="text-xs text-text-dim">
             {selected.state === "sealed" ? `v${selected.version} · ${short(selected.digest)}` : "draft · seal to run"}
@@ -324,6 +343,12 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
             <div className="text-xs text-text-dim">Every sealed benchmark</div>
           </button>
           <button className={btn} onClick={() => { setView("pack"); setNewPackOpen(true); }}>+ New benchmark</button>
+          {categories.length > 0 && (
+            <select className={field} value={packCategory} onChange={(e) => setPackCategory(e.target.value)}>
+              <option value="">All categories</option>
+              {categories.map((category) => <option key={category} value={category}>{categoryLabel(category)}</option>)}
+            </select>
+          )}
           <PackGroup label="Drafts" packs={drafts} selectedId={view === "pack" ? selectedId : ""} onSelect={(id) => { setView("pack"); setSelectedId(id); }} />
           <PackGroup label="Sealed" packs={sealed} selectedId={view === "pack" ? selectedId : ""} onSelect={(id) => { setView("pack"); setSelectedId(id); }} />
           {packs.length === 0 && (
@@ -335,7 +360,7 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
 
         <div className="overflow-auto p-4 flex flex-col gap-4">
           {view === "global" && (
-            <GlobalLeaderboard board={globalBoard} />
+            <GlobalLeaderboard board={globalBoard} categories={categories} category={globalCategory} onCategory={setGlobalCategory} />
           )}
 
           {view === "pack" && !selected && <div className="text-sm text-text-dim">Select or create a benchmark.</div>}
@@ -345,9 +370,14 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <div className="font-medium">{selected.name}</div>
-                  <div className="text-xs text-text-dim">{selected.description || "No description."}</div>
+                  <div className="text-xs text-text-dim">
+                    {categoryLabel(selected.category)}{selected.description ? ` · ${selected.description}` : ""}
+                  </div>
                 </div>
                 <div className="flex gap-2">
+                  {isDraft && (
+                    <button className={btn} disabled={busy} onClick={() => setEditingPack(selected)}>Edit details</button>
+                  )}
                   {isDraft && (
                     <button className={btn} disabled={busy || selected.scenarios.length === 0}
                       onClick={() => act("", async () => {
@@ -415,11 +445,23 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
       </div>
 
       {newPackOpen && (
-        <NewPackForm busy={busy} onClose={() => setNewPackOpen(false)}
-          onSave={(name, description) => act("Benchmark created.", async () => {
-            const p = await call<Pack>("/api/packs", scope, { method: "POST", body: JSON.stringify({ name, description }) });
+        <PackForm title="New benchmark" busy={busy} onClose={() => setNewPackOpen(false)}
+          onSave={(name, category, description) => act("Benchmark created.", async () => {
+            const p = await call<Pack>("/api/packs", scope, {
+              method: "POST", body: JSON.stringify({ name, category, description }),
+            });
             setSelectedId(p.id);
             setNewPackOpen(false);
+          })} />
+      )}
+
+      {editingPack && (
+        <PackForm title="Edit benchmark details" initial={editingPack} busy={busy} onClose={() => setEditingPack(null)}
+          onSave={(name, category, description) => act("Benchmark details saved.", async () => {
+            await call<Pack>(`/api/packs/${editingPack.id}`, scope, {
+              method: "PUT", body: JSON.stringify({ name, category, description }),
+            });
+            setEditingPack(null);
           })} />
       )}
 
@@ -462,7 +504,7 @@ function PackGroup({ label, packs, selectedId, onSelect }: {
           className={`text-left border rounded px-2 py-1.5 ${p.id === selectedId ? "border-text" : "border-border"}`}>
           <div className="font-medium text-sm">{p.name}</div>
           <div className="text-xs text-text-dim">
-            {p.state === "sealed" ? `v${p.version} · ${short(p.digest)}` : "draft"} · {p.scenarios?.length || 0} scenario
+            {categoryLabel(p.category)} · {p.state === "sealed" ? `v${p.version} · ${short(p.digest)}` : "draft"} · {p.scenarios?.length || 0} scenario
             {(p.scenarios?.length || 0) === 1 ? "" : "s"}
           </div>
         </button>
@@ -486,20 +528,27 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
   );
 }
 
-function NewPackForm({ busy, onSave, onClose }: {
-  busy: boolean; onSave: (n: string, d: string) => void; onClose: () => void;
+function PackForm({ title, initial, busy, onSave, onClose }: {
+  title: string; initial?: Pack; busy: boolean;
+  onSave: (name: string, category: string, description: string) => void; onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
+  const [name, setName] = useState(initial?.name || "");
+  const [category, setCategory] = useState(initial?.category || "");
+  const [description, setDescription] = useState(initial?.description || "");
   return (
-    <Modal title="New benchmark" onClose={onClose}>
+    <Modal title={title} onClose={onClose}>
       <label className={labelCls}>Name</label>
-      <input className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Apteva Core" />
+      <input className={field} value={name} onChange={(e) => setName(e.target.value)} placeholder="Coding Core" />
+      <label className={labelCls}>Category</label>
+      <input className={field} value={category} onChange={(e) => setCategory(e.target.value)} placeholder="coding" />
+      <div className="text-xs text-text-dim">Stable family used for discovery and cross-pack leaderboards. Saved as a normalized slug.</div>
       <label className={labelCls}>Description</label>
       <textarea className={field} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
       <div className="flex justify-end gap-2">
         <button className={btn} onClick={onClose}>Cancel</button>
-        <button className={btn} disabled={busy || !name.trim()} onClick={() => onSave(name, description)}>Create</button>
+        <button className={btn} disabled={busy || !name.trim()} onClick={() => onSave(name, category, description)}>
+          {initial ? "Save" : "Create"}
+        </button>
       </div>
     </Modal>
   );
@@ -528,6 +577,12 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
       <label className={labelCls}>Name</label>
       <input className={field} value={s.name} onChange={(e) => set({ name: e.target.value })}
         placeholder="Create then update a contact" />
+
+      <label className={labelCls}>Tags</label>
+      <input className={field} value={(s.tags || []).join(", ")}
+        onChange={(e) => set({ tags: e.target.value.split(",").map((tag) => tag.trim()).filter(Boolean) })}
+        placeholder="bug-fix, typescript, backend" />
+      <div className="text-xs text-text-dim">Comma-separated task facets used to filter results inside this category.</div>
 
       <label className={labelCls}>Prompt — what the agent is asked to do</label>
       <textarea className={field} rows={4} value={s.prompt} onChange={(e) => set({ prompt: e.target.value })} />
@@ -780,6 +835,9 @@ function Definition({ pack, isDraft, onAdd, onEdit, onDelete }: {
             <div>
               <div className="font-medium text-sm">{s.name}</div>
               <div className="text-xs text-text-dim">{s.id}</div>
+              {(s.tags || []).length > 0 && <div className="flex flex-wrap gap-1 mt-1">
+                {(s.tags || []).map((tag) => <span key={tag} className="text-xs border border-border rounded px-1.5 py-0.5">{tag}</span>)}
+              </div>}
             </div>
             <div className="flex gap-2 items-center">
               <span className="text-xs text-text-dim">{s.checks?.length || 0} check{(s.checks?.length || 0) === 1 ? "" : "s"}</span>
@@ -1212,7 +1270,10 @@ function Board({ rows, byScenario, note }: {
             <tbody>
               {byScenario.map((r, i) => (
                 <tr key={i} className="border-b border-border">
-                  <td className="py-1">{r.scenario_name || r.scenario_id}</td>
+                  <td className="py-1">
+                    {r.scenario_name || r.scenario_id}
+                    {(r.scenario_tags || []).length > 0 && <span className="text-xs text-text-dim"> · {r.scenario_tags!.join(", ")}</span>}
+                  </td>
                   <td>{r.label}</td><td>{pct(r.pass_rate)}</td><td>{r.average_score}</td>
                   <td className="text-text-dim">{r.runs}</td>
                 </tr>
@@ -1237,11 +1298,10 @@ function Leaderboard({ pack, rows, byScenario }: {
   );
 }
 
-function GlobalLeaderboard({ board }: { board: GlobalBoard | null }) {
+function GlobalLeaderboard({ board, categories, category, onCategory }: {
+  board: GlobalBoard | null; categories: string[]; category: string; onCategory: (value: string) => void;
+}) {
   if (!board) return <div className="text-sm text-text-dim">Loading…</div>;
-  if (!board.rows || board.rows.length === 0) {
-    return <div className="text-sm text-text-dim">No admitted results yet. Seal a benchmark and run it.</div>;
-  }
   const packs = board.packs || [];
   // A ranking across targets that faced different benchmarks is not a fair
   // comparison; say so rather than letting the ordering imply otherwise.
@@ -1250,12 +1310,23 @@ function GlobalLeaderboard({ board }: { board: GlobalBoard | null }) {
     : `Targets here have not all faced the same benchmarks, so this ranking is not a like-for-like comparison — check the coverage column. Scoring contract ${board.scoring_version}.`;
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <div className="font-medium">Global leaderboard</div>
-        <div className="text-xs text-text-dim">
-          {packs.length} sealed benchmark{packs.length === 1 ? "" : "s"}: {packs.map((p) => `${p.name} v${p.version}`).join(", ")}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="font-medium">{category ? `${categoryLabel(category)} leaderboard` : "Global leaderboard"}</div>
+          <div className="text-xs text-text-dim">
+            {packs.length} sealed benchmark{packs.length === 1 ? "" : "s"}{packs.length > 0 ? `: ${packs.map((p) => `${p.name} v${p.version}`).join(", ")}` : ""}
+          </div>
         </div>
+        <select className={field + " max-w-[220px]"} value={category} onChange={(e) => onCategory(e.target.value)}>
+          <option value="">All categories</option>
+          {categories.map((item) => <option key={item} value={item}>{categoryLabel(item)}</option>)}
+        </select>
       </div>
+      {(!board.rows || board.rows.length === 0) ? (
+        <div className="text-xs text-text-dim">
+          No admitted results yet{category ? ` in ${categoryLabel(category)}` : ""}. Seal a benchmark and run it.
+        </div>
+      ) : <>
       {(board.scoring_versions?.length || 0) > 1 && (
         <div className="text-xs text-text-dim border border-border rounded p-2">
           Results exist under {board.scoring_versions!.length} scoring contracts; only {board.scoring_version} is shown.
@@ -1263,6 +1334,7 @@ function GlobalLeaderboard({ board }: { board: GlobalBoard | null }) {
         </div>
       )}
       <Board rows={board.rows} byScenario={board.by_scenario} note={note} />
+      </>}
     </div>
   );
 }

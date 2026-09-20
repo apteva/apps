@@ -2,6 +2,29 @@
 
 Reproducible, publishable benchmarks for agents.
 
+## Categories and scenario tags
+
+A pack can declare one normalized category such as `coding`, `customer-support`,
+or `research`. Categories group independently sealed packs into a discoverable
+benchmark family and can scope the global leaderboard. Scenario tags describe
+the work inside a pack, for example `bug-fix`, `typescript`, `backend`, or
+`test-writing`.
+
+```sh
+bench_pack_create  { "name": "Coding Core", "category": "coding" }
+bench_scenario_put { "pack_id": "...", "name": "Repair a failing test", "prompt": "...",
+                     "tags": ["bug-fix", "typescript"], "environment_id": "env-code",
+                     "checks": [...], "budget": {...} }
+bench_category_list {}
+bench_leaderboard_global { "category": "coding" }
+bench_result_list { "category": "coding", "tag": "bug-fix" }
+```
+
+Category and tag values are converted to stable slugs, deduplicated, and sorted.
+They are part of the sealed pack digest, copied into run provenance and results,
+and retained in evidence and full-data exports. Existing packs remain valid and
+are simply uncategorized until a draft is updated or forked.
+
 Evals answers *"did my agent regress?"*. Bench answers *"which target is better,
 and can someone else reproduce that number?"* — so Bench does not run anything
 itself. It delegates execution to **Evals**, which runs cases inside isolated

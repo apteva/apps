@@ -39,6 +39,7 @@ func newPage(limit, offset, total int) pageInfo {
 type runQuery struct {
 	PackID         string `json:"pack_id"`
 	PackDigest     string `json:"pack_digest"`
+	Category       string `json:"category"`
 	ProfileDigest  string `json:"profile_digest"`
 	Status         string `json:"status"`
 	Query          string `json:"query"`
@@ -63,6 +64,9 @@ func (s store) searchRuns(input runQuery) (*runPage, error) {
 	}
 	if input.PackDigest != "" {
 		add("pack_digest=?", input.PackDigest)
+	}
+	if input.Category != "" {
+		add("pack_category=?", normalizeTaxonomyValue(input.Category))
 	}
 	if input.ProfileDigest != "" {
 		add("scoring_profile_digest=?", input.ProfileDigest)
@@ -122,7 +126,9 @@ type resultQuery struct {
 	RunID      string `json:"run_id"`
 	PackID     string `json:"pack_id"`
 	PackDigest string `json:"pack_digest"`
+	Category   string `json:"category"`
 	ScenarioID string `json:"scenario_id"`
+	Tag        string `json:"tag"`
 	Admission  string `json:"admission"`
 	Provider   string `json:"provider"`
 	Model      string `json:"model"`
@@ -138,10 +144,10 @@ type resultPage struct {
 
 func scanResult(row interface{ Scan(...any) error }) (*Result, error) {
 	var result Result
-	var target, score, metrics, created string
+	var tags, target, score, metrics, created string
 	var passed int
 	err := row.Scan(&result.ID, &result.BenchRunID, &result.ScenarioID, &result.ScenarioName,
-		&result.TargetIndex, &target, &result.Trial, &result.EvalRunID, &result.Admission,
+		&tags, &result.TargetIndex, &target, &result.Trial, &result.EvalRunID, &result.Admission,
 		&result.InvalidReason, &passed, &score, &metrics, &result.Error, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -150,6 +156,7 @@ func scanResult(row interface{ Scan(...any) error }) (*Result, error) {
 		return nil, err
 	}
 	decodeJSON(target, &result.Target)
+	decodeJSON(tags, &result.ScenarioTags)
 	decodeJSON(score, &result.Score)
 	decodeJSON(metrics, &result.Metrics)
 	result.Passed = passed == 1
@@ -176,8 +183,14 @@ func (s store) searchResults(input resultQuery) (*resultPage, error) {
 	if input.PackDigest != "" {
 		add("b.pack_digest=?", input.PackDigest)
 	}
+	if input.Category != "" {
+		add("b.pack_category=?", normalizeTaxonomyValue(input.Category))
+	}
 	if input.ScenarioID != "" {
 		add("r.scenario_id=?", input.ScenarioID)
+	}
+	if input.Tag != "" {
+		add("EXISTS (SELECT 1 FROM json_each(r.scenario_tags_json) WHERE value=?)", normalizeTaxonomyValue(input.Tag))
 	}
 	if input.Admission != "" {
 		add("r.admission=?", input.Admission)
