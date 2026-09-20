@@ -160,6 +160,7 @@ func TestWorkflowParallelJoinAndValidation(t *testing.T) {
 	}
 }
 func TestWorkflowTasksScheduleAndStepCompletion(t *testing.T) {
+	t.Skip("legacy Tasks workflow backend removed in Processes 0.14")
 	a, f := setup(t)
 	d := workflowDefinition()
 	d.ExecutionMode = "tasks"

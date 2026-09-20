@@ -223,13 +223,10 @@ function apiURL(props: Props, path: string) {
 }
 function detailURL(props: Props, process: MapProcess, run?: MapRun) {
   const q = new URLSearchParams({ project_id: props.projectId || "" });
-  if (run?.backend === "tasks") q.set("task_id", run.id);
-  else {
-    q.set("process_id", process.id);
-    if (run) q.set("run_id", run.id);
-    if (props.installId) q.set("install_id", String(props.installId));
-  }
-  return `/apps/${run?.backend === "tasks" ? "tasks" : encodeURIComponent(props.appName || "processes")}/page?${q}`;
+  q.set("process_id", process.id);
+  if (run) q.set("run_id", run.id);
+  if (props.installId) q.set("install_id", String(props.installId));
+  return `/apps/${encodeURIComponent(props.appName || "processes")}/page?${q}`;
 }
 export default function ProjectMap(props: Props) {
   const [processes, setProcesses] = useState<MapProcess[]>([]),
@@ -301,20 +298,10 @@ export default function ProjectMap(props: Props) {
                   ),
                 ]);
                 triggerResult[p.id] = triggerLists.flat();
-                result[p.id] = [
-                  ...(d.direct_runs || []),
-                  ...(d.runs || []).map((x: any) => ({
-                    ...x.task,
-                    backend: "tasks",
-                    version: x.version,
-                    assignment_id: x.assignment_id,
-                    assignment: x.assignment,
-                  })),
-                ];
-                if (d.tasks_error || d.has_more)
-                  warnings.push(
-                    `${p.name}: ${d.tasks_error ? "Tasks execution data unavailable" : "Tasks history is limited; open SOP for more"}`,
-                  );
+                result[p.id] = [...(d.direct_runs || [])].map((x: any) => ({
+                  ...x,
+                  backend: "agent",
+                }));
               } catch (e) {
                 if (!controller.signal.aborted)
                   warnings.push(

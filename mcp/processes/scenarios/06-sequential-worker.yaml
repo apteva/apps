@@ -25,7 +25,7 @@ directive: |
   Shared instructions: perform only the assigned ready steps and use the Processes
   delivery contract for execution and worker lifetime. Completion criteria: all
   three steps complete in dependency order with the exact outputs above.
-  Create one assignment named Barcelona, owner yourself, execution_mode=agent,
+  Create one assignment named Barcelona, owner yourself,
   follow_latest=true, no schedule. Activate the procedure and assignment and
   start once with idempotency_key=benchmark-1. You are authorized to do this.
   Follow the app's execution contract. Do not manually forward downstream steps,

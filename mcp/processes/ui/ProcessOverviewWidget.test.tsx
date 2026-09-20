@@ -100,13 +100,13 @@ test("overview shows simultaneous steps, names, schedules and scoped links; refr
   expect(el.querySelector(".po-detail")).toBeNull();
   expect(reads.filter((u) => u.startsWith("/api/agents")).length).toBe(1);
 });
-test("task links target Tasks without the Processes install, assignment links target assignments", () => {
+test("run links stay in Processes and assignment links target assignments", () => {
   expect(
     overviewLink(
       { projectId: "p", installId: 77 },
       { ...overviewFixture.active[0], backend: "tasks" },
     ),
-  ).toBe("/apps/tasks/page?project_id=p&task_id=weather-run");
+  ).toBe("/apps/processes/page?project_id=p&install_id=77&process_id=weather&run_id=weather-run");
   expect(
     overviewLink(
       { projectId: "p", installId: 77 },

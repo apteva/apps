@@ -1,6 +1,5 @@
 import { LiveContext, useProcessEvents, useScopedRevision, type AppEvent } from "./live-events";
 import { useEffect, useState } from "react";
-import WorkPanel, { RunWork } from "./Work";
 import { ProcessFlow } from "./ProcessFlow";
 import ProjectMap from "./ProjectMap";
 import { stepProblem } from "./flow-model";
@@ -29,7 +28,6 @@ type Schedule = {
 type Definition = {
   steps?: Step[];
   parameters?: Parameter[];
-  execution_mode?: "agent" | "tasks";
   name: string;
   description: string;
   instructions: string;
@@ -57,7 +55,7 @@ type Version = { version: number; definition: Definition };
 type Entry = {
   assignment_id?: string;
   assignment?: Partial<Assignment>;
-  backend: "agent" | "tasks";
+  backend: "agent";
   version: number;
   record: {
     id: string;
@@ -69,7 +67,6 @@ type Entry = {
     schedule_kind?: string;
     schedule_enabled?: boolean;
     next_run_at?: string;
-    parent_task_id?: string;
     scheduled_for?: string;
     delivery_warning?: string;
     progress?: number;
@@ -80,7 +77,7 @@ type Entry = {
   };
 };
 function procedureOnly(d: Definition) {
-  const { owner_agent_id, execution_mode, schedule, ...definition } = d;
+  const { owner_agent_id, schedule, ...definition } = d;
   return definition;
 }
 const empty: Definition = {
@@ -95,29 +92,14 @@ const empty: Definition = {
   tags: [],
 };
 type History = {
-  runs?: {
-    version: number;
-    task: Entry["record"];
-    assignment_id?: string;
-    assignment?: Assignment;
-  }[];
   direct_runs?: (Entry["record"] & {
     version: number;
     assignment_id?: string;
     assignment?: Assignment;
   })[];
-  tasks_error?: string;
 };
 const historyEntries = (r: History): Entry[] =>
-  [
-    ...(r.runs || []).map((e) => ({
-      backend: "tasks" as const,
-      version: e.version,
-      assignment_id: e.assignment_id,
-      assignment: e.assignment,
-      record: e.task,
-    })),
-    ...(r.direct_runs || []).map((e) => ({
+  (r.direct_runs || []).map((e) => ({
       backend: "agent" as const,
       version: e.version,
       assignment_id: e.assignment_id,
@@ -126,8 +108,7 @@ const historyEntries = (r: History): Entry[] =>
         ...e,
         title: e.workflow ? "Team workflow run" : "Direct agent run",
       },
-    })),
-  ].sort(
+    })).sort(
     (a, b) => Date.parse(b.record.created_at) - Date.parse(a.record.created_at),
   );
 const cadence = (s?: Schedule) =>
@@ -182,9 +163,7 @@ function Panel(props: Props) {
     [creating, setCreating] = useState(false),
     [draft, setDraft] = useState<Definition>(empty);
   const [area, setArea] = useState("processes");
-  const [historyWarning, setHistoryWarning] = useState("");
   const [runs, setRuns] = useState<Entry[]>([]),
-    [more, setMore] = useState(false),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState(""),
     [category, setCategory] = useState(""),
@@ -244,8 +223,6 @@ function Panel(props: Props) {
   const loadRuns = async (id: string) => {
     const r = await api(`/${encodeURIComponent(id)}/runs`);
     setRuns(historyEntries(r));
-    setHistoryWarning(r.tasks_error || "");
-    setMore(!!r.has_more);
   };
   useEffect(() => {
     let live = true;
@@ -303,8 +280,6 @@ function Panel(props: Props) {
           if (live) {
             setDetail(current);
             setRuns(historyEntries(r));
-            setHistoryWarning(r.tasks_error || "");
-            setMore(!!r.has_more);
           }
         })
         .catch((e) => live && setError(e.message));
@@ -460,12 +435,6 @@ function Panel(props: Props) {
           >
             Project map
           </button>
-          <button
-            className={area === "work" ? "on" : ""}
-            onClick={() => setArea("work")}
-          >
-            Work
-          </button>
         </nav>
       )}
       {error && (
@@ -484,14 +453,6 @@ function Panel(props: Props) {
         <p className="muted">Loading processes…</p>
       ) : !selected && !creating && area === "map" ? (
         <ProjectMap projectId={props.projectId} installId={props.installId} appName={props.appName} eventRevision={liveEvents.eventRevision} agents={agents} />
-      ) : !selected && !creating && area === "work" ? (
-        <WorkPanel
-          key={`${props.projectId}:${props.installId}`}
-          api={api}
-          agents={agents}
-          processes={items}
-          eventRevision={liveEvents.eventRevision}
-        />
       ) : creating || editing ? (
         <form
           onSubmit={(e) => {
@@ -1139,17 +1100,6 @@ function Panel(props: Props) {
                   ))}
                 </select>
               </div>
-              {historyWarning && (
-                <div className="notice" role="status">
-                  Tasks history unavailable: {historyWarning}
-                </div>
-              )}
-              {more && (
-                <div className="notice">
-                  Showing the 200 most recent task records. Older history
-                  remains in Tasks.
-                </div>
-              )}
               {filteredExecutions.length ? (
                 filteredExecutions.map((r) => (
                   <article id={`run-${r.record.id}`} className="card run" key={r.record.id}>
@@ -1158,13 +1108,6 @@ function Panel(props: Props) {
                         <Pill state={r.record.state} />
                         <strong>{r.record.title}</strong>
                       </div>
-                      {r.backend === "tasks" && (
-                        <a
-                          href={`/apps/tasks/page?${new URLSearchParams({ project_id: props.projectId!, task_id: r.record.id })}`}
-                        >
-                          Open task ↗
-                        </a>
-                      )}
                     </div>
                     {r.assignment && (
                       <p className="small muted">
@@ -1190,7 +1133,7 @@ function Panel(props: Props) {
                         Procedure v{r.version}
                       </button>{" "}
                       ·{" "}
-                      {r.record.parent_task_id || r.record.scheduled_for
+                      {r.record.scheduled_for
                         ? "Scheduled"
                         : "Manual"}
                     </p>
@@ -1216,15 +1159,6 @@ function Panel(props: Props) {
                         r.record.current_step ||
                         (r.record.state === "scheduled" ? "Waiting for the next step’s scheduled start." : "Queued for the owner agent.")}
                     </div>
-                    {(r.backend === "agent" || r.record.workflow) && (
-                      <RunWork
-                        runID={r.record.id}
-                        runState={r.record.state}
-                        api={api}
-                        agents={agents}
-                        onChanged={() => loadRuns(p.id)}
-                      />
-                    )}
                     {r.record.workflow && (
                       <RunSteps
                         steps={r.record.steps || []}
@@ -1272,11 +1206,8 @@ function Panel(props: Props) {
               ) : (
                 <>
                   {ownerName(runAssignment.owner_agent_id)} receives procedure
-                  version {runAssignment.procedure_version}, tracked{" "}
-                  {runAssignment.execution_mode === "agent"
-                    ? "here in Processes"
-                    : "in Tasks"}
-                  .
+                  version {runAssignment.procedure_version}, tracked here in
+                  Processes.
                 </>
               )}
             </p>

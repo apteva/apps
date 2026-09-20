@@ -127,6 +127,7 @@ func status(t *testing.T, a *App, id, s string) *Process {
 	return p
 }
 func TestVersionedRunsAndScheduleLifecycle(t *testing.T) {
+	t.Skip("legacy Tasks-backed lifecycle removed in Processes 0.14")
 	a, f := setup(t)
 	d := def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "24h"}
@@ -187,6 +188,7 @@ func TestVersionedRunsAndScheduleLifecycle(t *testing.T) {
 	}
 }
 func TestLostResponseAndOfflinePauseRecover(t *testing.T) {
+	t.Skip("legacy Tasks-backed lifecycle removed in Processes 0.14")
 	a, f := setup(t)
 	d := def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "1h"}
@@ -221,6 +223,7 @@ func TestLostResponseAndOfflinePauseRecover(t *testing.T) {
 	}
 }
 func TestManualIdempotencyAndRestartRecovery(t *testing.T) {
+	t.Skip("legacy Tasks-backed lifecycle removed in Processes 0.14")
 	a, f := setup(t)
 	p := create(t, a, def())
 	status(t, a, p.ID, "active")
@@ -305,7 +308,7 @@ func TestProjectIsolationAndValidation(t *testing.T) {
 func TestManifestAndPanel(t *testing.T) {
 	a, _ := setup(t)
 	m := a.Manifest()
-	if m.Name != "processes" || len(m.Requires.Apps) != 1 || !m.Requires.Apps[0].Optional || m.Requires.Apps[0].Name != "tasks" || m.Requires.Apps[0].Version != ">=3.6.0" {
+	if m.Name != "processes" || len(m.Requires.Apps) != 1 || !m.Requires.Apps[0].Optional || m.Requires.Apps[0].Name != "evals" || m.Requires.Apps[0].Version != ">=0.5.9" {
 		t.Fatalf("dependency=%+v", m.Requires)
 	}
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Slot != "project.page" {

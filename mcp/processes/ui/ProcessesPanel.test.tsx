@@ -75,23 +75,13 @@ test("process creation is unassigned; execution configuration lives in Assignmen
   await click("Weekly review");
   await click("Assignments");
   await click("Add assignment");
-  const select = document.querySelector<HTMLSelectElement>("#assignment-mode")!;
-  expect(select.value).toBe("agent");
   expect(
     document.querySelector<HTMLSelectElement>("#assignment-agent")!.value,
   ).toBe("0");
-  await act(async () => {
-    select.value = "tasks";
-    select.dispatchEvent(
-      new window.Event("change", { bubbles: true }) as unknown as Event,
-    );
-  });
-  expect(
-    document.querySelector<HTMLSelectElement>("#assignment-mode")!.value,
-  ).toBe("tasks");
+  expect(document.body.textContent).toContain("Execution and history are recorded natively");
 });
 
-test("mixed history renders direct evidence and links only Tasks records", async () => {
+test("run history renders native evidence without external task links", async () => {
   await mount({
     direct_runs: [
       {
@@ -103,29 +93,11 @@ test("mixed history renders direct evidence and links only Tasks records", async
         created_at: "2026-09-12T10:00:00Z",
       },
     ],
-    runs: [
-      {
-        version: 1,
-        task: {
-          id: "task-1",
-          title: "Older Tasks run",
-          state: "completed",
-          result: "Task report",
-          created_at: "2026-09-11T10:00:00Z",
-        },
-      },
-    ],
-    tasks_error: "offline",
   });
   await click("Weekly review");
   await click("Runs");
   expect(document.body.textContent).toContain("Direct report approved");
-  expect(document.body.textContent).toContain(
-    "Tasks history unavailable: offline",
-  );
-  const links = document.querySelectorAll('a[href*="/apps/tasks/"]');
-  expect(links.length).toBe(1);
-  expect(links[0].getAttribute("href")).toContain("task-1");
+  expect(document.querySelectorAll('a[href*="/apps/tasks/"]').length).toBe(0);
 });
 
 const assignment = {

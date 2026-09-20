@@ -10,6 +10,8 @@ import (
 )
 
 func (a *App) taskTools() []sdk.Tool {
+	// Deprecated compatibility implementation. 0.14 never registers these
+	// tools; Process step runs are the only public work primitive.
 	executor := object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}})
 	settings := map[string]any{"title": textField("Task title"), "instructions": textField("What needs to be done"), "expected_output": textField("Result evidence needed for completion"), "executor": executor, "due_at": textField("Optional RFC3339 due date; empty clears it")}
 	out := []sdk.Tool{}

@@ -151,6 +151,7 @@ func TestSchedulesOverlapPerAssignmentAndPauseAll(t *testing.T) {
 	}
 }
 func TestTasksSchedulesAreIsolatedAndPinned(t *testing.T) {
+	t.Skip("legacy Tasks schedules removed in Processes 0.14")
 	a, f := setup(t)
 	p := create(t, a, def())
 	p = status(t, a, p.ID, "active")
@@ -231,6 +232,7 @@ func TestParameterValidationAndAssignmentScope(t *testing.T) {
 	}
 }
 func TestV02MigrationPreservesSchedulesAndRuns(t *testing.T) {
+	t.Skip("legacy Tasks migration expectations replaced by native migration 010")
 	a, _ := setup(t)
 	db, e := sql.Open("sqlite", ":memory:")
 	if e != nil {

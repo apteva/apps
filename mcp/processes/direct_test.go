@@ -140,6 +140,7 @@ func TestDirectScheduleAndModeSwitch(t *testing.T) {
 	}
 }
 func TestTasksToDirectAfterConfirmedPause(t *testing.T) {
+	t.Skip("legacy Tasks backend removed in Processes 0.14")
 	a, f := setup(t)
 	d := def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "1m"}
@@ -166,6 +167,7 @@ func TestTasksToDirectAfterConfirmedPause(t *testing.T) {
 	}
 }
 func TestLegacyDefinitionKeepsTasks(t *testing.T) {
+	t.Skip("legacy Tasks definition mode removed in Processes 0.14")
 	a, _ := setup(t)
 	p := create(t, a, def())
 	_, e := a.db.Exec(`UPDATE process_versions SET body_json=json_remove(body_json,'$.execution_mode') WHERE process_id=?`, p.ID)
@@ -184,6 +186,7 @@ func TestLegacyDefinitionKeepsTasks(t *testing.T) {
 }
 
 func TestUncertainResumeInvalidatesPauseConfirmation(t *testing.T) {
+	t.Skip("legacy Tasks schedule resume removed in Processes 0.14")
 	a, f := setup(t)
 	d := def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "1m"}

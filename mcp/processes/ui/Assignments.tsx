@@ -23,7 +23,6 @@ export type Assignment = {
   name: string;
   target: string;
   owner_agent_id: number;
-  execution_mode: "agent" | "tasks";
   procedure_version: number;
   follow_latest: boolean;
   parameters: Record<string, unknown>;
@@ -253,7 +252,6 @@ export default function Assignments({
             name: "",
             target: "",
             owner_agent_id: 0,
-            execution_mode: "agent",
             procedure_version: current,
             follow_latest: true,
             parameters: {},
@@ -474,27 +472,9 @@ export default function Assignments({
               )}
             </div>
             <div>
-              <div className="field">
-                <label htmlFor="assignment-mode">Execution</label>
-                <select
-                  id="assignment-mode"
-                  value={draft.execution_mode}
-                  onChange={(e) =>
-                    set({
-                      execution_mode: e.target
-                        .value as Assignment["execution_mode"],
-                    })
-                  }
-                >
-                  <option value="agent">Direct agent</option>
-                  <option value="tasks">Tasks</option>
-                </select>
-                <p className="small muted">
-                  {draft.execution_mode === "tasks"
-                    ? "Requires the optional Tasks integration (3.6.0+)."
-                    : "Progress and results are recorded in Processes."}
-                </p>
-              </div>
+              <p className="small muted">
+                Execution and history are recorded natively in Processes.
+              </p>
               <div className="field">
                 <label htmlFor="assignment-cadence">Schedule</label>
                 <select
@@ -602,7 +582,7 @@ export default function Assignments({
                   {x.target || "No target label"} ·{" "}
                   {agents.find((a) => a.id === x.owner_agent_id)?.name ||
                     `Agent ${x.owner_agent_id}`}{" "}
-                  · {x.execution_mode === "agent" ? "Direct agent" : "Tasks"}
+                  · Native Process execution
                 </p>
               </div>
               <span className={`pill ${x.status}`}>
@@ -629,9 +609,8 @@ export default function Assignments({
                 ? new Date(x.next_run_at).toLocaleString()
                 : processStatus === "active" &&
                     x.status === "active" &&
-                    x.schedule &&
-                    x.execution_mode === "tasks"
-                  ? "See Tasks schedule"
+                    x.schedule
+                  ? "Calculating next run…"
                   : "—"}
             </p>
             {Object.keys(x.parameters || {}).length > 0 && (
