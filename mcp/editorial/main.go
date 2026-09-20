@@ -131,6 +131,33 @@ func properties(keys []string) map[string]any {
 	return p
 }
 
+func itemProperties(keys []string) map[string]any {
+	p := properties(keys)
+	if field, ok := p["status"].(map[string]any); ok {
+		field["description"] = "Content workflow status configured by the project. Call editorial_settings_get before supplying it. On create, omit it to use the first configured status. This is separate from release status."
+	}
+	if field, ok := p["format"].(map[string]any); ok {
+		field["description"] = "Content format configured by the project. Call editorial_settings_get before supplying it. On create, omit it to use the first configured format."
+	}
+	if field, ok := p["approval"].(map[string]any); ok {
+		field["enum"] = approvalStates
+		field["description"] = "Approval state. The approved value requires a non-empty reviewer. Finish reviewable content before approving because later content changes reset approval to pending."
+	}
+	if field, ok := p["reviewer"].(map[string]any); ok {
+		field["description"] = "Free-text reviewer name. Required when approval is approved."
+	}
+	return p
+}
+
+func releaseProperties(keys []string) map[string]any {
+	p := properties(keys)
+	if field, ok := p["status"].(map[string]any); ok {
+		field["enum"] = releaseStatuses
+		field["description"] = "Release delivery status. This is separate from the content item's project-configured workflow status. Omit it on create to use planned."
+	}
+	return p
+}
+
 type toolSpec struct {
 	name, description string
 	schema            map[string]any
@@ -141,15 +168,15 @@ type toolSpec struct {
 // parameters against it.
 func toolSpecs() []toolSpec {
 	specs := []toolSpec{
-		{"items_list", "List planning items and releases with pagination. archived: false, true or all. brand_id: a brand ID, unassigned, or omit for all brands.", object(properties([]string{"q", "brand_id", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
+		{"items_list", "List planning items and releases with pagination. archived: false, true or all. brand_id: a brand ID, unassigned, or omit for all brands.", object(itemProperties([]string{"q", "brand_id", "status", "format", "owner", "campaign", "approval", "limit", "offset"}))},
 		{"items_get", "Read an item, releases and latest 100 history entries.", object(properties([]string{"id"}), "id")},
-		{"items_create", "Create a planning item. Dates: YYYY-MM-DD or RFC3339. No external action.", object(properties(itemFields), "title")},
-		{"items_update", "Patch with current revision. Content changes invalidate an existing approval.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(itemFields))}, "id", "revision", "patch")},
-		{"releases_create", "Plan a release; never schedules delivery. Optional app/external_id links an existing record.", object(properties(append(append([]string{}, releaseFields...), "item_id")), "item_id", "channel")},
-		{"releases_update", "Update using current revision. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(properties(releaseFields))}, "id", "revision", "patch")},
+		{"items_create", "Create a planning item. Only title is required. Omit status and format to use the project's first configured values; call editorial_settings_get before supplying either. The approved value requires a reviewer. Finish reviewable content before approving because later content changes reset approval to pending. Dates: YYYY-MM-DD or RFC3339. No external action.", object(itemProperties(itemFields), "title")},
+		{"items_update", "Patch with current revision. Content changes invalidate an existing approval. Setting approval to approved requires an existing reviewer or one in the patch.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(itemProperties(itemFields))}, "id", "revision", "patch")},
+		{"releases_create", "Plan a release; never schedules delivery. Release status is separate from content workflow status and defaults to planned. Optional app/external_id links an existing record.", object(releaseProperties(append(append([]string{}, releaseFields...), "item_id")), "item_id", "channel")},
+		{"releases_update", "Update using current revision. Release status is separate from content workflow status. Does not change the linked publisher record.", object(map[string]any{"id": properties([]string{"id"})["id"], "revision": properties([]string{"revision"})["revision"], "patch": object(releaseProperties(releaseFields))}, "id", "revision", "patch")},
 		{"releases_refresh", "Refresh linked results. Social exposes latest 200 posts; missing posts preserve prior results.", object(properties([]string{"id"}), "id")},
 		{"calendar", "List dated items and channel releases between from and to (YYYY-MM-DD) as one flat, sorted stream. Defaults to the next 30 days. date_field planned_at or deadline; releases appear on planned_at only.", object(properties([]string{"from", "to", "date_field", "brand_id", "include_releases", "limit"}))},
-		{"settings_get", "Read project brands, formats, statuses, channel suggestions and the due-date timezone and time.", object(nil)},
+		{"settings_get", "Read project brands, content workflow statuses, formats, channel suggestions and the due-date timezone and time. The first status and format are the defaults used when an item omits them.", object(nil)},
 		{"settings_update", "Configure brands, formats, statuses, channels and when a bare date falls due (timezone as an IANA name, due_time as HH:MM). Brand IDs are stable; keep brands and values used by existing items.", object(properties([]string{"revision", "brands", "statuses", "formats", "channels", "timezone", "due_time"}), "revision", "statuses", "formats", "channels")},
 		{"integrations", "Check optional bindings; pass app social or campaigns to browse existing records, with optional brand_id to apply saved mappings. Never publishes.", object(properties([]string{"app", "brand_id"}))},
 	}
