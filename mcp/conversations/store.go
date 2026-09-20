@@ -899,10 +899,14 @@ func (s *store) ResolveApproval(id int64, components []Component, verdict, resul
 func (s *store) MarkSeen(userID int64, conversationID string, lastSeenID int64) error {
 	_, err := s.db.Exec(`
 		INSERT INTO read_marks (user_id, conversation_id, last_seen_id)
-		SELECT ?, ?, MIN(?, COALESCE(MAX(id), 0)) FROM messages WHERE conversation_id = ?
+		SELECT ?, ?, CASE
+			WHEN ? <= 0 THEN COALESCE(MAX(id), 0)
+			ELSE MIN(?, COALESCE(MAX(id), 0))
+		END
+		FROM messages WHERE conversation_id = ? AND inbox_only = 0
 		ON CONFLICT (user_id, conversation_id) DO UPDATE SET
 			last_seen_id = MAX(read_marks.last_seen_id, excluded.last_seen_id)`,
-		userID, conversationID, lastSeenID, conversationID)
+		userID, conversationID, lastSeenID, lastSeenID, conversationID)
 	return err
 }
 

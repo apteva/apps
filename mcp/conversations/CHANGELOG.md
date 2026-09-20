@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.23.24 — 2026-09-20
+
+- Publish Conversations as an optional `mobile.project_app` using the generic `chat/v1` native surface contract, with app-owned conversation, agent, history, send, create, seen, and subscription routes.
+- Add opt-in summary and cursor response modes without changing the existing dashboard response shapes.
+- Make durable SSE messages named and revision-cursored so reconnects replay both new messages and updates, while ephemeral stream activity remains uncursored.
+- Let a missing or zero seen cursor atomically mark through the latest visible durable message.
+
 ## 0.23.23 — 2026-09-19
 
 - Preserve the mounted app service identity for background and cookieless HTTP work while deriving request-scoped platform credentials for signed-in browser requests.

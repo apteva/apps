@@ -1,0 +1,199 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "conversations",
+  "version": "1.0.0",
+  "title": "Conversations",
+  "description": "Conversations with your agents.",
+  "icon": "message-circle",
+  "context": {
+    "scope": "project"
+  },
+  "state": {
+    "conversation_id": {
+      "type": "string",
+      "default": ""
+    }
+  },
+  "data_sources": {
+    "conversations": {
+      "request": {
+        "method": "GET",
+        "path": "/chats",
+        "query": {
+          "view": "summary"
+        }
+      },
+      "response": {
+        "items": "$.items",
+        "id": "$.id"
+      },
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
+    },
+    "messages": {
+      "request": {
+        "method": "GET",
+        "path": "/messages",
+        "query": {
+          "chat_id": "$state.conversation_id",
+          "pagination": "cursor",
+          "limit": 50
+        }
+      },
+      "response": {
+        "items": "$.items",
+        "id": "$.id",
+        "next_cursor": "$.next_cursor"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "before",
+        "response_path": "$.next_cursor",
+        "page_size": 50
+      }
+    },
+    "agents": {
+      "request": {
+        "method": "GET",
+        "path": "/agents"
+      },
+      "response": {
+        "items": "$",
+        "id": "$.id"
+      }
+    }
+  },
+  "sections": [
+    {
+      "id": "chat",
+      "kind": "component",
+      "component": "chat/v1",
+      "chat": {
+        "conversations_source": "conversations",
+        "messages_source": "messages",
+        "selection_state": "conversation_id",
+        "send_action": "send-message",
+        "create_action": "create-conversation",
+        "mark_seen_action": "mark-seen",
+        "conversation": {
+          "id": "$.id",
+          "title": "$.title",
+          "subtitle": "$.lead_agent_name",
+          "preview": "$.preview",
+          "updated_at": "$.updated_at",
+          "unread": "$.unread"
+        },
+        "message": {
+          "id": "$.id",
+          "conversation_id": "$.conversation_id",
+          "body": "$.content",
+          "role": "$.role",
+          "created_at": "$.created_at",
+          "status": "$.status"
+        },
+        "subscription": {
+          "request": {
+            "method": "GET",
+            "path": "/stream",
+            "query": {
+              "chat_id": "$state.conversation_id"
+            }
+          },
+          "cursor_query": "since",
+          "events": {
+            "message": {
+              "operation": "upsert",
+              "source": "messages",
+              "value": "$",
+              "id": "$.id"
+            },
+            "stream": {
+              "operation": "set_activity",
+              "source": "messages",
+              "value": "$.text"
+            }
+          }
+        }
+      }
+    }
+  ],
+  "actions": {
+    "create-conversation": {
+      "type": "form",
+      "label": "New conversation",
+      "icon": "add",
+      "request": {
+        "method": "POST",
+        "path": "/chats",
+        "encoding": "json",
+        "body": {
+          "title": "$input.title",
+          "agent_id": "$input.agent_id"
+        }
+      },
+      "fields": [
+        {
+          "name": "title",
+          "type": "string",
+          "label": "Title",
+          "required": true
+        },
+        {
+          "name": "agent_id",
+          "type": "resource",
+          "label": "Agent",
+          "resource": "agent",
+          "required": true
+        }
+      ],
+      "result": "$",
+      "success": {
+        "refresh": [
+          "conversations"
+        ],
+        "dismiss": true
+      }
+    },
+    "send-message": {
+      "type": "request",
+      "label": "Send",
+      "request": {
+        "method": "POST",
+        "path": "/messages",
+        "encoding": "json",
+        "query": {
+          "chat_id": "$state.conversation_id"
+        },
+        "body": {
+          "content": "$input.text"
+        }
+      },
+      "result": "$"
+    },
+    "mark-seen": {
+      "type": "request",
+      "label": "Mark seen",
+      "request": {
+        "method": "POST",
+        "path": "/seen",
+        "encoding": "json",
+        "body": {
+          "chat_id": "$state.conversation_id"
+        }
+      }
+    }
+  },
+  "resources": {
+    "agent": {
+      "type": "list",
+      "label": "Agent",
+      "source": "agents",
+      "mapping": {
+        "id": "$.id",
+        "label": "$.name"
+      }
+    }
+  }
+}

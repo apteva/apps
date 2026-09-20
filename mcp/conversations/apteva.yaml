@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.23.23
+version: 0.23.24
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -65,6 +65,13 @@ config_schema:
     description: Comma-separated backend app install IDs. Empty denies all resolution. These apps must derive agent/thread from trusted caller context, never model arguments.
 
 provides:
+  ui_surfaces:
+    - id: conversations
+      label: Conversations
+      icon: message-circle
+      schema: apteva-native-surface/v1
+      entry: /ui/surfaces/conversations.json
+      slots: [mobile.project_app]
   http_routes:
     - prefix: /
     - prefix: /telegram-webhook/

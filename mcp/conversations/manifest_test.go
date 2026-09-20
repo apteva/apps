@@ -102,6 +102,48 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 	t.Fatal("agent-conversations component missing")
 }
 
+func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if len(manifest.Provides.UISurfaces) != 1 {
+		t.Fatalf("ui surfaces=%+v, want one", manifest.Provides.UISurfaces)
+	}
+	descriptor := manifest.Provides.UISurfaces[0]
+	if descriptor.ID != "conversations" || descriptor.Label != "Conversations" ||
+		descriptor.Icon != "message-circle" || descriptor.Schema != sdk.NativeSurfaceSchemaCurrent ||
+		descriptor.Entry != "/ui/surfaces/conversations.json" ||
+		len(descriptor.Slots) != 1 || descriptor.Slots[0] != sdk.UISurfaceSlotMobileProjectApp {
+		t.Fatalf("surface descriptor=%+v", descriptor)
+	}
+
+	document, err := os.ReadFile("ui/surfaces/conversations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface, err := sdk.ParseNativeSurface(document)
+	if err != nil {
+		t.Fatalf("parse conversations surface: %v", err)
+	}
+	if err := sdk.ValidateNativeSurfaceForDescriptor(surface, descriptor); err != nil {
+		t.Fatalf("validate conversations surface: %v", err)
+	}
+	if len(surface.Sections) != 1 || surface.Sections[0].Component != "chat/v1" || surface.Sections[0].Chat == nil {
+		t.Fatalf("chat surface=%+v", surface.Sections)
+	}
+	chat := surface.Sections[0].Chat
+	if chat.ConversationsSource != "conversations" || chat.MessagesSource != "messages" ||
+		chat.CreateAction != "create-conversation" || chat.SendAction != "send-message" ||
+		chat.MarkSeenAction != "mark-seen" || chat.Subscription == nil {
+		t.Fatalf("chat contract=%+v", chat)
+	}
+	messageEvent := chat.Subscription.Events["message"]
+	streamEvent := chat.Subscription.Events["stream"]
+	if chat.Subscription.CursorQuery != "since" ||
+		messageEvent.Operation != "upsert" || messageEvent.Source != "messages" || messageEvent.Value != "$" || messageEvent.ID != "$.id" ||
+		streamEvent.Operation != "set_activity" || streamEvent.Source != "messages" || streamEvent.Value != "$.text" {
+		t.Fatalf("subscription contract=%+v", chat.Subscription)
+	}
+}
+
 func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 	app := &App{}
 	descriptions := map[string]string{}

@@ -274,6 +274,10 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 				LeadAgentName: names[conv.LeadAgentID],
 			})
 		}
+		if r.URL.Query().Get("view") == "summary" {
+			writeJSON(w, map[string]any{"items": entries})
+			return
+		}
 		if r.URL.Query().Get("page") == "1" {
 			writeJSON(w, map[string]any{"conversations": entries, "next_cursor": page.NextCursor})
 			return
@@ -633,6 +637,21 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
+		if r.URL.Query().Get("pagination") == "cursor" {
+			before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+			page, err := a.store.MessagePage(conversationID, before, limit)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			nextCursor := ""
+			if page.HasMore {
+				nextCursor = strconv.FormatInt(page.Before, 10)
+			}
+			writeJSON(w, map[string]any{"items": page.Messages, "next_cursor": nextCursor})
+			return
+		}
 		if r.URL.Query().Get("page") == "1" {
 			before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -914,7 +933,7 @@ func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64,
 
 // handleStream serves both scopes: ?chat_id=<id> for one conversation
 // panel, ?scope=user for the global bell/tray. Reconnects backfill via
-// ?since=<last_id> before going live — the hub never replays.
+// ?since=<last_revision> before going live — the hub never replays.
 func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	userID, projectID, identityErr := requestIdentity(r)
 	if identityErr != nil {
@@ -948,13 +967,21 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
 		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		if since > 0 {
-			backlog, err := a.store.Transcript(conversationID, since, 200)
-			if err == nil {
-				for _, m := range backlog {
+			cursor := since
+			for {
+				backlog, err := a.store.MessageChanges(conversationID, cursor, 200)
+				if err != nil {
+					break
+				}
+				for _, m := range backlog.Messages {
 					writeSSE(w, m)
 				}
-				flusher.Flush()
+				cursor = backlog.Cursor
+				if !backlog.HasMore {
+					break
+				}
 			}
+			flusher.Flush()
 		}
 	case r.URL.Query().Get("scope") == "user":
 		ch, cancel = a.hub.subscribeUser(projectID + ":" + fmt.Sprint(userID))
@@ -985,9 +1012,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			// Named event: the client's `stream` listener gets ephemeral
 			// bubbles; default-event listeners never see them.
-			encoded, err := json.Marshal(f)
-			if err == nil {
-				fmt.Fprintf(w, "event: stream\ndata: %s\n\n", encoded)
+			if writeStreamSSE(w, f) {
 				flusher.Flush()
 			}
 		case m, open := <-ch:
@@ -1007,7 +1032,16 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 
 func writeSSE(w http.ResponseWriter, m Message) {
 	encoded, _ := json.Marshal(m)
-	fmt.Fprintf(w, "data: %s\n\n", encoded)
+	fmt.Fprintf(w, "event: message\nid: %d\ndata: %s\n\n", m.Revision, encoded)
+}
+
+func writeStreamSSE(w http.ResponseWriter, frame StreamFrame) bool {
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		return false
+	}
+	fmt.Fprintf(w, "event: stream\ndata: %s\n\n", encoded)
+	return true
 }
 
 // ─── inbox ───────────────────────────────────────────────────────────
