@@ -1,0 +1,80 @@
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+
+	sdk "github.com/apteva/app-sdk"
+	_ "modernc.org/sqlite"
+)
+
+//go:embed apteva.yaml
+var manifestYAML []byte
+
+type App struct{ svc *service }
+
+func (a *App) Manifest() sdk.Manifest {
+	manifest, err := sdk.ParseManifest(manifestYAML)
+	if err != nil {
+		panic(err)
+	}
+	return *manifest
+}
+
+func (a *App) OnMount(ctx *sdk.AppCtx) error {
+	if ctx.AppDB() == nil {
+		return errors.New("bench requires a database")
+	}
+	a.svc = &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	// Install the shipped scoring contracts and stamp any pre-profile history
+	// before anything can read a leaderboard.
+	if err := a.svc.ensureBuiltinProfiles(); err != nil {
+		return fmt.Errorf("install built-in scoring profiles: %w", err)
+	}
+	ctx.Logger().Info("bench mounted",
+		"project_id", ctx.CurrentProject(), "scoring_version", ScoringVersion)
+	return nil
+}
+
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{Name: "runner", Schedule: "@every 5s", Run: func(ctx context.Context, app *sdk.AppCtx) error {
+			a.svc.ctx = app
+			return a.svc.tick(ctx)
+		}},
+	}
+}
+
+func (a *App) HTTPRoutes() []sdk.Route {
+	return []sdk.Route{
+		{Pattern: "/api/packs", Handler: a.handlePacks},
+		{Pattern: "/api/packs/", Handler: a.handlePack},
+		{Pattern: "/api/runs", Handler: a.handleRuns},
+		{Pattern: "/api/runs/", Handler: a.handleRun},
+		{Pattern: "/api/leaderboard", Handler: a.handleGlobalLeaderboard},
+		{Pattern: "/api/profiles", Handler: a.handleProfiles},
+		{Pattern: "/api/profiles/", Handler: a.handleProfile},
+		{Pattern: "/api/catalog", Handler: a.handleCatalog},
+		{Pattern: "/api/scoring", Handler: a.handleScoring},
+	}
+}
+
+func main() { sdk.Run(&App{}) }
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func httpError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}

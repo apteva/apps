@@ -20,11 +20,26 @@ func nonEmptyArraySchema(items map[string]any) map[string]any {
 	return map[string]any{"type": "array", "items": items, "minItems": 1}
 }
 
+var draftAgentInputSchema = strictObject(map[string]any{
+	"name":      map[string]any{"type": "string", "minLength": 1},
+	"directive": map[string]any{"type": "string", "minLength": 1},
+	"mode":      map[string]any{"type": "string", "enum": []string{"autonomous", "cautious", "learn"}},
+	"config":    map[string]any{"type": "string", "description": "JSON object encoded as a string; defaults to {}."},
+}, "name", "directive")
+
 var targetInputSchema = strictObject(map[string]any{
 	"agent_id": map[string]any{"type": "integer", "minimum": 1},
+	"draft":    draftAgentInputSchema,
 	"provider": map[string]any{"type": "string"},
 	"model":    map[string]any{"type": "string"},
-}, "agent_id")
+})
+
+func init() {
+	targetInputSchema["oneOf"] = []any{
+		map[string]any{"required": []string{"agent_id"}, "not": map[string]any{"required": []string{"draft"}}},
+		map[string]any{"required": []string{"draft"}, "not": map[string]any{"required": []string{"agent_id"}}},
+	}
+}
 
 var assertionInputSchema = strictObject(map[string]any{
 	"name":        map[string]any{"type": "string"},

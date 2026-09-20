@@ -389,7 +389,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.5.9" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.6.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -434,6 +434,12 @@ func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
 			t.Errorf("target schema is missing %q", field)
 		}
 	}
+	if _, found := targetProperties["draft"]; !found {
+		t.Error("target schema is missing draft")
+	}
+	if choices, ok := targetItems["oneOf"].([]any); !ok || len(choices) != 2 {
+		t.Fatalf("target schema must require exactly one of agent_id or draft: %#v", targetItems)
+	}
 	argsWithProject := map[string]any{"_project_id": "project-one", "suite_id": "suite-one", "targets": []any{map[string]any{"agent_id": 7.0}}}
 	var decoded experimentInput
 	if err := decodeStrictArgs(argsWithProject, &decoded); err != nil || decoded.SuiteID != "suite-one" || len(decoded.Targets) != 1 {
@@ -444,6 +450,53 @@ func TestCreateToolSchemasExposeCanonicalWorkflow(t *testing.T) {
 	}
 	if _, err := (&App{}).toolCreateExperiment(nil, map[string]any{"suite_id": "suite-one", "targets": []any{}, "unexpected": true}); err == nil || !strings.Contains(err.Error(), "unknown field") {
 		t.Fatalf("strict experiment arguments error=%v", err)
+	}
+}
+
+func TestDraftTargetsAreCreatedOnDemandAndComparedTogether(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-drafts", Name: "Draft comparison"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-drafts", SuiteID: "suite-drafts", Name: "Resolve", Prompt: "Resolve support request", Goals: []string{"Resolve the request"}}, true); err != nil {
+		t.Fatal(err)
+	}
+	targets := []Target{
+		{Draft: &sdk.RuntimeAgentDraft{Name: "Concise", Directive: "Resolve the request concisely."}, Model: "openai/gpt-test"},
+		{Draft: &sdk.RuntimeAgentDraft{Name: "Thorough", Directive: "Resolve the request and explain every step.", Mode: "cautious", Config: `{"unconscious":false}`}, Model: "openai/gpt-test"},
+	}
+	experiment, err := svc.createExperiment("suite-drafts", "Two hidden setups", "manual", targets, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(experiment.Targets) != 2 || len(experiment.Runs) != 2 {
+		t.Fatalf("experiment=%#v", experiment)
+	}
+	if got := experiment.Targets[0]; got.AgentID != 0 || got.AgentName != "Concise" || got.Directive != targets[0].Draft.Directive || got.Draft == nil || got.Draft.Mode != "autonomous" || got.Draft.Config != "{}" || got.Provider != "openai" || got.Model != "gpt-test" {
+		t.Fatalf("normalized first draft=%#v", got)
+	}
+	for range 2 {
+		if err := svc.runNext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if platform.spawned != 2 || len(platform.spawnInputs) != 2 {
+		t.Fatalf("spawned=%d inputs=%#v", platform.spawned, platform.spawnInputs)
+	}
+	for i, input := range platform.spawnInputs {
+		agent, ok := input["agent"].(map[string]any)
+		if !ok {
+			t.Fatalf("spawn %d agent=%#v", i, input["agent"])
+		}
+		if _, found := agent["source_agent_id"]; found {
+			t.Fatalf("draft spawn %d leaked source_agent_id: %#v", i, agent)
+		}
+		draft, ok := agent["draft"].(map[string]any)
+		if !ok || draft["name"] != targets[i].Draft.Name || agent["alias"] != "main" {
+			t.Fatalf("draft spawn %d=%#v", i, agent)
+		}
 	}
 }
 

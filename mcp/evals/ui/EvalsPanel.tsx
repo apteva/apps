@@ -165,8 +165,16 @@ interface TaskDraft {
   success: string;
 }
 
+interface TargetDraft {
+  name: string;
+  directive: string;
+  mode?: "autonomous" | "cautious" | "learn";
+  config?: string;
+}
+
 interface Target {
-  agent_id: number;
+  agent_id?: number;
+  draft?: TargetDraft;
   agent_name?: string;
   model?: string;
   provider?: string;
@@ -449,6 +457,8 @@ function appURL(path: string) {
 const modelID = (model: Model) =>
   model.gateway_model || `${model.provider || ""}/${model.model_id || ""}`.replace(/^\//, "");
 const modelLabel = (model: Model) => model.display_name || modelID(model);
+const targetName = (target: Target) => target.agent_name || target.draft?.name || (target.agent_id ? String(target.agent_id) : "Hidden setup");
+const targetDescription = (target: Target) => `${targetName(target)} · ${target.model || "default"}`;
 const audioPresetOptions: { value: VoiceAudioConditions["preset"]; label: string }[] = [
   { value: "clean", label: "Clean audio" },
   { value: "office", label: "Busy office" },
@@ -993,6 +1003,8 @@ function PlanRunBuilder({ suites, catalog, initialSuiteID, onClose, onCreated }:
   const [suiteID, setSuiteID] = useState(initialSuite?.id || "");
   const [targets, setTargets] = useState<Target[]>([]);
   const [agent, setAgent] = useState<Agent | null>(null);
+  const [draft, setDraft] = useState<TargetDraft>({ name: "", directive: "", mode: "autonomous", config: "{}" });
+  const [draftModel, setDraftModel] = useState("");
   const [repetitions, setRepetitions] = useState(1);
   const [judgeModel, setJudgeModel] = useState(initialSuite?.judge_model || "");
   const [error, setError] = useState("");
@@ -1002,6 +1014,12 @@ function PlanRunBuilder({ suites, catalog, initialSuiteID, onClose, onCreated }:
     if (!agent) return;
     const value = { agent_id: agent.id, agent_name: agent.name, model: model ? modelID(model) : "" };
     if (!targets.some((item) => item.agent_id === value.agent_id && item.model === value.model)) setTargets([...targets, value]);
+  };
+  const addDraftTarget = () => {
+    if (!draft.name.trim() || !draft.directive.trim()) return;
+    setTargets([...targets, { draft: { ...draft, name: draft.name.trim() }, agent_name: draft.name.trim(), model: draftModel }]);
+    setDraft({ name: "", directive: "", mode: "autonomous", config: "{}" });
+    setDraftModel("");
   };
   const run = async () => {
     setBusy(true);
@@ -1021,7 +1039,9 @@ function PlanRunBuilder({ suites, catalog, initialSuiteID, onClose, onCreated }:
         <label><span className="ev-label">Eval</span><select value={suiteID} onChange={(event) => { setSuiteID(event.target.value); setJudgeModel(suites.find((item) => item.id === event.target.value)?.judge_model || ""); }} className="ev-field">{suites.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.cases?.length || 0} scenarios</option>)}</select></label>
         <label><span className="ev-label">Repetitions</span><input type="number" min={1} max={20} value={repetitions} onChange={(event) => setRepetitions(Number(event.target.value))} className="ev-field" /></label>
       </div>
-      <section><span className="ev-label">Agents and models</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(item) => `${item.name} · ${item.status}`} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div><div className="ev-selected-name">{agent.name}</div><div className="ev-selected-meta">Add its default model, or compare another model</div></div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}{agent && <div style={{ marginTop: 8 }}><SearchSelect placeholder="Search models to compare" items={catalog.models} label={modelLabel} onSelect={addTarget} /></div>}<div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>{targets.map((item, index) => <span key={`${item.agent_id}-${item.model}-${index}`} className="ev-button">{item.agent_name} · {item.model || "default"}<button type="button" onClick={() => setTargets(targets.filter((_, targetIndex) => targetIndex !== index))} title="Remove" style={{ marginLeft: 7 }}>×</button></span>)}</div></section>
+      <section><span className="ev-label">Existing agents</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(item) => `${item.name} · ${item.status}`} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div><div className="ev-selected-name">{agent.name}</div><div className="ev-selected-meta">Add its default model, or compare another model</div></div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}{agent && <div style={{ marginTop: 8 }}><SearchSelect placeholder="Search models to compare" items={catalog.models} label={modelLabel} onSelect={addTarget} /></div>}</section>
+      <section><span className="ev-label">Hidden on-demand setup</span><div className="ev-setup"><div className="ev-grid-2"><label><span className="ev-label">Setup name</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Candidate A" className="ev-field" /></label><label><span className="ev-label">Model override</span><select value={draftModel} onChange={(event) => setDraftModel(event.target.value)} className="ev-field"><option value="">Platform default</option>{catalog.models.map((item) => <option key={modelID(item)} value={modelID(item)}>{modelLabel(item)}</option>)}</select></label></div><label style={{ display: "block", marginTop: 10 }}><span className="ev-label">Directive</span><textarea value={draft.directive} onChange={(event) => setDraft({ ...draft, directive: event.target.value })} placeholder="Complete role, goals, rules, and tool-use instructions" className="ev-field" /></label><div className="ev-grid-2" style={{ marginTop: 10 }}><label><span className="ev-label">Mode</span><select value={draft.mode || "autonomous"} onChange={(event) => setDraft({ ...draft, mode: event.target.value as TargetDraft["mode"] })} className="ev-field"><option value="autonomous">Autonomous</option><option value="cautious">Cautious</option><option value="learn">Learn</option></select></label><label><span className="ev-label">Config JSON</span><input value={draft.config || "{}"} onChange={(event) => setDraft({ ...draft, config: event.target.value })} className="ev-field" /></label></div><button type="button" disabled={!draft.name.trim() || !draft.directive.trim()} onClick={addDraftTarget} className="ev-button" style={{ marginTop: 10 }}>Add hidden setup</button></div></section>
+      <section><span className="ev-label">Targets to compare</span><div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{targets.map((item, index) => <span key={`${item.agent_id || item.draft?.name}-${item.model}-${index}`} className="ev-button">{targetDescription(item)}<button type="button" onClick={() => setTargets(targets.filter((_, targetIndex) => targetIndex !== index))} title="Remove" style={{ marginLeft: 7 }}>×</button></span>)}</div>{targets.length === 0 && <span className="ev-help">Add one or more existing agents or hidden setups.</span>}</section>
       <label><span className="ev-label">Evaluation model</span><select value={judgeModel} onChange={(event) => setJudgeModel(event.target.value)} className="ev-field"><option value="">Deterministic checks only</option>{catalog.models.map((item) => <option key={modelID(item)} value={modelID(item)}>{modelLabel(item)}</option>)}</select></label>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
@@ -1062,7 +1082,7 @@ function PlanEditor({ initial, catalog, onClose, onSaved }: {
       <label><span className="ev-label">Name</span><input autoFocus value={item.name || ""} onChange={(event) => setItem({ ...item, name: event.target.value })} className="ev-field" /></label>
       <label><span className="ev-label">Description</span><textarea rows={3} value={item.description || ""} onChange={(event) => setItem({ ...item, description: event.target.value })} className="ev-field" /></label>
       <div className="ev-grid-2"><label><span className="ev-label">Environment</span><select value={item.environment_id || ""} onChange={(event) => setItem({ ...item, environment_id: event.target.value })} className="ev-field"><option value="">Fresh isolated environment</option>{catalog.environments.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}</select></label><label><span className="ev-label">Evaluation model</span><select value={item.judge_model || ""} onChange={(event) => setItem({ ...item, judge_model: event.target.value })} className="ev-field"><option value="">Deterministic checks only</option>{catalog.models.map((model) => <option key={modelID(model)} value={modelID(model)}>{modelLabel(model)}</option>)}</select></label></div>
-      <div className="ev-divider"><div className="ev-grid-2"><label><span className="ev-label">Continuous schedule</span><select value={item.schedule_minutes || 0} onChange={(event) => setItem({ ...item, schedule_minutes: Number(event.target.value) })} className="ev-field"><option value={0}>Manual only</option><option value={60}>Hourly</option><option value={360}>Every 6 hours</option><option value={1440}>Daily</option><option value={10080}>Weekly</option></select></label><label><span className="ev-label">Required pass rate</span><input type="number" min={0} max={100} value={Math.round((item.required_pass_rate || 0) * 100)} onChange={(event) => setItem({ ...item, required_pass_rate: Number(event.target.value) / 100 })} className="ev-field" /></label></div>{(item.schedule_minutes || 0) > 0 && <div style={{ marginTop: 14 }}><span className="ev-label">Production targets</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(value) => value.name} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div className="ev-selected-name">{agent.name}</div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}<div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{targets.map((target, index) => <span key={index} className="ev-button">{target.agent_name} · {target.model || "default"}<button type="button" title="Remove" onClick={() => setItem({ ...item, continuous_targets: targets.filter((_, targetIndex) => targetIndex !== index) })} style={{ marginLeft: 7 }}>×</button></span>)}</div></div>}</div>
+      <div className="ev-divider"><div className="ev-grid-2"><label><span className="ev-label">Continuous schedule</span><select value={item.schedule_minutes || 0} onChange={(event) => setItem({ ...item, schedule_minutes: Number(event.target.value) })} className="ev-field"><option value={0}>Manual only</option><option value={60}>Hourly</option><option value={360}>Every 6 hours</option><option value={1440}>Daily</option><option value={10080}>Weekly</option></select></label><label><span className="ev-label">Required pass rate</span><input type="number" min={0} max={100} value={Math.round((item.required_pass_rate || 0) * 100)} onChange={(event) => setItem({ ...item, required_pass_rate: Number(event.target.value) / 100 })} className="ev-field" /></label></div>{(item.schedule_minutes || 0) > 0 && <div style={{ marginTop: 14 }}><span className="ev-label">Production targets</span><SearchSelect placeholder="Search agents" items={catalog.agents} label={(value) => value.name} onSelect={setAgent} />{agent && <div className="ev-selected" style={{ marginTop: 8 }}><div className="ev-selected-name">{agent.name}</div><button type="button" onClick={() => addTarget()} className="ev-button">Add default</button></div>}<div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8 }}>{targets.map((target, index) => <span key={index} className="ev-button">{targetDescription(target)}<button type="button" title="Remove" onClick={() => setItem({ ...item, continuous_targets: targets.filter((_, targetIndex) => targetIndex !== index) })} style={{ marginLeft: 7 }}>×</button></span>)}</div></div>}</div>
       <label className="ev-check"><input type="checkbox" checked={item.enabled !== false} onChange={(event) => setItem({ ...item, enabled: event.target.checked })} /> Enabled</label>
       {error && <div className="ev-error"><span>{error}</span></div>}
     </div>
@@ -1141,7 +1161,7 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
       setError(cause.message);
     }
   };
-  return <Drawer title={`${run.case.name} · ${run.target.agent_name || run.target.agent_id}`} onClose={onClose} footer={<button type="button" onClick={onClose} className="ev-button">Close</button>}>
+  return <Drawer title={`${run.case.name} · ${targetName(run.target)}`} onClose={onClose} footer={<button type="button" onClick={onClose} className="ev-button">Close</button>}>
     <div className="ev-inspector-summary"><Metric label="Result" value={run.status} /><Metric label="Score" value={score(run.overall_score)} /><Metric label="Turns" value={String(run.execution?.turns || 0)} /></div>
     {(run.error || error) && <div className="ev-error" style={{ marginTop: 16 }}><span>{run.error || error}</span></div>}
     {run.voice_call && <section className="ev-inspector-section">
@@ -1171,7 +1191,7 @@ function RunRows({ runs, onInspect, liveVoiceCalls }: { runs: EvalRun[]; onInspe
       const goals = visibleGoals(run);
       const liveCall = run.status === "running" && run.environment_run_id ? liveVoiceCalls[run.environment_run_id] : undefined;
       return <div className="ev-case-result" data-has-goals={goals.length > 0} key={run.id}>
-        <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{run.target.agent_name} · {run.target.model || "default"}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span>{run.status === "running" ? <LiveStage stage={run.stage} /> : <Status value={run.status} />}</button>
+        <button type="button" onClick={() => onInspect(run)} className="ev-table-row ev-case-grid"><span className="ev-truncate">{run.case.name}</span><span className="ev-truncate">{targetDescription(run.target)}</span><span>{run.repetition}</span><span>{score(run.overall_score)}</span>{run.status === "running" ? <LiveStage stage={run.stage} /> : <Status value={run.status} />}</button>
         {liveCall && <LiveVoiceTranscript call={liveCall} />}
         {goals.length > 0 && <div className="ev-inline-goals"><div className="ev-inline-goals-head"><span>Goal results</span><span>{goals.length}</span></div>{goals.map((goal, index) => {
           const tone = goal.judged ? resultTone(goal.score, goal.passed) : "muted";
@@ -1188,7 +1208,7 @@ function RunDetail({ experiment, onInspect, liveVoiceCalls }: { experiment: Expe
   return <div className="ev-detail">
     <header className="ev-detail-header"><div><h2 className="ev-detail-title">{experiment.name}</h2><div className="ev-detail-id">{experiment.trigger_type === "schedule" ? "Scheduled run" : "Manual run"} · {formatDate(experiment.created_at)}</div></div><Status value={experimentOutcome(experiment)} /></header>
     <div className="ev-metrics"><Metric label="Pass rate" value={pct(summary?.pass_rate)} /><Metric label="Score" value={score(summary?.average_score)} /><Metric label="Passed" value={String(summary?.passed || 0)} /><Metric label="Failed" value={String(summary?.failed || 0)} /><Metric label="Invalid / error" value={String(summary?.errors || 0)} /><Metric label="In progress" value={String((summary?.queued || 0) + (summary?.running || 0))} /></div>
-    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{target.target.agent_name}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
+    {summary?.targets?.length ? <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Targets</span></div><div className="ev-table"><div className="ev-table-head ev-target-grid"><span>Agent and model</span><span>Pass rate</span><span>Score</span><span>Tokens</span><span>Cost</span></div>{summary.targets.map((target) => <div className="ev-table-row ev-target-grid" key={target.target_index}><span className="ev-truncate"><strong>{targetName(target.target)}</strong> · {target.target.model || "default"}</span><span>{pct(target.pass_rate)}</span><span>{score(target.average_score)}</span><span>{Math.round(target.average_tokens).toLocaleString()}</span><span>${target.average_cost_usd.toFixed(4)}</span></div>)}</div></section> : null}
     <section className="ev-section"><div className="ev-section-heading"><span className="ev-section-title">Scenario results</span><span className="ev-muted">{runs.length} runs</span></div><RunRows runs={runs} onInspect={onInspect} liveVoiceCalls={liveVoiceCalls} /></section>
   </div>;
 }
@@ -1228,7 +1248,7 @@ function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, l
   const environment = catalog.environments.find((item) => item.id === suite.environment_id);
   const targets = suite.continuous_targets?.length ? suite.continuous_targets : latest?.targets || [];
   const targetLabel = targets.length > 0
-    ? targets.map((target) => `${target.agent_name || target.agent_id}${target.model ? ` · ${target.model}` : ""}`).join(", ")
+    ? targets.map(targetDescription).join(", ")
     : "Chosen when run";
   const health = suiteHealth(suite, experiments);
   return <div className="ev-detail">

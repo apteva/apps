@@ -1,4 +1,4 @@
-module github.com/apteva/apps/mcp/evals
+module github.com/apteva/apps/mcp/bench
 
 go 1.25.1
 

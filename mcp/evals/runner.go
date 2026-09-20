@@ -65,7 +65,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return err
 	}
 	var spawned sdk.RuntimeAgent
-	spawnArgs := map[string]any{"run_id": created.ID, "agent": map[string]any{"source_agent_id": run.TargetSnapshot.AgentID, "alias": "main", "start_paused": true, "provider": run.TargetSnapshot.Provider, "model": run.TargetSnapshot.Model}}
+	spawnArgs := map[string]any{"run_id": created.ID, "agent": targetAgentSpec(run.TargetSnapshot)}
 	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
 		return fmt.Errorf("spawn agent: %w", err)
 	}
@@ -177,7 +177,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("judge: %w", judgeErr)
 		}
 		run.Judge = verdict
-		if len(assertionErrors) == 0 && len(collaboratorErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
+		if run.TargetSnapshot.AgentID > 0 && len(assertionErrors) == 0 && len(collaboratorErrors) == 0 && verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
 			suggestion := &Suggestion{ID: "suggest_" + token(10), RunID: run.ID, AgentID: run.TargetSnapshot.AgentID, Directive: verdict.DirectiveSuggestion.Directive, ExpectedETag: run.TargetSnapshot.DirectiveETag, Reason: verdict.DirectiveSuggestion.Reason, Status: "proposed", CreatedAt: time.Now().UTC()}
 			_ = s.db.saveSuggestion(suggestion)
 		}
@@ -222,6 +222,19 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 	return nil
+}
+
+func targetAgentSpec(target Target) map[string]any {
+	agent := map[string]any{
+		"alias": "main", "start_paused": true,
+		"provider": target.Provider, "model": target.Model,
+	}
+	if target.Draft != nil {
+		agent["draft"] = target.Draft
+	} else {
+		agent["source_agent_id"] = target.AgentID
+	}
+	return agent
 }
 
 func (s *service) setRunStage(run *Run, stage string) error {
@@ -337,9 +350,18 @@ func prepareEnvironmentSpec(spec map[string]any, target Target) (map[string]any,
 			return nil, nil, fmt.Errorf("duplicate environment agent alias %q at indexes %d and %d", effectiveAlias, previous, i)
 		}
 		aliases[effectiveAlias] = i
-		if agents[i].SourceAgentID == target.AgentID {
+		if target.AgentID > 0 && agents[i].SourceAgentID == target.AgentID {
 			matches = append(matches, i)
 		}
+	}
+	if target.Draft != nil {
+		for i, agent := range agents {
+			if agent.Alias == "" || agent.Alias == "main" {
+				return nil, nil, fmt.Errorf("environment agent at index %d uses reserved evaluation alias %q; draft targets already occupy main", i, "main")
+			}
+		}
+		spec["agents"] = agents
+		return spec, agents, nil
 	}
 	if len(matches) == 0 {
 		return nil, nil, fmt.Errorf("environment agents do not declare evaluation target agent_id %d by source_agent_id", target.AgentID)

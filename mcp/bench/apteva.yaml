@@ -1,0 +1,79 @@
+schema: apteva-app/v1
+name: bench
+display_name: Bench
+version: 0.5.0
+description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. Sealed scenario packs carry fixed budgets and a frozen scoring contract; v0.5.0 compares multiple hidden setups without adding agents to the project.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/bench
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [bench, benchmark, evals, agents, leaderboard, reproducibility]
+scopes: [project]
+min_apteva_version: "0.26.1"
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.runtime_catalog.read
+  apps:
+    - { name: evals, version: ">=0.6.0" }
+    - { name: environments, version: ">=0.7.4" }
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: bench_pack_list, description: "List benchmark packs, draft and sealed." }
+    - { name: bench_pack_get, description: "Get one benchmark pack and its scenarios." }
+    - { name: bench_pack_create, description: "Create a draft benchmark pack." }
+    - { name: bench_pack_update, description: "Update a draft benchmark pack. Sealed packs are immutable." }
+    - { name: bench_pack_delete, description: "Delete a draft pack, or a sealed pack that has no runs." }
+    - { name: bench_scenario_put, description: "Add or replace one scenario in a draft pack." }
+    - { name: bench_scenario_delete, description: "Remove a scenario from a draft pack." }
+    - { name: bench_pack_seal, description: "Seal a draft into a new immutable, content-hashed version." }
+    - { name: bench_pack_fork, description: "Fork any pack into a fresh editable draft." }
+    - { name: bench_run_create, description: "Run a sealed pack against one or more persistent agent_id or hidden draft targets for N trials." }
+    - { name: bench_run_list, description: "List benchmark runs." }
+    - { name: bench_run_get, description: "Get one benchmark run with its scored results." }
+    - { name: bench_run_search, description: "Search and paginate benchmark runs with pack, status, profile, and text filters." }
+    - { name: bench_run_cancel, description: "Cancel a queued or running benchmark run." }
+    - { name: bench_result_list, description: "Search and paginate raw scored results across runs and packs." }
+    - { name: bench_result_get, description: "Get one raw scored result by id." }
+    - { name: bench_leaderboard, description: "Rank targets across every run of one sealed pack." }
+    - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack under one scoring contract." }
+    - { name: bench_baseline_set, description: "Pin a run's result as the baseline for a pack scenario." }
+    - { name: bench_baseline_compare, description: "Compare a run against pinned baselines." }
+    - { name: bench_baseline_list, description: "List and paginate pinned baselines." }
+    - { name: bench_baseline_get, description: "Get one pinned baseline by id." }
+    - { name: bench_evidence_export, description: "Export a run's full provenance and scoring evidence bundle." }
+    - { name: bench_profile_list, description: "List built-in and custom scoring profiles." }
+    - { name: bench_profile_get, description: "Get one scoring profile by id or digest." }
+    - { name: bench_scoring_get, description: "Read one scoring profile and the complete supported scoring vocabulary." }
+    - { name: bench_pack_suite_list, description: "List materialized Evals suites and case-to-scenario mappings." }
+    - { name: bench_data_export, description: "Export every persisted Bench record in one snapshot." }
+    - { name: bench_catalog, description: "List agents, models, and Environments available as targets." }
+  publishes:
+    - { name: bench.pack.sealed, description: "A pack was sealed into an immutable version." }
+    - { name: bench.profile.sealed, description: "A scoring profile was sealed into an immutable contract." }
+    - { name: bench.run.started, description: "A benchmark run started executing." }
+    - { name: bench.run.completed, description: "A benchmark run finished and was scored." }
+    - { name: bench.run.failed, description: "A benchmark run failed to execute." }
+    - { name: bench.result.rejected, description: "A result was withheld from the record as a harness failure." }
+    - { name: bench.record.broken, description: "A target beat the pinned baseline for a scenario." }
+    - { name: bench.regression.detected, description: "A target fell below the pinned baseline for a scenario." }
+  ui_panels:
+    - { slot: project.page, label: "Bench", icon: chart-column, entry: /ui/BenchPanel.mjs }
+  workers:
+    - { name: runner, schedule: "@every 5s" }
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: bench/v0.5.0
+    entry: mcp/bench
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/bench.db
+  migrations: migrations/
+upgrade_policy: auto-patch

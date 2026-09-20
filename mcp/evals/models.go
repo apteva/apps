@@ -94,12 +94,13 @@ type AssertionResult struct {
 }
 
 type Target struct {
-	AgentID       int64  `json:"agent_id"`
-	AgentName     string `json:"agent_name,omitempty"`
-	Provider      string `json:"provider,omitempty"`
-	Model         string `json:"model,omitempty"`
-	Directive     string `json:"directive,omitempty"`
-	DirectiveETag string `json:"directive_etag,omitempty"`
+	AgentID       int64                  `json:"agent_id,omitempty"`
+	Draft         *sdk.RuntimeAgentDraft `json:"draft,omitempty"`
+	AgentName     string                 `json:"agent_name,omitempty"`
+	Provider      string                 `json:"provider,omitempty"`
+	Model         string                 `json:"model,omitempty"`
+	Directive     string                 `json:"directive,omitempty"`
+	DirectiveETag string                 `json:"directive_etag,omitempty"`
 }
 
 type Experiment struct {

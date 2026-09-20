@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -248,27 +249,43 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 		return nil, errors.New("suite has no enabled cases")
 	}
 
-	runtimeAPI := s.ctx.RuntimeAPI()
-	if runtimeAPI == nil {
-		return nil, errors.New("runtime catalog API unavailable")
-	}
-	agents, err := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
-	if err != nil {
-		return nil, fmt.Errorf("list target agents: %w", err)
-	}
 	byID := map[int64]sdk.RuntimeCatalogAgent{}
-	for _, agent := range agents {
-		byID[agent.ID] = agent
+	needsCatalog := false
+	for i := range targets {
+		hasAgent, hasDraft := targets[i].AgentID > 0, targets[i].Draft != nil
+		if hasAgent == hasDraft {
+			return nil, fmt.Errorf("target %d: exactly one of agent_id or draft is required", i)
+		}
+		needsCatalog = needsCatalog || hasAgent
+	}
+	if needsCatalog {
+		runtimeAPI := s.ctx.RuntimeAPI()
+		if runtimeAPI == nil {
+			return nil, errors.New("runtime catalog API unavailable")
+		}
+		agents, listErr := runtimeAPI.ListRuntimeCatalogAgents(s.ctx.CurrentProject())
+		if listErr != nil {
+			return nil, fmt.Errorf("list target agents: %w", listErr)
+		}
+		for _, agent := range agents {
+			byID[agent.ID] = agent
+		}
 	}
 	for i := range targets {
-		if targets[i].AgentID <= 0 {
-			return nil, fmt.Errorf("target %d: agent_id required", i)
+		if targets[i].Draft != nil {
+			if err := normalizeRuntimeDraft(targets[i].Draft); err != nil {
+				return nil, fmt.Errorf("target %d: %w", i, err)
+			}
+			targets[i].AgentName = targets[i].Draft.Name
+			targets[i].Directive = targets[i].Draft.Directive
+			targets[i].DirectiveETag = ""
+		} else {
+			agent, ok := byID[targets[i].AgentID]
+			if !ok {
+				return nil, fmt.Errorf("target %d: agent not found", i)
+			}
+			targets[i].AgentName, targets[i].Directive, targets[i].DirectiveETag = agent.Name, agent.Directive, agent.DirectiveETag
 		}
-		agent, ok := byID[targets[i].AgentID]
-		if !ok {
-			return nil, fmt.Errorf("target %d: agent not found", i)
-		}
-		targets[i].AgentName, targets[i].Directive, targets[i].DirectiveETag = agent.Name, agent.Directive, agent.DirectiveETag
 		if targets[i].Provider == "" && strings.Contains(targets[i].Model, "/") {
 			parts := strings.SplitN(targets[i].Model, "/", 2)
 			targets[i].Provider, targets[i].Model = parts[0], parts[1]
@@ -280,6 +297,34 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 	}
 	s.ctx.Emit("eval.experiment.created", map[string]any{"experiment_id": exp.ID, "suite_id": suite.ID, "trigger_type": trigger})
 	return s.db.getExperiment(exp.ID)
+}
+
+func normalizeRuntimeDraft(draft *sdk.RuntimeAgentDraft) error {
+	draft.Name = strings.TrimSpace(draft.Name)
+	if draft.Name == "" {
+		return errors.New("draft.name required")
+	}
+	if strings.TrimSpace(draft.Directive) == "" {
+		return errors.New("draft.directive required")
+	}
+	draft.Mode = strings.TrimSpace(draft.Mode)
+	if draft.Mode == "" {
+		draft.Mode = "autonomous"
+	}
+	switch draft.Mode {
+	case "autonomous", "cautious", "learn":
+	default:
+		return errors.New("draft.mode must be autonomous, cautious, or learn")
+	}
+	draft.Config = strings.TrimSpace(draft.Config)
+	if draft.Config == "" {
+		draft.Config = "{}"
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(draft.Config), &config); err != nil || config == nil {
+		return errors.New("draft.config must be a JSON object")
+	}
+	return nil
 }
 
 func (s *service) resolveJudgeModel(requested string) (string, error) {
