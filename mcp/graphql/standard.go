@@ -398,9 +398,22 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		return call()
 	}
 	if source.Kind == "tables" {
-		input, err := mappedTablesInput(config, p.Args)
+		var input map[string]any
+		var err error
+		if hasRelationFilter(config) {
+			var supported bool
+			input, supported, err = a.nativeRelationFilterInput(p.Context, config, p.Args, state.bindings)
+			if !supported {
+				input = nil
+			}
+		} else {
+			input, err = mappedTablesInput(config, p.Args)
+		}
 		if err != nil {
 			return nil, resolverError{err}
+		}
+		if input == nil {
+			goto deferred
 		}
 		tool := "rows_" + strings.ToLower(r.Operation)
 		if r.Operation == "find" || r.Operation == "list" {
@@ -429,6 +442,8 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 			return read, nil
 		}
 	}
+
+deferred:
 	path, _ := json.Marshal(p.Info.Path.AsArray())
 	read := trackResolverError(state, p, state.loader.deferCall("field:"+string(path), call))
 	if state.synchronous {

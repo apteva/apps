@@ -132,6 +132,62 @@ than its parent value, set `value_type` to `string`, `number`, or `boolean` in
 the relation mapping. Coercion is explicit so the adapter never guesses from
 identifiers or silently changes ordinary same-type relationships.
 
+For relationships that need more than one equality key, configure the
+server-owned `relation_filter` plan. This does not add syntax to GraphQL: clients
+still send standard fields, arguments and typed `where` inputs. The plan is
+validated when the resolver is saved and again when an atomic API release is
+published. Client filters are ANDed outside the plan and cannot replace fixed,
+identity-derived, or relationship predicates.
+
+```json
+{
+  "relation_filter": {
+    "and": [
+      {
+        "or": [
+          {"eq":[{"column":"prospect_id"},{"parent":"id"}]},
+          {"eq":[{"column":"prospect_business_id"},{"coalesce":[{"parent":"business_id"},{"parent":"legacy_business_id"}]}]}
+        ]
+      },
+      {
+        "exists": {
+          "source": "calls",
+          "correlate": [{"outer":"id","inner":"prospect_id"}],
+          "where": {
+            "and": [
+              {"eq":[{"column":"status"},{"const":"open"}]},
+              {"gte":[{"column":"created_at"},{"argument":"since"}]}
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "relation_scan_limit": 10000
+}
+```
+
+Boolean operators are `and`, `or`, `not`, `exists`, and `not_exists`.
+Comparisons are `eq`, `neq`, `lt`, `lte`, `gt`, `gte`, `contains`, `in`,
+`between`, `is_null`, and `is_not_null`. Values can come from `column`,
+`parent`, `outer`, `argument`, or `const`, and can use `coalesce` or an explicit
+`cast` to `string`, `number`, or `boolean`. Dotted parent and argument paths are
+supported. Correlated sources are immutable, active Tables sources in the same
+API release; source/table names are never supplied by clients.
+
+With Tables v0.1.25+, GraphQL compiles the saved plan to native `filter_ast` v1.
+Tables performs recursive and correlated filtering before pagination, totals,
+and aggregation; native filtered reads retain request-local deduplication and
+`tables_batch`. Capability negotiation is cached after a successful probe.
+
+For an older Tables runtime, GraphQL retains a compatibility fallback: simple
+top-level AND predicates are pushed down and the remaining plan is evaluated
+over ordered candidate pages. Its default candidate and correlated-row budget
+is 10,000 (configurable up to 100,000). Hitting it returns
+`relation_filter_scan_limit_exceeded`; partial data is never returned. Resolvers
+without `relation_filter` keep the ordinary Tables batch, projection, and fast
+completion paths on every supported Tables version.
+
 ```graphql
 query CustomerOrders($limit: Int = 10) {
   customers(limit: $limit) {

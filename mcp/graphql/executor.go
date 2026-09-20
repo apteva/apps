@@ -752,6 +752,9 @@ func (a *App) executeBatchedTableRoots(ctx context.Context, project, apiSlug str
 func tablesBatchInput(source sourceRecord, resolver resolverRecord, field *ast.Field, vars map[string]any) (string, map[string]any, bool) {
 	args := field.ArgumentMap(vars)
 	config := mergeMaps(source.Config, resolver.Config)
+	if hasRelationFilter(config) {
+		return "", nil, false
+	}
 	input := tablesReadInput(config, args)
 	operation := strings.ToLower(resolver.Operation)
 	switch operation {
@@ -862,6 +865,9 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 }
 
 func (a *App) callTables(ctx context.Context, operation string, config map[string]any) (any, error) {
+	if hasRelationFilter(config) {
+		return a.callTablesRelationFilter(ctx, operation, config)
+	}
 	args := resolverArgs(config)
 	input, err := mappedTablesInput(config, args)
 	if err != nil {

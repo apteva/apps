@@ -37,6 +37,9 @@ type App struct {
 	logStop          chan struct{}
 	logDone          chan struct{}
 	logStopOnce      sync.Once
+	tablesCapsMu     sync.Mutex
+	tablesCapsKnown  bool
+	tablesFilterAST  bool
 }
 
 func main() { sdk.Run(&App{}) }

@@ -340,6 +340,13 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 		if err := validateTableRelation(operation, merged); err != nil {
 			return nil, err
 		}
+		sources, err := listSources(db, project)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateRelationFilter(operation, merged, sources); err != nil {
+			return nil, err
+		}
 		if _, err := tablesDistinct(operation, merged, map[string]any{}); err != nil {
 			return nil, err
 		}

@@ -165,6 +165,12 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 				return invalid("resolver %s.%s references unpublished module %s", resolver.ParentType, resolver.FieldName, key)
 			}
 		}
+		if source.Kind == "tables" {
+			merged := mergeMaps(source.Config, resolver.Config)
+			if err := validateRelationFilter(resolver.Operation, merged, sources); err != nil {
+				return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+			}
+		}
 	}
 	for field := range policy.Fields {
 		parts := strings.SplitN(field, ".", 2)
