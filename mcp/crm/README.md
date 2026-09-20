@@ -1,12 +1,13 @@
-# CRM v0.9.2
+# CRM v0.9.3
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.2` repairs the correctness, concurrency and performance issues
-identified in the `crm/v0.9.1` audit.
+Release `crm/v0.9.3` adds deterministic list context to contact, conversation,
+activity, opportunity and segment events. It builds on the correctness,
+concurrency and performance repairs shipped in `crm/v0.9.2`.
 
 ## Capabilities
 
@@ -105,6 +106,12 @@ triggers and only on actual transitions. Inbound and recovery events also commit
 with their mutations. Other CRUD handlers enqueue after their database commit;
 there remains a process-crash gap between those two operations. Do not treat
 these latter events as an exactly-once replication feed.
+
+Contact-scoped events carry sorted `list_ids` snapshots. Activity and inbound
+message events also carry `attributed_list_ids`, which identify only the lists
+that directly caused or received that activity. Delete and merge events preserve
+explicit before/after list snapshots, while list-scoped segment events expose
+their optional `list_id`. Arrays are always present, including when empty.
 
 Workers log suppression duration/routes/changed rows/retries and event batch and
 pending counts. Suppressions are indexed per snapshot and written in batches of

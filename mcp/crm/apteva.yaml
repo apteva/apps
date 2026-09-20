@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.2
+version: 0.9.3
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -199,7 +199,7 @@ provides:
         archived: boolean
         list_ids: array<integer>
     - name: contact.updated
-      description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed.
+      description: A contact's core fields, channels, attributes, tags, or list-driven metadata changed; list_ids is its current active membership snapshot.
       payload:
         event_id: string
         id: integer
@@ -207,8 +207,9 @@ provides:
         first_name: string
         last_name: string
         archived: boolean
+        list_ids: array<integer>
     - name: contact.channel.deliverability.changed
-      description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state.
+      description: A contact email, SMS, or WhatsApp route changed delivery, quarantine, suppression, or effective messageability state; list_ids is the contact's current active membership snapshot.
       payload:
         event_id: string
         contact_id: integer
@@ -219,19 +220,23 @@ provides:
         quarantined: boolean
         messageable: boolean
         messageability_reason: string
+        list_ids: array<integer>
     - name: contact.deleted
-      description: A contact was archived/soft-deleted.
+      description: A contact was archived/soft-deleted; list_ids_before_delete preserves its active memberships immediately before archival.
       payload:
         event_id: string
         id: integer
+        list_ids_before_delete: array<integer>
     - name: contact.merged
-      description: Two contacts were merged; the loser row is marked merged and data moved to the winner.
+      description: Two contacts were merged; winner_list_ids is the post-merge active membership union and loser_list_ids_before_merge preserves the loser's prior memberships.
       payload:
         event_id: string
         winner_id: integer
         loser_id: integer
+        winner_list_ids: array<integer>
+        loser_list_ids_before_merge: array<integer>
     - name: contact.activity.added
-      description: An activity row was appended to a contact timeline.
+      description: An activity row was appended to a contact timeline; list_ids is the membership snapshot and attributed_list_ids identifies lists that directly caused or received the activity.
       payload:
         event_id: string
         contact_id: integer
@@ -239,8 +244,10 @@ provides:
         conversation_id: integer
         kind: string
         source: string
+        list_ids: array<integer>
+        attributed_list_ids: array<integer>
     - name: conversation.status.changed
-      description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling.
+      description: A conversation's workflow status or priority changed, including inbound auto-reopen and spam handling; list_ids is the contact's current active membership snapshot.
       payload:
         event_id: string
         conversation_id: integer
@@ -248,8 +255,9 @@ provides:
         status: string
         priority: string
         reason: string
+        list_ids: array<integer>
     - name: conversation.message.received
-      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies.
+      description: A Messaging inbound message was attached to a CRM conversation; use this for agent wakeups on external replies. list_ids is the membership snapshot and attributed_list_ids identifies matched inbound-routing lists.
       payload:
         event_id: string
         contact_id: integer
@@ -261,6 +269,8 @@ provides:
         thread_state: string
         thread_created: boolean
         messaging_id: integer
+        list_ids: array<integer>
+        attributed_list_ids: array<integer>
     - name: list.created
       description: A contact list was created.
       payload:
@@ -291,28 +301,32 @@ provides:
         list_id: integer
         contact_id: integer
     - name: segment.created
-      description: A saved segment was created.
+      description: A saved segment was created; list_id is its optional list scope.
       payload:
         event_id: string
         id: integer
         name: string
         kind: string
+        list_id: integer|null
     - name: segment.updated
-      description: A saved segment's metadata or definition changed.
+      description: A saved segment's metadata or definition changed; list_id is its optional list scope after the update.
       payload:
         event_id: string
         id: integer
+        list_id: integer|null
     - name: segment.archived
-      description: A saved segment was archived.
+      description: A saved segment was archived; list_id preserves its optional list scope.
       payload:
         event_id: string
         id: integer
+        list_id: integer|null
     - name: segment.materialised
-      description: A dynamic segment was frozen into a static membership snapshot.
+      description: A dynamic segment was frozen into a static membership snapshot; list_id is its optional list scope.
       payload:
         event_id: string
         id: integer
         count: integer
+        list_id: integer|null
     - name: pipeline.created
       description: A sales pipeline was created.
       payload:
@@ -333,7 +347,7 @@ provides:
         archived: boolean
     - name: opportunity.created
       description: >-
-        An opportunity was created for a contact. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
+        An opportunity was created for a contact. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
         event_id: string
         opportunity_id: integer
@@ -346,9 +360,10 @@ provides:
         value: number
         currency: string
         stage_probability: number
+        list_ids: array<integer>
     - name: opportunity.updated
       description: >-
-        An opportunity was updated. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
+        An opportunity was updated. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure.
       payload:
         event_id: string
         opportunity_id: integer
@@ -361,9 +376,10 @@ provides:
         value: number
         currency: string
         stage_probability: number
+        list_ids: array<integer>
     - name: opportunity.stage.changed
       description: >-
-        An opportunity moved to another pipeline stage. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
+        An opportunity moved to another pipeline stage. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         event_id: string
         opportunity_id: integer
@@ -377,9 +393,10 @@ provides:
         currency: string
         stage_probability: number
         previous_stage_id: integer
+        list_ids: array<integer>
     - name: opportunity.status.changed
       description: >-
-        An opportunity changed status. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
+        An opportunity changed status. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         event_id: string
         opportunity_id: integer
@@ -393,9 +410,10 @@ provides:
         currency: string
         stage_probability: number
         previous_stage_id: integer
+        list_ids: array<integer>
     - name: opportunity.won
       description: >-
-        An opportunity was marked won. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
+        An opportunity was marked won. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         event_id: string
         opportunity_id: integer
@@ -409,9 +427,10 @@ provides:
         currency: string
         stage_probability: number
         previous_stage_id: integer
+        list_ids: array<integer>
     - name: opportunity.lost
       description: >-
-        An opportunity was marked lost. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
+        An opportunity was marked lost. list_ids is the contact's current active membership snapshot. value, currency and stage_probability are omitted when unset; stage_probability is the current stage's forecast weight, not a per-deal figure. previous_stage_id is the stage the opportunity sat in before the change, which equals stage_id when only the status moved.
       payload:
         event_id: string
         opportunity_id: integer
@@ -425,6 +444,7 @@ provides:
         currency: string
         stage_probability: number
         previous_stage_id: integer
+        list_ids: array<integer>
 
 runtime:
   kind: source
