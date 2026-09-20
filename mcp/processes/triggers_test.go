@@ -284,10 +284,35 @@ func TestTriggerSyncFailureVisibleAndRetried(t *testing.T) {
 	}
 }
 func TestEventFilterTypesAndExistence(t *testing.T) {
-	root := map[string]any{"data": map[string]any{"n": 12.0, "flag": false}}
+	root := map[string]any{"data": map[string]any{
+		"n":        12.0,
+		"flag":     false,
+		"list_ids": []any{1.0, 2.0},
+		"tags":     []any{"pro", "trial"},
+		"empty":    []any{},
+	}}
 	for _, f := range []EventFilter{{Path: "data.absent", Op: "exists", Value: false}, {Path: "data.n", Op: "gte", Value: 12.0}, {Path: "data.flag", Op: "eq", Value: false}} {
 		if !filterMatches(f, root) {
 			t.Fatal(f)
+		}
+	}
+	for _, f := range []EventFilter{
+		{Path: "data.list_ids", Op: "contains", Value: 2.0},
+		{Path: "data.tags", Op: "contains", Value: "pro"},
+	} {
+		if !filterMatches(f, root) {
+			t.Fatal("array/string contains should match", f)
+		}
+	}
+	for _, f := range []EventFilter{
+		{Path: "data.list_ids", Op: "contains", Value: 3.0},
+		{Path: "data.list_ids", Op: "contains", Value: "2"},
+		{Path: "data.tags", Op: "contains", Value: "missing"},
+		{Path: "data.empty", Op: "contains", Value: 1.0},
+		{Path: "data.n", Op: "contains", Value: "12"},
+	} {
+		if filterMatches(f, root) {
+			t.Fatal("contains should not match", f)
 		}
 	}
 	if filterMatches(EventFilter{Path: "data.n", Op: "eq", Value: "12"}, root) {

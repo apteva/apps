@@ -14,7 +14,10 @@ The process and assignment must also be active. `sync_pending=false` and
 All conditions must match. Field paths include `data.customer_id`, `topic`,
 `source_app`, `source_install_id`, `project_id`, and `event_id`. Conditions support
 `eq`, `neq`, `contains`, `exists`, `gt`, `gte`, `lt`, and `lte` without evaluating
-arbitrary code. Mappings preserve JSON types and must name declared parameters.
+arbitrary code. `contains` performs substring matching for strings and membership
+matching for arrays, preserving JSON types (for example, numeric `2` matches an
+array containing numeric `2`, but not the string `"2"`). Mappings preserve JSON
+types and must name declared parameters.
 For example, map `customer_id` to `data.id`. Missing fields or invalid types are
 recorded as failed events; they never create a run. Event payloads remain data,
 not instructions or additional authority for the agent.
