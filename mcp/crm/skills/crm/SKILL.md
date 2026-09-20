@@ -64,6 +64,11 @@ customer conversations, lists, segments, opportunities, and pipelines.
 - Preserve declared JSON types in attribute predicates. Static segments populate
   snapshots on creation and definition updates; `not_in_segment` accepts only
   active static references from the same project.
+- Segment definitions are AND-ed arrays. A copyable tag example is
+  `{"name":"VIP contacts","definition":[{"predicate":"tag_in","tags":["vip"]}]}`.
+  Supported predicates are `tag_in`, `tag_not_in`, `attribute`,
+  `last_activity_within`, `channel_present`, `in_list`, `not_in_list`, and
+  `not_in_segment`; core-field conditions use `{"field","op","value"}`.
 - Page list/segment evaluation using `next_after_contact_id` until an empty page.
   Resolve an audience before sending; static membership alone is not eligibility.
 
