@@ -119,7 +119,8 @@ func (a *App) handleGlobalQueryWidget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Widget DashboardWidget `json:"widget"`
+		Widget    DashboardWidget `json:"widget"`
+		ProjectID string          `json:"project_id"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128*1024)).Decode(&body); err != nil {
 		http.Error(w, "invalid JSON", 400)
@@ -131,10 +132,20 @@ func (a *App) handleGlobalQueryWidget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ids := make([]string, 0, len(projects))
+	visible := make(map[string]bool, len(projects))
 	for _, p := range projects {
 		if strings.TrimSpace(p.ID) != "" {
-			ids = append(ids, p.ID)
+			id := strings.TrimSpace(p.ID)
+			ids = append(ids, id)
+			visible[id] = true
 		}
+	}
+	if selected := strings.TrimSpace(body.ProjectID); selected != "" {
+		if !visible[selected] {
+			http.Error(w, "project is not visible to this install", http.StatusForbidden)
+			return
+		}
+		ids = []string{selected}
 	}
 	metric, ok, err := metricFromConfig(requestReadDB(r), "__global__", body.Widget.Config)
 	if err != nil {

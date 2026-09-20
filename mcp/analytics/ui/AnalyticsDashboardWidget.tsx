@@ -73,6 +73,17 @@ interface GlobalSummary extends ActivitySummary {
   selected_project_id?: string;
 }
 
+interface GlobalMetricSpec {
+  key: string;
+  type: "stat" | "timeseries" | "table";
+}
+
+interface GlobalMetricResult {
+  spec: GlobalMetricSpec;
+  data?: Record<string, any>;
+  error?: string;
+}
+
 const PREVIEW_SUMMARY: ActivitySummary = {
   total: 12840,
   apps: 6,
@@ -104,6 +115,21 @@ function settingBoolean(
 ): boolean {
   const value = settings?.[key];
   return typeof value === "boolean" ? value : fallback;
+}
+
+function globalMetricSpecs(settings: Record<string, unknown> | undefined): GlobalMetricSpec[] {
+  const raw = settings?.global_metrics;
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [key, requestedType] = entry.split(":", 2).map((part) => part.trim());
+      const type = requestedType === "timeseries" || requestedType === "table" ? requestedType : "stat";
+      return { key, type };
+    })
+    .filter((spec) => /^[a-zA-Z0-9_-]+$/.test(spec.key));
 }
 
 function asOptions(raw?: Array<FilterOption | string>): FilterOption[] {
@@ -504,6 +530,37 @@ function ActivityFallback({ summary }: { summary: ActivitySummary | null }) {
   );
 }
 
+function GlobalMetricCards({ results, full }: { results: GlobalMetricResult[]; full: boolean }) {
+  if (!results.length) return null;
+  return (
+    <div className="min-h-0 flex-1 overflow-auto p-3">
+      <div className={`grid gap-2 ${full ? "grid-cols-2" : "grid-cols-1"}`}>
+        {results.map(({ spec, data, error }) => {
+          const config = {
+            format: data?.format,
+            currency: data?.currency,
+            unit: data?.unit,
+          };
+          return (
+            <article key={`${spec.key}:${spec.type}`} className="min-w-0 rounded border border-border px-3 py-3">
+              <div className="truncate text-[10px] font-bold uppercase tracking-wide text-text-dim">{spec.key.replaceAll("_", " ")}</div>
+              {error || data?.error ? (
+                <div className="mt-2 truncate text-xs text-error" title={error || String(data?.error)}>{error || String(data?.error)}</div>
+              ) : spec.type === "timeseries" ? (
+                <AreaChart rows={data?.series ?? []} config={config} gradientId={`analytics-global-${spec.key}`} tone="accent" />
+              ) : spec.type === "table" ? (
+                <div className="mt-2 overflow-x-auto"><table className="w-full text-[10px]"><thead><tr className="text-left text-text-dim"><th className="pb-1">Project</th><th className="pb-1 text-right">Value</th></tr></thead><tbody>{(data?.rows ?? []).map((row: any) => <tr key={String(row.group)} className="border-t border-border"><td className="py-1.5 text-text-muted">{String(row.group)}</td><td className="py-1.5 text-right tabular-nums text-text">{formatMetric(Number(row.value), config)}</td></tr>)}</tbody></table></div>
+              ) : (
+                <div className="mt-1 truncate text-2xl font-semibold tabular-nums text-text">{formatMetric(data?.value == null ? null : Number(data.value), config)}</div>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export default function AnalyticsDashboardWidget(props: HostProps) {
   return <DashboardWidgetContent key={`${props.dashboardScope || "project"}:${props.projectId || "global"}`} {...props} />;
 }
@@ -520,6 +577,7 @@ function DashboardWidgetContent(props: HostProps) {
       Math.min(6, settingNumber(props.widgetSettings, "max_metrics", 3)),
     ),
   );
+  const globalMetrics = useMemo(() => globalMetricSpecs(props.widgetSettings), [props.widgetSettings]);
   const preferredDashboardID = Math.floor(
     settingNumber(props.widgetSettings, "dashboard_id", 0),
   );
@@ -543,6 +601,7 @@ function DashboardWidgetContent(props: HostProps) {
     props.preview ? PREVIEW_SUMMARY : null,
   );
   const [globalSummary, setGlobalSummary] = useState<GlobalSummary | null>(null);
+  const [globalMetricResults, setGlobalMetricResults] = useState<GlobalMetricResult[]>([]);
   const [selectedGlobalProject, setSelectedGlobalProject] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -573,8 +632,33 @@ function DashboardWidgetContent(props: HostProps) {
     }).catch((reason) => {
       if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
     });
+    if (!globalMetrics.length) {
+      setGlobalMetricResults([]);
+    } else {
+      void Promise.all(globalMetrics.map(async (spec): Promise<GlobalMetricResult> => {
+        try {
+          const response = await fetch(`${api}/global-query-widget`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              project_id: selectedGlobalProject || undefined,
+              widget: {
+                type: spec.type,
+                title: spec.key,
+                config: { metric: spec.key, interval: "day", by: "project_id", limit: 25 },
+              },
+            }),
+          });
+          if (!response.ok) throw new Error((await response.text()).trim() || response.statusText);
+          return { spec, data: await response.json() };
+        } catch (reason) {
+          return { spec, error: reason instanceof Error ? reason.message : String(reason) };
+        }
+      })).then(setGlobalMetricResults);
+    }
     return () => { cancelled = true; };
-  }, [getJSON, globalMode, props.preview, selectedGlobalProject]);
+  }, [api, getJSON, globalMetrics, globalMode, props.preview, selectedGlobalProject]);
 
   const loadDashboards = useCallback(async () => {
     if (globalMode || !projectID || props.preview) return;
@@ -855,7 +939,9 @@ function DashboardWidgetContent(props: HostProps) {
           {error}
         </div>
       )}
-      {!dashboard ? (
+      {globalMode && globalMetricResults.length ? (
+        <GlobalMetricCards results={globalMetricResults} full={full} />
+      ) : !dashboard ? (
         <ActivityFallback summary={fallback} />
       ) : loading ? (
         <div className="p-4">

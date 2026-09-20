@@ -20,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.16.1
+version: 0.16.2
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -235,11 +235,16 @@ provides:
             default: 3
             minimum: 1
             maximum: 6
+          global_metrics:
+            type: string
+            title: Global calculated metrics
+            description: Comma-separated metric entries for global Home, for example monthly_visits:timeseries,monthly_sales:stat.
+            default: monthly_visits:timeseries,monthly_sales:stat
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: analytics/v0.16.1
+    ref: analytics/v0.16.2
     entry: mcp/analytics
   port: 8080
   health_check: /health
