@@ -1421,12 +1421,25 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	notes, _ := args["notes"].(string)
 	source, _ := args["source"].(string)
+	loserListIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, loser)
+	if listErr != nil {
+		ctx.Logger().Warn("merge loser list snapshot failed", "contact_id", loser, "err", listErr)
+		loserListIDs = []int64{}
+	}
 	if err := dbMerge(ctx.AppDB(), pid, loser, winner, notes, source); err != nil {
 		return nil, err
 	}
+	winnerListIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, winner)
+	if listErr != nil {
+		ctx.Logger().Warn("merge winner list snapshot failed", "contact_id", winner, "err", listErr)
+		winnerListIDs = []int64{}
+	}
 	if ctx != nil {
 		emitCRMEvent(ctx, pid, "contact.merged", map[string]any{
-			"winner_id": winner, "loser_id": loser,
+			"winner_id":                   winner,
+			"loser_id":                    loser,
+			"winner_list_ids":             winnerListIDs,
+			"loser_list_ids_before_merge": loserListIDs,
 		})
 	}
 	return map[string]any{"merged": true, "winner_id": winner, "loser_id": loser}, nil
@@ -1434,8 +1447,8 @@ func (a *App) toolMerge(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // emitContact broadcasts a contact mutation. Best-effort: ctx.Emit is
 // fire-and-forget and the DB write has already committed. Subscribers
-// re-fetch the row themselves rather than trusting the payload. The added
-// event also includes the complete active list membership snapshot.
+// re-fetch the row themselves rather than trusting the payload. The shared
+// event enricher adds the complete active list membership snapshot.
 func emitContact(ctx *sdk.AppCtx, pid, topic string, c *Contact) {
 	if ctx == nil || c == nil {
 		return
@@ -1446,20 +1459,6 @@ func emitContact(ctx *sdk.AppCtx, pid, topic string, c *Contact) {
 		"first_name":   c.FirstName,
 		"last_name":    c.LastName,
 		"archived":     c.Status == "archived",
-	}
-	if topic == "contact.added" {
-		// Query after all create-time list operations so this is the complete
-		// active membership set, not merely the lists requested by one caller.
-		lists, err := dbListsForContact(ctx.AppDB(), pid, c.ID)
-		listIDs := make([]int64, 0, len(lists))
-		if err != nil {
-			ctx.Logger().Warn("contact event list lookup failed", "contact_id", c.ID, "err", err)
-		} else {
-			for _, list := range lists {
-				listIDs = append(listIDs, list.ID)
-			}
-		}
-		payload["list_ids"] = listIDs
 	}
 	emitCRMEvent(ctx, pid, topic, payload)
 }
@@ -1901,6 +1900,11 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
+	listIDs, listErr := dbActiveListIDsForContact(ctx.AppDB(), pid, id)
+	if listErr != nil {
+		ctx.Logger().Warn("contact archive list snapshot failed", "contact_id", id, "err", listErr)
+		listIDs = []int64{}
+	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE contacts SET status='archived', updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`, id, pid); err != nil {
@@ -1908,7 +1912,10 @@ func (a *App) handleHTTPArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ctx != nil {
-		emitCRMEvent(ctx, pid, "contact.deleted", map[string]any{"id": id})
+		emitCRMEvent(ctx, pid, "contact.deleted", map[string]any{
+			"id":                     id,
+			"list_ids_before_delete": listIDs,
+		})
 	}
 	httpJSON(w, map[string]any{"archived": true})
 }

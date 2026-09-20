@@ -17,6 +17,9 @@ func messagingInstallID(ctx *sdk.AppCtx) int64 {
 	return 0
 }
 func queueCRMEvent(tx *sql.Tx, pid, topic string, payload map[string]any) error {
+	if err := enrichCRMEventListContext(tx, pid, topic, payload); err != nil {
+		return fmt.Errorf("enrich %s list context: %w", topic, err)
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -137,6 +140,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 		}
 	}
 	recipients := append([]string{body.MatchedRecipient}, body.To...)
+	attributedListIDs := []int64{}
 	for _, rule := range rules {
 		if !rule.Enabled || !ruleRecipientMatches(rule, recipients) || !ruleSenderMatches(rule, body.From) {
 			continue
@@ -145,6 +149,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if _, err = dbListAddContactChanged(tx, pid, *rule.AddListID, cid, "routing_rule"); err != nil {
 				return nil, err
 			}
+			attributedListIDs = append(attributedListIDs, *rule.AddListID)
 		}
 		if tag := strings.TrimSpace(rule.AddTag); tag != "" {
 			if err = dbAddTag(tx, pid, cid, tag); err != nil {
@@ -163,6 +168,7 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 			if _, err = dbListAddContactChanged(tx, pid, listID, cid, "messaging:inbound"); err != nil {
 				return nil, err
 			}
+			attributedListIDs = append(attributedListIDs, listID)
 		}
 	}
 	var convoID int64
@@ -239,36 +245,23 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	if err = dbConversationParticipantsAdd(tx, pid, convoID, body.Channel, parts); err != nil {
 		return nil, err
 	}
+	listIDs, err := dbActiveListIDsForContact(tx, pid, cid)
+	if err != nil {
+		return nil, err
+	}
+	attributedListIDs = normalizeEventListIDs(attributedListIDs)
 	if created {
-		ids := []int64{}
-		rows, err := tx.Query(`SELECT list_id FROM contact_list_members WHERE project_id=? AND contact_id=? ORDER BY list_id`, pid, cid)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id int64
-			if err = rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			ids = append(ids, id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return nil, err
-		}
-		payload := map[string]any{"id": cid, "contact_id": cid, "display_name": contact.DisplayName, "primary_email": contact.PrimaryEmail, "primary_phone": contact.PrimaryPhone, "source": contact.Source, "list_ids": ids}
+		payload := map[string]any{"id": cid, "contact_id": cid, "display_name": contact.DisplayName, "primary_email": contact.PrimaryEmail, "primary_phone": contact.PrimaryPhone, "source": contact.Source, "list_ids": listIDs}
 		if err = queueCRMEvent(tx, pid, "contact.added", payload); err != nil {
 			return nil, err
 		}
 	}
 	if targetStatus != status {
-		if err = queueCRMEvent(tx, pid, "conversation.status.changed", map[string]any{"contact_id": cid, "conversation_id": convoID, "status": targetStatus, "previous_status": status, "auto_reopened": targetStatus == "open"}); err != nil {
+		if err = queueCRMEvent(tx, pid, "conversation.status.changed", map[string]any{"contact_id": cid, "conversation_id": convoID, "status": targetStatus, "previous_status": status, "auto_reopened": targetStatus == "open", "list_ids": listIDs}); err != nil {
 			return nil, err
 		}
 	}
-	payload := map[string]any{"contact_id": cid, "activity_id": act.ID, "conversation_id": convoID, "kind": act.Kind, "source": "messaging", "attachment_count": len(body.Attachments)}
+	payload := map[string]any{"contact_id": cid, "activity_id": act.ID, "conversation_id": convoID, "kind": act.Kind, "source": "messaging", "attachment_count": len(body.Attachments), "list_ids": listIDs, "attributed_list_ids": attributedListIDs}
 	if err = queueCRMEvent(tx, pid, "contact.activity.added", payload); err != nil {
 		return nil, err
 	}

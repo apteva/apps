@@ -53,6 +53,21 @@ type Segment struct {
 	UpdatedAt   string          `json:"updated_at,omitempty"`
 }
 
+func segmentEventPayload(s *Segment, payload map[string]any) map[string]any {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	payload["list_id"] = nil
+	if s == nil {
+		return payload
+	}
+	payload["id"] = s.ID
+	if s.ListID != nil {
+		payload["list_id"] = *s.ListID
+	}
+	return payload
+}
+
 // ─── Definition compiler ──────────────────────────────────────────
 
 // compiledFilter is the SQL fragment + args produced by walking one
@@ -818,7 +833,7 @@ func (a *App) toolSegmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(ctx, pid, "segment.created", segmentEventPayload(out, map[string]any{"name": out.Name, "kind": out.Kind}))
 	return map[string]any{"segment": out}, nil
 }
 
@@ -871,7 +886,7 @@ func (a *App) toolSegmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.updated", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.updated", segmentEventPayload(out, nil))
 	return map[string]any{"segment": out}, nil
 }
 
@@ -884,10 +899,14 @@ func (a *App) toolSegmentsDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	s, err := dbSegmentGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
 	if err := dbSegmentArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.archived", map[string]any{"id": id})
+	emitCRMEvent(ctx, pid, "segment.archived", segmentEventPayload(s, map[string]any{"id": id}))
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -959,7 +978,7 @@ func (a *App) toolSegmentsMaterialise(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
-	emitCRMEvent(ctx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(ctx, pid, "segment.materialised", segmentEventPayload(s, map[string]any{"count": n}))
 	return map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"}, nil
 }
 
@@ -1052,7 +1071,7 @@ func (a *App) handleHTTPSegmentsCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.created", map[string]any{"id": out.ID, "name": out.Name, "kind": out.Kind})
+	emitCRMEvent(globalCtx, pid, "segment.created", segmentEventPayload(out, map[string]any{"name": out.Name, "kind": out.Kind}))
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1090,7 +1109,7 @@ func (a *App) handleHTTPSegmentUpdate(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.updated", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.updated", segmentEventPayload(out, nil))
 	httpJSON(w, map[string]any{"segment": out})
 }
 
@@ -1100,11 +1119,16 @@ func (a *App) handleHTTPSegmentDelete(w http.ResponseWriter, r *http.Request, id
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s, err := dbSegmentGet(globalCtx.AppDB(), pid, id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if err := dbSegmentArchive(globalCtx.AppDB(), pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.archived", map[string]any{"id": id})
+	emitCRMEvent(globalCtx, pid, "segment.archived", segmentEventPayload(s, map[string]any{"id": id}))
 	httpJSON(w, map[string]any{"archived": true, "id": id})
 }
 
@@ -1168,7 +1192,7 @@ func (a *App) handleHTTPSegmentMaterialise(w http.ResponseWriter, r *http.Reques
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	emitCRMEvent(globalCtx, pid, "segment.materialised", map[string]any{"id": id, "count": n})
+	emitCRMEvent(globalCtx, pid, "segment.materialised", segmentEventPayload(s, map[string]any{"count": n}))
 	httpJSON(w, map[string]any{"materialised": true, "id": id, "count": n, "kind": "static"})
 }
 

@@ -1264,6 +1264,10 @@ func emitCRMEvent(ctx *sdk.AppCtx, pid, topic string, payload map[string]any) {
 		ctx.Logger().Warn("crm emit without project", "topic", topic)
 		return
 	}
+	if err := enrichCRMEventListContext(ctx.AppDB(), pid, topic, payload); err != nil {
+		ctx.Logger().Warn("crm event list context lookup failed", "topic", topic, "err", err)
+		preserveCRMEventListShape(topic, payload)
+	}
 	if topic != "list.member.added" && topic != "list.member.removed" {
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -1599,7 +1603,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	from := strArg(args, "from")
 	listID := int64Arg(args, "list_id")
 	var resolvedList *List
-	if from == "" && listID != 0 {
+	if listID != 0 {
 		l, err := dbListGet(ctx.AppDB(), pid, listID)
 		if err != nil {
 			return nil, fmt.Errorf("list lookup: %w", err)
@@ -1608,7 +1612,9 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			return nil, fmt.Errorf("list_id %d not found", listID)
 		}
 		resolvedList = l
-		from = l.defaultSenderForChannel(addr.Channel)
+	}
+	if from == "" && resolvedList != nil {
+		from = resolvedList.defaultSenderForChannel(addr.Channel)
 	}
 	if from == "" {
 		from = defaultSenderForChannel(ctx, addr.Channel)
@@ -1616,8 +1622,6 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 	if from == "" {
 		return nil, missingSenderError(addr.Channel, listID)
 	}
-	_ = resolvedList // reserved for future "tag activity with list" enrichment
-
 	sendArgs := map[string]any{
 		"_project_id": pid,
 		"channel":     addr.Channel,
@@ -1932,13 +1936,18 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			})
 		}
 	}
+	attributedListIDs := []int64{}
+	if listID != 0 {
+		attributedListIDs = append(attributedListIDs, listID)
+	}
 	emitCRMEvent(ctx, pid, "contact.activity.added", map[string]any{
-		"contact_id":       cid,
-		"activity_id":      act.ID,
-		"conversation_id":  act.ConversationID,
-		"kind":             kind,
-		"source":           act.Source,
-		"attachment_count": len(act.Attachments),
+		"contact_id":          cid,
+		"activity_id":         act.ID,
+		"conversation_id":     act.ConversationID,
+		"kind":                kind,
+		"source":              act.Source,
+		"attachment_count":    len(act.Attachments),
+		"attributed_list_ids": attributedListIDs,
 	})
 
 	return outboundSendResult(
