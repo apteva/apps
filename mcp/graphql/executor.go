@@ -157,7 +157,7 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 		policy = release.Security
 		limits = release.Limits
 		schemaRow = &schemaRecord{Version: release.SchemaVersion, Hash: release.SchemaHash, SDL: release.SchemaSDL, Status: "published"}
-		bindings = bindingsFromRelease(release)
+		bindings = a.bindingsFromRelease(release)
 	} else {
 		policy, err = a.cachedSecurity(project, apiSlug)
 		if err != nil {
@@ -262,7 +262,14 @@ type executionBindings struct {
 	modules   map[string]resolverModule
 }
 
-func bindingsFromRelease(release *apiRelease) *executionBindings {
+func (a *App) bindingsFromRelease(release *apiRelease) *executionBindings {
+	key := releaseRuntimeKey(release.ProjectID, release.APISlug, release.Environment, release.ID)
+	a.cacheMu.RLock()
+	cached := a.releasePlanCache[key]
+	a.cacheMu.RUnlock()
+	if cached != nil {
+		return cached
+	}
 	bindings := &executionBindings{resolvers: map[string]resolverRecord{}, sources: map[int64]sourceRecord{}, modules: map[string]resolverModule{}}
 	for _, resolver := range release.Resolvers {
 		bindings.resolvers[resolver.ParentType+"."+resolver.FieldName] = resolver
@@ -273,6 +280,16 @@ func bindingsFromRelease(release *apiRelease) *executionBindings {
 	for _, module := range release.Modules {
 		bindings.modules[moduleKey(module.Name, module.Version)] = module
 	}
+	a.cacheMu.Lock()
+	if a.releasePlanCache == nil || len(a.releasePlanCache) >= compiledCacheLimit {
+		a.releasePlanCache = map[string]*executionBindings{}
+	}
+	if existing := a.releasePlanCache[key]; existing != nil {
+		bindings = existing
+	} else {
+		a.releasePlanCache[key] = bindings
+	}
+	a.cacheMu.Unlock()
 	return bindings
 }
 

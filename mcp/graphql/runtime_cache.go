@@ -130,6 +130,11 @@ func (a *App) invalidateRuntime(project, api string) {
 			delete(a.releaseCache, key)
 		}
 	}
+	for key := range a.releasePlanCache {
+		if key == prefix || strings.HasPrefix(key, prefix+"\x00") {
+			delete(a.releasePlanCache, key)
+		}
+	}
 	for key := range a.schemaRowCache {
 		if key == prefix || strings.HasPrefix(key, prefix+"\x00") {
 			delete(a.schemaRowCache, key)
