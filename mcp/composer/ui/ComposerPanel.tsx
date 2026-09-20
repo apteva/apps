@@ -887,6 +887,18 @@ function isV2CompositionJSON(raw?: string): boolean {
   }
 }
 
+function hasProceduralClipsJSON(raw?: string): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    return (parsed?.timeline?.tracks || []).some((track: any) =>
+      (track?.clips || []).some((clip: any) => !!clip?.asset?.procedure),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function activeClipAt(clips: ClipDraft[], seconds: number): ClipDraft | null {
   const normalized = normalizeClips(clips);
   if (normalized.length === 0) return null;
@@ -1392,7 +1404,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     loadedDraftId.current = selectedId;
     draftRevision.current = selectedFull.revision;
     setDirty(false);
-    if (isV2CompositionJSON(selectedFull.edit_json || "")) setTab("json");
+    if (isV2CompositionJSON(selectedFull.edit_json || "") || hasProceduralClipsJSON(selectedFull.edit_json || "")) setTab("json");
     const next = parseComposition(selectedFull);
     undoStack.current = [];
     redoStack.current = [];
@@ -2240,7 +2252,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
         <main className="flex-1 min-w-0 flex flex-col">
           <nav className="border-b border-border px-3 pt-2 flex gap-1 text-xs">
-            <TabButton active={tab === "timeline"} onClick={() => { if (isV2CompositionJSON(jsonEdit)) { setStatus("V2 scene compositions are edited in JSON. The timeline editor supports V1 clips."); return; } setTab("timeline"); }}>Timeline</TabButton>
+            <TabButton active={tab === "timeline"} onClick={() => {
+              if (isV2CompositionJSON(jsonEdit)) { setStatus("V2 scene compositions are edited in JSON. The timeline editor supports V1 clips."); return; }
+              if (hasProceduralClipsJSON(jsonEdit)) { setStatus("Procedural clips are edited in JSON in this release so their procedure bindings remain intact."); return; }
+              setTab("timeline");
+            }}>Timeline</TabButton>
             <TabButton active={tab === "outputs"} onClick={() => setTab("outputs")}>Outputs</TabButton>
             <TabButton active={tab === "json"} onClick={() => setTab("json")}>JSON</TabButton>
           </nav>

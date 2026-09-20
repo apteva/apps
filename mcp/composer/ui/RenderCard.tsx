@@ -14,7 +14,7 @@ interface RenderData {
 }
 interface Props { render_id: number; projectId?: string; preview?: boolean }
 const sample: RenderData = { render_id: 1, composition_id: 4, composition_name: "Product launch overview", executor: "local", status: "rendering", phase: "rendering", progress_pct: 50, progress: { message: "Rendering composition" }, storage_id: 0, duration_ms: 0, cost_usd: 0, output: { format: "mp4", aspect: "16:9", resolution: "hd" } };
-const phases = ["queued", "generating_assets", "preparing", "rendering", "quality_checks", "uploading", "complete"];
+const phases = ["queued", "generating_assets", "preparing", "running_procedures", "rendering", "quality_checks", "uploading", "complete"];
 
 export default function RenderCard({ render_id, projectId, preview }: Props) {
   const [row, setRow] = useState<RenderData | null>(preview ? sample : null);
@@ -70,4 +70,4 @@ function PhaseRail({ phase, status }: { phase: string; status: string }) {
   </div>;
 }
 function terminal(status: string): boolean { return ["complete", "failed", "cancelled"].includes(status); }
-function prettyPhase(phase: string): string { return ({ generating_assets: "Generating assets", quality_checks: "Quality checks" } as Record<string, string>)[phase] || phase.replaceAll("_", " ").replace(/^./, c => c.toUpperCase()) || "Queued"; }
+function prettyPhase(phase: string): string { return ({ generating_assets: "Generating assets", running_procedures: "Running procedural clips", quality_checks: "Quality checks" } as Record<string, string>)[phase] || phase.replaceAll("_", " ").replace(/^./, c => c.toUpperCase()) || "Queued"; }

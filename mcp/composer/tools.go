@@ -4,6 +4,8 @@ import sdk "github.com/apteva/app-sdk"
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/procedures", Handler: a.handleProcedures},
+		{Pattern: "/procedure/", Handler: a.handleProcedureByID},
 		{Pattern: "/compositions", Handler: a.handleListCompositions},
 		{Pattern: "/composition/", Handler: a.handleCompositionByID},
 		{Pattern: "/render", Handler: a.handleRender},
@@ -22,7 +24,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return append(a.outputTools(), []sdk.Tool{
+	return append(append(a.outputTools(), a.procedureTools()...), []sdk.Tool{
 		{
 			Name:        "composition_create",
 			Description: "Create a V1 timeline composition, or pass spec with version composer/v2 for native shape/text scene graphs. V2 shapes support rectangles, ellipses, gradients, borders, radii, and shadows. V1 args: name?, tracks, markers?, soundtrack?, background?, output?. Video and audio clips can reuse source assets with source_start/source_end and playback_rate; retained audio stays synchronized. Visual clips can crop normalized source regions and animate source-space focus/zoom through transform.keyframes. Returns {id, version, duration_seconds}.",
@@ -136,6 +138,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAssetSearch,
 		},
 	}...)
+}
+
+func (a *App) procedureTools() []sdk.Tool {
+	sourceProps := map[string]any{
+		"name": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+		"runtime":    map[string]any{"type": "string", "enum": []string{"python-3.13-media", "bun-1-media", "web-canvas-1", "go-1.25-media"}},
+		"entrypoint": map[string]any{"type": "string"}, "target": map[string]any{"type": "string", "enum": []string{"clip", "audio", "still", "composition"}},
+		"output_kind": map[string]any{"type": "string", "enum": []string{"video", "image", "audio"}},
+		"source":      map[string]any{"type": "string"}, "files": map[string]any{"type": "object"}, "manifest": map[string]any{"type": "object"},
+		"id": map[string]any{"type": "integer"}, "revision": map[string]any{"type": "integer"}, "expected_revision": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"},
+	}
+	return []sdk.Tool{
+		{Name: "procedure_create", Description: "Create a reusable code-authored Composer procedure and immutable revision. The trusted local runner executes Python, Bun/TypeScript, and Go; Web Canvas is reserved by the contract but not executable yet.", InputSchema: schemaObject(sourceProps, []string{"name", "runtime"}), Handler: a.toolProcedureCreate},
+		{Name: "procedure_revision_create", Description: "Publish a new immutable procedure revision. Requires id and expected_revision.", InputSchema: schemaObject(sourceProps, []string{"id", "expected_revision", "runtime"}), Handler: a.toolProcedureRevisionCreate},
+		{Name: "procedure_get", Description: "Fetch one procedure and an exact or latest immutable revision.", InputSchema: schemaObject(sourceProps, []string{"id"}), Handler: a.toolProcedureGet},
+		{Name: "procedure_list", Description: "List reusable procedures in the current project.", InputSchema: schemaObject(sourceProps, nil), Handler: a.toolProcedureList},
+		{Name: "procedure_validate", Description: "Validate a procedure manifest and source bundle without executing code or generating assets.", InputSchema: schemaObject(sourceProps, []string{"runtime"}), Handler: a.toolProcedureValidate},
+	}
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

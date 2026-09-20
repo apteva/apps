@@ -21,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -29,8 +30,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.8.0
+version: 0.9.0
 description: |
+  v0.9.0 adds trusted local procedural clips. Immutable Python,
+  Bun/TypeScript, and Go procedures consume named Storage or AI-generated
+  inputs, produce validated media artifacts, and become ordinary cached clips.
+  Execution uses a shared job/result contract with cancellation, timeouts,
+  bounded logs, media probing, and path/output limits. Isolated execution is
+  intentionally deferred and local execution can be disabled per installation.
   v0.8.0 adds saved audio, image-video and full-video output presets sharing
   one composition and master, selective generation, durable asset reuse,
   independent previews/history, excerpts and safe artifact adoption.
@@ -145,6 +152,11 @@ provides:
     - { name: composition_output_history }
     - { name: composition_output_adopt }
     - { name: composition_output_estimate }
+    - { name: procedure_create }
+    - { name: procedure_revision_create }
+    - { name: procedure_get }
+    - { name: procedure_list }
+    - { name: procedure_validate }
     - { name: composition_create }
     - { name: composition_update }
     - { name: composition_validate }
@@ -182,6 +194,8 @@ provides:
       props_schema: { type: object, required: [render_id], properties: { render_id: { type: integer } } }
       preview_props: { preview: true, render_id: 1 }
   publishes:
+    - { name: procedure.created, description: "A reusable procedure was created." }
+    - { name: procedure.revised, description: "A new immutable procedure revision was published." }
     - { name: composition.created, description: "A composition was created." }
     - { name: composition.updated, description: "A composition changed." }
     - { name: composition.deleted, description: "A composition was deleted." }
@@ -229,6 +243,31 @@ config_schema:
     type: text
     default: "ffprobe"
     label: ffprobe binary
+  - name: procedural_execution_enabled
+    type: toggle
+    default: "true"
+    label: Trusted local procedural execution
+    description: Run procedure source directly in the Composer sidecar. Only enable for trusted procedure authors; process isolation is deferred.
+  - name: procedural_python_path
+    type: text
+    default: "python3"
+    label: Python binary for procedures
+  - name: procedural_bun_path
+    type: text
+    default: "bun"
+    label: Bun binary for procedures
+  - name: procedural_go_path
+    type: text
+    default: "go"
+    label: Go binary for procedures
+  - name: procedural_timeout_seconds
+    type: text
+    default: "900"
+    label: Procedure timeout (seconds)
+  - name: procedural_max_output_bytes
+    type: text
+    default: "1073741824"
+    label: Maximum procedure artifact bytes
 upgrade_policy: auto-patch
 `
 
@@ -236,6 +275,7 @@ var globalCtx *sdk.AppCtx
 
 type App struct {
 	outputRenderer   func(context.Context, *sdk.AppCtx, outputSnapshot, string) (Result, error)
+	procedureRunner  procedureRunner
 	renderPoolCancel context.CancelFunc
 }
 
@@ -330,6 +370,72 @@ func browserNodePath() string {
 		return v
 	}
 	return "node"
+}
+
+func procedureExecutable(ctx *sdk.AppCtx, runtime string) string {
+	key, envName, fallback := "", "", ""
+	switch runtime {
+	case "python-3.13-media":
+		key, envName, fallback = "procedural_python_path", "COMPOSER_PROCEDURAL_PYTHON_PATH", "python3"
+	case "bun-1-media":
+		key, envName, fallback = "procedural_bun_path", "COMPOSER_PROCEDURAL_BUN_PATH", "bun"
+	case "go-1.25-media":
+		key, envName, fallback = "procedural_go_path", "COMPOSER_PROCEDURAL_GO_PATH", "go"
+	}
+	if ctx != nil && key != "" {
+		if value := strings.TrimSpace(ctx.Config().Get(key)); value != "" {
+			return value
+		}
+	}
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func proceduralExecutionEnabled(ctx *sdk.AppCtx) bool {
+	value := ""
+	if ctx != nil {
+		value = ctx.Config().Get("procedural_execution_enabled")
+	}
+	if env := strings.TrimSpace(os.Getenv("COMPOSER_PROCEDURAL_EXECUTION_ENABLED")); env != "" {
+		value = env
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "" || (value != "0" && value != "false" && value != "no" && value != "off")
+}
+
+func proceduralTimeout(ctx *sdk.AppCtx) time.Duration {
+	seconds := int64(900)
+	value := ""
+	if ctx != nil {
+		value = ctx.Config().Get("procedural_timeout_seconds")
+	}
+	if env := strings.TrimSpace(os.Getenv("COMPOSER_PROCEDURAL_TIMEOUT_SECONDS")); env != "" {
+		value = env
+	}
+	if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && parsed > 0 {
+		seconds = parsed
+	}
+	if seconds > 3600 {
+		seconds = 3600
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func proceduralMaxOutputBytes(ctx *sdk.AppCtx) int64 {
+	limit := int64(1 << 30)
+	value := ""
+	if ctx != nil {
+		value = ctx.Config().Get("procedural_max_output_bytes")
+	}
+	if env := strings.TrimSpace(os.Getenv("COMPOSER_PROCEDURAL_MAX_OUTPUT_BYTES")); env != "" {
+		value = env
+	}
+	if parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64); err == nil && parsed > 0 {
+		limit = parsed
+	}
+	return limit
 }
 
 func composerV2Enabled() bool {

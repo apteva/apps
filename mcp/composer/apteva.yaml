@@ -2,8 +2,14 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.8.0
+version: 0.9.0
 description: |
+  v0.9.0 adds trusted local procedural clips. Immutable Python,
+  Bun/TypeScript, and Go procedures consume named Storage or AI-generated
+  inputs, produce validated media artifacts, and become ordinary cached clips.
+  Execution uses a shared job/result contract with cancellation, timeouts,
+  bounded logs, media probing, and path/output limits. Isolated execution is
+  intentionally deferred and local execution can be disabled per installation.
   v0.8.0 adds saved audio, image-video and full-video output presets sharing
   one composition and master, selective generation, durable asset reuse,
   independent previews/history, excerpts and safe artifact adoption.
@@ -338,6 +344,11 @@ provides:
     - { name: composition_output_history }
     - { name: composition_output_adopt }
     - { name: composition_output_estimate }
+    - { name: procedure_create, description: "Create a reusable code-authored procedure and immutable revision." }
+    - { name: procedure_revision_create, description: "Publish a new immutable procedure revision." }
+    - { name: procedure_get, description: "Fetch a procedure revision." }
+    - { name: procedure_list, description: "List project procedures." }
+    - { name: procedure_validate, description: "Validate procedure source and manifest without execution." }
     - { name: composition_create, description: "Create a v1 timeline composition or a composer/v2 composition via spec." }
     - { name: composition_update, description: "Patch a composition. V2 compositions accept patch.spec or a full composer/v2 payload." }
     - { name: composition_validate, description: "Validate composer/v1 or composer/v2 JSON and report renderer compatibility." }
@@ -385,6 +396,8 @@ provides:
           render_id: { type: integer }
       preview_props: { preview: true, render_id: 1 }
   publishes:
+    - { name: procedure.created, description: "A reusable procedure was created." }
+    - { name: procedure.revised, description: "A new immutable procedure revision was published." }
     - { name: composition.created, description: "A composition was created." }
     - { name: composition.updated, description: "A composition timeline or metadata changed." }
     - { name: composition.deleted, description: "A composition was deleted." }
@@ -434,5 +447,30 @@ config_schema:
     type: text
     default: "ffprobe"
     label: ffprobe binary
+  - name: procedural_execution_enabled
+    type: toggle
+    default: "true"
+    label: Trusted local procedural execution
+    description: Run procedure source directly in the Composer sidecar. Only enable for trusted procedure authors; process isolation is deferred.
+  - name: procedural_python_path
+    type: text
+    default: "python3"
+    label: Python binary for procedures
+  - name: procedural_bun_path
+    type: text
+    default: "bun"
+    label: Bun binary for procedures
+  - name: procedural_go_path
+    type: text
+    default: "go"
+    label: Go binary for procedures
+  - name: procedural_timeout_seconds
+    type: text
+    default: "900"
+    label: Procedure timeout (seconds)
+  - name: procedural_max_output_bytes
+    type: text
+    default: "1073741824"
+    label: Maximum procedure artifact bytes
 
 upgrade_policy: auto-patch

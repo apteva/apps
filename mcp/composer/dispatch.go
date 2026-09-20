@@ -448,7 +448,17 @@ func (a *App) toolCompositionValidate(ctx *sdk.AppCtx, args map[string]any) (any
 			Errors:   []string{"composer/v2 is disabled by COMPOSER_V2_ENABLED"},
 		}, nil
 	}
-	return validateCompositionJSON(editJSON), nil
+	validation := validateCompositionJSON(editJSON)
+	if validation.Valid && !isV2EditJSON(editJSON) {
+		if edit, err := parseEditJSON(editJSON); err == nil {
+			validation.Errors = append(validation.Errors, validateProcedureReferences(ctx.AppDB(), projectScope(ctx), edit)...)
+			validation.Valid = len(validation.Errors) == 0
+			if !validation.Valid {
+				validation.Renderer = "none"
+			}
+		}
+	}
+	return validation, nil
 }
 
 func (a *App) toolCompositionExamples(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -736,7 +746,24 @@ func (a *App) renderComposition(parent context.Context, ctx *sdk.AppCtx, args ma
 			"message": "AI assets ready; preparing render",
 		})
 	}
-
+	if editHasProceduralAssets(edit) {
+		setRenderProgress(ctx, renderID, id, pid, "rendering", "running_procedures", 32, map[string]any{
+			"message": "Materializing procedural clips",
+		})
+		proceduresChanged, procedureErr := a.materializeProceduralAssets(rctx, ctx, edit, output, id, pid)
+		if procedureErr != nil {
+			failRender(ctx, renderID, id, pid, procedureErr, "")
+			return nil, procedureErr
+		}
+		if proceduresChanged {
+			materialized, _ := json.Marshal(edit)
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE renders SET edit_snapshot=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+				string(materialized), renderID,
+			)
+			rawEditJSON = string(materialized)
+		}
+	}
 	exec, err := chooseExecutor(ctx, executorOverride)
 	if err != nil {
 		failRender(ctx, renderID, id, pid, err, "")
@@ -993,6 +1020,20 @@ func renderContentType(format string) string {
 		return "audio/aac"
 	case "mp4":
 		return "video/mp4"
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "webp":
+		return "image/webp"
+	case "gif":
+		return "image/gif"
+	case "ppm":
+		return "image/x-portable-pixmap"
+	case "webm":
+		return "video/webm"
+	case "mov":
+		return "video/quicktime"
 	default:
 		return "application/octet-stream"
 	}
