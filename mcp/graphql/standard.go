@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	gql "github.com/graphql-go/graphql"
 	gast "github.com/graphql-go/graphql/language/ast"
@@ -24,6 +25,8 @@ type standardRequest struct {
 	mutation           bool
 	synchronous        bool
 	fastProjectionUsed bool
+	timingMu           sync.Mutex
+	sourceDuration     time.Duration
 	errorMu            sync.Mutex
 	errorCodes         map[string]string
 	moduleMu           sync.Mutex
@@ -37,13 +40,17 @@ func (a *App) executeStandard(ctx context.Context, project, api, key string, sch
 	}
 	bindings, _ := ctx.Value(executionBindingsKey{}).(*executionBindings)
 	state := &standardRequest{project: project, api: api, bindings: bindings, policy: policy, mutation: op.Operation == ast.Mutation}
-	state.loader = newResolverLoader(a, ctx, project)
 	ctx = context.WithValue(ctx, standardRequestKey{}, state)
+	state.loader = newResolverLoader(a, ctx, project)
 	result, inputErr := executeRuntime(ctx, runtime, schema, doc, op, req.Variables)
 	if inputErr != nil {
 		result = inputError(inputErr)
 	}
 	out := executeResult{OperationName: op.Name, OperationType: string(op.Operation)}
+	state.timingMu.Lock()
+	out.Timings.Source = state.sourceDuration
+	state.timingMu.Unlock()
+	out.Timings.Fast = state.fastProjectionUsed
 	out.Data, _ = result.Data.(map[string]any)
 	out.HasData = result.Data != nil
 	for _, e := range result.Errors {

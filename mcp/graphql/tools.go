@@ -61,6 +61,7 @@ func (a *App) toolAPICreate(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, row.Slug)
 	return map[string]any{"api": publicAPI(*row)}, nil
 }
 
@@ -155,6 +156,7 @@ func (a *App) toolSchemaPublish(callCtx context.Context, ctx *sdk.AppCtx, args m
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, apiSlugArg(args))
 	return map[string]any{"schema": publicSchema(row), "deployed": true}, nil
 }
 
@@ -179,6 +181,7 @@ func (a *App) toolModuleCreate(callCtx context.Context, ctx *sdk.AppCtx, args ma
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, apiSlugArg(args))
 	return map[string]any{"module": publicResolverModule(*row)}, nil
 }
 
@@ -282,6 +285,7 @@ func (a *App) toolModulePublish(callCtx context.Context, ctx *sdk.AppCtx, args m
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, apiSlugArg(args))
 	return map[string]any{"module": publicResolverModule(*row), "published": true}, nil
 }
 
@@ -337,6 +341,7 @@ func (a *App) toolSourceAdd(callCtx context.Context, ctx *sdk.AppCtx, args map[s
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, apiSlugArg(args))
 	return map[string]any{"source": publicSource(*row)}, nil
 }
 
@@ -381,6 +386,7 @@ func (a *App) toolResolverSet(callCtx context.Context, ctx *sdk.AppCtx, args map
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateRuntime(project, apiSlugArg(args))
 	source, _ := getSourceForAPI(ctx.AppReadDB(), project, apiSlugArg(args), row.SourceID, "")
 	return map[string]any{"resolver": publicResolver(*row, source)}, nil
 }

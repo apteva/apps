@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -477,6 +478,50 @@ func authorizeSelection(ctx context.Context, p securityPolicy, selection ast.Sel
 	return nil
 }
 
+// selectedPermissionFields extracts the immutable authorization work from a
+// validated operation. The request-specific permission check remains in
+// authorizePermissionFields, while fragment traversal and field discovery are
+// paid only once per cached operation.
+func selectedPermissionFields(selection ast.SelectionSet) []string {
+	seen := map[string]struct{}{}
+	var visit func(ast.SelectionSet)
+	visit = func(set ast.SelectionSet) {
+		for _, item := range set {
+			switch field := item.(type) {
+			case *ast.Field:
+				if field.ObjectDefinition != nil {
+					key := field.ObjectDefinition.Name + "." + field.Name
+					seen[key] = struct{}{}
+				}
+				visit(field.SelectionSet)
+			case *ast.InlineFragment:
+				visit(field.SelectionSet)
+			case *ast.FragmentSpread:
+				if field.Definition != nil {
+					visit(field.Definition.SelectionSet)
+				}
+			}
+		}
+	}
+	visit(selection)
+	out := make([]string, 0, len(seen))
+	for field := range seen {
+		out = append(out, field)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func authorizePermissionFields(ctx context.Context, p securityPolicy, fields []string) error {
+	identity := securityIdentity(ctx)
+	for _, field := range fields {
+		if err := requirePermissions(identity, p.Fields[field]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // A separate Auth-only entry point preserves the platform gate on the existing
 // /graphql, /admin and MCP surfaces. No anonymous fallback, even on default APIs.
 func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
@@ -496,11 +541,11 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 		writeGraphQLError(w, 405, invalid("GET or POST required"))
 		return
 	}
-	if _, err := resolveGraphQLAPI(a.ctx.AppDB(), project, slug); err != nil {
+	if _, err := a.cachedAPI(project, slug); err != nil {
 		writeGraphQLError(w, 404, invalid("API not found"))
 		return
 	}
-	p, err := getSecurity(a.ctx.AppReadDB(), project, slug)
+	p, err := a.cachedSecurity(project, slug)
 	if err != nil || p.Mode != "auth" {
 		writeGraphQLError(w, 403, forbidden("user-authenticated API is not enabled"))
 		return
@@ -508,7 +553,9 @@ func (a *App) handlePublicGraphQL(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 	r = r.WithContext(ctx)
+	authStart := time.Now()
 	identity, err := a.authenticateGraphQL(r, project, slug, p)
+	w.Header().Add("Server-Timing", fmt.Sprintf("graphql_auth;dur=%.3f", milliseconds(time.Since(authStart))))
 	if err != nil {
 		status := 401
 		if errorCode(err) == "permission_denied" {

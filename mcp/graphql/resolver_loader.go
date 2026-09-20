@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -84,6 +85,14 @@ func (l *resolverLoader) flush() {
 	if len(jobs) == 0 {
 		return
 	}
+	sourceStart := time.Now()
+	defer func() {
+		if state, ok := l.ctx.Value(standardRequestKey{}).(*standardRequest); ok {
+			state.timingMu.Lock()
+			state.sourceDuration += time.Since(sourceStart)
+			state.timingMu.Unlock()
+		}
+	}()
 	fusions := fuseCountAggregates(jobs)
 	var small, singles []*resolverJob
 	for _, j := range jobs {
@@ -272,17 +281,15 @@ func (f countAggregateFusion) finish() {
 	search["total"] = total
 }
 
-// batch prefers the server/SDK batch transport added in SDK v0.82. It makes
-// one authorization decision, negotiates direct JSON results, and dispatches
-// explicitly independent Tables reads with bounded parallelism. The Tables
-// native batch remains a safe compatibility fallback: query loaders contain
-// reads only, so an outer transport/capability failure can be retried without
-// duplicating mutations.
+// batch prefers the server/SDK direct-JSON transport, which dispatches the
+// independent reads concurrently. The Tables-native batch remains a safe
+// compatibility fallback: query loaders contain reads only, so an outer
+// transport failure can be retried without duplicating mutations.
 func (l *resolverLoader) batch(jobs []*resolverJob) {
 	if err := l.serverBatch(jobs); err == nil {
 		return
 	}
-	l.tablesBatch(jobs)
+	_ = l.tablesBatch(jobs)
 }
 
 func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
@@ -328,40 +335,46 @@ func (l *resolverLoader) serverBatch(jobs []*resolverJob) (err error) {
 	return nil
 }
 
-func (l *resolverLoader) tablesBatch(jobs []*resolverJob) {
+func (l *resolverLoader) tablesBatch(jobs []*resolverJob) (err error) {
 	defer func() {
-		if recover() != nil {
-			for _, j := range jobs {
-				select {
-				case <-j.done:
-				default:
-					j.err = internal("source batch failed")
-					close(j.done)
-				}
-			}
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("tables native batch unavailable: %v", recovered)
 		}
 	}()
+	var out tablesBatchResult
+	err = sdk.CallAppResultContext(l.ctx, l.app.ctx.WithProject(l.project).PlatformAPI(), "tables", "tables_batch", l.tablesBatchInput(jobs), &out)
+	if err != nil {
+		return err
+	}
+	l.completeTablesBatch(jobs, out)
+	return nil
+}
+
+type tablesBatchResult struct {
+	Results map[string]struct {
+		Status string `json:"status"`
+		Result any    `json:"result"`
+		Error  any    `json:"error"`
+	} `json:"results"`
+}
+
+func (l *resolverLoader) tablesBatchInput(jobs []*resolverJob) map[string]any {
 	ops := make([]map[string]any, len(jobs))
-	for i, j := range jobs {
-		ops[i] = map[string]any{"id": fmt.Sprint("op", i), "operation": j.tool, "args": j.input}
+	for i, job := range jobs {
+		ops[i] = map[string]any{"id": fmt.Sprint("op", i), "operation": job.tool, "args": job.input}
 	}
-	var out struct {
-		Results map[string]struct {
-			Status string `json:"status"`
-			Result any    `json:"result"`
-			Error  any    `json:"error"`
-		} `json:"results"`
-	}
-	err := sdk.CallAppResultContext(l.ctx, l.app.ctx.WithProject(l.project).PlatformAPI(), "tables", "tables_batch", map[string]any{"mode": "best_effort", "operations": ops, "_project_id": l.project}, &out)
+	return map[string]any{"mode": "best_effort", "operations": ops, "_project_id": l.project}
+}
+
+func (l *resolverLoader) completeTablesBatch(jobs []*resolverJob, out tablesBatchResult) {
 	for i, j := range jobs {
-		j.err = err
-		if err == nil {
-			entry := out.Results[fmt.Sprint("op", i)]
-			if entry.Status != "ok" {
-				j.err = fmt.Errorf("tables read failed: %v", entry.Error)
-			} else {
-				j.value = entry.Result
-			}
+		entry, found := out.Results[fmt.Sprint("op", i)]
+		if !found {
+			j.err = fmt.Errorf("tables native batch omitted operation op%d", i)
+		} else if entry.Status != "ok" {
+			j.err = fmt.Errorf("tables read failed: %v", entry.Error)
+		} else {
+			j.value = entry.Result
 		}
 		close(j.done)
 	}

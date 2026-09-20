@@ -161,12 +161,12 @@ func (a *App) handleRealtime(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 		return
 	}
-	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, realtimeAPISlugFromPath(r.URL.Path))
+	api, err := a.cachedAPI(project, realtimeAPISlugFromPath(r.URL.Path))
 	if err != nil {
 		writeJSONError(w, http.StatusNotFound, err.Error(), errorCode(err))
 		return
 	}
-	policy, err := getSecurity(a.ctx.AppReadDB(), project, api.Slug)
+	policy, err := a.cachedSecurity(project, api.Slug)
 	if err != nil || policy.Mode != "platform" {
 		writeJSONError(w, 403, "authenticated subscriptions are not supported yet", "permission_denied")
 		return

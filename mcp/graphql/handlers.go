@@ -42,11 +42,13 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apiSlug := apiSlugFromPath(r.URL.Path)
-	api, err := resolveGraphQLAPI(a.ctx.AppDB(), project, apiSlug)
+	apiLookupStart := time.Now()
+	api, err := a.cachedAPI(project, apiSlug)
 	if err != nil {
 		writeGraphQLError(w, http.StatusNotFound, err)
 		return
 	}
+	apiLookupDuration := time.Since(apiLookupStart)
 	var req graphqlRequest
 	reader := io.Reader(http.MaxBytesReader(w, r.Body, int64(maxRequestBytes(a.ctx))))
 	if r.Method == http.MethodGet {
@@ -101,6 +103,8 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	}
 	start := time.Now()
 	result, executeErr := a.execute(context.WithValue(r.Context(), requestMethodKey{}, r.Method), project, api.Slug, environment, req)
+	w.Header().Add("Server-Timing", fmt.Sprintf("graphql_api;dur=%.3f, graphql_config;dur=%.3f, graphql_prepare;dur=%.3f, graphql_plan;dur=%.3f, graphql_source;dur=%.3f, graphql_execute;dur=%.3f, graphql_fast;desc=%q",
+		milliseconds(apiLookupDuration), milliseconds(result.Timings.Config), milliseconds(result.Timings.Prepare), milliseconds(result.Timings.Plan), milliseconds(result.Timings.Source), milliseconds(result.Timings.Execute), fmt.Sprint(result.Timings.Fast)))
 	status := http.StatusOK
 	if executeErr != nil {
 		status = http.StatusBadRequest
@@ -144,6 +148,10 @@ func (a *App) handleGraphQL(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
+func milliseconds(duration time.Duration) float64 {
+	return float64(duration) / float64(time.Millisecond)
+}
+
 func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 	project, err := a.projectFromRequest(r)
 	if err != nil {
@@ -180,6 +188,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, row.Slug)
 		writeJSON(w, map[string]any{"api": publicAPI(*row)})
 		return
 	}
@@ -228,6 +237,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 				writeJSONError(w, 400, err.Error(), errorCode(err))
 				return
 			}
+			a.invalidateRuntime(project, api.Slug)
 			writeJSON(w, map[string]any{"security": policy})
 			return
 		}
@@ -295,6 +305,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, api.Slug)
 		writeJSON(w, map[string]any{"module": publicResolverModule(*row)})
 		return
 	}
@@ -357,6 +368,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, 400, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, api.Slug)
 		writeJSON(w, map[string]any{"module": publicResolverModule(*row), "published": true})
 		return
 	}
@@ -388,6 +400,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, api.Slug)
 		writeJSON(w, map[string]any{"source": publicSource(*row)})
 		return
 	}
@@ -435,6 +448,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, api.Slug)
 		source, _ := getSourceForAPI(a.ctx.AppReadDB(), project, api.Slug, row.SourceID, "")
 		writeJSON(w, map[string]any{"resolver": publicResolver(*row, source)})
 		return
@@ -485,6 +499,7 @@ func (a *App) handleAdminHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, err.Error(), errorCode(err))
 			return
 		}
+		a.invalidateRuntime(project, api.Slug)
 		writeJSON(w, map[string]any{"schema": publicSchema(row), "deployed": true})
 		return
 	}
@@ -525,8 +540,16 @@ func (a *App) logRequest(project, apiSlug, operationName, operationType string, 
 			message = value
 		}
 	}
-	_, err := a.ctx.AppDB().Exec(`INSERT INTO graphql_request_logs(project_id,operation_name,operation_type,status_code,duration_ms,error,created_at) VALUES(?,?,?,?,?,?,?)`, storageProject(project, apiSlug), operationName, operationType, status, duration.Milliseconds(), message, nowUTC())
-	return err
+	a.enqueueRequestLog(requestLogEntry{
+		projectID:     storageProject(project, apiSlug),
+		operationName: operationName,
+		operationType: operationType,
+		status:        status,
+		durationMS:    duration.Milliseconds(),
+		errorMessage:  message,
+		createdAt:     nowUTC(),
+	})
+	return nil
 }
 
 func writeGraphQLError(w http.ResponseWriter, status int, err error) {

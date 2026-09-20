@@ -32,6 +32,24 @@ type executeResult struct {
 	Errors        []map[string]any
 	OperationName string
 	OperationType string
+	Timings       executionTimings
+}
+
+type executionTimings struct {
+	Config  time.Duration
+	Prepare time.Duration
+	Plan    time.Duration
+	Execute time.Duration
+	Source  time.Duration
+	Fast    bool
+}
+
+type preparedOperation struct {
+	doc              *ast.QueryDocument
+	op               *ast.OperationDefinition
+	fields           int
+	depth            int
+	permissionFields []string
 }
 
 const compiledCacheLimit = 256
@@ -57,6 +75,7 @@ func (a *App) compiledSchema(key, sdl string) (*ast.Schema, []string) {
 	if len(a.schemaCache) >= compiledCacheLimit {
 		a.schemaCache = make(map[string]*ast.Schema)
 		a.queryCache = make(map[string]*ast.QueryDocument)
+		a.operationCache = make(map[string]*preparedOperation)
 	}
 	a.schemaCache[key] = compiled
 	a.cacheMu.Unlock()
@@ -77,14 +96,48 @@ func (a *App) parsedQuery(key, query string, schema *ast.Schema) (*ast.QueryDocu
 	a.cacheMu.Lock()
 	if a.queryCache == nil || len(a.queryCache) >= compiledCacheLimit*4 {
 		a.queryCache = make(map[string]*ast.QueryDocument)
+		a.operationCache = make(map[string]*preparedOperation)
 	}
 	a.queryCache[key] = parsed
 	a.cacheMu.Unlock()
 	return parsed, nil
 }
 
+func (a *App) prepareOperation(key, query, operationName string, schema *ast.Schema) (*preparedOperation, []string, error) {
+	a.cacheMu.RLock()
+	prepared := a.operationCache[key]
+	a.cacheMu.RUnlock()
+	if prepared != nil {
+		return prepared, nil, nil
+	}
+	doc, validationErrors := a.parsedQuery(key, query, schema)
+	if len(validationErrors) > 0 {
+		return nil, validationErrors, nil
+	}
+	op, err := operationFor(doc, operationName)
+	if err != nil {
+		return nil, nil, err
+	}
+	fields, depth := queryCost(op.SelectionSet, 0)
+	prepared = &preparedOperation{
+		doc:              doc,
+		op:               op,
+		fields:           fields,
+		depth:            depth,
+		permissionFields: selectedPermissionFields(op.SelectionSet),
+	}
+	a.cacheMu.Lock()
+	if a.operationCache == nil || len(a.operationCache) >= compiledCacheLimit*4 {
+		a.operationCache = make(map[string]*preparedOperation)
+	}
+	a.operationCache[key] = prepared
+	a.cacheMu.Unlock()
+	return prepared, nil, nil
+}
+
 func (a *App) execute(ctx context.Context, project, apiSlug, environment string, req graphqlRequest) (executeResult, error) {
-	policy, err := getSecurity(a.ctx.AppReadDB(), project, apiSlug)
+	configStart := time.Now()
+	policy, err := a.cachedSecurity(project, apiSlug)
 	if err != nil {
 		return executeResult{}, err
 	}
@@ -97,7 +150,7 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if req.Variables == nil {
 		req.Variables = map[string]any{}
 	}
-	schemaRow, err := getSchemaForAPI(a.ctx.AppReadDB(), project, apiSlug, environment, 0, true)
+	schemaRow, err := a.cachedPublishedSchema(project, apiSlug, environment)
 	if err != nil {
 		return executeResult{}, err
 	}
@@ -109,37 +162,47 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if len(schemaErrors) > 0 {
 		return executeResult{}, internal("published schema is invalid")
 	}
+	timings := executionTimings{Config: time.Since(configStart)}
+	prepareStart := time.Now()
 	queryKey := schemaKey + "\x00" + req.OperationName + "\x00" + req.Query
-	doc, queryErrors := a.parsedQuery(queryKey, req.Query, schema)
+	prepared, queryErrors, err := a.prepareOperation(queryKey, req.Query, req.OperationName, schema)
 	if len(queryErrors) > 0 {
 		return executeResult{Errors: queryErrorObjects(schema, req.Query)}, nil
 	}
-	op, err := operationFor(doc, req.OperationName)
 	if err != nil {
 		return executeResult{}, err
 	}
+	op := prepared.op
 	if ctx.Value(requestMethodKey{}) == http.MethodGet && op.Operation != ast.Query {
 		return executeResult{}, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
 	}
 	if policy.Mode == "auth" && op.Operation == ast.Subscription {
 		return executeResult{}, forbidden("authenticated subscriptions are not supported yet")
 	}
-	fields, depth := queryCost(op.SelectionSet, 0)
-	if fields > maxQueryComplexity(a.ctx) {
-		return executeResult{}, invalid("query complexity %d exceeds limit %d", fields, maxQueryComplexity(a.ctx))
+	if prepared.fields > maxQueryComplexity(a.ctx) {
+		return executeResult{}, invalid("query complexity %d exceeds limit %d", prepared.fields, maxQueryComplexity(a.ctx))
 	}
-	if depth > maxQueryDepth(a.ctx) {
-		return executeResult{}, invalid("query depth %d exceeds limit %d", depth, maxQueryDepth(a.ctx))
+	if prepared.depth > maxQueryDepth(a.ctx) {
+		return executeResult{}, invalid("query depth %d exceeds limit %d", prepared.depth, maxQueryDepth(a.ctx))
 	}
-	if err := authorizeSelection(ctx, policy, op.SelectionSet); err != nil {
+	if err := authorizePermissionFields(ctx, policy, prepared.permissionFields); err != nil {
 		return executeResult{}, err
 	}
-	bindings, err := a.executionPlan(project, apiSlug, policy.Mode == "auth")
+	timings.Prepare = time.Since(prepareStart)
+	planStart := time.Now()
+	bindings, err := a.executionPlan(project, apiSlug)
 	if err != nil {
 		return executeResult{}, err
 	}
+	timings.Plan = time.Since(planStart)
 	ctx = context.WithValue(ctx, executionBindingsKey{}, bindings)
-	return a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, doc, policy)
+	executeStart := time.Now()
+	result, err := a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
+	timings.Execute = time.Since(executeStart)
+	timings.Source = result.Timings.Source
+	timings.Fast = result.Timings.Fast
+	result.Timings = timings
+	return result, err
 }
 
 type executionBindingsKey struct{}
@@ -151,17 +214,15 @@ type executionBindings struct {
 
 type planCacheEntry struct {
 	bindings *executionBindings
-	expires  time.Time
 }
 
-func (a *App) executionPlan(project, apiSlug string, fresh ...bool) (*executionBindings, error) {
-	cacheable := len(fresh) == 0 || !fresh[0]
-	key := project + "\x00" + apiSlug
-	now := time.Now()
+func (a *App) executionPlan(project, apiSlug string) (*executionBindings, error) {
+	key := apiRuntimeKey(project, apiSlug)
 	a.cacheMu.RLock()
 	entry, found := a.planCache[key]
+	generation := a.cacheGeneration[key]
 	a.cacheMu.RUnlock()
-	if cacheable && found && entry.bindings != nil && now.Before(entry.expires) {
+	if found && entry.bindings != nil {
 		return entry.bindings, nil
 	}
 	resolvers, err := listResolversForAPI(a.ctx.AppReadDB(), project, apiSlug)
@@ -186,14 +247,13 @@ func (a *App) executionPlan(project, apiSlug string, fresh ...bool) (*executionB
 	for _, module := range modules {
 		bindings.modules[moduleKey(module.Name, module.Version)] = module
 	}
-	if !cacheable {
-		return bindings, nil
-	}
 	a.cacheMu.Lock()
 	if a.planCache == nil || len(a.planCache) >= compiledCacheLimit {
 		a.planCache = make(map[string]planCacheEntry)
 	}
-	a.planCache[key] = planCacheEntry{bindings: bindings, expires: now.Add(time.Second)}
+	if a.cacheGeneration[key] == generation {
+		a.planCache[key] = planCacheEntry{bindings: bindings}
+	}
 	a.cacheMu.Unlock()
 	return bindings, nil
 }

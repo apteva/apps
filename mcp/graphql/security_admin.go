@@ -30,6 +30,9 @@ func (a *App) toolSecuritySet(callCtx context.Context, ctx *sdk.AppCtx, args map
 		return nil, err
 	}
 	policy, err := setSecurity(ctx.AppDB(), project, apiSlugArg(args), args["security"])
+	if err == nil {
+		a.invalidateRuntime(project, apiSlugArg(args))
+	}
 	return map[string]any{"security": policy}, err
 }
 func (a *App) toolSecurityValidate(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
