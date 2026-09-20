@@ -174,11 +174,12 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	if strings.TrimSpace(req.Query) == "" {
 		return executeResult{}, invalid("query is required")
 	}
+	resultBase := executionMetadata(ctx, project, req, release)
 	if req.Variables == nil {
 		req.Variables = map[string]any{}
 	}
 	if schemaRow == nil {
-		return executeResult{}, invalid("no published schema for environment %q", normalizeEnvironment(environment))
+		return resultBase, invalid("no published schema for environment %q", normalizeEnvironment(environment))
 	}
 	schemaKey := project + "\x00" + apiSlug + "\x00" + normalizeEnvironment(environment) + "\x00" + fmt.Sprint(schemaRow.Version) + "\x00" + schemaRow.Hash
 	if release != nil {
@@ -186,44 +187,47 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	}
 	schema, schemaErrors := a.compiledSchema(schemaKey, schemaRow.SDL)
 	if len(schemaErrors) > 0 {
-		return executeResult{}, internal("published schema is invalid")
+		return resultBase, internal("published schema is invalid")
 	}
 	timings := executionTimings{Config: time.Since(configStart)}
 	prepareStart := time.Now()
 	queryKey := schemaKey + "\x00" + req.OperationName + "\x00" + req.Query
 	prepared, queryErrors, err := a.prepareOperation(queryKey, req.Query, req.OperationName, schema)
 	if len(queryErrors) > 0 {
-		return executeResult{Errors: queryErrorObjects(schema, req.Query)}, nil
+		resultBase.Errors = queryErrorObjects(schema, req.Query)
+		return resultBase, nil
 	}
 	if err != nil {
-		return executeResult{}, err
+		return resultBase, err
 	}
 	op := prepared.op
+	resultBase.OperationName = op.Name
+	resultBase.OperationType = string(op.Operation)
 	if ctx.Value(requestMethodKey{}) == http.MethodGet && op.Operation != ast.Query {
-		return executeResult{}, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
+		return resultBase, &graphqlError{Code: "method_not_allowed", Message: "GET supports query operations only"}
 	}
 	cost, estimatedRows, estimatedResolvers := cardinalityCost(op.SelectionSet, req.Variables, limits.DefaultListSize)
 	if cost > limits.MaxCost {
-		return executeResult{}, &graphqlError{Code: "query_cost_exceeded", Message: fmt.Sprintf("query cost %d exceeds limit %d", cost, limits.MaxCost)}
+		return resultBase, &graphqlError{Code: "query_cost_exceeded", Message: fmt.Sprintf("query cost %d exceeds limit %d", cost, limits.MaxCost)}
 	}
 	if prepared.depth > limits.MaxDepth {
-		return executeResult{}, &graphqlError{Code: "query_depth_exceeded", Message: fmt.Sprintf("query depth %d exceeds limit %d", prepared.depth, limits.MaxDepth)}
+		return resultBase, &graphqlError{Code: "query_depth_exceeded", Message: fmt.Sprintf("query depth %d exceeds limit %d", prepared.depth, limits.MaxDepth)}
 	}
 	if estimatedRows > limits.MaxRows {
-		return executeResult{}, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("estimated rows %d exceeds limit %d", estimatedRows, limits.MaxRows)}
+		return resultBase, &graphqlError{Code: "row_limit_exceeded", Message: fmt.Sprintf("estimated rows %d exceeds limit %d", estimatedRows, limits.MaxRows)}
 	}
 	if estimatedResolvers > limits.MaxNestedResolvers {
-		return executeResult{}, &graphqlError{Code: "resolver_limit_exceeded", Message: fmt.Sprintf("estimated resolver calls %d exceeds limit %d", estimatedResolvers, limits.MaxNestedResolvers)}
+		return resultBase, &graphqlError{Code: "resolver_limit_exceeded", Message: fmt.Sprintf("estimated resolver calls %d exceeds limit %d", estimatedResolvers, limits.MaxNestedResolvers)}
 	}
 	if err := authorizePermissionFields(ctx, policy, prepared.permissionFields); err != nil {
-		return executeResult{}, err
+		return resultBase, err
 	}
 	timings.Prepare = time.Since(prepareStart)
 	planStart := time.Now()
 	if bindings == nil {
 		bindings, err = a.executionPlan(project, apiSlug)
 		if err != nil {
-			return executeResult{}, err
+			return resultBase, err
 		}
 	}
 	timings.Plan = time.Since(planStart)
@@ -235,23 +239,32 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	executeStart := time.Now()
 	result, err := a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
 	timings.Execute = time.Since(executeStart)
-	if executionDeadlineExceeded(ctx, deadline) {
-		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Timings: timings}, &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
-	}
 	timings.Source = result.Timings.Source
 	timings.Fast = result.Timings.Fast
 	result.Timings = timings
+	result.OperationName = resultBase.OperationName
+	result.OperationType = resultBase.OperationType
+	result.Release = resultBase.Release
+	result.OperationHash = resultBase.OperationHash
+	result.AuthScope = resultBase.AuthScope
+	if executionDeadlineExceeded(ctx, deadline) {
+		return result, &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
+	}
+	return result, err
+}
+
+func executionMetadata(ctx context.Context, project string, req graphqlRequest, release *apiRelease) executeResult {
+	hash := sha256.Sum256([]byte(req.Query + "\x00" + req.OperationName))
+	result := executeResult{OperationName: req.OperationName, OperationHash: hex.EncodeToString(hash[:])}
 	if release != nil {
 		result.Release = release.Version
 	}
-	hash := sha256.Sum256([]byte(req.Query + "\x00" + req.OperationName))
-	result.OperationHash = hex.EncodeToString(hash[:])
 	if identity := securityIdentity(ctx); identity != nil {
 		result.AuthScope = identity.Issuer + ":" + identity.Subject
 	} else {
 		result.AuthScope = "platform:" + project
 	}
-	return result, err
+	return result
 }
 
 type executionBindingsKey struct{}

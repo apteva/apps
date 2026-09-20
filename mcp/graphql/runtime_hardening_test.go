@@ -96,6 +96,13 @@ func TestExecutionDeadlineExceededAtClockBoundary(t *testing.T) {
 	}
 }
 
+func TestExecutionMetadataIsAvailableToEarlyFailures(t *testing.T) {
+	result := executionMetadata(context.Background(), "telemetry-project", graphqlRequest{Query: "query Workspace { value }", OperationName: "Workspace"}, &apiRelease{Version: 7})
+	if result.OperationName != "Workspace" || len(result.OperationHash) != 64 || result.Release != 7 || result.AuthScope != "platform:telemetry-project" {
+		t.Fatalf("metadata=%#v", result)
+	}
+}
+
 func TestHardenedModuleDecimalNullAndDate(t *testing.T) {
 	decimal := resolverModule{Name: "price", Version: 1, Status: "published", OutputType: "Decimal", NullBehavior: "strict", DecimalPrecision: 8, DecimalScale: 2, RoundingMode: "half_even", Timezone: "UTC", Inputs: map[string]any{"value": "Decimal!"}, Definition: map[string]any{"op": "multiply", "args": []any{map[string]any{"input": "value"}, map[string]any{"const": "1.005"}}}}
 	value, err := (moduleRuntime{}).evaluate(decimal, map[string]any{"value": "10"})
