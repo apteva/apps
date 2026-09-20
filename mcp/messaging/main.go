@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.47
+version: 0.13.48
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -169,6 +169,32 @@ provides:
       label: Messaging
       icon: mail
       entry: /ui/MessagingPanel.mjs
+  ui_components:
+    - name: messages
+      label: Messages
+      description: SMS and WhatsApp conversations in a compact phone-style inbox.
+      entry: /ui/MessagingWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [message.sent, message.received, message.event]
+      settings_schema:
+        type: object
+        properties:
+          default_channel:
+            type: string
+            title: Default channel
+            enum: [all, sms, whatsapp]
+            enum_names: [All messages, SMS, WhatsApp]
+            default: all
+          max_conversations:
+            type: integer
+            title: Maximum conversations
+            default: 10
+            minimum: 4
+            maximum: 20
   workers:
     - name: messaging-recovery
       schedule: "@every 30s"
