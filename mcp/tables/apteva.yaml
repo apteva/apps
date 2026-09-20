@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.24
+version: 0.1.25
 description: |
+  v0.1.25 Adds a generic versioned recursive filter AST with correlated
+  exists/not_exists predicates, typed value expressions, bounded compilation,
+  and capability negotiation for Tables clients.
   v0.1.24 Adds bounded prepared-statement caching for searches, counts, and
   aggregations with schema invalidation, upgrades the SDK transport for
   structured internal app results, and preserves normal MCP compatibility.
@@ -78,15 +81,17 @@ provides:
     - name: rows_delete
       description: 'Delete by id, or by filter when where is supplied + confirm=true. Returns {deleted}.'
     - name: rows_search
-      description: 'Filter, sort, paginate. Args: table, where?, order_by?, limit?, offset?, cursor?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more. Ops: eq, neq, lt, lte, gt, gte, contains (literal), like (pattern), in, between, is_null, is_not_null.'
+      description: 'Filter, sort, paginate. Args: table, where? (legacy) or filter_ast? (recursive, correlated, parameterized), order_by?, limit?, offset?, cursor?, select?, include_total? (default true). Set include_total=false to skip COUNT and return has_more.'
     - name: rows_count
-      description: 'Count rows matching a filter. Args: table, where?. Returns {count}.'
+      description: 'Count rows matching a filter. Args: table, where? or filter_ast?. Returns {count}.'
     - name: rows_aggregate
-      description: 'Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.'
+      description: 'Single-table grouped aggregations. Args: table, where? or filter_ast?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.'
     - name: tables_query
       description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced.'
     - name: tables_batch
       description: 'Execute a bounded list of validated Tables operations. Modes: read_snapshot, write_transaction, best_effort. Supports dependency references with {$ref: operation.path}; returns per-operation status and errors.'
+    - name: tables_capabilities
+      description: 'Return versioned generic Tables capabilities, including the recursive filter AST contract and enforced limits.'
   ui_panels:
     - slot: project.page
       label: Tables
@@ -149,7 +154,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.24
+    ref: tables/v0.1.25
     entry: mcp/tables
   port: 8080
   health_check: /health

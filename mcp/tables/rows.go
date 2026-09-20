@@ -737,7 +737,7 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 	if err != nil {
 		return nil, err
 	}
-	clause, vals, err := buildWhere(t, sliceArg(args, "where"))
+	clause, vals, filterAST, err := a.compileFilter(ctx, pid, t, sliceArg(args, "where"), args["filter_ast"])
 	if err != nil {
 		return nil, err
 	}
@@ -796,11 +796,18 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 			if err == nil && cached.Valid {
 				total = cached.Int64
 			} else if err == nil {
-				err = query.QueryRowContext(qctx,
-					fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(t.PhysicalName))).Scan(&total)
+				fromTable := quote(t.PhysicalName)
+				if filterAST {
+					fromTable += ` AS "root"`
+				}
+				err = query.QueryRowContext(qctx, fmt.Sprintf("SELECT COUNT(*) FROM %s", fromTable)).Scan(&total)
 			}
 		} else {
-			totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
+			fromTable := quote(t.PhysicalName)
+			if filterAST {
+				fromTable += ` AS "root"`
+			}
+			totalSQL := "SELECT COUNT(*) FROM " + fromTable + " " + clause
 			countStmt, prepErr := a.bindPreparedRead(qctx, read, tablePlanKey(t.ID, "count", totalSQL), totalSQL)
 			if prepErr != nil {
 				return nil, queryStageErr("prepare", tableName, prepErr)
@@ -846,7 +853,11 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (resultValue 
 		}
 		vals = append(vals, seekValues...)
 	}
-	planShape := selectClause + " FROM " + quote(t.PhysicalName)
+	fromTable := quote(t.PhysicalName)
+	if filterAST {
+		fromTable += ` AS "root"`
+	}
+	planShape := selectClause + " FROM " + fromTable
 	if clause != "" {
 		planShape += " " + clause
 	}
@@ -923,7 +934,7 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue a
 	if err != nil {
 		return nil, err
 	}
-	clause, vals, err := buildWhere(t, sliceArg(args, "where"))
+	clause, vals, filterAST, err := a.compileFilter(ctx, pid, t, sliceArg(args, "where"), args["filter_ast"])
 	if err != nil {
 		return nil, err
 	}
@@ -934,7 +945,11 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (resultValue a
 		}
 		return map[string]any{"count": count}, nil
 	}
-	stmt := "SELECT COUNT(*) FROM " + quote(t.PhysicalName)
+	fromTable := quote(t.PhysicalName)
+	if filterAST {
+		fromTable += ` AS "root"`
+	}
+	stmt := "SELECT COUNT(*) FROM " + fromTable
 	if clause != "" {
 		stmt += " " + clause
 	}
@@ -982,7 +997,7 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultVal
 	if err != nil {
 		return nil, err
 	}
-	clause, vals, err := buildWhere(t, sliceArg(args, "where"))
+	clause, vals, filterAST, err := a.compileFilter(ctx, pid, t, sliceArg(args, "where"), args["filter_ast"])
 	if err != nil {
 		return nil, err
 	}
@@ -1008,7 +1023,11 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (resultVal
 		return nil, errf("at least one metric is required")
 	}
 
-	stmt := "SELECT " + strings.Join(selectParts, ", ") + " FROM " + quote(t.PhysicalName)
+	fromTable := quote(t.PhysicalName)
+	if filterAST {
+		fromTable += ` AS "root"`
+	}
+	stmt := "SELECT " + strings.Join(selectParts, ", ") + " FROM " + fromTable
 	if clause != "" {
 		stmt += " " + clause
 	}

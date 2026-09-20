@@ -187,6 +187,50 @@ func TestTablesBatch_ReadSnapshotUsesSharedReadTransaction(t *testing.T) {
 	}
 }
 
+func TestRecursiveFilterAST_CorrelatedAcrossReadOperations(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{"name": "customers", "columns": []any{
+		map[string]any{"name": "region", "type": "text"},
+	}})
+	mustCall(t, app, ctx, "tables_create", map[string]any{"name": "orders", "columns": []any{
+		map[string]any{"name": "customer_id", "type": "number"},
+		map[string]any{"name": "status", "type": "text"},
+		map[string]any{"name": "amount", "type": "number"},
+	}})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "customers", "rows": []any{
+		map[string]any{"region": "eu"}, map[string]any{"region": "us"},
+	}})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "orders", "rows": []any{
+		map[string]any{"customer_id": 1, "status": "open", "amount": 10},
+		map[string]any{"customer_id": 2, "status": "open", "amount": 20},
+	}})
+	filter := map[string]any{"and": []any{
+		map[string]any{"compare": map[string]any{"op": "eq", "left": map[string]any{"column": "status"}, "right": map[string]any{"literal": "open"}}},
+		map[string]any{"exists": map[string]any{
+			"table":       "customers",
+			"correlation": []any{map[string]any{"outer": "customer_id", "inner": "id"}},
+			"filter":      map[string]any{"compare": map[string]any{"op": "eq", "left": map[string]any{"column": "region"}, "right": map[string]any{"literal": "eu"}}},
+		}},
+	}}
+	search := mustCall(t, app, ctx, "rows_search", map[string]any{"table": "orders", "filter_ast": filter, "include_total": true})
+	if search["total"].(int64) != 1 || len(search["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("recursive search=%v", search)
+	}
+	count := mustCall(t, app, ctx, "rows_count", map[string]any{"table": "orders", "filter_ast": filter})
+	if count["count"].(int64) != 1 {
+		t.Fatalf("recursive count=%v", count)
+	}
+	agg := mustCall(t, app, ctx, "rows_aggregate", map[string]any{"table": "orders", "filter_ast": filter, "metrics": []any{map[string]any{"name": "n", "op": "count"}}})
+	if len(agg["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("recursive aggregate=%v", agg)
+	}
+	batch := mustCall(t, app, ctx, "tables_batch", map[string]any{"operations": []any{map[string]any{"id": "n", "operation": "rows_count", "args": map[string]any{"table": "orders", "filter_ast": filter}}}})
+	if batch["results"].(map[string]any)["n"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("recursive batch=%v", batch)
+	}
+}
+
 func TestPreparedPlanCache_InvalidatesOnSchemaChange(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
@@ -204,6 +248,45 @@ func TestPreparedPlanCache_InvalidatesOnSchemaChange(t *testing.T) {
 	app.plans.mu.Unlock()
 	if remaining != 0 {
 		t.Fatalf("schema change left %d prepared plans cached", remaining)
+	}
+}
+
+func TestRecursiveFilterAST_UsesIndexPlan(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "indexes_create", map[string]any{"table": "books", "name": "books_rating_idx", "columns": []any{"rating"}})
+	table, err := app.loadTableSchema(ctx, "test-proj", "books")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clause, vals, used, err := app.compileFilter(ctx, "test-proj", table, nil, map[string]any{"compare": map[string]any{
+		"op": "eq", "left": map[string]any{"column": "rating"}, "right": map[string]any{"literal": 5},
+	}})
+	if err != nil || !used {
+		t.Fatalf("compile filter: used=%v err=%v", used, err)
+	}
+	rows, err := ctx.AppReadDB().Query(`EXPLAIN QUERY PLAN SELECT * FROM `+quote(table.PhysicalName)+` AS "root" `+clause, vals...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var detail string
+	found := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(detail), "USING INDEX") {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("expected indexed plan, got %q", detail)
 	}
 }
 
