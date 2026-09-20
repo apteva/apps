@@ -2,7 +2,10 @@ import { expect, test } from "bun:test";
 import {
   groupPhoneConversations,
   messagingWidgetPreferences,
+  normalisePhoneRecipient,
   phoneMessagePeer,
+  templateVariableKeys,
+  validPhoneRecipient,
   type PhoneMessage,
 } from "./MessagingWidget";
 
@@ -48,4 +51,20 @@ test("normalizes widget settings", () => {
     defaultChannel: "all",
     maxConversations: 10,
   });
+});
+
+test("normalizes and validates international phone recipients", () => {
+  expect(normalisePhoneRecipient("whatsapp:+1 (555) 222-0000")).toBe("+15552220000");
+  expect(validPhoneRecipient("+34 612 345 678")).toBe(true);
+  expect(validPhoneRecipient("555-222-0000")).toBe(false);
+});
+
+test("discovers ordered WhatsApp template variables", () => {
+  expect(templateVariableKeys({
+    id: 1,
+    channel: "whatsapp",
+    name: "welcome",
+    body_text: "Hello {{2}}, your code is {{1}}.",
+    vars_schema: { "3": "Optional note" },
+  })).toEqual(["1", "2", "3"]);
 });
