@@ -228,6 +228,7 @@ func TestTimedParallelJoinWaitsForAllInputs(t *testing.T) {
 	}
 }
 func TestTimedTasksBackend(t *testing.T) {
+	t.Skip("legacy Tasks backend removed in Processes 0.14")
 	a, f := setup(t)
 	d := workflowDefinition()
 	d.ExecutionMode = "tasks"

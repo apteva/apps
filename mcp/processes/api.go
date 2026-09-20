@@ -28,7 +28,7 @@ func definitionSchema() map[string]any {
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create an unassigned draft procedure when authorized to define company policy. Configure agents, parameter values, execution mode, and schedules separately with assignment_create. No assignment is created automatically.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure for use by its assignments; an unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment of a procedure. Create and activate an assignment first. Supply a stable idempotency_key and reuse it on retries. Track execution in the selected backend.", "runs": "Read direct runs and live Tasks history when used."}
+	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create an unassigned draft procedure when authorized to define company policy. Configure agents, parameter values, and schedules separately with assignment_create. No assignment is created automatically.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure for use by its assignments; an unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment of a procedure. Create and activate an assignment first. Supply a stable idempotency_key and reuse it on retries. Execution is tracked natively by Processes.", "runs": "Read native process run and step history."}
 	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
@@ -119,7 +119,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			return a.execute(caller.ProjectID, fmt.Sprintf("agent:%d:%s", caller.AgentID, caller.ThreadID), name, args)
 		}})
 	}
-	return append(append(out, a.triggerTools()...), a.taskTools()...)
+	return append(out, a.triggerTools()...)
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
 	if action == "overview" {
@@ -127,9 +127,6 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if action == "tasks" || strings.HasPrefix(action, "task_") {
-		return a.executeTask(project, actor, action, args)
-	}
 	if strings.HasPrefix(action, "trigger_") || action == "triggers" {
 		return a.executeTrigger(project, action, args)
 	}
@@ -418,43 +415,6 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if parts[0] == "tasks" || path == "task-runs" {
-		args = map[string]any{}
-		action = ""
-		if path == "task-runs" && r.Method == "GET" {
-			action = "task_runs"
-		}
-		if path == "tasks" {
-			if r.Method == "POST" {
-				action = "task_create"
-			}
-			if r.Method == "GET" {
-				action = "tasks"
-				for _, k := range []string{"assignee", "state", "origin", "run_id", "process_id", "search"} {
-					args[k] = r.URL.Query().Get(k)
-				}
-				args["overdue"] = r.URL.Query().Get("overdue") == "true"
-				for _, k := range []string{"limit", "offset"} {
-					v, _ := strconv.Atoi(r.URL.Query().Get(k))
-					args[k] = float64(v)
-				}
-			}
-		}
-		if len(parts) == 2 && parts[0] == "tasks" {
-			args["task_id"] = parts[1]
-			if r.Method == "GET" {
-				action = "task_get"
-			}
-			if r.Method == "PUT" {
-				action = "task_update"
-			}
-		}
-		if len(parts) == 3 && parts[0] == "tasks" && parts[2] == "cancel" && r.Method == "POST" {
-			args["task_id"] = parts[1]
-			action = "task_cancel"
-		}
-	}
-
 	if action == "" {
 		http.Error(w, "unsupported route or method", 405)
 		return
@@ -502,8 +462,8 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func assignmentSchema() map[string]any {
-	return object([]string{"name", "owner_agent_id", "execution_mode"}, map[string]any{
-		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "execution_mode": map[string]any{"type": "string", "enum": []string{"agent", "tasks"}, "description": "Direct agent by default; tasks requires the optional Tasks integration"}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
+	return object([]string{"name", "owner_agent_id"}, map[string]any{
+		"name": textField("Assignment name, for example Photography Patreon"), "target": textField("Page, client, business or other target; never credentials"), "owner_agent_id": map[string]any{"type": "integer", "minimum": 1}, "schedule": object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"interval", "cron"}}, "every": textField("Duration, e.g. 24h; minimum 1m"), "cron": textField("Five-field cron expression"), "timezone": textField("IANA timezone; default UTC")}), "procedure_version": map[string]any{"type": "integer", "minimum": 1}, "roles": map[string]any{"type": "object", "additionalProperties": executorSchema()}, "follow_latest": map[string]any{"type": "boolean", "description": "Adopt future procedure revisions; otherwise pin procedure_version"}, "parameters": map[string]any{"type": "object", "description": "Values for the procedure's declared parameters; use authorized connection references, not credentials"}})
 }
 
 func executorSchema() map[string]any {

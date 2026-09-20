@@ -77,7 +77,7 @@ directive: |
      Expected output: simulated receipt for the approved draft.
 
   While the procedure is still draft, create an assignment named "Team",
-  owned by you, execution_mode=agent, follow_latest=true, no schedule,
+  owned by you, follow_latest=true, no schedule,
   parameters={"page":"photography"}, with explicit agent role bindings: researcher and publisher to you, writer to
   ${AGENT_writer_ID}, reviewer to ${AGENT_reviewer_ID}. Do NOT leave review as human.
   You are authorized to create, bind and activate this test procedure. Activate

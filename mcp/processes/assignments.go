@@ -23,7 +23,7 @@ type AssignmentConfig struct {
 	Name             string              `json:"name"`
 	Target           string              `json:"target"`
 	OwnerAgentID     int64               `json:"owner_agent_id"`
-	ExecutionMode    string              `json:"execution_mode"`
+	ExecutionMode    string              `json:"-"`
 	Schedule         *Schedule           `json:"schedule,omitempty"`
 	ProcedureVersion int                 `json:"procedure_version"`
 	Parameters       map[string]any      `json:"parameters"`
@@ -132,6 +132,9 @@ func scanAssignment(row scanner) (Assignment, error) {
 	if e == nil {
 		e = json.Unmarshal([]byte(body), &x.AssignmentConfig)
 	}
+	// Legacy assignments may contain an old execution_mode value. It is no
+	// longer part of the public model; all assignments execute natively.
+	x.ExecutionMode = "agent"
 	x.Parameters = params(x.Parameters)
 	return x, e
 }
@@ -171,7 +174,7 @@ func (a *App) assigned(p *Process, x Assignment) (*Process, error) {
 	v.Version = x.ProcedureVersion
 	v.Assignment = &x
 	v.OwnerAgentID = x.OwnerAgentID
-	v.ExecutionMode = x.ExecutionMode
+	v.ExecutionMode = "agent"
 	v.Schedule = x.Schedule
 	v.NextRunAt = x.NextRunAt
 	v.ScheduledVersion = x.ScheduledVersion
@@ -187,7 +190,7 @@ func (a *App) runDefinition(r Run) (Definition, error) {
 	d, e := a.definition(r.ProcessID, r.Version)
 	if e == nil {
 		d.OwnerAgentID = r.Binding.OwnerAgentID
-		d.ExecutionMode = r.Backend
+		d.ExecutionMode = "agent"
 		d.Schedule = r.Binding.Schedule
 	}
 	return d, e

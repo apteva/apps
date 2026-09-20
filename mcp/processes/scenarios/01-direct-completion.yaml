@@ -15,7 +15,7 @@ directive: |
   are to prepare a short briefing from these facts: revenue 1200, expenses 400.
   Completion criteria: report the net amount as "Net: 800". You are authorized
   to create and activate this test procedure.
-  Create an assignment named "Briefing", owned by you, execution_mode=agent,
+  Create an assignment named "Briefing", owned by you,
   follow_latest=true, no schedule. Activate the procedure, activate this assignment,
   and start this assignment once with idempotency_key=briefing-day-1.
   Read run_get before doing the work. Report completion using run_update with
@@ -26,9 +26,6 @@ assert:
   - http: GET /api/apps/processes/processes
     expect_count_at: processes
     expect_count: 1
-  - http: GET /api/apps/processes/processes
-    expect_field_at: processes.0.assignments.0.execution_mode
-    expect_field_eq: agent
   - tool_called: processes_run_get
   - tool_called_with:
       tool: processes_run_update

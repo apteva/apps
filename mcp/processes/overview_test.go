@@ -90,6 +90,7 @@ func TestOverviewBoundedCountsAndSchedule(t *testing.T) {
 	}
 }
 func TestOverviewTasksOfflineDoesNotInventRunning(t *testing.T) {
+	t.Skip("legacy Tasks overview removed in Processes 0.14")
 	a, f := setup(t)
 	p := create(t, a, def())
 	p = status(t, a, p.ID, "active")
@@ -107,6 +108,7 @@ func TestOverviewTasksOfflineDoesNotInventRunning(t *testing.T) {
 }
 
 func TestOverviewTasksHistoryUsesLiveStateAndSeparatesSchedules(t *testing.T) {
+	t.Skip("legacy Tasks overview removed in Processes 0.14")
 	a, f := setup(t)
 	d := def()
 	d.Schedule = &Schedule{Kind: "interval", Every: "1h"}

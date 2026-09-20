@@ -32,10 +32,11 @@ type Executor struct {
 	Kind    string `json:"kind"` // agent or human (authorized project operator)
 	AgentID int64  `json:"agent_id,omitempty"`
 }
-type StepRun = Task
 
-// Task is the shared execution record for procedure steps and ad hoc work.
-type Task struct {
+// StepRun is the durable native execution record for one procedure step.
+// The Task alias is kept privately for decoding legacy pre-0.14 rows; it is
+// not exposed by the Processes manifest or API.
+type StepRun struct {
 	StartAt           string   `json:"start_at,omitempty"`
 	CompletedAt       string   `json:"completed_at,omitempty"`
 	ProjectID         string   `json:"project_id"`
@@ -58,7 +59,6 @@ type Task struct {
 	Decision          string   `json:"decision"`
 	UpdatedBy         string   `json:"updated_by"`
 	UpdatedAt         string   `json:"updated_at"`
-	TaskID            string   `json:"task_id,omitempty"`
 	DeliveredAt       string   `json:"delivered_at,omitempty"`
 	ThreadID          string   `json:"target_thread_id,omitempty"`
 	ExecutionID       string   `json:"execution_id,omitempty"`
@@ -68,6 +68,8 @@ type Task struct {
 	LifecycleSequence int64    `json:"-"`
 	ExecutionState    string   `json:"execution_state,omitempty"`
 }
+
+type Task = StepRun
 
 func validateSteps(steps []Step) error {
 	if len(steps) > 30 {
@@ -193,8 +195,8 @@ const stepColumns = `id,COALESCE(run_id,''),step_key,position,definition_json,ex
 
 func scanStep(row scanner) (StepRun, error) {
 	var s StepRun
-	var def, executor string
-	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &s.Decision, &s.UpdatedBy, &s.UpdatedAt, &s.TaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt)
+	var def, executor, legacyTaskID string
+	e := row.Scan(&s.ID, &s.RunID, &s.Key, &s.Position, &def, &executor, &s.State, &s.Progress, &s.Output, &s.Error, &s.Decision, &s.UpdatedBy, &s.UpdatedAt, &legacyTaskID, &s.DeliveredAt, &s.ThreadID, &s.ExecutionID, &s.DeliveryWarning, &s.Attempts, &s.NextAttemptAt, &s.LifecycleSequence, &s.ExecutionState, &s.ProjectID, &s.Origin, &s.Required, &s.DueAt, &s.CreatedAt, &s.CreatedBy, &s.Revision, &s.StartAt, &s.CompletedAt)
 	if e == nil {
 		e = json.Unmarshal([]byte(def), &s.Definition)
 	}
@@ -256,8 +258,15 @@ func dependenciesReady(s StepRun, all []StepRun) bool {
 	return true
 }
 func stepUsesTasks(r Run, s StepRun) bool {
-	return s.Origin == "process_step" && r.Backend == "tasks" && s.Executor.Kind == "agent" && s.Definition.Kind == "work"
+	return false
 }
+
+// Every Process worker needs the native read/update and run-control surface.
+// Claims are only valid for a persistent sequential worker; independently
+// dispatched steps are already assigned and must use step_get/step_update.
+const processWorkerTools = "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel"
+const processSequentialWorkerTools = "processes_step_claim," + processWorkerTools
+
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 	if s.Origin != "process_step" {
 		return a.nativeTaskContext(p, r, s, all)
@@ -268,12 +277,12 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 		if worker != "" {
 			return "Next sequential step ready: " + ids + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies and approvals remain enforced. Keep this worker alive between steps. After step_update, call done only when worker.done is true; otherwise wait for the next Processes event without polling."
 		}
-		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting processes_step_claim, processes_step_update and domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while worker.done=false, including while awaiting human approval. Call done once after worker.done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, ids, p.Name, jsonText(p.Definition))
+		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while worker.done=false, including while awaiting human approval. Call done once after worker.done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
 	}
 	inputs := dependencyOutputs(s, all)
 	contract := fmt.Sprintf("Worker: read Processes step_get(process_id=%s, run_id=%s, step_id=%s) before domain action. Check readiness, assignment and terminal state. Use dependencies for ancestor IDs, states, outputs and approval decisions; this is authoritative evidence, with no separate run_get or parent confirmation needed when complete. Follow the frozen instructions. Use step_update for meaningful milestones and the terminal outcome, then report once to main. Do not execute downstream steps.", p.ID, r.ID, s.ID)
 	if !stepUsesTasks(r, s) {
-		contract = fmt.Sprintf("The agent main thread coordinates this assignment using platform spawn when separate execution is useful. Suggested worker ID: process-run-%s-step-%s. Pass the exact IDs and this worker contract, granting processes_step_get and processes_step_update plus required domain tools. Main may read the step to choose tools, but need not duplicate the worker's evidence checks or rewrite the procedure. Reuse known worker ownership on repeated events; inspect threads only if ownership is uncertain. Independent ready steps can be delegated together. Processes dispatches downstream steps to their assigned agent when dependencies finish; wait for those events rather than polling or forwarding them yourself. This app event requires no reply.\n", r.ID, s.Key) + contract
+		contract = fmt.Sprintf("The agent main thread coordinates this assignment using platform spawn when separate execution is useful. Suggested worker ID: process-run-%s-step-%s. Pass the exact IDs and this worker contract, granting tools=\"%s\" plus required domain tools. This is an independently dispatched step that is already assigned; do not call processes_step_claim. Read it with processes_step_get and complete it with processes_step_update. Main may read the step to choose tools, but need not duplicate the worker's evidence checks or rewrite the procedure. Reuse known worker ownership on repeated events; inspect threads only if ownership is uncertain. Independent ready steps can be delegated together. Processes dispatches downstream steps to their assigned agent when dependencies finish; wait for those events rather than polling or forwarding them yourself. This app event requires no reply.\n", r.ID, s.Key, processWorkerTools) + contract
 	}
 
 	if stepUsesTasks(r, s) {
@@ -307,18 +316,6 @@ func (a *App) deliverStep(p *Process, r Run, s *StepRun, all []StepRun) (err err
 	message := a.stepContext(p, r, *s, all)
 	if s.DueAt != "" {
 		message += "\nStep deadline: " + s.DueAt + ". Report completion or a blocker; a missed deadline does not cancel this work."
-	}
-	if stepUsesTasks(r, *s) {
-		var result TaskResult
-		if err = a.callTasks(p.ProjectID, p.ID, "create", map[string]any{"run_key": s.ID, "version": r.Version, "agent_id": s.Executor.AgentID, "title": p.Name + " / " + r.Binding.Name + " / " + s.Definition.Name, "description": message}, &result); err != nil {
-			return err
-		}
-		id, _ := result.Task["id"].(string)
-		if id == "" {
-			return errors.New("Tasks returned no step task ID")
-		}
-		_, err = a.db.Exec(`UPDATE process_step_runs SET task_id=?,delivered_at=?,delivery_warning=?,next_attempt_at='' WHERE id=?`, id, timestamp(), result.DeliveryWarning, s.ID)
-		return err
 	}
 	if s.ThreadID == "" && sequentialAgent(r, all) != 0 {
 		worker, e := a.runWorker(r.ID, s.Executor.AgentID)
@@ -401,45 +398,8 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 		return e
 	}
 	var failures []error
-	// Read Tasks outcomes before evaluating the DAG. Approval steps never rely on
-	// Task completion; they require an explicit decision in Processes.
-	for _, s := range all {
-		if !stepUsesTasks(*r, s) || s.TaskID == "" || terminal(s.State) {
-			continue
-		}
-		var result TaskResult
-		if e = a.callTasks(p.ProjectID, p.ID, "get", map[string]any{"task_id": s.TaskID}, &result); e != nil {
-			failures = append(failures, e)
-			continue
-		}
-		state, _ := result.Task["state"].(string)
-		output, _ := result.Task["result"].(string)
-		reason, _ := result.Task["error"].(string)
-		progress := number(result.Task, "progress")
-		switch state {
-		case "completed":
-			if strings.TrimSpace(output) == "" {
-				state = "blocked"
-				reason = "Task completed without required result evidence"
-			} else {
-				progress = 100
-			}
-		case "failed", "cancelled", "running", "waiting", "blocked":
-		case "queued":
-			state = "ready"
-		default:
-			continue
-		}
-		if s.State != state || s.Output != output || s.Error != reason || s.Progress != progress {
-			if e = a.writeStep(s, state, progress, output, reason, "", "tasks"); e != nil {
-				return e
-			}
-		}
-	}
-	all, e = a.steps(r.ID)
-	if e != nil {
-		return e
-	}
+	// Step state and progress are authoritative in Processes. There is no
+	// external task status to reconcile before evaluating the DAG.
 	for _, s := range all {
 		if s.Required && (s.State == "failed" || s.State == "cancelled" || s.Decision == "rejected") {
 			_, e = a.db.Exec(`UPDATE process_runs SET state='failed',error=?,current_step=? WHERE id=?`, s.Definition.Name+": "+s.Output+" "+s.Error, s.Definition.Name, r.ID)
@@ -695,7 +655,7 @@ func (a *App) cancelWorkflow(project, actor, process, run, reason string) (any, 
 		return nil, e
 	}
 	if !r.Workflow {
-		return nil, errors.New("use run_update or Tasks for a single-agent run")
+		return nil, errors.New("use run_update for a single-agent run")
 	}
 	if actor != "operator" && !strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", r.Binding.OwnerAgentID)) {
 		return nil, errors.New("only the coordinator or project operator can cancel a run")
@@ -737,9 +697,6 @@ func (a *App) updateTaskState(s Task, r Run, all []Task, actor string, args map[
 	allowed := s.Executor.Kind == "human" && actor == "operator" || s.Executor.Kind == "agent" && strings.HasPrefix(actor, fmt.Sprintf("agent:%d:", s.Executor.AgentID))
 	if !allowed {
 		return errors.New("only this step's assigned executor can update it")
-	}
-	if stepUsesTasks(r, s) {
-		return errors.New("update the linked Tasks record for this work step")
 	}
 	if s.State == "scheduled" || !stepTimeReady(s, time.Now()) {
 		return errors.New("step is scheduled; Processes will notify its executor when the start time is reached")

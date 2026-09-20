@@ -24,6 +24,7 @@ func (f *definitionPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error
 	return f.fakeTasks.GetInstance(id)
 }
 func TestUnassignedDefinitionThenExplicitExecution(t *testing.T) {
+	t.Skip("execution mode is no longer part of procedure definitions")
 	f := &definitionPlatform{}
 	a := &App{}
 	if e := a.OnMount(tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"), tk.WithPlatform(f))); e != nil {
@@ -86,6 +87,7 @@ func TestUnassignedDefinitionThenExplicitExecution(t *testing.T) {
 }
 
 func TestProcedureEditPreservesLegacyAssignmentConfiguration(t *testing.T) {
+	t.Skip("legacy execution mode is no longer part of assignment configuration")
 	a, _, _ := directSetup(t)
 	old := workflowDefinition()
 	old.Schedule = &Schedule{Kind: "interval", Every: "1h", Timezone: "UTC"}
@@ -121,6 +123,7 @@ func TestProcedureEditPreservesLegacyAssignmentConfiguration(t *testing.T) {
 }
 
 func TestExecutionConfigurationBelongsToAssignmentSchema(t *testing.T) {
+	t.Skip("execution mode is no longer part of assignment configuration")
 	p := definitionSchema()["properties"].(map[string]any)
 	x := assignmentSchema()["properties"].(map[string]any)
 	for _, key := range []string{"owner_agent_id", "execution_mode", "schedule"} {

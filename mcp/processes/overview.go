@@ -1,9 +1,7 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -72,7 +70,7 @@ func (a *App) overview(project string) (*processOverview, error) {
 	out := &processOverview{Active: []overviewItem{}, Upcoming: []overviewItem{}, Recent: []overviewItem{}, Attention: []overviewItem{}, LiveSteps: []overviewStep{}, Warnings: []string{}, GeneratedAt: timestamp()}
 	const direct = `(r.backend='agent' OR r.workflow=1)`
 	const active = `r.state NOT IN ('completed','failed','cancelled')`
-	const attention = `(r.state IN ('waiting','blocked') OR r.delivery_warning<>'' OR EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','cancelled') AND (s.state IN ('waiting','blocked','failed') OR (s.due_at<>'' AND julianday(s.due_at)<julianday('now') AND s.state NOT IN ('completed','failed','cancelled')) OR s.delivery_warning<>'' OR (json_extract(s.definition_json,'$.kind')='approval' AND s.state IN ('ready','running')))))`
+	const attention = `(r.state IN ('waiting','blocked') OR r.delivery_warning<>'' OR EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','cancelled') AND (s.state IN ('waiting','blocked','failed') OR (s.due_at<>'' AND julianday(s.due_at)<=julianday('now') AND s.state NOT IN ('completed','failed','cancelled')) OR s.delivery_warning<>'' OR (json_extract(s.definition_json,'$.kind')='approval' AND s.state IN ('ready','running')))))`
 	base := ` FROM process_runs r JOIN processes p ON p.id=r.process_id WHERE p.project_id=? AND ` + direct
 	if e := a.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN `+attention+` THEN 1 ELSE 0 END),0)`+base+` AND `+active, project).Scan(&out.Counts.Active, &out.Counts.Attention); e != nil {
 		return nil, e
@@ -170,9 +168,6 @@ func (a *App) overview(project string) (*processOverview, error) {
 	if e != nil {
 		return nil, e
 	}
-	if e = a.overviewTasks(project, out); e != nil {
-		return nil, e
-	}
 	sort.SliceStable(out.Active, func(i, j int) bool {
 		rank := func(state string) int {
 			if state == "running" {
@@ -242,113 +237,4 @@ func (a *App) overviewSteps(x *overviewItem) error {
 		x.Steps = append(x.Steps, s)
 	}
 	return rows.Err()
-}
-
-// Tasks keeps authoritative execution state. Never count its persisted dispatch
-// placeholders as running, or a recurring schedule definition as an execution.
-func (a *App) overviewTasks(project string, out *processOverview) error {
-	rows, e := a.db.Query(`SELECT DISTINCT p.id FROM processes p JOIN process_runs r ON r.process_id=p.id WHERE p.project_id=? AND r.backend='tasks' AND r.workflow=0 ORDER BY p.id LIMIT 9`, project)
-	if e != nil {
-		return e
-	}
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if e = rows.Scan(&id); e != nil {
-			rows.Close()
-			return e
-		}
-		ids = append(ids, id)
-	}
-	e = rows.Err()
-	rows.Close()
-	if e != nil {
-		return e
-	}
-	if len(ids) > 8 {
-		ids = ids[:8]
-		out.Partial = true
-		out.Warnings = append(out.Warnings, "Tasks history covers the first 8 procedures. Open Processes for other Tasks-backed procedures.")
-	}
-	for _, id := range ids {
-		var history struct {
-			HasMore bool `json:"has_more"`
-			Runs    []struct {
-				RunKey  string `json:"run_key"`
-				Version int    `json:"version"`
-				Task    struct {
-					ID              string `json:"id"`
-					AgentID         int64  `json:"agent_id"`
-					State           string `json:"state"`
-					Progress        int    `json:"progress"`
-					CurrentStep     string `json:"current_step"`
-					CreatedAt       string `json:"created_at"`
-					NextRunAt       string `json:"next_run_at"`
-					ScheduleKind    string `json:"schedule_kind"`
-					ScheduleEnabled bool   `json:"schedule_enabled"`
-					Error           string `json:"error"`
-				} `json:"task"`
-			} `json:"runs"`
-		}
-		if e = a.callTasks(project, id, "list", nil, &history); e != nil {
-			out.Partial = true
-			out.Warnings = append(out.Warnings, "Tasks history is unavailable. Counts exclude unverified Tasks executions.")
-			continue
-		}
-		if history.HasMore {
-			out.Partial = true
-			out.Warnings = append(out.Warnings, "Tasks supplies at most 200 records per procedure. Counts may exclude older Tasks work.")
-		}
-		for _, h := range history.Runs {
-			if strings.HasPrefix(h.RunKey, "step-") {
-				continue
-			}
-			var x overviewItem
-			var body string
-			var activeAssignment bool
-			e = a.db.QueryRow(`SELECT r.process_id,COALESCE(json_extract(v.body_json,'$.name'),''),r.assignment_id,r.assignment_json,(p.status='active' AND COALESCE(x.status,'')='active' AND COALESCE(x.sync_pending,1)=0) FROM process_runs r JOIN processes p ON p.id=r.process_id JOIN process_versions v ON v.process_id=r.process_id AND v.version=r.version LEFT JOIN process_assignments x ON x.id=r.assignment_id WHERE p.project_id=? AND r.process_id=? AND r.id=? AND r.workflow=0 AND r.backend='tasks'`, project, id, h.RunKey).Scan(&x.ProcessID, &x.ProcessName, &x.AssignmentID, &body, &activeAssignment)
-			if errors.Is(e, sql.ErrNoRows) {
-				continue
-			} // A stale/foreign link is never admitted into this project.
-			if e != nil {
-				return e
-			}
-			var b AssignmentConfig
-			if e = json.Unmarshal([]byte(body), &b); e != nil {
-				return e
-			}
-			x.ID = h.Task.ID
-			x.AssignmentName = b.Name
-			x.Target = b.Target
-			x.AgentID = h.Task.AgentID
-			x.Backend = "tasks"
-			x.Version = h.Version
-			x.State = h.Task.State
-			x.Progress = h.Task.Progress
-			x.CurrentStep = h.Task.CurrentStep
-			x.CreatedAt = h.Task.CreatedAt
-			x.Warning = h.Task.Error
-			x.Steps = []overviewStep{}
-			if h.Task.ScheduleKind == "interval" || h.Task.ScheduleKind == "cron" {
-				if activeAssignment && h.Task.ScheduleEnabled {
-					x.State = "scheduled"
-					x.NextRunAt = h.Task.NextRunAt
-					x.Schedule = b.Schedule
-					out.Counts.Scheduled++
-					out.Upcoming = append(out.Upcoming, x)
-				}
-			} else if terminal(x.State) {
-				out.Counts.Recent++
-				out.Recent = append(out.Recent, x)
-			} else {
-				x.NeedsAttention = x.State == "waiting" || x.State == "blocked"
-				out.Counts.Active++
-				if x.NeedsAttention {
-					out.Counts.Attention++
-				}
-				out.Active = append(out.Active, x)
-			}
-		}
-	}
-	return nil
 }

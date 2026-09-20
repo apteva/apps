@@ -23,7 +23,7 @@ type Schedule struct {
 type Definition struct {
 	Steps                []Step      `json:"steps,omitempty"`
 	Parameters           []Parameter `json:"parameters,omitempty"`
-	ExecutionMode        string      `json:"execution_mode,omitempty"`
+	ExecutionMode        string      `json:"-"`
 	Name                 string      `json:"name"`
 	Description          string      `json:"description"`
 	Instructions         string      `json:"instructions"`
@@ -66,29 +66,33 @@ type Run struct {
 	AssignmentRevision int              `json:"assignment_revision"`
 	Binding            AssignmentConfig `json:"assignment"`
 	Overrides          map[string]any   `json:"parameter_overrides"`
-	Backend            string           `json:"backend"`
-	State              string           `json:"state"`
-	Progress           int              `json:"progress"`
-	CurrentStep        string           `json:"current_step"`
-	Result             string           `json:"result"`
-	Error              string           `json:"error"`
-	ExecutionID        string           `json:"execution_id,omitempty"`
-	TargetThreadID     string           `json:"target_thread_id,omitempty"`
-	DeliveredAt        string           `json:"delivered_at,omitempty"`
-	DeliveryAttempts   int              `json:"delivery_attempts"`
-	NextAttemptAt      string           `json:"next_attempt_at,omitempty"`
-	ScheduledFor       string           `json:"scheduled_for,omitempty"`
-	SchedulePaused     bool             `json:"schedule_paused"`
-	LifecycleSequence  int64            `json:"-"`
-	ExecutionState     string           `json:"execution_state,omitempty"`
+	// Backend remains an internal migration discriminator for pre-0.14 rows.
+	// The public API has one native execution mode and does not expose it.
+	Backend           string `json:"-"`
+	State             string `json:"state"`
+	Progress          int    `json:"progress"`
+	CurrentStep       string `json:"current_step"`
+	Result            string `json:"result"`
+	Error             string `json:"error"`
+	ExecutionID       string `json:"execution_id,omitempty"`
+	TargetThreadID    string `json:"target_thread_id,omitempty"`
+	DeliveredAt       string `json:"delivered_at,omitempty"`
+	DeliveryAttempts  int    `json:"delivery_attempts"`
+	NextAttemptAt     string `json:"next_attempt_at,omitempty"`
+	ScheduledFor      string `json:"scheduled_for,omitempty"`
+	SchedulePaused    bool   `json:"schedule_paused"`
+	LifecycleSequence int64  `json:"-"`
+	ExecutionState    string `json:"execution_state,omitempty"`
 
-	ID              string `json:"id"`
-	ProcessID       string `json:"process_id"`
-	Version         int    `json:"version"`
-	Kind            string `json:"kind"`
-	RequestKey      string `json:"request_key"`
-	Inputs          string `json:"inputs"`
-	TaskID          string `json:"task_id"`
+	ID         string `json:"id"`
+	ProcessID  string `json:"process_id"`
+	Version    int    `json:"version"`
+	Kind       string `json:"kind"`
+	RequestKey string `json:"request_key"`
+	Inputs     string `json:"inputs"`
+	// TaskID is retained only for reading pre-0.14 history. New runs never
+	// populate it and it is intentionally omitted from the public contract.
+	TaskID          string `json:"-"`
 	DeliveryWarning string `json:"delivery_warning"`
 	CreatedAt       string `json:"created_at"`
 }
@@ -156,9 +160,9 @@ func validateExecution(c AssignmentConfig) error {
 	if c.OwnerAgentID <= 0 {
 		return errors.New("choose an owner agent for this assignment")
 	}
-	if c.ExecutionMode != "agent" && c.ExecutionMode != "tasks" {
-		return errors.New("execution_mode must be agent or tasks")
-	}
+	// Ignore legacy execution_mode values during upgrades. Processes has one
+	// native execution path now, so old assignments are transparently adopted.
+	c.ExecutionMode = "agent"
 	if s := c.Schedule; s != nil {
 		if s.Timezone == "" {
 			s.Timezone = "UTC"
@@ -198,9 +202,7 @@ func (a *App) get(project, id string) (*Process, error) {
 	if err = json.Unmarshal([]byte(body), &p.Definition); err != nil {
 		return nil, err
 	}
-	if p.ExecutionMode == "" && p.OwnerAgentID > 0 {
-		p.ExecutionMode = "tasks"
-	}
+	p.ExecutionMode = "agent"
 	p.Assignments, err = a.assignments(p.ID)
 	if err != nil {
 		return nil, err
@@ -264,9 +266,7 @@ func (a *App) versions(id string) ([]Version, error) {
 		if err = json.Unmarshal([]byte(body), &v.Definition); err != nil {
 			return nil, err
 		}
-		if v.Definition.ExecutionMode == "" && v.Definition.OwnerAgentID > 0 {
-			v.Definition.ExecutionMode = "tasks"
-		}
+		v.Definition.ExecutionMode = "agent"
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -278,9 +278,7 @@ func (a *App) definition(id string, version int) (Definition, error) {
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &d)
 	}
-	if d.ExecutionMode == "" && d.OwnerAgentID > 0 {
-		d.ExecutionMode = "tasks"
-	}
+	d.ExecutionMode = "agent"
 	return d, err
 }
 func (a *App) save(project, id, actor string, expected int, d Definition) (*Process, error) {
@@ -419,7 +417,7 @@ func (a *App) prepareAssignedRun(p *Process, kind, key, inputs string, overrides
 	if e != nil {
 		return Run{}, e
 	}
-	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: p.ExecutionMode, State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides), Workflow: len(p.Steps) > 0}
+	r := Run{ID: newID("run-"), ProcessID: p.ID, Version: p.Version, Kind: kind, RequestKey: key, Inputs: inputs, CreatedAt: timestamp(), Backend: "agent", State: "queued", AssignmentID: p.Assignment.ID, AssignmentRevision: p.Assignment.Revision, Binding: c, Overrides: params(overrides), Workflow: len(p.Steps) > 0}
 	return r, nil
 }
 

@@ -30,7 +30,6 @@ export type StepRun = {
   decision: string;
   updated_by: string;
   updated_at: string;
-  task_id?: string;
   delivery_warning?: string;
 };
 const examples: Step[] = [
@@ -293,13 +292,6 @@ export function RunSteps({
                 Recorded by {s.updated_by} ·{" "}
                 {new Date(s.updated_at).toLocaleString()}
               </p>
-            )}
-            {s.task_id && (
-              <a
-                href={`/apps/tasks/page?${new URLSearchParams({ project_id: projectId, task_id: s.task_id })}`}
-              >
-                Open step task ↗
-              </a>
             )}
             {actionable && (
               <>

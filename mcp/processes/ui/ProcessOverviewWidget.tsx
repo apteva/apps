@@ -72,17 +72,11 @@ export function overviewLink(props: Props, x?: Item, assignment = false) {
   const q = new URLSearchParams();
   if (props.projectId) q.set("project_id", props.projectId);
   if (props.installId) q.set("install_id", String(props.installId));
-  let app = props.appName || "processes";
+  const app = props.appName || "processes";
   if (x) {
-    if (x.backend === "tasks" && !assignment) {
-      app = "tasks";
-      q.delete("install_id");
-      q.set("task_id", x.id);
-    } else {
-      q.set("process_id", x.process_id);
-      if (assignment) q.set("assignment_id", x.assignment_id || x.id);
-      else q.set("run_id", x.id);
-    }
+    q.set("process_id", x.process_id);
+    if (assignment) q.set("assignment_id", x.assignment_id || x.id);
+    else q.set("run_id", x.id);
   }
   return `/apps/${encodeURIComponent(app)}/page?${q}`;
 }

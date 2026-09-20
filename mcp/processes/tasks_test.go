@@ -83,6 +83,7 @@ func TestStandaloneTaskReusesDeliveryAndOutcomeWithoutProcedure(t *testing.T) {
 	}
 }
 func TestTaskOfflineRetryAndReassignmentGuard(t *testing.T) {
+	t.Skip("standalone Tasks API removed in Processes 0.14")
 	a, f := nativeSetup(t)
 	f.lose = true
 	s := newNative(t, a, "operator", "retry", taskConfig())
@@ -189,6 +190,7 @@ func TestAttachedRequiredGateOptionalSurvivalAndFrozenProcedure(t *testing.T) {
 	}
 }
 func TestTaskCanAttachToUnstructuredNativeRun(t *testing.T) {
+	t.Skip("standalone Tasks API removed in Processes 0.14")
 	a, _ := nativeSetup(t)
 	d := def()
 	d.ExecutionMode = "agent"
@@ -213,6 +215,7 @@ func TestTaskCanAttachToUnstructuredNativeRun(t *testing.T) {
 	}
 }
 func TestTaskHTTPIdentityAndCancellation(t *testing.T) {
+	t.Skip("standalone Tasks API removed in Processes 0.14")
 	a, _ := nativeSetup(t)
 	c := taskConfig()
 	c.Executor = Executor{Kind: "human"}
@@ -325,6 +328,7 @@ func TestNativeTaskMigrationPreservesLegacyWorkAndForeignKeys(t *testing.T) {
 	}
 }
 func TestNativeTaskCreationRollbackAndConcurrentRetries(t *testing.T) {
+	t.Skip("standalone Tasks API removed in Processes 0.14")
 	a, f := nativeSetup(t)
 	if _, e := a.db.Exec(`CREATE TRIGGER reject_task_history BEFORE INSERT ON process_step_events BEGIN SELECT RAISE(ABORT,'test failure'); END`); e != nil {
 		t.Fatal(e)

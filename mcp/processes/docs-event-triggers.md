@@ -2,7 +2,8 @@
 
 Processes can listen to an installed app's events and start an assignment. It
 receives the business event itself; agents receive their individual work steps
-from the existing run engine. Neither Tasks nor Workflows is required.
+from the existing native run engine. Triggers use the same durable Process run
+and step history as manual and scheduled executions.
 
 In an assignment, open **Event triggers**, select **Add app event**, choose the
 source installation and event, add conditions, and map event fields to declared

@@ -14,10 +14,10 @@ directive: |
   and no structured steps, with required string parameter page
   defaulting to photography. Instructions: read the run's frozen page parameter
   and report exactly "Briefing for <page>". Completion criteria: that exact result.
-  Create an assignment named "Photography", owned by you, execution_mode=agent,
+  Create an assignment named "Photography", owned by you,
   follow_latest=true, no schedule, parameters={"page":"photography"}.
   Add one assignment named "Cooking"
-  with target "Cooking page", owned by you, execution_mode=agent, follow_latest=true,
+  with target "Cooking page", owned by you, follow_latest=true,
   parameters={"page":"cooking"}. You are authorized to activate the procedure and
   both assignments.
   Start each assignment exactly once using the SAME idempotency_key=day-1 for

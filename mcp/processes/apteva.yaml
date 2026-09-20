@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.13.7
-description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and native one-off tasks.
+version: 0.14.1
+description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and durable native run history.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
 icon: /ui/icon.svg
@@ -13,10 +13,10 @@ min_apteva_version: "0.51.3"
 requires:
   permissions: [platform.events.subscribe, db.write.app, platform.apps.call, platform.instances.read, platform.instances.write, platform.threads.write]
   apps:
-    - name: tasks
+    - name: evals
       optional: true
-      version: ">=3.6.0"
-      reason: Optional Tasks-backed execution and scheduling when selected for an assignment.
+      version: ">=0.5.9"
+      reason: Optional isolated evaluation of immutable procedure revisions before activation.
 provides:
   publishes:
     - name: process.created
@@ -37,15 +37,15 @@ provides:
       description: Run progress or execution details changed.
     - name: run.state_changed
       description: Run state changed; filter to_state for completion or failure.
-    - name: task.created
-      description: A process step or native task was created.
-    - name: task.updated
-      description: Task progress, executor, or details changed.
-    - name: task.state_changed
-      description: Task state changed.
-    - name: task.approval_requested
+    - name: step.created
+      description: A process step run was created.
+    - name: step.updated
+      description: Step progress, executor, or details changed.
+    - name: step.state_changed
+      description: Step state changed.
+    - name: step.approval_requested
       description: An approval became actionable.
-    - name: task.approval_resolved
+    - name: step.approval_resolved
       description: An approval received a decision.
     - name: trigger.updated
       description: A trigger or its synchronization status changed.
@@ -64,7 +64,7 @@ provides:
     - { name: pause, description: Stop future scheduled runs without interrupting current work. }
     - { name: archive, description: Retire a procedure and stop future scheduled runs. }
     - { name: start, description: Start one execution of an active assignment. }
-    - { name: runs, description: Inspect direct and Tasks-backed execution history. }
+    - { name: runs, description: Inspect native process execution history. }
     - { name: run_get, description: "Read a run, its immutable instructions, and workflow steps before acting." }
     - { name: run_update, description: Record progress or an explicit outcome for a direct run owned by this agent. }
     - { name: assignments, description: List saved process assignments. }
@@ -89,12 +89,6 @@ provides:
     - { name: trigger_test_run, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_events, description: "Configure, preview and inspect assignment event triggers." }
     - { name: trigger_event_retry, description: "Retry a failed event against current trigger rules with a stable key." }
-    - { name: tasks, description: "Find assigned or project work across procedure tasks, standalone tasks, and added run tasks." }
-    - { name: task_runs, description: "List active runs that accept additional native tasks." }
-    - { name: task_create, description: "Create one-off work or add a required or optional task to a run." }
-    - { name: task_get, description: "Read task instructions, revision, execution context, and history." }
-    - { name: task_update, description: "Update assigned task progress or permitted settings using the current revision." }
-    - { name: task_cancel, description: "Cancel a task with a reason and its current revision." }
   ui_panels:
     - slot: project.page
       label: Processes
@@ -111,7 +105,7 @@ provides:
       visibility: project
       supported_sizes: [half, full]
       default_size: half
-      refresh_topics: [process.created, assignment.created, delivery.state_changed, process.updated, process.state_changed, assignment.updated, assignment.state_changed, run.created, run.updated, run.state_changed, task.created, task.updated, task.state_changed, task.approval_requested, task.approval_resolved]
+      refresh_topics: [process.created, assignment.created, delivery.state_changed, process.updated, process.state_changed, assignment.updated, assignment.state_changed, run.created, run.updated, run.state_changed, step.created, step.updated, step.state_changed, step.approval_requested, step.approval_resolved]
       settings_schema:
         type: object
         properties:
@@ -125,14 +119,14 @@ provides:
   skills:
     - name: how-to-use-processes
       body_file: skills/how-to-use-processes.md
-      description: Discover, maintain, and execute company procedures with direct or Tasks-backed execution.
+      description: Discover, maintain, evaluate, and execute company procedures with native run and step tracking.
       metadata:
         category: productivity
 runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.13.7
+    ref: processes/v0.14.1
     entry: mcp/processes
   port: 8080
   health_check: /health

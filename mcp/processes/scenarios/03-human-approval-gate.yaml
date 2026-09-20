@@ -21,7 +21,7 @@ directive: |
   - key=publish, name=Publish approved draft, role=publisher, kind=work,
     depends_on=[review], instructions="Publish only the approved draft.",
     expected_output="Publication evidence".
-  Create an assignment named "Review", owned by you, execution_mode=agent,
+  Create an assignment named "Review", owned by you,
   follow_latest=true, no schedule. Keep default role bindings on this assignment:
   work roles use you, approval role is human.
   You are authorized to activate this test procedure and assignment, then start one occurrence
