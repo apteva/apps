@@ -139,9 +139,7 @@ func filterMatches(f EventFilter, root map[string]any) bool {
 	case "neq":
 		return !reflect.DeepEqual(v, f.Value)
 	case "contains":
-		x, xok := v.(string)
-		y, yok := f.Value.(string)
-		return xok && yok && strings.Contains(x, y)
+		return containsValue(v, f.Value)
 	}
 	x, xok := v.(float64)
 	y, yok := f.Value.(float64)
@@ -157,6 +155,26 @@ func filterMatches(f EventFilter, root map[string]any) bool {
 		return x < y
 	case "lte":
 		return x <= y
+	}
+	return false
+}
+
+// containsValue preserves substring matching for strings and adds membership
+// matching for JSON arrays. JSON numbers are decoded as float64 on both sides,
+// so numeric membership remains type-safe (2 does not match "2").
+func containsValue(value, want any) bool {
+	if text, ok := value.(string); ok {
+		needle, ok := want.(string)
+		return ok && strings.Contains(text, needle)
+	}
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || (rv.Kind() != reflect.Array && rv.Kind() != reflect.Slice) {
+		return false
+	}
+	for i := 0; i < rv.Len(); i++ {
+		if reflect.DeepEqual(rv.Index(i).Interface(), want) {
+			return true
+		}
 	}
 	return false
 }
