@@ -89,6 +89,10 @@ func scenarioPutSchema() map[string]any {
 		"type": "array", "items": stringField("Scenario tag such as bug-fix or typescript"),
 		"description": "Searchable scenario tags; values are normalized, deduplicated, and sealed into the pack digest",
 	}
+	properties["environment"] = map[string]any{
+		"type": "object", "additionalProperties": true,
+		"description": "Portable inline environment spec. Use apps with stable app names plus seeds; Evals resolves installs and creates a fresh runtime per trial.",
+	}
 	return schema
 }
 

@@ -25,22 +25,26 @@ type Suite struct {
 }
 
 type Case struct {
-	ID             string      `json:"id"`
-	SuiteID        string      `json:"suite_id"`
-	Name           string      `json:"name"`
-	Prompt         string      `json:"prompt"`
-	Mode           string      `json:"mode,omitempty"`
-	Voice          *VoiceCase  `json:"voice,omitempty"`
-	Goals          []string    `json:"goals"`
-	Assertions     []Assertion `json:"assertions"`
-	EnvironmentID  string      `json:"environment_id,omitempty"`
-	Weight         float64     `json:"weight"`
-	TimeoutSeconds int         `json:"timeout_seconds"`
-	MaxTurns       int         `json:"max_turns"`
-	Enabled        bool        `json:"enabled"`
-	Revision       int         `json:"revision"`
-	CreatedAt      time.Time   `json:"created_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
+	ID            string      `json:"id"`
+	SuiteID       string      `json:"suite_id"`
+	Name          string      `json:"name"`
+	Prompt        string      `json:"prompt"`
+	Mode          string      `json:"mode,omitempty"`
+	Voice         *VoiceCase  `json:"voice,omitempty"`
+	Goals         []string    `json:"goals"`
+	Assertions    []Assertion `json:"assertions"`
+	EnvironmentID string      `json:"environment_id,omitempty"`
+	// Environment is a self-contained inline Environments spec. Its optional
+	// `apps` field contains stable app names which Evals resolves to the current
+	// project's install ids immediately before each isolated run.
+	Environment    map[string]any `json:"environment,omitempty"`
+	Weight         float64        `json:"weight"`
+	TimeoutSeconds int            `json:"timeout_seconds"`
+	MaxTurns       int            `json:"max_turns"`
+	Enabled        bool           `json:"enabled"`
+	Revision       int            `json:"revision"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 }
 
 type VoiceCase struct {

@@ -66,18 +66,21 @@ func (p *Pack) scenario(id string) *Scenario {
 // Scenario is one benchmark task: a seeded world, a prompt, deterministic
 // final-state checks, and the budgets efficiency is scored against.
 type Scenario struct {
-	ID             string   `json:"id"`
-	Name           string   `json:"name"`
-	Tags           []string `json:"tags,omitempty"`
-	Prompt         string   `json:"prompt"`
-	Goals          []string `json:"goals,omitempty"`
-	EnvironmentID  string   `json:"environment_id,omitempty"`
-	SnapshotID     string   `json:"snapshot_id,omitempty"`
-	Checks         []Check  `json:"checks"`
-	Budget         Budget   `json:"budget"`
-	TimeoutSeconds int      `json:"timeout_seconds,omitempty"`
-	MaxTurns       int      `json:"max_turns,omitempty"`
-	Weight         float64  `json:"weight,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Tags          []string `json:"tags,omitempty"`
+	Prompt        string   `json:"prompt"`
+	Goals         []string `json:"goals,omitempty"`
+	EnvironmentID string   `json:"environment_id,omitempty"`
+	// Environment is a portable inline Environments spec. App dependencies are
+	// named in its `apps` field and resolved by Evals for the current project.
+	Environment    map[string]any `json:"environment,omitempty"`
+	SnapshotID     string         `json:"snapshot_id,omitempty"`
+	Checks         []Check        `json:"checks"`
+	Budget         Budget         `json:"budget"`
+	TimeoutSeconds int            `json:"timeout_seconds,omitempty"`
+	MaxTurns       int            `json:"max_turns,omitempty"`
+	Weight         float64        `json:"weight,omitempty"`
 }
 
 // Check mirrors an Evals assertion. One check is one deterministic fact about
@@ -157,20 +160,21 @@ func (t Target) key() string {
 // the snapshot ids they pinned and callers must treat world-identity as
 // asserted rather than proven until that lands.
 type Provenance struct {
-	ScoringVersion    string              `json:"scoring_version"`
-	PackDigest        string              `json:"pack_digest"`
-	PackVersion       string              `json:"pack_version"`
-	Category          string              `json:"category,omitempty"`
-	JudgeModel        string              `json:"judge_model,omitempty"`
-	JudgePrompt       string              `json:"judge_prompt_version,omitempty"`
-	JudgeRubric       string              `json:"judge_rubric_version,omitempty"`
-	ScenarioDigests   map[string]string   `json:"scenario_digests"`
-	ScenarioTags      map[string][]string `json:"scenario_tags,omitempty"`
-	SnapshotIDs       map[string]string   `json:"snapshot_ids,omitempty"`
-	EnvironmentIDs    map[string]string   `json:"environment_ids,omitempty"`
-	PlatformVersion   string              `json:"platform_version,omitempty"`
-	SnapshotsVerified bool                `json:"snapshots_verified"`
-	CapturedAt        time.Time           `json:"captured_at"`
+	ScoringVersion     string              `json:"scoring_version"`
+	PackDigest         string              `json:"pack_digest"`
+	PackVersion        string              `json:"pack_version"`
+	Category           string              `json:"category,omitempty"`
+	JudgeModel         string              `json:"judge_model,omitempty"`
+	JudgePrompt        string              `json:"judge_prompt_version,omitempty"`
+	JudgeRubric        string              `json:"judge_rubric_version,omitempty"`
+	ScenarioDigests    map[string]string   `json:"scenario_digests"`
+	ScenarioTags       map[string][]string `json:"scenario_tags,omitempty"`
+	SnapshotIDs        map[string]string   `json:"snapshot_ids,omitempty"`
+	EnvironmentIDs     map[string]string   `json:"environment_ids,omitempty"`
+	EnvironmentDigests map[string]string   `json:"environment_digests,omitempty"`
+	PlatformVersion    string              `json:"platform_version,omitempty"`
+	SnapshotsVerified  bool                `json:"snapshots_verified"`
+	CapturedAt         time.Time           `json:"captured_at"`
 }
 
 type Run struct {

@@ -25,7 +25,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql", "migrations/006_inline_environments.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -389,7 +389,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.7.0" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.8.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -578,7 +578,10 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 	var value any
 	switch tool {
 	case "environment_catalog":
-		value = map[string]any{"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"}}
+		value = map[string]any{
+			"assertion_types": []string{"app_state", "mcp_state", "mcp_tool_call", "edge_call", "telemetry", "web_state", "web_event", "protocol_event"},
+			"apps":            []map[string]any{{"install_id": 30, "name": "code", "status": "running"}},
+		}
 	case "environment_get":
 		id, _ := input["id"].(string)
 		value = s.definitions[id]
@@ -709,6 +712,58 @@ func TestOutputEqualsRunIsEvaluatedInsideEvals(t *testing.T) {
 	}
 	if platform.asserted != 0 || platform.stopped != 1 {
 		t.Fatalf("environment assertions=%d stopped=%d", platform.asserted, platform.stopped)
+	}
+}
+
+func TestInlineEnvironmentResolvesAppNamesAndRunsWithoutSavedDefinition(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-inline", Name: "Inline environment"}, true); err != nil {
+		t.Fatal(err)
+	}
+	inline := map[string]any{
+		"version": 1, "apps": []any{"code"}, "network_mode": "block", "integration_mode": "mock",
+		"seeds": []any{map[string]any{"app": "code", "tool": "repos_create", "input": map[string]any{"name": "Fixture"}}},
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-inline", SuiteID: "suite-inline", Name: "Inline Code", Prompt: "Inspect Code",
+		Environment: inline,
+		Assertions:  []Assertion{{Name: "done", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-inline", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 || completed.Runs[0].Status != "pass" {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	if len(platform.createdSpecs) != 1 {
+		t.Fatalf("created specs=%#v", platform.createdSpecs)
+	}
+	spec := platform.createdSpecs[0]
+	if _, leaked := spec["apps"]; leaked || fmt.Sprint(spec["app_install_ids"]) != "[30]" || len(spec["seeds"].([]any)) != 1 {
+		t.Fatalf("resolved inline spec=%#v", spec)
+	}
+	if fmt.Sprint(completed.Runs[0].CaseSnapshot.Environment["apps"]) != "[code]" || platform.stopped != 1 {
+		t.Fatalf("snapshot=%#v stopped=%d", completed.Runs[0].CaseSnapshot.Environment, platform.stopped)
+	}
+}
+
+func TestInlineEnvironmentRejectsUnavailableAppBeforeRuntimeCreation(t *testing.T) {
+	platform := &evalCampaignPlatformStub{t: t, definitions: map[string]EnvironmentDefinition{}}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	spec := map[string]any{"apps": []any{"missing-app"}}
+	err := svc.resolveInlineEnvironment(spec, 60)
+	if err == nil || !strings.Contains(err.Error(), `required app "missing-app" is not installed and running`) || platform.created != 0 {
+		t.Fatalf("error=%v created=%d", err, platform.created)
 	}
 }
 

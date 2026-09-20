@@ -552,7 +552,7 @@ func TestSealedPacksRejectEdits(t *testing.T) {
 	}
 }
 
-func TestSealPinsAutomaticEnvironmentAndRejectsUnscoredScenarios(t *testing.T) {
+func TestSealPinsInlineEnvironmentAndRejectsUnscoredScenarios(t *testing.T) {
 	platform := &fakePlatform{}
 	svc, _ := newTestService(t, platform)
 	if err := svc.ensureBuiltinProfiles(); err != nil {
@@ -569,12 +569,13 @@ func TestSealPinsAutomaticEnvironmentAndRejectsUnscoredScenarios(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sealed.Scenarios[0].EnvironmentID != automaticEnvironmentID || len(platform.envInputs) != 1 {
-		t.Fatalf("automatic environment not pinned: pack=%+v calls=%#v", sealed, platform.envInputs)
+	if sealed.Scenarios[0].EnvironmentID != "" || len(sealed.Scenarios[0].Environment) == 0 || len(platform.envInputs) != 0 {
+		t.Fatalf("inline environment not pinned: pack=%+v calls=%#v", sealed, platform.envInputs)
 	}
-	spec, ok := platform.envInputs[0]["spec"].(map[string]any)
+	spec := sealed.Scenarios[0].Environment
+	_, ok := spec["version"]
 	if !ok || spec["network_mode"] != "block" || spec["integration_mode"] != "mock" || spec["ttl_seconds"] != 86400 {
-		t.Fatalf("automatic environment spec=%#v", platform.envInputs[0]["spec"])
+		t.Fatalf("automatic inline environment spec=%#v", spec)
 	}
 
 	unbudgeted := crmScenario()
@@ -587,8 +588,46 @@ func TestSealPinsAutomaticEnvironmentAndRejectsUnscoredScenarios(t *testing.T) {
 	if _, err := svc.seal(draft2.ID, ""); err == nil {
 		t.Fatal("expected seal to refuse a scenario with no budgets")
 	}
-	if len(platform.envInputs) != 1 {
-		t.Fatalf("invalid scenario should not create another environment: %#v", platform.envInputs)
+	if len(platform.envInputs) != 0 {
+		t.Fatalf("sealing should not create durable environments: %#v", platform.envInputs)
+	}
+}
+
+func TestInlineEnvironmentIsSealedMaterializedAndProvenanced(t *testing.T) {
+	platform := &fakePlatform{suiteID: "suite-inline"}
+	svc, _ := newTestService(t, platform)
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	scenario := crmScenario()
+	scenario.EnvironmentID = ""
+	scenario.Environment = map[string]any{
+		"version": 1, "apps": []any{"code"}, "network_mode": "block", "integration_mode": "mock",
+		"seeds": []any{map[string]any{"app": "code", "tool": "repos_create", "input": map[string]any{"name": "Fixture"}}},
+	}
+	draft, err := svc.savePack(&Pack{Name: "Inline Code", Scenarios: []Scenario{scenario}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.createRun(sealed.ID, "", []Target{{AgentID: 1, Model: "gpt-5.5"}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Provenance.EnvironmentDigests[scenario.ID]) != 64 || len(run.Provenance.EnvironmentIDs) != 0 {
+		t.Fatalf("provenance=%#v", run.Provenance)
+	}
+	if _, err := svc.ensureSuite(sealed); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.caseInputs) != 1 || fmt.Sprint(platform.caseInputs[0]["environment"].(map[string]any)["apps"]) != "[code]" {
+		t.Fatalf("case inputs=%#v", platform.caseInputs)
+	}
+	if len(platform.envInputs) != 0 {
+		t.Fatalf("inline environment unexpectedly created a durable definition: %#v", platform.envInputs)
 	}
 }
 

@@ -28,7 +28,9 @@ the work inside a pack, for example `bug-fix`, `typescript`, `backend`, or
 ```sh
 bench_pack_create  { "name": "Coding Core", "category": "coding" }
 bench_scenario_put { "pack_id": "...", "name": "Repair a failing test", "prompt": "...",
-                     "tags": ["bug-fix", "typescript"], "environment_id": "env-code",
+                     "tags": ["bug-fix", "typescript"],
+                     "environment": {"version": 1, "apps": ["code"], "network_mode": "block",
+                       "integration_mode": "mock", "seeds": [...]},
                      "checks": [...], "budget": {...} }
 bench_category_list {}
 bench_leaderboard_global { "category": "coding" }
@@ -65,18 +67,25 @@ budget can be lowered after a bad score, every earlier number is meaningless.
 Leaderboards therefore join only on `(pack_digest, scoring_version)`; results
 from two different digests are never averaged together.
 
-When a scenario omits both an environment and a snapshot, sealing automatically
-creates and pins the versioned `Bench automatic isolation` Environment: blocked
-network, mocked integrations, and no project apps or fixtures. This makes simple
-output-only benchmarks zero-config without weakening reproducibility. Scenarios
-that need apps, seeds, websites, protocols, or other fixtures should select an
-explicit Environment. Sealing still refuses a scenario with no budgets because
-it is not scoreable.
+Every sealed scenario pins its world. Prefer an inline `environment` containing
+stable app names and seed steps. Evals resolves those names to the current
+project's running installs, asks Environments to create a fresh runtime for each
+trial, and always destroys it afterward. No durable Environment or visible agent
+is created. The complete inline spec is content-hashed into the pack and its
+digest is recorded in run provenance.
+
+When a scenario omits `environment`, `environment_id`, and `snapshot_id`, sealing
+embeds a safe default inline environment with blocked network, mocked
+integrations, and no apps or fixtures. Saved `environment_id` and `snapshot_id`
+remain supported for intentionally shared worlds. Sealing still refuses a
+scenario with no budgets because it is not scoreable.
 
 ```sh
 bench_pack_create   { "name": "Apteva Core" }
 bench_scenario_put  { "pack_id": "...", "name": "Create then update a contact", "prompt": "...",
-                      "environment_id": "env-crm", "checks": [...], "budget": {...} }
+                      "environment": {"version": 1, "apps": ["crm"], "network_mode": "block",
+                        "integration_mode": "mock", "seeds": [...]},
+                      "checks": [...], "budget": {...} }
 bench_pack_seal     { "id": "..." }                      # → version 1.0.0 + digest
 bench_run_create    { "pack_id": "<sealed id>", "targets": [...], "trials": 5 }
 bench_leaderboard   { "pack_digest": "..." }

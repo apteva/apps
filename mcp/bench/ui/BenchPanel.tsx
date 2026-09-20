@@ -37,6 +37,7 @@ interface Scenario {
   prompt: string;
   goals?: string[];
   environment_id?: string;
+  environment?: Record<string, unknown>;
   snapshot_id?: string;
   checks: Check[];
   budget: Budget;
@@ -570,6 +571,11 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
   scenario: Scenario; catalog: Catalog; busy: boolean; onSave: (s: Scenario) => void; onClose: () => void;
 }) {
   const [s, setS] = useState<Scenario>(scenario);
+  const [environmentJSON, setEnvironmentJSON] = useState(
+    scenario.environment && Object.keys(scenario.environment).length > 0
+      ? JSON.stringify(scenario.environment, null, 2)
+      : "",
+  );
   const set = (patch: Partial<Scenario>) => setS((cur) => ({ ...cur, ...patch }));
   const setBudget = (patch: Partial<Budget>) => setS((cur) => ({ ...cur, budget: { ...cur.budget, ...patch } }));
   const setCheck = (i: number, patch: Partial<Check>) =>
@@ -583,6 +589,15 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
     try { return JSON.parse(t); } catch { return raw; }
   };
   const showEquals = (v: unknown) => (typeof v === "string" ? v : JSON.stringify(v ?? ""));
+  const parsedEnvironment = (() => {
+    if (!environmentJSON.trim()) return { valid: true, value: undefined as Record<string, unknown> | undefined };
+    try {
+      const value = JSON.parse(environmentJSON);
+      return { valid: !!value && typeof value === "object" && !Array.isArray(value), value };
+    } catch {
+      return { valid: false, value: undefined };
+    }
+  })();
 
   return (
     <Modal title={scenario.id ? `Edit ${scenario.name}` : "Add scenario"} onClose={onClose}>
@@ -602,22 +617,35 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className={labelCls}>Environment</label>
-          <select className={field} value={s.environment_id || ""} onChange={(e) => set({ environment_id: e.target.value })}>
+          <select className={field} value={s.environment_id || ""} onChange={(e) => {
+            set({ environment_id: e.target.value, snapshot_id: e.target.value ? "" : s.snapshot_id });
+            if (e.target.value) setEnvironmentJSON("");
+          }}>
             <option value="">Automatic isolated environment</option>
             {(catalog.environments || []).map((e) => <option key={e.id} value={e.id}>{e.name || e.id}</option>)}
           </select>
         </div>
         <div>
           <label className={labelCls}>Or pinned snapshot</label>
-          <select className={field} value={s.snapshot_id || ""} onChange={(e) => set({ snapshot_id: e.target.value })}>
+          <select className={field} value={s.snapshot_id || ""} onChange={(e) => {
+            set({ snapshot_id: e.target.value, environment_id: e.target.value ? "" : s.environment_id });
+            if (e.target.value) setEnvironmentJSON("");
+          }}>
             <option value="">— none —</option>
             {(catalog.snapshots || []).map((x) => <option key={x.id} value={x.id}>{x.description || x.id}</option>)}
           </select>
         </div>
       </div>
       <div className="text-xs text-text-dim">
-        Leave both empty for Bench-managed isolation. Select one when the scenario needs apps, seeds, websites, protocols, or other fixtures.
+        Leave both empty for automatic blank isolation, or embed the app-and-seed definition below. Evals creates and destroys a fresh environment for every trial.
       </div>
+
+      <label className={labelCls}>Inline environment (JSON, optional)</label>
+      <textarea className={field} rows={6} value={environmentJSON} onChange={(e) => {
+        setEnvironmentJSON(e.target.value);
+        if (e.target.value.trim()) set({ environment_id: "", snapshot_id: "" });
+      }} placeholder={'{"version":1,"apps":["code"],"network_mode":"block","integration_mode":"mock","seeds":[]}'} />
+      {!parsedEnvironment.valid && <div className="text-xs text-red">Inline environment must be a valid JSON object.</div>}
 
       <div className="flex items-center justify-between pt-2">
         <span className={labelCls}>Final-state checks — what must be true when the agent stops</span>
@@ -695,8 +723,8 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
 
       <div className="flex justify-end gap-2 pt-2">
         <button className={btn} onClick={onClose}>Cancel</button>
-        <button className={btn} disabled={busy || !s.name.trim() || !s.prompt.trim()}
-          onClick={() => onSave({ ...s, checks: s.checks.filter((c) => c.name.trim() || c.tool?.trim()) })}>
+        <button className={btn} disabled={busy || !s.name.trim() || !s.prompt.trim() || !parsedEnvironment.valid}
+          onClick={() => onSave({ ...s, environment: parsedEnvironment.value, checks: s.checks.filter((c) => c.name.trim() || c.tool?.trim()) })}>
           Save scenario
         </button>
       </div>
@@ -863,7 +891,7 @@ function Definition({ pack, isDraft, onAdd, onEdit, onDelete }: {
             <span>≤ {s.budget.turns} turns</span>
             <span>≤ {s.budget.tokens_total.toLocaleString()} tokens</span>
             {s.budget.cost_usd > 0 && <span>≤ ${s.budget.cost_usd}</span>}
-            <span>{s.snapshot_id || s.environment_id || "no pinned world"}</span>
+            <span>{s.snapshot_id || s.environment_id || (s.environment?.apps ? `inline: ${(s.environment.apps as string[]).join(", ")}` : "automatic inline isolation")}</span>
           </div>
         </div>
       ))}

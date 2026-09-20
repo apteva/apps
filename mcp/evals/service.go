@@ -68,6 +68,13 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	if item.SuiteID == "" || item.Name == "" || item.Prompt == "" {
 		return nil, errors.New("suite_id, name, and prompt required")
 	}
+	item.EnvironmentID = strings.TrimSpace(item.EnvironmentID)
+	if item.EnvironmentID != "" && len(item.Environment) > 0 {
+		return nil, errors.New("environment_id and inline environment are mutually exclusive")
+	}
+	if err := validateInlineEnvironment(item.Environment); err != nil {
+		return nil, err
+	}
 	if item.Mode != "text" && item.Mode != "voice" {
 		return nil, errors.New("mode must be text or voice")
 	}
@@ -126,6 +133,52 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 		return nil, err
 	}
 	return s.db.getCase(item.ID)
+}
+
+func validateInlineEnvironment(spec map[string]any) error {
+	if len(spec) == 0 {
+		return nil
+	}
+	if version, ok := spec["version"]; ok {
+		switch value := version.(type) {
+		case float64:
+			if value != 1 {
+				return errors.New("inline environment version must be 1")
+			}
+		case int:
+			if value != 1 {
+				return errors.New("inline environment version must be 1")
+			}
+		default:
+			return errors.New("inline environment version must be a number")
+		}
+	}
+	if apps, ok := spec["apps"]; ok {
+		values, ok := apps.([]any)
+		if !ok {
+			if typed, typedOK := apps.([]string); typedOK {
+				values = make([]any, len(typed))
+				for i := range typed {
+					values[i] = typed[i]
+				}
+			} else {
+				return errors.New("inline environment apps must be an array of app names")
+			}
+		}
+		seen := map[string]bool{}
+		for _, raw := range values {
+			name, ok := raw.(string)
+			name = strings.TrimSpace(name)
+			if !ok || name == "" {
+				return errors.New("inline environment apps must contain non-empty app names")
+			}
+			if seen[name] {
+				return fmt.Errorf("inline environment contains duplicate app %q", name)
+			}
+			seen[name] = true
+		}
+	}
+	return nil
 }
 
 const outputEqualsAssertionType = "output_equals"
@@ -230,7 +283,7 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 		if !item.Enabled {
 			continue
 		}
-		if item.EnvironmentID == "" {
+		if item.EnvironmentID == "" && len(item.Environment) == 0 {
 			item.EnvironmentID = suite.EnvironmentID
 		}
 		if item.EnvironmentID != "" && !validatedEnvironments[item.EnvironmentID] {

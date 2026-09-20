@@ -21,10 +21,6 @@ const (
 	JudgePromptVersion = "goal-evidence-v1"
 	JudgeRubricVersion = "required-goals-v1"
 	judgeDisabledValue = "disabled"
-	// automaticEnvironmentID is a versioned, Bench-owned Environment
-	// definition. A new id must be used if its isolation contract changes so
-	// sealed packs keep naming the exact world they were authored against.
-	automaticEnvironmentID = "env_bench_isolated_v1"
 )
 
 // ---- pack authoring ----
@@ -255,7 +251,7 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	if judgeModel != "" && !profileUsesJudge(profile) {
 		return nil, errors.New("judged packs require a scoring profile with a judge_score quality component")
 	}
-	scenarios, err := s.pinAutomaticEnvironment(draft.Scenarios)
+	scenarios, err := s.pinInlineEnvironments(draft.Scenarios)
 	if err != nil {
 		return nil, err
 	}
@@ -325,8 +321,21 @@ func validateScenario(scenario Scenario) error {
 	if err := validateScenarioContent(scenario); err != nil {
 		return err
 	}
-	if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
+	worlds := 0
+	if scenario.EnvironmentID != "" {
+		worlds++
+	}
+	if scenario.SnapshotID != "" {
+		worlds++
+	}
+	if len(scenario.Environment) > 0 {
+		worlds++
+	}
+	if worlds == 0 {
 		return fmt.Errorf("scenario %q pins no environment or snapshot, so its world is not reproducible", scenario.ID)
+	}
+	if worlds > 1 {
+		return fmt.Errorf("scenario %q must use exactly one of environment, environment_id, or snapshot_id", scenario.ID)
 	}
 	return nil
 }
@@ -345,46 +354,20 @@ func validateScenarioContent(scenario Scenario) error {
 	return nil
 }
 
-// pinAutomaticEnvironment makes the common no-fixture case zero-config while
-// preserving Bench's sealed-world invariant. Environments stores this durable,
-// stopped definition; Evals creates a fresh isolated run from it for every
-// trial and still keeps transient agents out of the project's Agents list.
-func (s *service) pinAutomaticEnvironment(input []Scenario) ([]Scenario, error) {
+// pinInlineEnvironments makes the common no-fixture case zero-config while
+// preserving Bench's sealed-world invariant. The environment definition is
+// sealed into the pack itself; Evals creates and destroys a fresh isolated run
+// for every trial, so no durable Environment must be authored by hand.
+func (s *service) pinInlineEnvironments(input []Scenario) ([]Scenario, error) {
 	scenarios := append([]Scenario(nil), input...)
-	needsDefault := false
-	for _, scenario := range scenarios {
-		if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
-			needsDefault = true
-			break
-		}
-	}
-	if !needsDefault {
-		return scenarios, nil
-	}
-	request := map[string]any{
-		"id":            automaticEnvironmentID,
-		"name":          "Bench automatic isolation",
-		"description":   "Bench-managed isolated world for scenarios without apps, seeds, fixtures, or an explicit Environment.",
-		"desired_state": "stopped",
-		"spec": map[string]any{
-			"version":          1,
-			"ttl_seconds":      86400,
-			"network_mode":     "block",
-			"integration_mode": "mock",
-		},
-	}
-	var created struct {
-		ID string `json:"id"`
-	}
-	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_create", request, &created); err != nil {
-		return nil, fmt.Errorf("create automatic isolated environment: %w", err)
-	}
-	if created.ID == "" {
-		return nil, errors.New("create automatic isolated environment: Environments returned no id")
-	}
 	for i := range scenarios {
-		if scenarios[i].EnvironmentID == "" && scenarios[i].SnapshotID == "" {
-			scenarios[i].EnvironmentID = created.ID
+		if scenarios[i].EnvironmentID == "" && scenarios[i].SnapshotID == "" && len(scenarios[i].Environment) == 0 {
+			scenarios[i].Environment = map[string]any{
+				"version":          1,
+				"ttl_seconds":      86400,
+				"network_mode":     "block",
+				"integration_mode": "mock",
+			}
 		}
 	}
 	return scenarios, nil

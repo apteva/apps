@@ -77,7 +77,7 @@ func (s *service) captureProvenance(pack *Pack) Provenance {
 		Category: pack.Category, JudgeModel: pack.JudgeModel,
 		ScenarioDigests: scenarioDigests(pack.Scenarios),
 		ScenarioTags:    map[string][]string{},
-		SnapshotIDs:     map[string]string{}, EnvironmentIDs: map[string]string{},
+		SnapshotIDs:     map[string]string{}, EnvironmentIDs: map[string]string{}, EnvironmentDigests: map[string]string{},
 		SnapshotsVerified: false, CapturedAt: time.Now().UTC(),
 	}
 	if pack.JudgeModel != "" {
@@ -93,6 +93,11 @@ func (s *service) captureProvenance(pack *Pack) Provenance {
 		}
 		if scenario.EnvironmentID != "" {
 			provenance.EnvironmentIDs[scenario.ID] = scenario.EnvironmentID
+		}
+		if len(scenario.Environment) > 0 {
+			if digest, err := canonicalDigest(scenario.Environment); err == nil {
+				provenance.EnvironmentDigests[scenario.ID] = digest
+			}
 		}
 	}
 	if info, err := s.ctx.PlatformInfo(); err == nil && info != nil {
@@ -219,6 +224,7 @@ func (s *service) ensureSuite(pack *Pack) (*packSuite, error) {
 			"goals":           scenario.Goals,
 			"assertions":      checksToAssertions(scenario.Checks),
 			"environment_id":  scenario.EnvironmentID,
+			"environment":     scenario.Environment,
 			"weight":          scenario.Weight,
 			"timeout_seconds": scenario.TimeoutSeconds,
 			"max_turns":       scenario.MaxTurns,

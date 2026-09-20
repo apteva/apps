@@ -39,7 +39,12 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return err
 	}
 	spec := map[string]any{"version": 1, "ttl_seconds": run.CaseSnapshot.TimeoutSeconds + 300, "network_mode": "block", "integration_mode": "mock"}
-	if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
+	if len(run.CaseSnapshot.Environment) > 0 {
+		spec = cloneMap(run.CaseSnapshot.Environment)
+		if err = s.resolveInlineEnvironment(spec, run.CaseSnapshot.TimeoutSeconds); err != nil {
+			return fmt.Errorf("resolve inline environment: %w", err)
+		}
+	} else if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
 		var definition EnvironmentDefinition
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": environmentID}, &definition); err != nil {
 			return fmt.Errorf("load environment: %w", err)
@@ -221,6 +226,66 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			}
 		}
 	}
+	return nil
+}
+
+func (s *service) resolveInlineEnvironment(spec map[string]any, timeoutSeconds int) error {
+	if _, ok := spec["version"]; !ok {
+		spec["version"] = 1
+	}
+	if _, ok := spec["ttl_seconds"]; !ok {
+		spec["ttl_seconds"] = timeoutSeconds + 300
+	}
+	if _, ok := spec["network_mode"]; !ok {
+		spec["network_mode"] = "block"
+	}
+	if _, ok := spec["integration_mode"]; !ok {
+		spec["integration_mode"] = "mock"
+	}
+	rawApps, ok := spec["apps"]
+	if !ok {
+		return nil
+	}
+	requested := []string{}
+	switch values := rawApps.(type) {
+	case []any:
+		for _, raw := range values {
+			name, _ := raw.(string)
+			requested = append(requested, strings.TrimSpace(name))
+		}
+	case []string:
+		for _, name := range values {
+			requested = append(requested, strings.TrimSpace(name))
+		}
+	default:
+		return errors.New("apps must be an array of app names")
+	}
+	var catalog struct {
+		Apps []struct {
+			InstallID int64  `json:"install_id"`
+			Name      string `json:"name"`
+			Status    string `json:"status"`
+		} `json:"apps"`
+	}
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &catalog); err != nil {
+		return fmt.Errorf("load app catalog: %w", err)
+	}
+	available := map[string]int64{}
+	for _, app := range catalog.Apps {
+		if app.InstallID > 0 && app.Status == "running" {
+			available[app.Name] = app.InstallID
+		}
+	}
+	ids := make([]int64, 0, len(requested))
+	for _, name := range requested {
+		id := available[name]
+		if id == 0 {
+			return fmt.Errorf("required app %q is not installed and running in this project", name)
+		}
+		ids = append(ids, id)
+	}
+	spec["app_install_ids"] = ids
+	delete(spec, "apps")
 	return nil
 }
 

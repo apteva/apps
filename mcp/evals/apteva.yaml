@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.7.0
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of persistent or on-demand draft agents inside isolated Environments. v0.7.0 records the exact judge model, prompt contract, rubric contract, and usage for reproducible scoring.
+version: 0.8.0
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of persistent or on-demand draft agents inside isolated Environments. v0.8.0 accepts self-contained inline environment specs, resolves stable app names per project, and creates and destroys a fresh runtime for every trial.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -28,7 +28,7 @@ provides:
     - { name: eval_suite_create, description: "Create an evaluation suite. Add cases with eval_case_create, then execute them with eval_experiment_create." }
     - { name: eval_suite_update, description: "Update an evaluation suite." }
     - { name: eval_suite_delete, description: "Delete an evaluation suite." }
-    - { name: eval_case_create, description: "Add a behavioral case to a suite. Execute cases with eval_experiment_create; do not call environment_run_create once per case." }
+    - { name: eval_case_create, description: "Add a behavioral case with an optional inline app-and-seed environment spec. Evals creates the ephemeral runtime when the case executes." }
     - { name: eval_case_update, description: "Update a behavioral case." }
     - { name: eval_case_delete, description: "Delete a behavioral case." }
     - { name: eval_experiment_create, description: "Execute a suite's enabled cases against one or more persistent agent_id or hidden draft targets. Create cases first, and select judge_model from eval_catalog.models[].gateway_model; Evals creates and stops the isolated runtimes." }
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.7.0
+    ref: evals/v0.8.0
     entry: mcp/evals
   port: 8080
   health_check: /health

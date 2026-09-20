@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.7.1
-description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. v0.7.1 automatically pins a safe isolated Environment when a scenario does not specify one.
+version: 0.8.0
+description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. v0.8.0 seals portable inline app-and-seed environment specs so Evals materializes every benchmark world automatically per trial.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -16,7 +16,7 @@ requires:
     - platform.apps.call
     - platform.runtime_catalog.read
   apps:
-    - { name: evals, version: ">=0.7.0" }
+    - { name: evals, version: ">=0.8.0" }
     - { name: environments, version: ">=0.7.4" }
 provides:
   http_routes:
@@ -28,7 +28,7 @@ provides:
     - { name: bench_pack_create, description: "Create a categorized draft benchmark pack with an optional judge model." }
     - { name: bench_pack_update, description: "Update a draft benchmark pack, category, and judge model. Sealed packs are immutable." }
     - { name: bench_pack_delete, description: "Delete a draft pack, or a sealed pack that has no runs." }
-    - { name: bench_scenario_put, description: "Add or replace one tagged scenario in a draft pack." }
+    - { name: bench_scenario_put, description: "Add or replace one tagged scenario, optionally embedding a portable app-and-seed environment spec." }
     - { name: bench_scenario_delete, description: "Remove a scenario from a draft pack." }
     - { name: bench_pack_seal, description: "Seal a draft into a new immutable, content-hashed version." }
     - { name: bench_pack_fork, description: "Fork any pack into a fresh editable draft." }
@@ -69,7 +69,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.7.1
+    ref: bench/v0.8.0
     entry: mcp/bench
   port: 8080
   health_check: /health
