@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.23.26 — 2026-09-20
+
+- Accept the platform's signed first-party bearer principal on Conversations HTTP routes instead of misclassifying it as an incomplete delegated application user.
+- Keep delegated application-user isolation fail-closed whenever an issuer marker is present but the external identity or scope is incomplete.
+
 ## 0.23.25 — 2026-09-20
 
 - Bind the generic `chat/v1` surface to the established `/chats?page=1` and `/messages?page=1` page contracts while preserving every legacy dashboard response shape.
