@@ -21,6 +21,10 @@ const (
 	JudgePromptVersion = "goal-evidence-v1"
 	JudgeRubricVersion = "required-goals-v1"
 	judgeDisabledValue = "disabled"
+	// automaticEnvironmentID is a versioned, Bench-owned Environment
+	// definition. A new id must be used if its isolation contract changes so
+	// sealed packs keep naming the exact world they were authored against.
+	automaticEnvironmentID = "env_bench_isolated_v1"
 )
 
 // ---- pack authoring ----
@@ -206,7 +210,7 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 		return nil, errors.New("cannot seal a pack with no scenarios")
 	}
 	for _, scenario := range draft.Scenarios {
-		if err := validateScenario(scenario); err != nil {
+		if err := validateScenarioContent(scenario); err != nil {
 			return nil, err
 		}
 	}
@@ -251,12 +255,21 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	if judgeModel != "" && !profileUsesJudge(profile) {
 		return nil, errors.New("judged packs require a scoring profile with a judge_score quality component")
 	}
+	scenarios, err := s.pinAutomaticEnvironment(draft.Scenarios)
+	if err != nil {
+		return nil, err
+	}
+	for _, scenario := range scenarios {
+		if err := validateScenario(scenario); err != nil {
+			return nil, err
+		}
+	}
 	now := time.Now().UTC()
 	pack := &Pack{
 		ID: newID("pack"), Name: draft.Name, Description: draft.Description, Category: draft.Category,
 		State: PackStateSealed, Version: version, ScoringVersion: profile.Version,
 		ProfileDigest: profile.Digest, JudgeModel: judgeModel,
-		SourcePackID: draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
+		SourcePackID: draft.ID, Scenarios: normalizeScenarios(scenarios),
 		Revision: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	digest, err := packDigest(pack)
@@ -309,20 +322,72 @@ func (s *service) fork(sourceID, name string) (*Pack, error) {
 }
 
 func validateScenario(scenario Scenario) error {
+	if err := validateScenarioContent(scenario); err != nil {
+		return err
+	}
+	if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
+		return fmt.Errorf("scenario %q pins no environment or snapshot, so its world is not reproducible", scenario.ID)
+	}
+	return nil
+}
+
+func validateScenarioContent(scenario Scenario) error {
 	if scenario.ID == "" || scenario.Name == "" {
 		return errors.New("every scenario needs an id and a name")
 	}
 	if strings.TrimSpace(scenario.Prompt) == "" {
 		return fmt.Errorf("scenario %q has no prompt", scenario.ID)
 	}
-	if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
-		return fmt.Errorf("scenario %q pins no environment or snapshot, so its world is not reproducible", scenario.ID)
-	}
 	budget := scenario.Budget
 	if budget.DurationMS <= 0 || budget.Turns <= 0 || (budget.TokensTotal <= 0 && budget.CostUSD <= 0) {
 		return fmt.Errorf("scenario %q needs duration, turn, and token or cost budgets to be scoreable", scenario.ID)
 	}
 	return nil
+}
+
+// pinAutomaticEnvironment makes the common no-fixture case zero-config while
+// preserving Bench's sealed-world invariant. Environments stores this durable,
+// stopped definition; Evals creates a fresh isolated run from it for every
+// trial and still keeps transient agents out of the project's Agents list.
+func (s *service) pinAutomaticEnvironment(input []Scenario) ([]Scenario, error) {
+	scenarios := append([]Scenario(nil), input...)
+	needsDefault := false
+	for _, scenario := range scenarios {
+		if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
+			needsDefault = true
+			break
+		}
+	}
+	if !needsDefault {
+		return scenarios, nil
+	}
+	request := map[string]any{
+		"id":            automaticEnvironmentID,
+		"name":          "Bench automatic isolation",
+		"description":   "Bench-managed isolated world for scenarios without apps, seeds, fixtures, or an explicit Environment.",
+		"desired_state": "stopped",
+		"spec": map[string]any{
+			"version":          1,
+			"ttl_seconds":      86400,
+			"network_mode":     "block",
+			"integration_mode": "mock",
+		},
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_create", request, &created); err != nil {
+		return nil, fmt.Errorf("create automatic isolated environment: %w", err)
+	}
+	if created.ID == "" {
+		return nil, errors.New("create automatic isolated environment: Environments returned no id")
+	}
+	for i := range scenarios {
+		if scenarios[i].EnvironmentID == "" && scenarios[i].SnapshotID == "" {
+			scenarios[i].EnvironmentID = created.ID
+		}
+	}
+	return scenarios, nil
 }
 
 // normalizeScenarios sorts scenarios and fills defaults so that two packs with

@@ -65,8 +65,13 @@ budget can be lowered after a bad score, every earlier number is meaningless.
 Leaderboards therefore join only on `(pack_digest, scoring_version)`; results
 from two different digests are never averaged together.
 
-Sealing refuses a scenario that pins no environment or snapshot (its world is not
-reproducible) or that carries no budgets (it is not scoreable).
+When a scenario omits both an environment and a snapshot, sealing automatically
+creates and pins the versioned `Bench automatic isolation` Environment: blocked
+network, mocked integrations, and no project apps or fixtures. This makes simple
+output-only benchmarks zero-config without weakening reproducibility. Scenarios
+that need apps, seeds, websites, protocols, or other fixtures should select an
+explicit Environment. Sealing still refuses a scenario with no budgets because
+it is not scoreable.
 
 ```sh
 bench_pack_create   { "name": "Apteva Core" }

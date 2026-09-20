@@ -26,6 +26,7 @@ type fakePlatform struct {
 	calls      []string
 	suiteInput map[string]any
 	caseInputs []map[string]any
+	envInputs  []map[string]any
 }
 
 func (f *fakePlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -51,6 +52,9 @@ func (f *fakePlatform) CallAppResult(app, tool string, input map[string]any, out
 		payload = map[string]bool{"ok": true}
 	case "environment_catalog", "environment_list", "environment_snapshot_list":
 		payload = map[string]any{}
+	case "environment_create":
+		f.envInputs = append(f.envInputs, input)
+		payload = map[string]any{"id": input["id"], "name": input["name"], "spec": input["spec"]}
 	default:
 		return fmt.Errorf("unexpected call %s.%s", app, tool)
 	}
@@ -548,8 +552,12 @@ func TestSealedPacksRejectEdits(t *testing.T) {
 	}
 }
 
-func TestSealRefusesScenariosThatCannotBeReproducedOrScored(t *testing.T) {
-	svc, _ := newTestService(t, &fakePlatform{})
+func TestSealPinsAutomaticEnvironmentAndRejectsUnscoredScenarios(t *testing.T) {
+	platform := &fakePlatform{}
+	svc, _ := newTestService(t, platform)
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
 
 	unpinned := crmScenario()
 	unpinned.EnvironmentID, unpinned.SnapshotID = "", ""
@@ -557,11 +565,20 @@ func TestSealRefusesScenariosThatCannotBeReproducedOrScored(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.seal(draft.ID, ""); err == nil {
-		t.Fatal("expected seal to refuse a scenario with no pinned world")
+	sealed, err := svc.seal(draft.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.Scenarios[0].EnvironmentID != automaticEnvironmentID || len(platform.envInputs) != 1 {
+		t.Fatalf("automatic environment not pinned: pack=%+v calls=%#v", sealed, platform.envInputs)
+	}
+	spec, ok := platform.envInputs[0]["spec"].(map[string]any)
+	if !ok || spec["network_mode"] != "block" || spec["integration_mode"] != "mock" || spec["ttl_seconds"] != 86400 {
+		t.Fatalf("automatic environment spec=%#v", platform.envInputs[0]["spec"])
 	}
 
 	unbudgeted := crmScenario()
+	unbudgeted.EnvironmentID, unbudgeted.SnapshotID = "", ""
 	unbudgeted.Budget = Budget{}
 	draft2, err := svc.savePack(&Pack{Name: "Unbudgeted", Scenarios: []Scenario{unbudgeted}}, true)
 	if err != nil {
@@ -569,6 +586,9 @@ func TestSealRefusesScenariosThatCannotBeReproducedOrScored(t *testing.T) {
 	}
 	if _, err := svc.seal(draft2.ID, ""); err == nil {
 		t.Fatal("expected seal to refuse a scenario with no budgets")
+	}
+	if len(platform.envInputs) != 1 {
+		t.Fatalf("invalid scenario should not create another environment: %#v", platform.envInputs)
 	}
 }
 

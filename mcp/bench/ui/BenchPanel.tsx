@@ -603,7 +603,7 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
         <div>
           <label className={labelCls}>Environment</label>
           <select className={field} value={s.environment_id || ""} onChange={(e) => set({ environment_id: e.target.value })}>
-            <option value="">— none —</option>
+            <option value="">Automatic isolated environment</option>
             {(catalog.environments || []).map((e) => <option key={e.id} value={e.id}>{e.name || e.id}</option>)}
           </select>
         </div>
@@ -616,7 +616,7 @@ function ScenarioForm({ scenario, catalog, busy, onSave, onClose }: {
         </div>
       </div>
       <div className="text-xs text-text-dim">
-        A scenario needs one of these — sealing refuses a world it cannot reproduce.
+        Leave both empty for Bench-managed isolation. Select one when the scenario needs apps, seeds, websites, protocols, or other fixtures.
       </div>
 
       <div className="flex items-center justify-between pt-2">
