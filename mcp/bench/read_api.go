@@ -144,11 +144,11 @@ type resultPage struct {
 
 func scanResult(row interface{ Scan(...any) error }) (*Result, error) {
 	var result Result
-	var tags, target, score, metrics, created string
+	var tags, target, score, metrics, created, evaluation string
 	var passed int
 	err := row.Scan(&result.ID, &result.BenchRunID, &result.ScenarioID, &result.ScenarioName,
 		&tags, &result.TargetIndex, &target, &result.Trial, &result.EvalRunID, &result.Admission,
-		&result.InvalidReason, &passed, &score, &metrics, &result.Error, &created)
+		&result.InvalidReason, &passed, &score, &metrics, &result.Error, &created, &evaluation)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -159,6 +159,7 @@ func scanResult(row interface{ Scan(...any) error }) (*Result, error) {
 	decodeJSON(tags, &result.ScenarioTags)
 	decodeJSON(score, &result.Score)
 	decodeJSON(metrics, &result.Metrics)
+	decodeJSON(evaluation, &result.Evaluation)
 	result.Passed = passed == 1
 	result.CreatedAt = parseTime(created)
 	return &result, nil

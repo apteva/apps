@@ -23,6 +23,7 @@ const (
 	KindGate      = "gate"      // pass/fail; drives on_failure
 	KindBudget    = "budget"    // a metric measured against the scenario's budget
 	KindThreshold = "threshold" // binary: metric at or below a cutoff
+	KindQuality   = "quality"   // a 0-100 quality metric; higher is better
 )
 
 // Curves map a metric's ratio-to-budget onto [0,1]. Only budget components use
@@ -111,6 +112,11 @@ func metricValue(m Metrics, name string) (float64, bool) {
 		return float64(m.ToolCalls), true
 	case "errors":
 		return float64(m.Errors), true
+	case "judge_score":
+		if m.JudgeScore == nil {
+			return 0, false
+		}
+		return *m.JudgeScore, true
 	}
 	return 0, false
 }
@@ -188,7 +194,7 @@ func validateProfile(p *Profile) error {
 		switch c.Kind {
 		case KindGate:
 			gates++
-		case KindBudget, KindThreshold:
+		case KindBudget, KindThreshold, KindQuality:
 			if strings.TrimSpace(c.Metric) == "" {
 				return fmt.Errorf("component %q needs a metric", c.Key)
 			}
@@ -287,6 +293,28 @@ func correctnessOnly() *Profile {
 	}
 }
 
+// judgedV1 makes the qualitative verdict visible in Bench's score while
+// retaining deterministic success as a hard gate. A failed assertion or judge
+// verdict still zeroes the entire score through OnFailureZero.
+func judgedV1() *Profile {
+	return &Profile{
+		Name:        "Judged v1",
+		Description: "40 points for gated task success, 30 for the pinned LLM judge score, and 30 for budgeted efficiency. Deterministic and judge failures are hard gates.",
+		State:       ProfileStateSealed,
+		Version:     "2026-09.judged-v1",
+		Builtin:     true,
+		OnFailure:   OnFailureZero,
+		Components: []ProfileComponent{
+			{Key: "success", Label: "Task success", Kind: KindGate, Weight: 40},
+			{Key: "judge", Label: "Judge quality", Kind: KindQuality, Metric: "judge_score", Weight: 30},
+			{Key: "duration", Label: "Duration", Kind: KindBudget, Metric: "duration_ms", Weight: 10, Curve: CurveCliff, ZeroAt: 2},
+			{Key: "cost", Label: "Cost / tokens", Kind: KindBudget, Metric: "cost_usd", FallbackMetric: "tokens_total", Weight: 10, Curve: CurveCliff, ZeroAt: 2},
+			{Key: "turns", Label: "Turns", Kind: KindBudget, Metric: "turns_used", Weight: 5, Curve: CurveCliff, ZeroAt: 2},
+			{Key: "tool_errors", Label: "No tool errors", Kind: KindThreshold, Metric: "errors", At: 0, Weight: 5},
+		},
+	}
+}
+
 func builtinProfiles() []*Profile {
-	return []*Profile{verifiedV1(), gradedV1(), correctnessOnly()}
+	return []*Profile{verifiedV1(), judgedV1(), gradedV1(), correctnessOnly()}
 }

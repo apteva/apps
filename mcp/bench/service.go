@@ -17,6 +17,12 @@ type service struct {
 
 var errSealed = errors.New("sealed packs are immutable: fork it into a draft, or seal a new version")
 
+const (
+	JudgePromptVersion = "goal-evidence-v1"
+	JudgeRubricVersion = "required-goals-v1"
+	judgeDisabledValue = "disabled"
+)
+
 // ---- pack authoring ----
 
 func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
@@ -25,11 +31,15 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 	}
 	now := time.Now().UTC()
 	if creating {
+		judgeModel := strings.TrimSpace(input.JudgeModel)
+		if strings.EqualFold(judgeModel, judgeDisabledValue) {
+			judgeModel = ""
+		}
 		pack := &Pack{
 			ID: newID("pack"), Name: input.Name, Description: input.Description,
 			Category: normalizeTaxonomyValue(input.Category),
 			State:    PackStateDraft, Scenarios: normalizeScenarioTaxonomy(input.Scenarios),
-			ProfileDigest: input.ProfileDigest, Revision: 1,
+			ProfileDigest: input.ProfileDigest, JudgeModel: judgeModel, Revision: 1,
 			CreatedAt: now, UpdatedAt: now,
 		}
 		if pack.ProfileDigest != "" {
@@ -70,6 +80,15 @@ func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
 			return nil, errors.New("no sealed scoring profile with that digest")
 		}
 		existing.ProfileDigest = input.ProfileDigest
+	}
+	// JudgeModel was added in v0.7. Preserve it when an older client updates a
+	// different field. The literal "disabled" explicitly clears the judge.
+	if value := strings.TrimSpace(input.JudgeModel); value != "" {
+		if strings.EqualFold(value, judgeDisabledValue) {
+			existing.JudgeModel = ""
+		} else {
+			existing.JudgeModel = value
+		}
 	}
 	if err := s.db.savePack(existing); err != nil {
 		return nil, err
@@ -191,6 +210,17 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 			return nil, err
 		}
 	}
+	judgeModel, err := s.resolveJudgeModel(draft.JudgeModel)
+	if err != nil {
+		return nil, err
+	}
+	if judgeModel != "" {
+		for _, scenario := range draft.Scenarios {
+			if len(scenario.Goals) == 0 {
+				return nil, fmt.Errorf("scenario %q needs at least one goal when judge_model is set", scenario.ID)
+			}
+		}
+	}
 
 	if strings.TrimSpace(version) == "" {
 		sealed, err := s.db.sealedVersions(draft.ID)
@@ -204,7 +234,13 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	// meaning the same thing even if the default profile later changes.
 	profileDigest := draft.ProfileDigest
 	if profileDigest == "" {
-		if profileDigest, err = s.defaultProfileDigest(); err != nil {
+		if judgeModel != "" {
+			profile := judgedV1()
+			if profile.Digest, err = profileDigestFor(profile); err != nil {
+				return nil, err
+			}
+			profileDigest = profile.Digest
+		} else if profileDigest, err = s.defaultProfileDigest(); err != nil {
 			return nil, err
 		}
 	}
@@ -212,12 +248,15 @@ func (s *service) seal(draftID, version string) (*Pack, error) {
 	if err != nil {
 		return nil, err
 	}
+	if judgeModel != "" && !profileUsesJudge(profile) {
+		return nil, errors.New("judged packs require a scoring profile with a judge_score quality component")
+	}
 	now := time.Now().UTC()
 	pack := &Pack{
 		ID: newID("pack"), Name: draft.Name, Description: draft.Description, Category: draft.Category,
 		State: PackStateSealed, Version: version, ScoringVersion: profile.Version,
-		ProfileDigest: profile.Digest,
-		SourcePackID:  draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
+		ProfileDigest: profile.Digest, JudgeModel: judgeModel,
+		SourcePackID: draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
 		Revision: 1, CreatedAt: now, UpdatedAt: now,
 	}
 	digest, err := packDigest(pack)
@@ -259,7 +298,8 @@ func (s *service) fork(sourceID, name string) (*Pack, error) {
 	now := time.Now().UTC()
 	draft := &Pack{
 		ID: newID("pack"), Name: name, Description: source.Description, Category: source.Category,
-		State: PackStateDraft, Scenarios: source.Scenarios, ProfileDigest: source.ProfileDigest, Revision: 1,
+		State: PackStateDraft, Scenarios: source.Scenarios, ProfileDigest: source.ProfileDigest,
+		JudgeModel: source.JudgeModel, Revision: 1,
 		CreatedAt: now, UpdatedAt: now,
 	}
 	if err := s.db.savePack(draft); err != nil {
@@ -314,8 +354,74 @@ func packDigest(pack *Pack) (string, error) {
 		Description    string     `json:"description"`
 		Category       string     `json:"category,omitempty"`
 		ScoringVersion string     `json:"scoring_version"`
+		JudgeModel     string     `json:"judge_model,omitempty"`
 		Scenarios      []Scenario `json:"scenarios"`
-	}{pack.Name, pack.Description, pack.Category, pack.ScoringVersion, normalizeScenarios(pack.Scenarios)})
+	}{pack.Name, pack.Description, pack.Category, pack.ScoringVersion, pack.JudgeModel, normalizeScenarios(pack.Scenarios)})
+}
+
+func profileDigestFor(profile *Profile) (string, error) {
+	if profile.Digest != "" {
+		return profile.Digest, nil
+	}
+	return profileDigest(profile)
+}
+
+func profileUsesJudge(profile *Profile) bool {
+	if profile == nil {
+		return false
+	}
+	for _, component := range profile.Components {
+		if component.Kind == KindQuality && component.Metric == "judge_score" {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveJudgeModel canonicalizes a pack's selection against the same live
+// catalog Evals uses. A missing model fails sealing before any benchmark is
+// queued; no silent provider/model substitution is allowed.
+func (s *service) resolveJudgeModel(requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || strings.EqualFold(requested, judgeDisabledValue) {
+		return "", nil
+	}
+	var catalog struct {
+		Models []struct {
+			ModelID      string `json:"model_id"`
+			GatewayModel string `json:"gateway_model"`
+		} `json:"models"`
+	}
+	if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_catalog", map[string]any{}, &catalog); err != nil {
+		return "", fmt.Errorf("resolve judge_model %q: %w", requested, err)
+	}
+	matches := map[string]struct{}{}
+	for _, model := range catalog.Models {
+		canonical := strings.TrimSpace(model.GatewayModel)
+		if canonical == "" {
+			continue
+		}
+		if requested == canonical {
+			return canonical, nil
+		}
+		if requested == strings.TrimSpace(model.ModelID) {
+			matches[canonical] = struct{}{}
+		}
+	}
+	if len(matches) == 1 {
+		for canonical := range matches {
+			return canonical, nil
+		}
+	}
+	if len(matches) > 1 {
+		values := make([]string, 0, len(matches))
+		for canonical := range matches {
+			values = append(values, canonical)
+		}
+		sort.Strings(values)
+		return "", fmt.Errorf("judge_model %q is ambiguous; choose one of: %s", requested, strings.Join(values, ", "))
+	}
+	return "", fmt.Errorf("judge_model %q is not available in eval_catalog.models[].gateway_model", requested)
 }
 
 func scenarioDigests(scenarios []Scenario) map[string]string {
@@ -820,6 +926,7 @@ func (s *service) compareToBaselines(benchRunID string) (map[string]any, error) 
 // see *why* a target scores what it does rather than only the total.
 type ScoreComponents struct {
 	Success    float64 `json:"success"`
+	Judge      float64 `json:"judge,omitempty"`
 	Duration   float64 `json:"duration"`
 	Cost       float64 `json:"cost"`
 	Turns      float64 `json:"turns"`
@@ -888,6 +995,7 @@ func aggregate(results []resultWithPack) []leaderboardRow {
 		g.row.AverageTokens += float64(result.Metrics.TokensTotal)
 		g.row.AverageCostUSD += result.Metrics.CostUSD
 		g.row.Components.Success += result.Score.SuccessPoints
+		g.row.Components.Judge += result.Score.JudgePoints
 		g.row.Components.Duration += result.Score.DurationPoints
 		g.row.Components.Cost += result.Score.CostPoints
 		g.row.Components.Turns += result.Score.TurnPoints
@@ -915,6 +1023,7 @@ func aggregate(results []resultWithPack) []leaderboardRow {
 		g.row.AverageCostUSD = round3(g.row.AverageCostUSD / n)
 		g.row.Components = ScoreComponents{
 			Success:    round1(g.row.Components.Success / n),
+			Judge:      round1(g.row.Components.Judge / n),
 			Duration:   round1(g.row.Components.Duration / n),
 			Cost:       round1(g.row.Components.Cost / n),
 			Turns:      round1(g.row.Components.Turns / n),

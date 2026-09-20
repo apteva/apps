@@ -57,7 +57,7 @@ func (s *service) createRun(packID, name string, targets []Target, trials int) (
 	run := &Run{
 		ID: newID("run"), PackID: pack.ID, PackName: pack.Name, PackCategory: pack.Category, PackVersion: pack.Version,
 		PackDigest: pack.Digest, ScoringVersion: pack.ScoringVersion,
-		ScoringProfileDigest: pack.ProfileDigest, Name: name,
+		ScoringProfileDigest: pack.ProfileDigest, JudgeModel: pack.JudgeModel, Name: name,
 		Targets: targets, Trials: trials, Status: RunStatusQueued,
 		Provenance: s.captureProvenance(pack), CreatedAt: now,
 	}
@@ -74,11 +74,15 @@ func (s *service) createRun(packID, name string, targets []Target, trials int) (
 func (s *service) captureProvenance(pack *Pack) Provenance {
 	provenance := Provenance{
 		ScoringVersion: pack.ScoringVersion, PackDigest: pack.Digest, PackVersion: pack.Version,
-		Category:        pack.Category,
+		Category: pack.Category, JudgeModel: pack.JudgeModel,
 		ScenarioDigests: scenarioDigests(pack.Scenarios),
 		ScenarioTags:    map[string][]string{},
 		SnapshotIDs:     map[string]string{}, EnvironmentIDs: map[string]string{},
 		SnapshotsVerified: false, CapturedAt: time.Now().UTC(),
+	}
+	if pack.JudgeModel != "" {
+		provenance.JudgePrompt = JudgePromptVersion
+		provenance.JudgeRubric = JudgeRubricVersion
 	}
 	for _, scenario := range pack.Scenarios {
 		if len(scenario.Tags) > 0 {
@@ -196,6 +200,7 @@ func (s *service) ensureSuite(pack *Pack) (*packSuite, error) {
 	suiteInput := map[string]any{
 		"name":        fmt.Sprintf("bench: %s v%s", pack.Name, pack.Version),
 		"description": fmt.Sprintf("Materialized by Bench from sealed pack %s (digest %s).", pack.ID, short(pack.Digest)),
+		"judge_model": pack.JudgeModel,
 	}
 	if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_suite_create", suiteInput, &suite); err != nil {
 		return nil, err
@@ -371,7 +376,12 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profi
 		Trial:        evaluated.Repetition,
 		EvalRunID:    evaluated.ID,
 		Error:        evaluated.Error,
-		CreatedAt:    time.Now().UTC(),
+		Evaluation: EvaluationEvidence{
+			Assertions: evaluated.Assertions, Judge: evaluated.Judge,
+			CorrectnessScore: evaluated.CorrectnessScore, JudgeScore: evaluated.JudgeScore,
+			OverallScore: evaluated.OverallScore,
+		},
+		CreatedAt: time.Now().UTC(),
 	}
 	if result.Trial <= 0 {
 		result.Trial = 1
@@ -443,6 +453,7 @@ func metricsFrom(evaluated evalRun) Metrics {
 	metrics.TokensTotal = m.TokensIn + m.TokensOut
 	metrics.CostUSD = m.CostUSD
 	metrics.LLMCalls, metrics.ToolCalls, metrics.Errors = m.LLMCalls, m.ToolCalls, m.Errors
+	metrics.JudgeScore = evaluated.JudgeScore
 	if !execution.StartedAt.IsZero() && !execution.FinishedAt.IsZero() {
 		metrics.DurationMS = execution.FinishedAt.Sub(execution.StartedAt).Milliseconds()
 	}

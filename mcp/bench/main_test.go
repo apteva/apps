@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ type fakePlatform struct {
 	caseSeq    int
 	experiment evalExperiment
 	calls      []string
+	suiteInput map[string]any
 	caseInputs []map[string]any
 }
 
@@ -31,7 +33,12 @@ func (f *fakePlatform) CallAppResult(app, tool string, input map[string]any, out
 	var payload any
 	switch tool {
 	case "eval_suite_create":
+		f.suiteInput = input
 		payload = evalSuite{ID: f.suiteID, Name: "suite"}
+	case "eval_catalog":
+		payload = map[string]any{"models": []map[string]any{
+			{"provider": "openai-codex", "model_id": "gpt-5.6-sol", "gateway_model": "openai-codex/gpt-5.6-sol"},
+		}}
 	case "eval_case_create":
 		f.caseSeq++
 		f.caseInputs = append(f.caseInputs, input)
@@ -158,6 +165,89 @@ func TestCostBasisPrefersRealCostWhenReported(t *testing.T) {
 	score := computeScore(true, Metrics{DurationMS: 1_000, TurnsUsed: 1, TokensTotal: 1_000, CostUSD: 0.5}, budget)
 	if score.CostBasis != "cost_usd" {
 		t.Fatalf("cost basis = %q, want cost_usd", score.CostBasis)
+	}
+}
+
+func TestJudgedPackPinsCodexModelAndPreservesVerdictEvidence(t *testing.T) {
+	platform := &fakePlatform{suiteID: "suite-judge"}
+	svc, _ := newTestService(t, platform)
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	scenario := crmScenario()
+	scenario.Goals = []string{"Create and update the requested contact correctly"}
+	draft, err := svc.savePack(&Pack{
+		Name: "Coding judged", JudgeModel: "gpt-5.6-sol", Scenarios: []Scenario{scenario},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed.JudgeModel != "openai-codex/gpt-5.6-sol" || sealed.ScoringVersion != judgedV1().Version {
+		t.Fatalf("sealed judge/profile = %q / %q", sealed.JudgeModel, sealed.ScoringVersion)
+	}
+	run, err := svc.createRun(sealed.ID, "", []Target{{AgentID: 1}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.JudgeModel != sealed.JudgeModel || run.Provenance.JudgePrompt != JudgePromptVersion || run.Provenance.JudgeRubric != JudgeRubricVersion {
+		t.Fatalf("run lost judge provenance: %+v", run)
+	}
+	if _, err := svc.ensureSuite(sealed); err != nil {
+		t.Fatal(err)
+	}
+	if platform.suiteInput["judge_model"] != "openai-codex/gpt-5.6-sol" {
+		t.Fatalf("suite judge = %#v", platform.suiteInput["judge_model"])
+	}
+	judgeScore := 90.0
+	verdict := &JudgeVerdict{
+		Passed: true, Score: judgeScore, Model: "gpt-5.6-sol",
+		Usage:               map[string]any{"tokens_in": float64(123)},
+		DirectiveSuggestion: &DirectiveSuggestion{Directive: "Always verify the saved record.", Reason: "Prevents incomplete updates."},
+		PromptVersion:       JudgePromptVersion, RubricVersion: JudgeRubricVersion,
+	}
+	profile, err := svc.resolveProfile(sealed.ProfileDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := svc.scoreOne(run, scenario, evalRun{
+		ID: "eval-judge", Status: "pass", Execution: execution(1_000, 1, 100, 50, 0, 0.01),
+		Judge: verdict, JudgeScore: &judgeScore,
+	}, profile)
+	if result.Score.JudgePoints != 27 || result.Evaluation.Judge == nil || result.Evaluation.Judge.Model != "gpt-5.6-sol" {
+		t.Fatalf("judge scoring/evidence = %+v / %+v", result.Score, result.Evaluation)
+	}
+	if err := svc.db.saveResult(&result); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.db.getResult(result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || stored.Evaluation.Judge == nil || stored.Evaluation.Judge.DirectiveSuggestion == nil ||
+		stored.Evaluation.Judge.DirectiveSuggestion.Directive != "Always verify the saved record." ||
+		stored.Evaluation.Judge.PromptVersion != JudgePromptVersion || stored.Evaluation.Judge.RubricVersion != JudgeRubricVersion ||
+		stored.Evaluation.Judge.Usage["tokens_in"] != float64(123) {
+		t.Fatalf("stored judge evidence = %#v", stored)
+	}
+}
+
+func TestSealRejectsUnavailableJudgeModel(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	if err := svc.ensureBuiltinProfiles(); err != nil {
+		t.Fatal(err)
+	}
+	scenario := crmScenario()
+	scenario.Goals = []string{"Complete the requested contact operation"}
+	draft, err := svc.savePack(&Pack{Name: "Unavailable judge", JudgeModel: "missing-model", Scenarios: []Scenario{scenario}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.seal(draft.ID, "1.0.0"); err == nil || !strings.Contains(err.Error(), "not available") {
+		t.Fatalf("seal error = %v", err)
 	}
 }
 

@@ -54,6 +54,7 @@ interface Pack {
   version?: string;
   digest?: string;
   scoring_version?: string;
+  judge_model?: string;
   scenarios: Scenario[];
   updated_at: string;
 }
@@ -373,6 +374,7 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
                   <div className="text-xs text-text-dim">
                     {categoryLabel(selected.category)}{selected.description ? ` · ${selected.description}` : ""}
                   </div>
+                  <div className="text-xs text-text-dim">Judge: {selected.judge_model || "deterministic checks only"}</div>
                 </div>
                 <div className="flex gap-2">
                   {isDraft && (
@@ -445,10 +447,10 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
       </div>
 
       {newPackOpen && (
-        <PackForm title="New benchmark" busy={busy} onClose={() => setNewPackOpen(false)}
-          onSave={(name, category, description) => act("Benchmark created.", async () => {
+        <PackForm title="New benchmark" catalog={catalog} busy={busy} onClose={() => setNewPackOpen(false)}
+          onSave={(name, category, description, judgeModel) => act("Benchmark created.", async () => {
             const p = await call<Pack>("/api/packs", scope, {
-              method: "POST", body: JSON.stringify({ name, category, description }),
+              method: "POST", body: JSON.stringify({ name, category, description, judge_model: judgeModel }),
             });
             setSelectedId(p.id);
             setNewPackOpen(false);
@@ -456,10 +458,10 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
       )}
 
       {editingPack && (
-        <PackForm title="Edit benchmark details" initial={editingPack} busy={busy} onClose={() => setEditingPack(null)}
-          onSave={(name, category, description) => act("Benchmark details saved.", async () => {
+        <PackForm title="Edit benchmark details" initial={editingPack} catalog={catalog} busy={busy} onClose={() => setEditingPack(null)}
+          onSave={(name, category, description, judgeModel) => act("Benchmark details saved.", async () => {
             await call<Pack>(`/api/packs/${editingPack.id}`, scope, {
-              method: "PUT", body: JSON.stringify({ name, category, description }),
+              method: "PUT", body: JSON.stringify({ name, category, description, judge_model: judgeModel || (editingPack.judge_model ? "disabled" : "") }),
             });
             setEditingPack(null);
           })} />
@@ -528,13 +530,14 @@ function Modal({ title, children, onClose }: { title: string; children: React.Re
   );
 }
 
-function PackForm({ title, initial, busy, onSave, onClose }: {
-  title: string; initial?: Pack; busy: boolean;
-  onSave: (name: string, category: string, description: string) => void; onClose: () => void;
+function PackForm({ title, initial, catalog, busy, onSave, onClose }: {
+  title: string; initial?: Pack; catalog: Catalog; busy: boolean;
+  onSave: (name: string, category: string, description: string, judgeModel: string) => void; onClose: () => void;
 }) {
   const [name, setName] = useState(initial?.name || "");
   const [category, setCategory] = useState(initial?.category || "");
   const [description, setDescription] = useState(initial?.description || "");
+  const [judgeModel, setJudgeModel] = useState(initial?.judge_model || "");
   return (
     <Modal title={title} onClose={onClose}>
       <label className={labelCls}>Name</label>
@@ -544,9 +547,18 @@ function PackForm({ title, initial, busy, onSave, onClose }: {
       <div className="text-xs text-text-dim">Stable family used for discovery and cross-pack leaderboards. Saved as a normalized slug.</div>
       <label className={labelCls}>Description</label>
       <textarea className={field} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+      <label className={labelCls}>Judge model</label>
+      <select className={field} value={judgeModel} onChange={(e) => setJudgeModel(e.target.value)}>
+        <option value="">Deterministic checks only</option>
+        {(catalog.models || []).map((model) => {
+          const id = modelLabel(model);
+          return <option key={id} value={id}>{id}</option>;
+        })}
+      </select>
+      <div className="text-xs text-text-dim">Pinned into the sealed benchmark. The run fails before execution if this exact gateway model is unavailable.</div>
       <div className="flex justify-end gap-2">
         <button className={btn} onClick={onClose}>Cancel</button>
-        <button className={btn} disabled={busy || !name.trim()} onClick={() => onSave(name, category, description)}>
+        <button className={btn} disabled={busy || !name.trim()} onClick={() => onSave(name, category, description, judgeModel)}>
           {initial ? "Save" : "Create"}
         </button>
       </div>
@@ -977,17 +989,17 @@ const VIZ_CSS = `
 .bench-viz {
   --viz-grid: color-mix(in srgb, currentColor 14%, transparent);
   --viz-surface: var(--bg, #fcfcfb);
-  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #7c6ee6;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) .bench-viz {
     --viz-surface: var(--bg, #1a1a19);
-    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #8b7cf0;
   }
 }
 :root[data-theme="dark"] .bench-viz {
   --viz-surface: var(--bg, #1a1a19);
-  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --s5: #d55181; --s6: #8b7cf0;
 }
 `;
 
@@ -1083,14 +1095,15 @@ function RowKey({ rank, color, label, y, swatch = true }: {
 }
 
 const COMPONENT_SERIES = [
-  { key: "success", label: "Task success", color: "var(--s1)", max: 70 },
-  { key: "duration", label: "Duration", color: "var(--s2)", max: 10 },
-  { key: "cost", label: "Cost / tokens", color: "var(--s3)", max: 10 },
-  { key: "turns", label: "Turns", color: "var(--s4)", max: 5 },
-  { key: "tool_errors", label: "No tool errors", color: "var(--s5)", max: 5 },
+  { key: "success", label: "Task success", color: "var(--s1)" },
+  { key: "judge", label: "Judge quality", color: "var(--s2)" },
+  { key: "duration", label: "Duration", color: "var(--s3)" },
+  { key: "cost", label: "Cost / tokens", color: "var(--s4)" },
+  { key: "turns", label: "Turns", color: "var(--s5)" },
+  { key: "tool_errors", label: "No tool errors", color: "var(--s6)" },
 ] as const;
 
-// Part-to-whole across five fixed scoring components: stacked bars, categorical,
+// Part-to-whole across the scoring components: stacked bars, categorical,
 // legend always present. Segments are separated by a 2px surface gap, and the
 // numbers live in the table below rather than crowding the interior segments.
 function CompositionBars({ rows }: { rows: { label: string; components: Record<string, number>; color: string }[] }) {
@@ -1126,7 +1139,7 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
               <RowKey rank={i + 1} color={r.color} label={r.label} y={y} swatch={false} />
               {segs.map((s) => s.w <= 0 ? null : (
                 <g key={s.c.key}>
-                  <title>{`${r.label} — ${s.c.label}: ${s.v} of ${s.c.max}`}</title>
+                  <title>{`${r.label} — ${s.c.label}: ${s.v} points`}</title>
                   <path d={s.last ? barPath(s.x, y, s.w, BAR_H) : `M${s.x},${y} h${s.w} v${BAR_H} h${-s.w} Z`}
                     fill={s.c.color} />
                 </g>
@@ -1141,7 +1154,7 @@ function CompositionBars({ rows }: { rows: { label: string; components: Record<s
         {COMPONENT_SERIES.map((c) => (
           <span key={c.key} className="flex items-center gap-1.5">
             <svg width="10" height="10" aria-hidden="true"><rect width="10" height="10" rx="2" fill={c.color} /></svg>
-            {c.label} <span className="opacity-60">/{c.max}</span>
+            {c.label}
           </span>
         ))}
       </div>
@@ -1171,7 +1184,7 @@ function ComponentTable({ rows }: { rows: { label: string; components: Record<st
               <td className="py-1">{r.label}</td>
               {COMPONENT_SERIES.map((c) => (
                 <td key={c.key} className="text-text-dim">
-                  {r.components[c.key] ?? 0}<span className="opacity-60">/{c.max}</span>
+                  {r.components[c.key] ?? 0}
                 </td>
               ))}
             </tr>

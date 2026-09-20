@@ -2,6 +2,21 @@
 
 Reproducible, publishable benchmarks for agents.
 
+## Selectable judges
+
+Draft packs may set `judge_model` to any canonical
+`bench_catalog.models[].gateway_model`, for example
+`openai-codex/gpt-5.6-sol`. The model is validated when the pack is sealed,
+then becomes part of the immutable pack digest and run provenance. Omit it for
+deterministic-only scoring. To clear a judge from an existing draft through the
+MCP update tool, send `judge_model: "disabled"`.
+
+Judged packs use the built-in `Judged v1` scoring contract by default: both
+deterministic checks and the qualitative verdict are hard gates; successful
+runs receive 40 task-success points, up to 30 judge-quality points, and 30
+efficiency points. Bench preserves the complete per-goal verdict, actual model,
+prompt/rubric versions, and usage in every result and evidence export.
+
 ## Categories and scenario tags
 
 A pack can declare one normalized category such as `coding`, `customer-support`,

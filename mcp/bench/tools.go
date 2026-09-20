@@ -78,6 +78,7 @@ func packWriteSchema(fields ...string) map[string]any {
 	properties["description"] = stringField("Benchmark pack description")
 	properties["category"] = stringField("Stable category slug such as coding; human-readable input is normalized")
 	properties["profile_digest"] = stringField("Optional sealed scoring profile digest")
+	properties["judge_model"] = stringField("Optional canonical eval_catalog.models[].gateway_model; omit for deterministic-only scoring, or use disabled to clear a draft judge")
 	return schema
 }
 

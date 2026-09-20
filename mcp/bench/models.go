@@ -43,12 +43,15 @@ type Pack struct {
 	ScoringVersion string `json:"scoring_version,omitempty"`
 	// ProfileDigest pins the scoring contract this pack is scored under. A
 	// sealed pack carries one so its results always mean the same thing.
-	ProfileDigest string     `json:"profile_digest,omitempty"`
-	SourcePackID  string     `json:"source_pack_id,omitempty"`
-	Scenarios     []Scenario `json:"scenarios"`
-	Revision      int        `json:"revision"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ProfileDigest string `json:"profile_digest,omitempty"`
+	// JudgeModel is the canonical LLM Gateway model used for qualitative
+	// grading. Empty means deterministic-only scoring.
+	JudgeModel   string     `json:"judge_model,omitempty"`
+	SourcePackID string     `json:"source_pack_id,omitempty"`
+	Scenarios    []Scenario `json:"scenarios"`
+	Revision     int        `json:"revision"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
 }
 
 func (p *Pack) scenario(id string) *Scenario {
@@ -158,6 +161,9 @@ type Provenance struct {
 	PackDigest        string              `json:"pack_digest"`
 	PackVersion       string              `json:"pack_version"`
 	Category          string              `json:"category,omitempty"`
+	JudgeModel        string              `json:"judge_model,omitempty"`
+	JudgePrompt       string              `json:"judge_prompt_version,omitempty"`
+	JudgeRubric       string              `json:"judge_rubric_version,omitempty"`
 	ScenarioDigests   map[string]string   `json:"scenario_digests"`
 	ScenarioTags      map[string][]string `json:"scenario_tags,omitempty"`
 	SnapshotIDs       map[string]string   `json:"snapshot_ids,omitempty"`
@@ -179,6 +185,7 @@ type Run struct {
 	// The leaderboard joins on it, so a run scored under a different profile is
 	// never averaged with this one.
 	ScoringProfileDigest string     `json:"scoring_profile_digest"`
+	JudgeModel           string     `json:"judge_model,omitempty"`
 	Name                 string     `json:"name"`
 	Targets              []Target   `json:"targets"`
 	Trials               int        `json:"trials"`
@@ -195,36 +202,82 @@ type Run struct {
 }
 
 type Result struct {
-	ID            string    `json:"id"`
-	BenchRunID    string    `json:"bench_run_id"`
-	ScenarioID    string    `json:"scenario_id"`
-	ScenarioName  string    `json:"scenario_name"`
-	ScenarioTags  []string  `json:"scenario_tags,omitempty"`
-	TargetIndex   int       `json:"target_index"`
-	Target        Target    `json:"target"`
-	Trial         int       `json:"trial"`
-	EvalRunID     string    `json:"eval_run_id,omitempty"`
-	Admission     string    `json:"admission"`
-	InvalidReason string    `json:"invalid_reason,omitempty"`
-	Passed        bool      `json:"passed"`
-	Score         Score     `json:"score"`
-	Metrics       Metrics   `json:"metrics"`
-	Error         string    `json:"error,omitempty"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID            string             `json:"id"`
+	BenchRunID    string             `json:"bench_run_id"`
+	ScenarioID    string             `json:"scenario_id"`
+	ScenarioName  string             `json:"scenario_name"`
+	ScenarioTags  []string           `json:"scenario_tags,omitempty"`
+	TargetIndex   int                `json:"target_index"`
+	Target        Target             `json:"target"`
+	Trial         int                `json:"trial"`
+	EvalRunID     string             `json:"eval_run_id,omitempty"`
+	Admission     string             `json:"admission"`
+	InvalidReason string             `json:"invalid_reason,omitempty"`
+	Passed        bool               `json:"passed"`
+	Score         Score              `json:"score"`
+	Metrics       Metrics            `json:"metrics"`
+	Evaluation    EvaluationEvidence `json:"evaluation,omitempty"`
+	Error         string             `json:"error,omitempty"`
+	CreatedAt     time.Time          `json:"created_at"`
 }
 
 type Metrics struct {
-	Provider    string  `json:"provider,omitempty"`
-	Model       string  `json:"model,omitempty"`
-	DurationMS  int64   `json:"duration_ms"`
-	TurnsUsed   int     `json:"turns_used"`
-	TokensIn    int     `json:"tokens_in"`
-	TokensOut   int     `json:"tokens_out"`
-	TokensTotal int     `json:"tokens_total"`
-	CostUSD     float64 `json:"cost_usd"`
-	LLMCalls    int     `json:"llm_calls"`
-	ToolCalls   int     `json:"tool_calls"`
-	Errors      int     `json:"errors"`
+	Provider    string   `json:"provider,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	DurationMS  int64    `json:"duration_ms"`
+	TurnsUsed   int      `json:"turns_used"`
+	TokensIn    int      `json:"tokens_in"`
+	TokensOut   int      `json:"tokens_out"`
+	TokensTotal int      `json:"tokens_total"`
+	CostUSD     float64  `json:"cost_usd"`
+	LLMCalls    int      `json:"llm_calls"`
+	ToolCalls   int      `json:"tool_calls"`
+	Errors      int      `json:"errors"`
+	JudgeScore  *float64 `json:"judge_score,omitempty"`
+}
+
+// EvaluationEvidence is the complete qualitative and deterministic scoring
+// evidence returned by Evals. It is persisted as one JSON object so future
+// verdict fields remain backward compatible.
+type EvaluationEvidence struct {
+	Assertions       []evalAssertionResult `json:"assertions,omitempty"`
+	Judge            *JudgeVerdict         `json:"judge,omitempty"`
+	CorrectnessScore *float64              `json:"correctness_score,omitempty"`
+	JudgeScore       *float64              `json:"judge_score,omitempty"`
+	OverallScore     *float64              `json:"overall_score,omitempty"`
+}
+
+type evalAssertionResult struct {
+	Name    string `json:"name"`
+	Passed  bool   `json:"passed"`
+	Actual  any    `json:"actual,omitempty"`
+	Message string `json:"message,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Gating  bool   `json:"gating,omitempty"`
+}
+
+type JudgeVerdict struct {
+	Passed              bool                 `json:"passed"`
+	Score               float64              `json:"score"`
+	Reasoning           string               `json:"reasoning"`
+	PerGoal             []GoalVerdict        `json:"per_goal"`
+	DirectiveSuggestion *DirectiveSuggestion `json:"directive_suggestion,omitempty"`
+	Model               string               `json:"model,omitempty"`
+	Usage               map[string]any       `json:"usage,omitempty"`
+	PromptVersion       string               `json:"prompt_version,omitempty"`
+	RubricVersion       string               `json:"rubric_version,omitempty"`
+}
+
+type GoalVerdict struct {
+	Goal   string   `json:"goal"`
+	Score  *float64 `json:"score,omitempty"`
+	Passed bool     `json:"passed"`
+	Why    string   `json:"why"`
+}
+
+type DirectiveSuggestion struct {
+	Directive string `json:"directive"`
+	Reason    string `json:"reason"`
 }
 
 // Summary aggregates one bench run. PassRate is the headline; AverageScore is
@@ -269,17 +322,22 @@ type Baseline struct {
 
 // evalRun is the subset of the Evals run shape bench reads back.
 type evalRun struct {
-	ID           string                     `json:"id"`
-	ExperimentID string                     `json:"experiment_id"`
-	CaseID       string                     `json:"case_id"`
-	TargetIndex  int                        `json:"target_index"`
-	Repetition   int                        `json:"repetition"`
-	Status       string                     `json:"status"`
-	TargetSnap   Target                     `json:"target"`
-	Execution    *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
-	Error        string                     `json:"error,omitempty"`
-	StartedAt    *time.Time                 `json:"started_at,omitempty"`
-	FinishedAt   *time.Time                 `json:"finished_at,omitempty"`
+	ID               string                     `json:"id"`
+	ExperimentID     string                     `json:"experiment_id"`
+	CaseID           string                     `json:"case_id"`
+	TargetIndex      int                        `json:"target_index"`
+	Repetition       int                        `json:"repetition"`
+	Status           string                     `json:"status"`
+	TargetSnap       Target                     `json:"target"`
+	Execution        *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
+	Assertions       []evalAssertionResult      `json:"assertions,omitempty"`
+	Judge            *JudgeVerdict              `json:"judge,omitempty"`
+	CorrectnessScore *float64                   `json:"correctness_score,omitempty"`
+	JudgeScore       *float64                   `json:"judge_score,omitempty"`
+	OverallScore     *float64                   `json:"overall_score,omitempty"`
+	Error            string                     `json:"error,omitempty"`
+	StartedAt        *time.Time                 `json:"started_at,omitempty"`
+	FinishedAt       *time.Time                 `json:"finished_at,omitempty"`
 }
 
 type evalExperiment struct {

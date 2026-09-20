@@ -67,13 +67,13 @@ func boolInt(value bool) int {
 
 // ---- packs ----
 
-const packColumns = `id,name,description,category,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at,profile_digest`
+const packColumns = `id,name,description,category,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at,profile_digest,judge_model`
 
 func scanPack(row interface{ Scan(...any) error }) (*Pack, error) {
 	var pack Pack
 	var scenarios, created, updated string
 	err := row.Scan(&pack.ID, &pack.Name, &pack.Description, &pack.Category, &pack.State, &pack.Version, &pack.Digest,
-		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated, &pack.ProfileDigest)
+		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated, &pack.ProfileDigest, &pack.JudgeModel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -120,16 +120,16 @@ func (s store) getPackByDigest(digest string) (*Pack, error) {
 
 func (s store) savePack(pack *Pack) error {
 	_, err := s.db.Exec(`INSERT INTO bench_packs(`+packColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, description=excluded.description, category=excluded.category, state=excluded.state,
 			version=excluded.version, digest=excluded.digest, scoring_version=excluded.scoring_version,
 			source_pack_id=excluded.source_pack_id, scenarios_json=excluded.scenarios_json,
-			profile_digest=excluded.profile_digest,
+			profile_digest=excluded.profile_digest, judge_model=excluded.judge_model,
 			revision=bench_packs.revision+1, updated_at=excluded.updated_at`,
 		pack.ID, pack.Name, pack.Description, pack.Category, pack.State, pack.Version, pack.Digest,
 		pack.ScoringVersion, pack.SourcePackID, encodeJSON(pack.Scenarios), pack.Revision,
-		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt), pack.ProfileDigest)
+		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt), pack.ProfileDigest, pack.JudgeModel)
 	return err
 }
 
@@ -282,7 +282,7 @@ func (s store) backfillRunProfiles(digest string) (int64, error) {
 // ---- runs ----
 
 const runColumns = `id,pack_id,pack_name,pack_category,pack_version,pack_digest,scoring_version,name,targets_json,trials,` +
-	`suite_id,experiment_id,status,provenance_json,summary_json,error,created_at,started_at,finished_at,scoring_profile_digest`
+	`suite_id,experiment_id,status,provenance_json,summary_json,error,created_at,started_at,finished_at,scoring_profile_digest,judge_model`
 
 func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var run Run
@@ -290,7 +290,7 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 	var started, finished sql.NullString
 	err := row.Scan(&run.ID, &run.PackID, &run.PackName, &run.PackCategory, &run.PackVersion, &run.PackDigest,
 		&run.ScoringVersion, &run.Name, &targets, &run.Trials, &run.SuiteID, &run.ExperimentID,
-		&run.Status, &provenance, &summary, &run.Error, &created, &started, &finished, &run.ScoringProfileDigest)
+		&run.Status, &provenance, &summary, &run.Error, &created, &started, &finished, &run.ScoringProfileDigest, &run.JudgeModel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -310,15 +310,16 @@ func scanRun(row interface{ Scan(...any) error }) (*Run, error) {
 
 func (s store) saveRun(run *Run) error {
 	_, err := s.db.Exec(`INSERT INTO bench_runs(`+runColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			suite_id=excluded.suite_id, experiment_id=excluded.experiment_id, status=excluded.status,
 			provenance_json=excluded.provenance_json, summary_json=excluded.summary_json,
-			error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at`,
+			error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at,
+			judge_model=excluded.judge_model`,
 		run.ID, run.PackID, run.PackName, run.PackCategory, run.PackVersion, run.PackDigest, run.ScoringVersion,
 		run.Name, encodeJSON(run.Targets), run.Trials, run.SuiteID, run.ExperimentID, run.Status,
 		encodeJSON(run.Provenance), encodeJSON(run.Summary), run.Error,
-		formatTime(run.CreatedAt), nullableTime(run.StartedAt), nullableTime(run.FinishedAt), run.ScoringProfileDigest)
+		formatTime(run.CreatedAt), nullableTime(run.StartedAt), nullableTime(run.FinishedAt), run.ScoringProfileDigest, run.JudgeModel)
 	return err
 }
 
@@ -363,18 +364,19 @@ func (s store) nextActiveRun() (*Run, error) {
 // ---- results ----
 
 const resultColumns = `id,bench_run_id,scenario_id,scenario_name,scenario_tags_json,target_index,target_json,trial,` +
-	`eval_run_id,admission,invalid_reason,passed,score_json,metrics_json,error,created_at`
+	`eval_run_id,admission,invalid_reason,passed,score_json,metrics_json,error,created_at,evaluation_json`
 
 func (s store) saveResult(result *Result) error {
 	_, err := s.db.Exec(`INSERT INTO bench_results(`+resultColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			admission=excluded.admission, invalid_reason=excluded.invalid_reason, passed=excluded.passed,
-			score_json=excluded.score_json, metrics_json=excluded.metrics_json, error=excluded.error`,
+			score_json=excluded.score_json, metrics_json=excluded.metrics_json, error=excluded.error,
+			evaluation_json=excluded.evaluation_json`,
 		result.ID, result.BenchRunID, result.ScenarioID, result.ScenarioName, encodeJSON(result.ScenarioTags), result.TargetIndex,
 		encodeJSON(result.Target), result.Trial, result.EvalRunID, result.Admission,
 		result.InvalidReason, boolInt(result.Passed), encodeJSON(result.Score),
-		encodeJSON(result.Metrics), result.Error, formatTime(result.CreatedAt))
+		encodeJSON(result.Metrics), result.Error, formatTime(result.CreatedAt), encodeJSON(result.Evaluation))
 	return err
 }
 
@@ -383,17 +385,18 @@ func scanResults(rows *sql.Rows) ([]Result, error) {
 	results := []Result{}
 	for rows.Next() {
 		var result Result
-		var tags, target, score, metrics, created string
+		var tags, target, score, metrics, created, evaluation string
 		var passed int
 		if err := rows.Scan(&result.ID, &result.BenchRunID, &result.ScenarioID, &result.ScenarioName,
 			&tags, &result.TargetIndex, &target, &result.Trial, &result.EvalRunID, &result.Admission,
-			&result.InvalidReason, &passed, &score, &metrics, &result.Error, &created); err != nil {
+			&result.InvalidReason, &passed, &score, &metrics, &result.Error, &created, &evaluation); err != nil {
 			return nil, err
 		}
 		decodeJSON(target, &result.Target)
 		decodeJSON(tags, &result.ScenarioTags)
 		decodeJSON(score, &result.Score)
 		decodeJSON(metrics, &result.Metrics)
+		decodeJSON(evaluation, &result.Evaluation)
 		result.Passed = passed == 1
 		result.CreatedAt = parseTime(created)
 		results = append(results, result)
@@ -443,11 +446,11 @@ func (s store) listAdmittedResults(profileDigest, category string) ([]resultWith
 	out := []resultWithPack{}
 	for rows.Next() {
 		var item resultWithPack
-		var tags, target, score, metrics, created string
+		var tags, target, score, metrics, created, evaluation string
 		var passed int
 		if err := rows.Scan(&item.ID, &item.BenchRunID, &item.ScenarioID, &item.ScenarioName,
 			&tags, &item.TargetIndex, &target, &item.Trial, &item.EvalRunID, &item.Admission,
-			&item.InvalidReason, &passed, &score, &metrics, &item.Error, &created,
+			&item.InvalidReason, &passed, &score, &metrics, &item.Error, &created, &evaluation,
 			&item.PackDigest, &item.PackName, &item.PackCategory, &item.PackVersion); err != nil {
 			return nil, err
 		}
@@ -455,6 +458,7 @@ func (s store) listAdmittedResults(profileDigest, category string) ([]resultWith
 		decodeJSON(tags, &item.ScenarioTags)
 		decodeJSON(score, &item.Score)
 		decodeJSON(metrics, &item.Metrics)
+		decodeJSON(evaluation, &item.Evaluation)
 		item.Passed = passed == 1
 		item.CreatedAt = parseTime(created)
 		out = append(out, item)

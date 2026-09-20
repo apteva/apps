@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.6.0
-description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. v0.6.0 adds sealed benchmark categories, scenario tags, category-scoped discovery, result search, and cross-pack leaderboards.
+version: 0.7.0
+description: Reproducible, publishable benchmarks for persistent and on-demand draft agents. v0.7.0 adds user-selectable LLM judges, judge-aware scoring, and complete verdict provenance.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -16,7 +16,7 @@ requires:
     - platform.apps.call
     - platform.runtime_catalog.read
   apps:
-    - { name: evals, version: ">=0.6.0" }
+    - { name: evals, version: ">=0.7.0" }
     - { name: environments, version: ">=0.7.4" }
 provides:
   http_routes:
@@ -25,8 +25,8 @@ provides:
     - { name: bench_pack_list, description: "List benchmark packs, optionally filtered by category, state, scoring profile, or text." }
     - { name: bench_category_list, description: "List benchmark categories with pack, scenario, and tag counts." }
     - { name: bench_pack_get, description: "Get one benchmark pack and its scenarios." }
-    - { name: bench_pack_create, description: "Create a categorized draft benchmark pack." }
-    - { name: bench_pack_update, description: "Update a draft benchmark pack and its category. Sealed packs are immutable." }
+    - { name: bench_pack_create, description: "Create a categorized draft benchmark pack with an optional judge model." }
+    - { name: bench_pack_update, description: "Update a draft benchmark pack, category, and judge model. Sealed packs are immutable." }
     - { name: bench_pack_delete, description: "Delete a draft pack, or a sealed pack that has no runs." }
     - { name: bench_scenario_put, description: "Add or replace one tagged scenario in a draft pack." }
     - { name: bench_scenario_delete, description: "Remove a scenario from a draft pack." }
@@ -69,7 +69,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.6.0
+    ref: bench/v0.7.0
     entry: mcp/bench
   port: 8080
   health_check: /health

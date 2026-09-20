@@ -219,6 +219,8 @@ type JudgeVerdict struct {
 	DirectiveSuggestion *DirectiveSuggestion `json:"directive_suggestion,omitempty"`
 	Model               string               `json:"model,omitempty"`
 	Usage               map[string]any       `json:"usage,omitempty"`
+	PromptVersion       string               `json:"prompt_version,omitempty"`
+	RubricVersion       string               `json:"rubric_version,omitempty"`
 }
 
 type GoalVerdict struct {

@@ -64,6 +64,7 @@ type Score struct {
 	CostPoints      float64             `json:"cost_points"`
 	TurnPoints      float64             `json:"turn_points"`
 	ToolErrorPoints float64             `json:"tool_error_points"`
+	JudgePoints     float64             `json:"judge_points,omitempty"`
 	CostBasis       string              `json:"cost_basis"`
 	Formula         string              `json:"formula"`
 	Ratios          map[string]*float64 `json:"ratios"`
@@ -126,6 +127,19 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 			if actual <= c.At {
 				out.Earned = c.Weight
 			}
+		case KindQuality:
+			if gated {
+				out.Skipped = true
+				break
+			}
+			actual, available := metricValue(m, c.Metric)
+			if !available {
+				out.Skipped = true
+				break
+			}
+			out.Actual, out.Budget = ptr(actual), ptr(100)
+			out.Ratio = ptr(round3(clamp(actual/100, 0, 1)))
+			out.Earned = round1(c.Weight * clamp(actual/100, 0, 1))
 		case KindBudget:
 			if gated {
 				out.Skipped = true
@@ -161,6 +175,8 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 			score.TurnPoints = out.Earned
 		case "tool_errors":
 			score.ToolErrorPoints = out.Earned
+		case "judge":
+			score.JudgePoints = out.Earned
 		}
 	}
 	// Legacy consumers read ratios by metric name, not component key.
@@ -179,6 +195,8 @@ func profileFormula(p *Profile) string {
 			parts = append(parts, fmt.Sprintf("%g for %s", c.Weight, orKey(c.Label, c.Key)))
 		case KindThreshold:
 			parts = append(parts, fmt.Sprintf("%g for %s at or below %g", c.Weight, c.Metric, c.At))
+		case KindQuality:
+			parts = append(parts, fmt.Sprintf("%g for %s scaled from 0-100", c.Weight, c.Metric))
 		default:
 			parts = append(parts, fmt.Sprintf("%g for %s (%s)", c.Weight, c.Metric, orKey(c.Curve, CurveCliff)))
 		}

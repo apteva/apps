@@ -389,7 +389,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.6.0" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.7.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -927,6 +927,9 @@ func TestMultiAgentEnvironmentPreservesAndCapturesCollaborators(t *testing.T) {
 	run := completed.Runs[0]
 	if run.Status != "pass" || run.Execution == nil || len(run.Collaborators) != 1 {
 		t.Fatalf("run=%#v", run)
+	}
+	if run.Judge == nil || run.Judge.PromptVersion != judgePromptVersion || run.Judge.RubricVersion != judgeRubricVersion {
+		t.Fatalf("persisted judge versions=%#v", run.Judge)
 	}
 	collaborator := run.Collaborators[0]
 	if collaborator.Alias != "specialist" || collaborator.SourceAgentID != 8 || !collaborator.Participated || collaborator.Execution == nil || len(collaborator.Execution.Trace) != 1 {

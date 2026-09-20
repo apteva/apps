@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.6.0
-description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of persistent or on-demand draft agents inside isolated Environments. v0.6.0 adds hidden draft targets and multi-setup comparisons without creating project agents.
+version: 0.7.0
+description: Behavioral, conditioned live voice, carrier-path, and continuous evaluation of persistent or on-demand draft agents inside isolated Environments. v0.7.0 records the exact judge model, prompt contract, rubric contract, and usage for reproducible scoring.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.6.0
+    ref: evals/v0.7.0
     entry: mcp/evals
   port: 8080
   health_check: /health
