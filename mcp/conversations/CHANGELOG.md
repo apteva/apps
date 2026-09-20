@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.23.25 — 2026-09-20
+
+- Bind the generic `chat/v1` surface to the established `/chats?page=1` and `/messages?page=1` page contracts while preserving every legacy dashboard response shape.
+- Close the SSE replay/live handoff gap by deduplicating buffered changes with the durable `message_changes` cursor; ephemeral `stream` frames remain cursor-free.
+- Pin source installs to the immutable `conversations/v0.23.25` release ref and add release-artifact, packaged-surface, page-contract, mark-seen, and reconnect coverage.
+
 ## 0.23.24 — 2026-09-20
 
 - Publish Conversations as an optional `mobile.project_app` using the generic `chat/v1` native surface contract, with app-owned conversation, agent, history, send, create, seen, and subscription routes.

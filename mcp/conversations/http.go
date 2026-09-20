@@ -645,11 +645,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			nextCursor := ""
-			if page.HasMore {
-				nextCursor = strconv.FormatInt(page.Before, 10)
-			}
-			writeJSON(w, map[string]any{"items": page.Messages, "next_cursor": nextCursor})
+			writeJSON(w, map[string]any{"items": page.Messages, "next_cursor": page.NextCursor})
 			return
 		}
 		if r.URL.Query().Get("page") == "1" {
@@ -961,22 +957,22 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	var ch <-chan Message
 	var frames <-chan StreamFrame
 	var cancel, cancelFrames func()
+	var durableCursor int64
 	switch {
 	case conversationID != "":
 		ch, cancel = a.hub.subscribeConversation(conversationID)
 		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
-		since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-		if since > 0 {
-			cursor := since
+		durableCursor, _ = strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+		if durableCursor > 0 {
 			for {
-				backlog, err := a.store.MessageChanges(conversationID, cursor, 200)
+				backlog, err := a.store.MessageChanges(conversationID, durableCursor, 200)
 				if err != nil {
-					break
+					return
 				}
 				for _, m := range backlog.Messages {
 					writeSSE(w, m)
 				}
-				cursor = backlog.Cursor
+				durableCursor = backlog.Cursor
 				if !backlog.HasMore {
 					break
 				}
@@ -1024,7 +1020,17 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil || !allowed {
 				continue
 			}
+			// The durable subscription is registered before replay so no
+			// committed change can fall into a reconnect gap. A change that
+			// raced into both the replay query and the live buffer is skipped
+			// here using that same message_changes cursor.
+			if conversationID != "" && m.Revision > 0 && m.Revision <= durableCursor {
+				continue
+			}
 			writeSSE(w, m)
+			if conversationID != "" && m.Revision > durableCursor {
+				durableCursor = m.Revision
+			}
 			flusher.Flush()
 		}
 	}

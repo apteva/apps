@@ -20,12 +20,20 @@
         "method": "GET",
         "path": "/chats",
         "query": {
-          "view": "summary"
+          "page": 1,
+          "limit": 50
         }
       },
       "response": {
-        "items": "$.items",
-        "id": "$.id"
+        "items": "$.conversations",
+        "id": "$.id",
+        "next_cursor": "$.next_cursor"
+      },
+      "pagination": {
+        "type": "cursor",
+        "request_key": "cursor",
+        "response_path": "$.next_cursor",
+        "page_size": 50
       },
       "refresh": {
         "on_appear": true,
@@ -38,12 +46,12 @@
         "path": "/messages",
         "query": {
           "chat_id": "$state.conversation_id",
-          "pagination": "cursor",
+          "page": 1,
           "limit": 50
         }
       },
       "response": {
-        "items": "$.items",
+        "items": "$.messages",
         "id": "$.id",
         "next_cursor": "$.next_cursor"
       },

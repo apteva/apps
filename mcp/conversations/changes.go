@@ -6,10 +6,11 @@ import (
 )
 
 type ChangePage struct {
-	Messages []Message `json:"messages"`
-	Cursor   int64     `json:"cursor"`
-	HasMore  bool      `json:"has_more"`
-	Before   int64     `json:"before"`
+	Messages   []Message `json:"messages"`
+	Cursor     int64     `json:"cursor"`
+	HasMore    bool      `json:"has_more"`
+	Before     int64     `json:"before"`
+	NextCursor string    `json:"next_cursor,omitempty"`
 }
 
 // Snapshot and replay cursor are read in one transaction. Live events never
@@ -54,6 +55,9 @@ func (s *store) MessagePage(id string, before int64, limit int) (ChangePage, err
 	if len(out.Messages) > 0 {
 		out.Before = out.Messages[0].ID
 	}
+	if out.HasMore {
+		out.NextCursor = strconv.FormatInt(out.Before, 10)
+	}
 	return out, tx.Commit()
 }
 func (s *store) MessageChanges(id string, since int64, limit int) (ChangePage, error) {
@@ -77,6 +81,11 @@ func (s *store) MessageChanges(id string, since int64, limit int) (ChangePage, e
 			out.HasMore = true
 			break
 		}
+		// The SSE id is the message_changes row, not the stable message id
+		// nor a later revision observed through the joined messages row.
+		// Replaying edits therefore advances exactly the same durable cursor
+		// that live Message.Revision values use.
+		m.Revision = cursor
 		out.Cursor = cursor
 		out.Messages = append(out.Messages, *m)
 	}

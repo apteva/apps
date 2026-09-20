@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -141,6 +142,66 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 		messageEvent.Operation != "upsert" || messageEvent.Source != "messages" || messageEvent.Value != "$" || messageEvent.ID != "$.id" ||
 		streamEvent.Operation != "set_activity" || streamEvent.Source != "messages" || streamEvent.Value != "$.text" {
 		t.Fatalf("subscription contract=%+v", chat.Subscription)
+	}
+
+	conversations := surface.DataSources["conversations"]
+	messages := surface.DataSources["messages"]
+	agents := surface.DataSources["agents"]
+	if conversations.Request.Path != "/chats" || conversations.Request.Query["page"] != float64(1) ||
+		conversations.Response.Items != "$.conversations" || conversations.Pagination == nil || conversations.Pagination.RequestKey != "cursor" {
+		t.Fatalf("conversations source=%+v", conversations)
+	}
+	if messages.Request.Path != "/messages" || messages.Request.Query["page"] != float64(1) ||
+		messages.Request.Query["chat_id"] != "$state.conversation_id" || messages.Response.Items != "$.messages" ||
+		messages.Pagination == nil || messages.Pagination.RequestKey != "before" {
+		t.Fatalf("messages source=%+v", messages)
+	}
+	if agents.Request.Path != "/agents" || agents.Request.Method != http.MethodGet {
+		t.Fatalf("agents source=%+v", agents)
+	}
+	for name, expected := range map[string]struct{ method, path string }{
+		"create-conversation": {http.MethodPost, "/chats"},
+		"send-message":        {http.MethodPost, "/messages"},
+		"mark-seen":           {http.MethodPost, "/seen"},
+	} {
+		action := surface.Actions[name]
+		if action.Request == nil || action.Request.Method != expected.method || action.Request.Path != expected.path {
+			t.Fatalf("action %s=%+v", name, action)
+		}
+	}
+}
+
+func TestReleaseVersionArtifactsAgree(t *testing.T) {
+	const releaseVersion = "0.23.25"
+	manifest := (&App{}).Manifest()
+	if manifest.Version != releaseVersion {
+		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
+	}
+	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "conversations/v"+releaseVersion {
+		t.Fatalf("runtime source=%+v; release installs must use their immutable tag", manifest.Runtime.Source)
+	}
+
+	for _, path := range []string{"frontend/package.json", "ui/frontend.json"} {
+		document, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var artifact struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(document, &artifact); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if artifact.Version != releaseVersion {
+			t.Fatalf("%s version=%q want=%q", path, artifact.Version, releaseVersion)
+		}
+	}
+	module, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.83.0") {
+		t.Fatal("go.mod must pin app-sdk v0.83.0")
 	}
 }
 
