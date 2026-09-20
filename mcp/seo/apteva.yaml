@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.7.1
+version: 0.7.2
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -86,6 +86,10 @@ description: |
         multi-provider reads, bulk preflight jobs, panel selection races,
         domain refresh locales, and large page ranking batches; reduces
         initial panel requests and speeds up cached backlink summaries.
+  v0.7.2: makes content opportunities provider/locale-specific with explicit
+        metric availability, returns successful partial keyword refreshes,
+        serializes and deduplicates metric work, exposes per-keyword progress,
+        and adds DataForSEO Retry-After guidance.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -143,7 +147,7 @@ provides:
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, provider? (default binding; all for every provider), since?, limit?, history?." }
     - { name: rank_trackers_list, description: "List automatic rank trackers, refresh frequency, and status. Args: keyword_id?." }
     - { name: rank_history, description: "Read durable scheduled rank/not-found observations. Args: tracker_id, limit?." }
-    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only." }
+    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into provider- and locale-specific content opportunities. Missing metrics return an explicit status and no score. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations. Args: provider? (default binding; all for every provider), search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────
     - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?, location_id? or country_iso+language_code? for the default locale." }

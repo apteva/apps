@@ -118,3 +118,18 @@ test("domain refresh preserves its configured locale outside the loaded catalog"
   await click("Refresh metrics");
   expect(requests.find((r) => r.tool === "refresh")?.args.location_id).toBe("42");
 });
+
+test("partial keyword refresh is successful and explains unavailable fields", async () => {
+  delayed = (tool) => tool === "refresh" ? Promise.resolve({
+    status: "partial",
+    available: ["volume"],
+    unavailable: ["difficulty"],
+    provider: "dataforseo",
+    last_refreshed_at: 100,
+  }) : undefined;
+  await mount();
+  await click("Keywords");
+  await click("Refresh Metrics");
+  expect(container.textContent).toContain("difficulty unavailable from provider");
+  expect(container.textContent).not.toContain("500:");
+});

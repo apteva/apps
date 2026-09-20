@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.2
+
+- Keep content opportunities separate by provider and locale, join only the
+  matching keyword metrics, and return project/snapshot provenance.
+- Return a null score plus `metrics_status` when volume or difficulty is
+  unavailable instead of silently applying the fallback score of 50.
+- Treat provider-confirmed missing keyword fields as a successful partial
+  refresh, preserve available values, and expose available/unavailable fields.
+- Add per-keyword job field states and make provider-unavailable fields terminal
+  until an operator explicitly resumes the job.
+- Serialize metric jobs, reuse overlapping active work, retry DataForSEO 429s
+  with backoff, and return `Retry-After: 60` when throttling remains.
+- Add locale, project-isolation, partial-refresh, active-job idempotency, and
+  panel regressions; update app-sdk to v0.82.0.
+
 ## 0.7.1
 
 - Preserve paid rank-tracking costs through queue submission, failed tasks,

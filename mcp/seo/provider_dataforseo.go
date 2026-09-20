@@ -35,6 +35,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -64,7 +65,7 @@ func classifyProviderError(code int, message string) error {
 	case code == 40202, code == 50301,
 		strings.Contains(lower, "rate limit"), strings.Contains(lower, "rates limit"),
 		strings.Contains(lower, "too many requests"):
-		return &providerRequestError{Provider: "dataforseo", HTTPStatus: http.StatusTooManyRequests, ProviderCode: code, Message: message}
+		return &providerRequestError{Provider: "dataforseo", HTTPStatus: http.StatusTooManyRequests, ProviderCode: code, RetryAfter: 60, Message: message}
 	case code == 40200, strings.Contains(lower, "payment required"),
 		strings.Contains(lower, "insufficient") && (strings.Contains(lower, "credit") || strings.Contains(lower, "fund")),
 		strings.Contains(lower, "balance") && strings.Contains(lower, "low"):
@@ -113,7 +114,11 @@ func callDfsRowsWithIntegrationInput(ctx *sdk.AppCtx, connID int64, tool string,
 			status = http.StatusBadGateway
 		}
 		if status == http.StatusPaymentRequired || status == http.StatusTooManyRequests {
-			return nil, nil, &providerRequestError{Provider: "dataforseo", HTTPStatus: status, Message: fmt.Sprintf("%s returned HTTP %d", tool, status)}
+			retryAfter := 0
+			if status == http.StatusTooManyRequests {
+				retryAfter = 60
+			}
+			return nil, nil, &providerRequestError{Provider: "dataforseo", HTTPStatus: status, RetryAfter: retryAfter, Message: fmt.Sprintf("%s returned HTTP %d", tool, status)}
 		}
 		return nil, nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, status)
 	}
@@ -512,10 +517,6 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, connID int64, k *Keyword, loc 
 	if loc.ID != k.LocationID {
 		return nil, fmt.Errorf("keyword %d belongs to location %d, not %d", k.ID, k.LocationID, loc.ID)
 	}
-	balance, err := preflightDataForSEO(ctx, connID)
-	if err != nil {
-		return nil, err
-	}
 	jobs, err := createKeywordMetricJobs(ctx.AppDB(), k.ProjectID, []int64{k.ID})
 	if err != nil {
 		return nil, err
@@ -528,8 +529,8 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, connID int64, k *Keyword, loc 
 	if err != nil {
 		return nil, err
 	}
-	if completed.Status != "completed" {
-		return nil, fmt.Errorf("keyword metrics refresh incomplete: %s", completed.LastError)
+	if completed.Status != "completed" && completed.Status != "partial" {
+		return nil, fmt.Errorf("keyword metrics refresh %s: %s", completed.Status, completed.LastError)
 	}
 	metrics, err := latestKeywordMetrics(ctx.AppDB(), k.ID, "dataforseo")
 	if err != nil {
@@ -542,17 +543,53 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, connID int64, k *Keyword, loc 
 		k.ID, loc.ID).Scan(&historyRows); err != nil {
 		return nil, err
 	}
+	items, err := listKeywordMetricJobItems(ctx.AppDB(), job.ID, completed.Status)
+	if err != nil {
+		return nil, err
+	}
+	available := []string{}
+	unavailable := []string{}
+	if len(items) > 0 {
+		for field, status := range map[string]string{
+			"volume": items[0].VolumeStatus, "difficulty": items[0].DifficultyStatus,
+		} {
+			switch status {
+			case "available":
+				available = append(available, field)
+			case "unavailable":
+				unavailable = append(unavailable, field)
+			}
+		}
+	}
+	sort.Strings(available)
+	sort.Strings(unavailable)
+	var snapshotID any
+	var volume any
+	var difficulty any
+	lastRefreshedAt := completed.UpdatedAt
+	if metrics != nil {
+		snapshotID = metrics.ID
+		if metrics.Volume != nil {
+			volume = *metrics.Volume
+		}
+		if metrics.Difficulty != nil {
+			difficulty = *metrics.Difficulty
+		}
+		lastRefreshedAt = metrics.TS
+	}
 	return map[string]any{
-		"keyword_id":      k.ID,
-		"location_id":     loc.ID,
-		"snapshot_id":     metrics.ID,
-		"provider":        "dataforseo",
-		"fetched_at":      metrics.TS,
-		"volume":          valOr(metrics.Volume, 0),
-		"difficulty":      valOr(metrics.Difficulty, 0),
-		"history_rows":    historyRows,
-		"metric_job_id":   job.ID,
-		"account_balance": balance,
+		"status":            completed.Status,
+		"available":         available,
+		"unavailable":       unavailable,
+		"keyword_id":        k.ID,
+		"location_id":       loc.ID,
+		"snapshot_id":       snapshotID,
+		"provider":          "dataforseo",
+		"last_refreshed_at": lastRefreshedAt,
+		"volume":            volume,
+		"difficulty":        difficulty,
+		"history_rows":      historyRows,
+		"metric_job_id":     job.ID,
 	}, nil
 }
 
