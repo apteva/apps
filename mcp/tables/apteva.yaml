@@ -2,8 +2,11 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.25
+version: 0.1.26
 description: |
+  v0.1.26 Fixes recursive-filter literal coercion: explicit cast operands
+  retain their declared type, boolean literals are coerced once, and
+  casted outer numeric IDs can use indexed text foreign keys.
   v0.1.25 Adds a generic versioned recursive filter AST with correlated
   exists/not_exists predicates, typed value expressions, bounded compilation,
   and capability negotiation for Tables clients.
@@ -154,7 +157,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: tables/v0.1.25
+    ref: tables/v0.1.26
     entry: mcp/tables
   port: 8080
   health_check: /health

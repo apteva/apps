@@ -33,10 +33,12 @@ type filterScope struct {
 }
 
 type filterExpr struct {
-	sql      string
-	args     []any
-	typeName string
-	column   *Column
+	sql          string
+	args         []any
+	typeName     string
+	column       *Column
+	literal      bool
+	explicitCast bool
 }
 
 // compileFilter accepts both the legacy flat predicate list and the additive
@@ -154,6 +156,9 @@ func (s *filterCompileState) compare(raw any, scope filterScope) (filterExpr, er
 		rightRaw = map[string]any{"literal": obj["value"]}
 	}
 	expected := left.column
+	if expected == nil && left.typeName != "" {
+		expected = &Column{Type: left.typeName}
+	}
 	switch op {
 	case "in":
 		vals := rightRaw
@@ -169,6 +174,9 @@ func (s *filterCompileState) compare(raw any, scope filterScope) (filterExpr, er
 		for i, v := range arr {
 			e, err := s.value(map[string]any{"literal": v}, scope, expected)
 			if err != nil {
+				return filterExpr{}, err
+			}
+			if err := coerceFilterExpr(&e, expected); err != nil {
 				return filterExpr{}, err
 			}
 			ph[i] = e.sql
@@ -192,6 +200,12 @@ func (s *filterCompileState) compare(raw any, scope filterScope) (filterExpr, er
 		if err != nil {
 			return filterExpr{}, err
 		}
+		if err := coerceFilterExpr(&lo, expected); err != nil {
+			return filterExpr{}, err
+		}
+		if err := coerceFilterExpr(&hi, expected); err != nil {
+			return filterExpr{}, err
+		}
 		return filterExpr{sql: left.sql + " BETWEEN " + lo.sql + " AND " + hi.sql, args: append(append(left.args, lo.args...), hi.args...)}, nil
 	}
 	right, err := s.value(rightRaw, scope, expected)
@@ -201,12 +215,11 @@ func (s *filterCompileState) compare(raw any, scope filterScope) (filterExpr, er
 	if expected == nil {
 		expected = right.column
 	}
-	if expected != nil && right.column == nil && len(right.args) > 0 {
-		v, err := coerceForStorage(*expected, right.args[0])
-		if err != nil {
-			return filterExpr{}, err
-		}
-		right.args[0] = v
+	if err := coerceFilterExpr(&left, expected); err != nil {
+		return filterExpr{}, err
+	}
+	if err := coerceFilterExpr(&right, expected); err != nil {
+		return filterExpr{}, err
 	}
 	switch op {
 	case "eq", "neq", "lt", "lte", "gt", "gte":
@@ -224,6 +237,22 @@ func (s *filterCompileState) compare(raw any, scope filterScope) (filterExpr, er
 	default:
 		return filterExpr{}, errf("unknown filter_ast comparison op %q", op)
 	}
+}
+
+// coerceFilterExpr applies storage coercion only to an ordinary literal.
+// Explicit casts own their operand's type and must not be coerced against the
+// surrounding column: doing so both rejects valid cross-type comparisons and
+// can force callers to cast the indexed database column instead of the value.
+func coerceFilterExpr(expr *filterExpr, expected *Column) error {
+	if expr == nil || expected == nil || !expr.literal || expr.explicitCast || len(expr.args) != 1 {
+		return nil
+	}
+	v, err := coerceForStorage(*expected, expr.args[0])
+	if err != nil {
+		return err
+	}
+	expr.args[0] = v
+	return nil
 }
 
 func (s *filterCompileState) value(raw any, scope filterScope, expected *Column) (filterExpr, error) {
@@ -244,14 +273,7 @@ func (s *filterCompileState) value(raw any, scope filterScope, expected *Column)
 		return s.column(scope.outerTable, scope.outerAlias, colName, expected)
 	}
 	if literal, ok := obj["literal"]; ok {
-		if expected != nil {
-			v, err := coerceForStorage(*expected, literal)
-			if err != nil {
-				return filterExpr{}, err
-			}
-			literal = v
-		}
-		return filterExpr{sql: "?", args: []any{literal}}, nil
+		return filterExpr{sql: "?", args: []any{literal}, literal: true}, nil
 	}
 	if rawCast, ok := obj["cast"]; ok {
 		m, ok := rawCast.(map[string]any)
@@ -262,11 +284,11 @@ func (s *filterCompileState) value(raw any, scope filterScope, expected *Column)
 		if _, err := sqliteType(typ); err != nil && typ != "integer" {
 			return filterExpr{}, errf("invalid cast type %q", typ)
 		}
-		e, err := s.value(m["expr"], scope, expected)
+		e, err := s.value(m["expr"], scope, nil)
 		if err != nil {
 			return filterExpr{}, err
 		}
-		return filterExpr{sql: "CAST(" + e.sql + " AS " + strings.ToUpper(typ) + ")", args: e.args, typeName: typ}, nil
+		return filterExpr{sql: "CAST(" + e.sql + " AS " + strings.ToUpper(typ) + ")", args: e.args, typeName: typ, explicitCast: true}, nil
 	}
 	if rawCoal, ok := obj["coalesce"]; ok {
 		arr, ok := rawCoal.([]any)

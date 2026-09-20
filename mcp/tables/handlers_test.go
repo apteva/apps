@@ -231,6 +231,116 @@ func TestRecursiveFilterAST_CorrelatedAcrossReadOperations(t *testing.T) {
 	}
 }
 
+func TestRecursiveFilterAST_BooleanLiteralCoercedOnce(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "flags",
+		"columns": []any{map[string]any{"name": "active", "type": "bool", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "flags",
+		"rows":  []any{map[string]any{"active": true}, map[string]any{"active": false}},
+	})
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table":         "flags",
+		"include_total": true,
+		"filter_ast": map[string]any{"compare": map[string]any{
+			"op":    "eq",
+			"left":  map[string]any{"column": "active"},
+			"right": map[string]any{"literal": true},
+		}},
+	})
+	if got := out["total"].(int64); got != 1 {
+		t.Fatalf("active=true total=%d, want 1", got)
+	}
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["active"] != true {
+		t.Fatalf("active=true rows=%v", rows)
+	}
+}
+
+func TestRecursiveFilterAST_CastOuterNumericIDToTextUsesIndex(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "companies",
+		"columns": []any{map[string]any{"name": "name", "type": "text"}},
+	})
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name": "contracts",
+		"columns": []any{
+			map[string]any{"name": "commercial_id", "type": "text"},
+			map[string]any{"name": "status", "type": "text"},
+		},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "companies", "rows": []any{map[string]any{"name": "Acme"}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "contracts", "rows": []any{map[string]any{"commercial_id": "1", "status": "active"}},
+	})
+	mustCall(t, app, ctx, "indexes_create", map[string]any{
+		"table": "contracts", "name": "contracts_commercial_id_idx", "columns": []any{"commercial_id"},
+	})
+	filter := map[string]any{"exists": map[string]any{
+		"table": "contracts",
+		"filter": map[string]any{"compare": map[string]any{
+			"op":   "eq",
+			"left": map[string]any{"column": "commercial_id"},
+			"right": map[string]any{"cast": map[string]any{
+				"type": "text", "expr": map[string]any{"outer_column": "id"},
+			}},
+		}},
+	}}
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table": "companies", "filter_ast": filter, "include_total": true,
+	})
+	if got := out["total"].(int64); got != 1 {
+		t.Fatalf("casted correlated filter total=%d, want 1", got)
+	}
+
+	table, err := app.loadTableSchema(ctx, "test-proj", "companies")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clause, args, used, err := app.compileFilter(ctx, "test-proj", table, nil, filter)
+	if err != nil || !used {
+		t.Fatalf("compile filter: used=%v err=%v", used, err)
+	}
+	if !strings.Contains(clause, `"sub0"."commercial_id" = CAST("root"."id" AS TEXT)`) {
+		t.Fatalf("unexpected cast placement: %s", clause)
+	}
+	if strings.Contains(clause, `CAST("sub0"."commercial_id"`) {
+		t.Fatalf("database column was cast: %s", clause)
+	}
+	planRows, err := ctx.AppReadDB().Query(`EXPLAIN QUERY PLAN SELECT * FROM `+quote(table.PhysicalName)+` AS "root" `+clause, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer planRows.Close()
+	foundIndex := false
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := planRows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+		upperDetail := strings.ToUpper(detail)
+		if strings.Contains(upperDetail, "USING") && strings.Contains(upperDetail, "INDEX") && strings.Contains(upperDetail, "COMMERCIAL_ID") {
+			foundIndex = true
+		}
+	}
+	if err := planRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !foundIndex {
+		t.Fatalf("expected correlated lookup to use contracts_commercial_id_idx, plan=%v", details)
+	}
+}
+
 func TestPreparedPlanCache_InvalidatesOnSchemaChange(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
