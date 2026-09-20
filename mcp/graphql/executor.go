@@ -235,7 +235,7 @@ func (a *App) execute(ctx context.Context, project, apiSlug, environment string,
 	executeStart := time.Now()
 	result, err := a.executeStandard(ctx, project, apiSlug, schemaKey, schema, req, op, prepared.doc, policy)
 	timings.Execute = time.Since(executeStart)
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if executionDeadlineExceeded(ctx, deadline) {
 		return executeResult{OperationName: op.Name, OperationType: string(op.Operation), Timings: timings}, &graphqlError{Code: "execution_timeout", Message: "GraphQL execution exceeded its release deadline"}
 	}
 	timings.Source = result.Timings.Source
@@ -296,6 +296,14 @@ func (a *App) bindingsFromRelease(release *apiRelease) *executionBindings {
 func deadlineFromContext(ctx context.Context) time.Time {
 	deadline, _ := ctx.Deadline()
 	return deadline
+}
+
+// Context cancellation and a downstream call can become observable in either
+// order at the deadline boundary. Comparing the clock as well as ctx.Err keeps
+// the public error code deterministic when the source returns just before the
+// context timer goroutine records DeadlineExceeded.
+func executionDeadlineExceeded(ctx context.Context, deadline time.Time) bool {
+	return errors.Is(ctx.Err(), context.DeadlineExceeded) || (!deadline.IsZero() && !time.Now().Before(deadline))
 }
 
 func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultList int) (cost, rows, resolvers int) {

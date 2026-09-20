@@ -79,6 +79,23 @@ func TestCardinalityCostAndDeadlineLimits(t *testing.T) {
 	}
 }
 
+func TestExecutionDeadlineExceededAtClockBoundary(t *testing.T) {
+	active, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if executionDeadlineExceeded(active, time.Now().Add(time.Second)) {
+		t.Fatal("future execution deadline reported as exceeded")
+	}
+	if !executionDeadlineExceeded(active, time.Now().Add(-time.Nanosecond)) {
+		t.Fatal("elapsed execution deadline was not reported as exceeded")
+	}
+
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	if !executionDeadlineExceeded(expired, time.Now().Add(time.Second)) {
+		t.Fatal("context deadline was not reported as exceeded")
+	}
+}
+
 func TestHardenedModuleDecimalNullAndDate(t *testing.T) {
 	decimal := resolverModule{Name: "price", Version: 1, Status: "published", OutputType: "Decimal", NullBehavior: "strict", DecimalPrecision: 8, DecimalScale: 2, RoundingMode: "half_even", Timezone: "UTC", Inputs: map[string]any{"value": "Decimal!"}, Definition: map[string]any{"op": "multiply", "args": []any{map[string]any{"input": "value"}, map[string]any{"const": "1.005"}}}}
 	value, err := (moduleRuntime{}).evaluate(decimal, map[string]any{"value": "10"})
