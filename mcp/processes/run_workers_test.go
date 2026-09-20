@@ -24,7 +24,7 @@ func sequentialSetup(t *testing.T) (*App, *directPlatform, *Process, Run) {
 
 func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 	a, f, p, r := sequentialSetup(t)
-	actor := "agent:7:run-worker"
+	actor := "agent:7:" + stepBy(t, a, r, "research").ThreadID
 	claim := func(key string) map[string]any {
 		t.Helper()
 		s := stepBy(t, a, r, key)
@@ -56,7 +56,7 @@ func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 	}
 	claim("research") // lost claim response is safe to retry
 	finishStep(t, a, p, r, "research", actor, "research", "")
-	if len(f.events) != 2 || f.events[1].ThreadID != "run-worker" {
+	if len(f.events) != 2 || f.events[1].ThreadID != strings.TrimPrefix(actor, "agent:7:") {
 		t.Fatal("next step returned to coordinator", f.events)
 	}
 	if strings.Contains(f.events[1].Message.(string), "Shared procedure") || len(f.events[1].Message.(string)) > 800 {
@@ -81,7 +81,7 @@ func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 		t.Fatal("claimed before approval")
 	}
 	finishStep(t, a, p, r, "review", "operator", "approved", "approved")
-	if len(f.events) != 3 || f.events[2].ThreadID != "run-worker" {
+	if len(f.events) != 3 || f.events[2].ThreadID != strings.TrimPrefix(actor, "agent:7:") {
 		t.Fatal("approval lost run worker")
 	}
 	claim("publish")

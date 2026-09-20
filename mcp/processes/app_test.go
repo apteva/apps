@@ -23,6 +23,7 @@ type fakeTasks struct {
 	loseCreate bool
 	creates    int
 	calls      []string
+	threads    []sdk.ThreadSpawnRequest
 }
 
 func (f *fakeTasks) GetInstance(id int64) (*sdk.PlatformInstance, error) {
@@ -77,6 +78,14 @@ func (f *fakeTasks) CallAppResult(app, tool string, input map[string]any, out an
 	}
 	raw, _ := json.Marshal(map[string]any{"task": task})
 	return json.Unmarshal(raw, out)
+}
+func (f *fakeTasks) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
+	f.threads = append(f.threads, req)
+	accepted := make([]string, 0, len(req.Events))
+	for _, event := range req.Events {
+		accepted = append(accepted, event.ID)
+	}
+	return &sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, Events: sdk.ThreadEventReceipt{Accepted: accepted}}, nil
 }
 func setup(t *testing.T) (*App, *fakeTasks) {
 	t.Helper()

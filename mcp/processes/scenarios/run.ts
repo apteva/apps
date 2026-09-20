@@ -171,7 +171,7 @@ for (const scenario of report.results) {
     if (scenario.scenario === "processes-browser-continuity") {
       check(runs.length === 1 && history.runs.length === 0, "Expected one direct browser run");
       const workers = db.query("SELECT * FROM process_run_workers WHERE run_id=?").all(runs[0].id) as any[];
-      verifySequentialWorker(scenario.tool_calls, runs[0], workers);
+      verifySequentialWorker(scenario.tool_calls, runs[0], workers, false);
       verifyBrowserContinuity(scenario.tool_calls, runs[0], workers, browserFixture!);
       await Bun.write(resolve(outputDir, "browser-evidence.json"), JSON.stringify({visits: browserFixture!.visits, receipts: browserFixture!.receipts}, null, 2));
       browserFixture!.stop();
@@ -183,7 +183,8 @@ for (const scenario of report.results) {
       ].includes(scenario.scenario)
     )
       verifyMultiAgentTrajectory(scenario.tool_calls, runs[0]);
-    if (scenario.scenario === "processes-multi-agent-workflow") verifyStepWorkers(scenario.tool_calls, runs[0]);
+    if (["processes-multi-agent-workflow", "processes-event-trigger-workflow"].includes(scenario.scenario))
+      verifyStepWorkers(scenario.tool_calls, runs[0]);
     if (scenario.scenario === OPERATOR_SCENARIO) {
       check(
         confirmed && !(confirmed instanceof Error),

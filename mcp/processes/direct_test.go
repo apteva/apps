@@ -16,6 +16,22 @@ type directPlatform struct {
 	lose   bool
 }
 
+func (f *directPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.ThreadSpawnResult, error) {
+	f.threads = append(f.threads, req)
+	for _, event := range req.Events {
+		f.events = append(f.events, sdk.AgentEventRequest{AgentID: req.AgentID, ThreadID: req.ThreadID, SourceEventID: event.ID, Message: event.Message})
+	}
+	if f.lose {
+		f.lose = false
+		return nil, errors.New("response lost")
+	}
+	accepted := make([]string, 0, len(req.Events))
+	for _, event := range req.Events {
+		accepted = append(accepted, event.ID)
+	}
+	return &sdk.ThreadSpawnResult{Status: "created", Thread: sdk.ThreadRef{AgentID: req.AgentID, ThreadID: req.ThreadID}, Events: sdk.ThreadEventReceipt{Accepted: accepted}}, nil
+}
+
 func (f *directPlatform) SendTrackedAgentEvent(r sdk.AgentEventRequest) (*sdk.AgentEventReceipt, error) {
 	f.events = append(f.events, r)
 	if f.lose {
