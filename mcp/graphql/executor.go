@@ -320,8 +320,8 @@ func executionDeadlineExceeded(ctx context.Context, deadline time.Time) bool {
 }
 
 func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultList int) (cost, rows, resolvers int) {
-	var walk func(ast.SelectionSet, int)
-	walk = func(set ast.SelectionSet, fanout int) {
+	var walk func(ast.SelectionSet, int, int)
+	walk = func(set ast.SelectionSet, fanout, inheritedListSize int) {
 		if fanout < 1 {
 			fanout = 1
 		}
@@ -331,31 +331,21 @@ func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultLis
 				switch fragment := item.(type) {
 				case *ast.FragmentSpread:
 					if fragment.Definition != nil {
-						walk(fragment.Definition.SelectionSet, fanout)
+						walk(fragment.Definition.SelectionSet, fanout, inheritedListSize)
 					}
 				case *ast.InlineFragment:
-					walk(fragment.SelectionSet, fanout)
+					walk(fragment.SelectionSet, fanout, inheritedListSize)
 				}
 				continue
 			}
 			resolvers += fanout
 			cost += fanout
 			next := fanout
+			childListSize := 0
 			if field.Definition != nil && field.Definition.Type.Elem != nil {
-				size := defaultList
-				args := field.ArgumentMap(vars)
-				firstSelected := false
-				if first := field.Arguments.ForName("first"); first != nil {
-					value, _ := first.Value.Value(vars)
-					if n := moduleInt(value); n > 0 {
-						size = n
-						firstSelected = true
-					}
-				}
-				if !firstSelected {
-					if n := moduleInt(args["limit"]); n > 0 {
-						size = n
-					}
+				size, paginated := fieldPaginationSize(field, vars, defaultList)
+				if inheritedListSize > 0 && !paginated {
+					size = inheritedListSize
 				}
 				if fanout > 1_000_000_001/max(1, size) {
 					next = 1_000_000_001
@@ -363,14 +353,47 @@ func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultLis
 					next *= size
 				}
 				rows = min(1_000_000_001, rows+next)
+			} else if size, paginated := fieldPaginationSize(field, vars, defaultList); paginated {
+				// Connection/page fields put pagination arguments on the object
+				// and return the actual list through rows, nodes, edges, or an
+				// equivalent selected child. Carry the chosen size one level so
+				// that list is costed exactly once.
+				childListSize = size
 			}
-			walk(field.SelectionSet, next)
+			walk(field.SelectionSet, next, childListSize)
 			cost = min(1_000_000_001, cost)
 			resolvers = min(1_000_000_001, resolvers)
 		}
 	}
-	walk(selection, 1)
+	walk(selection, 1, 0)
 	return
+}
+
+func fieldPaginationSize(field *ast.Field, vars map[string]any, defaultList int) (int, bool) {
+	if field == nil || field.Definition == nil {
+		return defaultList, false
+	}
+	supportsFirst := field.Definition.Arguments.ForName("first") != nil
+	supportsLimit := field.Definition.Arguments.ForName("limit") != nil
+	if !supportsFirst && !supportsLimit {
+		return defaultList, false
+	}
+	if first := field.Arguments.ForName("first"); first != nil {
+		value, _ := first.Value.Value(vars)
+		if n := moduleInt(value); n > 0 {
+			return n, true
+		}
+	}
+	if limit := field.Arguments.ForName("limit"); limit != nil {
+		value, _ := limit.Value.Value(vars)
+		if n := moduleInt(value); n > 0 {
+			return n, true
+		}
+	}
+	if n := moduleInt(field.ArgumentMap(vars)["limit"]); n > 0 {
+		return n, true
+	}
+	return defaultList, true
 }
 
 type planCacheEntry struct {

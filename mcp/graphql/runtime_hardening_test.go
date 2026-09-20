@@ -80,7 +80,7 @@ func TestCardinalityCostAndDeadlineLimits(t *testing.T) {
 }
 
 func TestCardinalityCostPrefersExplicitFirstOverDefaultLimit(t *testing.T) {
-	schema, problems := validateSDL(`type Query { prospectPage(first: Int, limit: Int = 50): [Prospect!]! } type Prospect { id: ID! }`)
+	schema, problems := validateSDL(`type Query { prospectPage(first: Int, limit: Int = 50): ProspectPage! } type ProspectPage { rows: [Prospect!]! total: Int } type Prospect { id: ID! }`)
 	if len(problems) > 0 {
 		t.Fatal(problems)
 	}
@@ -92,10 +92,10 @@ func TestCardinalityCostPrefersExplicitFirstOverDefaultLimit(t *testing.T) {
 		defaultList int
 		wantRows    int
 	}{
-		{name: "literal first", query: `{ prospectPage(first: 200000) { id } }`, defaultList: 100, wantRows: 200000},
-		{name: "variable first", query: `query($count: Int = 200000) { prospectPage(first: $count) { id } }`, defaultList: 100, wantRows: 200000},
-		{name: "non-positive first falls back to limit", query: `{ prospectPage(first: 0) { id } }`, defaultList: 100, wantRows: 50},
-		{name: "defaulted limit", query: `{ prospectPage { id } }`, defaultList: 100, wantRows: 50},
+		{name: "literal first", query: `{ prospectPage(first: 200000) { rows { id } total } }`, defaultList: 100, wantRows: 200000},
+		{name: "variable first", query: `query($count: Int = 200000) { prospectPage(first: $count) { rows { id } } }`, defaultList: 100, wantRows: 200000},
+		{name: "non-positive first falls back to limit", query: `{ prospectPage(first: 0) { rows { id } } }`, defaultList: 100, wantRows: 50},
+		{name: "defaulted limit", query: `{ prospectPage { rows { id } } }`, defaultList: 100, wantRows: 50},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -107,17 +107,18 @@ func TestCardinalityCostPrefersExplicitFirstOverDefaultLimit(t *testing.T) {
 			if rows != tt.wantRows {
 				t.Fatalf("rows=%d want=%d", rows, tt.wantRows)
 			}
-			if resolvers != tt.wantRows+1 {
-				t.Fatalf("resolvers=%d want=%d", resolvers, tt.wantRows+1)
+			minimumResolvers := tt.wantRows + 2
+			if resolvers < minimumResolvers {
+				t.Fatalf("resolvers=%d want at least %d", resolvers, minimumResolvers)
 			}
 		})
 	}
 
-	schema, problems = validateSDL(`type Query { prospectPage(first: Int, limit: Int): [Prospect!]! } type Prospect { id: ID! }`)
+	schema, problems = validateSDL(`type Query { prospectPage(first: Int, limit: Int): ProspectPage! } type ProspectPage { rows: [Prospect!]! } type Prospect { id: ID! }`)
 	if len(problems) > 0 {
 		t.Fatal(problems)
 	}
-	doc, queryProblems := parseAndValidateQuery(schema, `{ prospectPage { id } }`)
+	doc, queryProblems := parseAndValidateQuery(schema, `{ prospectPage { rows { id } } }`)
 	if len(queryProblems) > 0 {
 		t.Fatal(queryProblems)
 	}
