@@ -344,8 +344,16 @@ func cardinalityCost(selection ast.SelectionSet, vars map[string]any, defaultLis
 			if field.Definition != nil && field.Definition.Type.Elem != nil {
 				size := defaultList
 				args := field.ArgumentMap(vars)
-				for _, key := range []string{"first", "limit"} {
-					if n := moduleInt(args[key]); n > 0 {
+				firstSelected := false
+				if first := field.Arguments.ForName("first"); first != nil {
+					value, _ := first.Value.Value(vars)
+					if n := moduleInt(value); n > 0 {
+						size = n
+						firstSelected = true
+					}
+				}
+				if !firstSelected {
+					if n := moduleInt(args["limit"]); n > 0 {
 						size = n
 					}
 				}

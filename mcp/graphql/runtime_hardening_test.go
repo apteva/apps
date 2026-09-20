@@ -79,6 +79,54 @@ func TestCardinalityCostAndDeadlineLimits(t *testing.T) {
 	}
 }
 
+func TestCardinalityCostPrefersExplicitFirstOverDefaultLimit(t *testing.T) {
+	schema, problems := validateSDL(`type Query { prospectPage(first: Int, limit: Int = 50): [Prospect!]! } type Prospect { id: ID! }`)
+	if len(problems) > 0 {
+		t.Fatal(problems)
+	}
+
+	tests := []struct {
+		name        string
+		query       string
+		variables   map[string]any
+		defaultList int
+		wantRows    int
+	}{
+		{name: "literal first", query: `{ prospectPage(first: 200000) { id } }`, defaultList: 100, wantRows: 200000},
+		{name: "variable first", query: `query($count: Int = 200000) { prospectPage(first: $count) { id } }`, defaultList: 100, wantRows: 200000},
+		{name: "non-positive first falls back to limit", query: `{ prospectPage(first: 0) { id } }`, defaultList: 100, wantRows: 50},
+		{name: "defaulted limit", query: `{ prospectPage { id } }`, defaultList: 100, wantRows: 50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc, queryProblems := parseAndValidateQuery(schema, tt.query)
+			if len(queryProblems) > 0 {
+				t.Fatal(queryProblems)
+			}
+			_, rows, resolvers := cardinalityCost(doc.Operations[0].SelectionSet, tt.variables, tt.defaultList)
+			if rows != tt.wantRows {
+				t.Fatalf("rows=%d want=%d", rows, tt.wantRows)
+			}
+			if resolvers != tt.wantRows+1 {
+				t.Fatalf("resolvers=%d want=%d", resolvers, tt.wantRows+1)
+			}
+		})
+	}
+
+	schema, problems = validateSDL(`type Query { prospectPage(first: Int, limit: Int): [Prospect!]! } type Prospect { id: ID! }`)
+	if len(problems) > 0 {
+		t.Fatal(problems)
+	}
+	doc, queryProblems := parseAndValidateQuery(schema, `{ prospectPage { id } }`)
+	if len(queryProblems) > 0 {
+		t.Fatal(queryProblems)
+	}
+	_, rows, _ := cardinalityCost(doc.Operations[0].SelectionSet, nil, 100)
+	if rows != 100 {
+		t.Fatalf("rows=%d want release default 100", rows)
+	}
+}
+
 func TestExecutionDeadlineExceededAtClockBoundary(t *testing.T) {
 	active, cancel := context.WithCancel(context.Background())
 	defer cancel()
