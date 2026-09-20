@@ -58,10 +58,14 @@ export function verifyBrowserContinuity(calls: any[], run: any, workers: any[], 
   const uses = calls.filter(c => c.name === "computer_computer_use" && c.ok && c.completed);
   const ids = new Set(uses.map(c => c.args.session_id));
   check(ids.size === 1 && ids.has(closes[0].args.session_id), "Browser session changed across steps");
+  const browserActivity = calls.filter(c =>
+    ["computer_computer_use", "computer_browser_screenshot", "computer_browser_session"].includes(c.name) &&
+    c.ok && c.completed && c.args?.action !== "close"
+  );
   let previous = -1;
   for (const step of run.steps) {
     const completion = calls.findIndex(c => c.name === "processes_step_update" && c.ok && c.completed && c.args.step_id === step.id && c.args.state === "completed");
-    check(uses.some(c => c.thread_id === thread && calls.indexOf(c) > previous && calls.indexOf(c) < completion), "Each step must really use the browser");
+    check(browserActivity.some(c => c.thread_id === thread && calls.indexOf(c) > previous && calls.indexOf(c) < completion), "Each step must really use the browser");
     previous = completion;
   }
   check(calls.indexOf(closes[0]) > calls.findIndex(c => c.name === "processes_step_update" && c.ok && c.args?.step_id === run.steps[1].id && c.args?.state === "completed"), "Browser closed before final step");

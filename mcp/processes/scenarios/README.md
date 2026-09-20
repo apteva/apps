@@ -60,10 +60,10 @@ for connection-backed provider configuration, otherwise server defaults can repl
 ready together; drafting waits for both; review gates simulated publication.
 The verifier checks audit ordering, frozen roles, distinct executor IDs, and
 successful read/completion calls attributed to the assigned agent.
-The fourth fixture enables `setup.app.spawnable` so workers can access Processes,
-and requires successful main-thread spawns plus an authoritative read and
-completion from a distinct worker for every step. Main coordinates; focused
-workers read and complete the assigned steps.
+The fourth fixture enables `setup.app.spawnable` so the Processes app can create
+workers through the platform thread API. Each worker inherits its executor
+agent's spawnable MCP servers, reads the authoritative step, and completes it;
+the model does not need to spawn or assign workers itself.
 
 This is a starter suite. Operator confirmation of a human step is covered by
 `07-operator-confirmation.yaml`. It does not yet cover operator *rejection*, the
@@ -109,7 +109,8 @@ the same signup produced one event record and one completed five-step run.
 Workers receive approval evidence directly in `step_get.dependencies`: ancestor
 IDs, kinds, states, decisions, outputs, and direct-dependency flags. They should
 not need `run_get` or parent confirmation to verify complete approval evidence.
-The worker verifier rejects completion on main and missing worker reads/spawns.
+The worker verifier rejects completion on main, missing worker reads, and any
+model-facing assignment of an app-provisioned worker.
 
 ## Sequential worker benchmark
 
@@ -117,8 +118,9 @@ The worker verifier rejects completion on main and missing worker reads/spawns.
 conversation and notification receipts. This isolates orchestration; it does not
 measure live weather retrieval or external delivery. Use the same CLI, Core,
 server, model and fixture for before/after comparisons. The current verifier
-requires one persisted worker, one successful spawn, ordered claims/completions,
-and exactly one worker `done` after the last step. The unoptimized baseline is
+requires one persisted worker, ordered claims/completions, and exactly one
+worker `done` after the last step. A legacy model-spawn trace remains accepted
+for historical artifacts, but the current path has no model spawn. The unoptimized baseline is
 checked for saved outputs and ordering without the worker-reuse requirement.
 
 Recorded on 2026-09-13 using `openai-codex` / `gpt-5.6-terra`:
@@ -162,7 +164,7 @@ needed; the topology regression used the existing topology-capable CLI binary.
 
 On 2026-09-13, the updated five-step scenario passed with `gpt-6-astra`:
 203 seconds, 40 iterations, 480,809 reported tokens. All five steps completed
-in distinct workers spawned from each assigned agent's main thread; persisted
+in distinct app-provisioned workers with inherited agent MCP scopes; persisted
 state, dependency ordering, approval and worker-read assertions passed. The
 publication worker used dependency evidence without tool discovery or a parent
 clarification. The preceding run stopped at 48 iterations after 242 seconds

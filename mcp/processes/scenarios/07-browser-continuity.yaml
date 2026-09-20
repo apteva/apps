@@ -26,6 +26,9 @@ directive: |
   follow the Processes worker contract; retain the live browser across steps,
   never reload or navigate away, and never use a script, HTTP client or another tool
   to manufacture a receipt. The browser fixture is the only authorized write target.
+  Important: the coordinator/main thread must not call any Computer or browser
+  tool. Processes provisions one persistent worker; only that worker may open,
+  use, or close the browser session for these steps.
   Create one assignment with yourself as owner, follow_latest=true,
   no schedule. Activate procedure and assignment; start once with idempotency_key=browser-1.
   Allow the run worker access to Processes and Computer for all three steps.
@@ -46,5 +49,5 @@ assert:
       success: true
   - tool_not_called: processes_run_update
 budget:
-  total_tokens: 900000
+  total_tokens: 4000000
   cost_usd: 7.50

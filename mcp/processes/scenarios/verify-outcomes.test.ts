@@ -150,14 +150,24 @@ test("worker verification rejects main completion, wrong agent, and missing work
   const { verifyStepWorkers } = await import("./verify-outcomes");
   const run = { steps: [{ id: "s1", key: "publish" }] };
   const calls = [
-    { name: "spawn", agent: "primary", thread_id: "main", ok: true, completed: true, args: { id: "worker" } },
+    { name: "spawn", agent: "primary", thread_id: "main", ok: true, completed: true, args: { id: "worker", paused: "true", tools: "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel" } },
+    { name: "processes_step_assign", agent: "primary", thread_id: "main", ok: true, completed: true, args: { step_id: "s1", thread_id: "worker" } },
     { name: "processes_step_get", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1" } },
+    { name: "worker_fixture_lookup", agent: "primary", thread_id: "worker", ok: true, completed: true, args: {} },
     { name: "processes_step_update", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1", state: "completed" } },
   ];
+  calls[0].args.tools += ",worker_fixture_lookup";
   expect(() => verifyStepWorkers(calls, run)).not.toThrow();
-  expect(() => verifyStepWorkers([calls[0], calls[2]], run)).toThrow("authoritative worker read");
-  expect(() => verifyStepWorkers([calls[0], calls[1], { ...calls[2], thread_id: "main" }], run)).toThrow("not recorded by a worker");
-  expect(() => verifyStepWorkers([{ ...calls[0], agent: "other" }, calls[1], calls[2]], run)).toThrow("missing main spawn");
+  expect(() => verifyStepWorkers([calls[0], calls[1], calls[3], calls[4]], run)).toThrow("ordered spawn, assignment");
+  expect(() => verifyStepWorkers([calls[0], calls[1], calls[2], calls[3], { ...calls[4], thread_id: "main" }], run)).toThrow("not recorded by a worker");
+  expect(() => verifyStepWorkers([{ ...calls[0], agent: "other" }, calls[1], calls[2], calls[3], calls[4]], run)).toThrow("model must not assign");
+  expect(() => verifyStepWorkers([{ ...calls[0], args: { ...calls[0].args, tools: "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel" } }, calls[1], calls[2], calls[3], calls[4]], run)).toThrow("used worker_fixture_lookup without receiving it");
+  const appOwnedCalls = [
+    { name: "processes_step_get", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1" } },
+    { name: "worker_fixture_lookup", agent: "primary", thread_id: "worker", ok: true, completed: true, args: {} },
+    { name: "processes_step_update", agent: "primary", thread_id: "worker", ok: true, completed: true, args: { step_id: "s1", state: "completed" } },
+  ];
+  expect(() => verifyStepWorkers(appOwnedCalls, run)).not.toThrow();
 });
 
 test("sequential verification rejects extra workers, premature done, and missing claims", () => {
@@ -171,12 +181,17 @@ test("sequential verification rejects extra workers, premature done, and missing
   };
   const call = (name: string, args = {}, thread_id = worker.thread_id) => ({ name, args, thread_id, agent: "primary", completed: true, ok: true });
   const calls = [
-    call("spawn", { id: worker.thread_id }, "main"),
     ...run.steps.flatMap(s => [call("processes_step_claim", { step_id: s.id }), call("processes_step_update", { step_id: s.id, state: "completed" })]),
     call("done"),
   ];
   expect(() => verifySequentialWorker(calls, run, [worker])).not.toThrow();
-  expect(() => verifySequentialWorker([...calls, call("spawn", { id: "extra" }, "main")], run, [worker])).toThrow("exactly one main-thread spawn");
+  const legacyCalls = [
+    call("spawn", { id: worker.thread_id }, "main"),
+    ...run.steps.flatMap(s => [call("processes_step_claim", { step_id: s.id }), call("processes_step_update", { step_id: s.id, state: "completed" })]),
+    call("done"),
+  ];
+  expect(() => verifySequentialWorker(legacyCalls, run, [worker])).not.toThrow();
+  expect(() => verifySequentialWorker([...legacyCalls, call("spawn", { id: "extra" }, "main")], run, [worker])).toThrow("app-provisioned worker");
   expect(() => verifySequentialWorker(calls.filter(c => c.name !== "processes_step_claim"), run, [worker])).toThrow("missing ordered claim");
   expect(() => verifySequentialWorker([calls[0], calls.at(-1)!, ...calls.slice(1, -1)], run, [worker])).toThrow("finish once after the final step");
   expect(() => verifySequentialWorker(calls, run, [worker, worker])).toThrow("one persisted run worker");

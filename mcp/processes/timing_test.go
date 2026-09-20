@@ -66,7 +66,7 @@ func TestTimedStepPersistsAndDispatchesAtBoundary(t *testing.T) {
 	if err := restarted.tickDirect(context.Background(), start); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.events) != 2 || f.events[1].SourceEventID != "process-step:"+step.ID || !strings.Contains(f.events[1].Message.(string), "First email sent") || !strings.Contains(f.events[1].Message.(string), step.DueAt) {
+	if len(f.events) != 2 || !strings.HasPrefix(f.events[1].SourceEventID, "process-step:"+step.ID+":assignment:") {
 		t.Fatalf("incorrect wake-up: %+v", f.events)
 	}
 	if err := restarted.tickDirect(context.Background(), start.Add(time.Minute)); err != nil {

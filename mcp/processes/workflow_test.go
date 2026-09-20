@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	sdk "github.com/apteva/app-sdk"
 	"strings"
 	"testing"
@@ -49,9 +50,23 @@ func stepBy(t *testing.T, a *App, r Run, key string) StepRun {
 	t.Fatal("missing step", key)
 	return StepRun{}
 }
+func hasTool(tools []string, want string) bool {
+	for _, tool := range tools {
+		if tool == want {
+			return true
+		}
+	}
+	return false
+}
 func finishStep(t *testing.T, a *App, p *Process, r Run, key, actor, output, decision string) {
 	t.Helper()
 	s := stepBy(t, a, r, key)
+	// Automatic worker provisioning targets the durable worker thread. Tests
+	// that name an agent's default `main` thread mean “the assigned executor”
+	// and should follow the persisted target after provisioning.
+	if strings.HasSuffix(actor, ":main") && s.Executor.Kind == "agent" && s.ThreadID != "" {
+		actor = fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, s.ThreadID)
+	}
 	args := map[string]any{"state": "completed", "output": output}
 	if decision != "" {
 		args["decision"] = decision
@@ -112,6 +127,50 @@ func TestWorkflowHandoffsApprovalAndOutputs(t *testing.T) {
 		t.Fatal("approval audit duplicated")
 	}
 }
+
+func TestIndependentStepAssignmentWakesExistingWorker(t *testing.T) {
+	a, f, p, r := workflowSetup(t)
+	step := stepBy(t, a, r, "research")
+	if len(f.events) != 1 || f.events[0].ThreadID != step.ThreadID || step.ThreadID == "main" {
+		t.Fatalf("ready step was not delivered directly to an app-created worker: %+v step=%+v", f.events, step)
+	}
+	if len(f.threads) != 1 || f.threads[0].MCP != nil {
+		t.Fatalf("worker did not request inherited agent MCP scopes: %+v", f.threads)
+	}
+	for _, required := range strings.Split(processWorkerTools, ",") {
+		if !hasTool(f.threads[0].Tools, required) {
+			t.Fatalf("worker omitted required Processes tool %s: %+v", required, f.threads[0].Tools)
+		}
+	}
+	read, err := a.stepAction(p.ProjectID, "agent:8:"+step.ThreadID, p.ID, r.ID, step.ID, "step_get", nil)
+	if err != nil || read.(map[string]any)["step"].(StepRun).ID != step.ID {
+		t.Fatalf("assigned worker could not read authoritative step: result=%+v err=%v", read, err)
+	}
+	if _, err = a.stepAction(p.ProjectID, "agent:8:"+step.ThreadID, p.ID, r.ID, step.ID, "step_update", map[string]any{"state": "completed", "output": "worker evidence"}); err != nil {
+		t.Fatalf("assigned worker could not complete step: %v", err)
+	}
+	completed := stepBy(t, a, r, "research")
+	if completed.State != "completed" || completed.UpdatedBy != "agent:8:"+step.ThreadID {
+		t.Fatalf("worker completion not attributed: %+v", completed)
+	}
+}
+
+func TestIndependentStepRejectsDefaultThreadCompletion(t *testing.T) {
+	a, _, p, r := workflowSetup(t)
+	step := stepBy(t, a, r, "research")
+	// The first delivery targets the agent's default thread so it can inspect
+	// the step and provision a worker. That thread is not allowed to complete
+	// the business step itself.
+	if _, err := a.stepAction(p.ProjectID, "agent:8:main", p.ID, r.ID, step.ID, "step_update", map[string]any{
+		"state": "completed", "output": "main-thread bypass",
+	}); err == nil || !strings.Contains(err.Error(), "Processes worker") {
+		t.Fatalf("default thread completion was accepted: %v", err)
+	}
+	if got := stepBy(t, a, r, "research"); got.State != "ready" {
+		t.Fatalf("rejected completion changed step state: %+v", got)
+	}
+}
+
 func TestWorkflowRejectPreventsDownstream(t *testing.T) {
 	a, f, p, r := workflowSetup(t)
 	finishStep(t, a, p, r, "research", "agent:8:t", "notes", "")

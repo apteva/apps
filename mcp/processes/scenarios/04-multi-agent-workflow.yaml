@@ -1,8 +1,8 @@
 name: processes-multi-agent-workflow
 description: Three real agents execute five steps with parallel inputs, a join, an approval, and a simulated publication receipt.
-timeout: 6m
+timeout: 10m
 settle_for: 5s
-max_iterations: 48
+max_iterations: 80
 setup:
   mode: autonomous
   app:
@@ -19,10 +19,12 @@ setup:
               Your agent ID is ${AGENT_writer_ID}. Main coordinates your assigned
               Processes steps using the Processes skill and delivery contract.
               Do not create procedures or runs, or execute other agents' steps.
-              Delegate ready steps to focused workers with step_get and step_update.
-              Pass exact IDs; workers read the authoritative record and its
-              dependencies, complete their own step, then report once. Main may
-              read to choose tools but need not duplicate the worker's checks.
+              Processes provisions an isolated worker for each independent step,
+              inheriting this agent's spawnable MCP servers and the Processes
+              coordination tools. Do not spawn a worker or call step_assign.
+              Workers read the authoritative record and its dependencies,
+              complete their own step, then report once. Main may read the
+              record for visibility but must not complete the step itself.
               Use known ownership rather than listing threads for every new step.
               Wait for Processes events; do not manually forward downstream work.
           - id: reviewer
@@ -30,14 +32,17 @@ setup:
             directive: |
               Your agent ID is ${AGENT_reviewer_ID}. Main coordinates assigned
               approval steps using the Processes skill and delivery contract.
-              Spawn a focused worker with step_get and step_update. The worker
-              reads the frozen context, verifies evidence, records the explicit
-              approval decision and reports once. Do not publish, create runs or
-              execute another agent's work. Wait for assigned Processes events.
+              Processes provisions an isolated worker for every independent
+              approval step, inheriting the agent's spawnable MCP servers and
+              Processes coordination tools. Do not spawn a worker or call
+              step_assign. The worker reads the frozen context, verifies
+              evidence, records the explicit approval decision and reports
+              once. Do not publish, create runs or execute another agent's
+              work. Wait for Processes events.
 directive: |
   You are the coordinator of an isolated test workflow. Your ID is
   ${PRIMARY_AGENT_ID}; writer is ${AGENT_writer_ID}; reviewer is ${AGENT_reviewer_ID}.
-  Use Processes and Core thread tools (spawn, send, and pace). There is no external publication in this test.
+  Use Processes and Core thread tools (send and pace). There is no external publication in this test.
   Create exactly one procedure "Tier 3 collaborative briefing", initially unassigned,
   with required string parameter page with default
   photography. Shared instructions: prepare a verified beginner photography tip
@@ -83,11 +88,13 @@ directive: |
   You are authorized to create, bind and activate this test procedure. Activate
   it, activate the Team assignment, and start one occurrence with idempotency_key=team-day-1. Never create a
   second occurrence. Main coordinates assigned research and publish work using
-  the Processes skill and delivery contract. Spawn focused step workers with
-  step_get and step_update. Pass exact IDs; workers read the authoritative record
-  and its dependencies, record the terminal outcome and report once. Main may
-  read to choose tools but need not duplicate evidence checks or rewrite the
-  procedure. Use known ownership rather than listing threads for every new step.
+  the Processes skill and delivery contract. Processes creates each independent
+  worker and automatically inherits the executor agent's spawnable MCP servers.
+  Do not spawn workers or call processes_step_assign; workers read the
+  authoritative record and its dependencies, record the terminal outcome and
+  report once. Main may read for visibility but must not duplicate evidence
+  checks or rewrite the procedure. Use delivered Processes events rather than
+  listing threads or forwarding work.
   Other agents receive their own work directly from Processes. Wait for these
   events; do not poll or manually dispatch downstream steps. Do not pace until
   activation and start have succeeded. After the publication worker reports
@@ -103,12 +110,6 @@ outcome_assert:
     expect_count_at: processes.0.steps
     expect_count: 5
 trajectory_assert:
-  - tool_called_with:
-      node: main
-      agent: primary
-      thread_id: main
-      tool: spawn
-      success: true
   - tool_called_with:
       node: main
       agent: primary

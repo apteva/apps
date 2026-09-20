@@ -17,6 +17,14 @@ and the terminal outcome with `run_update` or `step_update`. Completion requires
 concrete output and evidence. Approval steps require an explicit approved or
 rejected decision.
 
+For an agent step, Processes provisions an isolated worker through the platform
+thread API. The worker receives the Processes coordination tools and inherits
+the executor agent's spawnable MCP servers automatically, using the same
+capability-inheritance path as Conversations. The worker reads the authoritative
+step before any domain action and reports milestones and the terminal outcome
+with `step_update`. Agents do not spawn workers or call `step_assign`; worker
+creation, ownership, and the authoritative wake are app-owned and idempotent.
+
 Processes is the sole execution and history system. Do not create a separate
 task, forward work manually, or poll another app for step status. For structured
 runs, wait for the Process event that delivers the next ready step after its
