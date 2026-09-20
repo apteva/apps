@@ -337,11 +337,16 @@ func upsertResolver(db *sql.DB, project, parentType, fieldName, operation string
 	}
 	if source.Kind == "tables" {
 		merged := mergeMaps(source.Config, config)
-		if err := validateTableRelation(operation, merged); err != nil {
-			return nil, err
-		}
 		sources, err := listSources(db, project)
 		if err != nil {
+			return nil, err
+		}
+		if operation == aggregatePipelineOperation {
+			if _, err := validateAggregatePipeline(operation, merged, sources, source.ID); err != nil {
+				return nil, err
+			}
+		}
+		if err := validateTableRelation(operation, merged); err != nil {
 			return nil, err
 		}
 		if err := validateRelationFilter(operation, merged, sources); err != nil {

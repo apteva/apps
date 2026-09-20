@@ -215,6 +215,15 @@ func getSourceForAPI(db *sql.DB, project, apiSlug string, id int64, name string)
 }
 
 func upsertResolverForAPI(db *sql.DB, project, apiSlug, parentType, fieldName, operation string, sourceID int64, config map[string]any) (*resolverRecord, error) {
+	if operation == aggregatePipelineOperation {
+		policy, err := getSecurity(db, project, apiSlug)
+		if err != nil {
+			return nil, err
+		}
+		if len(policy.RowFilters[parentType+"."+fieldName]) > 0 {
+			return nil, invalid("aggregate_pipeline cannot be combined with automatic row_filters; bind verified $identity parameters in its fixed SQL")
+		}
+	}
 	return upsertResolver(db, storageProject(project, apiSlug), parentType, fieldName, operation, sourceID, config)
 }
 

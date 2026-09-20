@@ -106,6 +106,11 @@ func applyTablesProjection(p gql.ResolveParams, state *standardRequest, operatio
 		if resolved {
 			if source, found := state.bindings.sources[resolver.SourceID]; found && source.Kind == "tables" {
 				childConfig := mergeMaps(source.Config, resolver.Config)
+				if resolver.Operation == aggregatePipelineOperation {
+					for _, column := range aggregatePipelineParentDependencies(childConfig) {
+						columns[column] = true
+					}
+				}
 				if relation, ok := childConfig["relation"].(map[string]any); ok {
 					if parentKey, ok := relation["parent_key"].(string); ok && graphqlName(parentKey) {
 						columns[parentKey] = true

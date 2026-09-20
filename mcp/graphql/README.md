@@ -434,6 +434,37 @@ fields and metric names in your schema; GraphQL itself does not standardize
 aggregation field names. Aggregate queries return native aggregate rows, while
 the `count` operation returns the scalar count.
 
+For a server-defined multi-table aggregation, use the separate
+`aggregate_pipeline` operation. This does not add syntax to GraphQL: clients
+still select an ordinary typed field. The immutable resolver configuration
+declares active Tables sources, one read-only `SELECT`/`WITH` query using
+`{table_name}` placeholders, and positional parameters derived from coerced
+`$args`, `$parent`, verified `$identity`, or fixed literals:
+
+```json
+{
+  "version": 1,
+  "engine": "tables_query",
+  "sources": ["prospects", "calls", "sales"],
+  "sql": "SELECT p.centre_id, COUNT(*) AS total FROM {prospects} p LEFT JOIN {calls} c ON c.prospect_id=p.id WHERE p.centre_id=? GROUP BY p.centre_id",
+  "params": [
+    {"from": "$identity.claim.centre_id", "type": "string", "required": true}
+  ],
+  "result": "rows",
+  "max_rows": 100,
+  "on_truncated": "error"
+}
+```
+
+`result` is `rows`, `single`, or `envelope`. Truncation fails closed by
+default. SQL, identifiers, source names, and ordering can never come from the
+client. Automatic `row_filters` and pre-scoped Tables sources are rejected for
+pipelines because silently applying them outside the fixed SQL would be
+unsafe; put authorization predicates directly in fixed SQL and bind only
+verified `$identity.*` values. Each pipeline is one Tables call, sibling
+pipelines share the existing batch transport, and Tables executes joins,
+window functions, grouping, and conditional metrics in SQLite.
+
 Regression tests exercise real Tables grouped/filtered and per-parent metrics
 against direct native results; Database adapter forwarding/result mapping;
 mixed Tables/Database/HTTP/Function queries; pagination; API/project/environment

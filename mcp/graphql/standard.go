@@ -340,20 +340,35 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 	}
 	config := mergeMaps(source.Config, r.Config)
 	if source.Kind == "tables" {
+		if r.Operation == aggregatePipelineOperation {
+			if len(state.policy.RowFilters[fieldKey]) > 0 {
+				return nil, resolverError{invalid("aggregate_pipeline cannot be combined with automatic row_filters")}
+			}
+			sources := make([]sourceRecord, 0, len(state.bindings.sources))
+			for _, candidate := range state.bindings.sources {
+				sources = append(sources, candidate)
+			}
+			if _, err := validateAggregatePipeline(r.Operation, config, sources, source.ID); err != nil {
+				return nil, resolverError{err}
+			}
+		}
 		if err := validateTableRelation(r.Operation, config); err != nil {
 			return nil, resolverError{err}
 		}
-		mandatory, err := identityWhere(p.Context, state.policy, fieldKey)
-		if err != nil {
-			return nil, resolverError{err}
+		if r.Operation != aggregatePipelineOperation {
+			mandatory, err := identityWhere(p.Context, state.policy, fieldKey)
+			if err != nil {
+				return nil, resolverError{err}
+			}
+			if len(mandatory) > 0 {
+				config["identity_where"] = mandatory
+			}
+			applyTablesEnvelopeSelection(p, r.Operation, config)
+			applyTablesProjection(p, state, r.Operation, config)
 		}
-		if len(mandatory) > 0 {
-			config["identity_where"] = mandatory
-		}
-		applyTablesEnvelopeSelection(p, r.Operation, config)
-		applyTablesProjection(p, state, r.Operation, config)
 	}
 	config["_project_id"] = state.project
+	config["_source_id"] = source.ID
 	config["graphql_args"] = p.Args
 	config["parent"] = p.Source
 	call := func() (any, error) {
@@ -398,6 +413,32 @@ func (a *App) standardResolve(p gql.ResolveParams) (any, error) {
 		return call()
 	}
 	if source.Kind == "tables" {
+		if r.Operation == aggregatePipelineOperation {
+			sources := make([]sourceRecord, 0, len(state.bindings.sources))
+			for _, candidate := range state.bindings.sources {
+				sources = append(sources, candidate)
+			}
+			plan, err := validateAggregatePipeline(r.Operation, config, sources, source.ID)
+			if err != nil {
+				return nil, resolverError{err}
+			}
+			input, err := buildAggregatePipelineInput(p.Context, plan, p.Args, p.Source, state.project)
+			if err != nil {
+				return nil, resolverError{err}
+			}
+			baseRead := state.loader.load("tables_query", input, r.Operation)
+			read := trackResolverError(state, p, func() (any, error) {
+				value, err := baseRead()
+				if err != nil {
+					return nil, err
+				}
+				return transformAggregatePipelineResult(plan, value)
+			})
+			if state.synchronous {
+				return read()
+			}
+			return read, nil
+		}
 		var input map[string]any
 		var err error
 		if hasRelationFilter(config) {

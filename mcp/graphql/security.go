@@ -249,6 +249,9 @@ func validateRowFilterTargets(db *sql.DB, project, api string, p securityPolicy)
 		if source == nil || source.Kind != "tables" {
 			return invalid("row filter target %s must use a Tables source", field)
 		}
+		if resolver.Operation == aggregatePipelineOperation {
+			return invalid("row filter target %s cannot use aggregate_pipeline; bind verified $identity parameters in its fixed SQL", field)
+		}
 	}
 	return nil
 }

@@ -132,7 +132,7 @@ func releaseChecksum(schema *schemaRecord, sources []sourceRecord, resolvers []r
 	return hex.EncodeToString(hash[:])
 }
 
-func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, resolvers []resolverRecord, policy securityPolicy, modules []resolverModule) error {
+func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, resolvers []resolverRecord, policy securityPolicy, limits releaseLimits, modules []resolverModule) error {
 	schema, problems := validateSDL(schemaRow.SDL)
 	if len(problems) > 0 {
 		return invalid("schema has validation errors")
@@ -167,6 +167,18 @@ func validateReleaseSnapshot(schemaRow *schemaRecord, sources []sourceRecord, re
 		}
 		if source.Kind == "tables" {
 			merged := mergeMaps(source.Config, resolver.Config)
+			if resolver.Operation == aggregatePipelineOperation {
+				plan, err := validateAggregatePipeline(resolver.Operation, merged, sources, source.ID)
+				if err != nil {
+					return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
+				}
+				if plan.MaxRows > limits.MaxRows {
+					return invalid("resolver %s.%s: aggregate_pipeline max_rows %d exceeds release max_rows %d", resolver.ParentType, resolver.FieldName, plan.MaxRows, limits.MaxRows)
+				}
+				if len(policy.RowFilters[resolver.ParentType+"."+resolver.FieldName]) > 0 {
+					return invalid("resolver %s.%s: aggregate_pipeline cannot be combined with automatic row_filters", resolver.ParentType, resolver.FieldName)
+				}
+			}
 			if err := validateRelationFilter(resolver.Operation, merged, sources); err != nil {
 				return invalid("resolver %s.%s: %s", resolver.ParentType, resolver.FieldName, err)
 			}
@@ -224,7 +236,7 @@ func publishAPIRelease(db *sql.DB, project, api, environment string, schemaVersi
 	sort.Slice(modules, func(i, j int) bool {
 		return moduleKey(modules[i].Name, modules[i].Version) < moduleKey(modules[j].Name, modules[j].Version)
 	})
-	if err := validateReleaseSnapshot(schemaRow, sources, resolvers, policy, modules); err != nil {
+	if err := validateReleaseSnapshot(schemaRow, sources, resolvers, policy, limits, modules); err != nil {
 		return nil, err
 	}
 	encodedSources, _ := json.Marshal(sources)

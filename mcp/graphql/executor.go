@@ -790,6 +790,7 @@ func (a *App) resolveField(ctx context.Context, project, apiSlug string, resolve
 	args := field.ArgumentMap(vars)
 	config := mergeMaps(source.Config, resolver.Config)
 	config["_project_id"] = project
+	config["_source_id"] = source.ID
 	config["graphql_args"] = args
 	if parent != nil {
 		config["parent"] = parent
@@ -865,6 +866,36 @@ func (a *App) callDatabase(ctx context.Context, operation string, config map[str
 }
 
 func (a *App) callTables(ctx context.Context, operation string, config map[string]any) (any, error) {
+	if operation == aggregatePipelineOperation {
+		bindings := bindingsFromContext(ctx)
+		if bindings == nil {
+			return nil, internal("aggregate pipeline execution bindings are unavailable")
+		}
+		sources := make([]sourceRecord, 0, len(bindings.sources))
+		currentID, _ := config["_source_id"].(int64)
+		if currentID == 0 {
+			currentID = int64(intValue(config["_source_id"]))
+		}
+		for id, source := range bindings.sources {
+			sources = append(sources, source)
+			if currentID == 0 && source.Config["table"] == config["table"] {
+				currentID = id
+			}
+		}
+		plan, err := validateAggregatePipeline(operation, config, sources, currentID)
+		if err != nil {
+			return nil, err
+		}
+		input, err := buildAggregatePipelineInput(ctx, plan, resolverArgs(config), config["parent"], config["_project_id"].(string))
+		if err != nil {
+			return nil, err
+		}
+		var out any
+		if err := sdk.CallAppResultContext(ctx, a.ctx.WithProject(config["_project_id"].(string)).PlatformAPI(), "tables", "tables_query", input, &out); err != nil {
+			return nil, err
+		}
+		return transformAggregatePipelineResult(plan, out)
+	}
 	if hasRelationFilter(config) {
 		return a.callTablesRelationFilter(ctx, operation, config)
 	}
