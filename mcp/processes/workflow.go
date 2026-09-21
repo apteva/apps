@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -267,6 +268,63 @@ func stepUsesTasks(r Run, s StepRun) bool {
 // dispatched steps are already assigned and must use step_get/step_update.
 const processWorkerTools = "processes_step_get,processes_step_update,processes_run_get,processes_run_update,processes_run_cancel"
 const processSequentialWorkerTools = "processes_step_claim," + processWorkerTools
+const staleStepReminderAfter = 10 * time.Minute
+const staleStepReminderCooldown = 10 * time.Minute
+
+// Workers can lose the procedure id while retaining the durable run/step ids.
+// Resolve it in Processes, scoped to the caller's project, and tolerate an
+// incorrect guessed process_id when the run/step identifies one process.
+func (a *App) resolveWorkerProcess(project, supplied, runID, stepID string) (string, error) {
+	if strings.TrimSpace(runID) == "" {
+		return "", errors.New("run_id is required")
+	}
+	query := `SELECT p.id FROM processes p JOIN process_runs r ON r.process_id=p.id WHERE p.project_id=? AND r.id=?`
+	args := []any{project, runID}
+	if strings.TrimSpace(stepID) != "" {
+		query += ` AND EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.id=?)`
+		args = append(args, stepID)
+	}
+	var process string
+	if err := a.db.QueryRow(query, args...).Scan(&process); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errNotFound
+		}
+		return "", err
+	}
+	return process, nil
+}
+
+func (a *App) staleStepReminder(p *Process, r Run, s StepRun, all []StepRun, now time.Time) error {
+	if sequentialAgent(r, all) == 0 || s.State != "running" || s.Executor.Kind != "agent" || s.ThreadID == "" || s.DeliveredAt == "" {
+		return nil
+	}
+	updated, err := time.Parse(time.RFC3339Nano, s.UpdatedAt)
+	if err != nil || now.Sub(updated) < staleStepReminderAfter {
+		return nil
+	}
+	if next, e := time.Parse(time.RFC3339Nano, s.NextAttemptAt); e == nil && next.After(now) {
+		return nil
+	}
+	worker, err := a.runWorker(r.ID, s.Executor.AgentID)
+	if err != nil || worker == "" || worker != s.ThreadID {
+		return err
+	}
+	message := fmt.Sprintf("Processes reminder: this sequential step appears stale. Re-read processes_step_get using process_id=%s, run_id=%s, step_id=%s and inspect existing external records before repeating any writes. Then call processes_step_update with the current milestone or terminal outcome before sleeping or finishing. Keep using this same worker thread.", p.ID, r.ID, s.ID)
+	eventID := fmt.Sprintf("process-step:%s:reminder:%d", s.ID, now.UnixNano())
+	api := a.ctx.WithProject(s.ProjectID).AgentEventsAPI()
+	if api == nil {
+		return errors.New("tracked delivery unavailable")
+	}
+	receipt, err := api.SendTrackedAgentEvent(sdk.AgentEventRequest{AgentID: s.Executor.AgentID, ThreadID: worker, SourceEventID: eventID, Message: message})
+	if err != nil {
+		return err
+	}
+	if receipt == nil || (!receipt.Accepted && !receipt.Duplicate) {
+		return errors.New("stale-step reminder not accepted")
+	}
+	_, err = a.db.Exec(`UPDATE process_step_runs SET next_attempt_at=?,delivery_warning='' WHERE id=?`, now.Add(staleStepReminderCooldown).UTC().Format(time.RFC3339Nano), s.ID)
+	return err
+}
 
 func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 	if s.Origin != "process_step" {
@@ -416,33 +474,16 @@ func deliveryEventID(step StepRun, worker string) string {
 	return "process-step:" + step.ID + ":assignment:" + worker
 }
 
-func (a *App) spawnProcessThread(project string, request sdk.ThreadSpawnRequest, eventID string) error {
+func (a *App) spawnProcessThread(project string, request sdk.ThreadSpawnRequest) error {
 	threads := a.ctx.WithProject(project).ThreadAPI()
 	if threads == nil {
 		return errors.New("platform thread API unavailable")
 	}
-	result, err := threads.SpawnThread(request)
+	_, err := threads.SpawnThread(request)
 	if err != nil {
 		return err
 	}
-	for _, id := range result.Events.Accepted {
-		if id == eventID {
-			return nil
-		}
-	}
-	for _, id := range result.Events.Duplicates {
-		if id == eventID {
-			return nil
-		}
-	}
-	return errors.New("platform did not acknowledge the worker event")
-}
-
-func (a *App) markStepWorkerDelivered(s *StepRun, eventID string) error {
-	s.DeliveryEventID = eventID
-	s.DeliveredAt = timestamp()
-	_, err := a.db.Exec(`UPDATE process_step_runs SET delivery_event_id=?,delivered_at=?,execution_id='',delivery_warning='',next_attempt_at='',delivery_attempts=delivery_attempts+1 WHERE id=?`, eventID, s.DeliveredAt, s.ID)
-	return err
+	return nil
 }
 
 func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {
@@ -460,20 +501,19 @@ func (a *App) spawnIndependentWorker(p *Process, r *Run, s *StepRun, all []StepR
 	}
 	s.ThreadID, s.DeliveryEventID, s.DeliveredAt = worker, eventID, ""
 	request := sdk.ThreadSpawnRequest{
-		AgentID: s.Executor.AgentID,
-		ThreadID: worker,
-		ProjectID: p.ProjectID,
+		AgentID:         s.Executor.AgentID,
+		ThreadID:        worker,
+		ProjectID:       p.ProjectID,
 		DirectiveSuffix: message,
-		Tools: processWorkerToolList(false),
+		Tools:           processWorkerToolList(false),
 		// A nil MCP slice deliberately means “inherit all spawnable MCP
 		// servers attached to this agent”; the server filters no_spawn scopes.
 		MCP: nil,
-		Events: []sdk.ThreadEvent{{ID: eventID, Message: message}},
 	}
-	if err := a.spawnProcessThread(p.ProjectID, request, eventID); err != nil {
+	if err := a.spawnProcessThread(p.ProjectID, request); err != nil {
 		return err
 	}
-	return a.markStepWorkerDelivered(s, eventID)
+	return a.deliverStepToThread(p, *r, s, all)
 }
 
 func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRun) error {
@@ -488,25 +528,23 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	workerStep := *s
 	workerStep.ThreadID = worker
 	workerStep.DeliveryEventID = eventID
-	message := a.stepContext(p, *r, workerStep, all)
 	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across the run. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Call done only after the returned worker.done is true.", r.ID)
 	if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=?,delivered_at='',execution_id='',delivery_warning='',next_attempt_at='' WHERE id=?`, worker, eventID, s.ID); err != nil {
 		return err
 	}
 	s.ThreadID, s.DeliveryEventID, s.DeliveredAt = worker, eventID, ""
 	request := sdk.ThreadSpawnRequest{
-		AgentID: s.Executor.AgentID,
-		ThreadID: worker,
-		ProjectID: p.ProjectID,
+		AgentID:         s.Executor.AgentID,
+		ThreadID:        worker,
+		ProjectID:       p.ProjectID,
 		DirectiveSuffix: directive,
-		Tools: processWorkerToolList(true),
-		MCP: nil,
-		Events: []sdk.ThreadEvent{{ID: eventID, Message: message}},
+		Tools:           processWorkerToolList(true),
+		MCP:             nil,
 	}
-	if err := a.spawnProcessThread(p.ProjectID, request, eventID); err != nil {
+	if err := a.spawnProcessThread(p.ProjectID, request); err != nil {
 		return err
 	}
-	return a.markStepWorkerDelivered(s, eventID)
+	return a.deliverStepToThread(p, *r, s, all)
 }
 
 // assignStep mirrors Tasks assignment semantics: Processes stores the durable
@@ -678,6 +716,11 @@ func (a *App) reconcileWorkflowAt(p *Process, r *Run, now time.Time) error {
 				return e
 			}
 		}
+		if s.State == "running" {
+			if e = a.staleStepReminder(p, *r, *s, all, now); e != nil {
+				failures = append(failures, e)
+			}
+		}
 		if s.State == "ready" || s.State == "running" || s.State == "waiting" || s.State == "blocked" {
 			if e = a.deliverStep(p, *r, s, all); e != nil {
 				failures = append(failures, e)
@@ -803,7 +846,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		return nil, e
 	}
 	if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
-		result := map[string]any{"run": map[string]any{"id": r.ID, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": terminal(r.State)}}
+		result := map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID, "run": map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": terminal(r.State)}}
 		if action == "step_claim" {
 			result["instructions"] = d.Instructions
 			result["required_inputs"] = d.RequiredInputs
@@ -815,7 +858,7 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		}
 		return result, nil
 	}
-	return map[string]any{"run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "dependencies": dependencyEvidence(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
+	return map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID, "run": r, "step": s, "dependency_outputs": dependencyOutputs(s, all), "dependencies": dependencyEvidence(s, all), "parameters": r.Binding.Parameters, "definition": d}, nil
 }
 
 func (a *App) stepLifecycle(event sdk.Event, l *sdk.AgentEventLifecycle) error {

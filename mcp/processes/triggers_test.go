@@ -263,7 +263,7 @@ func TestTriggerAgentDeliveryFailureRecoversWithoutAnotherRun(t *testing.T) {
 		t.Fatal(e)
 	}
 	runs, _ := a.dispatches(p.ID)
-	if len(runs) != 1 || len(f.events) != 2 || f.events[0].SourceEventID != f.events[1].SourceEventID {
+	if len(runs) != 1 || len(f.threads) != 2 || f.threads[0].ThreadID != f.threads[1].ThreadID || len(f.events) != 1 {
 		t.Fatal("retry changed run or event")
 	}
 }

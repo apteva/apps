@@ -43,9 +43,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		name := name
 		props := map[string]any{}
 		required := []string{}
+		workerCoordination := name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
 		if name != "list" && name != "create" {
 			props["process_id"] = textField("Process ID")
-			required = append(required, "process_id")
+			if !workerCoordination {
+				required = append(required, "process_id")
+			}
 		}
 		switch name {
 		case "assignment_get", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive":
@@ -131,6 +134,13 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.executeTrigger(project, action, args)
 	}
 	id := str(args, "process_id")
+	if action == "run_get" || action == "run_update" || action == "step_get" || action == "step_claim" || action == "step_update" {
+		resolved, err := a.resolveWorkerProcess(project, id, str(args, "run_id"), str(args, "step_id"))
+		if err != nil {
+			return nil, err
+		}
+		id = resolved
+	}
 	switch action {
 	case "list":
 		items, err := a.list(project)

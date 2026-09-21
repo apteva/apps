@@ -153,6 +153,9 @@ func TestIndependentStepAssignmentWakesExistingWorker(t *testing.T) {
 	if completed.State != "completed" || completed.UpdatedBy != "agent:8:"+step.ThreadID {
 		t.Fatalf("worker completion not attributed: %+v", completed)
 	}
+	if completed.ExecutionID == "" {
+		t.Fatalf("worker delivery did not retain tracked execution id: %+v", completed)
+	}
 }
 
 func TestIndependentStepRejectsDefaultThreadCompletion(t *testing.T) {
@@ -280,8 +283,8 @@ func TestWorkflowLostDeliveryAndFrozenRoles(t *testing.T) {
 	if e := restarted.tickDirect(context.Background(), time.Now()); e != nil {
 		t.Fatal(e)
 	}
-	if len(f.events) != 2 || f.events[0].SourceEventID != f.events[1].SourceEventID {
-		t.Fatal("retry identity changed")
+	if len(f.threads) != 1 || len(f.events) != 1 || f.events[0].ThreadID != f.threads[0].ThreadID || f.events[0].SourceEventID != s.DeliveryEventID {
+		t.Fatalf("retry identity changed: threads=%+v events=%+v step=%+v", f.threads, f.events, s)
 	}
 	x, e := a.assignmentStatus(p.ProjectID, p.ID, r.AssignmentID, "paused")
 	if e != nil {

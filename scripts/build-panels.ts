@@ -49,6 +49,11 @@ async function findPanels(): Promise<string[]> {
 }
 
 async function main() {
+  // Panels are shipped as production ESM and run against the dashboard's
+  // external React runtime. Without this explicit mode Bun emits
+  // `react/jsx-dev-runtime`/jsxDEV imports, which the host runtime does not
+  // expose and which makes dynamic panel/widget imports crash at startup.
+  process.env.NODE_ENV = "production";
   const panels = await findPanels();
   if (panels.length === 0) {
     console.log("no panels found under mcp/*/ui/");
