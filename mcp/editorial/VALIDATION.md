@@ -1,5 +1,14 @@
 # Validation
 
+## v0.4.3 native calendar widget
+
+The existing `editorial-calendar` Home contribution now advertises an `apteva-native-surface/v1` renderer. Its native presentation is a project-scoped agenda, not a month grid, and binds the shared date, brand, release and horizon settings to a dedicated `GET /mobile/calendar-summary` source. The endpoint returns stable native row IDs, normalized timestamps, display-ready detail and brand text, and a non-nil `events` array. It derives project scope from the pinned app context or trusted gateway header and ignores caller-controlled `project_id` query parameters.
+
+Regression coverage parses and validates the strict JSON surface, matches it to the manifest descriptor, checks every settings binding and the empty state, and exercises project/brand/date/release/horizon/result filters, cross-project isolation, empty arrays, timestamp normalization, truncation and invalid booleans. The app-sdk pin advances from v0.82.0 to v0.85.0, verified as the newest published tag by ancestry on 2026-09-21.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, and a standalone build passed.
+- All 14 browser-widget tests and the host React import-surface verifier passed unchanged.
+
 ## v0.4.2 agent guidance
 
 The live MCP schemas now distinguish project-configured content workflow statuses from fixed release statuses, publish the fixed approval and release-status enums, explain create defaults, and state that approved items require a reviewer. Validation errors include the project's allowed values and default, with a specific release-status hint when a release value such as `planned` is mistakenly supplied as an item status. The settings response and stored data are unchanged, and approval invalidation remains intact.
