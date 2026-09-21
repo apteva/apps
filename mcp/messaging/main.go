@@ -65,7 +65,7 @@ const (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.49
+version: 0.13.50
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
@@ -180,6 +180,9 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       refresh_topics: [message.sent, message.received, message.event]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/messages.json
       settings_schema:
         type: object
         properties:
@@ -322,6 +325,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodPost, Pattern: "/webhooks/twilio-status", Handler: a.handleTwilioStatusWebhook, NoAuth: true},
 		{Pattern: "/messages", Handler: a.handleMessagesList},
 		{Pattern: "/messages/", Handler: a.handleMessageItem},
+		{Method: http.MethodGet, Pattern: "/mobile/conversations", Handler: a.handleMobileConversations},
 		{Pattern: "/templates", Handler: a.handleTemplatesList},
 		{Pattern: "/inbound-routes", Handler: a.handleInboundRoutesList},
 		{Pattern: "/suppressions", Handler: a.handleSuppressionsList},

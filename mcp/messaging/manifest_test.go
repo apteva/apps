@@ -29,6 +29,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if widget.Name != "messages" || widget.Entry != "/ui/MessagingWidget.mjs" {
 		t.Fatalf("unexpected messaging widget: %+v", widget)
 	}
+	if widget.Native == nil || widget.Native.Schema != sdk.NativeSurfaceSchemaCurrent || widget.Native.Entry != "/ui/surfaces/messages.json" {
+		t.Fatalf("messaging native widget is not advertised: %+v", widget.Native)
+	}
 }
 
 func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
