@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,8 +14,10 @@ import (
 const (
 	mediaSearchDefaultLimit     = 20
 	mediaSearchMaxLimit         = 100
+	mediaSearchFullDefaultLimit = 5
+	mediaSearchFullMaxLimit     = 10
 	mediaSearchMaxResponseBytes = 64 * 1024
-	mediaSearchCursorVersion    = "v1"
+	mediaSearchCursorVersion    = "v2"
 )
 
 // MediaSearchRow is deliberately much smaller than MediaResponseRow. Search is
@@ -22,15 +25,25 @@ const (
 // internals, descriptions, and every keyframe out of this shape prevents broad
 // catalog searches from consuming an agent's context window.
 type MediaSearchRow struct {
-	FileID     string                `json:"file_id"`
-	Filename   string                `json:"filename,omitempty"`
-	Title      string                `json:"title,omitempty"`
-	MediaType  string                `json:"type"`
-	DurationMs int64                 `json:"duration_ms,omitempty"`
-	Width      int                   `json:"width,omitempty"`
-	Height     int                   `json:"height,omitempty"`
-	Folder     string                `json:"folder,omitempty"`
-	Thumbnail  *MediaSearchThumbnail `json:"thumbnail,omitempty"`
+	FileID                     string                `json:"file_id"`
+	Filename                   string                `json:"filename,omitempty"`
+	Title                      string                `json:"title,omitempty"`
+	MediaType                  string                `json:"type"`
+	DurationMs                 int64                 `json:"duration_ms,omitempty"`
+	Width                      int                   `json:"width,omitempty"`
+	Height                     int                   `json:"height,omitempty"`
+	Folder                     string                `json:"folder,omitempty"`
+	Thumbnail                  *MediaSearchThumbnail `json:"thumbnail,omitempty"`
+	Site                       string                `json:"site,omitempty"`
+	Channel                    string                `json:"channel,omitempty"`
+	RecordingDate              string                `json:"recording_date,omitempty"`
+	AudienceRating             string                `json:"audience_rating,omitempty"`
+	CreatedAt                  string                `json:"created_at,omitempty"`
+	UpdatedAt                  string                `json:"updated_at,omitempty"`
+	ProbeStatus                string                `json:"probe_status,omitempty"`
+	TranscriptStatus           string                `json:"transcript_status,omitempty"`
+	BasicReady                 bool                  `json:"basic_ready"`
+	RequiredDerivativesPresent bool                  `json:"required_derivatives_present"`
 }
 
 type MediaSearchThumbnail struct {
@@ -131,6 +144,9 @@ func mediaSearchQueryEcho(f SearchFilters) map[string]any {
 		query["metadata_filters"] = filters
 	}
 	putString("order_by", f.OrderBy)
+	if normalizedMediaSearchDirection(f.SortDirection) == "ASC" {
+		query["sort_direction"] = "asc"
+	}
 	return query
 }
 
@@ -155,51 +171,139 @@ func mediaSearchResponseMetadata(f SearchFilters, diagnostic *MediaSearchEmptyDi
 	return metadata
 }
 
-func mediaSearchLimit(v any) int {
+func mediaSearchLimit(v any, detailLevel ...string) (int, error) {
+	full := len(detailLevel) > 0 && detailLevel[0] == "full"
 	limit := int(int64Arg(v))
 	if limit <= 0 {
-		return mediaSearchDefaultLimit
+		if full {
+			return mediaSearchFullDefaultLimit, nil
+		}
+		return mediaSearchDefaultLimit, nil
+	}
+	if full && limit > mediaSearchFullMaxLimit {
+		return 0, fmt.Errorf("full-detail media_search supports at most %d records; use compact/planning search and media_get for selected file IDs", mediaSearchFullMaxLimit)
 	}
 	if limit > mediaSearchMaxLimit {
-		return mediaSearchMaxLimit
+		return mediaSearchMaxLimit, nil
 	}
-	return limit
+	return limit, nil
 }
 
-func encodeMediaSearchCursor(offset int) string {
-	raw := mediaSearchCursorVersion + ":" + strconv.Itoa(offset)
-	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+type MediaSearchBoundary struct {
+	TextValue   string `json:"t,omitempty"`
+	NumberValue int64  `json:"n,omitempty"`
+	FileID      string `json:"id"`
 }
 
-func decodeMediaSearchCursor(cursor string) (int, error) {
+type MediaSearchCursor struct {
+	Version     string `json:"v"`
+	Fingerprint string `json:"f"`
+	OrderBy     string `json:"o"`
+	Direction   string `json:"d"`
+	MediaSearchBoundary
+	Snapshot MediaSearchBoundary `json:"snapshot"`
+	Seen     int                 `json:"s"`
+	Total    int                 `json:"total"`
+}
+
+func mediaSearchFingerprint(f SearchFilters) string {
+	payload, _ := json.Marshal(mediaSearchQueryEcho(f))
+	digest := sha256.Sum256(payload)
+	return base64.RawURLEncoding.EncodeToString(digest[:12])
+}
+
+func mediaSearchSortValue(row MediaRow, f SearchFilters) (string, int64) {
+	switch normalizedMediaSearchOrder(f).name {
+	case "duration_ms":
+		return "", row.DurationMs
+	case "updated_at":
+		return row.UpdatedAt, 0
+	case "recording_date":
+		return mediaMetadataString(row.Metadata, "recording_date"), 0
+	case "session_date":
+		value := mediaMetadataString(row.Metadata, "session", "date")
+		if value == "" {
+			value = mediaMetadataString(row.Metadata, "session_date")
+		}
+		return value, 0
+	case "hosting_readiness":
+		if mediaHostingSummary(row.Metadata).Ready {
+			return "", 1
+		}
+		return "", 0
+	case "patreon_status":
+		return "", mediaPatreonStatusPriority(mediaMetadataString(row.Metadata, "patreon", "status"))
+	case "audience_rating":
+		return "", mediaAudienceRatingPriority(row.AudienceRating)
+	default:
+		return row.CreatedAt, 0
+	}
+}
+
+func mediaSearchBoundary(row MediaRow, f SearchFilters) MediaSearchBoundary {
+	textValue, numberValue := mediaSearchSortValue(row, f)
+	return MediaSearchBoundary{TextValue: textValue, NumberValue: numberValue, FileID: row.FileID}
+}
+
+func encodeMediaSearchCursor(row MediaRow, f SearchFilters, snapshot MediaSearchBoundary, seen, total int) string {
+	order := normalizedMediaSearchOrder(f)
+	cursor := MediaSearchCursor{
+		Version: mediaSearchCursorVersion, Fingerprint: mediaSearchFingerprint(f),
+		OrderBy: order.name, Direction: strings.ToLower(normalizedMediaSearchDirection(f.SortDirection)),
+		MediaSearchBoundary: mediaSearchBoundary(row, f), Snapshot: snapshot, Seen: seen, Total: total,
+	}
+	raw, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func decodeMediaSearchCursor(cursor string, f SearchFilters) (*MediaSearchCursor, int, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(cursor))
 	if err != nil {
-		return 0, errors.New("invalid media_search cursor")
+		return nil, 0, errors.New("invalid media_search cursor")
 	}
-	parts := strings.SplitN(string(raw), ":", 2)
-	if len(parts) != 2 || parts[0] != mediaSearchCursorVersion {
-		return 0, errors.New("invalid media_search cursor")
+	// v1 was an encoded offset. Accept it for one release so callers can
+	// finish an in-flight traversal, while all newly emitted cursors are stable
+	// filter-bound keysets.
+	if strings.HasPrefix(string(raw), "v1:") {
+		parts := strings.SplitN(string(raw), ":", 2)
+		offset, convErr := strconv.Atoi(parts[1])
+		if convErr != nil || offset < 0 {
+			return nil, 0, errors.New("invalid media_search cursor")
+		}
+		return nil, offset, nil
 	}
-	offset, err := strconv.Atoi(parts[1])
-	if err != nil || offset < 0 {
-		return 0, errors.New("invalid media_search cursor")
+	var decoded MediaSearchCursor
+	if err := json.Unmarshal(raw, &decoded); err != nil || decoded.Version != mediaSearchCursorVersion || decoded.FileID == "" || decoded.Snapshot.FileID == "" || decoded.Seen < 0 || decoded.Total < decoded.Seen {
+		return nil, 0, errors.New("invalid media_search cursor")
 	}
-	return offset, nil
+	order := normalizedMediaSearchOrder(f)
+	direction := strings.ToLower(normalizedMediaSearchDirection(f.SortDirection))
+	if decoded.Fingerprint != mediaSearchFingerprint(f) || decoded.OrderBy != order.name || decoded.Direction != direction {
+		return nil, 0, errors.New("media_search cursor does not match the current filters or sorting")
+	}
+	return &decoded, 0, nil
 }
 
-func mediaSearchOffset(args map[string]any) (int, error) {
+func mediaSearchPagination(args map[string]any, f SearchFilters) (*MediaSearchCursor, int, int, error) {
 	offset := int(int64Arg(args["offset"]))
 	if offset < 0 {
-		return 0, errors.New("offset must be non-negative")
+		return nil, 0, 0, errors.New("offset must be non-negative")
 	}
 	cursor, _ := args["cursor"].(string)
 	if strings.TrimSpace(cursor) == "" {
-		return offset, nil
+		return nil, offset, offset, nil
 	}
 	if offset > 0 {
-		return 0, errors.New("provide cursor or offset, not both")
+		return nil, 0, 0, errors.New("provide cursor or offset, not both")
 	}
-	return decodeMediaSearchCursor(cursor)
+	decoded, legacyOffset, err := decodeMediaSearchCursor(cursor, f)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if decoded == nil {
+		return nil, legacyOffset, legacyOffset, nil
+	}
+	return decoded, 0, decoded.Seen, nil
 }
 
 func mediaSearchType(row MediaRow) string {
@@ -259,15 +363,25 @@ func projectMediaSearchRows(rows []MediaRow, files map[string]*StorageFile) []Me
 	for i := range rows {
 		row := rows[i]
 		item := MediaSearchRow{
-			FileID:     row.FileID,
-			Filename:   row.Name,
-			Title:      row.Title,
-			MediaType:  mediaSearchType(row),
-			DurationMs: row.DurationMs,
-			Width:      row.Width,
-			Height:     row.Height,
-			Folder:     row.Folder,
+			FileID:           row.FileID,
+			Filename:         row.Name,
+			Title:            row.Title,
+			MediaType:        mediaSearchType(row),
+			DurationMs:       row.DurationMs,
+			Width:            row.Width,
+			Height:           row.Height,
+			Folder:           row.Folder,
+			Site:             firstNonEmpty(mediaMetadataString(row.Metadata, "site"), mediaMetadataString(row.Metadata, "site_id")),
+			Channel:          firstNonEmpty(mediaMetadataString(row.Metadata, "channel"), mediaMetadataString(row.Metadata, "channel_id")),
+			RecordingDate:    mediaMetadataString(row.Metadata, "recording_date"),
+			AudienceRating:   row.AudienceRating,
+			CreatedAt:        row.CreatedAt,
+			UpdatedAt:        row.UpdatedAt,
+			ProbeStatus:      row.ProbeStatus,
+			TranscriptStatus: row.TranscriptStatus,
 		}
+		item.RequiredDerivativesPresent = mediaRequiredDerivativesPresent(row)
+		item.BasicReady = row.ProbeStatus == "ok" && item.RequiredDerivativesPresent
 		if source := files[row.FileID]; source != nil {
 			if source.Name != "" {
 				item.Filename = source.Name
@@ -296,7 +410,7 @@ func projectMediaSearchRows(rows []MediaRow, files map[string]*StorageFile) []Me
 // page limit bounds row count; this second guard bounds unusually large titles,
 // filenames, URLs, or detail rows. The cursor advances only by rows actually
 // returned, so size truncation cannot silently skip candidates.
-func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavailable bool, metadata ...map[string]any) (map[string]any, error) {
+func fitMediaSearchPage[T any](items []T, cursors []string, seenBefore, total int, moreFromDB, storageUnavailable bool, metadata ...map[string]any) (map[string]any, error) {
 	if items == nil {
 		items = []T{}
 	}
@@ -305,10 +419,20 @@ func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavail
 			break
 		}
 		hasMore := moreFromDB || n < len(items)
+		seen := seenBefore + n
+		remaining := total - seen
+		if remaining < 0 {
+			remaining = 0
+		}
 		response := map[string]any{
-			"media":    items[:n],
-			"returned": n,
-			"has_more": hasMore,
+			"media":               items[:n],
+			"returned":            n,
+			"has_more":            hasMore,
+			"incomplete":          hasMore,
+			"must_continue":       hasMore,
+			"complete":            !hasMore,
+			"estimated_remaining": remaining,
+			"estimated_total":     total,
 		}
 		if len(metadata) > 0 {
 			for key, value := range metadata[0] {
@@ -316,7 +440,10 @@ func fitMediaSearchPage[T any](items []T, offset int, moreFromDB, storageUnavail
 			}
 		}
 		if hasMore {
-			response["next_cursor"] = encodeMediaSearchCursor(offset + n)
+			if n == 0 || n > len(cursors) {
+				return nil, errors.New("media_search cannot continue without a row cursor")
+			}
+			response["next_cursor"] = cursors[n-1]
 		}
 		if n < len(items) {
 			response["response_truncated"] = true

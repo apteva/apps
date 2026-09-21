@@ -844,12 +844,23 @@ type SearchFilters struct {
 	// "/clips/" is exact by default. FolderScope="subtree" treats it
 	// as a prefix so it also matches "/clips/q3/", etc. Recursive is
 	// retained for legacy callers and maps to the same subtree scope.
-	Folder      string
-	FolderScope string
-	Recursive   bool
-	Limit       int
-	Offset      int
-	OrderBy     string // duration_ms | created_at | updated_at
+	Folder        string
+	FolderScope   string
+	Recursive     bool
+	Limit         int
+	Offset        int
+	OrderBy       string // duration_ms | created_at | updated_at | recording_date | session_date | hosting_readiness | patreon_status | audience_rating
+	SortDirection string // desc (default) | asc
+	Cursor        *MediaSearchCursor
+	Snapshot      *MediaSearchBoundary
+	// Projection controls how much data SQLite materializes for each result.
+	// The empty value retains the historical internal/full behavior. Tool search
+	// sets compact or planning so raw probes and other large fields never cross
+	// the database boundary unless the caller explicitly asks for them.
+	Projection      string // compact | planning | full
+	IncludeRawProbe bool
+	IncludeMetadata bool
+	DerivationMode  string // none | essential | all; empty retains all
 	// AudienceRating filters by the column populated by the
 	// describer (v0.13.0+). Nil/empty = no filter (everything,
 	// including unrated). Multiple values OR'd: ["general","mature"]
@@ -861,6 +872,64 @@ type SearchFilters struct {
 	// validated dotted paths such as metadata.patreon.status. All predicates
 	// are ANDed with the standard catalog filters.
 	MetadataFilters []MetadataCondition
+}
+
+type mediaSearchOrder struct {
+	name    string
+	expr    string
+	numeric bool
+}
+
+func normalizedMediaSearchOrder(f SearchFilters) mediaSearchOrder {
+	switch f.OrderBy {
+	case "duration_ms":
+		return mediaSearchOrder{name: "duration_ms", expr: "COALESCE(m.duration_ms, 0)", numeric: true}
+	case "updated_at":
+		return mediaSearchOrder{name: "updated_at", expr: "COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', m.updated_at), '')"}
+	case "recording_date":
+		return mediaSearchOrder{name: "recording_date", expr: "COALESCE(CAST(json_extract(m.metadata, '$.recording_date') AS TEXT), '')"}
+	case "session_date":
+		return mediaSearchOrder{name: "session_date", expr: "COALESCE(CAST(json_extract(m.metadata, '$.session.date') AS TEXT), CAST(json_extract(m.metadata, '$.session_date') AS TEXT), '')"}
+	case "hosting_readiness":
+		return mediaSearchOrder{name: "hosting_readiness", expr: mediaHostingReadinessSQL("m.metadata"), numeric: true}
+	case "patreon_status":
+		return mediaSearchOrder{name: "patreon_status", expr: mediaPatreonPrioritySQL("m.metadata"), numeric: true}
+	case "audience_rating":
+		return mediaSearchOrder{name: "audience_rating", expr: `CASE COALESCE(NULLIF(m.audience_rating,''),'unrated') WHEN 'general' THEN 3 WHEN 'unrated' THEN 2 WHEN 'mature' THEN 1 ELSE 0 END`, numeric: true}
+	default:
+		return mediaSearchOrder{name: "created_at", expr: "COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', m.created_at), '')"}
+	}
+}
+
+func normalizedMediaSearchDirection(direction string) string {
+	if strings.EqualFold(strings.TrimSpace(direction), "asc") {
+		return "ASC"
+	}
+	return "DESC"
+}
+
+func mediaHostingReadinessSQL(metadataExpr string) string {
+	return `CASE
+		WHEN json_type(` + metadataExpr + `, '$.hosting.ready') IN ('true','integer')
+		 AND json_extract(` + metadataExpr + `, '$.hosting.ready') IN (1, 'true') THEN 1
+		WHEN LOWER(COALESCE(CAST(json_extract(` + metadataExpr + `, '$.hosting.status') AS TEXT), ''))
+		 IN ('ready','hosted','published','complete','completed','available') THEN 1
+		ELSE 0 END`
+}
+
+func mediaPatreonPrioritySQL(metadataExpr string) string {
+	return `CASE LOWER(COALESCE(CAST(json_extract(` + metadataExpr + `, '$.patreon.status') AS TEXT), ''))
+		WHEN 'ready' THEN 5
+		WHEN 'scheduled' THEN 4
+		WHEN 'draft' THEN 3
+		WHEN 'pending' THEN 3
+		WHEN 'review' THEN 3
+		WHEN 'published' THEN 2
+		WHEN 'shared' THEN 2
+		WHEN 'posted' THEN 2
+		WHEN 'blocked' THEN 1
+		WHEN 'failed' THEN 1
+		ELSE 0 END`
 }
 
 const (
@@ -1017,6 +1086,31 @@ func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) 
 			args = append(args, values...)
 		}
 	}
+	order := normalizedMediaSearchOrder(f)
+	direction := normalizedMediaSearchDirection(f.SortDirection)
+	appendBoundary := func(boundary MediaSearchBoundary, inclusive bool) {
+		op := "<"
+		fileOp := "<"
+		if direction == "ASC" {
+			op = ">"
+			fileOp = ">"
+		}
+		if inclusive {
+			fileOp += "="
+		}
+		var value any = boundary.TextValue
+		if order.numeric {
+			value = boundary.NumberValue
+		}
+		clauses = append(clauses, fmt.Sprintf("(%s %s ? OR (%s = ? AND m.file_id %s ?))", order.expr, op, order.expr, fileOp))
+		args = append(args, value, value, boundary.FileID)
+	}
+	if f.Snapshot != nil {
+		appendBoundary(*f.Snapshot, true)
+	}
+	if f.Cursor != nil {
+		appendBoundary(f.Cursor.MediaSearchBoundary, false)
+	}
 	return clauses, args
 }
 
@@ -1024,16 +1118,8 @@ func buildMediaSearchWhere(projectID string, f SearchFilters) ([]string, []any) 
 // end so each row has its thumbnail/waveform pointers.
 func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, error) {
 	clauses, args := buildMediaSearchWhere(projectID, f)
-
-	order := "created_at DESC"
-	switch f.OrderBy {
-	case "duration_ms":
-		order = "duration_ms DESC"
-	case "updated_at":
-		order = "updated_at DESC"
-	case "created_at":
-		order = "created_at DESC"
-	}
+	order := normalizedMediaSearchOrder(f)
+	direction := normalizedMediaSearchDirection(f.SortDirection)
 
 	limit := mediaSearchDefaultLimit
 	if f.Limit > 0 && f.Limit <= 500 {
@@ -1044,24 +1130,50 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		offset = f.Offset
 	}
 
-	query := `SELECT m.file_id, m.project_id, m.source_sha256, m.folder, m.name,
-		m.format_name, m.duration_ms, m.bitrate,
+	rawProbeExpr := "m.raw_probe"
+	metadataExpr := "m.metadata"
+	sourceSHAExpr := "m.source_sha256"
+	descriptionExpr := "m.description"
+	altTextExpr := "m.alt_text"
+	descriptionSourceExpr := "m.description_source"
+	descriptionUpdatedExpr := "COALESCE(m.description_updated_at, '')"
+	descriptionAttemptedExpr := "COALESCE(m.description_attempted_at, '')"
+	descriptionErrorExpr := "m.description_error"
+	audienceReasoningExpr := "m.audience_reasoning"
+	if f.Projection != "" && f.Projection != "full" {
+		sourceSHAExpr = "''"
+		descriptionExpr = "''"
+		altTextExpr = "''"
+		descriptionSourceExpr = "''"
+		descriptionUpdatedExpr = "''"
+		descriptionAttemptedExpr = "''"
+		descriptionErrorExpr = "''"
+		audienceReasoningExpr = "''"
+	}
+	if !f.IncludeRawProbe && f.Projection != "" {
+		rawProbeExpr = "''"
+	}
+	if !f.IncludeMetadata && f.Projection != "" {
+		metadataExpr = "'{}'"
+	}
+	query := `SELECT m.file_id, m.project_id, ` + sourceSHAExpr + `, m.folder, m.name,
+			m.format_name, m.duration_ms, m.bitrate,
 		m.has_video, m.has_audio, m.is_image,
 		m.width, m.height, m.rotation, m.fps, m.video_codec,
 		m.channels, m.sample_rate, m.audio_codec,
-		m.probe_status, m.probe_error, m.probe_at, m.raw_probe,
-		m.title, m.description, m.alt_text,
-		m.description_source, COALESCE(m.description_updated_at, ''),
-		COALESCE(m.description_attempted_at, ''), m.description_error,
+			m.probe_status, m.probe_error, m.probe_at, ` + rawProbeExpr + `,
+		m.title, ` + descriptionExpr + `, ` + altTextExpr + `,
+		` + descriptionSourceExpr + `, ` + descriptionUpdatedExpr + `,
+		` + descriptionAttemptedExpr + `, ` + descriptionErrorExpr + `,
 		COALESCE(t.status, ''),
-		m.audience_rating, m.audience_reasoning, COALESCE(m.audience_updated_at, ''),
-		m.metadata, m.metadata_version,
+		m.audience_rating, ` + audienceReasoningExpr + `, COALESCE(m.audience_updated_at, ''),
+		` + metadataExpr + `, m.metadata_version,
 		m.created_at, m.updated_at,
 		m.index_attempts, COALESCE(m.index_claimed_at, ''), COALESCE(m.index_last_error, '')
 	FROM media m
-	LEFT JOIN transcripts t
-	  ON t.file_id = m.file_id AND t.project_id = m.project_id
-	WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY m." + order + " LIMIT ? OFFSET ?"
+		LEFT JOIN transcripts t
+		  ON t.file_id = m.file_id AND t.project_id = m.project_id
+		WHERE ` + strings.Join(clauses, " AND ") + " ORDER BY " + order.expr + " " + direction + ", m.file_id " + direction + " LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
 
 	rows, err := db.Query(query, args...)
@@ -1082,7 +1194,11 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	if len(ids) == 0 {
 		return out, nil
 	}
-	derivByFile, err := listDerivationsByFiles(db, projectID, ids)
+	if f.DerivationMode == "none" {
+		return out, nil
+	}
+	essentialOnly := f.DerivationMode == "essential"
+	derivByFile, err := listDerivationsByFiles(db, projectID, ids, essentialOnly)
 	if err == nil {
 		for i := range out {
 			out[i].Derivations = visibleDerivations(derivByFile[out[i].FileID])
@@ -1099,6 +1215,8 @@ type MediaSearchEmptyDiagnostic struct {
 }
 
 func mediaSearchCount(db *sql.DB, projectID string, f SearchFilters, descendantsOnly bool) (int, error) {
+	f.Cursor = nil
+	f.Offset = 0
 	clauses, args := buildMediaSearchWhere(projectID, f)
 	if descendantsOnly {
 		clauses = append(clauses, "m.folder <> ?")
@@ -1291,7 +1409,7 @@ func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, err
 	return out, nil
 }
 
-func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string) (map[string][]DerivationRow, error) {
+func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string, essentialOnly ...bool) (map[string][]DerivationRow, error) {
 	if len(fileIDs) == 0 {
 		return nil, nil
 	}
@@ -1301,9 +1419,13 @@ func listDerivationsByFiles(db *sql.DB, projectID string, fileIDs []string) (map
 	for _, id := range fileIDs {
 		args = append(args, id)
 	}
+	kindClause := ""
+	if len(essentialOnly) > 0 && essentialOnly[0] {
+		kindClause = " AND kind IN ('thumbnail','waveform','cover')"
+	}
 	rows, err := db.Query(
 		`SELECT id, file_id, kind, storage_file_id, width, height, position_ms, status, error, generated_at
-		FROM derivations WHERE project_id=? AND file_id IN (`+placeholders+`)
+		FROM derivations WHERE project_id=? AND file_id IN (`+placeholders+`)`+kindClause+`
 		ORDER BY file_id, kind, position_ms`, args...,
 	)
 	if err != nil {

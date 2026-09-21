@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.14.5
+version: 0.14.6
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -19,6 +19,11 @@ description: |
   by default, Cloudinary when bound. A wedged encode releases its
   slot without disturbing the indexer.
 
+  v0.14.6 makes safe catalog discovery the default: compact, planning, and
+  bounded full detail levels; field projection; explicit large expansions;
+  stable filter-bound cursors; unmistakable completion metadata; planning
+  sorts and normalized release readiness; and media_inventory counts grouped
+  by editorial dimensions without returning records.
   v0.14.5 fixes a Media indexing queue defect that could leave valid files
   permanently pending, including files in hidden Storage folders. Explicit
   reindex requests now dispatch immediately; stale claims are reclaimed,
@@ -120,7 +125,9 @@ provides:
     - name: media_ask
       description: Ask a grounded question using the configured descriptions vision/chat integration and only artifacts that already exist. Images use an existing thumbnail or source object; videos use the canonical thumbnail and cached storyboard keyframes; at_ms selects the nearest existing keyframe and reports the actual timestamp; audio uses an existing completed transcript. Never runs ffmpeg, generates frames/derivations, or writes files. Args — file_id, question, at_ms?, frame_count? (1-8), include_transcript?.
     - name: media_search
-      description: Search the catalog with q, filename, or title plus folder, folder_scope (exact|subtree), media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, codec, and arbitrary metadata_filters equality predicates. exact is the default and searches only the supplied folder; subtree includes every descendant. Empty exact searches report matching descendants and an actionable retry rather than silently broadening. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in. recursive remains a compatibility alias for folder_scope.
+      description: Safe catalog search with compact (default), planning, and full detail levels. Full searches default to 5 and reject limits above 10; raw probes and keyframes require explicit expand values. Supports field projection, planning-oriented sorting, exact totals, and stable filter-bound next_cursor pagination. Responses include complete, incomplete, must_continue, returned, and estimated_remaining. Use media_inventory for counts and media_get for selected full records.
+    - name: media_inventory
+      description: Count matching media without returning records. Groups by content type, audience rating, Patreon status, model, session, hosting readiness, and recording month. Uses the same core filters as media_search; bounded buckets include other_count.
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder

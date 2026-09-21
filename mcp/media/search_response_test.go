@@ -93,7 +93,7 @@ func TestToolSearch_DefaultCompactAndDetailOptIn(t *testing.T) {
 		t.Fatalf("compact thumbnail = %+v", row.Thumbnail)
 	}
 	encoded, _ := json.Marshal(row)
-	for _, forbidden := range []string{"source_sha256", "probe_status", "derivations", "video_codec"} {
+	for _, forbidden := range []string{"source_sha256", "raw_probe", "derivations", "video_codec", "metadata"} {
 		if strings.Contains(string(encoded), forbidden) {
 			t.Errorf("compact row leaked %q: %s", forbidden, encoded)
 		}
@@ -172,10 +172,12 @@ func TestFitMediaSearchPage_EnforcesSerializedBudget(t *testing.T) {
 		Text string `json:"text"`
 	}
 	items := make([]largeRow, 100)
+	cursors := make([]string, 100)
 	for i := range items {
 		items[i] = largeRow{ID: i, Text: strings.Repeat("x", 2048)}
+		cursors[i] = fmt.Sprintf("cursor-%d", i+1)
 	}
-	page, err := fitMediaSearchPage(items, 0, false, false)
+	page, err := fitMediaSearchPage(items, cursors, 0, len(items), false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,22 +192,30 @@ func TestFitMediaSearchPage_EnforcesSerializedBudget(t *testing.T) {
 	if returned <= 0 || returned >= len(items) || page["response_truncated"] != true || page["has_more"] != true {
 		t.Fatalf("budget did not truncate safely: %+v", page)
 	}
-	offset, err := decodeMediaSearchCursor(page["next_cursor"].(string))
-	if err != nil || offset != returned {
-		t.Fatalf("cursor offset=%d err=%v, returned=%d", offset, err, returned)
+	if got := page["next_cursor"].(string); got != cursors[returned-1] {
+		t.Fatalf("cursor=%q want %q", got, cursors[returned-1])
+	}
+	if page["incomplete"] != true || page["must_continue"] != true || page["estimated_remaining"] != len(items)-returned {
+		t.Fatalf("completion metadata missing: %+v", page)
 	}
 }
 
 func TestMediaSearchCursorValidation(t *testing.T) {
-	if _, err := decodeMediaSearchCursor("not-a-cursor"); err == nil {
+	f := SearchFilters{OrderBy: "created_at", SortDirection: "desc"}
+	if _, _, err := decodeMediaSearchCursor("not-a-cursor", f); err == nil {
 		t.Fatal("invalid cursor accepted")
 	}
-	cursor := encodeMediaSearchCursor(12)
-	if got, err := mediaSearchOffset(map[string]any{"cursor": cursor}); err != nil || got != 12 {
-		t.Fatalf("cursor decoded to %d, %v", got, err)
+	row := MediaRow{FileID: "12", CreatedAt: "2026-01-01T00:00:00Z"}
+	cursor := encodeMediaSearchCursor(row, f, mediaSearchBoundary(row, f), 12, 20)
+	decoded, offset, seen, err := mediaSearchPagination(map[string]any{"cursor": cursor}, f)
+	if err != nil || decoded == nil || decoded.FileID != "12" || offset != 0 || seen != 12 {
+		t.Fatalf("cursor decoded to %+v offset=%d seen=%d err=%v", decoded, offset, seen, err)
 	}
-	if _, err := mediaSearchOffset(map[string]any{"cursor": cursor, "offset": 3}); err == nil {
+	if _, _, _, err := mediaSearchPagination(map[string]any{"cursor": cursor, "offset": 3}, f); err == nil {
 		t.Fatal("cursor + offset should be rejected")
+	}
+	if _, _, _, err := mediaSearchPagination(map[string]any{"cursor": cursor}, SearchFilters{OrderBy: "duration_ms", SortDirection: "desc"}); err == nil {
+		t.Fatal("cursor reused with different sort should be rejected")
 	}
 }
 
@@ -217,13 +227,13 @@ func TestMediaSearchToolDescriptionGuidesTwoStepFlow(t *testing.T) {
 		}
 		found = true
 		description := strings.ToLower(tool.Description)
-		for _, term := range []string{"q", "compact", "media_get", "next_cursor", "default limit is 20", "folder_scope", "exact", "subtree", "has_matching_descendants"} {
+		for _, term := range []string{"compact", "planning", "full", "media_get", "media_inventory", "next_cursor", "must_continue", "fields", "expand"} {
 			if !strings.Contains(description, term) {
 				t.Errorf("media_search description missing %q: %s", term, tool.Description)
 			}
 		}
 		properties := tool.InputSchema["properties"].(map[string]any)
-		for _, name := range []string{"q", "filename", "title", "folder_scope", "recursive", "metadata_filters", "cursor", "detail", "include_raw_probe"} {
+		for _, name := range []string{"q", "filename", "title", "folder_scope", "recursive", "metadata_filters", "cursor", "detail_level", "fields", "expand", "detail", "include_raw_probe"} {
 			if _, ok := properties[name]; !ok {
 				t.Errorf("media_search schema missing %q", name)
 			}

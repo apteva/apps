@@ -33,17 +33,27 @@ import (
 // replaced with their enriched counterparts.
 type MediaResponseRow struct {
 	MediaRow
-	DisplayOrientation string  `json:"display_orientation,omitempty"`
-	DisplayAspectRatio float64 `json:"display_aspect_ratio,omitempty"`
-	URL                string  `json:"url,omitempty"`
-	Delivery           string  `json:"delivery,omitempty"`
-	Disposition        string  `json:"disposition,omitempty"`
-	ExpiresAt          int64   `json:"expires_at,omitempty"`
-	Name               string  `json:"name,omitempty"`
-	Folder             string  `json:"folder,omitempty"`
-	Visibility         string  `json:"visibility,omitempty"`
-	SizeBytes          int64   `json:"size_bytes,omitempty"`
-	ContentType        string  `json:"content_type,omitempty"`
+	DisplayOrientation   string                    `json:"display_orientation,omitempty"`
+	DisplayAspectRatio   float64                   `json:"display_aspect_ratio,omitempty"`
+	URL                  string                    `json:"url,omitempty"`
+	Delivery             string                    `json:"delivery,omitempty"`
+	Disposition          string                    `json:"disposition,omitempty"`
+	ExpiresAt            int64                     `json:"expires_at,omitempty"`
+	Name                 string                    `json:"name,omitempty"`
+	Folder               string                    `json:"folder,omitempty"`
+	Visibility           string                    `json:"visibility,omitempty"`
+	SizeBytes            int64                     `json:"size_bytes,omitempty"`
+	ContentType          string                    `json:"content_type,omitempty"`
+	Site                 string                    `json:"site,omitempty"`
+	Channel              string                    `json:"channel,omitempty"`
+	RecordingDate        string                    `json:"recording_date,omitempty"`
+	Patreon              MediaChannelStatus        `json:"patreon"`
+	Social               MediaChannelStatus        `json:"social"`
+	Hosting              MediaHostingStatus        `json:"hosting"`
+	Lineage              MediaLineageSummary       `json:"lineage"`
+	PublicationState     string                    `json:"publication_state,omitempty"`
+	EssentialDerivatives MediaEssentialDerivatives `json:"essential_derivatives"`
+	Readiness            MediaReleaseReadiness     `json:"readiness"`
 	// Derivations carries enriched DerivationRows. Re-tagged with
 	// the same JSON name as MediaRow.Derivations so it overrides
 	// the embedded field's serialization.
@@ -113,6 +123,16 @@ func enrichRows(ctx context.Context, projectID string, rows []MediaRow) ([]Media
 // still ships with everything else.
 func mergeRow(r MediaRow, files map[string]*StorageFile) MediaResponseRow {
 	out := MediaResponseRow{MediaRow: r}
+	out.Site = firstNonEmpty(mediaMetadataString(r.Metadata, "site"), mediaMetadataString(r.Metadata, "site_id"))
+	out.Channel = firstNonEmpty(mediaMetadataString(r.Metadata, "channel"), mediaMetadataString(r.Metadata, "channel_id"))
+	out.RecordingDate = mediaMetadataString(r.Metadata, "recording_date")
+	out.Patreon = mediaPatreonStatus(r.Metadata)
+	out.Social = mediaSocialStatus(r.Metadata)
+	out.Hosting = mediaHostingSummary(r.Metadata)
+	out.Lineage = mediaLineageSummary(r.Metadata)
+	out.PublicationState = firstNonEmpty(mediaMetadataString(r.Metadata, "publication_state"), mediaMetadataString(r.Metadata, "release_status"))
+	out.EssentialDerivatives = mediaEssentialDerivatives(r)
+	out.Readiness = mediaReleaseReadiness(r)
 	// Never let the embedded row serialize stale IDs when every candidate is
 	// rejected below.
 	out.MediaRow.Derivations = nil

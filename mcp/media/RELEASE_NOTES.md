@@ -1,3 +1,21 @@
+# Media 0.14.6
+
+Media 0.14.6 makes safe, planning-oriented catalog discovery the default.
+
+- Adds `compact`, `planning`, and bounded `full` search detail levels. Full
+  searches default to five records, reject limits above ten, and keep raw probes
+  and large derivation arrays behind explicit expansions.
+- Adds field projection and normalized release-readiness fields for Patreon,
+  social usage, hosting, audience suitability, required derivatives, and exact
+  session/package lineage.
+- Makes partial results explicit with exact totals, returned and remaining
+  counts, `must_continue`, and stable filter-bound cursors.
+- Adds recording/session, creation, hosting, Patreon, and audience planning
+  sorts, backed by new catalog indexes.
+- Adds `media_inventory` for bounded grouped counts by content type, audience
+  rating, Patreon status, model, session, hosting readiness, and recording
+  month, without returning media records.
+
 # Media 0.14.5
 
 Media 0.14.5 fixes a general indexing queue defect that could leave valid

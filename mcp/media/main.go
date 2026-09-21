@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.14.5
+version: 0.14.6
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -31,7 +31,10 @@ description: |
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
-  through storage. v0.14.5 fixes a Media indexing queue defect that could leave
+  through storage. v0.14.6 adds compact/planning/bounded-full search,
+  projections, explicit expansions, stable cursors, release-readiness fields,
+  planning sorts, and record-free media_inventory counts. v0.14.5 fixes a
+  Media indexing queue defect that could leave
   valid files permanently pending, including files in hidden Storage folders.
   Explicit reindex requests now dispatch immediately; stale claims are
   reclaimed, retries are durable, and queue diagnostics expose attempts and
@@ -115,7 +118,8 @@ provides:
     - { name: media_get,             description: "Fetch one media record by storage file_id, including arbitrary metadata and metadata_version. External ingestion URL delivery defaults to apteva/inline; callers can explicitly request proxy, direct, or attachment disposition. Returned delivery, disposition, and expires_at are Storage-confirmed." }
     - { name: media_analyze,         description: "Read-only technical and quality analysis for an image, video, or audio file. Follows render_host_id when configured, reports the effective executor, and never silently falls back to local execution. Returns encoding metadata, decode integrity, visual measurements and timeline anomalies, and audio loudness/peak/silence measurements where applicable. Creates no artifacts." }
     - { name: media_ask,             description: "Ask a grounded question using only existing source images, cached thumbnails/keyframes, and completed transcripts. Never runs ffmpeg, creates derivations, or writes files." }
-    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder_scope exact|subtree, type, aspect, duration, rating, dimensions, codec, and arbitrary metadata equality filters. Empty exact searches diagnose matching descendants; call media_get for full details." }
+    - { name: media_search,          description: "Safe compact/planning/bounded-full catalog discovery with field projection, explicit expansions, stable cursors, planning sorts, totals, and unmistakable completion metadata." }
+    - { name: media_inventory,       description: "Count matching media by bounded editorial dimensions without returning records." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
@@ -289,7 +293,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: media/v0.14.5
+    ref: media/v0.14.6
     entry: mcp/media
   port: 8080
   health_check: /health
@@ -496,7 +500,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. With folder, folder_scope='exact' (the default) searches only that folder; folder_scope='subtree' searches it and every descendant. Namespace roots such as /hgv, /ashley, /monika, /alexa, and /lily normally require subtree. An empty exact result does not prove its subtree is empty: inspect has_matching_descendants and retry_recommended. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, codec, and metadata_filters exact matches such as {'metadata.patreon.status':'ready'}. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
+			Description: "Search the media catalog before calling media_get. compact is the safe default; planning adds publication, hosting, lineage, derivatives, and release-readiness fields; full is capped at 10 and should only select candidate IDs. fields projects only requested values. Large probes and keyframes require explicit expand values. Every response states complete/incomplete, must_continue, returned, estimated_remaining, and next_cursor. Reuse the same filters and sorting with next_cursor. Use media_inventory for counts without records and media_get for complete data on a selected file.",
 			InputSchema: schemaObject(map[string]any{
 				"q":               map[string]any{"type": "string", "description": "Case-insensitive contains match across filename, title, description, and alt text."},
 				"filename":        map[string]any{"type": "string", "description": "Case-insensitive contains match on the storage filename only."},
@@ -536,14 +540,47 @@ func (a *App) MCPTools() []sdk.Tool {
 						{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}},
 					},
 				},
-				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": mediaSearchMaxLimit, "default": mediaSearchDefaultLimit},
+				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": mediaSearchMaxLimit, "default": mediaSearchDefaultLimit, "description": "compact/planning maximum 100. full maximum 10 and default 5."},
 				"cursor":            map[string]any{"type": "string", "description": "Opaque next_cursor from the preceding page. Reuse the same filters."},
 				"offset":            map[string]any{"type": "integer", "minimum": 0, "description": "Legacy pagination offset. Prefer cursor; do not pass both."},
-				"order_by":          map[string]any{"type": "string", "enum": []string{"duration_ms", "created_at", "updated_at"}},
-				"detail":            map[string]any{"type": "boolean", "default": false, "description": "Return full metadata rows. Prefer media_get for a selected file."},
-				"include_raw_probe": map[string]any{"type": "boolean", "default": false, "description": "Include raw ffprobe JSON. Implies detail=true."},
+				"order_by":          map[string]any{"type": "string", "enum": []string{"duration_ms", "created_at", "updated_at", "recording_date", "session_date", "hosting_readiness", "patreon_status", "audience_rating"}, "default": "created_at"},
+				"sort_direction":    map[string]any{"type": "string", "enum": []string{"desc", "asc"}, "default": "desc"},
+				"detail_level":      map[string]any{"type": "string", "enum": []string{"compact", "planning", "full"}, "default": "compact"},
+				"fields":            map[string]any{"type": "array", "maxItems": maxMediaSearchProjectionFields, "items": map[string]any{"type": "string"}, "description": "Optional field projection, including file_id/id, recording_date, rating, patreon.status, hosting, lineage, publication_state, and readiness."},
+				"expand":            map[string]any{"type": "array", "maxItems": 4, "items": map[string]any{"type": "string", "enum": []string{"raw_probe", "derivations", "keyframes", "urls"}}, "description": "Full detail only. Large raw probes and keyframe arrays are never implicit."},
+				"detail":            map[string]any{"type": "boolean", "default": false, "description": "Deprecated compatibility alias: true maps to detail_level=full; false maps to compact."},
+				"include_raw_probe": map[string]any{"type": "boolean", "default": false, "description": "Deprecated compatibility alias for detail_level=full plus expand=['raw_probe']."},
 			}, nil),
 			Handler: a.toolSearch,
+		},
+		{
+			Name:        "media_inventory",
+			Description: "Count the matching media inventory without returning records. Groups by content_type, audience_rating, patreon_status, model, session, hosting_readiness, or recording_month. Buckets are bounded and report other_count so high-cardinality inventories stay small.",
+			InputSchema: schemaObject(map[string]any{
+				"group_by":                map[string]any{"type": "array", "minItems": 1, "maxItems": 7, "items": map[string]any{"type": "string", "enum": []string{"content_type", "audience_rating", "patreon_status", "model", "session", "hosting_readiness", "recording_month"}}},
+				"group_limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+				"q":                       map[string]any{"type": "string"},
+				"filename":                map[string]any{"type": "string"},
+				"title":                   map[string]any{"type": "string"},
+				"folder":                  map[string]any{"type": "string"},
+				"folder_scope":            map[string]any{"type": "string", "enum": []string{"exact", "subtree"}, "default": "exact"},
+				"recursive":               map[string]any{"type": "boolean", "description": "Compatibility alias for folder_scope=subtree."},
+				"media_type":              map[string]any{"type": "string", "enum": []string{"image", "video", "audio"}},
+				"aspect":                  map[string]any{"type": "string", "enum": []string{"portrait", "landscape", "square", "reel", "wide"}},
+				"duration_min_ms":         map[string]any{"type": "integer", "minimum": 0},
+				"duration_max_ms":         map[string]any{"type": "integer", "minimum": 0},
+				"has_video":               map[string]any{"type": "boolean"},
+				"has_audio":               map[string]any{"type": "boolean"},
+				"is_image":                map[string]any{"type": "boolean"},
+				"width_min":               map[string]any{"type": "integer", "minimum": 0},
+				"width_max":               map[string]any{"type": "integer", "minimum": 0},
+				"video_codec":             map[string]any{"type": "string"},
+				"audio_codec":             map[string]any{"type": "string"},
+				"audience_rating":         map[string]any{"oneOf": []map[string]any{{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}, {"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}}}},
+				"exclude_audience_rating": map[string]any{"oneOf": []map[string]any{{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}, {"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}}}},
+				"metadata_filters":        map[string]any{"type": "object", "maxProperties": maxMediaMetadataConditions, "additionalProperties": map[string]any{"type": []string{"string", "number", "boolean", "null"}}},
+			}, []string{"group_by"}),
+			Handler: a.toolInventory,
 		},
 		{
 			Name:        "media_list_folders",
@@ -1350,11 +1387,7 @@ func ratingFilterQuery(values []string) []string {
 	return out
 }
 
-func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid, err := resolveProjectFromArgs(args)
-	if err != nil {
-		return nil, err
-	}
+func mediaSearchFiltersFromArgs(args map[string]any) (SearchFilters, error) {
 	f := SearchFilters{}
 	f.Q, _ = args["q"].(string)
 	f.Filename, _ = args["filename"].(string)
@@ -1385,32 +1418,100 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.AudioCodec, _ = args["audio_codec"].(string)
 	f.Folder, _ = args["folder"].(string)
 	f.Folder = normalizeFolderFilter(f.Folder)
+	var err error
 	f.FolderScope, err = resolveMediaSearchFolderScope(args, f.Folder)
 	if err != nil {
-		return nil, err
+		return f, err
 	}
 	f.Recursive = f.FolderScope == folderScopeSubtree
-	pageLimit := mediaSearchLimit(args["limit"])
-	pageOffset, err := mediaSearchOffset(args)
-	if err != nil {
-		return nil, err
-	}
-	// Fetch one extra row so has_more does not require a COUNT query.
-	f.Limit = pageLimit + 1
-	f.Offset = pageOffset
 	f.OrderBy, _ = args["order_by"].(string)
+	if f.OrderBy == "" {
+		f.OrderBy = "created_at"
+	}
+	switch f.OrderBy {
+	case "duration_ms", "created_at", "updated_at", "recording_date", "session_date", "hosting_readiness", "patreon_status", "audience_rating":
+	default:
+		return f, fmt.Errorf("unsupported media_search order_by %q", f.OrderBy)
+	}
+	f.SortDirection, _ = args["sort_direction"].(string)
+	if f.SortDirection == "" {
+		f.SortDirection = "desc"
+	}
+	if f.SortDirection != "asc" && f.SortDirection != "desc" {
+		return f, errors.New("sort_direction must be asc or desc")
+	}
 	f.AudienceRatingIn = ratingFilterArg(args["audience_rating"])
 	f.AudienceRatingNotIn = ratingFilterArg(args["exclude_audience_rating"])
 	f.MetadataFilters, err = parseMetadataConditions(args["metadata_filters"], "metadata_filters")
 	if err != nil {
+		return f, err
+	}
+	return f, nil
+}
+
+func mediaSearchCursors(rows []MediaRow, f SearchFilters, seenBefore, total int) []string {
+	out := make([]string, len(rows))
+	if len(rows) == 0 {
+		return out
+	}
+	snapshot := mediaSearchBoundary(rows[0], f)
+	if f.Snapshot != nil {
+		snapshot = *f.Snapshot
+	}
+	for i := range rows {
+		out[i] = encodeMediaSearchCursor(rows[i], f, snapshot, seenBefore+i+1, total)
+	}
+	return out
+}
+
+func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
 		return nil, err
+	}
+	contract, err := parseMediaSearchContract(args)
+	if err != nil {
+		return nil, err
+	}
+	f, err := mediaSearchFiltersFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	pageLimit, err := mediaSearchLimit(args["limit"], contract.DetailLevel)
+	if err != nil {
+		return nil, err
+	}
+	f.Projection = contract.DetailLevel
+	f.IncludeRawProbe = contract.Expand["raw_probe"]
+	f.IncludeMetadata = mediaSearchNeedsMetadata(contract)
+	f.DerivationMode = mediaSearchNeedsDerivations(contract)
+	f.Cursor, f.Offset, _, err = mediaSearchPagination(args, f)
+	if err != nil {
+		return nil, err
+	}
+	seenBefore := f.Offset
+	if f.Cursor != nil {
+		seenBefore = f.Cursor.Seen
+		f.Snapshot = &f.Cursor.Snapshot
+	}
+	// Fetch one extra row for has_more. The exact count is returned separately
+	// so an agent cannot mistake a page for the complete inventory.
+	f.Limit = pageLimit + 1
+	total := 0
+	if f.Cursor != nil {
+		total = f.Cursor.Total
+	} else {
+		total, err = mediaSearchCount(ctx.AppDB(), pid, f, false)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rows, err := searchMedia(ctx.AppDB(), pid, f)
 	if err != nil {
 		return nil, err
 	}
 	var diagnostic *MediaSearchEmptyDiagnostic
-	if len(rows) == 0 && pageOffset == 0 && f.Folder != "" {
+	if len(rows) == 0 && seenBefore == 0 && f.Folder != "" {
 		var d MediaSearchEmptyDiagnostic
 		if f.effectiveFolderScope() == folderScopeSubtree {
 			d, err = diagnoseEmptySubtreeMediaSearch(ctx.AppDB(), pid, f)
@@ -1423,40 +1524,74 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		diagnostic = &d
 	}
 	responseMetadata := mediaSearchResponseMetadata(f, diagnostic)
+	responseMetadata["detail_level"] = contract.DetailLevel
+	if len(contract.Fields) > 0 {
+		responseMetadata["fields"] = contract.Fields
+	}
 	moreFromDB := len(rows) > pageLimit
 	if moreFromDB {
 		rows = rows[:pageLimit]
 	}
-	includeRawProbe, _ := boolArg(args["include_raw_probe"])
-	detail, _ := boolArg(args["detail"])
-	if includeRawProbe {
-		detail = true
+	cursors := mediaSearchCursors(rows, f, seenBefore, total)
+
+	if contract.DetailLevel == "compact" || contract.DetailLevel == "planning" {
+		compact := projectMediaSearchRows(rows, nil)
+		storageUnavailable := false
+		if contract.ResolveStorage {
+			if resolved, eerr := compactMediaSearchRows(context.Background(), pid, rows); eerr == nil {
+				compact = resolved
+			} else {
+				storageUnavailable = true
+			}
+		}
+		if contract.DetailLevel == "compact" {
+			if len(contract.Fields) > 0 {
+				// Projection may request safe planning fields such as
+				// patreon.status without asking for the whole planning row.
+				planning := planningMediaSearchRows(rows, compact)
+				projected, perr := projectMediaSearchFields(planning, contract.Fields)
+				if perr != nil {
+					return nil, perr
+				}
+				return fitMediaSearchPage(projected, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
+			}
+			return fitMediaSearchPage(compact, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
+		}
+		planning := planningMediaSearchRows(rows, compact)
+		if len(contract.Fields) > 0 {
+			projected, perr := projectMediaSearchFields(planning, contract.Fields)
+			if perr != nil {
+				return nil, perr
+			}
+			return fitMediaSearchPage(projected, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
+		}
+		return fitMediaSearchPage(planning, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
 	}
 
-	if !detail {
-		compact, eerr := compactMediaSearchRows(context.Background(), pid, rows)
-		if eerr != nil {
-			// Compact discovery still works without Storage; only resolved
-			// thumbnail URLs may be absent.
-			compact = projectMediaSearchRows(rows, nil)
-			return fitMediaSearchPage(compact, pageOffset, moreFromDB, true, responseMetadata)
+	rows = sanitizeMediaToolRows(rows, contract.Expand["raw_probe"])
+	fullRows := make([]MediaResponseRow, 0, len(rows))
+	storageUnavailable := false
+	if contract.ResolveStorage {
+		enriched, _, eerr := enrichRows(context.Background(), pid, rows)
+		if eerr == nil {
+			fullRows = enriched
+		} else {
+			storageUnavailable = true
 		}
-		return fitMediaSearchPage(compact, pageOffset, moreFromDB, false, responseMetadata)
 	}
-
-	rows = sanitizeMediaToolRows(rows, includeRawProbe)
-	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
-	if eerr != nil {
-		// Storage temporarily unreachable — return un-enriched rows
-		// with a flag so the agent doesn't read missing URLs as
-		// "files deleted". media's own probe + description data is
-		// still useful even without storage's metadata.
-		for i := range rows {
-			rows[i].Derivations = nil
+	if len(fullRows) == 0 && len(rows) > 0 {
+		for _, row := range rows {
+			fullRows = append(fullRows, mergeRow(row, nil))
 		}
-		return fitMediaSearchPage(rows, pageOffset, moreFromDB, true, responseMetadata)
 	}
-	return fitMediaSearchPage(enriched, pageOffset, moreFromDB, false, responseMetadata)
+	if len(contract.Fields) > 0 {
+		projected, perr := projectMediaSearchFields(fullRows, contract.Fields)
+		if perr != nil {
+			return nil, perr
+		}
+		return fitMediaSearchPage(projected, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
+	}
+	return fitMediaSearchPage(fullRows, cursors, seenBefore, total, moreFromDB, storageUnavailable, responseMetadata)
 }
 
 // toolListFolders mirrors storage's files_list_folders semantics —

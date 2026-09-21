@@ -349,7 +349,7 @@ func TestSearch_StorageUnavailable_FlagsAndDegrades(t *testing.T) {
 	if r["storage_unavailable"] != true {
 		t.Errorf("expected storage_unavailable flag, got %+v", r)
 	}
-	rows := r["media"].([]MediaRow)
+	rows := r["media"].([]MediaResponseRow)
 	if len(rows) != 1 || !rows[0].HasVideo {
 		t.Errorf("probe data missing in degraded response: %+v", rows)
 	}
@@ -416,8 +416,8 @@ func TestSearch_OneBatchRoundtripPerCall(t *testing.T) {
 	defer cleanup()
 
 	app := &App{}
-	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "limit": 100, "detail": true})
-	rows := out.(map[string]any)["media"].([]MediaResponseRow)
+	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "limit": 50})
+	rows := out.(map[string]any)["media"].([]MediaSearchRow)
 	if len(rows) != 50 {
 		t.Errorf("want 50 enriched rows, got %d", len(rows))
 	}
