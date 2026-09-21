@@ -99,6 +99,58 @@ func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 	}
 }
 
+func TestWorkerRecoversCanonicalProcessAndIdentifiesStep(t *testing.T) {
+	a, _, p, r := sequentialSetup(t)
+	s := stepBy(t, a, r, "research")
+	worker := s.ThreadID
+	result, err := a.execute(p.ProjectID, "agent:7:"+worker, "step_get", map[string]any{
+		"process_id": "process-run-" + r.ID + "-worker", // common worker-name guess
+		"run_id":     r.ID,
+		"step_id":    s.ID,
+	})
+	if err != nil {
+		t.Fatalf("worker identity recovery failed: %v", err)
+	}
+	out := result.(map[string]any)
+	if out["process_id"] != p.ID || out["run_id"] != r.ID || out["step_id"] != s.ID {
+		t.Fatalf("worker result did not identify canonical records: %#v", out)
+	}
+	run := out["run"].(map[string]any)
+	if run["process_id"] != p.ID {
+		t.Fatalf("run result omitted canonical process id: %#v", run)
+	}
+}
+
+func TestStaleSequentialStepRemindsSameWorker(t *testing.T) {
+	a, f, p, r := sequentialSetup(t)
+	s := stepBy(t, a, r, "research")
+	actor := "agent:7:" + s.ThreadID
+	if _, err := a.execute(p.ProjectID, actor, "step_claim", map[string]any{"run_id": r.ID, "step_id": s.ID}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if _, err := a.db.Exec(`UPDATE process_step_runs SET updated_at=?,next_attempt_at='' WHERE id=?`, now.Add(-staleStepReminderAfter-time.Second).Format(time.RFC3339Nano), s.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := len(f.events)
+	if err := a.tickDirect(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.events) != before+1 {
+		t.Fatalf("stale step did not send one reminder: before=%d after=%d", before, len(f.events))
+	}
+	reminder := f.events[len(f.events)-1]
+	if reminder.ThreadID != s.ThreadID || !strings.Contains(reminder.Message.(string), "process_id="+p.ID) || !strings.Contains(reminder.Message.(string), "run_id="+r.ID) || !strings.Contains(reminder.Message.(string), "step_id="+s.ID) {
+		t.Fatalf("reminder lost worker identity: %#v", reminder)
+	}
+	if err := a.tickDirect(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.events) != before+1 {
+		t.Fatal("stale reminder was not throttled")
+	}
+}
+
 func TestRunWorkerEligibilityPreservesIndependentExecution(t *testing.T) {
 	a, _, _, r := sequentialSetup(t)
 	all, err := a.steps(r.ID)

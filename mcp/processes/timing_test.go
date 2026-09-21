@@ -191,8 +191,8 @@ func TestTimedDeliveryRetryKeepsIdentity(t *testing.T) {
 	if err := restarted.tickDirect(context.Background(), start); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.events) != 3 || f.events[1].SourceEventID != f.events[2].SourceEventID || f.events[1].ThreadID != f.events[2].ThreadID {
-		t.Fatal("retry identity changed")
+	if len(f.threads) != 3 || f.threads[1].ThreadID != f.threads[2].ThreadID || len(f.events) != 2 || f.events[1].ThreadID != f.threads[2].ThreadID || !strings.HasPrefix(f.events[1].SourceEventID, "process-step:"+s.ID+":assignment:") {
+		t.Fatalf("retry identity changed: threads=%+v events=%+v step=%+v", f.threads, f.events, s)
 	}
 }
 func TestTimedParallelJoinWaitsForAllInputs(t *testing.T) {
