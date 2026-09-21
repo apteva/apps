@@ -18,9 +18,11 @@ type service struct {
 var errSealed = errors.New("sealed packs are immutable: fork it into a draft, or seal a new version")
 
 const (
-	JudgePromptVersion = "goal-evidence-v1"
-	JudgeRubricVersion = "required-goals-v1"
-	judgeDisabledValue = "disabled"
+	JudgePromptVersion   = "goal-evidence-v1"
+	JudgeRubricVersion   = "required-goals-v1"
+	JudgePromptVersionV2 = "goal-evidence-v2"
+	JudgeRubricVersionV2 = "weighted-goals-v2"
+	judgeDisabledValue   = "disabled"
 )
 
 // ---- pack authoring ----
@@ -347,6 +349,22 @@ func validateScenarioContent(scenario Scenario) error {
 	if strings.TrimSpace(scenario.Prompt) == "" {
 		return fmt.Errorf("scenario %q has no prompt", scenario.ID)
 	}
+	for _, goal := range scenario.Goals {
+		if strings.TrimSpace(goal.Text) == "" {
+			return fmt.Errorf("scenario %q has an empty goal", scenario.ID)
+		}
+		if goal.Weight < 0 {
+			return fmt.Errorf("scenario %q goal weight must not be negative", scenario.ID)
+		}
+	}
+	for _, check := range scenario.Checks {
+		if check.Weight < 0 {
+			return fmt.Errorf("scenario %q check %q weight must not be negative", scenario.ID, check.Name)
+		}
+		if len(check.EvidenceAnyOf) > 0 && check.Type != "" {
+			return fmt.Errorf("scenario %q check %q cannot set both type and evidence_any_of", scenario.ID, check.Name)
+		}
+	}
 	budget := scenario.Budget
 	if budget.DurationMS <= 0 || budget.Turns <= 0 || (budget.TokensTotal <= 0 && budget.CostUSD <= 0) {
 		return fmt.Errorf("scenario %q needs duration, turn, and token or cost budgets to be scoreable", scenario.ID)
@@ -386,7 +404,7 @@ func normalizeScenarios(scenarios []Scenario) []Scenario {
 			out[i].Checks = []Check{}
 		}
 		if out[i].Goals == nil {
-			out[i].Goals = []string{}
+			out[i].Goals = []Goal{}
 		}
 		out[i].Tags = normalizeTaxonomyValues(out[i].Tags)
 	}
@@ -419,7 +437,7 @@ func profileUsesJudge(profile *Profile) bool {
 		return false
 	}
 	for _, component := range profile.Components {
-		if component.Kind == KindQuality && component.Metric == "judge_score" {
+		if component.Kind == KindQuality && (component.Metric == "judge_score" || component.Metric == "quality_score") {
 			return true
 		}
 	}

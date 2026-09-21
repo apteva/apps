@@ -17,12 +17,17 @@ func (a *App) handlePacks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		category := normalizeTaxonomyValue(r.URL.Query().Get("category"))
-		if category != "" {
+		includeArchived := r.URL.Query().Get("include_archived") == "true"
+		if category != "" || !includeArchived {
 			filtered := make([]Pack, 0, len(packs))
 			for _, pack := range packs {
-				if pack.Category == category {
-					filtered = append(filtered, pack)
+				if pack.Archived && !includeArchived {
+					continue
 				}
+				if category != "" && pack.Category != category {
+					continue
+				}
+				filtered = append(filtered, pack)
 			}
 			packs = filtered
 		}
@@ -59,6 +64,22 @@ func (a *App) handlePack(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case action == "archive" && r.Method == http.MethodPost:
+		var body struct {
+			Archived     bool   `json:"archived"`
+			SupersededBy string `json:"superseded_by"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := a.svc.db.setPackArchived(id, body.Archived, body.SupersededBy); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		pack, _ := a.svc.db.getPack(id)
+		writeJSON(w, http.StatusOK, pack)
+
 	case action == "seal" && r.Method == http.MethodPost:
 		var body struct {
 			Version string `json:"version"`

@@ -135,8 +135,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "bench_pack_list", Description: "List benchmark packs and their scenarios, optionally filtering by category, state, scoring profile, or text.",
 			InputSchema: readSchema(map[string]any{
 				"state": stringField("draft or sealed"), "profile_digest": stringField("Scoring profile digest"),
-				"category": stringField("Category slug such as coding"),
-				"query":    stringField("Case-insensitive text matched against pack, category, scenario names, and tags"),
+				"category":         stringField("Category slug such as coding"),
+				"query":            stringField("Case-insensitive text matched against pack, category, scenario names, and tags"),
+				"include_archived": boolField("Include superseded packs; defaults to false"),
 			}), Handler: a.toolListPacks},
 		{Name: "bench_category_list", Description: "List benchmark categories with pack, scenario, and tag counts.",
 			InputSchema: readSchema(map[string]any{}), Handler: a.toolListCategories},
@@ -151,6 +152,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
 				err := a.svc.deletePack(str(args, "id"))
 				return map[string]bool{"ok": err == nil}, err
+			}},
+		{Name: "bench_pack_archive", Description: "Archive or restore a pack without deleting its immutable definition or history.",
+			InputSchema: readSchema(map[string]any{"id": stringField("Pack id"), "archived": boolField("True to hide from default discovery"), "superseded_by": stringField("Optional replacement pack id")}),
+			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+				archived, _ := args["archived"].(bool)
+				err := a.svc.db.setPackArchived(str(args, "id"), archived, str(args, "superseded_by"))
+				if err != nil {
+					return nil, err
+				}
+				return a.svc.db.getPack(str(args, "id"))
 			}},
 
 		{Name: "bench_scenario_put", Description: "Add or replace one tagged scenario in a draft pack.", InputSchema: scenarioPutSchema(),
@@ -259,8 +270,12 @@ func (a *App) toolListPacks(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	state, digest := str(args, "state"), str(args, "profile_digest")
 	category := normalizeTaxonomyValue(str(args, "category"))
 	query := strings.ToLower(strings.TrimSpace(str(args, "query")))
+	includeArchived, _ := args["include_archived"].(bool)
 	out := make([]Pack, 0, len(packs))
 	for _, pack := range packs {
+		if pack.Archived && !includeArchived {
+			continue
+		}
 		if state != "" && pack.State != state {
 			continue
 		}
@@ -298,7 +313,7 @@ func (a *App) toolListCategories(_ *sdk.AppCtx, _ map[string]any) (any, error) {
 	byCategory := map[string]*categorySummary{}
 	tagSets := map[string]map[string]struct{}{}
 	for _, pack := range packs {
-		if pack.Category == "" {
+		if pack.Archived || pack.Category == "" {
 			continue
 		}
 		item := byCategory[pack.Category]

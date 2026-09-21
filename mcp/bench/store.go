@@ -67,13 +67,14 @@ func boolInt(value bool) int {
 
 // ---- packs ----
 
-const packColumns = `id,name,description,category,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at,profile_digest,judge_model`
+const packColumns = `id,name,description,category,state,version,digest,scoring_version,source_pack_id,scenarios_json,revision,created_at,updated_at,profile_digest,judge_model,archived,superseded_by`
 
 func scanPack(row interface{ Scan(...any) error }) (*Pack, error) {
 	var pack Pack
 	var scenarios, created, updated string
+	var archived int
 	err := row.Scan(&pack.ID, &pack.Name, &pack.Description, &pack.Category, &pack.State, &pack.Version, &pack.Digest,
-		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated, &pack.ProfileDigest, &pack.JudgeModel)
+		&pack.ScoringVersion, &pack.SourcePackID, &scenarios, &pack.Revision, &created, &updated, &pack.ProfileDigest, &pack.JudgeModel, &archived, &pack.SupersededBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -81,6 +82,7 @@ func scanPack(row interface{ Scan(...any) error }) (*Pack, error) {
 		return nil, err
 	}
 	decodeJSON(scenarios, &pack.Scenarios)
+	pack.Archived = archived != 0
 	if pack.Scenarios == nil {
 		pack.Scenarios = []Scenario{}
 	}
@@ -120,17 +122,30 @@ func (s store) getPackByDigest(digest string) (*Pack, error) {
 
 func (s store) savePack(pack *Pack) error {
 	_, err := s.db.Exec(`INSERT INTO bench_packs(`+packColumns+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, description=excluded.description, category=excluded.category, state=excluded.state,
 			version=excluded.version, digest=excluded.digest, scoring_version=excluded.scoring_version,
 			source_pack_id=excluded.source_pack_id, scenarios_json=excluded.scenarios_json,
 			profile_digest=excluded.profile_digest, judge_model=excluded.judge_model,
+			archived=excluded.archived, superseded_by=excluded.superseded_by,
 			revision=bench_packs.revision+1, updated_at=excluded.updated_at`,
 		pack.ID, pack.Name, pack.Description, pack.Category, pack.State, pack.Version, pack.Digest,
 		pack.ScoringVersion, pack.SourcePackID, encodeJSON(pack.Scenarios), pack.Revision,
-		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt), pack.ProfileDigest, pack.JudgeModel)
+		formatTime(pack.CreatedAt), formatTime(pack.UpdatedAt), pack.ProfileDigest, pack.JudgeModel, boolInt(pack.Archived), pack.SupersededBy)
 	return err
+}
+
+func (s store) setPackArchived(id string, archived bool, supersededBy string) error {
+	result, err := s.db.Exec(`UPDATE bench_packs SET archived=?,superseded_by=?,updated_at=? WHERE id=?`, boolInt(archived), supersededBy, formatTime(time.Now().UTC()), id)
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		return errors.New("pack not found")
+	}
+	return nil
 }
 
 func (s store) deletePack(id string) error {
@@ -397,6 +412,7 @@ func scanResults(rows *sql.Rows) ([]Result, error) {
 		decodeJSON(score, &result.Score)
 		decodeJSON(metrics, &result.Metrics)
 		decodeJSON(evaluation, &result.Evaluation)
+		result.Outcome = result.Evaluation.Outcome
 		result.Passed = passed == 1
 		result.CreatedAt = parseTime(created)
 		results = append(results, result)
@@ -459,6 +475,7 @@ func (s store) listAdmittedResults(profileDigest, category string) ([]resultWith
 		decodeJSON(score, &item.Score)
 		decodeJSON(metrics, &item.Metrics)
 		decodeJSON(evaluation, &item.Evaluation)
+		item.Outcome = item.Evaluation.Outcome
 		item.Passed = passed == 1
 		item.CreatedAt = parseTime(created)
 		out = append(out, item)
@@ -560,6 +577,22 @@ func summarize(results []Result, targets []Target) Summary {
 			summary.Passed++
 			bucket.Passed++
 		}
+		switch result.Outcome {
+		case "partial":
+			summary.Partial++
+			bucket.Partial++
+		case "unsafe_disqualified":
+			summary.Disqualified++
+			bucket.Disqualified++
+		case "failed":
+			summary.Failed++
+			bucket.Failed++
+		default:
+			if !result.Passed {
+				summary.Failed++
+				bucket.Failed++
+			}
+		}
 		bucket.AverageScore += result.Score.Score
 		bucket.AverageDurationMS += float64(result.Metrics.DurationMS)
 		bucket.AverageTokens += float64(result.Metrics.TokensTotal)
@@ -570,6 +603,7 @@ func summarize(results []Result, targets []Target) Summary {
 		summary.PassRate = round3(float64(summary.Passed) / float64(summary.Verified))
 	}
 	totalScore := 0.0
+	totalPassPowerK := 0.0
 	sort.Ints(order)
 	for _, index := range order {
 		bucket := buckets[index]
@@ -577,6 +611,8 @@ func summarize(results []Result, targets []Target) Summary {
 			divisor := float64(bucket.Verified)
 			totalScore += bucket.AverageScore
 			bucket.PassRate = round3(float64(bucket.Passed) / divisor)
+			bucket.PassPowerK = round3(math.Pow(bucket.PassRate, divisor))
+			totalPassPowerK += bucket.PassPowerK
 			bucket.AverageScore = round1(bucket.AverageScore / divisor)
 			bucket.AverageDurationMS = math.Round(bucket.AverageDurationMS / divisor)
 			bucket.AverageTokens = math.Round(bucket.AverageTokens / divisor)
@@ -586,6 +622,9 @@ func summarize(results []Result, targets []Target) Summary {
 	}
 	if summary.Verified > 0 {
 		summary.AverageScore = round1(totalScore / float64(summary.Verified))
+	}
+	if len(summary.Targets) > 0 {
+		summary.PassPowerK = round3(totalPassPowerK / float64(len(summary.Targets)))
 	}
 	return summary
 }

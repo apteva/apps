@@ -107,13 +107,22 @@ func (s *service) saveCase(item *Case, creating bool) (*Case, error) {
 	} else if suite == nil {
 		return nil, errors.New("suite not found")
 	}
-	goals := make([]string, 0, len(item.Goals))
+	goals := make([]Goal, 0, len(item.Goals))
 	for _, goal := range item.Goals {
-		if value := strings.TrimSpace(goal); value != "" {
-			goals = append(goals, value)
+		goal.Text = strings.TrimSpace(goal.Text)
+		goal.Category = strings.TrimSpace(goal.Category)
+		if goal.Text != "" {
+			if goal.Weight < 0 {
+				return nil, errors.New("goal weight must not be negative")
+			}
+			goals = append(goals, goal)
 		}
 	}
 	item.Goals = goals
+	item.RatingProfile = strings.TrimSpace(item.RatingProfile)
+	if item.RatingProfile != "" && item.RatingProfile != agenticQualityV2Profile {
+		return nil, fmt.Errorf("unsupported rating_profile %q", item.RatingProfile)
+	}
 	if len(item.Goals) == 0 && len(item.Assertions) == 0 {
 		return nil, errors.New("case requires a goal or deterministic assertion")
 	}
@@ -196,6 +205,18 @@ func (s *service) validateAssertions(assertions []Assertion) error {
 		supported[assertionType] = true
 	}
 	for i := range assertions {
+		if assertions[i].Weight < 0 {
+			return fmt.Errorf("assertion %q: weight must not be negative", assertions[i].Name)
+		}
+		if len(assertions[i].EvidenceAnyOf) > 0 {
+			if assertions[i].Type != "" {
+				return fmt.Errorf("assertion %q: type and evidence_any_of are mutually exclusive", assertions[i].Name)
+			}
+			if err := s.validateAssertions(assertions[i].EvidenceAnyOf); err != nil {
+				return fmt.Errorf("assertion %q: %w", assertions[i].Name, err)
+			}
+			continue
+		}
 		assertions[i].Type = strings.TrimSpace(assertions[i].Type)
 		if !supported[assertions[i].Type] {
 			return fmt.Errorf("unsupported assertion type %q; supported types: %s. For agent output, use goals or the Evals-native %s assertion", assertions[i].Type, strings.Join(assertionTypes, ", "), outputEqualsAssertionType)

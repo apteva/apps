@@ -31,13 +31,14 @@ type Case struct {
 	Prompt        string      `json:"prompt"`
 	Mode          string      `json:"mode,omitempty"`
 	Voice         *VoiceCase  `json:"voice,omitempty"`
-	Goals         []string    `json:"goals"`
+	Goals         []Goal      `json:"goals"`
 	Assertions    []Assertion `json:"assertions"`
 	EnvironmentID string      `json:"environment_id,omitempty"`
 	// Environment is a self-contained inline Environments spec. Its optional
 	// `apps` field contains stable app names which Evals resolves to the current
 	// project's install ids immediately before each isolated run.
 	Environment    map[string]any `json:"environment,omitempty"`
+	RatingProfile  string         `json:"rating_profile,omitempty"`
 	Weight         float64        `json:"weight"`
 	TimeoutSeconds int            `json:"timeout_seconds"`
 	MaxTurns       int            `json:"max_turns"`
@@ -45,6 +46,38 @@ type Case struct {
 	Revision       int            `json:"revision"`
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+// Goal accepts both the historical string form and a weighted v2 object. The
+// compact string representation keeps legacy suites byte-compatible.
+type Goal struct {
+	Text     string  `json:"text"`
+	Weight   float64 `json:"weight,omitempty"`
+	Critical bool    `json:"critical,omitempty"`
+	Category string  `json:"category,omitempty"`
+}
+
+func (g *Goal) UnmarshalJSON(raw []byte) error {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		g.Text = text
+		return nil
+	}
+	type alias Goal
+	var value alias
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	*g = Goal(value)
+	return nil
+}
+
+func (g Goal) MarshalJSON() ([]byte, error) {
+	if g.Weight == 0 && !g.Critical && g.Category == "" {
+		return json.Marshal(g.Text)
+	}
+	type alias Goal
+	return json.Marshal(alias(g))
 }
 
 type VoiceCase struct {
@@ -72,29 +105,39 @@ type VoiceAudioConditions struct {
 }
 
 type Assertion struct {
-	Name       string         `json:"name"`
-	Type       string         `json:"type"`
-	App        string         `json:"app,omitempty"`
-	MCP        string         `json:"mcp,omitempty"`
-	Tool       string         `json:"tool,omitempty"`
-	Input      map[string]any `json:"input,omitempty"`
-	Path       string         `json:"path,omitempty"`
-	Equals     any            `json:"equals,omitempty"`
-	Method     string         `json:"method,omitempty"`
-	Host       string         `json:"host,omitempty"`
-	MinCalls   int            `json:"min_calls,omitempty"`
-	AgentAlias string         `json:"agent_alias,omitempty"`
-	EventType  string         `json:"event_type,omitempty"`
-	Fixture    string         `json:"fixture,omitempty"`
+	Name          string         `json:"name"`
+	Type          string         `json:"type"`
+	App           string         `json:"app,omitempty"`
+	MCP           string         `json:"mcp,omitempty"`
+	Tool          string         `json:"tool,omitempty"`
+	Input         map[string]any `json:"input,omitempty"`
+	Path          string         `json:"path,omitempty"`
+	Equals        any            `json:"equals,omitempty"`
+	Method        string         `json:"method,omitempty"`
+	Host          string         `json:"host,omitempty"`
+	MinCalls      int            `json:"min_calls,omitempty"`
+	AgentAlias    string         `json:"agent_alias,omitempty"`
+	EventType     string         `json:"event_type,omitempty"`
+	Fixture       string         `json:"fixture,omitempty"`
+	Weight        float64        `json:"weight,omitempty"`
+	Critical      bool           `json:"critical,omitempty"`
+	Category      string         `json:"category,omitempty"`
+	Disqualify    bool           `json:"disqualifying,omitempty"`
+	EvidenceAnyOf []Assertion    `json:"evidence_any_of,omitempty"`
 }
 
 type AssertionResult struct {
-	Name    string `json:"name"`
-	Passed  bool   `json:"passed"`
-	Actual  any    `json:"actual,omitempty"`
-	Message string `json:"message,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Gating  bool   `json:"gating,omitempty"`
+	Name       string            `json:"name"`
+	Passed     bool              `json:"passed"`
+	Actual     any               `json:"actual,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Error      string            `json:"error,omitempty"`
+	Gating     bool              `json:"gating,omitempty"`
+	Weight     float64           `json:"weight,omitempty"`
+	Critical   bool              `json:"critical,omitempty"`
+	Category   string            `json:"category,omitempty"`
+	Disqualify bool              `json:"disqualifying,omitempty"`
+	Evidence   []AssertionResult `json:"evidence,omitempty"`
 }
 
 type Target struct {
@@ -144,8 +187,10 @@ type Run struct {
 	VoiceCall         *EnvironmentVoiceCall      `json:"voice_call,omitempty"`
 	Assertions        []AssertionResult          `json:"assertions"`
 	Judge             *JudgeVerdict              `json:"judge,omitempty"`
+	Outcome           string                     `json:"outcome,omitempty"`
 	CorrectnessScore  *float64                   `json:"correctness_score,omitempty"`
 	JudgeScore        *float64                   `json:"judge_score,omitempty"`
+	QualityScore      *float64                   `json:"quality_score,omitempty"`
 	OverallScore      *float64                   `json:"overall_score,omitempty"`
 	StartedAt         *time.Time                 `json:"started_at,omitempty"`
 	FinishedAt        *time.Time                 `json:"finished_at,omitempty"`
@@ -228,10 +273,13 @@ type JudgeVerdict struct {
 }
 
 type GoalVerdict struct {
-	Goal   string   `json:"goal"`
-	Score  *float64 `json:"score,omitempty"`
-	Passed bool     `json:"passed"`
-	Why    string   `json:"why"`
+	Goal     string   `json:"goal"`
+	Score    *float64 `json:"score,omitempty"`
+	Passed   bool     `json:"passed"`
+	Why      string   `json:"why"`
+	Weight   float64  `json:"weight,omitempty"`
+	Critical bool     `json:"critical,omitempty"`
+	Category string   `json:"category,omitempty"`
 }
 
 type DirectiveSuggestion struct {

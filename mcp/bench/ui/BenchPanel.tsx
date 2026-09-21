@@ -28,14 +28,21 @@ interface Check {
   input?: Record<string, unknown>;
   path?: string;
   equals?: unknown;
+	weight?: number;
+	critical?: boolean;
+	category?: string;
+	disqualifying?: boolean;
+	evidence_any_of?: Check[];
 }
+
+interface WeightedGoal { text: string; weight?: number; critical?: boolean; category?: string }
 
 interface Scenario {
   id: string;
   name: string;
   tags?: string[];
   prompt: string;
-  goals?: string[];
+  goals?: Array<string | WeightedGoal>;
   environment_id?: string;
   environment?: Record<string, unknown>;
   snapshot_id?: string;
@@ -56,6 +63,8 @@ interface Pack {
   digest?: string;
   scoring_version?: string;
   judge_model?: string;
+	archived?: boolean;
+	superseded_by?: string;
   scenarios: Scenario[];
   updated_at: string;
 }
@@ -83,6 +92,7 @@ interface TargetSummary {
   invalid: number;
   passed: number;
   pass_rate: number;
+  pass_power_k?: number;
   average_score: number;
   average_duration_ms: number;
   average_tokens: number;
@@ -93,7 +103,11 @@ interface Summary {
   verified: number;
   invalid: number;
   passed: number;
+  partial?: number;
+  failed?: number;
+  disqualified?: number;
   pass_rate: number;
+  pass_power_k?: number;
   average_score: number;
   targets: TargetSummary[];
 }
@@ -107,6 +121,7 @@ interface Result {
   admission: string;
   invalid_reason?: string;
   passed: boolean;
+	outcome?: string;
   score: { score: number; cost_basis?: string };
   metrics: { duration_ms: number; turns_used: number; tokens_total: number; cost_usd: number; errors: number };
   error?: string;
@@ -928,7 +943,7 @@ function Runs({ runs, busy, runnable, onNew, onOpen, onCancel }: {
               {r.summary?.verified > 0 && (
                 <div className="text-right">
                   <div className="font-medium text-sm">{pct(r.summary.pass_rate)}</div>
-                  <div className="text-xs text-text-dim">{r.summary.average_score}/100</div>
+                  <div className="text-xs text-text-dim">{r.summary.average_score}/100 · pass^{r.trials} {pct(r.summary.pass_power_k)}</div>
                 </div>
               )}
               <button className={btn} onClick={() => onOpen(r.id)}>Results</button>
@@ -947,7 +962,7 @@ function Runs({ runs, busy, runnable, onNew, onOpen, onCancel }: {
             <div key={t.target_index} className="text-xs flex justify-between gap-4 border-t border-border pt-1">
               <span>{t.label}</span>
               <span className="text-text-dim">
-                {pct(t.pass_rate)} · {t.average_score}/100 · {secs(t.average_duration_ms)} ·{" "}
+                {pct(t.pass_rate)} · pass^{t.verified} {pct(t.pass_power_k)} · {t.average_score}/100 · {secs(t.average_duration_ms)} ·{" "}
                 {Math.round(t.average_tokens).toLocaleString()} tok{t.invalid > 0 ? ` · ${t.invalid} withheld` : ""}
               </span>
             </div>
@@ -1123,6 +1138,7 @@ function RowKey({ rank, color, label, y, swatch = true }: {
 }
 
 const COMPONENT_SERIES = [
+  { key: "quality", label: "Agentic quality", color: "var(--s1)" },
   { key: "success", label: "Task success", color: "var(--s1)" },
   { key: "judge", label: "Judge quality", color: "var(--s2)" },
   { key: "duration", label: "Duration", color: "var(--s3)" },

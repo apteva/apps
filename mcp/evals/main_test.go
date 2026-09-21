@@ -25,7 +25,7 @@ func testStore(t *testing.T) store {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql", "migrations/006_inline_environments.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_voice_cases.sql", "migrations/003_run_progress.sql", "migrations/004_simulation_retry.sql", "migrations/005_collaborator_executions.sql", "migrations/006_inline_environments.sql", "migrations/007_agentic_quality_v2.sql"} {
 		migration, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
@@ -46,7 +46,7 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 	item := &Case{
 		ID: "case-one", SuiteID: suite.ID, Name: "Answer a caller", Mode: "voice",
-		Prompt: "Help the caller book an appointment", Goals: []string{"The appointment is booked"},
+		Prompt: "Help the caller book an appointment", Goals: []Goal{{Text: "The appointment is booked"}},
 		Assertions: []Assertion{{Name: "record", Type: "app_state", App: "crm", Tool: "contacts_get"}},
 		Voice: &VoiceCase{
 			CallerGoal: "Book an appointment for tomorrow", CallerPersona: "A concise customer",
@@ -117,7 +117,7 @@ func TestInvalidSimulationRetriesSameLogicalRunOnce(t *testing.T) {
 	}
 	item := Case{
 		ID: "case-retry", SuiteID: suite.ID, Name: "Voice", Mode: "voice",
-		Prompt: "Complete the call", Goals: []string{"Finish naturally"},
+		Prompt: "Complete the call", Goals: []Goal{{Text: "Finish naturally"}},
 		Voice: &VoiceCase{CallerGoal: "Complete the call"}, Enabled: true,
 	}
 	if err := db.saveCase(&item); err != nil {
@@ -170,6 +170,36 @@ func TestScoreRunGatesOnDeterministicFailure(t *testing.T) {
 	status, _, _, overall = scoreRun(nil, &JudgeVerdict{Passed: true, Score: 82})
 	if status != "pass" || *overall != 82 {
 		t.Fatalf("judge-only status=%s score=%v", status, *overall)
+	}
+}
+
+func TestAgenticQualityV2GradesWithoutFailureCliff(t *testing.T) {
+	status, outcome, correctness, judgeScore, quality := scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 3}, {Passed: false, Weight: 1}},
+		&JudgeVerdict{Score: 90, Passed: true})
+	if status != "pass" || outcome != "passed" || *correctness != 75 || *judgeScore != 90 || *quality != 79.5 {
+		t.Fatalf("status=%s outcome=%s correctness=%v judge=%v quality=%v", status, outcome, *correctness, *judgeScore, *quality)
+	}
+
+	status, outcome, _, _, quality = scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 1}, {Passed: false, Weight: 1, Critical: true}}, nil)
+	if status != "fail" || outcome != "failed" || *quality != 50 {
+		t.Fatalf("critical result status=%s outcome=%s quality=%v", status, outcome, *quality)
+	}
+
+	_, outcome, _, _, quality = scoreRunProfile(agenticQualityV2Profile,
+		[]AssertionResult{{Passed: true, Weight: 4}, {Passed: false, Weight: 1, Disqualify: true}}, nil)
+	if outcome != "unsafe_disqualified" || *quality != 80 {
+		t.Fatalf("disqualified outcome=%s quality=%v", outcome, *quality)
+	}
+}
+
+func TestWeightedJudgeDoesNotClampToWeakestGoal(t *testing.T) {
+	high, low := 100.0, 40.0
+	verdict := &JudgeVerdict{PerGoal: []GoalVerdict{{Score: &high}, {Score: &low}}}
+	alignJudgeGoals(verdict, []Goal{{Text: "Primary", Weight: 4}, {Text: "Polish", Weight: 1}}, agenticQualityV2Profile)
+	if verdict.Score != 88 || verdict.Passed || verdict.PerGoal[0].Weight != 4 {
+		t.Fatalf("verdict=%+v", verdict)
 	}
 }
 
@@ -353,7 +383,7 @@ func TestAlignJudgeGoalsUsesConfiguredGoalsAndFailsMissingResults(t *testing.T) 
 		Score:   90,
 		PerGoal: []GoalVerdict{{Goal: "paraphrased goal", Score: &first, Passed: true, Why: "Met"}},
 	}
-	alignJudgeGoals(verdict, []string{"Greet the caller", "Confirm the callback"})
+	alignJudgeGoals(verdict, []Goal{{Text: "Greet the caller"}, {Text: "Confirm the callback"}}, "")
 	if verdict.Passed || verdict.Score != 45 || len(verdict.PerGoal) != 2 {
 		t.Fatalf("verdict=%#v", verdict)
 	}
@@ -389,7 +419,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.8.0" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.0" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -460,7 +490,7 @@ func TestDraftTargetsAreCreatedOnDemandAndComparedTogether(t *testing.T) {
 	if _, err := svc.saveSuite(&Suite{ID: "suite-drafts", Name: "Draft comparison"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.saveCase(&Case{ID: "case-drafts", SuiteID: "suite-drafts", Name: "Resolve", Prompt: "Resolve support request", Goals: []string{"Resolve the request"}}, true); err != nil {
+	if _, err := svc.saveCase(&Case{ID: "case-drafts", SuiteID: "suite-drafts", Name: "Resolve", Prompt: "Resolve support request", Goals: []Goal{{Text: "Resolve the request"}}}, true); err != nil {
 		t.Fatal(err)
 	}
 	targets := []Target{
@@ -780,7 +810,7 @@ func TestAssertionExecutionErrorPreservesJudgeAndDoesNotScoreAgent(t *testing.T)
 		t.Fatal(err)
 	}
 	if _, err := svc.saveCase(&Case{
-		ID: "case-assertion-error", SuiteID: "suite-assertion-error", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"},
+		ID: "case-assertion-error", SuiteID: "suite-assertion-error", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}},
 		Assertions: []Assertion{{Name: "CRM state", Type: "app_state", App: "crm", Tool: "record_get", Path: "status", Equals: "done"}},
 	}, true); err != nil {
 		t.Fatal(err)
@@ -821,7 +851,7 @@ func TestExperimentCanonicalizesJudgeModelBeforeQueueingRuns(t *testing.T) {
 	if _, err := svc.saveSuite(&Suite{ID: "suite-judge", Name: "Judge resolution"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.saveCase(&Case{ID: "case-judge", SuiteID: "suite-judge", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+	if _, err := svc.saveCase(&Case{ID: "case-judge", SuiteID: "suite-judge", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := svc.resolveJudgeModel("openai-codex/gpt-5.6-sol")
@@ -854,7 +884,7 @@ func TestExperimentRejectsUnknownOrAmbiguousJudgeModelBeforeQueueingRuns(t *test
 			if _, err := svc.saveSuite(&Suite{ID: "suite-reject", Name: "Judge rejection"}, true); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := svc.saveCase(&Case{ID: "case-reject", SuiteID: "suite-reject", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+			if _, err := svc.saveCase(&Case{ID: "case-reject", SuiteID: "suite-reject", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := svc.createExperiment("suite-reject", "", "manual", []Target{{AgentID: 7}}, 1, 0, test.requested); err == nil || !strings.Contains(err.Error(), test.wantError) || !strings.Contains(err.Error(), "eval_catalog.models[].gateway_model") {
@@ -963,7 +993,7 @@ func TestMultiAgentEnvironmentPreservesAndCapturesCollaborators(t *testing.T) {
 	}
 	if _, err := svc.saveCase(&Case{
 		ID: "case-team", SuiteID: "suite-team", Name: "Delegate", Prompt: "Resolve with the specialist",
-		Goals:      []string{"Use the specialist to resolve the request"},
+		Goals:      []Goal{{Text: "Use the specialist to resolve the request"}},
 		Assertions: []Assertion{{Name: "Final response", Type: outputEqualsAssertionType, Equals: "support request resolved"}},
 	}, true); err != nil {
 		t.Fatal(err)
@@ -1061,7 +1091,7 @@ func TestEnvironmentAgentMappingRejectedBeforeRuntimeCreation(t *testing.T) {
 			if _, err := svc.saveSuite(&Suite{ID: "suite-invalid-team", Name: "Invalid team", EnvironmentID: "env-invalid"}, true); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := svc.saveCase(&Case{ID: "case-invalid-team", SuiteID: "suite-invalid-team", Name: "Case", Prompt: "Help", Goals: []string{"Help the user"}}, true); err != nil {
+			if _, err := svc.saveCase(&Case{ID: "case-invalid-team", SuiteID: "suite-invalid-team", Name: "Case", Prompt: "Help", Goals: []Goal{{Text: "Help the user"}}}, true); err != nil {
 				t.Fatal(err)
 			}
 			experiment, err := svc.createExperiment("suite-invalid-team", "", "manual", []Target{{AgentID: 7}}, 1, 0, "")

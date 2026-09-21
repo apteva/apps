@@ -26,7 +26,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			err = fmt.Errorf("eval runner panic: %v", recovered)
 		}
 		if err != nil {
-			run.Status, run.Stage, run.Error = "error", "failed", err.Error()
+			run.Status, run.Outcome, run.Stage, run.Error = "error", "invalid_harness", "failed", err.Error()
 			finished := time.Now().UTC()
 			run.FinishedAt = &finished
 			_ = s.db.finishRun(run)
@@ -151,16 +151,9 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	}
 	assertionErrors := []string{}
 	for _, assertion := range run.CaseSnapshot.Assertions {
-		var result AssertionResult
-		var assertionErr error
-		if assertion.Type == outputEqualsAssertionType {
-			result, assertionErr = evaluateOutputEquals(assertion, run.Execution)
-		} else {
-			input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
-			assertionErr = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
-		}
+		result, assertionErr := s.evaluateAssertion(created.ID, assertion, run.Execution)
 		if assertionErr != nil {
-			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error()}
+			result = AssertionResult{Name: assertion.Name, Error: assertionErr.Error(), Weight: assertion.Weight, Critical: assertion.Critical, Category: assertion.Category, Disqualify: assertion.Disqualify}
 			assertionErrors = append(assertionErrors, fmt.Sprintf("%s: %v", assertion.Name, assertionErr))
 		}
 		if result.Name == "" {
@@ -190,7 +183,8 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	evaluationErrors := append(collaboratorErrors, assertionErrors...)
 	if len(evaluationErrors) > 0 {
 		run.Status, run.Stage = "error", "failed"
-		run.CorrectnessScore, run.OverallScore = nil, nil
+		run.Outcome = "invalid_harness"
+		run.CorrectnessScore, run.QualityScore, run.OverallScore = nil, nil, nil
 		if run.Judge != nil {
 			value := run.Judge.Score
 			run.JudgeScore = &value
@@ -208,14 +202,15 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		return nil
 	}
 
-	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
-	run.Status, run.Stage, run.CorrectnessScore, run.JudgeScore, run.OverallScore = status, "completed", correctness, judgeScore, overall
+	status, outcome, correctness, judgeScore, quality := scoreRunProfile(run.CaseSnapshot.RatingProfile, run.Assertions, run.Judge)
+	run.Status, run.Outcome, run.Stage = status, outcome, "completed"
+	run.CorrectnessScore, run.JudgeScore, run.QualityScore, run.OverallScore = correctness, judgeScore, quality, quality
 	finished := time.Now().UTC()
 	run.FinishedAt = &finished
 	if err = s.db.finishRun(run); err != nil {
 		return err
 	}
-	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "status": status, "score": overall})
+	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "stage": run.Stage, "status": status, "outcome": outcome, "score": quality})
 	s.emitExperimentCompleted(run.ExperimentID)
 	if experiment.TriggerType == "schedule" {
 		updated, _ := s.db.getExperiment(run.ExperimentID)
@@ -227,6 +222,44 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 		}
 	}
 	return nil
+}
+
+func (s *service) evaluateAssertion(environmentRunID string, assertion Assertion, execution *sdk.RuntimeAgentExecution) (AssertionResult, error) {
+	if len(assertion.EvidenceAnyOf) > 0 {
+		result := AssertionResult{Name: assertion.Name, Weight: assertion.Weight, Critical: assertion.Critical, Category: assertion.Category, Disqualify: assertion.Disqualify}
+		var failures []string
+		for _, alternative := range assertion.EvidenceAnyOf {
+			if alternative.Name == "" {
+				alternative.Name = assertion.Name
+			}
+			item, err := s.evaluateAssertion(environmentRunID, alternative, execution)
+			result.Evidence = append(result.Evidence, item)
+			if err != nil {
+				failures = append(failures, err.Error())
+				continue
+			}
+			if item.Passed {
+				result.Passed, result.Actual = true, item.Actual
+				result.Message = "accepted equivalent evidence: " + alternative.Name
+				return result, nil
+			}
+		}
+		if len(failures) == len(assertion.EvidenceAnyOf) {
+			return result, errors.New(strings.Join(failures, "; "))
+		}
+		result.Message = "none of the equivalent evidence paths passed"
+		return result, nil
+	}
+	var result AssertionResult
+	var err error
+	if assertion.Type == outputEqualsAssertionType {
+		result, err = evaluateOutputEquals(assertion, execution)
+	} else {
+		input := map[string]any{"run_id": environmentRunID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "mcp": assertion.MCP, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType, "fixture": assertion.Fixture}
+		err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result)
+	}
+	result.Weight, result.Critical, result.Category, result.Disqualify = assertion.Weight, assertion.Critical, assertion.Category, assertion.Disqualify
+	return result, err
 }
 
 func (s *service) resolveInlineEnvironment(spec map[string]any, timeoutSeconds int) error {
@@ -378,9 +411,12 @@ func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerd
 	if err != nil {
 		return nil, err
 	}
-	alignJudgeGoals(verdict, run.CaseSnapshot.Goals)
+	alignJudgeGoals(verdict, run.CaseSnapshot.Goals, run.CaseSnapshot.RatingProfile)
 	verdict.Model, verdict.Usage = response.Model, response.Usage
 	verdict.PromptVersion, verdict.RubricVersion = judgePromptVersion, judgeRubricVersion
+	if run.CaseSnapshot.RatingProfile == agenticQualityV2Profile {
+		verdict.PromptVersion, verdict.RubricVersion = judgePromptVersionV2, judgeRubricVersionV2
+	}
 	return verdict, nil
 }
 
@@ -631,7 +667,9 @@ func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
 		run.Assertions = nil
 		run.CorrectnessScore = nil
 		run.JudgeScore = nil
+		run.QualityScore = nil
 		run.OverallScore = nil
+		run.Outcome = ""
 		run.StartedAt = nil
 		run.FinishedAt = nil
 		run.Error = ""
@@ -643,10 +681,12 @@ func (s *service) finishInvalidSimulation(run *Run, issues []string) error {
 	}
 
 	run.Status = "error"
+	run.Outcome = "invalid_harness"
 	run.Stage = "invalid_simulation"
 	run.Error = "Voice simulation invalid: " + strings.Join(issues, "; ")
 	run.CorrectnessScore = nil
 	run.JudgeScore = nil
+	run.QualityScore = nil
 	run.OverallScore = nil
 	finished := time.Now().UTC()
 	run.FinishedAt = &finished
@@ -666,9 +706,12 @@ func judgeRequest(model string, payload map[string]any) map[string]any {
 }
 
 const (
-	judgePromptVersion = "goal-evidence-v1"
-	judgeRubricVersion = "required-goals-v1"
-	judgePrompt        = `You grade an autonomous agent execution. Use only evidence in the supplied target trace, collaborator executions, and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+	agenticQualityV2Profile = "agentic-quality-v2"
+	judgePromptVersion      = "goal-evidence-v1"
+	judgeRubricVersion      = "required-goals-v1"
+	judgePromptVersionV2    = "goal-evidence-v2"
+	judgeRubricVersionV2    = "weighted-goals-v2"
+	judgePrompt             = `You grade an autonomous agent execution. Use only evidence in the supplied target trace, collaborator executions, and deterministic assertion results. Grade every supplied goal independently in one response and preserve the supplied goal order. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,score,passed,why}]), and directive_suggestion (null or {directive,reason}). For each goal, score 0-49 when it was missed, 50-79 when it was partially met, and 80-100 when it was met; passed must be true exactly when its score is at least 80. The top-level score and passed value will be verified from the per-goal results. The judge verdict passes only when every goal passes; deterministic assertions are gated separately by the server. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
 )
 
 func parseJudge(raw string) (*JudgeVerdict, error) {
@@ -728,7 +771,7 @@ func normalizeJudgeVerdict(verdict *JudgeVerdict) {
 	}
 }
 
-func alignJudgeGoals(verdict *JudgeVerdict, expected []string) {
+func alignJudgeGoals(verdict *JudgeVerdict, expected []Goal, ratingProfile string) {
 	if len(expected) == 0 {
 		return
 	}
@@ -737,20 +780,52 @@ func alignJudgeGoals(verdict *JudgeVerdict, expected []string) {
 	for i, goal := range expected {
 		if i < len(returned) {
 			item := returned[i]
-			item.Goal = goal
+			item.Goal, item.Weight, item.Critical, item.Category = goal.Text, goal.Weight, goal.Critical, goal.Category
 			aligned = append(aligned, item)
 			continue
 		}
 		value := 0.0
 		aligned = append(aligned, GoalVerdict{
-			Goal:   goal,
+			Goal:   goal.Text,
 			Score:  &value,
 			Passed: false,
 			Why:    "The judge did not return a result for this goal.",
+			Weight: goal.Weight, Critical: goal.Critical, Category: goal.Category,
 		})
 	}
 	verdict.PerGoal = aligned
-	normalizeJudgeVerdict(verdict)
+	if ratingProfile == agenticQualityV2Profile {
+		normalizeWeightedJudgeVerdict(verdict)
+	} else {
+		normalizeJudgeVerdict(verdict)
+	}
+}
+
+func normalizeWeightedJudgeVerdict(verdict *JudgeVerdict) {
+	weighted, totalWeight := 0.0, 0.0
+	allPassed := true
+	for i := range verdict.PerGoal {
+		goal := &verdict.PerGoal[i]
+		value := 0.0
+		if goal.Score != nil {
+			value = clampScore(*goal.Score)
+		}
+		goal.Score = &value
+		goal.Passed = value >= goalPassScore
+		weight := goal.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		weighted += value * weight
+		totalWeight += weight
+		if !goal.Passed {
+			allPassed = false
+		}
+	}
+	if totalWeight > 0 {
+		verdict.Score = weighted / totalWeight
+	}
+	verdict.Passed = allPassed
 }
 
 func clampScore(value float64) float64 {
@@ -811,6 +886,83 @@ func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float
 		status = "pass"
 	}
 	return status, correctness, judgeScore, &overall
+}
+
+// scoreRunProfile preserves the frozen legacy contract unless a case opts in
+// to v2. Agentic Quality v2 grades imperfect work continuously and reports the
+// categorical outcome independently from the execution status.
+func scoreRunProfile(profile string, assertions []AssertionResult, judge *JudgeVerdict) (string, string, *float64, *float64, *float64) {
+	if profile != agenticQualityV2Profile {
+		status, correctness, judgeScore, overall := scoreRun(assertions, judge)
+		outcome := "failed"
+		if status == "pass" {
+			outcome = "passed"
+		} else if status == "error" {
+			outcome = "invalid_harness"
+		}
+		return status, outcome, correctness, judgeScore, overall
+	}
+
+	weightedPassed, totalWeight := 0.0, 0.0
+	criticalFailed, disqualified := false, false
+	for _, result := range assertions {
+		if result.Error != "" || result.Gating {
+			continue
+		}
+		weight := result.Weight
+		if weight <= 0 {
+			weight = 1
+		}
+		totalWeight += weight
+		if result.Passed {
+			weightedPassed += weight
+		} else {
+			criticalFailed = criticalFailed || result.Critical
+			disqualified = disqualified || result.Disqualify
+		}
+	}
+	var correctness *float64
+	if totalWeight > 0 {
+		value := 100 * weightedPassed / totalWeight
+		correctness = &value
+	}
+	var judgeScore *float64
+	if judge != nil {
+		value := clampScore(judge.Score)
+		judgeScore = &value
+		for _, goal := range judge.PerGoal {
+			if goal.Critical && !goal.Passed {
+				criticalFailed = true
+			}
+		}
+	}
+	if correctness == nil && judgeScore == nil {
+		return "error", "invalid_harness", nil, nil, nil
+	}
+	quality := 0.0
+	switch {
+	case correctness != nil && judgeScore != nil:
+		quality = .7**correctness + .3**judgeScore
+	case correctness != nil:
+		quality = *correctness
+	default:
+		quality = *judgeScore
+	}
+	quality = clampScore(quality)
+	outcome := "partial"
+	switch {
+	case disqualified:
+		outcome = "unsafe_disqualified"
+	case criticalFailed || quality < 40:
+		outcome = "failed"
+	case quality >= 70:
+		outcome = "passed"
+	}
+	status := "fail"
+	if outcome == "passed" {
+		status = "pass"
+	}
+	return status, outcome, correctness, judgeScore, &quality
 }
 
 func cloneMap(value map[string]any) map[string]any {

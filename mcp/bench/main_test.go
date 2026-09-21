@@ -172,6 +172,21 @@ func TestCostBasisPrefersRealCostWhenReported(t *testing.T) {
 	}
 }
 
+func TestAgenticQualityV2CombinesQualityAndEfficiencyWithoutZeroing(t *testing.T) {
+	quality := 60.0
+	metrics := Metrics{DurationMS: 75_000, TurnsUsed: 8, TokensTotal: 60_000, Errors: 0, QualityScore: &quality}
+	profile := agenticQualityV2()
+	digest, err := profileDigest(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile.Digest = digest
+	score := scoreWithProfile(false, metrics, crmScenario().Budget, profile)
+	if score.QualityScore != 60 || score.EfficiencyScore != 100 || score.Score != 66 {
+		t.Fatalf("score=%+v", score)
+	}
+}
+
 func TestJudgedPackPinsCodexModelAndPreservesVerdictEvidence(t *testing.T) {
 	platform := &fakePlatform{suiteID: "suite-judge"}
 	svc, _ := newTestService(t, platform)
@@ -179,7 +194,7 @@ func TestJudgedPackPinsCodexModelAndPreservesVerdictEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	scenario := crmScenario()
-	scenario.Goals = []string{"Create and update the requested contact correctly"}
+	scenario.Goals = []Goal{{Text: "Create and update the requested contact correctly"}}
 	draft, err := svc.savePack(&Pack{
 		Name: "Coding judged", JudgeModel: "gpt-5.6-sol", Scenarios: []Scenario{scenario},
 	}, true)
@@ -245,7 +260,7 @@ func TestSealRejectsUnavailableJudgeModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	scenario := crmScenario()
-	scenario.Goals = []string{"Complete the requested contact operation"}
+	scenario.Goals = []Goal{{Text: "Complete the requested contact operation"}}
 	draft, err := svc.savePack(&Pack{Name: "Unavailable judge", JudgeModel: "missing-model", Scenarios: []Scenario{scenario}}, true)
 	if err != nil {
 		t.Fatal(err)

@@ -49,12 +49,14 @@ type ScoreComponent struct {
 }
 
 type Score struct {
-	Score          float64          `json:"score"`
-	MaxScore       float64          `json:"max_score"`
-	ProfileVersion string           `json:"profile_version,omitempty"`
-	ProfileDigest  string           `json:"profile_digest,omitempty"`
-	ProfileName    string           `json:"profile_name,omitempty"`
-	Components     []ScoreComponent `json:"components"`
+	Score           float64          `json:"score"`
+	MaxScore        float64          `json:"max_score"`
+	ProfileVersion  string           `json:"profile_version,omitempty"`
+	ProfileDigest   string           `json:"profile_digest,omitempty"`
+	ProfileName     string           `json:"profile_name,omitempty"`
+	Components      []ScoreComponent `json:"components"`
+	QualityScore    float64          `json:"quality_score,omitempty"`
+	EfficiencyScore float64          `json:"efficiency_score,omitempty"`
 
 	// Legacy mirrors. Results stored before profiles existed carry these, and
 	// the panel still reads them, so a profile using the verified-v1 keys keeps
@@ -65,6 +67,7 @@ type Score struct {
 	TurnPoints      float64             `json:"turn_points"`
 	ToolErrorPoints float64             `json:"tool_error_points"`
 	JudgePoints     float64             `json:"judge_points,omitempty"`
+	QualityPoints   float64             `json:"quality_points,omitempty"`
 	CostBasis       string              `json:"cost_basis"`
 	Formula         string              `json:"formula"`
 	Ratios          map[string]*float64 `json:"ratios"`
@@ -108,6 +111,8 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 	gated := !passed && p.OnFailure == OnFailureZero
 
 	total := 0.0
+	qualityEarned, qualityWeight := 0.0, 0.0
+	efficiencyEarned, efficiencyWeight := 0.0, 0.0
 	for _, c := range p.Components {
 		out := ScoreComponent{Key: c.Key, Label: c.Label, Kind: c.Kind, Weight: c.Weight, Metric: c.Metric, Curve: c.Curve}
 		score.Weights[c.Key] = c.Weight
@@ -163,6 +168,12 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 			out.Earned = round1(c.Weight * curveScore(c.Curve, actual, allowance, c.ZeroAt))
 		}
 		total += out.Earned
+		if c.Kind == KindQuality && c.Metric == "quality_score" {
+			qualityEarned, qualityWeight = out.Earned, c.Weight
+		} else if c.Kind != KindGate && !(c.Kind == KindQuality && c.Metric == "judge_score") {
+			efficiencyEarned += out.Earned
+			efficiencyWeight += c.Weight
+		}
 		score.Components = append(score.Components, out)
 		switch c.Key {
 		case "success":
@@ -177,6 +188,8 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 			score.ToolErrorPoints = out.Earned
 		case "judge":
 			score.JudgePoints = out.Earned
+		case "quality":
+			score.QualityPoints = out.Earned
 		}
 	}
 	// Legacy consumers read ratios by metric name, not component key.
@@ -184,6 +197,12 @@ func scoreWithProfile(passed bool, m Metrics, budget Budget, p *Profile) Score {
 	score.Ratios["turns"] = metricRatio(float64(m.TurnsUsed), float64(budget.Turns))
 	score.Ratios["tokens_total"] = metricRatio(float64(m.TokensTotal), float64(budget.TokensTotal))
 	score.Score = round1(total)
+	if qualityWeight > 0 {
+		score.QualityScore = round1(100 * qualityEarned / qualityWeight)
+	}
+	if efficiencyWeight > 0 {
+		score.EfficiencyScore = round1(100 * efficiencyEarned / efficiencyWeight)
+	}
 	return score
 }
 

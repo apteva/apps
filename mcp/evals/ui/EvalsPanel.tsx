@@ -182,7 +182,7 @@ interface Target {
 
 interface Assertion {
   name: string;
-  type: string;
+  type?: string;
   app?: string;
   mcp?: string;
   tool?: string;
@@ -195,7 +195,14 @@ interface Assertion {
   agent_alias?: string;
   event_type?: string;
   fixture?: string;
+	weight?: number;
+	critical?: boolean;
+	category?: string;
+	disqualifying?: boolean;
+	evidence_any_of?: Assertion[];
 }
+
+interface WeightedGoal { text: string; weight?: number; critical?: boolean; category?: string }
 
 interface EvalCase {
   id: string;
@@ -204,9 +211,10 @@ interface EvalCase {
   prompt: string;
   mode?: "text" | "voice";
   voice?: VoiceCase;
-  goals: string[];
+  goals: Array<string | WeightedGoal>;
   assertions: Assertion[];
   environment_id?: string;
+	rating_profile?: "agentic-quality-v2";
   timeout_seconds: number;
   max_turns: number;
   enabled: boolean;
@@ -339,6 +347,7 @@ interface EvalRun {
   id: string;
   case_id: string;
   status: string;
+	outcome?: string;
   stage?: string;
   environment_run_id?: string;
   target_index: number;
@@ -348,6 +357,7 @@ interface EvalRun {
   overall_score?: number;
   correctness_score?: number;
   judge_score?: number;
+	quality_score?: number;
   error?: string;
   assertions: AssertionResult[];
   suggestions?: { id: string; directive: string; reason: string; status: string }[];
@@ -479,8 +489,9 @@ const visibleGoals = (run: EvalRun): DisplayGoal[] => {
   if (run.judge?.per_goal?.length) {
     return run.judge.per_goal.map((goal) => ({ ...goal, judged: true }));
   }
-  return (run.case.goals || []).map((goal) => ({ goal, passed: false, why: "", judged: false }));
+	return (run.case.goals || []).map((goal) => ({ goal: typeof goal === "string" ? goal : goal.text, passed: false, why: "", judged: false }));
 };
+const goalText = (goal: string | WeightedGoal) => typeof goal === "string" ? goal : goal.text;
 const goalsFromText = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
 const formatDate = (value: string) => new Date(value).toLocaleString([], {
   month: "short",
@@ -1135,7 +1146,7 @@ function ScenarioEditor({ suite, initial, catalog, onClose, onSaved }: {
         </div>
         <details className="ev-advanced" style={{ marginTop: 12 }}><summary>Caller behavior</summary><div className="ev-advanced-body"><label><span className="ev-label">Caller persona</span><input value={item.voice?.caller_persona || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_persona: event.target.value } })} placeholder="A natural, concise customer" className="ev-field" /></label><label><span className="ev-label">Conversation behavior</span><textarea rows={3} value={item.voice?.caller_behavior || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), caller_behavior: event.target.value } })} className="ev-field" /></label><label><span className="ev-label">Opening guidance</span><input value={item.voice?.greeting || ""} onChange={(event) => setItem({ ...item, voice: { ...(item.voice || { caller_goal: item.prompt || "" }), greeting: event.target.value } })} placeholder="First response only" className="ev-field" /></label></div></details>
       </div>}
-      <label><span className="ev-label">Success criteria</span><textarea rows={5} value={(item.goals || []).join("\n")} onChange={(event) => setItem({ ...item, goals: event.target.value.split("\n") })} placeholder="One requirement per line" className="ev-field" /></label>
+      <label><span className="ev-label">Success criteria</span><textarea rows={5} value={(item.goals || []).map(goalText).join("\n")} onChange={(event) => setItem({ ...item, goals: event.target.value.split("\n") })} placeholder="One requirement per line" className="ev-field" /></label>
       <details className="ev-advanced"><summary>Deterministic checks and execution limits</summary><div className="ev-advanced-body"><label><span className="ev-label">Deterministic checks (JSON)</span><textarea rows={9} value={assertionRaw} onChange={(event) => setAssertionRaw(event.target.value)} spellCheck={false} className="ev-field" style={{ fontFamily: "monospace", fontSize: 11 }} /></label><div className="ev-grid-2">{item.mode !== "voice" && <label><span className="ev-label">Maximum turns</span><input type="number" min={1} max={100} value={item.max_turns || 10} onChange={(event) => setItem({ ...item, max_turns: Number(event.target.value) })} className="ev-field" /></label>}<label><span className="ev-label">Timeout seconds</span><input type="number" min={5} max={item.mode === "voice" ? 300 : 1800} value={item.timeout_seconds || (item.mode === "voice" ? 90 : 600)} onChange={(event) => setItem({ ...item, timeout_seconds: Number(event.target.value) })} className="ev-field" /></label></div></div></details>
       <label className="ev-check"><input type="checkbox" checked={item.enabled !== false} onChange={(event) => setItem({ ...item, enabled: event.target.checked })} /> Enabled</label>
       {error && <div className="ev-error"><span>{error}</span></div>}
@@ -1162,7 +1173,7 @@ function RunInspector({ run, onClose }: { run: EvalRun; onClose: () => void }) {
     }
   };
   return <Drawer title={`${run.case.name} · ${targetName(run.target)}`} onClose={onClose} footer={<button type="button" onClick={onClose} className="ev-button">Close</button>}>
-    <div className="ev-inspector-summary"><Metric label="Result" value={run.status} /><Metric label="Score" value={score(run.overall_score)} /><Metric label="Turns" value={String(run.execution?.turns || 0)} /></div>
+    <div className="ev-inspector-summary"><Metric label="Result" value={run.outcome || run.status} /><Metric label="Score" value={score(run.quality_score ?? run.overall_score)} /><Metric label="Turns" value={String(run.execution?.turns || 0)} /></div>
     {(run.error || error) && <div className="ev-error" style={{ marginTop: 16 }}><span>{run.error || error}</span></div>}
     {run.voice_call && <section className="ev-inspector-section">
       <div className="ev-section-heading"><div className="ev-section-title">Voice simulation</div><Status value={run.voice_call.validity?.status === "valid" ? "pass" : run.voice_call.validity?.status === "invalid" ? "error" : "unknown"} /></div>
@@ -1265,7 +1276,7 @@ function EvalDetail({ suite, experiments, selectedExperiment, detail, catalog, l
     </div>
     <section className="ev-section">
       <div className="ev-section-heading"><span className="ev-section-title">Scenarios and goals</span><button type="button" onClick={() => onScenario(suite)} className="ev-button">Add scenario</button></div>
-      {suite.cases.length > 0 ? <div className="ev-table">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span className="ev-scenario-top"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.assertions.length} checks</span></span>{item.goals.length > 0 && <span className="ev-definition-list">{item.goals.map((goal, index) => <span className="ev-definition-goal" key={`${goal}-${index}`}><span className="ev-definition-dot" aria-hidden="true" /><span>{goal}</span></span>)}</span>}</button>)}</div> : <div className="ev-muted">No scenarios configured.</div>}
+      {suite.cases.length > 0 ? <div className="ev-table">{suite.cases.map((item) => <button type="button" key={item.id} onClick={() => onScenario(suite, item)} className="ev-scenario"><span className="ev-scenario-top"><span style={{ minWidth: 0 }}><span className="ev-scenario-name">{item.name}</span><span className="ev-scenario-prompt">{item.prompt}</span></span><span className="ev-muted">{item.mode === "voice" ? "Voice call · " : ""}{item.assertions.length} checks</span></span>{item.goals.length > 0 && <span className="ev-definition-list">{item.goals.map((goal, index) => <span className="ev-definition-goal" key={`${goalText(goal)}-${index}`}><span className="ev-definition-dot" aria-hidden="true" /><span>{goalText(goal)}</span></span>)}</span>}</button>)}</div> : <div className="ev-muted">No scenarios configured.</div>}
     </section>
     <section className="ev-section">
       <div className="ev-selected-run-head"><div><div className="ev-selected-run-title">{selected?.id === latest?.id ? "Latest run" : "Selected run"}</div>{selected && <div className="ev-selected-run-meta">{selected.trigger_type === "schedule" ? "Scheduled" : "Manual"} · {formatDate(selected.created_at)}</div>}</div>{selected && <Status value={experimentOutcome(selected)} />}</div>

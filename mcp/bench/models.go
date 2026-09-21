@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -47,6 +48,8 @@ type Pack struct {
 	// JudgeModel is the canonical LLM Gateway model used for qualitative
 	// grading. Empty means deterministic-only scoring.
 	JudgeModel   string     `json:"judge_model,omitempty"`
+	Archived     bool       `json:"archived,omitempty"`
+	SupersededBy string     `json:"superseded_by,omitempty"`
 	SourcePackID string     `json:"source_pack_id,omitempty"`
 	Scenarios    []Scenario `json:"scenarios"`
 	Revision     int        `json:"revision"`
@@ -70,7 +73,7 @@ type Scenario struct {
 	Name          string   `json:"name"`
 	Tags          []string `json:"tags,omitempty"`
 	Prompt        string   `json:"prompt"`
-	Goals         []string `json:"goals,omitempty"`
+	Goals         []Goal   `json:"goals,omitempty"`
 	EnvironmentID string   `json:"environment_id,omitempty"`
 	// Environment is a portable inline Environments spec. App dependencies are
 	// named in its `apps` field and resolved by Evals for the current project.
@@ -83,17 +86,52 @@ type Scenario struct {
 	Weight         float64        `json:"weight,omitempty"`
 }
 
+type Goal struct {
+	Text     string  `json:"text"`
+	Weight   float64 `json:"weight,omitempty"`
+	Critical bool    `json:"critical,omitempty"`
+	Category string  `json:"category,omitempty"`
+}
+
+func (g *Goal) UnmarshalJSON(raw []byte) error {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		g.Text = text
+		return nil
+	}
+	type alias Goal
+	var value alias
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return err
+	}
+	*g = Goal(value)
+	return nil
+}
+
+func (g Goal) MarshalJSON() ([]byte, error) {
+	if g.Weight == 0 && !g.Critical && g.Category == "" {
+		return json.Marshal(g.Text)
+	}
+	type alias Goal
+	return json.Marshal(alias(g))
+}
+
 // Check mirrors an Evals assertion. One check is one deterministic fact about
 // final state, read back through an app tool.
 type Check struct {
-	Name   string         `json:"name"`
-	Type   string         `json:"type,omitempty"` // app_state (default), mcp_state, telemetry, edge_call…
-	App    string         `json:"app,omitempty"`
-	MCP    string         `json:"mcp,omitempty"`
-	Tool   string         `json:"tool,omitempty"`
-	Input  map[string]any `json:"input,omitempty"`
-	Path   string         `json:"path,omitempty"`
-	Equals any            `json:"equals,omitempty"`
+	Name          string         `json:"name"`
+	Type          string         `json:"type,omitempty"` // app_state (default), mcp_state, telemetry, edge_call…
+	App           string         `json:"app,omitempty"`
+	MCP           string         `json:"mcp,omitempty"`
+	Tool          string         `json:"tool,omitempty"`
+	Input         map[string]any `json:"input,omitempty"`
+	Path          string         `json:"path,omitempty"`
+	Equals        any            `json:"equals,omitempty"`
+	Weight        float64        `json:"weight,omitempty"`
+	Critical      bool           `json:"critical,omitempty"`
+	Category      string         `json:"category,omitempty"`
+	Disqualify    bool           `json:"disqualifying,omitempty"`
+	EvidenceAnyOf []Check        `json:"evidence_any_of,omitempty"`
 }
 
 // Budget is the per-scenario efficiency allowance. Hitting budget earns full
@@ -218,6 +256,7 @@ type Result struct {
 	Admission     string             `json:"admission"`
 	InvalidReason string             `json:"invalid_reason,omitempty"`
 	Passed        bool               `json:"passed"`
+	Outcome       string             `json:"outcome,omitempty"`
 	Score         Score              `json:"score"`
 	Metrics       Metrics            `json:"metrics"`
 	Evaluation    EvaluationEvidence `json:"evaluation,omitempty"`
@@ -226,18 +265,19 @@ type Result struct {
 }
 
 type Metrics struct {
-	Provider    string   `json:"provider,omitempty"`
-	Model       string   `json:"model,omitempty"`
-	DurationMS  int64    `json:"duration_ms"`
-	TurnsUsed   int      `json:"turns_used"`
-	TokensIn    int      `json:"tokens_in"`
-	TokensOut   int      `json:"tokens_out"`
-	TokensTotal int      `json:"tokens_total"`
-	CostUSD     float64  `json:"cost_usd"`
-	LLMCalls    int      `json:"llm_calls"`
-	ToolCalls   int      `json:"tool_calls"`
-	Errors      int      `json:"errors"`
-	JudgeScore  *float64 `json:"judge_score,omitempty"`
+	Provider     string   `json:"provider,omitempty"`
+	Model        string   `json:"model,omitempty"`
+	DurationMS   int64    `json:"duration_ms"`
+	TurnsUsed    int      `json:"turns_used"`
+	TokensIn     int      `json:"tokens_in"`
+	TokensOut    int      `json:"tokens_out"`
+	TokensTotal  int      `json:"tokens_total"`
+	CostUSD      float64  `json:"cost_usd"`
+	LLMCalls     int      `json:"llm_calls"`
+	ToolCalls    int      `json:"tool_calls"`
+	Errors       int      `json:"errors"`
+	JudgeScore   *float64 `json:"judge_score,omitempty"`
+	QualityScore *float64 `json:"quality_score,omitempty"`
 }
 
 // EvaluationEvidence is the complete qualitative and deterministic scoring
@@ -249,15 +289,21 @@ type EvaluationEvidence struct {
 	CorrectnessScore *float64              `json:"correctness_score,omitempty"`
 	JudgeScore       *float64              `json:"judge_score,omitempty"`
 	OverallScore     *float64              `json:"overall_score,omitempty"`
+	QualityScore     *float64              `json:"quality_score,omitempty"`
+	Outcome          string                `json:"outcome,omitempty"`
 }
 
 type evalAssertionResult struct {
-	Name    string `json:"name"`
-	Passed  bool   `json:"passed"`
-	Actual  any    `json:"actual,omitempty"`
-	Message string `json:"message,omitempty"`
-	Error   string `json:"error,omitempty"`
-	Gating  bool   `json:"gating,omitempty"`
+	Name       string  `json:"name"`
+	Passed     bool    `json:"passed"`
+	Actual     any     `json:"actual,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	Error      string  `json:"error,omitempty"`
+	Gating     bool    `json:"gating,omitempty"`
+	Weight     float64 `json:"weight,omitempty"`
+	Critical   bool    `json:"critical,omitempty"`
+	Category   string  `json:"category,omitempty"`
+	Disqualify bool    `json:"disqualifying,omitempty"`
 }
 
 type JudgeVerdict struct {
@@ -291,7 +337,11 @@ type Summary struct {
 	Verified     int             `json:"verified"`
 	Invalid      int             `json:"invalid"`
 	Passed       int             `json:"passed"`
+	Partial      int             `json:"partial"`
+	Failed       int             `json:"failed"`
+	Disqualified int             `json:"disqualified"`
 	PassRate     float64         `json:"pass_rate"`
+	PassPowerK   float64         `json:"pass_power_k"`
 	AverageScore float64         `json:"average_score"`
 	Targets      []TargetSummary `json:"targets"`
 }
@@ -304,7 +354,11 @@ type TargetSummary struct {
 	Verified          int     `json:"verified"`
 	Invalid           int     `json:"invalid"`
 	Passed            int     `json:"passed"`
+	Partial           int     `json:"partial"`
+	Failed            int     `json:"failed"`
+	Disqualified      int     `json:"disqualified"`
 	PassRate          float64 `json:"pass_rate"`
+	PassPowerK        float64 `json:"pass_power_k"`
 	AverageScore      float64 `json:"average_score"`
 	AverageDurationMS float64 `json:"average_duration_ms"`
 	AverageTokens     float64 `json:"average_tokens"`
@@ -332,6 +386,7 @@ type evalRun struct {
 	TargetIndex      int                        `json:"target_index"`
 	Repetition       int                        `json:"repetition"`
 	Status           string                     `json:"status"`
+	Outcome          string                     `json:"outcome,omitempty"`
 	TargetSnap       Target                     `json:"target"`
 	Execution        *sdk.RuntimeAgentExecution `json:"execution,omitempty"`
 	Assertions       []evalAssertionResult      `json:"assertions,omitempty"`
@@ -339,6 +394,7 @@ type evalRun struct {
 	CorrectnessScore *float64                   `json:"correctness_score,omitempty"`
 	JudgeScore       *float64                   `json:"judge_score,omitempty"`
 	OverallScore     *float64                   `json:"overall_score,omitempty"`
+	QualityScore     *float64                   `json:"quality_score,omitempty"`
 	Error            string                     `json:"error,omitempty"`
 	StartedAt        *time.Time                 `json:"started_at,omitempty"`
 	FinishedAt       *time.Time                 `json:"finished_at,omitempty"`

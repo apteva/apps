@@ -117,6 +117,11 @@ func metricValue(m Metrics, name string) (float64, bool) {
 			return 0, false
 		}
 		return *m.JudgeScore, true
+	case "quality_score":
+		if m.QualityScore == nil {
+			return 0, false
+		}
+		return *m.QualityScore, true
 	}
 	return 0, false
 }
@@ -198,7 +203,7 @@ func validateProfile(p *Profile) error {
 			if strings.TrimSpace(c.Metric) == "" {
 				return fmt.Errorf("component %q needs a metric", c.Key)
 			}
-			if _, ok := metricValue(Metrics{}, c.Metric); !ok {
+			if _, ok := metricValue(Metrics{}, c.Metric); !ok && c.Metric != "judge_score" && c.Metric != "quality_score" {
 				return fmt.Errorf("component %q references unknown metric %q", c.Key, c.Metric)
 			}
 			if c.FallbackMetric != "" {
@@ -215,10 +220,14 @@ func validateProfile(p *Profile) error {
 			return fmt.Errorf("component %q has unknown kind %q", c.Key, c.Kind)
 		}
 	}
-	// Without a gate every run scores its efficiency regardless of whether it
-	// did the task, which is not a benchmark.
-	if gates == 0 {
-		return errors.New("a profile needs a gate component for task success")
+	qualitySignal := false
+	for _, component := range p.Components {
+		qualitySignal = qualitySignal || (component.Kind == KindQuality && component.Metric == "quality_score")
+	}
+	// A benchmark needs either the frozen binary gate or a continuous quality
+	// signal. Agentic Quality v2 intentionally uses the latter without a cliff.
+	if gates == 0 && !qualitySignal {
+		return errors.New("a profile needs a gate or quality_score component for task success")
 	}
 	if gates > 1 {
 		return errors.New("a profile may only have one gate component")
@@ -315,6 +324,27 @@ func judgedV1() *Profile {
 	}
 }
 
+// agenticQualityV2 separates quality from efficiency. Evals supplies quality
+// as 70% weighted deterministic outcomes plus 30% judge; Bench contributes a
+// separately visible efficiency score worth 15% of the published overall.
+func agenticQualityV2() *Profile {
+	return &Profile{
+		Name:        "Agentic Quality v2",
+		Description: "Continuous outcome quality (70% deterministic, 30% judge) contributes 85 points; efficiency contributes 15. Imperfect work is graded instead of zeroed. Critical and safety outcomes remain explicit statuses.",
+		State:       ProfileStateSealed,
+		Version:     "2026-09.agentic-quality-v2",
+		Builtin:     true,
+		OnFailure:   OnFailureComponents,
+		Components: []ProfileComponent{
+			{Key: "quality", Label: "Agentic quality", Kind: KindQuality, Metric: "quality_score", Weight: 85},
+			{Key: "duration", Label: "Duration", Kind: KindBudget, Metric: "duration_ms", Weight: 5, Curve: CurveRatio},
+			{Key: "cost", Label: "Cost / tokens", Kind: KindBudget, Metric: "cost_usd", FallbackMetric: "tokens_total", Weight: 5, Curve: CurveLog},
+			{Key: "turns", Label: "Turns", Kind: KindBudget, Metric: "turns_used", Weight: 3, Curve: CurveRatio},
+			{Key: "tool_errors", Label: "No tool errors", Kind: KindThreshold, Metric: "errors", At: 0, Weight: 2},
+		},
+	}
+}
+
 func builtinProfiles() []*Profile {
-	return []*Profile{verifiedV1(), judgedV1(), gradedV1(), correctnessOnly()}
+	return []*Profile{verifiedV1(), agenticQualityV2(), judgedV1(), gradedV1(), correctnessOnly()}
 }

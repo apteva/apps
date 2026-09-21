@@ -41,22 +41,58 @@ func init() {
 	}
 }
 
+var assertionEvidenceSchema = strictObject(map[string]any{
+	"name":          map[string]any{"type": "string"},
+	"type":          map[string]any{"type": "string", "description": "Use a type listed by eval_catalog.assertion_types. output_equals is evaluated natively by Evals against the final assistant message."},
+	"app":           map[string]any{"type": "string"},
+	"mcp":           map[string]any{"type": "string"},
+	"tool":          map[string]any{"type": "string"},
+	"input":         map[string]any{"type": "object", "additionalProperties": true},
+	"path":          map[string]any{"type": "string"},
+	"equals":        map[string]any{},
+	"method":        map[string]any{"type": "string"},
+	"host":          map[string]any{"type": "string"},
+	"min_calls":     map[string]any{"type": "integer", "minimum": 0},
+	"agent_alias":   map[string]any{"type": "string"},
+	"event_type":    map[string]any{"type": "string"},
+	"fixture":       map[string]any{"type": "string"},
+	"weight":        map[string]any{"type": "number", "minimum": 0},
+	"critical":      map[string]any{"type": "boolean"},
+	"category":      map[string]any{"type": "string"},
+	"disqualifying": map[string]any{"type": "boolean"},
+}, "type")
+
 var assertionInputSchema = strictObject(map[string]any{
-	"name":        map[string]any{"type": "string"},
-	"type":        map[string]any{"type": "string", "description": "Use a type listed by eval_catalog.assertion_types. output_equals is evaluated natively by Evals against the final assistant message."},
-	"app":         map[string]any{"type": "string"},
-	"mcp":         map[string]any{"type": "string"},
-	"tool":        map[string]any{"type": "string"},
-	"input":       map[string]any{"type": "object", "additionalProperties": true},
-	"path":        map[string]any{"type": "string"},
-	"equals":      map[string]any{},
-	"method":      map[string]any{"type": "string"},
-	"host":        map[string]any{"type": "string"},
-	"min_calls":   map[string]any{"type": "integer", "minimum": 0},
-	"agent_alias": map[string]any{"type": "string"},
-	"event_type":  map[string]any{"type": "string"},
-	"fixture":     map[string]any{"type": "string"},
-}, "name", "type")
+	"name":            map[string]any{"type": "string"},
+	"type":            map[string]any{"type": "string", "description": "Use a type listed by eval_catalog.assertion_types. output_equals is evaluated natively by Evals."},
+	"app":             map[string]any{"type": "string"},
+	"mcp":             map[string]any{"type": "string"},
+	"tool":            map[string]any{"type": "string"},
+	"input":           map[string]any{"type": "object", "additionalProperties": true},
+	"path":            map[string]any{"type": "string"},
+	"equals":          map[string]any{},
+	"method":          map[string]any{"type": "string"},
+	"host":            map[string]any{"type": "string"},
+	"min_calls":       map[string]any{"type": "integer", "minimum": 0},
+	"agent_alias":     map[string]any{"type": "string"},
+	"event_type":      map[string]any{"type": "string"},
+	"fixture":         map[string]any{"type": "string"},
+	"weight":          map[string]any{"type": "number", "minimum": 0},
+	"critical":        map[string]any{"type": "boolean"},
+	"category":        map[string]any{"type": "string"},
+	"disqualifying":   map[string]any{"type": "boolean"},
+	"evidence_any_of": nonEmptyArraySchema(assertionEvidenceSchema),
+}, "name")
+
+var goalInputSchema = map[string]any{"oneOf": []any{
+	map[string]any{"type": "string", "minLength": 1},
+	strictObject(map[string]any{
+		"text":     map[string]any{"type": "string", "minLength": 1},
+		"weight":   map[string]any{"type": "number", "minimum": 0},
+		"critical": map[string]any{"type": "boolean"},
+		"category": map[string]any{"type": "string"},
+	}, "text"),
+}}
 
 var voiceCaseInputSchema = strictObject(map[string]any{
 	"caller_name":             map[string]any{"type": "string"},
@@ -98,7 +134,7 @@ var evalCaseCreateSchema = strictObject(map[string]any{
 	"prompt":         map[string]any{"type": "string"},
 	"mode":           map[string]any{"type": "string", "enum": []string{"text", "voice"}},
 	"voice":          voiceCaseInputSchema,
-	"goals":          arraySchema(map[string]any{"type": "string"}),
+	"goals":          arraySchema(goalInputSchema),
 	"assertions":     arraySchema(assertionInputSchema),
 	"environment_id": map[string]any{"type": "string"},
 	"environment": map[string]any{
@@ -117,6 +153,7 @@ var evalCaseCreateSchema = strictObject(map[string]any{
 	"weight":          map[string]any{"type": "number", "minimum": 0},
 	"timeout_seconds": map[string]any{"type": "integer", "minimum": 0, "maximum": 1800},
 	"max_turns":       map[string]any{"type": "integer", "minimum": 0, "maximum": 100},
+	"rating_profile":  map[string]any{"type": "string", "enum": []string{"agentic-quality-v2"}},
 }, "suite_id", "name", "prompt")
 
 var evalExperimentCreateSchema = strictObject(map[string]any{

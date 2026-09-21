@@ -83,6 +83,10 @@ func (s *service) captureProvenance(pack *Pack) Provenance {
 	if pack.JudgeModel != "" {
 		provenance.JudgePrompt = JudgePromptVersion
 		provenance.JudgeRubric = JudgeRubricVersion
+		if pack.ScoringVersion == agenticQualityV2().Version {
+			provenance.JudgePrompt = JudgePromptVersionV2
+			provenance.JudgeRubric = JudgeRubricVersionV2
+		}
 	}
 	for _, scenario := range pack.Scenarios {
 		if len(scenario.Tags) > 0 {
@@ -230,6 +234,9 @@ func (s *service) ensureSuite(pack *Pack) (*packSuite, error) {
 			"max_turns":       scenario.MaxTurns,
 			"enabled":         true,
 		}
+		if pack.ScoringVersion == agenticQualityV2().Version {
+			caseInput["rating_profile"] = "agentic-quality-v2"
+		}
 		if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_case_create", caseInput, &createdCase); err != nil {
 			return nil, fmt.Errorf("scenario %q: %w", scenario.ID, err)
 		}
@@ -263,7 +270,10 @@ func checksToAssertions(checks []Check) []map[string]any {
 		case "mcp":
 			kind = "mcp_state"
 		}
-		assertion := map[string]any{"name": check.Name, "type": kind}
+		assertion := map[string]any{"name": check.Name}
+		if kind != "" {
+			assertion["type"] = kind
+		}
 		if check.App != "" {
 			assertion["app"] = check.App
 		}
@@ -281,6 +291,21 @@ func checksToAssertions(checks []Check) []map[string]any {
 		}
 		if check.Equals != nil {
 			assertion["equals"] = check.Equals
+		}
+		if check.Weight > 0 {
+			assertion["weight"] = check.Weight
+		}
+		if check.Critical {
+			assertion["critical"] = true
+		}
+		if check.Category != "" {
+			assertion["category"] = check.Category
+		}
+		if check.Disqualify {
+			assertion["disqualifying"] = true
+		}
+		if len(check.EvidenceAnyOf) > 0 {
+			assertion["evidence_any_of"] = checksToAssertions(check.EvidenceAnyOf)
 		}
 		assertions = append(assertions, assertion)
 	}
@@ -385,8 +410,9 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profi
 		Evaluation: EvaluationEvidence{
 			Assertions: evaluated.Assertions, Judge: evaluated.Judge,
 			CorrectnessScore: evaluated.CorrectnessScore, JudgeScore: evaluated.JudgeScore,
-			OverallScore: evaluated.OverallScore,
+			OverallScore: evaluated.OverallScore, QualityScore: evaluated.QualityScore, Outcome: evaluated.Outcome,
 		},
+		Outcome:   evaluated.Outcome,
 		CreatedAt: time.Now().UTC(),
 	}
 	if result.Trial <= 0 {
@@ -420,7 +446,7 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profi
 	}
 
 	result.Metrics = metricsFrom(evaluated)
-	result.Passed = evaluated.Status == "pass"
+	result.Passed = evaluated.Outcome == "passed" || (evaluated.Outcome == "" && evaluated.Status == "pass")
 
 	switch {
 	case len(scenario.Checks) == 0:
@@ -460,6 +486,10 @@ func metricsFrom(evaluated evalRun) Metrics {
 	metrics.CostUSD = m.CostUSD
 	metrics.LLMCalls, metrics.ToolCalls, metrics.Errors = m.LLMCalls, m.ToolCalls, m.Errors
 	metrics.JudgeScore = evaluated.JudgeScore
+	metrics.QualityScore = evaluated.QualityScore
+	if metrics.QualityScore == nil {
+		metrics.QualityScore = evaluated.OverallScore
+	}
 	if !execution.StartedAt.IsZero() && !execution.FinishedAt.IsZero() {
 		metrics.DurationMS = execution.FinishedAt.Sub(execution.StartedAt).Milliseconds()
 	}
