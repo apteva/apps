@@ -13,6 +13,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+var errRunCancelled = errors.New("eval run cancelled")
+
 func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 	started := time.Now().UTC()
 	run.StartedAt = &started
@@ -26,6 +28,16 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			err = fmt.Errorf("eval runner panic: %v", recovered)
 		}
 		if err != nil {
+			cancelled := errors.Is(err, errRunCancelled)
+			if !cancelled {
+				current, currentErr := s.db.getRun(run.ID)
+				cancelled = currentErr == nil && current != nil && current.Status == "cancelled"
+			}
+			if cancelled {
+				s.emitExperimentCompleted(run.ExperimentID)
+				err = nil
+				return
+			}
 			run.Status, run.Outcome, run.Stage, run.Error = "error", "invalid_harness", "failed", err.Error()
 			finished := time.Now().UTC()
 			run.FinishedAt = &finished

@@ -519,6 +519,35 @@ func (s *service) runNext(ctx context.Context) error {
 	return s.executeRun(ctx, run)
 }
 
+func (s *service) cancelExperiment(id string) error {
+	experiment, err := s.db.getExperiment(id)
+	if err != nil {
+		return err
+	}
+	if experiment == nil {
+		return errors.New("experiment not found")
+	}
+	if err := s.db.cancelExperiment(id); err != nil {
+		return err
+	}
+
+	var stopErrors []string
+	for _, run := range experiment.Runs {
+		if (run.Status != "running" && run.Status != "cancelled") || run.EnvironmentRunID == "" {
+			continue
+		}
+		var ignored map[string]any
+		if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_stop", map[string]any{"id": run.EnvironmentRunID}, &ignored); err != nil {
+			stopErrors = append(stopErrors, fmt.Sprintf("stop environment for run %s: %v", run.ID, err))
+		}
+	}
+	s.emitExperimentCompleted(id)
+	if len(stopErrors) > 0 {
+		return errors.New(strings.Join(stopErrors, "; "))
+	}
+	return nil
+}
+
 func (s *service) applySuggestion(id string) (*sdk.RuntimeCatalogAgent, error) {
 	item, err := s.db.getSuggestion(id)
 	if err != nil || item == nil {

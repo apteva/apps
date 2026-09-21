@@ -191,7 +191,7 @@ func (a *App) handleExperiment(w http.ResponseWriter, r *http.Request) {
 	}
 	id := parts[0]
 	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
-		if err := a.svc.db.cancelExperiment(id); err != nil {
+		if err := a.svc.cancelExperiment(id); err != nil {
 			httpError(w, 400, err)
 			return
 		}

@@ -53,8 +53,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "eval_experiment_create", Description: "Execute a suite's enabled cases against one or more persistent agent_id or hidden draft targets. Create cases first, and select judge_model from eval_catalog.models[].gateway_model; Evals creates and stops the isolated runtimes.", InputSchema: evalExperimentCreateSchema, Handler: a.toolCreateExperiment},
 		{Name: "eval_experiment_list", Description: "List evaluation experiments.", InputSchema: objectSchema, Handler: func(*sdk.AppCtx, map[string]any) (any, error) { return a.svc.db.listExperiments(100) }},
 		{Name: "eval_experiment_get", Description: "Get an experiment and all runs.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.svc.db.getExperiment(str(args, "id")) }},
-		{Name: "eval_experiment_cancel", Description: "Cancel queued experiment runs.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
-			err := a.svc.db.cancelExperiment(str(args, "id"))
+		{Name: "eval_experiment_cancel", Description: "Cancel queued and running experiment runs and stop their active Environments.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+			err := a.svc.cancelExperiment(str(args, "id"))
 			return map[string]bool{"ok": err == nil}, err
 		}},
 		{Name: "eval_run_get", Description: "Inspect one evaluation run.", InputSchema: requiredSchema("id"), Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) { return a.svc.db.getRun(str(args, "id")) }},

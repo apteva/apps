@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.9.0
-description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.0 adds Agentic Quality v2 with weighted and critical outcomes, equivalent evidence paths, disqualification, and continuous quality scores without changing legacy scoring.
+version: 0.9.1
+description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.1 cancels active runs safely and destroys their isolated Environment runtimes immediately.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -34,7 +34,7 @@ provides:
     - { name: eval_experiment_create, description: "Execute a suite's enabled cases against one or more persistent agent_id or hidden draft targets. Create cases first, and select judge_model from eval_catalog.models[].gateway_model; Evals creates and stops the isolated runtimes." }
     - { name: eval_experiment_list, description: "List evaluation experiments." }
     - { name: eval_experiment_get, description: "Get an experiment with its individual runs." }
-    - { name: eval_experiment_cancel, description: "Cancel queued runs in an experiment." }
+    - { name: eval_experiment_cancel, description: "Cancel queued and running experiment runs and stop their active Environments." }
     - { name: eval_run_get, description: "Inspect one run, including target and collaborator traces, metrics, assertions, and judge verdict." }
     - { name: eval_run_retry, description: "Queue a fresh retry of one run." }
     - { name: eval_compare, description: "Compare target performance within an experiment." }
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.9.0
+    ref: evals/v0.9.1
     entry: mcp/evals
   port: 8080
   health_check: /health

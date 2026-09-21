@@ -547,8 +547,10 @@ func (s *service) cancelRun(id string) (*Run, error) {
 	}
 	if run.ExperimentID != "" {
 		var ignored map[string]any
-		_ = s.ctx.PlatformAPI().CallAppResult("evals", "eval_experiment_cancel",
-			map[string]any{"id": run.ExperimentID}, &ignored)
+		if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_experiment_cancel",
+			map[string]any{"id": run.ExperimentID}, &ignored); err != nil {
+			return nil, fmt.Errorf("cancel eval experiment %s: %w", run.ExperimentID, err)
+		}
 	}
 	now := time.Now().UTC()
 	run.Status, run.FinishedAt = RunStatusCancelled, &now

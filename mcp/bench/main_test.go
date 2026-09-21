@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,6 +28,7 @@ type fakePlatform struct {
 	suiteInput map[string]any
 	caseInputs []map[string]any
 	envInputs  []map[string]any
+	cancelErr  error
 }
 
 func (f *fakePlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -49,6 +51,9 @@ func (f *fakePlatform) CallAppResult(app, tool string, input map[string]any, out
 	case "eval_experiment_get":
 		payload = f.experiment
 	case "eval_experiment_cancel":
+		if f.cancelErr != nil {
+			return f.cancelErr
+		}
 		payload = map[string]bool{"ok": true}
 	case "environment_catalog", "environment_list", "environment_snapshot_list":
 		payload = map[string]any{}
@@ -83,6 +88,38 @@ func execution(durationMS int64, turns, tokensIn, tokensOut, toolErrors int, cos
 			TokensIn: tokensIn, TokensOut: tokensOut, CostUSD: cost,
 			ToolCalls: 5, Errors: toolErrors,
 		},
+	}
+}
+
+func TestCancelRunPropagatesEvalCancellationFailure(t *testing.T) {
+	platform := &fakePlatform{cancelErr: errors.New("environment cleanup failed")}
+	svc, _ := newTestService(t, platform)
+	draft, err := svc.savePack(&Pack{Name: "Cancellation", Scenarios: []Scenario{crmScenario()}}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := svc.seal(draft.ID, "1.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := svc.createRun(sealed.ID, "", []Target{{AgentID: 1}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status, run.ExperimentID = RunStatusRunning, "exp-cancel"
+	if err := svc.db.saveRun(run); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.cancelRun(run.ID); err == nil || !strings.Contains(err.Error(), "environment cleanup failed") {
+		t.Fatalf("cancel error=%v", err)
+	}
+	stored, err := svc.db.getRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != RunStatusRunning || stored.FinishedAt != nil {
+		t.Fatalf("run was falsely marked cancelled: %#v", stored)
 	}
 }
 

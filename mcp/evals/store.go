@@ -425,8 +425,25 @@ func (s store) claimRun() (*Run, error) {
 }
 
 func (s store) updateRunProgress(id, stage, environmentRunID string) error {
-	_, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=?`, stage, environmentRunID, id)
-	return err
+	result, err := s.db.Exec(`UPDATE eval_runs SET stage=?,environment_run_id=? WHERE id=? AND status='running'`, stage, environmentRunID, id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 1 {
+		return nil
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM eval_runs WHERE id=?`, id).Scan(&status); err != nil {
+		return err
+	}
+	if status == "cancelled" {
+		return errRunCancelled
+	}
+	return fmt.Errorf("eval run %s is not running (status %s)", id, status)
 }
 
 func (s store) finishRun(run *Run) error {
@@ -443,9 +460,23 @@ func (s store) finishRun(run *Run) error {
 	if run.VoiceCall != nil {
 		voiceCallJSON = encodeJSON(run.VoiceCall)
 	}
-	_, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,collaborator_executions_json=?,voice_call_json=?,assertions_json=?,judge_json=?,outcome=?,correctness_score=?,judge_score=?,quality_score=?,overall_score=?,finished_at=?,error=? WHERE id=?`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, collaboratorsJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, run.Outcome, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.QualityScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
+	result, err := s.db.Exec(`UPDATE eval_runs SET status=?,stage=?,environment_run_id=?,execution_json=?,collaborator_executions_json=?,voice_call_json=?,assertions_json=?,judge_json=?,outcome=?,correctness_score=?,judge_score=?,quality_score=?,overall_score=?,finished_at=?,error=? WHERE id=? AND status!='cancelled'`, run.Status, run.Stage, run.EnvironmentRunID, executionJSON, collaboratorsJSON, voiceCallJSON, encodeJSON(run.Assertions), judgeJSON, run.Outcome, nullableFloat(run.CorrectnessScore), nullableFloat(run.JudgeScore), nullableFloat(run.QualityScore), nullableFloat(run.OverallScore), nullableTime(run.FinishedAt), run.Error, run.ID)
 	if err != nil {
 		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		var status string
+		if err := s.db.QueryRow(`SELECT status FROM eval_runs WHERE id=?`, run.ID).Scan(&status); err != nil {
+			return err
+		}
+		if status == "cancelled" {
+			return errRunCancelled
+		}
+		return fmt.Errorf("eval run %s could not be finished from status %s", run.ID, status)
 	}
 	return s.rollupExperiment(run.ExperimentID)
 }
@@ -471,7 +502,7 @@ func (s store) retryInvalidSimulation(run *Run) (bool, error) {
 			started_at=NULL,
 			finished_at=NULL,
 			error=''
-		WHERE id=? AND simulation_attempt=?
+		WHERE id=? AND simulation_attempt=? AND status='running'
 	`, run.ID, run.SimulationAttempt)
 	if err != nil {
 		return false, err
@@ -499,7 +530,7 @@ func (s store) rollupExperiment(id string) error {
 }
 
 func (s store) cancelExperiment(id string) error {
-	_, err := s.db.Exec(`UPDATE eval_runs SET status='cancelled',finished_at=? WHERE experiment_id=? AND status='queued'`, formatTime(time.Now().UTC()), id)
+	_, err := s.db.Exec(`UPDATE eval_runs SET status='cancelled',stage='cancelled',finished_at=?,error='' WHERE experiment_id=? AND status IN ('queued','running')`, formatTime(time.Now().UTC()), id)
 	if err != nil {
 		return err
 	}

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +107,43 @@ func TestSuiteCaseExperimentPersistence(t *testing.T) {
 	}
 	if got.Summary.Passed != 1 || got.Summary.Queued != 1 || got.Summary.Targets[0].AverageTokens != 15 {
 		t.Fatalf("summary=%#v", got.Summary)
+	}
+}
+
+func TestCancelledRunCannotBeAdvancedOrFinished(t *testing.T) {
+	db := testStore(t)
+	suite := &Suite{ID: "suite-cancel-guard", Name: "Cancellation guard", RequiredPassRate: 1, Enabled: true}
+	if err := db.saveSuite(suite); err != nil {
+		t.Fatal(err)
+	}
+	item := Case{ID: "case-cancel-guard", SuiteID: suite.ID, Name: "Task", Prompt: "Complete it", Goals: []Goal{{Text: "Complete it"}}, Enabled: true}
+	if err := db.saveCase(&item); err != nil {
+		t.Fatal(err)
+	}
+	experiment := &Experiment{ID: "exp-cancel-guard", SuiteID: suite.ID, SuiteRevision: 1, Name: "Cancel", TriggerType: "manual", Targets: []Target{{Draft: &sdk.RuntimeAgentDraft{Name: "Ephemeral", Directive: "Complete it."}}}, Repetitions: 1, CreatedAt: time.Now().UTC()}
+	if err := db.createExperiment(experiment, []Case{item}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := db.claimRun()
+	if err != nil || run == nil {
+		t.Fatalf("claim run: run=%#v err=%v", run, err)
+	}
+	if err := db.cancelExperiment(experiment.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.updateRunProgress(run.ID, "agent_running", "environment-too-late"); !errors.Is(err, errRunCancelled) {
+		t.Fatalf("advance cancelled run error=%v", err)
+	}
+	run.Status, run.Stage = "pass", "completed"
+	if err := db.finishRun(run); !errors.Is(err, errRunCancelled) {
+		t.Fatalf("finish cancelled run error=%v", err)
+	}
+	stored, err := db.getRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "cancelled" || stored.Stage != "cancelled" || stored.EnvironmentRunID != "" {
+		t.Fatalf("cancelled run was overwritten: %#v", stored)
 	}
 }
 
@@ -419,7 +457,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.9.0" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.1" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -667,6 +705,100 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+type cancellationPlatformStub struct {
+	testkit.BasePlatformClient
+	waitStarted chan struct{}
+	stopped     chan struct{}
+	stopCalls   chan string
+	stopOnce    sync.Once
+}
+
+func (s *cancellationPlatformStub) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app != "environments" {
+		return fmt.Errorf("unexpected app call %s/%s", app, tool)
+	}
+	var value any
+	switch tool {
+	case "environment_run_create":
+		value = EnvironmentRun{ID: "environment-run-cancel", RuntimeID: "runtime-cancel", Status: "running"}
+	case "environment_agent_spawn":
+		value = sdk.RuntimeAgent{Alias: "main", Status: "paused"}
+	case "environment_agent_send", "environment_agent_control":
+		value = map[string]any{"ok": true}
+	case "environment_agent_wait":
+		close(s.waitStarted)
+		<-s.stopped
+		value = sdk.RuntimeAgentExecution{Status: "failed", Reason: "agent_stopped", ThreadID: "main"}
+	case "environment_run_stop":
+		runID, _ := input["id"].(string)
+		s.stopCalls <- runID
+		s.stopOnce.Do(func() { close(s.stopped) })
+		value = map[string]any{"ok": true}
+	default:
+		return fmt.Errorf("unexpected environment tool %s", tool)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, out)
+}
+
+func TestCancelExperimentStopsRunningEnvironmentAndPreservesCancelledStatus(t *testing.T) {
+	platform := &cancellationPlatformStub{
+		waitStarted: make(chan struct{}),
+		stopped:     make(chan struct{}),
+		stopCalls:   make(chan string, 4),
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-cancel", Name: "Cancellation"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{ID: "case-cancel", SuiteID: "suite-cancel", Name: "Long task", Prompt: "Wait", Goals: []Goal{{Text: "Complete the task"}}, Enabled: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-cancel", "", "manual", []Target{{Draft: &sdk.RuntimeAgentDraft{Name: "Ephemeral", Directive: "Complete the task."}}}, 1, 0, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- svc.runNext(context.Background()) }()
+	select {
+	case <-platform.waitStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("eval run did not reach environment_agent_wait")
+	}
+	if err := svc.cancelExperiment(experiment.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("runner returned cancellation as an error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not exit after cancellation stopped the environment")
+	}
+
+	select {
+	case runID := <-platform.stopCalls:
+		if runID != "environment-run-cancel" {
+			t.Fatalf("stopped environment %q", runID)
+		}
+	default:
+		t.Fatal("active environment was not stopped")
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Status != "completed" || len(completed.Runs) != 1 || completed.Runs[0].Status != "cancelled" || completed.Runs[0].Stage != "cancelled" {
+		t.Fatalf("cancelled experiment=%#v", completed)
+	}
 }
 
 func TestCaseRejectsUnsupportedAssertionBeforePersistence(t *testing.T) {
