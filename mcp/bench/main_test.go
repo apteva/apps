@@ -417,6 +417,24 @@ func TestAdmissionScoresGenuineTaskFailuresAsZero(t *testing.T) {
 	}
 }
 
+func TestAdmissionRejectsExplicitHarnessFailureAfterAgentExecution(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	run := &Run{ID: "run-1", Targets: []Target{{Provider: "openai-codex", Model: "gpt-5.6-sol"}}}
+
+	result := svc.scoreOne(run, crmScenario(), evalRun{
+		ID: "eval-harness-error", Status: "error", Outcome: "invalid_harness",
+		Execution: execution(60_000, 8, 20_000, 2_000, 0, 0),
+		Error:     "assertion fixture unavailable",
+	}, verifiedV1())
+
+	if result.Admission != AdmissionInvalid || result.Score.Score != 0 {
+		t.Fatalf("explicit harness failure admission=%q score=%v", result.Admission, result.Score.Score)
+	}
+	if !strings.Contains(result.InvalidReason, "fixture unavailable") {
+		t.Fatalf("invalid reason=%q", result.InvalidReason)
+	}
+}
+
 func TestAdmissionMarksChecklessScenariosDiagnostic(t *testing.T) {
 	svc, _ := newTestService(t, &fakePlatform{})
 	scenario := crmScenario()

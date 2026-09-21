@@ -457,7 +457,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.9.4" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.5" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -613,6 +613,7 @@ type evalCampaignPlatformStub struct {
 	collaboratorExecutions map[string]sdk.RuntimeAgentExecution
 	collaboratorWaits      []string
 	mainWaitScopes         []string
+	mainExecution          *sdk.RuntimeAgentExecution
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -690,6 +691,9 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 				Turns:    1,
 				Trace:    []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "support request resolved"}},
 				Metrics:  sdk.RuntimeAgentMetrics{LLMCalls: 1, TokensIn: 8, TokensOut: 4},
+			}
+			if s.mainExecution != nil {
+				value = *s.mainExecution
 			}
 		}
 	case "environment_assert":
@@ -879,6 +883,55 @@ func TestOutputEqualsRunIsEvaluatedInsideEvals(t *testing.T) {
 	}
 	if platform.asserted != 0 || platform.stopped != 1 {
 		t.Fatalf("environment assertions=%d stopped=%d", platform.asserted, platform.stopped)
+	}
+}
+
+func TestTimedOutAgentExecutionIsStillCheckedAndJudged(t *testing.T) {
+	started := time.Now().UTC().Add(-time.Minute)
+	finished := time.Now().UTC()
+	platform := &evalCampaignPlatformStub{
+		t:           t,
+		models:      []LLMModel{{Provider: "openai-codex", ModelID: "gpt-5.6-sol", GatewayModel: "openai-codex/gpt-5.6-sol"}},
+		definitions: map[string]EnvironmentDefinition{},
+		mainExecution: &sdk.RuntimeAgentExecution{
+			Status: "timeout", Reason: "timeout", ThreadID: "main", Turns: 8,
+			StartedAt: started, FinishedAt: finished,
+			Trace:   []sdk.RuntimeTraceEvent{{Index: 1, ThreadID: "main", Role: "assistant", Content: "partial work"}},
+			Metrics: sdk.RuntimeAgentMetrics{LLMCalls: 8, TokensIn: 80, TokensOut: 20},
+		},
+	}
+	ctx := testkit.NewAppCtx(t, "apteva.yaml", testkit.WithProjectID("project-one"), testkit.WithPlatform(platform))
+	svc := &service{ctx: ctx, db: store{db: ctx.AppDB()}}
+	if _, err := svc.saveSuite(&Suite{ID: "suite-timeout", Name: "Timeout grading"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.saveCase(&Case{
+		ID: "case-timeout", SuiteID: "suite-timeout", Name: "Grade partial work", Prompt: "Help",
+		Goals:      []Goal{{Text: "Help the user"}},
+		Assertions: []Assertion{{Name: "CRM state", Type: "app_state", App: "crm", Tool: "record_get", Path: "status", Equals: "done"}},
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	experiment, err := svc.createExperiment("suite-timeout", "", "manual", []Target{{AgentID: 7}}, 1, 0, "openai-codex/gpt-5.6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.runNext(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := svc.db.getExperiment(experiment.ID)
+	if err != nil || completed == nil || len(completed.Runs) != 1 {
+		t.Fatalf("experiment=%#v err=%v", completed, err)
+	}
+	run := completed.Runs[0]
+	if run.Status != "pass" || run.Outcome != "passed" || run.Execution == nil || run.Execution.Status != "timeout" {
+		t.Fatalf("timed-out execution was not graded: %#v", run)
+	}
+	if len(run.Assertions) != 1 || !run.Assertions[0].Passed || run.Judge == nil || run.OverallScore == nil {
+		t.Fatalf("checks/judge missing after timeout: %#v", run)
+	}
+	if platform.asserted != 1 || platform.judgeCalls != 1 || platform.stopped != 1 {
+		t.Fatalf("asserted=%d judged=%d stopped=%d", platform.asserted, platform.judgeCalls, platform.stopped)
 	}
 }
 

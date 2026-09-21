@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.9.4
-description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.4 retains ephemeral worker evidence with accurate full-run duration and token accounting.
+version: 0.9.5
+description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.5 grades timed-out or failed agent executions from their persisted work, checks, and judge evidence instead of misclassifying them as harness failures.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.9.4
+    ref: evals/v0.9.5
     entry: mcp/evals
   port: 8080
   health_check: /health

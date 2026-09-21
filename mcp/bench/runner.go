@@ -454,6 +454,10 @@ func (s *service) scoreOne(run *Run, scenario Scenario, evaluated evalRun, profi
 	result.Passed = evaluated.Outcome == "passed" || (evaluated.Outcome == "" && evaluated.Status == "pass")
 
 	switch {
+	case evaluated.Outcome == "invalid_harness":
+		result.Admission = AdmissionInvalid
+		result.InvalidReason = firstNonEmpty(evaluated.Error, "the evaluation harness could not produce a quality result")
+		return result
 	case len(scenario.Checks) == 0:
 		// Without deterministic checks the outcome rests on a judge, which is
 		// diagnosis, not evidence. Score it, but mark it uncomparable.

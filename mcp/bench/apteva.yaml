@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.9.2
-description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.9.2 reliably cancels active Evals runs and surfaces downstream cancellation failures instead of reporting a false cancellation.
+version: 0.9.3
+description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.9.3 consistently excludes explicit harness-invalid Evals outcomes even when an agent trace exists.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -16,7 +16,7 @@ requires:
     - platform.apps.call
     - platform.runtime_catalog.read
   apps:
-    - { name: evals, version: ">=0.9.1" }
+    - { name: evals, version: ">=0.9.5" }
     - { name: environments, version: ">=0.7.4" }
 provides:
   http_routes:
@@ -70,7 +70,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.9.2
+    ref: bench/v0.9.3
     entry: mcp/bench
   port: 8080
   health_check: /health

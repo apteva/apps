@@ -146,9 +146,11 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return fmt.Errorf("wait for agent: %w", err)
 		}
 		run.Execution = &execution
-		if execution.Status == "failed" || execution.Status == "timeout" {
-			return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
-		}
+		// A started agent that times out or fails is still evidence about the
+		// target. Preserve its trace and continue through deterministic checks
+		// and judging so imperfect work receives a quality score instead of
+		// being mislabeled as a harness failure. Failures before an execution is
+		// returned still take the error path above and remain invalid_harness.
 	}
 	collaboratorErrors := []string{}
 	if len(collaborators) > 0 {
