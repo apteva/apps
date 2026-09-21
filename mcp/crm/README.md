@@ -1,14 +1,14 @@
-# CRM v0.9.4
+# CRM v0.9.5
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.4` makes the segment predicate contract self-describing for
-agents. It documents every supported definition shape, supplies copyable MCP
-examples and returns the supported predicate list after invalid guesses. It
-builds on the list-aware events shipped in `crm/v0.9.3`.
+Release `crm/v0.9.5` adds a suggested Customer inbox component for the dashboard
+home. It gives operators a compact, live view of actionable CRM conversations
+and deep-links each row into the full CRM Inbox. It builds on the self-describing
+segment contract shipped in `crm/v0.9.4`.
 
 ## Capabilities
 
@@ -22,6 +22,8 @@ builds on the list-aware events shipped in `crm/v0.9.3`.
 - HTTP endpoints mounted at `/api/apps/crm/*`, MCP tools, event subscribers and
   workers. Project installations use their own partition; global installations
   require an explicit project on every request.
+- A configurable Customer inbox dashboard component shows open, pending or all
+  conversations for one channel and refreshes from CRM conversation events.
 
 ## Data contracts
 
@@ -90,6 +92,19 @@ shape and their required arguments.
 For list/segment evaluation, pass the returned `next_after_contact_id` into the
 next request; stop on an empty `contact_ids` page. Do not use page length as the
 full audience size. Static membership does not itself guarantee messageability.
+
+## Dashboard inbox component
+
+The suggested `customer-inbox` component is available in the dashboard home at
+half or full width. It reads the existing paged `/inbox` endpoint and shows the
+contact, channel, priority, automated flag, subject, latest-message preview and
+relative activity time. Settings choose the default status, channel and a limit
+from 4 to 20 conversations.
+
+Rows link to `/apps/crm/page?tab=inbox` with the conversation and status encoded.
+The full panel opens the Inbox tab and selects that conversation, keeping reply
+composition and status mutations in the richer CRM surface. The component is
+read-only and does not send messages or change CRM data.
 
 ## Messaging and automation
 

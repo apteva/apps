@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.4
+version: 0.9.5
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -187,6 +187,38 @@ provides:
       label: Contacts
       icon: contacts
       entry: /ui/CrmPanel.mjs
+  ui_components:
+    - name: customer-inbox
+      label: Customer inbox
+      description: Open and pending customer conversations, ordered by latest activity, with contact, channel, priority, subject, and message preview.
+      entry: /ui/CrmInboxWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [conversation.message.received, conversation.status.changed, contact.activity.added]
+      settings_schema:
+        type: object
+        properties:
+          default_status:
+            type: string
+            title: Conversation status
+            enum: [open, pending, all]
+            enum_names: [Open, Pending, All]
+            default: open
+          default_channel:
+            type: string
+            title: Channel
+            enum: [all, email, sms, whatsapp]
+            enum_names: [All channels, Email, SMS, WhatsApp]
+            default: all
+          max_conversations:
+            type: integer
+            title: Maximum conversations
+            default: 8
+            minimum: 4
+            maximum: 20
   publishes:
     - name: contact.added
       description: A contact was created or first materialised from inbound messaging; list_ids contains its active list memberships after creation routing completes.
