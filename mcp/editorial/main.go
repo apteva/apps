@@ -70,7 +70,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		w.Write(iconSVG)
-	}}, {Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}, {Pattern: "/calendar", Handler: a.http}}
+	}}, {Method: "GET", Pattern: "/mobile/calendar-summary", Handler: a.mobileCalendarSummary}, {Pattern: "/items", Handler: a.http}, {Pattern: "/items/", Handler: a.http}, {Pattern: "/releases", Handler: a.http}, {Pattern: "/releases/", Handler: a.http}, {Pattern: "/settings", Handler: a.http}, {Pattern: "/integrations", Handler: a.http}, {Pattern: "/calendar", Handler: a.http}}
 }
 func str(m map[string]any, k string) string { v, _ := m[k].(string); return v }
 func number(m map[string]any, k string) int64 {
