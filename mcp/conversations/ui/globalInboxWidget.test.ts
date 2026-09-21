@@ -16,4 +16,6 @@ test("global Inbox filters the existing route and scopes actions per item", () =
   expect(widget).toContain("project_id: global ? selectedProject || undefined");
   expect(widget).toContain("projectId={item.project_id || projectId}");
   expect(widget).toContain("item.project_name || item.project_id");
+  expect(widget).not.toContain('t("common.refresh")');
+  expect(widget).toContain("window.setInterval(load, 15000)");
 });

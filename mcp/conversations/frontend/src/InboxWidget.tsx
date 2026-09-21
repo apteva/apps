@@ -586,14 +586,6 @@ export default function InboxWidget(props: HostProps) {
           {props.conversationsHref && <a href={props.conversationsHref} className="text-[11px] text-text-muted hover:text-text">
             {t("inbox.openConversations")}
           </a>}
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading}
-            className="text-[11px] text-text-muted hover:text-text disabled:opacity-40"
-          >
-            {loading ? t("common.loading") : t("common.refresh")}
-          </button>
         </div>
       </div>
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.1 — 2026-09-21
+
+- Remove the redundant manual Refresh control from the Inbox widget; app events and the 15-second fallback poll continue to keep it current.
+
 ## 0.24.0 — 2026-09-21
 
 - Expose the existing Inbox dashboard widget in global dashboards as well as project dashboards.
