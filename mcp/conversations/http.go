@@ -1053,6 +1053,15 @@ func writeStreamSSE(w http.ResponseWriter, frame StreamFrame) bool {
 // ─── inbox ───────────────────────────────────────────────────────────
 
 func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope != "" && scope != "global" {
+		http.Error(w, "scope must be global when provided", http.StatusBadRequest)
+		return
+	}
+	if scope == "global" {
+		a.handleGlobalInbox(w, r)
+		return
+	}
 	userID, projectID, identityErr := requestIdentity(r)
 	if identityErr != nil {
 		http.Error(w, identityErr.Error(), http.StatusUnauthorized)
@@ -1079,6 +1088,90 @@ func (a *App) handleInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, items)
+}
+
+// handleGlobalInbox is the All Projects Home projection of the ordinary
+// inbox. It keeps the existing route and response contract, but derives the
+// project set from the request-scoped platform identity instead of accepting a
+// browser-supplied allowlist. Mutations remain on the established project-
+// scoped message endpoints.
+func (a *App) handleGlobalInbox(w http.ResponseWriter, r *http.Request) {
+	if delegatedFrom(r) != nil {
+		http.Error(w, "global inbox is unavailable to delegated application users", http.StatusForbidden)
+		return
+	}
+	userID := requestUser(r)
+	if userID <= 0 {
+		http.Error(w, "authenticated user required", http.StatusUnauthorized)
+		return
+	}
+	app := a.appCtx(r)
+	if app == nil || app.PlatformAPI() == nil {
+		http.Error(w, "platform unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	projects, err := app.PlatformAPI().ListProjects()
+	if err != nil {
+		http.Error(w, "unable to list projects", http.StatusInternalServerError)
+		return
+	}
+	allowed := make(map[string]sdk.PlatformProject, len(projects))
+	projectIDs := make([]string, 0, len(projects))
+	projectList := make([]InboxProject, 0, len(projects))
+	for _, project := range projects {
+		id := strings.TrimSpace(project.ID)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := allowed[id]; duplicate {
+			continue
+		}
+		project.ID = id
+		allowed[id] = project
+		projectIDs = append(projectIDs, id)
+		projectList = append(projectList, InboxProject{ID: id, Name: project.Name})
+	}
+	selected := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if selected != "" {
+		if _, ok := allowed[selected]; !ok {
+			http.Error(w, "project is not visible to this user", http.StatusForbidden)
+			return
+		}
+		projectIDs = []string{selected}
+	}
+	agentID, scopeErr := requestAgentScope(r)
+	if scopeErr != nil {
+		http.Error(w, scopeErr.Error(), http.StatusBadRequest)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	page, err := a.store.InboxPageAcrossProjects(projectIDs, userID, agentID, limit, r.URL.Query().Get("cursor"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	page.Projects = projectList
+	page.SelectedProjectID = selected
+	agentNames := map[string]map[int64]string{}
+	for i := range page.Items {
+		item := &page.Items[i]
+		if project, ok := allowed[item.ProjectID]; ok {
+			item.ProjectName = project.Name
+		}
+		if item.Message.AgentID == 0 {
+			continue
+		}
+		if _, loaded := agentNames[item.ProjectID]; !loaded {
+			agentNames[item.ProjectID] = map[int64]string{}
+			if agents, listErr := sdk.ListAgentsVia(app.PlatformAPI(), item.ProjectID); listErr == nil {
+				for _, agent := range agents {
+					agentNames[item.ProjectID][agent.ID] = agent.Name
+				}
+			}
+		}
+		item.AgentName = agentNames[item.ProjectID][item.Message.AgentID]
+	}
+	writeJSON(w, page)
 }
 
 func (a *App) handleMessageAction(w http.ResponseWriter, r *http.Request) {

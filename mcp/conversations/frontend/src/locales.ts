@@ -81,6 +81,8 @@ export const catalog = {
   "common.review": ["Review", "Examiner", "Revisar"],
   "common.open": ["Open", "Ouvrir", "Abrir"],
   "inbox.title": ["Inbox", "Boîte de réception", "Bandeja de entrada"],
+  "inbox.projectFilter": ["Inbox project", "Projet de la boîte de réception", "Proyecto de la bandeja"],
+  "inbox.allProjects": ["All projects", "Tous les projets", "Todos los proyectos"],
   "inbox.description": ["Approvals, reports, and alerts from agents", "Approbations, rapports et alertes des agents", "Aprobaciones, informes y alertas de los agentes"],
   "inbox.openConversations": ["Open conversations →", "Ouvrir les conversations →", "Abrir conversaciones →"],
   "common.loading": ["Loading…", "Chargement…", "Cargando…"],

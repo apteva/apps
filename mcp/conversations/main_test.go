@@ -41,6 +41,7 @@ type recordingPlatform struct {
 	duplicateSpawnReceipt  bool
 	omitSpawnReceipt       bool
 	killed                 []sdk.ThreadRef
+	projects               []sdk.PlatformProject
 }
 
 type capturedEvent struct {
@@ -70,6 +71,10 @@ func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 		return &sdk.InstallIdentity{AppName: appName, Version: "test", ProjectID: testProject, Bindings: map[string]any{}}, nil
 	}
 	return p.identity, nil
+}
+
+func (p *recordingPlatform) ListProjects() ([]sdk.PlatformProject, error) {
+	return append([]sdk.PlatformProject(nil), p.projects...), nil
 }
 
 func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
@@ -169,7 +174,7 @@ const testProject = "proj-1"
 
 func newTestEnv(t *testing.T) (*App, *sdk.AppCtx, *recordingPlatform) {
 	t.Helper()
-	platform := &recordingPlatform{}
+	platform := &recordingPlatform{projects: []sdk.PlatformProject{{ID: testProject, Name: "Project One"}}}
 	spawnedThreads = sync.Map{}
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
 	app := &App{}

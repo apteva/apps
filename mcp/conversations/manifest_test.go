@@ -103,6 +103,29 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 	t.Fatal("agent-conversations component missing")
 }
 
+func TestManifestDeclaresInboxOnProjectAndGlobalHome(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	for _, component := range manifest.Provides.UIComponents {
+		if component.Name != "inbox-overview" {
+			continue
+		}
+		if len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardHome {
+			t.Fatalf("inbox-overview slots=%v", component.Slots)
+		}
+		wantScopes := []string{sdk.UIComponentDashboardScopeProject, sdk.UIComponentDashboardScopeGlobal}
+		if len(component.DashboardScopes) != len(wantScopes) {
+			t.Fatalf("inbox-overview dashboard scopes=%v want=%v", component.DashboardScopes, wantScopes)
+		}
+		for i := range wantScopes {
+			if component.DashboardScopes[i] != wantScopes[i] {
+				t.Fatalf("inbox-overview dashboard scopes=%v want=%v", component.DashboardScopes, wantScopes)
+			}
+		}
+		return
+	}
+	t.Fatal("inbox-overview component missing")
+}
+
 func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 	manifest := (&App{}).Manifest()
 	if len(manifest.Provides.UISurfaces) != 1 {
@@ -172,7 +195,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.23.26"
+	const releaseVersion = "0.24.0"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -200,8 +223,8 @@ func TestReleaseVersionArtifactsAgree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.83.0") {
-		t.Fatal("go.mod must pin app-sdk v0.83.0")
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.85.0") {
+		t.Fatal("go.mod must pin app-sdk v0.85.0 so chat/v1 and global dashboard scopes are both available")
 	}
 }
 

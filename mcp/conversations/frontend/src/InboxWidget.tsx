@@ -21,6 +21,7 @@ export interface HostProps extends ConversationLocalization {
   appName?: string;
   installId?: number;
   projectId?: string;
+  dashboardScope?: "project" | "global";
   slot?: string;
   eventRevision?: number;
   widgetId?: string;
@@ -89,6 +90,14 @@ interface InboxMessage {
 interface InboxItem {
   priority: number;
   message: InboxMessage;
+  project_id?: string;
+  project_name?: string;
+  agent_name?: string;
+}
+
+interface InboxProject {
+  id: string;
+  name: string;
 }
 
 interface AgentInfo {
@@ -369,12 +378,14 @@ function InboxRow({
   agentName,
   onChanged,
   projectId,
+  projectName,
 }: {
   item: InboxItem;
   now: number;
   agentName: string;
   onChanged: () => void;
   projectId: string;
+  projectName?: string;
 }) {
   const { t, relativeTime, dateTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -418,6 +429,12 @@ function InboxRow({
           <div className="mt-0.5 text-xs text-text truncate">{itemTitle(m)}</div>
           <div className="mt-0.5 flex items-center gap-2 text-[10px] text-text-dim min-w-0">
             <span className="shrink-0">{agentName}</span>
+            {projectName && (
+              <>
+                <span className="text-text-muted">·</span>
+                <span className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px]">{projectName}</span>
+              </>
+            )}
             {preview && (
               <>
                 <span className="text-text-muted">·</span>
@@ -469,7 +486,7 @@ function InboxRow({
           open={detailOpen}
           label={label}
           title={itemTitle(m)}
-          meta={`${agentName}${meta ? ` · ${kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}` : ""}`}
+          meta={`${agentName}${projectName ? ` · ${projectName}` : ""}${meta ? ` · ${kind === "report" && card(m, "report-card").period ? meta : statusLabel(meta)}` : ""}`}
           body={itemBody(m)}
           onClose={() => setDetailOpen(false)}
           onDismiss={() => void dismiss()}
@@ -484,9 +501,12 @@ function InboxRow({
 export default function InboxWidget(props: HostProps) {
   const { t, number } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
-	const projectId = props.projectId ?? "";
+  const projectId = props.projectId ?? "";
+  const global = props.dashboardScope === "global";
   const [items, setItems] = useState<InboxItem[]>([]);
- const [total,setTotal]=useState(0);
+  const [total,setTotal]=useState(0);
+  const [projects, setProjects] = useState<InboxProject[]>([]);
+  const [selectedProject, setSelectedProject] = useState("");
   const [agents, setAgents] = useState<Map<number, string>>(new Map());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -504,17 +524,22 @@ export default function InboxWidget(props: HostProps) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-		const inbox = await conversationsClient.inbox({agent_id:props.agentId,limit:100});
+      const inbox = await conversationsClient.inbox({
+        agent_id: props.agentId,
+        limit: 100,
+        project_id: global ? selectedProject || undefined : undefined,
+      });
       const all=[...inbox.items];let next=inbox.next_cursor;
-      while(next&&all.length<loadedCount.current){const page=await conversationsClient.inbox({agent_id:props.agentId,cursor:next,limit:100});all.push(...page.items.filter(row=>!all.some(old=>old.message.id===row.message.id)));if(next===page.next_cursor)break;next=page.next_cursor;}
+      while(next&&all.length<loadedCount.current){const page=await conversationsClient.inbox({agent_id:props.agentId,cursor:next,limit:100,project_id:global ? selectedProject || undefined : undefined});all.push(...page.items.filter(row=>!all.some(old=>old.message.id===row.message.id)));if(next===page.next_cursor)break;next=page.next_cursor;}
       setItems(all);setTotal(inbox.total);setCursor(next);
+      if(global)setProjects(inbox.projects ?? []);
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-	}, [projectId,props.agentId,conversationsClient]);
+	}, [global,props.agentId,conversationsClient,selectedProject]);
 
   useEffect(() => {
     load();
@@ -524,15 +549,16 @@ export default function InboxWidget(props: HostProps) {
   }, [load, props.eventRevision]);
 
   useEffect(() => {
-	apiGet<AgentInfo[]>(`/agents`, projectId).then(
+    if(global){setAgents(new Map());return;}
+    apiGet<AgentInfo[]>(`/agents`, projectId).then(
       (list) => setAgents(new Map(list.map((a) => [a.id, a.name]))),
       () => {},
     );
-	}, [projectId,props.agentId,conversationsClient]);
+	}, [global,projectId,apiGet]);
 
   const visible = items.slice(0, limit);
-  const agentName = (id?: number) =>
-    (id && agents.get(id)) || (id ? t("inbox.agentName", { id: String(id) }) : t("common.app"));
+  const agentName = (item: InboxItem) =>
+    item.agent_name || (item.message.agent_id && agents.get(item.message.agent_id)) || (item.message.agent_id ? t("inbox.agentName", { id: String(item.message.agent_id) }) : t("common.app"));
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-bg-card">
@@ -551,6 +577,12 @@ export default function InboxWidget(props: HostProps) {
           </p>
         </div>
         <div className="flex items-center gap-3">
+          {global && projects.length > 0 && (
+            <select aria-label={t("inbox.projectFilter")} value={selectedProject} onChange={(event)=>setSelectedProject(event.target.value)} className="max-w-sm rounded border border-border bg-bg-input px-2 py-1 text-[10px] text-text">
+              <option value="">{t("inbox.allProjects")}</option>
+              {projects.map(project=><option key={project.id} value={project.id}>{project.name || project.id}</option>)}
+            </select>
+          )}
           {props.conversationsHref && <a href={props.conversationsHref} className="text-[11px] text-text-muted hover:text-text">
             {t("inbox.openConversations")}
           </a>}
@@ -586,9 +618,10 @@ export default function InboxWidget(props: HostProps) {
             key={item.message.id}
             item={item}
             now={now}
-            agentName={agentName(item.message.agent_id)}
+            agentName={agentName(item)}
             onChanged={() => void load()}
-			projectId={projectId}
+            projectId={item.project_id || projectId}
+            projectName={global ? item.project_name || item.project_id : undefined}
           />
         ))}
         {total > visible.length && (props.conversationsHref ? (
@@ -597,7 +630,7 @@ export default function InboxWidget(props: HostProps) {
           <button type="button" disabled={loading} className="text-xs text-text-muted" onClick={async()=>{
             setLoading(true);
             try {
-              if(limit>=items.length&&cursor){const page=await conversationsClient.inbox({agent_id:props.agentId,cursor,limit:100});setItems(current=>[...current,...page.items.filter(row=>!current.some(old=>old.message.id===row.message.id))]);setCursor(page.next_cursor);}
+              if(limit>=items.length&&cursor){const page=await conversationsClient.inbox({agent_id:props.agentId,cursor,limit:100,project_id:global ? selectedProject || undefined : undefined});setItems(current=>[...current,...page.items.filter(row=>!current.some(old=>old.message.id===row.message.id))]);setCursor(page.next_cursor);}
               setLimit(current=>current+12);
             }catch(err){setError(String(err));}finally{setLoading(false);}
           }}>{t("inbox.showMore")}</button>

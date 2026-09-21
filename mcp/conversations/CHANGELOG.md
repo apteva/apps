@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.24.0 — 2026-09-21
+
+- Expose the existing Inbox dashboard widget in global dashboards as well as project dashboards.
+- Add a global Inbox view that combines only the authenticated user's visible projects, with project filtering and labels while preserving the existing priority and cursor ordering.
+- Keep Inbox mutations project-scoped by carrying each item's project through approval, dismissal, and seen actions.
+- Upgrade to App SDK v0.85.0, the combined release containing both the existing chat/v1 surface contract and global dashboard scopes.
+
 ## 0.23.26 — 2026-09-20
 
 - Accept the platform's signed first-party bearer principal on Conversations HTTP routes instead of misclassifying it as an incomplete delegated application user.

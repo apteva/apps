@@ -62,11 +62,15 @@ export interface StreamFrame {
   done: boolean;
 }
 
-export interface InboxPage {items:InboxItem[];total:number;next_cursor:string;attention:Record<string,number>}
+export interface InboxProject {id:string;name:string}
+export interface InboxPage {items:InboxItem[];total:number;next_cursor:string;attention:Record<string,number>;projects?:InboxProject[];selected_project_id?:string}
 
 export interface InboxItem {
   message: Message;
   priority: number;
+  project_id?: string;
+  project_name?: string;
+  agent_name?: string;
 }
 
 export interface UnreadEntry {

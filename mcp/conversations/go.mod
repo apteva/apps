@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/conversations
 go 1.26.8
 
 require (
-	github.com/apteva/app-sdk v0.83.0
+	github.com/apteva/app-sdk v0.85.0
 	golang.org/x/image v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.50.0
