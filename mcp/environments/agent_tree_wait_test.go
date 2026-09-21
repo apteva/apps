@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,60 @@ type agentTreeRuntimeStub struct {
 	contexts map[string]runtimeThreadContext
 	waitCall int
 	listCall int
+}
+
+type concurrentCaptureRuntimeStub struct {
+	mu           sync.Mutex
+	waits        []*sdk.RuntimeAgentExecution
+	waitCall     int
+	roster       []runtimeThreadRow
+	context      runtimeThreadContext
+	waitStarted  chan struct{}
+	releaseFirst chan struct{}
+	captured     chan struct{}
+	startedOnce  sync.Once
+	capturedOnce sync.Once
+}
+
+func (s *concurrentCaptureRuntimeStub) WaitRuntimeAgent(string, string, sdk.RuntimeAgentWaitRequest) (*sdk.RuntimeAgentExecution, error) {
+	s.mu.Lock()
+	index := s.waitCall
+	s.waitCall++
+	s.mu.Unlock()
+	if index == 0 {
+		s.startedOnce.Do(func() { close(s.waitStarted) })
+		<-s.releaseFirst
+	}
+	if index >= len(s.waits) {
+		index = len(s.waits) - 1
+	}
+	value := *s.waits[index]
+	value.Trace = append([]sdk.RuntimeTraceEvent(nil), value.Trace...)
+	return &value, nil
+}
+
+func (s *concurrentCaptureRuntimeStub) ListRuntimeAgentThreads(string, string) (json.RawMessage, error) {
+	s.mu.Lock()
+	roster := append([]runtimeThreadRow(nil), s.roster...)
+	s.mu.Unlock()
+	return json.Marshal(roster)
+}
+
+func (s *concurrentCaptureRuntimeStub) GetRuntimeAgentThread(_, _, _ string) (json.RawMessage, error) {
+	s.capturedOnce.Do(func() { close(s.captured) })
+	return json.Marshal(s.context)
+}
+
+func (s *concurrentCaptureRuntimeStub) setRoster(roster []runtimeThreadRow) {
+	s.mu.Lock()
+	s.roster = append([]runtimeThreadRow(nil), roster...)
+	s.mu.Unlock()
+}
+
+func (s *concurrentCaptureRuntimeStub) waitCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.waitCall
 }
 
 func (s *agentTreeRuntimeStub) WaitRuntimeAgent(string, string, sdk.RuntimeAgentWaitRequest) (*sdk.RuntimeAgentExecution, error) {
@@ -112,6 +167,88 @@ func TestWaitRuntimeAgentTreeWaitsForWorkerAndResumedRoot(t *testing.T) {
 	}
 	if execution.Metrics.TokensIn != 100 || execution.Metrics.ToolCalls != 2 {
 		t.Fatalf("metrics=%#v", execution.Metrics)
+	}
+}
+
+func TestWaitRuntimeAgentTreeCapturesWorkerThatDisappearsBeforeRootReturns(t *testing.T) {
+	previous := agentTreePollInterval
+	agentTreePollInterval = time.Millisecond
+	t.Cleanup(func() { agentTreePollInterval = previous })
+
+	initial := &sdk.RuntimeAgentExecution{
+		Status: "completed", Reason: "idle", ThreadID: "main", Turns: 2,
+		Trace: []sdk.RuntimeTraceEvent{
+			{Index: 0, ThreadID: "main", Role: "user", Content: "delegate checkout"},
+			{Index: 1, ThreadID: "main", Role: "agent", Content: "The worker finished; I will verify."},
+		},
+	}
+	resumed := &sdk.RuntimeAgentExecution{
+		Status: "completed", Reason: "idle", ThreadID: "main", Turns: 3,
+		Trace: []sdk.RuntimeTraceEvent{
+			{Index: 0, ThreadID: "main", Role: "user", Content: "delegate checkout"},
+			{Index: 1, ThreadID: "main", Role: "user", Content: "worker completion received"},
+			{Index: 2, ThreadID: "main", Role: "agent", Content: "Verified after the worker finished."},
+		},
+	}
+	stub := &concurrentCaptureRuntimeStub{
+		waits:        []*sdk.RuntimeAgentExecution{initial, resumed},
+		roster:       []runtimeThreadRow{{ID: "main", Iteration: 1}},
+		waitStarted:  make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+		captured:     make(chan struct{}),
+		context: runtimeThreadContext{
+			ID: "ephemeral-worker", Iteration: 2,
+			Messages: []runtimeThreadMessage{
+				{Role: "assistant", Content: "I inspected the Code issue."},
+				{Role: "assistant", Content: "Blocked and reported to main."},
+			},
+		},
+	}
+
+	result := make(chan *sdk.RuntimeAgentExecution, 1)
+	errs := make(chan error, 1)
+	go func() {
+		execution, err := waitRuntimeAgentTree(stub, "runtime-one", "main", sdk.RuntimeAgentWaitRequest{TimeoutSeconds: 30, MaxTurns: 22})
+		if err != nil {
+			errs <- err
+			return
+		}
+		result <- execution
+	}()
+
+	select {
+	case <-stub.waitStarted:
+	case <-time.After(time.Second):
+		t.Fatal("root wait did not start")
+	}
+	stub.setRoster([]runtimeThreadRow{{ID: "main", Iteration: 1}, {ID: "ephemeral-worker", ParentID: "main", Iteration: 2}})
+	select {
+	case <-stub.captured:
+	case <-time.After(time.Second):
+		t.Fatal("ephemeral worker was not captured while root wait was active")
+	}
+	stub.setRoster([]runtimeThreadRow{{ID: "main", Iteration: 2}})
+	close(stub.releaseFirst)
+
+	var execution *sdk.RuntimeAgentExecution
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case execution = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("tree wait did not finish")
+	}
+	if stub.waitCalls() != 2 {
+		t.Fatalf("root wait calls=%d, want initial and post-worker waits", stub.waitCalls())
+	}
+	foundWorker := false
+	for _, event := range execution.Trace {
+		if event.ThreadID == "ephemeral-worker" && event.Content == "Blocked and reported to main." {
+			foundWorker = true
+		}
+	}
+	if !foundWorker {
+		t.Fatalf("ephemeral worker trace missing: %#v", execution.Trace)
 	}
 }
 

@@ -58,6 +58,11 @@ type runtimeToolResult struct {
 	IsError bool   `json:"is_error,omitempty"`
 }
 
+type runtimeAgentWaitResult struct {
+	execution *sdk.RuntimeAgentExecution
+	err       error
+}
+
 func (m runtimeThreadMessage) text() string {
 	if strings.TrimSpace(m.Content) != "" {
 		return m.Content
@@ -95,7 +100,8 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 	started := time.Now()
 	deadline := started.Add(timeout)
 
-	root, err := runtime.WaitRuntimeAgent(runtimeID, agent, req)
+	children := map[string]*sdk.RuntimeAgentExecution{}
+	root, sawDescendant, err := waitRuntimeAgentAndCapture(runtime, runtimeID, agent, req, rootThread, children)
 	if err != nil {
 		return nil, err
 	}
@@ -103,18 +109,14 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 		return nil, fmt.Errorf("runtime returned no root execution")
 	}
 	if root.Status == "failed" || root.Status == "timeout" || root.Reason == "max_turns" {
-		return root, nil
+		return mergeRuntimeTreeExecution(root, children), nil
 	}
 
-	children := map[string]*sdk.RuntimeAgentExecution{}
-	sawDescendant := false
-
 	for {
-		rows, err := listRuntimeThreadRows(runtime, runtimeID, agent)
+		descendants, err := captureRuntimeDescendants(runtime, runtimeID, agent, rootThread, children)
 		if err != nil {
 			return nil, err
 		}
-		descendants := descendantRows(rows, rootThread)
 		if len(descendants) == 0 {
 			if !sawDescendant {
 				return mergeRuntimeTreeExecution(root, children), nil
@@ -128,7 +130,8 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 			if follow.TimeoutSeconds < 5 {
 				follow.TimeoutSeconds = 5
 			}
-			root, err = runtime.WaitRuntimeAgent(runtimeID, agent, follow)
+			var captured bool
+			root, captured, err = waitRuntimeAgentAndCapture(runtime, runtimeID, agent, follow, rootThread, children)
 			if err != nil {
 				return nil, err
 			}
@@ -140,36 +143,75 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 			}
 			// The resumed root may have spawned another generation of workers.
 			// Re-read the roster before accepting its idle state as terminal.
-			sawDescendant = false
+			sawDescendant = captured
 			continue
 		}
 
 		sawDescendant = true
-		for _, row := range descendants {
-			raw, getErr := runtime.GetRuntimeAgentThread(runtimeID, agent, row.ID)
-			if getErr != nil {
-				// Ephemeral workers can disappear between the roster and context
-				// reads. The next roster read resolves that race.
-				continue
-			}
-			var context runtimeThreadContext
-			if err := json.Unmarshal(raw, &context); err != nil {
-				return nil, fmt.Errorf("decode runtime thread %s: %w", row.ID, err)
-			}
-			if context.ID == "" {
-				context.ID = row.ID
-			}
-			if context.Iteration < row.Iteration {
-				context.Iteration = row.Iteration
-			}
-			children[row.ID] = normalizeRuntimeThreadContext(context)
-		}
 
 		if time.Now().After(deadline) {
 			return timedOutRuntimeTreeExecution(root, children), nil
 		}
 		time.Sleep(agentTreePollInterval)
 	}
+}
+
+// waitRuntimeAgentAndCapture samples the thread tree while the blocking root
+// wait is in flight. Without concurrent sampling, a worker that starts and
+// finishes before the root returns disappears from the live roster and its
+// trace cannot be included in the evaluation evidence.
+func waitRuntimeAgentAndCapture(runtime agentTreeRuntime, runtimeID, agent string, req sdk.RuntimeAgentWaitRequest, rootThread string, children map[string]*sdk.RuntimeAgentExecution) (*sdk.RuntimeAgentExecution, bool, error) {
+	result := make(chan runtimeAgentWaitResult, 1)
+	go func() {
+		execution, err := runtime.WaitRuntimeAgent(runtimeID, agent, req)
+		result <- runtimeAgentWaitResult{execution: execution, err: err}
+	}()
+
+	ticker := time.NewTicker(agentTreePollInterval)
+	defer ticker.Stop()
+	sawDescendant := false
+	for {
+		select {
+		case waited := <-result:
+			return waited.execution, sawDescendant, waited.err
+		case <-ticker.C:
+			descendants, err := captureRuntimeDescendants(runtime, runtimeID, agent, rootThread, children)
+			if err != nil {
+				return nil, sawDescendant, err
+			}
+			if len(descendants) > 0 {
+				sawDescendant = true
+			}
+		}
+	}
+}
+
+func captureRuntimeDescendants(runtime agentTreeRuntime, runtimeID, agent, rootThread string, children map[string]*sdk.RuntimeAgentExecution) ([]runtimeThreadRow, error) {
+	rows, err := listRuntimeThreadRows(runtime, runtimeID, agent)
+	if err != nil {
+		return nil, err
+	}
+	descendants := descendantRows(rows, rootThread)
+	for _, row := range descendants {
+		raw, getErr := runtime.GetRuntimeAgentThread(runtimeID, agent, row.ID)
+		if getErr != nil {
+			// Ephemeral workers can disappear between the roster and context
+			// reads. The next roster read resolves that race.
+			continue
+		}
+		var context runtimeThreadContext
+		if err := json.Unmarshal(raw, &context); err != nil {
+			return nil, fmt.Errorf("decode runtime thread %s: %w", row.ID, err)
+		}
+		if context.ID == "" {
+			context.ID = row.ID
+		}
+		if context.Iteration < row.Iteration {
+			context.Iteration = row.Iteration
+		}
+		children[row.ID] = normalizeRuntimeThreadContext(context)
+	}
+	return descendants, nil
 }
 
 func listRuntimeThreadRows(runtime agentTreeRuntime, runtimeID, agent string) ([]runtimeThreadRow, error) {
