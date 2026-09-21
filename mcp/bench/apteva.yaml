@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.9.0
-description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.9.0 adds Agentic Quality v2, graded outcomes, pass^k reporting, and reversible archival of superseded packs while preserving all history.
+version: 0.9.1
+description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.9.1 fixes execution of Agentic Quality v2 checks that accept equivalent evidence paths while preserving all v0.9.0 scoring and archival behavior.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -70,7 +70,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.9.0
+    ref: bench/v0.9.1
     entry: mcp/bench
   port: 8080
   health_check: /health

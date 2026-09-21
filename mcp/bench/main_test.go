@@ -1239,6 +1239,31 @@ func TestChecksMapOntoEnvironmentsAssertionTypes(t *testing.T) {
 	}
 }
 
+func TestChecksPreserveTypelessEvidenceGroups(t *testing.T) {
+	assertions := checksToAssertions([]Check{{
+		Name: "equivalent inspection evidence",
+		EvidenceAnyOf: []Check{
+			{Type: "mcp_tool_call", MCP: "code", Tool: "code_read_file"},
+			{Type: "mcp_tool_call", MCP: "code", Tool: "code_grep"},
+		},
+	}})
+	if len(assertions) != 1 {
+		t.Fatalf("assertions = %#v", assertions)
+	}
+	if got, exists := assertions[0]["type"]; exists {
+		t.Fatalf("evidence group type = %v; parent must remain typeless", got)
+	}
+	alternatives, ok := assertions[0]["evidence_any_of"].([]map[string]any)
+	if !ok || len(alternatives) != 2 {
+		t.Fatalf("evidence_any_of = %#v", assertions[0]["evidence_any_of"])
+	}
+	for i, alternative := range alternatives {
+		if got := alternative["type"]; got != "mcp_tool_call" {
+			t.Errorf("alternative %d type = %v, want mcp_tool_call", i, got)
+		}
+	}
+}
+
 // ---- leaderboards ----
 
 func seedResult(t *testing.T, svc *service, runID, scenarioID string, target Target, passed bool, score Score, m Metrics) {

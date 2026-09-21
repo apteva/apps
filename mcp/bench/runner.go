@@ -264,11 +264,16 @@ func checksToAssertions(checks []Check) []map[string]any {
 		// common case from the panel — must land on app_state rather than on
 		// bench's own shorthand.
 		kind := check.Type
-		switch kind {
-		case "", "app":
-			kind = "app_state"
-		case "mcp":
-			kind = "mcp_state"
+		// A grouped evidence assertion is intentionally typeless: Evals treats
+		// type and evidence_any_of as mutually exclusive. Only leaf assertions
+		// receive the normal app_state default or shorthand expansion.
+		if len(check.EvidenceAnyOf) == 0 {
+			switch kind {
+			case "", "app":
+				kind = "app_state"
+			case "mcp":
+				kind = "mcp_state"
+			}
 		}
 		assertion := map[string]any{"name": check.Name}
 		if kind != "" {
