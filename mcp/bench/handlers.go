@@ -403,6 +403,19 @@ func (a *App) handleGlobalLeaderboard(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, board)
 }
 
+func (a *App) handleModelRatings(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
+		return
+	}
+	board, err := a.svc.modelRatings(r.URL.Query().Get("category"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, board)
+}
+
 func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	catalog, err := a.svc.catalog()
 	if err != nil {

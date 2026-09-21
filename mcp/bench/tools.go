@@ -221,6 +221,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
 				return a.svc.globalLeaderboard(str(args, "profile_digest"), str(args, "category"))
 			}},
+		{Name: "bench_model_ratings", Description: "Rate models across stored Agentic Quality v2 evidence using the immutable category-balanced v3 policy. Coding and analytics use 80% deterministic correctness plus 20% efficiency; subjective categories retain their source quality score. No benchmark rerun or result mutation is performed.",
+			InputSchema: readSchema(map[string]any{
+				"category": stringField("Optional category slug; omit for the equal-category overall rating"),
+			}),
+			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
+				return a.svc.modelRatings(str(args, "category"))
+			}},
 		{Name: "bench_baseline_set", Description: "Pin a run's result as the baseline for a pack scenario.", InputSchema: requiredSchema("run_id", "scenario_id"),
 			Handler: func(_ *sdk.AppCtx, args map[string]any) (any, error) {
 				return a.svc.setBaseline(str(args, "run_id"), str(args, "scenario_id"), intArg(args, "target_index"), str(args, "label"))

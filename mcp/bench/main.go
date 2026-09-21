@@ -60,6 +60,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/runs", Handler: a.handleRuns},
 		{Pattern: "/api/runs/", Handler: a.handleRun},
 		{Pattern: "/api/leaderboard", Handler: a.handleGlobalLeaderboard},
+		{Pattern: "/api/ratings", Handler: a.handleModelRatings},
 		{Pattern: "/api/profiles", Handler: a.handleProfiles},
 		{Pattern: "/api/profiles/", Handler: a.handleProfile},
 		{Pattern: "/api/catalog", Handler: a.handleCatalog},

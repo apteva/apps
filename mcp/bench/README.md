@@ -42,6 +42,30 @@ They are part of the sealed pack digest, copied into run provenance and results,
 and retained in evidence and full-data exports. Existing packs remain valid and
 are simply uncategorized until a draft is updated or forked.
 
+## Category-balanced model ratings
+
+`bench_model_ratings` derives an overall model rating from preserved Agentic
+Quality v2 evidence. It does not rerun a benchmark and never overwrites the
+score stored on a result.
+
+- Coding and analytics use 80% deterministic correctness plus 20% recorded
+  efficiency. The single-model judge remains visible in the evidence but does
+  not rank objective work.
+- Other categories, including marketing, retain their source Agentic Quality
+  v2 score because qualitative assessment is material to the task.
+- The latest admitted result is selected for each model, pack, scenario, and
+  trial. Superseded attempts remain in the raw history and evidence export.
+- Evidence is averaged within each category, then every represented category
+  has equal weight in the overall score.
+
+The response includes the immutable rating-policy digest, its source-profile
+digest, source and selected evidence counts, per-category contributions, and
+coverage. Use `category` to inspect one benchmark family:
+
+```sh
+bench_model_ratings { "category": "coding" }
+```
+
 Evals answers *"did my agent regress?"*. Bench answers *"which target is better,
 and can someone else reproduce that number?"* — so Bench does not run anything
 itself. It delegates execution to **Evals**, which runs cases inside isolated

@@ -1333,6 +1333,84 @@ func seedResult(t *testing.T, svc *service, runID, scenarioID string, target Tar
 	}
 }
 
+func seedRatingEvidence(t *testing.T, svc *service, sourceDigest, model, category string, created time.Time, correctness, sourceScore, efficiency float64) {
+	t.Helper()
+	runID := newID("rating_run")
+	run := &Run{
+		ID: runID, PackID: "pack-" + category, PackName: category + " benchmark", PackCategory: category,
+		PackVersion: "1.0.0", PackDigest: "digest-" + category, ScoringVersion: agenticQualityV2().Version,
+		ScoringProfileDigest: sourceDigest, Name: "rating evidence", Status: RunStatusCompleted,
+		Targets: []Target{{Provider: "openai-codex", Model: model}}, Trials: 1, CreatedAt: created,
+	}
+	if err := svc.db.saveRun(run); err != nil {
+		t.Fatal(err)
+	}
+	correctnessCopy := correctness
+	result := &Result{
+		ID: newID("rating_result"), BenchRunID: runID, ScenarioID: "scenario-" + category,
+		ScenarioName: category, Target: run.Targets[0], Trial: 1, Admission: AdmissionVerified,
+		Score:      Score{Score: sourceScore, EfficiencyScore: efficiency},
+		Metrics:    Metrics{Provider: "openai-codex", Model: model, DurationMS: 1000, TokensTotal: 1000},
+		Evaluation: EvaluationEvidence{CorrectnessScore: &correctnessCopy}, CreatedAt: created,
+	}
+	if err := svc.db.saveResult(result); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelRatingsRescoreStoredEvidenceWithoutMutatingIt(t *testing.T) {
+	svc, _ := newTestService(t, &fakePlatform{})
+	policy, err := categoryBalancedRatingPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	type evidence struct {
+		model, category                 string
+		correctness, source, efficiency float64
+	}
+	for _, item := range []evidence{
+		{"gpt-5.6-terra", "coding", 71, 72.3, 77.3},
+		{"gpt-5.6-sol", "coding", 83, 77.3, 64.7},
+		{"gpt-5.6-luna", "coding", 71, 73.7, 72},
+		{"gpt-5.6-terra", "marketing", 100, 96.3, 75.3},
+		{"gpt-5.6-sol", "marketing", 100, 93.5, 75.3},
+		{"gpt-5.6-luna", "marketing", 100, 96.5, 76.7},
+		{"gpt-5.6-terra", "analytics", 50, 59.8, 88},
+		{"gpt-5.6-sol", "analytics", 50, 63.9, 88},
+		{"gpt-5.6-luna", "analytics", 50, 63.9, 84},
+	} {
+		seedRatingEvidence(t, svc, policy.SourceProfileDigest, item.model, item.category, base, item.correctness, item.source, item.efficiency)
+	}
+	// A later replacement is selected, while this timeout remains queryable in
+	// the immutable result history and is counted in source_results.
+	seedRatingEvidence(t, svc, policy.SourceProfileDigest, "gpt-5.6-luna", "coding", base.Add(-time.Hour), 0, 8.5, 56)
+
+	board, err := svc.modelRatings("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := board["rows"].([]ratingRow)
+	if len(rows) != 3 {
+		t.Fatalf("rating rows = %#v", rows)
+	}
+	got := []string{rows[0].Model, rows[1].Model, rows[2].Model}
+	want := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("rating order = %v, want %v", got, want)
+	}
+	if rows[0].AverageScore != 76.8 || rows[1].AverageScore != 75.4 || rows[2].AverageScore != 74.8 {
+		t.Fatalf("ratings = %.1f, %.1f, %.1f", rows[0].AverageScore, rows[1].AverageScore, rows[2].AverageScore)
+	}
+	if board["source_results"] != 10 || board["selected_results"] != 9 {
+		t.Fatalf("evidence counts = source %v selected %v", board["source_results"], board["selected_results"])
+	}
+	stored, err := svc.db.listAdmittedResults(policy.SourceProfileDigest, "coding")
+	if err != nil || len(stored) != 4 {
+		t.Fatalf("source evidence was changed: len=%d err=%v", len(stored), err)
+	}
+}
+
 func sealedPackWithRun(t *testing.T, svc *service, name string, target Target) (*Pack, *Run) {
 	t.Helper()
 	scenario := crmScenario()

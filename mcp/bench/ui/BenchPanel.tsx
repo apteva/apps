@@ -145,6 +145,8 @@ interface Run {
 
 interface LeaderboardRow {
   label: string;
+  provider?: string;
+  model?: string;
   runs: number;
   pass_rate: number;
   average_score: number;
@@ -170,6 +172,15 @@ interface GlobalBoard {
   category?: string;
   scoring_version: string;
   scoring_versions?: string[];
+  rating_policy?: {
+    name: string;
+    version: string;
+    digest: string;
+    evidence_selection: string;
+    aggregation: string;
+  };
+  source_results?: number;
+  selected_results?: number;
   packs: { digest: string; name: string; category?: string; version: string }[];
   rows: LeaderboardRow[];
   by_scenario?: ScenarioRow[];
@@ -304,7 +315,7 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     if (view !== "global" || !projectId) return;
     const query = globalCategory ? `?category=${encodeURIComponent(globalCategory)}` : "";
-    const load = () => call<GlobalBoard>(`/api/leaderboard${query}`, scope).then(setGlobalBoard).catch((e) => setStatus(String(e)));
+    const load = () => call<GlobalBoard>(`/api/ratings${query}`, scope).then(setGlobalBoard).catch((e) => setStatus(String(e)));
     void load();
     const timer = setInterval(load, 10000);
     return () => clearInterval(timer);
@@ -342,7 +353,7 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
       <div className="flex items-center gap-3 border-b border-border px-4 py-2">
         <span className="font-medium">Bench</span>
         {view === "global" && <span className="text-xs text-text-dim">
-          {globalCategory ? `${categoryLabel(globalCategory)} benchmarks` : "every sealed benchmark"}
+          {globalCategory ? `${categoryLabel(globalCategory)} model ratings` : "category-balanced model ratings"}
         </span>}
         {view === "pack" && selected && (
           <span className="text-xs text-text-dim">
@@ -356,8 +367,8 @@ export default function BenchPanel({ projectId, installId }: NativePanelProps) {
         <div className="border-r border-border overflow-auto p-3 flex flex-col gap-3">
           <button className={`text-left border rounded px-2 py-1.5 ${view === "global" ? "border-text" : "border-border"}`}
             onClick={() => setView("global")}>
-            <div className="font-medium text-sm">Global leaderboard</div>
-            <div className="text-xs text-text-dim">Every sealed benchmark</div>
+            <div className="font-medium text-sm">Model ratings</div>
+            <div className="text-xs text-text-dim">Category-balanced evidence</div>
           </button>
           <button className={btn} onClick={() => { setView("pack"); setNewPackOpen(true); }}>+ New benchmark</button>
           {categories.length > 0 && (
@@ -1362,17 +1373,21 @@ function GlobalLeaderboard({ board, categories, category, onCategory }: {
   const packs = board.packs || [];
   // A ranking across targets that faced different benchmarks is not a fair
   // comparison; say so rather than letting the ordering imply otherwise.
+  const policy = board.rating_policy;
   const note = board.comparable
-    ? `Every target has faced all ${packs.length} sealed benchmark${packs.length === 1 ? "" : "s"} under ${board.scoring_version}. Ranked by pass rate; score breaks ties.`
-    : `Targets here have not all faced the same benchmarks, so this ranking is not a like-for-like comparison — check the coverage column. Scoring contract ${board.scoring_version}.`;
+    ? `Every model has evidence for all ${packs.length} benchmark${packs.length === 1 ? "" : "s"}. Ranked by ${policy?.name || board.scoring_version}; ${policy?.aggregation || "scores are averaged"}. Existing runs were rescored without changing their original results.`
+    : `Models here have not all faced the same benchmarks, so this rating is not a like-for-like comparison — check the coverage column. Rating contract ${policy?.version || board.scoring_version}.`;
   return (
     <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="font-medium">{category ? `${categoryLabel(category)} leaderboard` : "Global leaderboard"}</div>
+          <div className="font-medium">{category ? `${categoryLabel(category)} model ratings` : "Overall model ratings"}</div>
           <div className="text-xs text-text-dim">
             {packs.length} sealed benchmark{packs.length === 1 ? "" : "s"}{packs.length > 0 ? `: ${packs.map((p) => `${p.name} v${p.version}`).join(", ")}` : ""}
           </div>
+          {policy && <div className="text-xs text-text-dim">
+            {policy.evidence_selection}. Contract {short(policy.digest)} · {board.selected_results || 0} selected from {board.source_results || 0} preserved results.
+          </div>}
         </div>
         <select className={field + " max-w-[220px]"} value={category} onChange={(e) => onCategory(e.target.value)}>
           <option value="">All categories</option>
@@ -1384,12 +1399,6 @@ function GlobalLeaderboard({ board, categories, category, onCategory }: {
           No admitted results yet{category ? ` in ${categoryLabel(category)}` : ""}. Seal a benchmark and run it.
         </div>
       ) : <>
-      {(board.scoring_versions?.length || 0) > 1 && (
-        <div className="text-xs text-text-dim border border-border rounded p-2">
-          Results exist under {board.scoring_versions!.length} scoring contracts; only {board.scoring_version} is shown.
-          Scores from different contracts are not comparable.
-        </div>
-      )}
       <Board rows={board.rows} byScenario={board.by_scenario} note={note} />
       </>}
     </div>

@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: bench
 display_name: Bench
-version: 0.9.3
-description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.9.3 consistently excludes explicit harness-invalid Evals outcomes even when an agent trace exists.
+version: 0.10.0
+description: Reproducible benchmarks for persistent and hidden on-demand agents. v0.10.0 adds immutable category-balanced model ratings derived from stored evidence without rerunning or overwriting results.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bench
 icon: /ui/icon.svg
@@ -42,6 +42,7 @@ provides:
     - { name: bench_result_get, description: "Get one raw scored result by id." }
     - { name: bench_leaderboard, description: "Rank targets across every run of one sealed pack." }
     - { name: bench_leaderboard_global, description: "Rank targets across every sealed pack, optionally scoped to one category, under one scoring contract." }
+    - { name: bench_model_ratings, description: "Rate models from preserved benchmark evidence under the immutable category-balanced v3 policy." }
     - { name: bench_baseline_set, description: "Pin a run's result as the baseline for a pack scenario." }
     - { name: bench_baseline_compare, description: "Compare a run against pinned baselines." }
     - { name: bench_baseline_list, description: "List and paginate pinned baselines." }
@@ -70,7 +71,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: bench/v0.9.3
+    ref: bench/v0.10.0
     entry: mcp/bench
   port: 8080
   health_check: /health
