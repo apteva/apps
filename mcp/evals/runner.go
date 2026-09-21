@@ -141,7 +141,7 @@ func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
 			return err
 		}
 		var execution sdk.RuntimeAgentExecution
-		wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
+		wait := map[string]any{"scope": "tree", "timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
 		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
 			return fmt.Errorf("wait for agent: %w", err)
 		}

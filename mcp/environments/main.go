@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.6
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.6 bounds failed reconciliation with exponential backoff and a persisted degraded state that requires an explicit retry or definition update.
+version: 0.7.7
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.7 adds generic thread-tree waits so delegated and nested workers finish before an evaluation is finalized.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -51,7 +51,7 @@ provides:
     - { name: environment_agent_spawn, description: "Spawn an agent inside a running environment." }
     - { name: environment_agent_send, description: "Send a message to a runtime agent." }
     - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
-    - { name: environment_agent_wait, description: "Wait for a runtime agent and return its normalized trace and metrics." }
+    - { name: environment_agent_wait, description: "Wait for one runtime agent thread or its complete delegated thread tree and return normalized traces and metrics." }
     - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions." }
     - { name: environment_voice_call_get, description: "Get a simulated voice call, transcript, metrics, and recording handles." }
     - { name: environment_voice_recording_get, description: "Get a receptionist, clean caller, or delivered caller WAV recording from a simulated voice call." }
@@ -72,7 +72,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.6, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.7, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }

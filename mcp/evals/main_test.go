@@ -457,7 +457,7 @@ func TestManifestAndToolsStayAligned(t *testing.T) {
 	}
 	sort.Strings(provided)
 	sort.Strings(runtime)
-	if manifest.Name != "evals" || manifest.Version != "0.9.1" || !reflect.DeepEqual(provided, runtime) {
+	if manifest.Name != "evals" || manifest.Version != "0.9.2" || !reflect.DeepEqual(provided, runtime) {
 		t.Fatalf("manifest tools=%v runtime tools=%v", provided, runtime)
 	}
 	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "evals/v"+manifest.Version {
@@ -612,6 +612,7 @@ type evalCampaignPlatformStub struct {
 	judgeInputs            []map[string]any
 	collaboratorExecutions map[string]sdk.RuntimeAgentExecution
 	collaboratorWaits      []string
+	mainWaitScopes         []string
 }
 
 func (s *evalCampaignPlatformStub) ListRuntimeCatalogAgents(string) ([]sdk.RuntimeCatalogAgent, error) {
@@ -679,6 +680,10 @@ func (s *evalCampaignPlatformStub) CallAppResult(app, tool string, input map[str
 			}
 			value = execution
 		} else {
+			if wait, ok := input["wait"].(map[string]any); ok {
+				scope, _ := wait["scope"].(string)
+				s.mainWaitScopes = append(s.mainWaitScopes, scope)
+			}
 			value = sdk.RuntimeAgentExecution{
 				Status:   "completed",
 				ThreadID: "main",
@@ -1080,6 +1085,14 @@ func TestFourCaseCampaignRunsPromptsAssertionsAndStopsEnvironments(t *testing.T)
 	}
 	if platform.created != 4 || platform.spawned != 4 || len(platform.prompts) != 4 || platform.asserted != 4 || platform.stopped != 4 {
 		t.Fatalf("orchestration created=%d spawned=%d prompts=%d asserted=%d stopped=%d", platform.created, platform.spawned, len(platform.prompts), platform.asserted, platform.stopped)
+	}
+	if len(platform.mainWaitScopes) != 4 {
+		t.Fatalf("main wait scopes=%#v", platform.mainWaitScopes)
+	}
+	for _, scope := range platform.mainWaitScopes {
+		if scope != "tree" {
+			t.Fatalf("main wait scope=%q, want tree", scope)
+		}
 	}
 	for _, prompt := range platform.prompts {
 		if !strings.Contains(prompt, "support request") {

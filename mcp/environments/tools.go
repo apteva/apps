@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -344,12 +345,22 @@ func (a *App) toolAgentWait(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	var req sdk.RuntimeAgentWaitRequest
+	scope := "thread"
 	if raw, ok := args["wait"].(map[string]any); ok {
+		if value, _ := raw["scope"].(string); strings.TrimSpace(value) != "" {
+			scope = strings.ToLower(strings.TrimSpace(value))
+		}
 		if err := decodeArgs(raw, &req); err != nil {
 			return nil, err
 		}
 	} else if err := decodeArgs(args, &req); err != nil {
 		return nil, err
+	}
+	if scope == "tree" {
+		return waitRuntimeAgentTree(a.svc.runtime(), r.RuntimeID, str(args, "agent"), req)
+	}
+	if scope != "thread" {
+		return nil, fmt.Errorf("wait scope must be thread or tree")
 	}
 	return a.svc.runtime().WaitRuntimeAgent(r.RuntimeID, str(args, "agent"), req)
 }
