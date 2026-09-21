@@ -111,7 +111,7 @@ func TestWaitRuntimeAgentTreeWaitsForWorkerAndResumedRoot(t *testing.T) {
 	}
 	resumed := &sdk.RuntimeAgentExecution{
 		Status: "completed", Reason: "idle", ThreadID: "main", Turns: 3,
-		StartedAt: initial.StartedAt, FinishedAt: time.Now(),
+		StartedAt: time.Now().Add(-time.Second), FinishedAt: time.Now(),
 		Trace: []sdk.RuntimeTraceEvent{
 			{Index: 0, ThreadID: "main", Role: "user", Content: "repair checkout"},
 			{Index: 1, ThreadID: "main", Role: "agent", Content: "I will delegate."},
@@ -168,6 +168,9 @@ func TestWaitRuntimeAgentTreeWaitsForWorkerAndResumedRoot(t *testing.T) {
 	if execution.Metrics.TokensIn != 100 || execution.Metrics.ToolCalls != 2 {
 		t.Fatalf("metrics=%#v", execution.Metrics)
 	}
+	if !execution.StartedAt.Equal(initial.StartedAt) {
+		t.Fatalf("started_at=%s, want original root start %s", execution.StartedAt, initial.StartedAt)
+	}
 }
 
 func TestWaitRuntimeAgentTreeCapturesWorkerThatDisappearsBeforeRootReturns(t *testing.T) {
@@ -177,6 +180,7 @@ func TestWaitRuntimeAgentTreeCapturesWorkerThatDisappearsBeforeRootReturns(t *te
 
 	initial := &sdk.RuntimeAgentExecution{
 		Status: "completed", Reason: "idle", ThreadID: "main", Turns: 2,
+		StartedAt: time.Now().Add(-time.Minute), FinishedAt: time.Now().Add(-30 * time.Second),
 		Trace: []sdk.RuntimeTraceEvent{
 			{Index: 0, ThreadID: "main", Role: "user", Content: "delegate checkout"},
 			{Index: 1, ThreadID: "main", Role: "agent", Content: "The worker finished; I will verify."},
@@ -184,6 +188,7 @@ func TestWaitRuntimeAgentTreeCapturesWorkerThatDisappearsBeforeRootReturns(t *te
 	}
 	resumed := &sdk.RuntimeAgentExecution{
 		Status: "completed", Reason: "idle", ThreadID: "main", Turns: 3,
+		StartedAt: time.Now().Add(-time.Second), FinishedAt: time.Now(),
 		Trace: []sdk.RuntimeTraceEvent{
 			{Index: 0, ThreadID: "main", Role: "user", Content: "delegate checkout"},
 			{Index: 1, ThreadID: "main", Role: "user", Content: "worker completion received"},
@@ -249,6 +254,9 @@ func TestWaitRuntimeAgentTreeCapturesWorkerThatDisappearsBeforeRootReturns(t *te
 	}
 	if !foundWorker {
 		t.Fatalf("ephemeral worker trace missing: %#v", execution.Trace)
+	}
+	if !execution.StartedAt.Equal(initial.StartedAt) {
+		t.Fatalf("started_at=%s, want original root start %s", execution.StartedAt, initial.StartedAt)
 	}
 }
 

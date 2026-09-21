@@ -1,8 +1,8 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.9.3
-description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.3 retains ephemeral delegated and nested worker traces in the evidence judged with the complete execution.
+version: 0.9.4
+description: Behavioral evaluation of persistent or hidden on-demand agents inside isolated Environments. v0.9.4 retains ephemeral worker evidence with accurate full-run duration and token accounting.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
 icon: /ui/icon.svg
@@ -17,7 +17,7 @@ requires:
     - platform.runtime_catalog.read
     - platform.agents.directive.write
   apps:
-    - { name: environments, version: ">=0.7.8" }
+    - { name: environments, version: ">=0.7.9" }
     - { name: llm, version: ">=0.3.0" }
 provides:
   http_routes:
@@ -59,7 +59,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.9.3
+    ref: evals/v0.9.4
     entry: mcp/evals
   port: 8080
   health_check: /health

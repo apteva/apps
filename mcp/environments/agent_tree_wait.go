@@ -108,6 +108,10 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 	if root == nil {
 		return nil, fmt.Errorf("runtime returned no root execution")
 	}
+	treeStartedAt := root.StartedAt
+	if treeStartedAt.IsZero() {
+		treeStartedAt = started.UTC()
+	}
 	if root.Status == "failed" || root.Status == "timeout" || root.Reason == "max_turns" {
 		return mergeRuntimeTreeExecution(root, children), nil
 	}
@@ -137,6 +141,9 @@ func waitRuntimeAgentTree(runtime agentTreeRuntime, runtimeID, agent string, req
 			}
 			if root == nil {
 				return nil, fmt.Errorf("runtime returned no resumed root execution")
+			}
+			if root.StartedAt.IsZero() || root.StartedAt.After(treeStartedAt) {
+				root.StartedAt = treeStartedAt
 			}
 			if root.Status == "failed" || root.Status == "timeout" || root.Reason == "max_turns" {
 				return mergeRuntimeTreeExecution(root, children), nil

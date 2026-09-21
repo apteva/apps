@@ -15,8 +15,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.8
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.8 captures ephemeral delegated and nested worker traces while the root agent is still running.
+version: 0.7.9
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.9 preserves full-run timing while capturing ephemeral delegated and nested worker traces.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
@@ -72,7 +72,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.8, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.9, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
