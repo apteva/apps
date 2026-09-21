@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.49
+version: 0.13.50
 description: |
   Send and receive email through AWS SES and SMS/WhatsApp through
   Twilio. Tracks
@@ -150,6 +150,9 @@ provides:
       supported_sizes: [half, full]
       default_size: half
       refresh_topics: [message.sent, message.received, message.event]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/messages.json
       settings_schema:
         type: object
         properties:
