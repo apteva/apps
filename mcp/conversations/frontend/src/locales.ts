@@ -136,6 +136,7 @@ export const catalog = {
   "chat.open": ["Open the conversation", "Ouvrir la conversation", "Abrir la conversación"],
   "panel.title": ["Conversations", "Conversations", "Conversaciones"],
   "panel.description": ["Chat, inbox, and optional Telegram delivery in one durable system.", "Chat, boîte de réception et envoi facultatif via Telegram dans un système persistant.", "Chat, bandeja de entrada y envío opcional por Telegram en un sistema persistente."],
+  "panel.workspace": ["Workspace", "Espace de travail", "Espacio de trabajo"],
   "panel.chats": ["Chats", "Discussions", "Chats"],
   "panel.telegram": ["Telegram", "Telegram", "Telegram"],
   "chat.archivedTitle": ["Archived conversations", "Conversations archivées", "Conversaciones archivadas"],

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.2 — 2026-09-22
+
+- Restore the host-personalized conversation workspace rail in the full Conversations project page, with app-owned Details plus eligible `dashboard.thread_sidebar` widgets.
+- Keep exported conversation and Inbox widgets unchanged, and retain the standalone Details column when the host does not provide a workspace rail.
+
 ## 0.24.1 — 2026-09-21
 
 - Remove the redundant manual Refresh control from the Inbox widget; app events and the 15-second fallback poll continue to keep it current.

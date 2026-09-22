@@ -27,7 +27,7 @@ import { AttachmentContent, GenericComponents, reportSectionsText } from "./mess
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
@@ -83,6 +83,19 @@ export interface NativePanelProps extends ConversationLocalization {
   installId: number;
   projectId: string;
   instanceId?: number;
+  workspaceRail?: ComponentType<WorkspaceRailProps>;
+}
+
+export interface WorkspaceRailProps {
+  projectId: string;
+  agentId?: number;
+  threadId?: string;
+  context?: {
+    app: string;
+    kind: string;
+    id: string;
+  };
+  children: ReactNode;
 }
 
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
@@ -971,6 +984,7 @@ function ContextColumn({
   onEnsureAgents,
   onManage,
   refreshHold,
+  embedded = false,
 }: {
   conversation: Conversation;
   agents: AgentInfo[] | null;
@@ -979,6 +993,7 @@ function ContextColumn({
   // While the details dialog is open we hold refreshes; when it closes
   // the roster refetches so its edits show up immediately.
   refreshHold: boolean;
+  embedded?: boolean;
 }) {
   const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -1013,9 +1028,11 @@ function ContextColumn({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg">
-      <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
-        <span className="text-xs font-semibold uppercase text-text-muted">{t("common.details")}</span>
-      </div>
+      {!embedded && (
+        <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
+          <span className="text-xs font-semibold uppercase text-text-muted">{t("common.details")}</span>
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-auto p-4 space-y-5">
         <div>
           <div className="mb-2 text-xs uppercase text-text-dim">{t("chat.conversation")}</div>
@@ -1999,7 +2016,7 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
 // ─── root panel ──────────────────────────────────────────────────────
 
-export default function ConversationsPanel({ projectId, instanceId }: NativePanelProps) {
+export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail }: NativePanelProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
@@ -2009,6 +2026,7 @@ export default function ConversationsPanel({ projectId, instanceId }: NativePane
   const [showArchived, setShowArchived] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
@@ -2082,9 +2100,19 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   // ChatMain guards the same way).
   useEffect(() => {
     setDetailsOpen(false);
+    setWorkspaceOpen(false);
   }, [selectedId]);
 
   const openDetails = () => {
+    ensureAgents();
+    if (WorkspaceRail && !hasContextColumn) {
+      setWorkspaceOpen(true);
+      return;
+    }
+    setDetailsOpen(true);
+  };
+
+  const openManage = () => {
     ensureAgents();
     setDetailsOpen(true);
   };
@@ -2147,7 +2175,11 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
       ) : (
         <main
           className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${
-            hasContextColumn && selected ? "lg:grid-cols-[260px_minmax(0,1fr)_280px]" : ""
+            hasContextColumn && selected
+              ? WorkspaceRail
+                ? "lg:grid-cols-[260px_minmax(0,1fr)_320px]"
+                : "lg:grid-cols-[260px_minmax(0,1fr)_280px]"
+              : ""
           }`}
         >
           <aside className="min-h-0 flex flex-col">
@@ -2272,16 +2304,80 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
           )}
           {hasContextColumn && selected && (
             <div className="h-full min-h-0 overflow-hidden">
-              <ContextColumn
-                conversation={selected}
-                agents={agents}
-                onEnsureAgents={ensureAgents}
-                onManage={openDetails}
-                refreshHold={detailsOpen}
-              />
+              {WorkspaceRail ? (
+                <WorkspaceRail
+                  projectId={selected.project_id || projectId}
+                  agentId={selected.lead_agent_id}
+                  threadId={selected.thread_id}
+                  context={{ app: "conversations", kind: "conversation", id: selected.id }}
+                >
+                  <ContextColumn
+                    conversation={selected}
+                    agents={agents}
+                    onEnsureAgents={ensureAgents}
+                    onManage={openManage}
+                    refreshHold={detailsOpen}
+                    embedded
+                  />
+                </WorkspaceRail>
+              ) : (
+                <ContextColumn
+                  conversation={selected}
+                  agents={agents}
+                  onEnsureAgents={ensureAgents}
+                  onManage={openManage}
+                  refreshHold={detailsOpen}
+                />
+              )}
             </div>
           )}
         </main>
+      )}
+
+      {WorkspaceRail && !hasContextColumn && selected && workspaceOpen && (
+        <div className="fixed inset-0 z-[90] lg:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/65"
+            onClick={() => setWorkspaceOpen(false)}
+            aria-label={t("common.close")}
+          />
+          <aside
+            className="absolute inset-y-0 right-0 flex w-[min(92vw,360px)] flex-col border-l border-border bg-bg shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("panel.workspace")}
+          >
+            <div className="flex h-10 shrink-0 items-center border-b border-border px-4">
+              <span className="text-xs font-semibold uppercase text-text-muted">{t("panel.workspace")}</span>
+              <button
+                type="button"
+                onClick={() => setWorkspaceOpen(false)}
+                className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded text-lg text-text-muted hover:bg-bg-input hover:text-text"
+                aria-label={t("common.close")}
+              >
+                ×
+              </button>
+            </div>
+            <div className="min-h-0 flex-1">
+              <WorkspaceRail
+                projectId={selected.project_id || projectId}
+                agentId={selected.lead_agent_id}
+                threadId={selected.thread_id}
+                context={{ app: "conversations", kind: "conversation", id: selected.id }}
+              >
+                <ContextColumn
+                  conversation={selected}
+                  agents={agents}
+                  onEnsureAgents={ensureAgents}
+                  onManage={openManage}
+                  refreshHold={detailsOpen}
+                  embedded
+                />
+              </WorkspaceRail>
+            </div>
+          </aside>
+        </div>
       )}
 
       <NewConversationDialog
