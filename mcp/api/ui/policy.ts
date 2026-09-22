@@ -53,7 +53,12 @@ export function updatedAuth(kind: string, settings: Record<string, unknown>) {
     return /^\d+$/.test(String(v).trim()) && Number.isSafeInteger(id) && id > 0 ? id : v;
   }) : [];
   const scope = ids.length ? { function_ids: ids } : {};
-  if (kind === "api_key") return { kind, ...scope };
+  if (kind === "api_key") {
+    const requiredScopes = Array.isArray(settings.required_scopes)
+      ? settings.required_scopes.filter((v): v is string => typeof v === "string" && !!v.trim()).map(v => v.trim())
+      : [];
+    return { kind, ...scope, ...(requiredScopes.length ? { required_scopes: requiredScopes } : {}) };
+  }
   const provider = kind === "auth_jwt" ? "auth" : settings.provider === "app" ? "app" : "auth";
   return {
     kind,

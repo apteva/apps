@@ -25,6 +25,21 @@ Existing `public`, `api_key`, and `auth_jwt` policies remain supported.
 }
 ```
 
+API-key policies may additionally require exact, case-sensitive scopes:
+
+```json
+{
+  "kind": "api_key",
+  "required_scopes": ["orders:write"],
+  "function_ids": [12]
+}
+```
+
+The key's gateway-managed principal always uses subject `api_key:<internal-id>`.
+Optional generic `subject_type`, `subject_id`, scopes, and stored claims are
+copied into its verified claims. Management metadata is never forwarded. An
+empty scope requirement preserves compatibility with every existing API key.
+
 Auth verifies the bearer token through its project-scoped `/me` endpoint. The
 principal uses the verified user ID, the organization slug as `tenant_id`, and
 `apteva:auth:<organization-slug>` as its issuer. Claims are selected exclusively

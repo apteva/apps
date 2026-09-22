@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -81,21 +82,46 @@ func (a *App) MCPTools() []sdk.Tool {
 			"project_id": map[string]any{"type": "string"},
 			"id":         map[string]any{"type": "integer"},
 		}, []string{"id"}), Handler: a.toolRouteDelete},
-		{Name: "api_key_create", Description: "Create an API key. Returns plaintext key once. Args: api_id or api_slug, name.", InputSchema: schemaObject(map[string]any{
-			"project_id": map[string]any{"type": "string"},
-			"api_id":     map[string]any{"type": "integer"},
-			"api_slug":   map[string]any{"type": "string"},
-			"name":       map[string]any{"type": "string"},
+		{Name: "api_key_create", Description: "Create a generic API credential. Returns plaintext key only when newly created; an idempotent retry returns metadata with created=false and no secret.", InputSchema: schemaObject(map[string]any{
+			"project_id":      map[string]any{"type": "string"},
+			"api_id":          map[string]any{"type": "integer"},
+			"api_slug":        map[string]any{"type": "string"},
+			"name":            map[string]any{"type": "string"},
+			"subject_type":    map[string]any{"type": "string"},
+			"subject_id":      map[string]any{"type": "string"},
+			"claims":          map[string]any{"type": "object", "description": "Generic verified claims forwarded to authenticated Functions. Reserved or secret-like claim names are rejected."},
+			"scopes":          map[string]any{"type": "array", "maxItems": 64, "uniqueItems": true, "items": map[string]any{"type": "string"}},
+			"expires_at":      map[string]any{"type": "string", "description": "Optional RFC3339 expiration timestamp."},
+			"metadata":        map[string]any{"type": "object", "description": "Management metadata; never forwarded to Functions."},
+			"external_id":     map[string]any{"type": "string", "description": "Optional unique external credential identifier within the API."},
+			"idempotency_key": map[string]any{"type": "string", "description": "Optional issuance operation key. Reuse with different arguments is rejected."},
 		}, []string{"name"}), Handler: a.toolKeyCreate},
+		{Name: "api_key_get", Description: "Fetch API key metadata by id. Secrets and hashes are never returned.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "id": map[string]any{"type": "integer"},
+		}, []string{"id"}), Handler: a.toolKeyGet},
 		{Name: "api_key_list", Description: "List API keys for an API.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"},
 			"api_id":     map[string]any{"type": "integer"},
 			"api_slug":   map[string]any{"type": "string"},
 		}, nil), Handler: a.toolKeyList},
+		{Name: "api_key_list_by_subject", Description: "List generic API credentials by exact subject_type and subject_id, optionally restricted to one API.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"},
+			"subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"},
+		}, []string{"subject_type", "subject_id"}), Handler: a.toolKeyListBySubject},
 		{Name: "api_key_revoke", Description: "Revoke an API key by id.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"},
 			"id":         map[string]any{"type": "integer"},
 		}, []string{"id"}), Handler: a.toolKeyRevoke},
+		{Name: "api_key_revoke_by_subject", Description: "Revoke every active credential for an exact generic subject, optionally restricted to one API.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"},
+			"subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"},
+		}, []string{"subject_type", "subject_id"}), Handler: a.toolKeyRevokeBySubject},
+		{Name: "api_usage_plan_create", Description: "Create an operational token-bucket request policy for an API. This is traffic control, not billing.", InputSchema: usagePlanInputSchema(false), Handler: a.toolUsagePlanCreate},
+		{Name: "api_usage_plan_get", Description: "Fetch an API usage plan by id.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolUsagePlanGet},
+		{Name: "api_usage_plan_list", Description: "List operational usage plans for an API.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "api_id": map[string]any{"type": "integer"}, "api_slug": map[string]any{"type": "string"}}, nil), Handler: a.toolUsagePlanList},
+		{Name: "api_usage_plan_update", Description: "Update an operational usage plan.", InputSchema: usagePlanInputSchema(true), Handler: a.toolUsagePlanUpdate},
+		{Name: "api_usage_plan_attach_key", Description: "Attach one usage plan to an API key, replacing its prior plan.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "key_id": map[string]any{"type": "integer"}, "usage_plan_id": map[string]any{"type": "integer"}}, []string{"key_id", "usage_plan_id"}), Handler: a.toolUsagePlanAttachKey},
+		{Name: "api_usage_plan_detach_key", Description: "Remove the operational usage plan from an API key.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}, "key_id": map[string]any{"type": "integer"}}, []string{"key_id"}), Handler: a.toolUsagePlanDetachKey},
 		{Name: "api_logs", Description: "List recent request logs for an API.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"},
 			"api_id":     map[string]any{"type": "integer"},
@@ -395,11 +421,34 @@ func (a *App) toolKeyCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || api == nil {
 		return nil, err
 	}
-	key, plaintext, err := dbCreateAPIKey(ctx.AppDB(), api.ProjectID, api.ID, stringArg(args, "name", "default"))
+	in, err := normalizedCredentialInput(api.ProjectID, api.ID, args)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"key": key, "secret": plaintext}, nil
+	key, plaintext, created, err := dbCreateAPIKey(ctx.AppDB(), in)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"key": key, "created": created}
+	if created {
+		out["secret"] = plaintext
+	}
+	return out, nil
+}
+
+func (a *App) toolKeyGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	key, err := dbGetAPIKey(ctx.AppDB(), pid, int64(intArg(args, "id", 0)))
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, errors.New("api key not found")
+	}
+	return map[string]any{"key": key}, nil
 }
 
 func (a *App) toolKeyList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -408,6 +457,43 @@ func (a *App) toolKeyList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	keys, err := dbListAPIKeys(ctx.AppDB(), api.ProjectID, api.ID)
+	return map[string]any{"keys": keys, "count": len(keys)}, err
+}
+
+func (a *App) optionalAPIForKeyQuery(ctx *sdk.AppCtx, args map[string]any) (int64, error) {
+	if intArg(args, "api_id", 0) == 0 && strings.TrimSpace(stringArg(args, "api_slug", "")) == "" {
+		return 0, nil
+	}
+	api, err := a.resolveAPI(ctx, args)
+	if err != nil || api == nil {
+		return 0, err
+	}
+	return api.ID, nil
+}
+
+func validatedSubjectArgs(args map[string]any) (string, string, error) {
+	subjectType := strings.TrimSpace(stringArg(args, "subject_type", ""))
+	subjectID := strings.TrimSpace(stringArg(args, "subject_id", ""))
+	if !subjectTypePattern.MatchString(subjectType) || !identityString(subjectID) {
+		return "", "", errors.New("valid subject_type and subject_id are required")
+	}
+	return subjectType, subjectID, nil
+}
+
+func (a *App) toolKeyListBySubject(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	subjectType, subjectID, err := validatedSubjectArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	apiID, err := a.optionalAPIForKeyQuery(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := dbListAPIKeysBySubject(ctx.AppDB(), pid, apiID, subjectType, subjectID)
 	return map[string]any{"keys": keys, "count": len(keys)}, err
 }
 
@@ -422,8 +508,35 @@ func (a *App) toolKeyRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ok, err := dbRevokeAPIKey(ctx.AppDB(), pid, id)
 	if err == nil {
 		a.streams.cancelMatching(pid, 0, 0, id)
+		a.forgetThrottle(id)
 	}
 	return map[string]any{"revoked": ok}, err
+}
+
+func (a *App) toolKeyRevokeBySubject(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	a.mutationMu.Lock()
+	defer a.mutationMu.Unlock()
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	subjectType, subjectID, err := validatedSubjectArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	apiID, err := a.optionalAPIForKeyQuery(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := dbRevokeAPIKeysBySubject(ctx.AppDB(), pid, apiID, subjectType, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		a.streams.cancelMatching(pid, 0, 0, id)
+		a.forgetThrottle(id)
+	}
+	return map[string]any{"revoked": len(ids), "key_ids": ids}, nil
 }
 
 func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {

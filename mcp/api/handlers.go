@@ -325,6 +325,17 @@ func (a *App) handleGateway(w http.ResponseWriter, r *http.Request) {
 		a.writeAuthorizationError(w, r, err, &logRow, start)
 		return
 	}
+	if authCtx.KeyID != 0 {
+		allowed, retryAfter, throttleErr := a.allowAPIKeyRequest(api.ProjectID, api.ID, authCtx.KeyID)
+		if throttleErr != nil {
+			a.writeAuthorizationError(w, r, authFailure(503, "request throttling unavailable", throttleErr), &logRow, start)
+			return
+		}
+		if !allowed {
+			a.writeAuthorizationError(w, r, throttleFailure(retryAfter), &logRow, start)
+			return
+		}
+	}
 	w.Header().Set("X-Request-ID", logRow.RequestID)
 	if route.TargetKind == "app_events" {
 		// Share the mutation lock with revocation so a stream cannot register
@@ -444,14 +455,18 @@ func (a *App) authorizeRequest(r *http.Request, api *API, route *APIRoute) (auth
 		if key == "" {
 			key = bearerToken(r.Header.Get("Authorization"))
 		}
-		keyID, ok, err := validateAPIKey(a.ctx.AppDB(), api.ProjectID, api.ID, key)
+		credential, ok, err := validateAPIKey(a.ctx.AppDB(), api.ProjectID, api.ID, key)
 		if err != nil {
 			return authContext{Kind: "api_key"}, authFailure(503, "authentication service unavailable", err)
 		}
 		if !ok {
 			return authContext{Kind: "api_key"}, authFailure(401, "invalid api key", nil)
 		}
-		return authContext{Kind: "api_key", Subject: "api_key", KeyID: keyID, Principal: &Principal{Issuer: "apteva:api", Subject: "api_key:" + strconv.FormatInt(keyID, 10), ProjectID: api.ProjectID}}, nil
+		if !keyHasRequiredScopes(credential.Scopes, policy.RequiredScopes) {
+			return authContext{Kind: "api_key", Subject: "api_key", KeyID: credential.ID}, authFailure(403, "api key lacks a required scope", nil)
+		}
+		principal, expiry := principalForAPIKey(credential)
+		return authContext{Kind: "api_key", Subject: principal.Subject, KeyID: credential.ID, Principal: principal, ExpiresAt: expiry}, nil
 	case "auth_jwt", "authorizer":
 		principal, expiry, err := a.authenticatePrincipal(r, api.ProjectID, policy)
 		result := authContext{Kind: kind, Principal: principal, ExpiresAt: expiry}

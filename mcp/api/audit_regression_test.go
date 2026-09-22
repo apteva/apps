@@ -365,7 +365,7 @@ func TestAuditRevocationStopsExistingStream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, secret, err := dbCreateAPIKey(ctx.AppDB(), testProject, api.ID, "revocable")
+	key, secret, _, err := dbCreateAPIKey(ctx.AppDB(), apiKeyInput{ProjectID: testProject, APIID: api.ID, Name: "revocable", ClaimsJSON: "{}", ScopesJSON: "[]", MetadataJSON: "{}"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,6 +3,50 @@
 API Gateway exposes project APIs backed by Functions, installed apps, HTTP
 origins, or safe AppBus invalidation streams.
 
+## Generic API credentials (0.10.0)
+
+API keys remain API-scoped opaque secrets, but may now carry an optional
+generic `subject_type`/`subject_id`, bounded verified `claims`, exact
+case-sensitive `scopes`, an RFC3339 expiration, management-only `metadata`, and
+an external credential identifier. The gateway assigns the authoritative
+principal subject (`api_key:<internal-id>`); application identifiers remain
+opaque values and no subject type or identifier format is hard-coded.
+
+```json
+{
+  "api_slug": "commerce",
+  "name": "order client",
+  "subject_type": "service",
+  "subject_id": "worker-42",
+  "claims": { "tenant_id": "tenant-a", "region": "eu" },
+  "scopes": ["orders:read", "orders:write"],
+  "expires_at": "2027-01-01T00:00:00Z",
+  "external_id": "credential-42",
+  "idempotency_key": "issue-42"
+}
+```
+
+The plaintext secret is returned only for a newly created credential. Retrying
+the same issuance key returns the existing metadata with `created: false` and
+no secret; reusing it with different arguments is rejected. Existing keys have
+empty identity, claims, and scopes with no expiration, so existing routes are
+unchanged. A route opts into scope enforcement explicitly:
+
+```json
+{ "kind": "api_key", "required_scopes": ["orders:write"] }
+```
+
+All listed scopes are required. Metadata is never forwarded. Functions receive
+only the gateway-owned identity plus the stored generic claims, subject fields,
+and scopes, and continue to own business authorization and billing-sensitive
+decisions.
+
+Optional usage plans attach a token-bucket `rate_limit`, `interval_seconds`, and
+`burst` to a key. They are operational traffic controls, not subscriptions,
+entitlements, billing quotas, or durable usage ledgers. Buckets are local to an
+API app process and reset when that process restarts; deployments requiring a
+strict cross-replica commercial limit must enforce it in shared infrastructure.
+
 ## Optional configurations and stages (0.9.0)
 
 Existing APIs remain mutable and continue to resolve exactly as before. The

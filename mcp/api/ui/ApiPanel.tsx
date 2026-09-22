@@ -50,6 +50,10 @@ interface APIKey {
   name: string;
   key_prefix: string;
   status: string;
+  subject_type?: string;
+  subject_id?: string;
+  scopes?: string[];
+  expires_at?: string;
   last_used_at?: string;
   created_at?: string;
   revoked_at?: string;
@@ -588,10 +592,13 @@ function KeysView({ keys, busy, onCreate, onRevoke }: {
         <button type="submit" className={primaryBtn} disabled={busy}>Create</button>
       </form>
       <DataTable
-        columns={["name", "prefix", "status", "last used", ""]}
+        columns={["name", "prefix", "subject", "scopes", "expires", "status", "last used", ""]}
         rows={keys.map((k) => [
           k.name,
           k.key_prefix,
+          k.subject_type && k.subject_id ? `${k.subject_type}:${k.subject_id}` : "-",
+          k.scopes?.join(", ") || "-",
+          date(k.expires_at),
           k.status,
           date(k.last_used_at),
           k.status === "active" ? <button type="button" className="text-red-300 hover:underline" disabled={busy} onClick={() => onRevoke(k.id)}>Revoke</button> : "",
@@ -682,6 +689,7 @@ function AuthorizerFields({ kind, value, onChange }: { kind: string; value: Reco
     </>}
     {kind !== "api_key" && <><Field label="Required tenant (optional)"><input className={inputCls} value={String(value.tenant_id || "")} onChange={e => field("tenant_id", e.target.value)} placeholder="Accept only this tenant" /></Field>
     <Field label="Allowed authorization claims"><input className={inputCls} value={Array.isArray(value.claims) ? value.claims.join(", ") : ""} onChange={e => onChange({ ...value, claims: e.target.value.split(",").map(s => s.trim()) })} placeholder="roles, permissions" /></Field></>}
+    {kind === "api_key" && <Field label="Required scopes"><input className={inputCls} value={Array.isArray(value.required_scopes) ? value.required_scopes.join(", ") : ""} onChange={e => onChange({ ...value, required_scopes: e.target.value.split(",").map(s => s.trim()).filter(Boolean) })} placeholder="orders:write, records:read" /></Field>}
     <Field label="Permitted Function IDs"><input className={inputCls} value={Array.isArray(value.function_ids) ? value.function_ids.join(", ") : ""} onChange={e => onChange({ ...value, function_ids: e.target.value.split(",").map(s => s.trim()) })} placeholder="12, 34" /></Field>
     <p className="lg:col-span-2 text-xs text-text-dim">Authenticated Function routes require the destination ID and every permitted nested Function ID. Each Function must trust this API installation and issuer.</p>
     <p className="lg:col-span-2 text-xs text-text-dim">Only allowed claims from the verified provider are passed to Functions. Auth supplies server-managed authorization claims. No claims are forwarded by default.</p>

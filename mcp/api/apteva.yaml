@@ -2,8 +2,13 @@ schema: apteva-app/v1
 
 name: api
 display_name: API Gateway
-version: 0.9.0
+version: 0.10.0
 description: |
+  v0.10.0 Extends API keys into generic attributed credentials with opaque
+  subjects and claims, exact route scopes, expiration, idempotent issuance,
+  subject lookup/revocation, and optional operational usage plans. Existing
+  keys and unscoped routes retain their previous behavior.
+
   v0.9.0 Adds optional immutable API configurations and stage pointers with
   atomic promotion and rollback; legacy mutable APIs remain unchanged.
 
@@ -106,11 +111,29 @@ provides:
     - name: api_route_delete
       description: "Delete a route by id."
     - name: api_key_create
-      description: "Create an API key. Returns the plaintext key once. Args: api_id or api_slug, name."
+      description: "Create a generic API credential. Returns plaintext only once; supports optional subject, claims, scopes, expiration, external ID, metadata, and idempotent issuance."
+    - name: api_key_get
+      description: "Fetch API key metadata by id without returning a secret or hash."
     - name: api_key_list
       description: "List API keys for an API, excluding key hashes."
+    - name: api_key_list_by_subject
+      description: "List credentials for an exact generic subject, optionally within one API."
     - name: api_key_revoke
       description: "Revoke an API key by id."
+    - name: api_key_revoke_by_subject
+      description: "Revoke active credentials for an exact generic subject."
+    - name: api_usage_plan_create
+      description: "Create an operational request-throttling plan for an API."
+    - name: api_usage_plan_get
+      description: "Fetch an operational usage plan."
+    - name: api_usage_plan_list
+      description: "List operational usage plans for an API."
+    - name: api_usage_plan_update
+      description: "Update an operational usage plan."
+    - name: api_usage_plan_attach_key
+      description: "Attach a usage plan to an API key."
+    - name: api_usage_plan_detach_key
+      description: "Detach a usage plan from an API key."
     - name: api_logs
       description: "List recent request logs for an API."
     - name: api_config_create
@@ -143,7 +166,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: api/v0.9.0
+    ref: api/v0.10.0
     entry: mcp/api
   port: 8080
   health_check: /health

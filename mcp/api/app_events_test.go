@@ -202,7 +202,7 @@ func TestGatewayProjectsFilteredCoalescedAppEvents(t *testing.T) {
 	if err != nil || api == nil {
 		t.Fatalf("api = %+v err=%v", api, err)
 	}
-	_, secret, err := dbCreateAPIKey(ctx.AppDB(), testProject, api.ID, "browser")
+	_, secret, _, err := dbCreateAPIKey(ctx.AppDB(), apiKeyInput{ProjectID: testProject, APIID: api.ID, Name: "browser", ClaimsJSON: "{}", ScopesJSON: "[]", MetadataJSON: "{}"})
 	if err != nil {
 		t.Fatal(err)
 	}

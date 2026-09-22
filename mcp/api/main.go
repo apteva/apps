@@ -27,6 +27,7 @@ type App struct {
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}
 	requestSlots      chan struct{}
+	throttles         throttleRegistry
 }
 
 func (a *App) Manifest() sdk.Manifest {
