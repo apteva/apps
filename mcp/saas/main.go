@@ -122,6 +122,12 @@ func (a *App) Workers() []sdk.Worker {
 			return a.recoverExpiredCheckouts(ctx)
 		},
 	}, {
+		Name:     "credit-checkout-recovery",
+		Schedule: "@every 60s",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.recoverCreditCheckouts(ctx)
+		},
+	}, {
 		Name:     "plan-change-recovery",
 		Schedule: "@every 60s",
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
@@ -153,7 +159,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{Name: "saas_plan_list", Description: "List SaaS plans with Catalog product identity.", InputSchema: schemaObject(nil, nil), Handler: a.toolPlanList},
 		{Name: "saas_plan_get", Description: "Fetch one SaaS plan with Catalog product identity.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanGet},
 		{Name: "saas_plan_upsert", Description: "Create or update a SaaS plan.", InputSchema: schemaObject(map[string]any{
@@ -218,6 +224,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_usage_get", Description: "Return live usage totals and plan limits.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "customer_id": intSchema(), "feature_key": strSchema()}, nil), Handler: a.toolUsageGet},
 		{Name: "saas_access_check", Description: "Check account status and usage limit for a feature.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolAccessCheck},
 	}
+	return append(tools, a.creditMCPTools()...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -392,6 +399,9 @@ type Account struct {
 	UpdatedAt       string          `json:"updated_at"`
 	Customer        *Customer       `json:"customer,omitempty"`
 	Billing         *BillingSummary `json:"billing,omitempty"`
+	Credits         any             `json:"credits,omitempty"`
+	Entitlements    any             `json:"entitlements,omitempty"`
+	Usage           []UsageTotal    `json:"usage,omitempty"`
 }
 
 type BillingSummary struct {
@@ -978,6 +988,7 @@ func (a *App) toolAccountGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err := dbHydrateAccounts(ctx.AppDB(), pid, []*Account{acct}); err != nil {
 		return nil, err
 	}
+	_ = a.enrichAccountReport(ctx, acct)
 	return map[string]any{"account": acct}, nil
 }
 
@@ -3124,6 +3135,11 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	if pid == "" || invoiceID <= 0 {
 		return nil
 	}
+	// One-time credit packs are fulfilled independently of recurring
+	// subscription commerce operations.
+	if err := a.handleCreditInvoicePaid(ctx, pid, invoiceID); err != nil {
+		return err
+	}
 	if handled, err := a.handlePlanChangeInvoicePaid(ctx, pid, invoiceID); err != nil || handled {
 		return err
 	}
@@ -3294,6 +3310,11 @@ func (a *App) handleInvoiceCollectionFailed(ctx *sdk.AppCtx, event sdk.Event) er
 	invoiceID := int64FromAny(event.Data["id"])
 	if pid == "" || invoiceID == 0 {
 		return nil
+	}
+	if event.Name() == "invoice.refunded" {
+		if err := a.handleCreditInvoiceRefunded(ctx, pid, invoiceID, event.Data); err != nil {
+			return err
+		}
 	}
 	op, err := dbCommerceOperationByInvoice(ctx.AppDB(), pid, invoiceID)
 	if err != nil || op == nil {

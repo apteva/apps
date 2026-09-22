@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.10.1
+version: 0.11.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -30,6 +30,10 @@ description: |
   v0.10.1 fixes managed grant revocation, fulfillment idempotency, delayed
   payment events, billing recovery, plan-change scheduling, usage freshness,
   account pagination, and fulfillment history cleanup performance.
+  v0.11.0 adds durable one-time credit-pack checkout orchestration. Catalog
+  defines metered one-time prices, Checkout preserves their metadata, Billing
+  emits payment/refund events, and Entitlements owns the append-only credit
+  ledger and reservations.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -225,6 +229,15 @@ provides:
       requires: saas.read
     - name: saas_access_check
       description: Check whether a SaaS account is active and within limit for a feature.
+      requires: saas.read
+    - name: saas_credit_pack_checkout_create
+      description: Create a one-time Catalog credit-pack checkout; grant credits only after invoice.paid.
+      requires: saas.checkout
+    - name: saas_credit_balance
+      description: Return prepaid credit balance for a SaaS account and feature.
+      requires: saas.read
+    - name: saas_credit_transactions
+      description: List prepaid credit ledger transactions for a SaaS account.
       requires: saas.read
   ui_panels:
     - slot: project.page

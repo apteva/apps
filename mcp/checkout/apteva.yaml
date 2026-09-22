@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.3.1
+version: 0.3.2
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
@@ -12,6 +12,8 @@ description: |
   reuse and webhook-driven payment completion. v0.3.1 adds deferred
   Payment Element preparation before buyer identity is known, without
   prematurely creating customers, invoices, or PaymentIntents.
+  v0.3.2 preserves cart/session and Catalog price metadata through Billing
+  invoice line items so generic one-time products can be fulfilled safely.
 
   Storefront blocks (add-to-cart, cart-summary, checkout-page) are
   added to the content app separately — checkout exposes the REST +

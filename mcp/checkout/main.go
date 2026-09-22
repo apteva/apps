@@ -63,7 +63,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("checkout mounted",
-		"version", "0.3.1",
+		"version", "0.3.2",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -1221,7 +1221,7 @@ func dbCartCreate(ctx *sdk.AppCtx, pid string, body map[string]any) (*Cart, erro
 	expires := time.Now().UTC().Add(time.Duration(ttlDays) * 24 * time.Hour).Format(time.RFC3339)
 	now := nowRFC3339()
 
-	args := []any{pid, nullStr(token), nullableInt64(customerID), "USD", "open", "{}", now, now}
+	args := []any{pid, nullStr(token), nullableInt64(customerID), "USD", "open", jsonOrEmpty(body["metadata"], "{}"), now, now}
 	q := `INSERT INTO carts (project_id, session_token, customer_id, currency, status, metadata, created_at, updated_at`
 	vals := `VALUES (?, ?, ?, ?, ?, ?, ?, ?`
 	if customerID == 0 {
@@ -1265,13 +1265,18 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 		return nil, errors.New("platform API unavailable (catalog app must be installed)")
 	}
 	type catalogPrice struct {
-		ID              int64  `json:"id"`
-		ProductID       int64  `json:"product_id"`
-		Nickname        string `json:"nickname"`
-		UnitAmountCents int64  `json:"unit_amount_cents"`
-		Currency        string `json:"currency"`
-		Active          bool   `json:"active"`
-		ArchivedAt      string `json:"archived_at"`
+		ID              int64           `json:"id"`
+		ProductID       int64           `json:"product_id"`
+		Nickname        string          `json:"nickname"`
+		UnitAmountCents int64           `json:"unit_amount_cents"`
+		Currency        string          `json:"currency"`
+		Active          bool            `json:"active"`
+		ArchivedAt      string          `json:"archived_at"`
+		BillingScheme   string          `json:"billing_scheme"`
+		MeterKey        string          `json:"meter_key"`
+		UnitLabel       string          `json:"unit_label"`
+		UnitSize        int64           `json:"unit_size"`
+		Metadata        json.RawMessage `json:"metadata"`
 	}
 	var priceResponse struct {
 		Price catalogPrice `json:"price"`
@@ -1289,7 +1294,7 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 	if cart.ItemCount == 0 {
 		cartCurrency = price.Currency
 	}
-	// Snapshot fields
+	// Snapshot fields, including generic Catalog metering metadata.
 	desc := price.Nickname
 	if desc == "" {
 		var productResponse struct {
@@ -1304,6 +1309,17 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 			desc = fmt.Sprintf("Product #%d", price.ProductID)
 		}
 	}
+	itemMetadata := mapFromAny(price.Metadata)
+	itemMetadata["billing_scheme"] = firstNonEmpty(price.BillingScheme, "flat")
+	if price.MeterKey != "" {
+		itemMetadata["meter_key"] = price.MeterKey
+	}
+	if price.UnitLabel != "" {
+		itemMetadata["unit_label"] = price.UnitLabel
+	}
+	if price.UnitSize != 0 {
+		itemMetadata["unit_size"] = price.UnitSize
+	}
 
 	tx, err := db.Begin()
 	if err != nil {
@@ -1316,13 +1332,13 @@ func dbCartAddItem(ctx *sdk.AppCtx, pid string, cartID, priceID int64, qty float
 	if _, err := tx.Exec(
 		`INSERT INTO cart_items
 		     (cart_id, price_id, product_id, description, unit_amount_cents,
-		      currency, quantity, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (cart_id, price_id) DO UPDATE SET
+		      currency, quantity, metadata, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (cart_id, price_id) DO UPDATE SET
 		     quantity = quantity + excluded.quantity,
 		     updated_at = excluded.updated_at`,
 		cartID, priceID, price.ProductID, desc, price.UnitAmountCents,
-		price.Currency, qty, now, now); err != nil {
+		price.Currency, qty, jsonOrEmpty(itemMetadata, "{}"), now, now); err != nil {
 		return nil, err
 	}
 	if err := recomputeCartTotalsTx(tx, cartID, cartCurrency); err != nil {
@@ -1962,6 +1978,7 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64, paymentArgs map
 	// 2. Build line items from cart snapshots.
 	lineItems := make([]map[string]any, 0, len(cart.Items))
 	for _, it := range cart.Items {
+		itemMeta := mapFromAny(it.Metadata)
 		lineItems = append(lineItems, map[string]any{
 			"description":      it.Description,
 			"quantity":         it.Quantity,
@@ -1969,6 +1986,7 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64, paymentArgs map
 			"price_id":         it.PriceID,
 			"product_id":       it.ProductID,
 			"tax_rate_bps":     0,
+			"metadata":         itemMeta,
 		})
 	}
 	if session.ShippingCents > 0 {
@@ -2003,18 +2021,21 @@ func dbCheckoutPay(ctx *sdk.AppCtx, pid string, sessionID int64, paymentArgs map
 		"line_items":  lineItems,
 		"_project_id": pid,
 	}
-	if session.CustomerName != "" || len(session.ShippingAddress) > 2 {
-		invMeta := map[string]any{
-			"checkout_session_id": sessionID,
+	invMeta := map[string]any{"source_app": "checkout", "checkout_session_id": sessionID}
+	if len(cart.Metadata) > 2 {
+		for k, v := range mapFromAny(cart.Metadata) {
+			invMeta[k] = v
 		}
+	}
+	if session.CustomerName != "" || len(session.ShippingAddress) > 2 {
 		if len(session.ShippingAddress) > 2 {
 			var ship map[string]any
 			if json.Unmarshal(session.ShippingAddress, &ship) == nil {
 				invMeta["shipping_address"] = ship
 			}
 		}
-		invoiceBody["metadata"] = invMeta
 	}
+	invoiceBody["metadata"] = invMeta
 	if err := api.CallAppResult("billing", "invoices_create", invoiceBody, &invResp); err != nil {
 		return nil, 0, "", nil, fmt.Errorf("billing invoice create failed: %w", err)
 	}
@@ -2402,6 +2423,34 @@ func jsonOrEmpty(v any, sentinel string) string {
 		return sentinel
 	}
 	return string(raw)
+}
+
+func mapFromAny(v any) map[string]any {
+	out := map[string]any{}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, value := range x {
+			out[k] = value
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(x, &out)
+	case []byte:
+		_ = json.Unmarshal(x, &out)
+	case string:
+		if strings.TrimSpace(x) != "" {
+			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func roundCents(f float64) int64 {

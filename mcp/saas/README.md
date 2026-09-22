@@ -356,6 +356,18 @@ recovery worker incrementally backfills projections missing after an upgrade.
 `billing_sync_pending` and each summary's `data_complete` flag expose unfinished
 backfill explicitly.
 
+### Prepaid credit packs
+
+Catalog defines one-time metered prices (`meter_key` + `unit_size`). Use
+`saas_credit_pack_checkout_create` to send an account through the generic
+Checkout/Billing flow. SaaS stores only the durable linkage and snapshots the
+credit quantity; it grants Entitlements credits after a confirmed
+`invoice.paid` using `billing:invoice:{invoice_id}:credit_grant`. Refunds append
+negative compensating transactions keyed by payment/refund identity.
+`saas_credit_balance` and `saas_credit_transactions` are facades over
+Entitlements, and `saas_account_get` includes best-effort credits and
+entitlement reporting alongside live gauges.
+
 An `invoice.paid` event activates access only after Billing confirms that the
 invoice status is actually `paid`. Partial payments update the reporting
 projection but leave the subscription and account payment state unchanged.
