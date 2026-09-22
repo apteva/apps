@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,116 @@ func overviewGET(t *testing.T, a *App, path, project string) *httptest.ResponseR
 	mux.ServeHTTP(w, r)
 	return w
 }
+
+type globalOverviewPlatform struct {
+	directPlatform
+	projects     []sdk.PlatformProject
+	agentProject string
+}
+
+func (f *globalOverviewPlatform) ListProjects() ([]sdk.PlatformProject, error) {
+	return append([]sdk.PlatformProject(nil), f.projects...), nil
+}
+
+func (f *globalOverviewPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
+	project := f.agentProject
+	if project == "" {
+		project = "project-a"
+	}
+	return &sdk.PlatformInstance{ID: id, ProjectID: project, DefaultThreadID: "owner-default"}, nil
+}
+
+func createOverviewProcess(t *testing.T, a *App, project string) *Process {
+	t.Helper()
+	d := workflowDefinition()
+	d.ExecutionMode = "agent"
+	p, err := a.save(project, "", "operator", 0, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := AssignmentConfig{FollowLatest: true, Name: "Overview assignment", OwnerAgentID: d.OwnerAgentID, ExecutionMode: "agent", ProcedureVersion: p.Version, Parameters: map[string]any{}, Roles: map[string]Executor{"researcher": {Kind: "agent", AgentID: 8}, "writer": {Kind: "agent", AgentID: 7}, "reviewer": {Kind: "human"}, "publisher": {Kind: "agent", AgentID: 8}}}
+	if _, err = a.db.Exec(`INSERT INTO process_assignments(id,process_id,body_json,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, "assignment-"+p.ID, p.ID, jsonText(c), timestamp(), timestamp()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec(`UPDATE process_versions SET body_json=? WHERE process_id=?`, jsonText(d), p.ID); err != nil {
+		t.Fatal(err)
+	}
+	p, err = a.get(project, p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func globalOverviewSetup(t *testing.T) (*App, *globalOverviewPlatform) {
+	t.Helper()
+	f := &globalOverviewPlatform{projects: []sdk.PlatformProject{{ID: "project-a", Name: "Alpha"}, {ID: "project-b", Name: "Beta"}}, agentProject: "project-a"}
+	a := &App{}
+	if err := a.OnMount(tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(f))); err != nil {
+		t.Fatal(err)
+	}
+	alpha := createOverviewProcess(t, a, "project-a")
+	if _, err := a.changeStatus("project-a", alpha.ID, "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.start("project-a", alpha.ID, "alpha-run", ""); err != nil {
+		t.Fatal(err)
+	}
+	beta := createOverviewProcess(t, a, "project-b")
+	f.agentProject = "project-b"
+	if _, err := a.changeStatus("project-b", beta.ID, "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE process_assignments SET body_json=?,next_run_at=? WHERE process_id=?`, jsonText(AssignmentConfig{FollowLatest: true, Name: "Beta schedule", OwnerAgentID: 7, ExecutionMode: "agent", ProcedureVersion: beta.Version, Schedule: &Schedule{Kind: "interval", Every: "1h"}}), "2030-01-01T12:00:00Z", beta.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,created_at,backend,state,assignment_id,assignment_json) VALUES(?,?,1,'manual',?,'2026-09-22T10:00:00Z','agent','completed',?,?)`, "beta-run", beta.ID, "beta-run", beta.Assignments[0].ID, jsonText(beta.Assignments[0].AssignmentConfig)); err != nil {
+		t.Fatal(err)
+	}
+	return a, f
+}
+
+func TestGlobalOverviewAggregatesVisibleProjectsAndFilters(t *testing.T) {
+	a, _ := globalOverviewSetup(t)
+	// Keep a real run in a project omitted by ListProjects. An unfiltered
+	// global response must not discover it merely because it shares the
+	// global installation's database.
+	secret := createOverviewProcess(t, a, "project-secret")
+	if _, err := a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,created_at,backend,state,assignment_id,assignment_json) VALUES(?,?,1,'manual',?,'2026-09-22T10:00:00Z','agent','running',?,?)`, "secret-run", secret.ID, "secret-run", secret.Assignments[0].ID, jsonText(secret.Assignments[0].AssignmentConfig)); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.overviewGlobal("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Scope != "global" || len(out.Projects) != 2 || out.Counts.Active != 1 || out.Counts.Scheduled != 1 || out.Counts.Recent != 1 {
+		t.Fatalf("global overview did not aggregate visible projects: %+v", out)
+	}
+	if out.Active[0].ProjectID != "project-a" || out.Active[0].ProjectName != "Alpha" || out.Recent[0].ProjectID != "project-b" || out.Recent[0].ProjectName != "Beta" || out.Upcoming[0].ProjectID != "project-b" {
+		t.Fatalf("global items lost project identity: active=%+v recent=%+v upcoming=%+v", out.Active, out.Recent, out.Upcoming)
+	}
+	for _, items := range [][]overviewItem{out.Active, out.Upcoming, out.Recent, out.Attention} {
+		for _, item := range items {
+			if item.ProjectID == "project-secret" {
+				t.Fatalf("global overview leaked an inaccessible project: %+v", item)
+			}
+		}
+	}
+	selected, err := a.overviewGlobal("project-b")
+	if err != nil || selected.Counts.Active != 0 || selected.Counts.Scheduled != 1 || selected.Counts.Recent != 1 || len(selected.Active) != 0 {
+		t.Fatalf("project selector did not filter global overview: %+v err=%v", selected, err)
+	}
+	if w := overviewGET(t, a, "/overview", ""); w.Code != http.StatusOK {
+		t.Fatalf("global HTTP overview status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := overviewGET(t, a, "/overview?project_id=project-b", ""); w.Code != http.StatusOK {
+		t.Fatalf("global selected HTTP overview status=%d body=%s", w.Code, w.Body.String())
+	}
+	if w := overviewGET(t, a, "/overview?project_id=secret", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("global overview exposed an inaccessible selector: %d %s", w.Code, w.Body.String())
+	}
+}
+
 func TestOverviewScopeAndLiveSteps(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	for _, path := range []string{"/overview?project_id=project-a", "/processes/overview?project_id=project-a", "/processes/mobile/overview?project_id=project-a"} {

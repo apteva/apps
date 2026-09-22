@@ -110,10 +110,65 @@ test("run links stay in Processes and assignment links target assignments", () =
   expect(
     overviewLink(
       { projectId: "p", installId: 77 },
+      { ...overviewFixture.upcoming[0], project_id: "other-project" },
+      true,
+    ),
+  ).toContain("project_id=other-project");
+  expect(
+    overviewLink(
+      { projectId: "p", installId: 77 },
       overviewFixture.upcoming[0],
       true,
     ),
   ).toContain("assignment_id=barcelona");
+});
+
+test("global overview loads without a project, labels results and filters by visible project", async () => {
+  const data: Data = {
+    ...structuredClone(overviewFixture),
+    scope: "global",
+    projects: [
+      { id: "project-a", name: "Alpha" },
+      { id: "project-b", name: "Beta" },
+    ],
+  };
+  data.active[0].project_id = "project-a";
+  data.active[0].project_name = "Alpha";
+  data.active[0].process_name = "Alpha process";
+  data.upcoming[0].project_id = "project-b";
+  data.upcoming[0].project_name = "Beta";
+  const reads: string[] = [];
+  globalThis.fetch = (async (input: unknown) => {
+    const url = String(input);
+    reads.push(url);
+    if (url.startsWith("/api/agents")) return Response.json([]);
+    return Response.json(data);
+  }) as typeof fetch;
+  const el = document.createElement("div");
+  document.body.append(el);
+  root = createRoot(el);
+  await act(async () =>
+    root.render(
+      <Widget dashboardScope="global" installId={88} />,
+    ),
+  );
+  expect(
+    reads.some(
+      (url) => url === "/api/apps/processes/processes/overview?install_id=88",
+    ),
+  ).toBe(true);
+  expect(el.textContent).toContain("Alpha");
+  expect(el.querySelector('select[aria-label="Filter by project"]')).not.toBeNull();
+  await act(async () => {
+    const select = el.querySelector<HTMLSelectElement>('select[aria-label="Filter by project"]')!;
+    select.value = "project-b";
+    select.dispatchEvent(new window.Event("change", { bubbles: true }) as unknown as Event);
+  });
+  expect(
+    reads.some(
+      (url) => url === "/api/apps/processes/processes/overview?project_id=project-b&install_id=88",
+    ),
+  ).toBe(true);
 });
 
 test("All orders running then schedules then blocked/outcomes, preserves settings and bounds legacy limits", async () => {
