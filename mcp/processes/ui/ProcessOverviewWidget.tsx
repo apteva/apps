@@ -5,6 +5,7 @@ type Props = {
   appName?: string;
   projectId?: string;
   installId?: number;
+  dashboardScope?: "project" | "global";
   eventRevision?: number;
   widgetSize?: "half" | "full";
   widgetSettings?: Record<string, unknown>;
@@ -24,6 +25,8 @@ type Step = {
 };
 export type Item = {
   id: string;
+  project_id?: string;
+  project_name?: string;
   process_id: string;
   process_name: string;
   assignment_id?: string;
@@ -45,6 +48,8 @@ export type Item = {
   steps_total?: number;
 };
 export type Data = {
+  scope?: "project" | "global";
+  projects?: Array<{ id: string; name: string }>;
   counts: {
     active: number;
     scheduled: number;
@@ -70,7 +75,8 @@ const terminal = (s: string) =>
   ["completed", "cancelled", "failed"].includes(s);
 export function overviewLink(props: Props, x?: Item, assignment = false) {
   const q = new URLSearchParams();
-  if (props.projectId) q.set("project_id", props.projectId);
+  if (x?.project_id || props.projectId)
+    q.set("project_id", x?.project_id || props.projectId || "");
   if (props.installId) q.set("install_id", String(props.installId));
   const app = props.appName || "processes";
   if (x) {
@@ -198,7 +204,7 @@ export function executionStatus({ item: x, assignment }: QueueEntry) {
 }
 const css = `
 .po-widget{color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-family:inherit;min-width:0;overflow:hidden}
-.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget p{margin:0}.po-widget header{padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget h2{font-size:14px;font-weight:700}.po-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}.po-widget button,.po-widget a{font-family:inherit}.po-widget button{cursor:pointer}.po-widget :is(button,a):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}.po-widget .po-filters{display:flex;gap:5px;padding:8px 16px;border-bottom:1px solid var(--color-border,#303030);overflow-x:auto}.po-widget .po-filters button,.po-widget .po-close{background:transparent;color:var(--color-text-muted,#aaa);font-size:11px;font-weight:600;border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 9px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);background:color-mix(in srgb,var(--color-accent,#ff8c36) 10%,transparent)}
+.po-widget *{box-sizing:border-box}.po-widget h2,.po-widget p{margin:0}.po-widget header{padding:14px 16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget h2{font-size:14px;font-weight:700}.po-widget header p{font-size:11px;color:var(--color-text-muted,#aaa);margin-top:4px}.po-widget button,.po-widget a,.po-widget select{font-family:inherit}.po-widget button{cursor:pointer}.po-widget :is(button,a,select):focus-visible{outline:2px solid var(--color-accent,#ff8c36);outline-offset:-2px}.po-widget .po-project-filter{display:flex;align-items:center;gap:7px;margin-top:10px;font-size:11px;color:var(--color-text-muted,#aaa)}.po-widget .po-project-filter select{min-width:0;max-width:100%;padding:5px 7px;color:var(--color-text,#eceef2);background:var(--color-bg-card,#141414);border:1px solid var(--color-border,#303030);border-radius:4px;font-size:11px}.po-widget .po-filters{display:flex;gap:5px;padding:8px 16px;border-bottom:1px solid var(--color-border,#303030);overflow-x:auto}.po-widget .po-filters button,.po-widget .po-close{background:transparent;color:var(--color-text-muted,#aaa);font-size:11px;font-weight:600;border:1px solid var(--color-border,#303030);border-radius:4px;padding:6px 9px;white-space:nowrap}.po-widget .po-filters button[aria-pressed=true]{color:var(--color-accent,#ff8c36);border-color:var(--color-accent,#ff8c36);background:color-mix(in srgb,var(--color-accent,#ff8c36) 10%,transparent)}
 .po-widget .po-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(160px,35%);gap:12px;align-items:center;width:100%;height:80px;padding:12px 16px;background:transparent;color:inherit;border:0;border-bottom:1px solid var(--color-border,#303030);text-align:left}.po-widget .po-row:hover,.po-widget .po-row[aria-expanded=true]{background:var(--color-bg-hover,#202020)}.po-widget .po-copy{min-width:0}.po-widget .po-execution{min-width:0;text-align:right}.po-widget .po-current{display:block;font-size:12px;font-weight:500;line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.po-widget .po-execution-meta{display:flex;align-items:center;justify-content:flex-end;gap:7px;margin-top:5px;font-size:10px;line-height:18px;color:var(--color-text-muted,#aaa);white-space:nowrap}.po-widget .po-badge.review{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-title{display:block;font-size:13px;line-height:20px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget .po-summary{display:block;margin-top:5px;font-size:11px;line-height:18px;color:var(--color-text-muted,#aaa);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.po-widget time{font-size:10px;color:var(--color-text-muted,#999);text-align:right;white-space:nowrap}.po-widget .po-badge{display:inline-block;justify-self:start;font-size:10px;font-weight:600;text-transform:uppercase;line-height:16px;padding:2px 6px;border-radius:4px;border:1px solid var(--color-border,#424242);color:var(--color-text-muted,#aaa)}.po-widget .po-badge.running,.po-widget .po-badge.ready{color:#8eabff;border-color:#8eabff60}.po-widget .po-badge.scheduled{color:#be9ff5;border-color:#be9ff560}.po-widget .po-badge.completed{color:#43c878;border-color:#43c87860}.po-widget .po-badge.blocked,.po-widget .po-badge.waiting,.po-widget .po-badge.attention{color:#e3b86d;border-color:#e3b86d60}.po-widget .po-badge.failed{color:#f08b8b;border-color:#f08b8b60}
 .po-widget .po-warning{font-size:11px;color:#e3b86d;padding:10px 16px;overflow-wrap:anywhere}.po-widget .po-empty{font-size:12px;color:var(--color-text-muted,#aaa);padding:24px 16px}.po-widget footer{display:flex;justify-content:space-between;gap:8px;padding:9px 16px;font-size:11px;color:var(--color-text-muted,#999)}.po-widget a{color:var(--color-accent,#ff8c36);text-decoration:none;font-size:11px}.po-widget .po-detail{padding:16px;border-bottom:1px solid var(--color-border,#303030)}.po-widget .po-detail-head{display:flex;align-items:center;justify-content:space-between;gap:12px}.po-widget .po-detail h3{font-size:13px;margin:0}.po-widget .po-detail p{font-size:12px;color:var(--color-text-muted,#aaa);margin:8px 0;overflow-wrap:anywhere}.po-widget .po-detail ol{padding:0;margin:10px 0;list-style:none;max-height:200px;overflow:auto}.po-widget .po-detail li{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;padding:10px 0;border-top:1px solid var(--color-border,#303030)}.po-widget .po-step-copy{min-width:0}.po-widget .po-step-copy small{display:block;color:var(--color-text-muted,#aaa);margin-top:4px}
 @media(max-width:480px){.po-widget .po-row{grid-template-columns:minmax(0,1fr) minmax(130px,46%);gap:8px;padding:12px}.po-widget .po-badge{font-size:9px;padding:2px 4px}.po-widget header,.po-widget .po-filters{padding-left:12px;padding-right:12px}}
@@ -206,7 +212,7 @@ const css = `
 export default function ProcessOverviewWidget(props: Props) {
   return (
     <Overview
-      key={`${props.projectId}:${props.installId}:${props.appName}`}
+      key={`${props.projectId}:${props.installId}:${props.appName}:${props.dashboardScope}`}
       {...props}
     />
   );
@@ -214,16 +220,20 @@ export default function ProcessOverviewWidget(props: Props) {
 function Overview(props: Props) {
   useTimingNow();
   const [view, setView] = useState("all"),
+    [projectFilter, setProjectFilter] = useState(""),
     [selected, setSelected] = useState<string | null>(null),
     [data, setData] = useState<Data | null>(null),
     [error, setError] = useState(""),
     [refresh, setRefresh] = useState(0),
     [names, setNames] = useState<Record<number, string>>({});
   useEffect(() => {
-    if (!props.projectId) return;
+    const global = props.dashboardScope === "global";
+    if (!global && !props.projectId) return;
     let alive = true;
     const c = new AbortController();
-    const q = new URLSearchParams({ project_id: props.projectId });
+    const q = new URLSearchParams();
+    if (props.projectId) q.set("project_id", props.projectId);
+    if (global && projectFilter) q.set("project_id", projectFilter);
     if (props.installId) q.set("install_id", String(props.installId));
     fetch(
       `/api/apps/${encodeURIComponent(props.appName || "processes")}/processes/overview?${q}`,
@@ -250,15 +260,21 @@ function Overview(props: Props) {
     props.appName,
     props.projectId,
     props.installId,
+    props.dashboardScope,
+    projectFilter,
     props.eventRevision,
     refresh,
   ]);
   useEffect(() => {
-    if (!props.projectId) return;
+    const global = props.dashboardScope === "global";
+    if (!global && !props.projectId) return;
     let alive = true;
     const c = new AbortController();
+    const agentQuery = props.projectId
+      ? `?${new URLSearchParams({ project_id: props.projectId })}`
+      : "";
     fetch(
-      `/api/agents?${new URLSearchParams({ project_id: props.projectId })}`,
+      `/api/agents${agentQuery}`,
       { credentials: "same-origin", signal: c.signal },
     )
       .then((r) => {
@@ -281,7 +297,7 @@ function Overview(props: Props) {
       alive = false;
       c.abort();
     };
-  }, [props.projectId]);
+  }, [props.dashboardScope, props.projectId]);
   const raw = Number(
     props.widgetSettings?.row_limit ?? props.widgetSettings?.recent_limit ?? 4,
   );
@@ -326,7 +342,31 @@ function Overview(props: Props) {
       <style>{css}</style>
       <header>
         <h2>Processes</h2>
-        <p>Running flows, upcoming schedules, and recent outcomes</p>
+        <p>
+          {props.dashboardScope === "global"
+            ? "Running flows, upcoming schedules, and recent outcomes across projects"
+            : "Running flows, upcoming schedules, and recent outcomes"}
+        </p>
+        {props.dashboardScope === "global" && data?.projects?.length ? (
+          <label className="po-project-filter">
+            <span>Project</span>
+            <select
+              aria-label="Filter by project"
+              value={projectFilter}
+              onChange={(e) => {
+                setProjectFilter(e.target.value);
+                setSelected(null);
+              }}
+            >
+              <option value="">All projects</option>
+              {data.projects.map((project) => (
+                <option key={project.id} value={project.id}>
+                  {project.name || project.id}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
       </header>
       <nav className="po-filters" aria-label="Filter processes">
         {[
@@ -357,7 +397,7 @@ function Overview(props: Props) {
           </button>
         </p>
       )}
-      {!props.projectId ? (
+      {!props.projectId && props.dashboardScope !== "global" ? (
         <p className="po-empty">Select a project to see its processes.</p>
       ) : !data ? (
         <p role="status" className="po-empty">
@@ -372,7 +412,11 @@ function Overview(props: Props) {
             {shown.map((entry) => {
               const x = entry.item;
               const status = executionStatus(entry);
-              const identity = [x.assignment_name || name(x.agent_id), x.target]
+              const identity = [
+                x.project_name || x.project_id,
+                x.assignment_name || name(x.agent_id),
+                x.target,
+              ]
                 .filter(Boolean)
                 .join(" · ");
               const progress = x.steps_total
@@ -519,7 +563,14 @@ function Overview(props: Props) {
                 ? `Showing first ${limit}`
                 : `${shown.length} shown`}
             </span>
-            <a href={overviewLink(props)}>All processes ↗</a>
+            <a
+              href={overviewLink({
+                ...props,
+                projectId: projectFilter || props.projectId,
+              })}
+            >
+              All processes ↗
+            </a>
           </footer>
         </>
       )}

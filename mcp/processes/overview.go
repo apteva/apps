@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,8 @@ type overviewStep struct {
 	DueAt       string   `json:"due_at,omitempty"`
 	CompletedAt string   `json:"completed_at,omitempty"`
 	ID          string   `json:"id"`
+	ProjectID   string   `json:"project_id,omitempty"`
+	ProjectName string   `json:"project_name,omitempty"`
 	Name        string   `json:"name"`
 	State       string   `json:"state"`
 	Kind        string   `json:"kind"`
@@ -25,6 +28,8 @@ type overviewStep struct {
 }
 type overviewItem struct {
 	ID             string         `json:"id"`
+	ProjectID      string         `json:"project_id,omitempty"`
+	ProjectName    string         `json:"project_name,omitempty"`
 	ProcessID      string         `json:"process_id"`
 	ProcessName    string         `json:"process_name"`
 	AssignmentID   string         `json:"assignment_id"`
@@ -52,16 +57,23 @@ type overviewCounts struct {
 	Recent    int `json:"recent"`
 }
 type processOverview struct {
-	Coverage    string         `json:"coverage"`
-	Counts      overviewCounts `json:"counts"`
-	Active      []overviewItem `json:"active"`
-	Upcoming    []overviewItem `json:"upcoming"`
-	Recent      []overviewItem `json:"recent"`
-	Attention   []overviewItem `json:"attention"`
-	LiveSteps   []overviewStep `json:"live_steps"`
-	Warnings    []string       `json:"warnings"`
-	Partial     bool           `json:"partial"`
-	GeneratedAt string         `json:"generated_at"`
+	Scope       string            `json:"scope,omitempty"`
+	Projects    []overviewProject `json:"projects,omitempty"`
+	Coverage    string            `json:"coverage"`
+	Counts      overviewCounts    `json:"counts"`
+	Active      []overviewItem    `json:"active"`
+	Upcoming    []overviewItem    `json:"upcoming"`
+	Recent      []overviewItem    `json:"recent"`
+	Attention   []overviewItem    `json:"attention"`
+	LiveSteps   []overviewStep    `json:"live_steps"`
+	Warnings    []string          `json:"warnings"`
+	Partial     bool              `json:"partial"`
+	GeneratedAt string            `json:"generated_at"`
+}
+
+type overviewProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // Reads never dispatch work or acquire the worker mutex. Direct-run counts cover
@@ -202,6 +214,116 @@ func (a *App) overview(project string) (*processOverview, error) {
 	}
 	if len(out.LiveSteps) > 24 {
 		out.LiveSteps = out.LiveSteps[:24]
+	}
+	return out, nil
+}
+
+// overviewGlobal reads the global installation's own database for every
+// project the platform says this install may see. A global install has its own
+// app storage; project-scoped installations are intentionally not opened or
+// merged here. This keeps the read boundary explicit and prevents a global
+// widget from discovering data outside the platform's project projection.
+func (a *App) overviewGlobal(selector string) (*processOverview, error) {
+	api := a.ctx.PlatformAPI()
+	if api == nil {
+		return nil, errors.New("platform project directory unavailable")
+	}
+	projects, err := api.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	visible := make([]overviewProject, 0, len(projects))
+	seen := map[string]bool{}
+	for _, project := range projects {
+		id := strings.TrimSpace(project.ID)
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		visible = append(visible, overviewProject{ID: id, Name: project.Name})
+	}
+	sort.Slice(visible, func(i, j int) bool {
+		if visible[i].Name != visible[j].Name {
+			return visible[i].Name < visible[j].Name
+		}
+		return visible[i].ID < visible[j].ID
+	})
+	selector = strings.TrimSpace(selector)
+	if selector != "" && !seen[selector] {
+		return nil, errProjectNotVisible
+	}
+	out := &processOverview{
+		Scope:       "global",
+		Projects:    visible,
+		Active:      []overviewItem{},
+		Upcoming:    []overviewItem{},
+		Recent:      []overviewItem{},
+		Attention:   []overviewItem{},
+		LiveSteps:   []overviewStep{},
+		Warnings:    []string{},
+		GeneratedAt: timestamp(),
+	}
+	for _, project := range visible {
+		if selector != "" && selector != project.ID {
+			continue
+		}
+		part, err := a.overview(project.ID)
+		if err != nil {
+			return nil, err
+		}
+		out.Counts.Active += part.Counts.Active
+		out.Counts.Scheduled += part.Counts.Scheduled
+		out.Counts.Attention += part.Counts.Attention
+		out.Counts.Recent += part.Counts.Recent
+		out.Partial = out.Partial || part.Partial
+		out.Warnings = append(out.Warnings, part.Warnings...)
+		annotate := func(items []overviewItem) {
+			for i := range items {
+				items[i].ProjectID = project.ID
+				items[i].ProjectName = project.Name
+			}
+		}
+		annotate(part.Active)
+		annotate(part.Upcoming)
+		annotate(part.Recent)
+		annotate(part.Attention)
+		for i := range part.LiveSteps {
+			part.LiveSteps[i].ProjectID = project.ID
+			part.LiveSteps[i].ProjectName = project.Name
+			part.LiveSteps[i].Name = project.Name + " · " + part.LiveSteps[i].Name
+		}
+		out.Active = append(out.Active, part.Active...)
+		out.Upcoming = append(out.Upcoming, part.Upcoming...)
+		out.Recent = append(out.Recent, part.Recent...)
+		out.Attention = append(out.Attention, part.Attention...)
+		out.LiveSteps = append(out.LiveSteps, part.LiveSteps...)
+	}
+	sort.SliceStable(out.Active, func(i, j int) bool {
+		rank := func(state string) int {
+			if state == "running" {
+				return 0
+			}
+			if state == "ready" || state == "queued" || state == "pending" {
+				return 1
+			}
+			return 2
+		}
+		if rank(out.Active[i].State) != rank(out.Active[j].State) {
+			return rank(out.Active[i].State) < rank(out.Active[j].State)
+		}
+		return newer(out.Active[i].CreatedAt, out.Active[j].CreatedAt)
+	})
+	sort.SliceStable(out.Recent, func(i, j int) bool { return newer(out.Recent[i].CreatedAt, out.Recent[j].CreatedAt) })
+	sort.SliceStable(out.Upcoming, func(i, j int) bool { return newer(out.Upcoming[j].NextRunAt, out.Upcoming[i].NextRunAt) })
+	out.Active = capOverview(out.Active)
+	out.Recent = capOverview(out.Recent)
+	out.Upcoming = capOverview(out.Upcoming)
+	out.Attention = capOverview(out.Attention)
+	if len(out.LiveSteps) > 24 {
+		out.LiveSteps = out.LiveSteps[:24]
+	}
+	if out.Partial {
+		out.Coverage = "Partial overview: " + strings.Join(out.Warnings, " ")
 	}
 	return out, nil
 }

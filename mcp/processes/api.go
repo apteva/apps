@@ -126,6 +126,9 @@ func (a *App) MCPTools() []sdk.Tool {
 }
 func (a *App) execute(project, actor, action string, args map[string]any) (any, error) {
 	if action == "overview" {
+		if a.ctx.CurrentProject() == "" {
+			return a.overviewGlobal(str(args, "project_id"))
+		}
 		return a.overview(project)
 	}
 	a.mu.Lock()
@@ -296,17 +299,22 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	project := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
 	query := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/processes"), "/")
+	isOverview := path == "overview" || path == "mobile/overview"
 	if project == "" {
 		project = query
 	} else if query != "" && query != project {
 		http.Error(w, "project scope mismatch", 403)
 		return
 	}
-	if project == "" || (a.ctx.CurrentProject() != "" && a.ctx.CurrentProject() != project) {
+	if project == "" && !isOverview {
 		http.Error(w, "project context required", 403)
 		return
 	}
-	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/processes"), "/")
+	if a.ctx.CurrentProject() != "" && (project == "" || a.ctx.CurrentProject() != project) {
+		http.Error(w, "project context required", 403)
+		return
+	}
 	parts := strings.Split(path, "/")
 	args := map[string]any{}
 	action := ""
@@ -320,6 +328,10 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if (path == "overview" || path == "mobile/overview") && r.Method == "GET" {
 		action = "overview"
+		if a.ctx.CurrentProject() == "" {
+			args["project_id"] = project
+			project = ""
+		}
 	} else if len(parts) == 1 {
 		args["process_id"] = parts[0]
 		if r.Method == "GET" {
@@ -455,6 +467,9 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, errConflict) {
 			status = 409
+		}
+		if errors.Is(err, errProjectNotVisible) {
+			status = 403
 		}
 		http.Error(w, err.Error(), status)
 		return

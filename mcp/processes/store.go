@@ -13,6 +13,7 @@ import (
 
 var errNotFound = errors.New("process not found in this project")
 var errConflict = errors.New("procedure changed; reload before saving")
+var errProjectNotVisible = errors.New("project is not visible to this Processes installation")
 
 type Schedule struct {
 	Kind     string `json:"kind"`

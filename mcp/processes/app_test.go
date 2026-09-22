@@ -323,6 +323,9 @@ func TestManifestAndPanel(t *testing.T) {
 	if len(m.Provides.UIPanels) != 1 || m.Provides.UIPanels[0].Slot != "project.page" {
 		t.Fatal("panel missing")
 	}
+	if len(m.Provides.UIComponents) != 1 || len(m.Provides.UIComponents[0].DashboardScopes) != 2 || m.Provides.UIComponents[0].DashboardScopes[0] != "project" || m.Provides.UIComponents[0].DashboardScopes[1] != "global" {
+		t.Fatalf("process overview dashboard scopes=%+v", m.Provides.UIComponents)
+	}
 	if len(a.MCPTools()) != len(m.Provides.MCPTools) {
 		t.Fatal("tool manifest drift")
 	}

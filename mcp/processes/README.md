@@ -241,11 +241,21 @@ checked every 5 seconds. Processes has one native execution path.
 
 ## Installation and limits
 
-Apteva >=0.51.3; app-sdk v0.82.0. Evals >=0.5.9 is optional. Source manifest pins
-`processes/v0.14.4`. Event triggers retain the durable app subscription requirement
+Apteva >=0.52.0; app-sdk v0.85.0. Evals >=0.5.9 is optional. Source manifest pins
+`processes/v0.14.5`. Event triggers retain the durable app subscription requirement
 introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
 Evaluation requires the optional Evals app and isolated Environments support.
 This release changes Processes only; Conversations is not modified.
+
+The Processes overview widget supports both project Home and the global Home
+(`All projects`). Global Home requires a separate global Processes installation;
+the global installation aggregates only the records in its own database for
+projects returned by `PlatformAPI().ListProjects()`. Existing project-scoped
+installations are not implicitly copied or merged, so their history remains
+available in the corresponding project Home. New work executed through the
+global installation is stored with its project ID and appears in the global
+overview. The global overview is read-only and supports a visible-project
+selector.
 
 Structured approval steps enforce downstream handoffs. Free-text approval
 requirements remain guidance. These gates do not revoke an agent’s general
