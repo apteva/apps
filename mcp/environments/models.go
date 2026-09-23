@@ -10,6 +10,7 @@ import (
 type EnvironmentSpec struct {
 	Version             int                             `json:"version"`
 	TTLSeconds          int                             `json:"ttl_seconds,omitempty"`
+	Clock               *sdk.RuntimeClockSpec           `json:"clock,omitempty"`
 	AppInstallIDs       []int64                         `json:"app_install_ids,omitempty"`
 	ConnectionIDs       []int64                         `json:"connection_ids,omitempty"`
 	MCPServerIDs        []int64                         `json:"mcp_server_ids,omitempty"`
