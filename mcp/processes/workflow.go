@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	sdk "github.com/apteva/app-sdk"
-	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -85,9 +84,6 @@ func validateSteps(steps []Step) error {
 	known := map[string]Step{}
 	identifier := regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_]{0,63}$`)
 	for _, s := range steps {
-		if p := s.Position; p != nil && (math.IsNaN(p.X) || math.IsNaN(p.Y) || math.IsInf(p.X, 0) || math.IsInf(p.Y, 0) || math.Abs(p.X) > 100000 || math.Abs(p.Y) > 100000) {
-			return errors.New("step positions must be finite and within the canvas bounds")
-		}
 		if !identifier.MatchString(s.Key) || !identifier.MatchString(s.Role) {
 			return errors.New("step keys and roles must be identifiers starting with a letter")
 		}
@@ -334,7 +330,7 @@ func (a *App) stepContext(p *Process, r Run, s StepRun, all []StepRun) string {
 		worker, _ := a.runWorker(r.ID, s.Executor.AgentID)
 		ids := fmt.Sprintf("process_id=%s, run_id=%s, step_id=%s", p.ID, r.ID, s.ID)
 		if worker != "" {
-			return "Next sequential step ready: " + ids + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies and approvals remain enforced. Keep this worker alive between steps. After step_update, call done only when worker.done is true; otherwise wait for the next Processes event without polling."
+			return "Next sequential step ready: " + ids + ". Call processes_step_claim to read and claim this step. Execute only ready work; dependencies and approvals remain enforced. Keep this worker alive between steps. After step_update, inspect its top-level done field: if true, immediately call done before any text; otherwise wait for the next Processes event without polling."
 		}
 		return fmt.Sprintf("Sequential same-agent run. Main: spawn ONE persistent worker for this entire run (suggested ID process-run-%s), granting tools=\"%s\" plus any domain tools needed across all its steps. Pass these IDs: %s. Worker: call step_claim before domain action; its result contains the frozen step, shared instructions, parameters and dependency evidence. Complete each step with step_update. Processes delivers subsequent ready steps directly to this worker; do not spawn a new worker, forward steps, or poll. Keep the worker alive while worker.done=false, including while awaiting human approval. Call done once after worker.done=true, with the final outcome. Main should not rewrite the procedure or request per-step reports. If workers cannot access Processes, main may execute steps directly using step_get/step_update. Procedure: %s\n%s", r.ID, processSequentialWorkerTools, ids, p.Name, jsonText(p.Definition))
 	}
@@ -528,7 +524,7 @@ func (a *App) spawnSequentialWorker(p *Process, r *Run, s *StepRun, all []StepRu
 	workerStep := *s
 	workerStep.ThreadID = worker
 	workerStep.DeliveryEventID = eventID
-	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across the run. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Call done only after the returned worker.done is true.", r.ID)
+	directive := fmt.Sprintf("You are the persistent Processes worker for run %s. Keep this thread alive across the run. For each authoritative ready step, call processes_step_claim before any domain action, use the returned frozen instructions and dependency evidence, then record milestones and the terminal outcome with processes_step_update. Do not execute unassigned work or create another worker. Inspect every step_update result: when its top-level done field is true, immediately call done before any text; when false, wait for the next Processes event without polling.", r.ID)
 	if _, err := a.db.Exec(`UPDATE process_step_runs SET target_thread_id=?,delivery_event_id=?,delivered_at='',execution_id='',delivery_warning='',next_attempt_at='' WHERE id=?`, worker, eventID, s.ID); err != nil {
 		return err
 	}
@@ -846,7 +842,12 @@ func (a *App) stepAction(project, actor, process, run, id, action string, args m
 		return nil, e
 	}
 	if worker != "" && actor == fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, worker) {
-		result := map[string]any{"process_id": process, "run_id": r.ID, "step_id": s.ID, "run": map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": terminal(r.State)}}
+		done := terminal(r.State)
+		next := "Wait for the next Processes event without polling."
+		if done {
+			next = "Call the native done tool immediately before writing any text."
+		}
+		result := map[string]any{"done": done, "next_action": next, "process_id": process, "run_id": r.ID, "step_id": s.ID, "run": map[string]any{"id": r.ID, "process_id": process, "state": r.State, "version": r.Version}, "step": s, "dependencies": dependencyEvidence(s, all), "dependency_outputs": dependencyOutputs(s, all), "parameters": r.Binding.Parameters, "worker": map[string]any{"thread_id": worker, "done": done}}
 		if action == "step_claim" {
 			result["instructions"] = d.Instructions
 			result["required_inputs"] = d.RequiredInputs

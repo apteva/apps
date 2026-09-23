@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: processes
 display_name: Processes
-version: 0.14.7
+version: 0.15.0
 description: Visual company procedures with independent assignments, multi-agent execution, approval gates, recurring runs, event triggers, and durable native run history.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/processes
@@ -58,6 +58,7 @@ provides:
   mcp_tools:
     - { name: list, description: Find company procedures. }
     - { name: get, description: Read a procedure and its version history. }
+    - { name: validate_definition, description: Validate and normalize a semantic procedure without saving it. }
     - { name: create, description: Create an unassigned draft company procedure. }
     - { name: update, description: Create an immutable procedure revision while paused or draft. }
     - { name: activate, description: Activate a procedure for use by its assignments. }
@@ -76,7 +77,7 @@ provides:
     - { name: assignment_archive, description: Archive one assignment. }
     - { name: step_claim, description: Claim a sequential step and reuse its run worker. }
     - { name: step_get, description: Read a workflow step and its dependency outputs. }
-    - { name: step_update, description: Report step output or an explicit approval decision as its assigned executor. }
+    - { name: step_update, description: Report step output or an explicit approval decision and follow the returned worker completion action. }
     - { name: run_cancel, description: Stop future handoffs in a structured run as coordinator or operator. }
     - { name: trigger_sources, description: "Configure, preview and inspect assignment event triggers." }
     - { name: triggers, description: "Configure, preview and inspect assignment event triggers." }
@@ -127,7 +128,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: processes/v0.14.7
+    ref: processes/v0.15.0
     entry: mcp/processes
   port: 8080
   health_check: /health

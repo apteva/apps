@@ -51,6 +51,7 @@ type Process struct {
 	SyncError        string       `json:"sync_error"`
 	CreatedAt        string       `json:"created_at"`
 	UpdatedAt        string       `json:"updated_at"`
+	Readiness        Readiness    `json:"readiness"`
 	Definition
 }
 type Version struct {
@@ -155,6 +156,12 @@ func (d Definition) procedureOnly() Definition {
 	d.OwnerAgentID = 0
 	d.ExecutionMode = ""
 	d.Schedule = nil
+	for i := range d.Steps {
+		// Layout is a deterministic view of dependency semantics, not procedure
+		// data. Keep decoding Position for old versions, but never persist it in
+		// a newly created immutable version.
+		d.Steps[i].Position = nil
+	}
 	return d
 }
 func validateExecution(c AssignmentConfig) error {
@@ -220,6 +227,7 @@ func (a *App) get(project, id string) (*Process, error) {
 			p.LastScheduleNote = x.LastScheduleNote
 		}
 	}
+	p.Readiness = readiness(p.Definition, p.Status, p.Assignments)
 	return &p, nil
 }
 func (a *App) list(project string) ([]Process, error) {

@@ -28,23 +28,25 @@ func definitionSchema() map[string]any {
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
-	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure and immutable versions. Specify version to retrieve a historical definition.", "create": "Create an unassigned draft procedure when authorized to define company policy. Configure agents, parameter values, and schedules separately with assignment_create. No assignment is created automatically.", "update": "Replace the definition with a new immutable version. Requires a draft or fully paused process and expected_version.", "activate": "Activate a procedure for use by its assignments; an unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment of a procedure. Create and activate an assignment first. Supply a stable idempotency_key and reuse it on retries. Execution is tracked natively by Processes.", "runs": "Read native process run and step history."}
+	descriptions := map[string]string{"list": "Find project procedures by search, status, or owner.", "get": "Read a procedure, readiness, and immutable versions. Specify version to retrieve a historical definition.", "validate_definition": "Validate and normalize a semantic procedure without saving it. Define steps and dependencies only; Processes always lays out the graph automatically.", "create": "Create an unassigned draft procedure. Send semantic steps and dependencies only; never graphical coordinates. No assignment or run is created. If the user names an executor, create the draft first, then use assignment_create, which starts paused.", "update": "Replace semantic procedure content with a new immutable draft version. Send no graphical coordinates. Requires a draft or fully paused process and expected_version.", "activate": "Activate a reviewed procedure only with explicit user authorization. An unassigned procedure schedules no work. Check sync_pending before claiming success.", "pause": "Stop future scheduled runs. Existing runs continue. Check sync_pending.", "archive": "Retire a process and stop future schedules. Existing runs continue.", "start": "Start one active assignment only with explicit user authorization. Create the draft, create a paused assignment, then explicitly activate the process and assignment first. Supply a stable idempotency_key and reuse it on retries.", "runs": "Read native process run and step history."}
 	descriptions["run_get"] = "Read the immutable procedure and direct run before acting."
 	descriptions["run_update"] = "Owner only: record direct run progress, blockers, or outcome. Completion requires evidence in result."
 	for _, name := range []string{"assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive"} {
 		descriptions[name] = "Manage saved process assignments: separate owners, targets, parameters, schedules, and execution modes. Update requires a paused assignment and expected_revision. Activate only after the process is active."
 	}
+	descriptions["assignment_create"] = "After creating a procedure, configure an executor, target, parameters, and optional schedule. The assignment is always created paused and does not run. Activate it only with explicit user authorization after the process is active."
+	descriptions["assignment_activate"] = "Enable a paused assignment only with explicit user authorization and only after the reviewed process is active."
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
 	descriptions["step_claim"] = "Claim and read a ready step as the persistent worker for a sequential same-agent run. Marks ready work running. Reuse this worker for later steps; finish only when worker.done is true."
 	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
-	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision."
+	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision. A persistent worker must inspect the returned done field: call done immediately when true, otherwise wait for the next Processes event."
 	out := []sdk.Tool{}
-	for _, name := range []string{"list", "get", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
+	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
 		name := name
 		props := map[string]any{}
 		required := []string{}
 		workerCoordination := name == "run_get" || name == "run_update" || name == "step_get" || name == "step_claim" || name == "step_update"
-		if name != "list" && name != "create" {
+		if name != "list" && name != "create" && name != "validate_definition" {
 			props["process_id"] = textField("Process ID")
 			if !workerCoordination {
 				required = append(required, "process_id")
@@ -70,7 +72,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			props["tag"] = textField("Tag to match")
 		case "get":
 			props["version"] = map[string]any{"type": "integer", "minimum": 1}
-		case "create", "update":
+		case "validate_definition", "create", "update":
 			props["definition"] = definitionSchema()
 			required = append(required, "definition")
 			if name == "update" {
@@ -145,6 +147,13 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		id = resolved
 	}
 	switch action {
+	case "validate_definition":
+		d, err := decodeDefinition(args["definition"])
+		if err != nil {
+			return nil, err
+		}
+		d = d.procedureOnly()
+		return map[string]any{"definition": d, "readiness": readiness(d, "", nil)}, nil
 	case "list":
 		items, err := a.list(project)
 		if err != nil {
@@ -499,5 +508,5 @@ func executorSchema() map[string]any {
 	return object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}})
 }
 func stepSchema() map[string]any {
-	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "position": object([]string{"x", "y"}, map[string]any{"x": map[string]any{"type": "number", "minimum": -100000, "maximum": 100000}, "y": map[string]any{"type": "number", "minimum": -100000, "maximum": 100000}}), "depends_on": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "start_after": timingSchema("Earliest start; Processes waits and notifies the executor when due. Never use agent sleep for a delay."), "due_after": timingSchema("Completion deadline; flags overdue work without delaying or cancelling execution.")})
+	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "depends_on": map[string]any{"type": "array", "description": "Step keys that must complete before this step. Processes derives the graph layout automatically.", "items": map[string]any{"type": "string"}}, "start_after": timingSchema("Earliest start; Processes waits and notifies the executor when due. Never use agent sleep for a delay."), "due_after": timingSchema("Completion deadline; flags overdue work without delaying or cancelling execution.")})
 }

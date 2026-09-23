@@ -89,7 +89,7 @@ func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if raw.(map[string]any)["worker"].(map[string]any)["done"] != true {
+	if raw.(map[string]any)["done"] != true || raw.(map[string]any)["worker"].(map[string]any)["done"] != true || !strings.Contains(raw.(map[string]any)["next_action"].(string), "done tool immediately") {
 		t.Fatal("worker not released on completion")
 	}
 	before := len(f.events)
