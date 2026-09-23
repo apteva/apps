@@ -161,6 +161,10 @@ func (d Definition) procedureOnly() Definition {
 		// data. Keep decoding Position for old versions, but never persist it in
 		// a newly created immutable version.
 		d.Steps[i].Position = nil
+		// Step kinds were a short-lived Processes-specific approval model.
+		// Keep decoding old versions, but every newly saved procedure consists
+		// solely of generic steps.
+		d.Steps[i].Kind = ""
 	}
 	return d
 }
@@ -210,6 +214,7 @@ func (a *App) get(project, id string) (*Process, error) {
 	if err = json.Unmarshal([]byte(body), &p.Definition); err != nil {
 		return nil, err
 	}
+	p.Definition = p.Definition.procedureOnly()
 	p.ExecutionMode = "agent"
 	p.Assignments, err = a.assignments(p.ID)
 	if err != nil {
@@ -275,6 +280,7 @@ func (a *App) versions(id string) ([]Version, error) {
 		if err = json.Unmarshal([]byte(body), &v.Definition); err != nil {
 			return nil, err
 		}
+		v.Definition = v.Definition.procedureOnly()
 		v.Definition.ExecutionMode = "agent"
 		out = append(out, v)
 	}
@@ -287,6 +293,7 @@ func (a *App) definition(id string, version int) (Definition, error) {
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &d)
 	}
+	d = d.procedureOnly()
 	d.ExecutionMode = "agent"
 	return d, err
 }

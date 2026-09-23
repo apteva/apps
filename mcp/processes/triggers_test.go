@@ -87,7 +87,7 @@ func TestEventStartsMultiAgentWorkflowWithFrozenInputs(t *testing.T) {
 		t.Fatal("reviewer not dispatched")
 	}
 	if stepBy(t, a, r, "publish").State != "pending" {
-		t.Fatal("approval bypassed")
+		t.Fatal("review dependency bypassed")
 	}
 	finishStep(t, a, p, r, "review", "agent:10:main", "approved customer-123", "approved")
 	finishStep(t, a, p, r, "publish", "agent:7:main", "simulated receipt", "")

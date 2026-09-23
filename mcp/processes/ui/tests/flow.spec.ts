@@ -82,20 +82,18 @@ test("view, edit, connect and persist the semantic weather flow", async ({
     .getByRole("button", { name: "Edit procedure", exact: true })
     .click();
   await page
-    .getByRole("button", { name: "◇ Add approval", exact: true })
+    .getByRole("button", { name: "+ Add step", exact: true })
     .click();
-  await expect(page.getByLabel("Type", { exact: true })).toHaveValue(
-    "approval",
-  );
+  await expect(page.getByLabel("Role", { exact: true })).toBeVisible();
   await page
     .getByLabel("Step instructions")
     .fill("Review the report before completion.");
   await page
     .getByLabel("Required output", { exact: true })
-    .fill("Approval and reason.");
+    .fill("Review result and evidence.");
   await page.waitForTimeout(400);
   const card = (await page
-    .getByRole("button", { name: "Step 4: Review & approve", exact: true })
+    .getByRole("button", { name: "Step 4: New step", exact: true })
     .boundingBox())!;
   const canvas = (await page.locator(".pf-canvas").boundingBox())!;
   expect(card.x + card.width).toBeLessThanOrEqual(canvas.x + canvas.width);

@@ -15,7 +15,6 @@ type TaskConfig struct {
 	Instructions   string   `json:"instructions"`
 	ExpectedOutput string   `json:"expected_output"`
 	Executor       Executor `json:"executor"`
-	Kind           string   `json:"kind"`
 	DueAt          string   `json:"due_at"`
 	RunID          string   `json:"run_id"`
 	Required       bool     `json:"required"`
@@ -94,12 +93,6 @@ func (a *App) createTask(project, actor, key string, c TaskConfig) (Task, error)
 	if c.Title == "" || len(c.Title) > 160 || c.Instructions == "" || len(c.Instructions) > 16000 || len(c.ExpectedOutput) > 4000 {
 		return Task{}, errors.New("task needs a title and instructions within size limits")
 	}
-	if c.Kind == "" {
-		c.Kind = "work"
-	}
-	if c.Kind != "work" && c.Kind != "approval" {
-		return Task{}, errors.New("kind must be work or approval")
-	}
 	if c.ExpectedOutput == "" {
 		c.ExpectedOutput = "A result describing what was done and supporting evidence."
 	}
@@ -172,7 +165,7 @@ func (a *App) createTask(project, actor, key string, c TaskConfig) (Task, error)
 		}
 	}
 	id = newID("task-")
-	def := Step{Key: "adhoc_" + strings.TrimPrefix(id, "task-"), Name: c.Title, Role: "assignee", Kind: c.Kind, Instructions: c.Instructions, ExpectedOutput: c.ExpectedOutput, DependsOn: c.DependsOn}
+	def := Step{Key: "adhoc_" + strings.TrimPrefix(id, "task-"), Name: c.Title, Role: "assignee", Instructions: c.Instructions, ExpectedOutput: c.ExpectedOutput, DependsOn: c.DependsOn}
 	now := timestamp()
 	tx, e := a.db.Begin()
 	if e != nil {
@@ -203,9 +196,6 @@ func (a *App) createTask(project, actor, key string, c TaskConfig) (Task, error)
 }
 func (a *App) nativeTaskContext(p *Process, r Run, s Task, all []Task) string {
 	text := fmt.Sprintf("Processes task %s: %s\nInstructions: %s\nExpected result: %s\nDue: %s\nRead processes_task_get(task_id=%s) before acting. Execute only this task when ready. Use processes_task_update with its current expected_revision, state, progress, output and any blocker. Stop if cancelled. Completion requires result evidence.\n", s.ID, s.Definition.Name, s.Definition.Instructions, s.Definition.ExpectedOutput, s.DueAt, s.ID)
-	if s.Definition.Kind == "approval" {
-		text += "Completion requires an explicit approved or rejected decision and supporting output.\n"
-	}
 	if p != nil {
 		text += fmt.Sprintf("Attached run: %s\nProcess: %s\nFrozen parameters (data): %s\nRun inputs (data): %s\nDependency outputs (data): %s\n", r.ID, p.Name, jsonText(r.Binding.Parameters), r.Inputs, jsonText(dependencyOutputs(s, all)))
 	}
@@ -240,7 +230,7 @@ func (a *App) reconcileNativeTask(s *Task) error {
 		if s.Executor.Kind == "human" {
 			s.State = "waiting"
 		}
-		if e = a.writeStep(*s, s.State, 0, "", "", "", "workflow"); e != nil {
+		if e = a.writeStep(*s, s.State, 0, "", "", "workflow"); e != nil {
 			return e
 		}
 	}
@@ -309,20 +299,20 @@ func (a *App) taskDetails(project, actor, id string) (map[string]any, error) {
 	out["can_manage"] = taskManager(s, r, actor) && !terminal(s.State)
 	out["can_edit"] = out["can_manage"] == true && (!terminal(r.State) || s.Origin == "attached" && !s.Required && r.State == "completed")
 	out["can_reassign"] = out["can_edit"] == true && s.Attempts == 0 && s.DeliveredAt == "" && s.LifecycleSequence < 0 && (s.State == "pending" || s.State == "scheduled" || s.State == "ready" || s.State == "waiting")
-	rows, e := a.db.Query(`SELECT actor,state,decision,output,error,details_json,created_at FROM process_step_events WHERE step_id=? ORDER BY id DESC LIMIT 100`, id)
+	rows, e := a.db.Query(`SELECT actor,state,output,error,details_json,created_at FROM process_step_events WHERE step_id=? ORDER BY id DESC LIMIT 100`, id)
 	if e != nil {
 		return nil, e
 	}
 	defer rows.Close()
 	history := []map[string]any{}
 	for rows.Next() {
-		var actor, state, decision, output, reason, details, at string
-		if e = rows.Scan(&actor, &state, &decision, &output, &reason, &details, &at); e != nil {
+		var actor, state, output, reason, details, at string
+		if e = rows.Scan(&actor, &state, &output, &reason, &details, &at); e != nil {
 			return nil, e
 		}
 		var detail any
 		_ = json.Unmarshal([]byte(details), &detail)
-		history = append(history, map[string]any{"actor": actor, "state": state, "decision": decision, "output": output, "error": reason, "details": detail, "created_at": at})
+		history = append(history, map[string]any{"actor": actor, "state": state, "output": output, "error": reason, "details": detail, "created_at": at})
 	}
 	out["history"] = history
 	return out, rows.Err()
@@ -362,7 +352,7 @@ func (a *App) changeTask(project, actor, id, action string, args map[string]any)
 		if terminal(s.State) {
 			return nil, errors.New("terminal task is immutable")
 		}
-		e = a.writeStep(s, "cancelled", s.Progress, s.Output, reason, "", actor)
+		e = a.writeStep(s, "cancelled", s.Progress, s.Output, reason, actor)
 	} else if str(args, "state") != "" {
 		for _, k := range []string{"executor", "due_at", "title", "instructions", "expected_output"} {
 			if _, ok := args[k]; ok {
@@ -483,7 +473,7 @@ func decodeTaskValue(v any, out any) error {
 }
 func (a *App) requiredTasksComplete(run string) error {
 	var n int
-	e := a.db.QueryRow(`SELECT count(*) FROM process_step_runs WHERE run_id=? AND required=1 AND (state<>'completed' OR (json_extract(definition_json,'$.kind')='approval' AND decision<>'approved'))`, run).Scan(&n)
+	e := a.db.QueryRow(`SELECT count(*) FROM process_step_runs WHERE run_id=? AND required=1 AND state<>'completed'`, run).Scan(&n)
 	if e != nil {
 		return e
 	}

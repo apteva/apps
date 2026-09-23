@@ -249,7 +249,7 @@ func TestSidecarAssignmentsAndParameterIsolation(t *testing.T) {
 	}
 }
 
-func TestSidecarWorkflowAgentHandoffsAndHumanApproval(t *testing.T) {
+func TestSidecarWorkflowAgentHandoffsAndGenericHumanStep(t *testing.T) {
 	var delivered atomic.Int32
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -311,16 +311,16 @@ func TestSidecarWorkflowAgentHandoffsAndHumanApproval(t *testing.T) {
 	}
 	read()
 	if delivered.Load() != 2 || detail.Steps[2].State != "waiting" || detail.Steps[3].State != "pending" {
-		t.Fatal("human gate bypassed")
+		t.Fatal("human step bypassed")
 	}
 	// Payload identifiers cannot override route scope.
-	resp = app.POST(runpath+"/steps/"+detail.Steps[2].ID+"?project_id=project-a", map[string]any{"state": "completed", "decision": "approved", "output": "Approved draft", "step_id": detail.Steps[3].ID, "run_id": "other"}, nil)
+	resp = app.POST(runpath+"/steps/"+detail.Steps[2].ID+"?project_id=project-a", map[string]any{"state": "completed", "output": "Reviewed draft", "step_id": detail.Steps[3].ID, "run_id": "other"}, nil)
 	if resp.Status != 200 || delivered.Load() != 3 {
-		t.Fatalf("approval %s", resp.Body)
+		t.Fatalf("human completion %s", resp.Body)
 	}
 	app.MCPAs("step_update", map[string]any{"process_id": p.ID, "run_id": started.Run.ID, "step_id": detail.Steps[3].ID, "state": "completed", "output": "Published URL"}, 8, "owner-thread", "project-a")
 	read()
-	if detail.Run.State != "completed" || detail.Steps[2].Decision != "approved" || detail.Steps[2].UpdatedBy != "operator" {
+	if detail.Run.State != "completed" || detail.Steps[2].UpdatedBy != "operator" {
 		t.Fatal("workflow did not complete", detail)
 	}
 }

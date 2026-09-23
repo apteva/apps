@@ -1,6 +1,6 @@
 import {flowThemes, applyFlowTheme, expectBorderContrast} from "./flow-themes";
 import { test, expect } from "@playwright/test";
-const step=(key:string,name:string,depends_on:string[],state:string,agent:number)=>({id:key,run_id:"run-live",key,state,progress:state==="completed"?100:0,output:"",error:"",decision:"",updated_at:new Date().toISOString(),executor:{kind:"agent",agent_id:agent},definition:{key,name,depends_on,kind:"work",role:"worker",instructions:"Follow this step",expected_output:"Evidence"}});
+const step=(key:string,name:string,depends_on:string[],state:string,agent:number)=>({id:key,run_id:"run-live",key,state,progress:state==="completed"?100:0,output:"",error:"",updated_at:new Date().toISOString(),executor:{kind:"agent",agent_id:agent},definition:{key,name,depends_on,role:"worker",instructions:"Follow this step",expected_output:"Evidence"}});
 const run=(done=false)=>({id:"run-live",process_id:"weather",version:1,workflow:true,state:done?"completed":"running",progress:done?100:0,created_at:new Date().toISOString(),steps:[step("fetch_weather","Fetch current weather",[],done?"completed":"running",7),step("post_conversations","Post alert in Conversations",["fetch_weather"],done?"completed":"pending",8),step("send_pushover","Send Pushover notification",["post_conversations"],done?"completed":"pending",9)]});
 test("SSE refreshes graphical multi-agent progress, batches events and preserves selection",async({page,request})=>{
  await request.post('/fixture/runs',{data:[run()]});

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,8 +134,7 @@ func TestEventsProjectFailureDoesNotStarveOtherProjects(t *testing.T) {
 		t.Fatal("lost failed events")
 	}
 }
-func TestEventsMultiAgentApprovalAndCompletionContract(t *testing.T) {
-	t.Skip("legacy task event namespace assertions replaced by step.* events")
+func TestEventsMultiAgentGenericStepCompletionContract(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	finishStep(t, a, p, r, "research", "agent:8:t", "Research evidence", "")
 	finishStep(t, a, p, r, "write", "agent:7:t", "Draft", "")
@@ -143,7 +143,7 @@ func TestEventsMultiAgentApprovalAndCompletionContract(t *testing.T) {
 	before := eventCount(t, a)
 	finishStep(t, a, p, r, "review", "operator", "Approved", "approved")
 	if eventCount(t, a) != before {
-		t.Fatal("duplicate approval emitted again")
+		t.Fatal("duplicate completion emitted again")
 	}
 	f := &eventPlatform{}
 	pub := publisher(t, a, f)
@@ -154,7 +154,7 @@ func TestEventsMultiAgentApprovalAndCompletionContract(t *testing.T) {
 	for _, d := range a.Manifest().Provides.Publishes {
 		declared[d.Name] = true
 	}
-	approvals, decisions, completed := 0, 0, 0
+	completed := 0
 	agents := map[float64]bool{}
 	for _, e := range f.accepted {
 		if !declared[e.topic] {
@@ -166,11 +166,8 @@ func TestEventsMultiAgentApprovalAndCompletionContract(t *testing.T) {
 		if e.data["process_id"] != p.ID || e.data["assignment_id"] != r.AssignmentID {
 			t.Fatal("missing scope", e)
 		}
-		if e.topic == "task.approval_requested" {
-			approvals++
-		}
-		if e.topic == "task.approval_resolved" {
-			decisions++
+		if strings.Contains(e.topic, "approval") {
+			t.Fatal("approval-specific event emitted", e.topic)
 		}
 		if e.topic == "run.state_changed" && e.data["to_state"] == "completed" {
 			completed++
@@ -183,9 +180,12 @@ func TestEventsMultiAgentApprovalAndCompletionContract(t *testing.T) {
 		if _, ok := e.data["output"]; ok {
 			t.Fatal("full result leaked into bus")
 		}
+		if _, ok := e.data["decision"]; ok {
+			t.Fatal("removed decision field leaked into bus")
+		}
 	}
-	if approvals != 1 || decisions != 1 || completed != 1 || !agents[7] || !agents[8] {
-		t.Fatalf("contract approval=%d decision=%d complete=%d agents=%v", approvals, decisions, completed, agents)
+	if completed != 1 || !agents[7] || !agents[8] {
+		t.Fatalf("contract complete=%d agents=%v", completed, agents)
 	}
 }
 func TestEventsNativeTaskAndDeliveryRecovery(t *testing.T) {

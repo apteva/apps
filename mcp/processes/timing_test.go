@@ -15,10 +15,15 @@ func timedSetup(t *testing.T, human bool) (*App, *directPlatform, *Process, Run)
 	d.Steps = d.Steps[:2]
 	d.Steps[1].StartAfter = &TimingRule{After: "step_completed", StepKey: "research", Offset: 10, Unit: "minutes"}
 	d.Steps[1].DueAfter = &TimingRule{After: "step_completed", StepKey: "research", Offset: 30, Unit: "minutes"}
-	if human {
-		d.Steps[1].Kind = "approval"
-	}
 	p := create(t, a, d)
+	if human {
+		x := p.Assignments[0]
+		c := x.AssignmentConfig
+		c.Roles = map[string]Executor{"writer": {Kind: "human"}}
+		if _, err := a.saveAssignment(p.ProjectID, p.ID, x.ID, x.Revision, c); err != nil {
+			t.Fatal(err)
+		}
+	}
 	p = status(t, a, p.ID, "active")
 	raw, err := a.start(p.ProjectID, p.ID, "timed", "")
 	if err != nil {
@@ -79,26 +84,19 @@ func TestTimedStepPersistsAndDispatchesAtBoundary(t *testing.T) {
 		t.Fatal("restart reset timer")
 	}
 }
-func TestTimedHumanApproval(t *testing.T) {
+func TestTimedGenericHumanStep(t *testing.T) {
 	a, f, p, r := timedSetup(t, true)
 	finishStep(t, a, p, r, "research", "agent:7:t", "sent", "")
 	step := stepBy(t, a, r, "write")
 	start, _ := time.Parse(time.RFC3339Nano, step.StartAt)
-	if _, err := a.stepAction(p.ProjectID, "operator", p.ID, r.ID, step.ID, "step_update", map[string]any{"state": "completed", "output": "early approval", "decision": "approved"}); err == nil {
-		t.Fatal("early human approval")
-	}
-	var approvals int
-	if err := a.db.QueryRow(`SELECT count(*) FROM process_event_outbox WHERE topic='task.approval_requested' AND json_extract(payload_json,'$.task_id')=?`, step.ID).Scan(&approvals); err != nil {
-		t.Fatal(err)
-	}
-	if approvals != 0 {
-		t.Fatal("approval requested before timer")
+	if _, err := a.stepAction(p.ProjectID, "operator", p.ID, r.ID, step.ID, "step_update", map[string]any{"state": "completed", "output": "too early"}); err == nil {
+		t.Fatal("early human completion")
 	}
 	if err := a.tickDirect(context.Background(), start); err != nil {
 		t.Fatal(err)
 	}
 	if stepBy(t, a, r, "write").State != "waiting" || len(f.events) != 1 {
-		t.Fatal("timed human step not released correctly")
+		t.Fatal("timed generic human step not released correctly")
 	}
 }
 func TestTimingValidation(t *testing.T) {

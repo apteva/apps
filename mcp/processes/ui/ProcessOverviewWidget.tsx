@@ -188,12 +188,7 @@ export function executionStatus({ item: x, assignment }: QueueEntry) {
     label: step
       ? `${step.name}${timingLabel(step) ? ` · ${timingLabel(step)}` : ""}`
       : x.current_step || "Preparing run",
-    state:
-      step?.kind === "approval" &&
-      step.executor.kind === "human" &&
-      ["ready", "running", "waiting"].includes(step.state)
-        ? "review"
-        : step?.state || x.state,
+    state: step?.state || x.state,
     current: true,
     extra: Math.max(0, same.length - 1),
     hint:
@@ -316,11 +311,7 @@ function Overview(props: Props) {
     <span
       className={`po-badge ${state === "sync pending" ? "attention" : state}`}
     >
-      {state === "sync pending"
-        ? "Attention"
-        : state === "review"
-          ? "Review"
-          : state.replaceAll("_", " ")}
+      {state === "sync pending" ? "Attention" : state.replaceAll("_", " ")}
     </span>
   );
   const relative = (value?: string) => {
@@ -528,7 +519,7 @@ function Overview(props: Props) {
                           {s.name}
                           <small>
                             {s.executor.kind === "human"
-                              ? "Human review"
+                              ? "Human"
                               : name(s.executor.agent_id)}
                             {s.warning ? ` · ${s.warning}` : ""}
                           </small>

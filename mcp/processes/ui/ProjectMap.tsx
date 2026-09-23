@@ -127,7 +127,7 @@ function MapStep({ data }: NodeProps<Node<StepData>>) {
         isConnectable={false}
       />
       <button className="pm-step-title nodrag" onClick={() => data.select()}>
-        <StepKind approval={data.step.kind === "approval"} index={data.index} />
+        <StepKind index={data.index} />
         <strong>{data.step.name}</strong>
       </button>
       {data.executions.map(({ run, step, agent }) => (

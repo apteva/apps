@@ -8,7 +8,6 @@ export type Step = {
   key: string;
   name: string;
   role: string;
-  kind: "work" | "approval";
   instructions: string;
   expected_output: string;
   depends_on: string[];
@@ -28,7 +27,6 @@ export type StepRun = {
   progress: number;
   output: string;
   error: string;
-  decision: string;
   updated_by: string;
   updated_at: string;
   delivery_warning?: string;
@@ -40,7 +38,6 @@ const examples: Step[] = [
     key: "research",
     name: "Research",
     role: "researcher",
-    kind: "work",
     instructions: "Research the topic using the configured sources.",
     expected_output: "Research notes with sources.",
     depends_on: [],
@@ -49,7 +46,6 @@ const examples: Step[] = [
     key: "write",
     name: "Write",
     role: "writer",
-    kind: "work",
     instructions:
       "Prepare a draft from the research and assignment parameters.",
     expected_output: "Complete draft ready for review.",
@@ -59,17 +55,15 @@ const examples: Step[] = [
     key: "review",
     name: "Review",
     role: "reviewer",
-    kind: "approval",
     instructions:
       "Review the draft against the procedure and audience requirements.",
-    expected_output: "Approve or reject with a reason.",
+    expected_output: "Review result with findings and evidence.",
     depends_on: ["write"],
   },
   {
     key: "publish",
     name: "Publish",
     role: "publisher",
-    kind: "work",
     instructions:
       "Publish the approved draft to the configured destination and record evidence.",
     expected_output: "Published URL and destination confirmation.",
@@ -108,11 +102,7 @@ export function RolesEditor({
         The responsible agent remains the run coordinator.
       </p>
       {keys.map((role) => {
-        const fallback = steps.some(
-          (s) => s.role === role && s.kind === "approval",
-        )
-          ? { kind: "human" as const }
-          : { kind: "agent" as const, agent_id: owner };
+        const fallback = { kind: "agent" as const, agent_id: owner };
         const x = roles[role] || fallback;
         return (
           <div className="field" key={role}>
@@ -172,14 +162,13 @@ export function RunSteps({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const isTerminal = ["completed", "failed", "cancelled"].includes(runState);
-  const submit = async (step: StepRun, decision?: string) => {
+  const submit = async (step: StepRun) => {
     setBusy(true);
     setError("");
     try {
       await api(`/runs/${runID}/steps/${step.id}`, "POST", {
         state: "completed",
         output,
-        ...(decision ? { decision } : {}),
       });
       setSelected("");
       setOutput("");
@@ -269,7 +258,7 @@ export function RunSteps({
           >
             <div className="row between">
               <strong>{s.definition.name}</strong>
-              <span className={`pill ${s.state}`}>{s.decision || s.state}</span>
+              <span className={`pill ${s.state}`}>{s.state}</span>
             </div>
             <p className="small muted">
               {s.definition.role} ·{" "}
@@ -277,7 +266,6 @@ export function RunSteps({
                 ? "Human · project operator"
                 : agents.find((a) => a.id === s.executor.agent_id)?.name ||
                   `Agent ${s.executor.agent_id}`}
-              {s.definition.kind === "approval" ? " · approval gate" : ""}
             </p>
             <p className="small muted">
               {s.definition.depends_on.length
@@ -317,20 +305,13 @@ export function RunSteps({
                       setError("");
                     }}
                   >
-                    {s.definition.kind === "approval"
-                      ? "Review & decide"
-                      : "Complete human step"}
+                    Complete human step
                   </button>
                 ) : (
                   <form
                     onSubmit={(e) => {
                       e.preventDefault();
-                      submit(
-                        s,
-                        s.definition.kind === "approval"
-                          ? "approved"
-                          : undefined,
-                      );
+                      submit(s);
                     }}
                   >
                     <div className="prose small" style={{ marginTop: 14 }}>
@@ -351,13 +332,9 @@ export function RunSteps({
                         ))}
                     </details>
                     <div className="field" style={{ marginTop: 12 }}>
-                      <label htmlFor={`decision-${s.id}`}>
-                        {s.definition.kind === "approval"
-                          ? "Decision reason and evidence"
-                          : "Result and evidence"}
-                      </label>
+                      <label htmlFor={`result-${s.id}`}>Result and evidence</label>
                       <textarea
-                        id={`decision-${s.id}`}
+                        id={`result-${s.id}`}
                         required
                         rows={4}
                         value={output}
@@ -369,19 +346,8 @@ export function RunSteps({
                         className="primary"
                         disabled={busy || !output.trim()}
                       >
-                        {s.definition.kind === "approval"
-                          ? "Approve"
-                          : "Complete step"}
+                        Complete step
                       </button>
-                      {s.definition.kind === "approval" && (
-                        <button
-                          type="button"
-                          disabled={busy || !output.trim()}
-                          onClick={() => submit(s, "rejected")}
-                        >
-                          Reject & stop run
-                        </button>
-                      )}
                       <button
                         type="button"
                         disabled={busy}

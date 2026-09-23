@@ -162,7 +162,7 @@ func TestOverviewScopeAndLiveSteps(t *testing.T) {
 		t.Fatal(e)
 	}
 	if out.Counts.Attention != 1 || out.Active[0].StepsCompleted != 2 {
-		t.Fatalf("approval missing %+v", out)
+		t.Fatalf("waiting human step missing from attention %+v", out)
 	}
 	other, e := a.overview("other")
 	if e != nil || other.Counts.Active != 0 || len(other.Active) != 0 {

@@ -1,5 +1,5 @@
 name: processes-multi-agent-workflow
-description: Three real agents execute five steps with parallel inputs, a join, an approval, and a simulated publication receipt.
+description: Three real agents execute five generic steps with parallel inputs, a join, a review, and a simulated publication receipt.
 timeout: 10m
 settle_for: 5s
 max_iterations: 80
@@ -31,12 +31,12 @@ setup:
             name: Process Reviewer
             directive: |
               Your agent ID is ${AGENT_reviewer_ID}. Main coordinates assigned
-              approval steps using the Processes skill and delivery contract.
+              review steps using the Processes skill and delivery contract.
               Processes provisions an isolated worker for every independent
-              approval step, inheriting the agent's spawnable MCP servers and
+              review step, inheriting the agent's spawnable MCP servers and
               Processes coordination tools. Do not spawn a worker or call
               step_assign. The worker reads the frozen context, verifies
-              evidence, records the explicit approval decision and reports
+              evidence, records the review output and reports
               once. Do not publish, create runs or execute another agent's
               work. Wait for Processes events.
 directive: |
@@ -50,30 +50,30 @@ directive: |
   criteria: all five steps complete and the final receipt matches the reviewed
   draft and the frozen page parameter. Define these steps:
 
-  1. key=research, name=Research tip, role=researcher, kind=work, depends_on=[].
+  1. key=research, name=Research tip, role=researcher, depends_on=[].
      Instructions: Read frozen page; output exactly `RESEARCH|page=<page>|tip=window-light`
      without backticks or trailing punctuation.
      Expected output: research evidence and page.
-  2. key=audience, name=Check audience, role=writer, kind=work, depends_on=[].
+  2. key=audience, name=Check audience, role=writer, depends_on=[].
      Instructions: Read frozen page; output exactly `AUDIENCE|page=<page>|level=beginner`
      without backticks or trailing punctuation.
      Expected output: audience evidence and page.
-  3. key=draft, name=Write joined draft, role=writer, kind=work,
+  3. key=draft, name=Write joined draft, role=writer,
      depends_on=[research,audience].
      Instructions: Read BOTH dependency outputs, ensure their page equals the
      frozen parameter, and use their level and tip to produce exactly
      `DRAFT|<page>|<level>|<tip>` without backticks or trailing punctuation.
      If evidence is missing or conflicts, block with a reason.
      Expected output: draft derived from both inputs.
-  4. key=review, name=Review joined draft, role=reviewer, kind=approval,
+  4. key=review, name=Review joined draft, role=reviewer,
      depends_on=[draft].
      Instructions: Verify the draft is DRAFT|photography|beginner|window-light
      and agrees with both research and audience outputs and the frozen page.
-     Approve only if all checks pass. Set decision=approved and output exactly
+     Complete only if all checks pass and output exactly
      `APPROVED|DRAFT|photography|beginner|window-light` without backticks or trailing
-     punctuation. Otherwise reject with a reason.
-     Expected output: explicit decision and evidence.
-  5. key=publish, name=Record simulated receipt, role=publisher, kind=work,
+     punctuation. Otherwise block with a reason.
+     Expected output: review result and evidence.
+  5. key=publish, name=Record simulated receipt, role=publisher,
      depends_on=[review].
      Instructions: Confirm the review approved this draft; use ancestor outputs
      and frozen page to record exactly `RECEIPT|photography|beginner|window-light`
@@ -142,7 +142,7 @@ trajectory_assert:
       node: main
       agent: reviewer
       tool: processes_step_update
-      args: {state: completed, decision: approved, output: "APPROVED|DRAFT|photography|beginner|window-light"}
+      args: {state: completed, output: "APPROVED|DRAFT|photography|beginner|window-light"}
       success: true
   - tool_called_with:
       node: main

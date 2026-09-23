@@ -53,7 +53,7 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
   const s = data.step;
   return (
     <div
-      className={`pf-step ${s.kind} ${selected ? "is-selected" : ""} ${data.problem ? "incomplete" : ""}`}
+      className={`pf-step ${selected ? "is-selected" : ""} ${data.problem ? "incomplete" : ""}`}
       data-state={flowState(
         (data.executions || (data.execution ? [data.execution] : [])).map(
           (e) => e.state,
@@ -77,7 +77,7 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
         aria-label={`Input to ${s.name}`}
       />
       <div className="pf-step-top">
-        <StepKind approval={s.kind === "approval"} index={data.index} />
+        <StepKind index={data.index} />
       </div>
       <strong className="pf-step-title">{s.name || "Untitled step"}</strong>
       <div className="pf-step-bottom">
@@ -107,7 +107,6 @@ function StepCard({ data, selected }: NodeProps<FlowNode>) {
               >
                 <FlowStatus
                   state={execution.state}
-                  label={execution.decision}
                   timing={execution}
                 />
                 <span className="pf-executor">
@@ -339,15 +338,14 @@ export function ProcessFlow({
         steps.map((s) => (s.key === selected ? { ...s, ...patch } : s)),
       ),
     );
-  const add = (kind: Step["kind"]) => {
+  const add = () => {
     if (!onChange || steps.length >= 30) return;
     const key = nextStepKey(steps),
       predecessor = active || steps.at(-1);
     const next: Step = {
       key,
-      name: kind === "approval" ? "Review & approve" : "New step",
-      role: kind === "approval" ? "reviewer" : predecessor?.role || "worker",
-      kind,
+      name: "New step",
+      role: predecessor?.role || "worker",
       instructions: "",
       expected_output: "",
       depends_on: predecessor ? [predecessor.key] : [],
@@ -398,16 +396,9 @@ export function ProcessFlow({
               <button
                 type="button"
                 disabled={steps.length >= 30}
-                onClick={() => add("work")}
+                onClick={add}
               >
                 + Add step
-              </button>
-              <button
-                type="button"
-                disabled={steps.length >= 30}
-                onClick={() => add("approval")}
-              >
-                ◇ Add approval
               </button>
             </>
           )}
@@ -488,7 +479,7 @@ export function ProcessFlow({
               </h3>
               <p>
                 {editable
-                  ? "Start with a work step, then connect what happens next. Add approval gates when a decision is needed."
+                  ? "Start with a step, then connect what happens next. Put any review, confirmation, or approval instructions inside the relevant step."
                   : "The assigned agent follows the general instructions for the whole run."}
               </p>
               {editable && (
@@ -496,7 +487,7 @@ export function ProcessFlow({
                   <button
                     type="button"
                     className="primary"
-                    onClick={() => add("work")}
+                    onClick={add}
                   >
                     Add first step
                   </button>
@@ -580,31 +571,14 @@ export function ProcessFlow({
                   value={active.name}
                   onChange={(e) => update({ name: e.target.value })}
                 />
-                <div className="pf-two">
-                  <div>
-                    <label htmlFor={`${instanceID}-kind`}>Type</label>
-                    <select
-                      id={`${instanceID}-kind`}
-                      value={active.kind}
-                      onChange={(e) =>
-                        update({ kind: e.target.value as Step["kind"] })
-                      }
-                    >
-                      <option value="work">Work</option>
-                      <option value="approval">Approval gate</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label htmlFor={`${instanceID}-role`}>Role</label>
-                    <input
-                      id={`${instanceID}-role`}
-                      required
-                      pattern="[a-zA-Z][a-zA-Z0-9_]{0,63}"
-                      value={active.role}
-                      onChange={(e) => update({ role: e.target.value })}
-                    />
-                  </div>
-                </div>
+                <label htmlFor={`${instanceID}-role`}>Role</label>
+                <input
+                  id={`${instanceID}-role`}
+                  required
+                  pattern="[a-zA-Z][a-zA-Z0-9_]{0,63}"
+                  value={active.role}
+                  onChange={(e) => update({ role: e.target.value })}
+                />
                 <p className="pf-hint">
                   Choose the agent for this role later, in Assignments.
                 </p>
@@ -679,9 +653,7 @@ export function ProcessFlow({
             ) : (
               <>
                 <div className="pf-read-meta">
-                  <span>
-                    {active.kind === "approval" ? "Approval gate" : "Work step"}
-                  </span>
+                  <span>Step</span>
                   <span>Role: {active.role}</span>
                 </div>
                 <TimingRules step={active} steps={steps} />

@@ -6,14 +6,14 @@ Evals is an optional integration for testing immutable revisions before activati
 
 ## Model
 
-- **Process:** shared instructions, parameter definitions, approval guidance,
+- **Process:** shared instructions, parameter definitions, operating policy,
   completion criteria, and immutable procedure versions.
 - **Assignment:** a saved target (page, client, business), agent, parameter values,
   schedule, and procedure version policy.
 - **Run:** one occurrence with a snapshot of the assignment, resolved parameters,
   original owner, procedure version, delivery identity, and outcome.
 - **Step run:** an executable procedure step attached to a run. Processes stores
-  its state, progress, output, evidence, approvals, retries, and delivery history.
+  its state, progress, output, evidence, retries, and delivery history.
 
 For example, one “Publish a Patreon post” procedure can have Photography and
 Cooking assignments with different page IDs, languages, agents, and daily times.
@@ -27,13 +27,13 @@ with state filters and a selected detail view. Each process also has Overview,
 Procedure, Assignments, Triggers, and Runs tabs; its Runs tab uses the same compact
 list-and-detail layout.
 
-Run details show native step state, approvals, evidence, timing, and delivery
+Run details show native step state, evidence, timing, and delivery
 history. Agent steps also expose their execution-scoped tool calls on demand,
 including the tool's `_reason`, success/failure state, and the providing app or
 integration icon. Correlation uses the durable execution ID, so sequential steps
 sharing a persistent worker thread do not mix their tool activity.
 
-The **Processes overview** dashboard widget shows active runs, approval/blocker
+The **Processes overview** dashboard widget shows active runs, blocker
 attention, upcoming assignments, and recent outcomes across the current project.
 Its default All view orders running work before schedules and past/blocked runs.
 Four equal-height rows show the process and assignment on the left and the
@@ -139,7 +139,7 @@ Records include assignment identity and the original assignment snapshot.
 
 ## Visual process editor
 
-Overview and Procedure show work steps and approval gates as connected cards. In
+Overview and Procedure show generic steps as connected cards. In
 the editor, add steps, select a card to edit its instructions, role and required
 output, and drag between its ports to set dependencies. Connections mean every
 predecessor must finish; cycles are rejected. Select a connection to remove it,
@@ -154,17 +154,17 @@ and normalizes semantic procedure content without writing. `create` saves an
 unassigned draft. `assignment_create` separately selects executors and always
 starts paused. Process activation, assignment activation, and starting a run are
 separate actions that require explicit authorization. Readiness metadata and the
-Overview/Procedure readiness card flag approval prose that has no enforced
-`kind: approval` step.
+Overview/Procedure readiness card summarizes steps, required parameters, and
+assignments. Approval requirements are ordinary frozen policy for agents to follow.
 
 ## Collaborative workflows
 
 Leave `steps` empty for the existing single-agent behavior. To coordinate several
-agents within one occurrence, define work and approval steps in **Procedure**,
+agents within one occurrence, define generic steps in **Procedure**,
 then bind each role in **Assignments**. The assignment owner remains the run
 coordinator. Roles can map to different agents, the same agent, or a human project
-operator. Unbound work roles use the coordinator; roles used by any approval step
-default to human review.
+operator. Every unbound role uses the coordinator; human execution must be chosen
+explicitly in the assignment.
 
 For example, a daily Patreon procedure can define research → write → review →
 publish. Photography and Cooking assignments reuse these steps with their own
@@ -173,14 +173,14 @@ page parameters, schedules, coordinators, and role bindings.
 ```json
 {
   "steps": [
-    {"key":"write","name":"Write draft","role":"writer","kind":"work",
+    {"key":"write","name":"Write draft","role":"writer",
      "instructions":"Write a post for the configured page.",
      "expected_output":"Complete draft text","depends_on":[]},
-    {"key":"review","name":"Review draft","role":"reviewer","kind":"approval",
+    {"key":"review","name":"Review draft","role":"reviewer",
      "instructions":"Check the draft against the publishing policy.",
-     "expected_output":"Decision with reason","depends_on":["write"]},
-    {"key":"publish","name":"Publish","role":"publisher","kind":"work",
-     "instructions":"Publish the approved draft.",
+     "expected_output":"Review result with evidence","depends_on":["write"]},
+    {"key":"publish","name":"Publish","role":"publisher",
+     "instructions":"Publish the reviewed draft.",
      "expected_output":"Published URL","depends_on":["review"]}
   ]
 }
@@ -195,13 +195,14 @@ Assignment configuration accepts `roles`, for example:
 ```
 
 Steps without dependencies start together. Joins wait for every dependency.
-Approval steps require an explicit `approved` or `rejected` decision; only
-approval releases downstream work. Completed outputs and decisions are immutable.
+Every step completes with output evidence; completed outputs are immutable.
+If approval is required, describe it in the step instructions or procedure policy
+and let the assigned agent use the appropriate tool or communication channel.
 The run freezes the procedure, role bindings, and parameters at creation. Each
 step receives its instructions and all completed ancestor outputs.
 
 Agents read `step_get(process_id, run_id, step_id)` before acting, then report
-`step_update` with state, progress, output, error, and (for approvals) decision.
+`step_update` with state, progress, output, and error.
 Only the assigned agent can update an agent step. Human steps are completed in
 **Runs** by authenticated project operators; agents cannot approve as a human.
 Completion requires nonempty evidence; waiting/blocked/failed/cancelled reports
@@ -209,7 +210,7 @@ require a reason. Core becoming idle does not complete a step. `run_update`
 cannot bypass a structured workflow: its outcome derives from its steps.
 
 Processes is the sole execution and history system. The Runs panel shows
-executors, dependencies, outputs, decisions, and step delivery details. It also
+executors, dependencies, outputs, and step delivery details. It also
 lets the coordinator/operator call `run_cancel` with a reason.
 Cancellation stops future handoffs; work already dispatched may still finish.
 Pausing a process or assignment stops future scheduled occurrences, not a run.
@@ -282,12 +283,10 @@ global installation is stored with its project ID and appears in the global
 overview. The global overview is read-only and supports a visible-project
 selector.
 
-Structured approval steps enforce downstream handoffs. Free-text approval
-requirements remain guidance. These gates do not revoke an agent’s general
-external tool permissions or verify its reported evidence against external apps.
-Human roles mean any authenticated project operator, not a named person; audit
-records identify them as `operator`. Rejection fails the run; rework loops are
-not supported yet. Correct the inputs/procedure and start a new run. External effects need integration-specific
+Dependencies enforce downstream handoffs. Approval requirements remain frozen
+procedure policy, not a Processes-specific gate or decision type. Human roles mean
+any authenticated project operator, not a named person; audit records identify
+them as `operator`. External effects need integration-specific
 deduplication/reconciliation; event delivery alone cannot guarantee exactly-once
 publication. Direct history is currently returned without pagination.
 
@@ -312,13 +311,14 @@ bun run scripts/build-panels.ts --app processes
 
 Tests cover assignment isolation, snapshots across edits and retries, typed
 parameters, independent schedule overlap/pause, version following and pinning,
-legacy migration, native execution without external work apps, and panel interactions, plus role handoffs, parallel joins, frozen approval
-outputs, rejected runs, workflow cancellation, and scoped executor authorization.
+legacy migration, native execution without external work apps, and panel interactions,
+plus role handoffs, parallel joins, generic human steps, workflow cancellation,
+and scoped executor authorization.
 
 
 Tier 3 live-LLM smoke tests are in [scenarios/README.md](scenarios/README.md).
 Run `bun run scenarios/run.ts` from this app directory to use Codex /
-`gpt-5.6-terra` and verify persisted direct-run, assignment, and approval-gate
+`gpt-6-sol` and verify persisted direct-run, assignment, and generic-step
 outcomes. These are separate from the deterministic Go integration suite.
 
 
@@ -358,8 +358,8 @@ Each structured step can define an optional `start_after` and `due_after` rule.
 deadline, which flags overdue work without delaying or cancelling it. Rules use
 `after: "run_start"` or `after: "step_completed"` with a `step_key` referencing a
 step dependency or its ancestor. Offsets are nonnegative whole `minutes`, `hours`,
-or `days`, at most 365 days; a day is 24 hours. All dependencies and approvals
-must still finish even if the start time has already passed.
+or `days`, at most 365 days; a day is 24 hours. All dependencies must still
+finish even if the start time has already passed.
 
 For “send an email now, then send a follow-up 10 minutes later,” define two steps,
 make the second depend on the first, and add this to the second:

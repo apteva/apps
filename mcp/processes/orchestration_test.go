@@ -40,7 +40,7 @@ func TestJoinWaitsForAllPredecessors(t *testing.T) {
 	}
 }
 
-func TestStepReadIncludesApprovalEvidenceAndAncestors(t *testing.T) {
+func TestStepReadIncludesDependencyEvidenceAndAncestors(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	finishStep(t, a, p, r, "research", "agent:8:t", "Research evidence", "")
 	finishStep(t, a, p, r, "write", "agent:7:t", "Draft v1", "")
@@ -53,7 +53,7 @@ func TestStepReadIncludesApprovalEvidenceAndAncestors(t *testing.T) {
 	got := raw.(map[string]any)
 	deps := got["dependencies"].(map[string]DependencyEvidence)
 	review := stepBy(t, a, r, "review")
-	if len(deps) != 3 || deps["review"].ID != review.ID || deps["review"].Kind != "approval" || deps["review"].Decision != "approved" || deps["review"].State != "completed" || !deps["review"].Direct {
+	if len(deps) != 3 || deps["review"].ID != review.ID || deps["review"].State != "completed" || !deps["review"].Direct {
 		t.Fatalf("incomplete review evidence: %#v", deps)
 	}
 	if deps["write"].Direct || deps["write"].Output != "Draft v1" || deps["research"].Output != "Research evidence" {
@@ -64,21 +64,21 @@ func TestStepReadIncludesApprovalEvidenceAndAncestors(t *testing.T) {
 	}
 }
 
-func TestDependencyEvidencePreservesPendingAndRejectedStates(t *testing.T) {
+func TestDependencyEvidencePreservesPendingStates(t *testing.T) {
 	target := StepRun{Key: "publish", Definition: Step{DependsOn: []string{"review", "draft"}}}
 	all := []StepRun{
-		{ID: "review-id", Key: "review", State: "completed", Decision: "rejected", Output: "needs work", Definition: Step{Kind: "approval", DependsOn: []string{"draft"}}},
-		{ID: "draft-id", Key: "draft", State: "pending", Definition: Step{Kind: "work"}},
+		{ID: "review-id", Key: "review", State: "completed", Output: "needs work", Definition: Step{DependsOn: []string{"draft"}}},
+		{ID: "draft-id", Key: "draft", State: "pending", Definition: Step{}},
 		{ID: "other-id", Key: "unrelated", State: "completed", Output: "not an ancestor"},
 	}
 	deps := dependencyEvidence(target, all)
-	if len(deps) != 2 || deps["review"].Decision != "rejected" || deps["draft"].State != "pending" || !deps["draft"].Direct {
+	if len(deps) != 2 || deps["review"].State != "completed" || deps["draft"].State != "pending" || !deps["draft"].Direct {
 		t.Fatalf("incorrect evidence: %#v", deps)
 	}
 	if _, ok := dependencyOutputs(target, all)["draft"]; ok {
 		t.Fatal("pending dependency exposed as completed output")
 	}
 	if dependenciesReady(target, all) {
-		t.Fatal("rejected approval released work")
+		t.Fatal("pending dependency released work")
 	}
 }

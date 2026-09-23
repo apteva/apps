@@ -128,10 +128,6 @@
     0 0 0 3px color-mix(in srgb, var(--pc-accent) 22%, transparent),
     0 7px 20px #0002;
 }
-.ap-processes .pf-step.approval {
-  border-top: 3px solid var(--pc-accent);
-  padding-top: 13px;
-}
 .ap-processes .pf-step-top {
   display: flex;
   align-items: center;
@@ -152,10 +148,6 @@
   background: color-mix(in srgb, var(--pc-accent) 10%, transparent);
   padding: 3px 7px;
   border-radius: 5px;
-}
-.ap-processes .pf-step.approval .pf-kind {
-  color: var(--pf-warning);
-  background: color-mix(in srgb,var(--pf-warning) 10%,transparent);
 }
 .ap-processes .pf-step-title {
   font-size: 14px;

@@ -288,7 +288,6 @@ const workflowSteps = [
     key: "write",
     name: "Write post",
     role: "writer",
-    kind: "work",
     instructions: "Write the draft",
     expected_output: "Draft",
     depends_on: [],
@@ -297,22 +296,20 @@ const workflowSteps = [
     key: "review",
     name: "Review post",
     role: "reviewer",
-    kind: "approval",
     instructions: "Review the draft",
-    expected_output: "Decision",
+    expected_output: "Review findings",
     depends_on: ["write"],
   },
   {
     key: "publish",
     name: "Publish post",
     role: "publisher",
-    kind: "work",
     instructions: "Publish approved draft",
     expected_output: "URL",
     depends_on: ["review"],
   },
 ];
-test("workflow template creates editable dependencies and approval gate", async () => {
+test("workflow template creates editable generic dependencies", async () => {
   await mount({});
   await click("+ New process");
   await click("Use research → write → review → publish");
@@ -323,9 +320,7 @@ test("workflow template creates editable dependencies and approval gate", async 
   expect(review).toBeTruthy();
   await act(async () => review.click());
   const inspector = document.querySelector(".pf-inspector")!;
-  expect(inspector.querySelector<HTMLSelectElement>("select")?.value).toBe(
-    "approval",
-  );
+  expect(inspector.querySelector('label[for$="-kind"]')).toBeNull();
   expect(
     inspector.querySelector<HTMLInputElement>('input[id$="-role"]')?.value,
   ).toBe("reviewer");
@@ -339,7 +334,7 @@ test("workflow template creates editable dependencies and approval gate", async 
   expect(document.querySelectorAll(".pf-step").length).toBe(3);
   expect(document.querySelector('[aria-label="Step 3: Publish"]')).toBeTruthy();
 });
-test("assignment saves agent role bindings and defaults approval to human", async () => {
+test("assignment saves agent role bindings and defaults every role to owner", async () => {
   await mount(
     {},
     {
@@ -352,7 +347,7 @@ test("assignment saves agent role bindings and defaults approval to human", asyn
   await click("Edit assignment");
   expect(
     document.querySelector<HTMLSelectElement>("#role-reviewer")?.value,
-  ).toBe("human");
+  ).toBe("7");
   const select = document.querySelector<HTMLSelectElement>("#role-writer")!;
   await act(async () => {
     select.value = "8";
@@ -382,7 +377,7 @@ test("assignment saves agent role bindings and defaults approval to human", asyn
     agent_id: 8,
   });
 });
-test("workflow history offers human review only after predecessor completion", async () => {
+test("workflow history offers a generic human step after predecessor completion", async () => {
   await mount({
     direct_runs: [
       {
@@ -411,16 +406,15 @@ test("workflow history offers human review only after predecessor completion", a
   expect(document.body.textContent).toContain("Draft evidence");
   expect(
     Array.from(document.querySelectorAll("button")).filter(
-      (b) => b.textContent === "Review & decide",
+      (b) => b.textContent === "Complete human step",
     ).length,
   ).toBe(1);
-  expect(document.body.textContent).not.toContain("Complete human step");
-  await click("Review & decide");
+  await click("Complete human step");
   expect(document.body.textContent).toContain("Completed inputs");
   expect(
     document.querySelector<HTMLButtonElement>("button.primary:disabled"),
   ).toBeTruthy();
-  expect(document.body.textContent).toContain("Reject & stop run");
+  expect(document.body.textContent).not.toContain("Reject & stop run");
 });
 
 test("main Runs tab browses executions across processes", async () => {
