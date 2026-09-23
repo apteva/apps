@@ -962,6 +962,8 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	case conversationID != "":
 		ch, cancel = a.hub.subscribeConversation(conversationID)
 		frames, cancelFrames = a.hub.subscribeFrames(conversationID)
+		defer cancel()
+		defer cancelFrames()
 		durableCursor, _ = strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
 		if durableCursor > 0 {
 			for {
@@ -979,12 +981,14 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			flusher.Flush()
 		}
+		if a.streamer != nil {
+			writeStreamSSE(w, a.streamer.snapshot(conversationID))
+		}
 	case r.URL.Query().Get("scope") == "user":
 		ch, cancel = a.hub.subscribeUser(projectID + ":" + fmt.Sprint(userID))
 	}
-	defer cancel()
-	if cancelFrames != nil {
-		defer cancelFrames()
+	if cancelFrames == nil {
+		defer cancel()
 	}
 	flusher.Flush()
 
@@ -996,6 +1000,14 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-heartbeat.C:
+			// Repair dropped ephemeral frames as well as reconnects. A quiet
+			// model step must retain feedback; a dropped idle frame must settle.
+			if conversationID != "" && a.streamer != nil {
+				if _, err := a.authorizeConversation(r, conversationID); err != nil {
+					return
+				}
+				writeStreamSSE(w, a.streamer.snapshot(conversationID))
+			}
 			fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case <-r.Context().Done():

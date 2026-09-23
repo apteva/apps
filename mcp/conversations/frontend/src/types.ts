@@ -22,6 +22,7 @@ export interface CardComponent {
 }
 
 export interface Message {
+ phase?: string;
  revision?: number;
   id: number;
   conversation_id: string;
@@ -45,9 +46,11 @@ export interface ToolActivity {
 export interface ResponseProgress {
  phase: "thinking" | "preparing" | "preparing_tool" | "running" | "continuing" | "idle";
  run_id: string; revision: number; after_message_id: number; started_at: string;
- tool_name?: string; call_id?: string;
+ tool_name?: string; call_id?: string; tool_started_at?: string;
 }
 export interface StreamFrame {
+ snapshot?: boolean;
+ frames?: StreamFrame[];
  response_progress?: ResponseProgress;
 
   created_at?: string;

@@ -24,7 +24,9 @@ export interface ToolActivity {
 
 export const MESSAGE_GROUP_GAP_MS = 5 * 60_000;
 export const TIME_MARKER_GAP_MS = 15 * 60_000;
+export interface TimelineStream { id: string; text: string; agentId?: number; startedAt: number }
 export type ChatTimelineItem =
+  | { kind: "stream"; key: string; ts: number; endTs: number; stream: TimelineStream }
   | { kind: "message"; key: string; ts: number; endTs: number; message: ChatMessageRow; compactBefore: boolean }
   | { kind: "tool"; key: string; ts: number; endTs: number; tool: ToolActivity }
   | { kind: "toolGroup"; key: string; ts: number; endTs: number; tools: ToolActivity[]; parallel: boolean }
@@ -54,11 +56,14 @@ export function buildChatTimeline(
   messages: ChatMessageRow[],
   tools: Iterable<ToolActivity>,
   now = Date.now(),
+  streams: TimelineStream[] = [],
 ): ChatTimelineItem[] {
   type RawItem =
+    | { kind: "stream"; ts: number; stream: TimelineStream }
     | { kind: "message"; ts: number; message: ChatMessageRow }
     | { kind: "tool"; ts: number; tool: ToolActivity };
   const raw: RawItem[] = [
+    ...streams.map(stream => ({kind: "stream" as const, ts: stream.startedAt, stream})),
     ...messages.map((message) => ({
       kind: "message" as const,
       ts: Date.parse(message.created_at) || 0,
@@ -91,6 +96,11 @@ export function buildChatTimeline(
   };
 
   for (const item of raw) {
+    if (item.kind === "stream") {
+      flushTools();
+      content.push({kind:"stream", key:`stream:${item.stream.id}`, ts:item.ts, endTs:item.ts, stream:item.stream});
+      continue;
+    }
     if (item.kind === "message") {
       flushTools();
       const previous = content[content.length - 1];

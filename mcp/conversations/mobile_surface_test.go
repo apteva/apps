@@ -221,6 +221,7 @@ func TestMobileSSEUsesNamedRevisionEventsAndReplaysUpdates(t *testing.T) {
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/stream?chat_id="+conv.ID+"&since="+strconv.FormatInt(initialRevision, 10), nil)
+	app.streamer.emitAck(conv.ID, "chat-"+conv.ID, 41, added.ID)
 	authorizeTestRequest(request)
 	ctx, cancel := context.WithCancel(request.Context())
 	request = request.WithContext(ctx)
@@ -247,6 +248,9 @@ func TestMobileSSEUsesNamedRevisionEventsAndReplaysUpdates(t *testing.T) {
 	}
 
 	body := writer.String()
+	if !strings.Contains(body, `"snapshot":true`) || !strings.Contains(body, `"phase":"thinking"`) {
+		t.Fatalf("reconnect did not restore current response progress: %s", body)
+	}
 	if strings.Count(body, "event: message\n") != 2 ||
 		!strings.Contains(body, "id: "+strconv.FormatInt(updated.Revision, 10)+"\n") ||
 		!strings.Contains(body, "id: "+strconv.FormatInt(added.Revision, 10)+"\n") ||

@@ -4,7 +4,7 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline, isVisibleChatTool } from "./toolActivityModel";
+import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -1157,6 +1157,7 @@ function MessageBody({
 }
 
 interface StreamBubbleState {
+ done?: boolean;
  optimistic?: boolean;
  threadId?: string;
  createdAt?: number;
@@ -1179,7 +1180,7 @@ function normalizeStreamText(value: string): string {
   return value.replace(/\r\n/g, "\n").trim();
 }
 
-type LiveResponseProgress = ResponseProgress & {agent_id?: number; thread_id?: string; updatedAt: number};
+type LiveResponseProgress = ResponseProgress & {agent_id?: number; thread_id?: string; updatedAt: number; sourceAt: number};
 
 function useConversationTransport(conversationID: string, projectId: string) {
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -1202,6 +1203,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
   const generationRef = useRef(0);
   const loadingOlderRef = useRef(false);
   const lastUserIdRef=useRef(0);
+  const messagesRef = useRef<Message[]>([]);
   const streamRef = useRef(new Map<string, StreamBubbleState & { updatedAt: number }>());
   const settledRef = useRef(new Map<string, number>());
   const publishBubbles = useCallback(() => setBubbles([...streamRef.current.values()]), []);
@@ -1217,6 +1219,9 @@ function useConversationTransport(conversationID: string, projectId: string) {
   const mergeMessages = useCallback((incoming: Message[]) => {
     const valid = incoming.filter(m => m.conversation_id === conversationID);
     if (!valid.length) return;
+    const known = new Map(messagesRef.current.map(m=>[m.id,m]));
+    for (const m of valid) if ((m.revision ?? 0) >= (known.get(m.id)?.revision ?? 0)) known.set(m.id,m);
+    messagesRef.current = [...known.values()];
     for(const m of valid)if(m.role==="user")lastUserIdRef.current=Math.max(lastUserIdRef.current,m.id);
     for (const m of valid) {
       // A new approval card also fulfils the pending response. Other cards
@@ -1252,6 +1257,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     let cancelled = false, loading = false, initialized = false, cursor = 0;
     setMessages([]); setActivities([]); setProgresses([]); setBubbles([]); setConnected(false); setHistoryError(""); setHasOlder(false);
     streamRef.current.clear(); settledRef.current.clear(); beforeRef.current = 0;lastUserIdRef.current=0;
+    messagesRef.current=[];
     let paintHandle: number | undefined;
     let queuedActivities: ToolActivity[] = [];
     const flushActivities = () => {
@@ -1264,12 +1270,21 @@ function useConversationTransport(conversationID: string, projectId: string) {
     };
     const applyFrame = (frame: StreamFrame) => {
       if (cancelled || frame.chat_id !== conversationID) return;
+      if (frame.snapshot) {
+        // A snapshot cannot cancel a send still in flight or remove completed
+        // text waiting on the separate durable-message queue.
+        for (const [key,value] of streamRef.current) if (!value.optimistic && !(value.done && value.text)) streamRef.current.delete(key);
+        setProgresses([]);
+        for (const current of frame.frames ?? []) applyFrame(current);
+        publishBubbles();
+        return;
+      }
       if (frame.response_progress || (!frame.tool_activity && !frame.done)) {
         for (const [key,value] of streamRef.current) if (value.optimistic && value.agentId === frame.agent_id) streamRef.current.delete(key);
         publishBubbles();
       }
       if (frame.response_progress) {
-        const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now()};
+        const progress = {...frame.response_progress,agent_id:frame.agent_id,thread_id:frame.thread_id,updatedAt:Date.now(),sourceAt:Date.parse(frame.created_at ?? "") || Date.now()};
         setProgresses(current => {
           const existing = current.find(p=>p.agent_id===progress.agent_id && p.thread_id===progress.thread_id);
           if (existing && existing.revision >= progress.revision) return current;
@@ -1290,16 +1305,26 @@ function useConversationTransport(conversationID: string, projectId: string) {
       }
       const key = `${frame.agent_id ?? 0}:${frame.thread_id ?? ""}:${frame.call_id}:${frame.run_id ?? ""}`;
       if (frame.done) {
+        settledRef.current.set(key, Date.now());
         for (const [k,v] of streamRef.current) if ((frame.run_id ? k === key : v.callId === frame.call_id) && (!frame.agent_id || v.agentId === frame.agent_id)) {
-          streamRef.current.delete(k); settledRef.current.set(k, Date.now());
+          // Completion and durable messages use independent SSE queues. Keep
+          // the text until its replacement arrives, without hiding Thinking.
+          if (v.text) streamRef.current.set(k,{...v,done:true});
+          else streamRef.current.delete(k);
+          settledRef.current.set(k, Date.now());
         }
       } else if (!settledRef.current.has(key)) {
         if (frame.phase === "acknowledgement") setProgresses(current=>current.filter(p=>p.agent_id!==frame.agent_id || p.run_id===frame.call_id));
         const afterMessageId=frame.after_message_id ?? Math.max(lastUserIdRef.current,...[...streamRef.current.values()].filter(v=>v.agentId===frame.agent_id).map(v=>v.afterMessageId ?? 0));
+        if (frame.text && messagesRef.current.some(m=>m.role==="agent" && m.agent_id===frame.agent_id && m.id>afterMessageId && !m.component_kind && normalizeStreamText(m.content)===normalizeStreamText(frame.text))) {
+          streamRef.current.delete(key); settledRef.current.set(key,Date.now()); publishBubbles(); return;
+        }
         if (frame.phase !== "acknowledgement") for (const [k,v] of streamRef.current) {
           if (v.agentId === frame.agent_id && v.phase === "acknowledgement") streamRef.current.delete(k);
         }
-        streamRef.current.set(key, {threadId:frame.thread_id,createdAt:streamRef.current.get(key)?.createdAt ?? (Date.parse(frame.created_at ?? "") || Date.now()),afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
+        const previous = streamRef.current.get(key);
+        if (previous?.text && previous.text.length > frame.text.length) return; // cumulative snapshot/live overlap
+        streamRef.current.set(key, {threadId:frame.thread_id,createdAt:previous?.createdAt ?? (Date.parse(frame.created_at ?? "") || Date.now()),afterMessageId,runId:frame.run_id,callId: frame.call_id, agentId: frame.agent_id, text:frame.text, phase:frame.phase, updatedAt:Date.now()});
       }
       publishBubbles();
     };
@@ -1330,7 +1355,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
       onFrame: applyFrame,
       onResync: () => { void load(); },
       onOpen: () => { if (!cancelled) { setConnected(true); void load(); } },
-      onError: () => { if (!cancelled) { setConnected(false); setProgresses([]); streamRef.current.clear(); publishBubbles(); } },
+      onError: () => { if (!cancelled) setConnected(false); },
     });
     void load();
     const poll = window.setInterval(() => {
@@ -1342,7 +1367,7 @@ function useConversationTransport(conversationID: string, projectId: string) {
     }, 5000);
     return () => { cancelled=true; generationRef.current++; window.clearInterval(poll); if (paintHandle!==undefined) window.cancelAnimationFrame(paintHandle); es.close(); };
   }, [conversationID, projectId, mergeMessages, publishBubbles]);
-  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles[0] ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
+  return { messages, activities, progresses, beginResponse, bubbles, bubble:bubbles.find(b=>!b.done) ?? null, connected, mergeMessages, hasOlder, loadOlder, historyError };
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
@@ -1426,7 +1451,11 @@ export function ConversationChat({
   const runningActivity = activities.find(item => item.status === "running");
   const responseProgress = progresses.find(p=>p.phase!=="idle");
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
-  const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
+  const preparingTools: TimelineTool[] = progresses.flatMap(p => p.phase === "preparing_tool" && p.tool_name && isVisibleChatTool(p.tool_name)
+    && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
+    ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
+    : []);
+  const timeline = buildChatTimeline(messages,[...activities.map(toChatToolActivity),...preparingTools],Date.now(),bubbles.filter(b=>b.text).map(b=>({id:`${b.agentId}:${b.callId}:${b.runId}`,text:b.text,agentId:b.agentId,startedAt:b.createdAt ?? Date.now()}))).filter(item => item.kind !== "day" && item.kind !== "time");
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
@@ -1599,7 +1628,7 @@ export function ConversationChat({
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
-        /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
+        /> : item.kind === "stream" ? <div key={item.key}>{agentName(item.stream.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(item.stream.agentId)}</p>}<StreamingBubble text={item.stream.text}/></div> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
  {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
    <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
    <button type="button" disabled={archived} className="ml-2 text-accent disabled:opacity-40" onClick={() => retryDelivery(d)}>{t(d.status === "ambiguous" ? "chat.retryDuplicate" : "chat.retryDelivery")}</button>
@@ -1607,14 +1636,10 @@ export function ConversationChat({
  </div>;})())}
       </>}
       hasMessages={timeline.length > 0}
-      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={b.optimistic || phase === "preparing"} />}</div>; })}
+      streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (b.text || phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId)) return null; return <ThinkingMessagePlaceholder key={`${b.agentId}:${b.callId}:${b.runId}`} preparing={b.optimistic}/>; })}
         {progresses.map(p => {
-          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text)) return null;
-          if (p.phase === "preparing_tool" && p.tool_name) {
-            if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;
-            return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry} showCompletion={showToolCompletion} showDuration={showToolDuration}/>;
-          }
-          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase==="preparing" || p.phase==="preparing_tool"}/>;
+          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}
       emptyMessage={emptyMessage}

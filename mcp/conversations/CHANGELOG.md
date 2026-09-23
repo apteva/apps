@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.24.5 — 2026-09-23
+
+- Keep streamed replies, preparing tools, executing tools, and saved messages in one chronological transcript. Retain completed streamed text until its durable replacement arrives.
+- Publish immediate response progress, restore Thinking after acknowledgements and completed calls, and reject delayed preparation events that would revive completed tools.
+- Restore current response progress and partial text on SSE reconnect; periodic snapshots repair dropped ephemeral frames without changing durable message cursors.
+- Rebuild native widget/panel bundles as well as app-served assets. Browser tests now load the actual packaged dashboard widget, and release tests reject stale compiled panel sources.
+- Add a sanitized replay of the reported Processes telemetry plus delayed-delivery, reconnect, streaming-order, and shipped-surface lifecycle regressions. Pin App SDK v0.88.0.
+
 ## 0.24.4 — 2026-09-23
 
 - Keep grouped tool activity compact when many apps or integrations are involved: show the source for the visible latest action in front, with at most one earlier source peeking behind it. Expanding the group still shows every call and its own source icon.

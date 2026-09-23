@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +27,34 @@ func TestUIModuleEntriesAreSelfContained(t *testing.T) {
 		}
 		if relativeImport.Match(body) {
 			t.Fatalf("%s imports a relative module; project/install scope would be lost", name)
+		}
+		// Source maps are part of the release. Verify they describe today's
+		// source, not stale compiled widgets left behind by a frontend build.
+		mapped, err := os.ReadFile(filepath.Join("ui", name+".map"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sourceMap struct {
+			Sources  []string `json:"sources"`
+			Contents []string `json:"sourcesContent"`
+		}
+		if err := json.Unmarshal(mapped, &sourceMap); err != nil {
+			t.Fatal(err)
+		}
+		if len(sourceMap.Sources) != len(sourceMap.Contents) {
+			t.Fatal("missing embedded panel sources")
+		}
+		for i, source := range sourceMap.Sources {
+			if strings.Contains(source, "node_modules/") {
+				continue
+			}
+			current, err := os.ReadFile(filepath.Join("ui", source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(current) != sourceMap.Contents[i] {
+				t.Fatalf("%s has stale %s; run scripts/build-panels.ts --app conversations", name, source)
+			}
 		}
 	}
 

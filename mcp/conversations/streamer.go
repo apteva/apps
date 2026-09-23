@@ -36,6 +36,8 @@ import (
 // StreamFrame mirrors channel-chat's wire shape so the dashboard's
 // existing streaming-bubble machinery ports to the panel unchanged.
 type StreamFrame struct {
+	Snapshot       bool              `json:"snapshot,omitempty"`
+	Frames         []StreamFrame     `json:"frames,omitempty"`
 	Progress       *ResponseProgress `json:"response_progress,omitempty"`
 	Activity       *ToolActivity     `json:"tool_activity,omitempty"`
 	AfterMessageID int64             `json:"after_message_id,omitempty"`
@@ -52,6 +54,8 @@ type StreamFrame struct {
 }
 
 type streamState struct {
+	agentID        int64
+	afterMessageID int64
 	runID          string
 	buf            strings.Builder
 	parser         flatStringParser
@@ -221,6 +225,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 		return
 	}
 	st := s.runLocked(key)
+	s.identifyStream(st, agentID, threadID, conversationID, callID, ts)
 	if st.buf.Len()+len(chunk) > maxMessageBytes {
 		delete(s.buffers, key)
 		delete(s.lastEmit, key)
@@ -245,7 +250,7 @@ func (s *streamer) onChunk(agentID int64, threadID, conversationID, dataJSON str
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID,
 	})
 }
 
@@ -283,6 +288,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 		return
 	}
 	st := s.runLocked(key)
+	s.identifyStream(st, agentID, threadID, conversationID, callID, ts)
 	changed := text != s.lastEmit[key]
 	if changed {
 		s.lastEmit[key] = text
@@ -293,7 +299,7 @@ func (s *streamer) onFinalArgs(agentID int64, threadID, conversationID, dataJSON
 	}
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
-		CallID: callID, RunID: st.runID, Text: text, CreatedAt: ts,
+		CallID: callID, RunID: st.runID, Text: text, CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID,
 	})
 }
 
@@ -346,14 +352,53 @@ func (s *streamer) emitAck(conversationID, threadID string, agentID int64, after
 		afterID = afterMessageIDs[0]
 	}
 	s.responses[responseProgressKey(conversationID, agentID)] = &responseProgressState{ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, AfterMessageID: afterID, StartedAt: time.Now()}, agentID: agentID, threadID: threadID, chatID: conversationID, touched: time.Now()}
+	s.progressSeq++
+	s.responses[responseProgressKey(conversationID, agentID)].Revision = s.progressSeq
+	progress := s.progressFrame(s.responses[responseProgressKey(conversationID, agentID)])
 	s.pendingAcks[conversationID+":"+strconv.FormatInt(agentID, 10)] = id
 	s.ackTimes[conversationID+":"+strconv.FormatInt(agentID, 10)] = time.Now()
 	s.mu.Unlock()
 	s.publish(StreamFrame{
 		Type: "stream", ConversationID: conversationID, AgentID: agentID, ThreadID: threadID,
 		CallID: id, Phase: "acknowledgement", AfterMessageID: afterID,
+		Progress:  progress.Progress,
 		CreatedAt: time.Now(),
 	})
+}
+
+// Called with mu held. The first source timestamp anchors text in the same
+// timeline as durable messages and tools, including after reconnect.
+func (s *streamer) identifyStream(st *streamState, agent int64, thread, chat, call string, ts time.Time) {
+	if st.conversationID != "" {
+		return
+	}
+	st.agentID, st.threadID, st.conversationID, st.callID = agent, thread, chat, call
+	st.createdAt = ts
+	if p := s.responses[responseProgressKey(chat, agent)]; p != nil {
+		st.afterMessageID = p.AfterMessageID
+	}
+}
+
+// Subscribe before taking this snapshot so events racing the snapshot are
+// queued. Stream snapshots never participate in the durable change cursor.
+func (s *streamer) snapshot(chat string) StreamFrame {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	// Older clients ignore this as an unrelated done frame rather than
+	// accidentally rendering the snapshot envelope as an empty text bubble.
+	frame := StreamFrame{Type: "stream", ConversationID: chat, Snapshot: true, Done: true, CallID: "snapshot", CreatedAt: time.Now()}
+	for _, p := range s.responses {
+		if p.chatID == chat {
+			frame.Frames = append(frame.Frames, s.progressFrame(p))
+		}
+	}
+	for key, st := range s.buffers {
+		if st.conversationID == chat && s.lastEmit[key] != "" {
+			frame.Frames = append(frame.Frames, StreamFrame{Type: "stream", ConversationID: chat, AgentID: st.agentID, ThreadID: st.threadID, CallID: st.callID, RunID: st.runID, Text: s.lastEmit[key], CreatedAt: st.createdAt, AfterMessageID: st.afterMessageID})
+		}
+	}
+	return frame
 }
 
 // settleAck settles the conversation's outstanding ack, if any. A

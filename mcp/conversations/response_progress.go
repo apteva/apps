@@ -16,6 +16,7 @@ type ResponseProgress struct {
 	StartedAt      time.Time `json:"started_at"`
 	ToolName       string    `json:"tool_name,omitempty"`
 	CallID         string    `json:"call_id,omitempty"`
+	ToolStartedAt  time.Time `json:"tool_started_at,omitempty"`
 }
 type responseProgressState struct {
 	ResponseProgress
@@ -24,8 +25,8 @@ type responseProgressState struct {
 	chatID     string
 	lastCallID string
 	hadTools   bool
-	hadReply   bool
 	touched    time.Time
+	lastEvent  time.Time
 }
 
 func responseProgressKey(chat string, agent int64) string {
@@ -55,10 +56,18 @@ func (s *streamer) finishResponse(chat string, agent int64) {
 }
 func (s *streamer) intermediateReply(chat string, agent int64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if p := s.responses[responseProgressKey(chat, agent)]; p != nil {
-		p.hadReply = true
+		p.Phase = "thinking"
+		p.ToolName, p.CallID = "", ""
+		s.progressSeq++
+		p.Revision = s.progressSeq
+		p.touched = time.Now()
+		frame := s.progressFrame(p)
+		s.mu.Unlock()
+		s.publish(frame)
+		return
 	}
+	s.mu.Unlock()
 }
 func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw string, ts time.Time) {
 	var d struct {
@@ -70,16 +79,18 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 	}
 	_ = json.Unmarshal([]byte(raw), &d)
 	name := firstNonEmptyString(d.Name, d.Tool)
-	if event == "llm.error" || event == "llm.err" || event == "thread.done" || (event == "tool.call" && (name == "pace" || name == "done")) {
-		s.settleAck(chat, agent)
-		s.finishResponse(chat, agent)
-		return
-	}
 	s.mu.Lock()
 	s.pruneLocked()
 	p := s.responses[responseProgressKey(chat, agent)]
-	if p == nil || p.threadID != thread {
+	if p == nil || p.threadID != thread || ts.Before(p.lastEvent) {
 		s.mu.Unlock()
+		return
+	}
+	p.lastEvent = ts
+	if event == "llm.error" || event == "llm.err" || event == "thread.done" || (event == "tool.call" && (name == "pace" || name == "done")) {
+		s.mu.Unlock()
+		s.settleAck(chat, agent)
+		s.finishResponse(chat, agent)
 		return
 	}
 	phase := p.Phase
@@ -88,8 +99,6 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		phase = "thinking"
 		if p.hadTools {
 			phase = "continuing"
-		} else if p.hadReply {
-			phase = "preparing"
 		}
 		p.ToolName = ""
 		p.CallID = ""
@@ -101,6 +110,9 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		phase = "preparing_tool"
 		p.ToolName = name
 		p.CallID = firstNonEmptyString(d.ID, d.CallID, d.ToolCallID)
+		if p.CallID != p.lastCallID || p.Phase != "preparing_tool" {
+			p.ToolStartedAt = ts
+		}
 	case "tool.result":
 		if !visibleActivityTool(name) || !p.hadTools {
 			s.mu.Unlock()

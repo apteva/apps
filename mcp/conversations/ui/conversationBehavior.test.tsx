@@ -105,7 +105,10 @@ test("two agents sharing a provider call id keep independent streaming bubbles",
  await act(async()=>{emit(41,"Alpha progress");emit(42,"Beta progress");});
  expect(element.textContent).toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
  await act(async()=>emit(41,"",true));
- expect(element.textContent).not.toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
+ expect(element.textContent).toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
+ await act(async()=>events.emit({...message(1,"a","Alpha progress"),role:"agent",agent_id:41}));
+ expect(element.textContent!.match(/Alpha progress/g)).toHaveLength(1);
+ expect(element.textContent).toContain("Beta progress");
  await act(async()=>emit(41,"New response",false,"2"));
  expect(element.textContent).toContain("New response");
 });
@@ -350,4 +353,75 @@ test("completed tool hands progress back to thinking without continuing to glow"
  expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
  expect(element.querySelector(".chat-tool-activity-continuing")).toBeNull();
  expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+});
+
+test("Processes trace: acknowledgement precedes grouped tools, every model gap thinks, final text survives done-before-message", async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const at=(seconds:number)=>new Date(Date.parse("2026-09-23T14:36:42.661Z")+seconds*1000).toISOString();
+ let revision=0;
+ const progress=async(phase:string,seconds:number,call_id="",tool_name="")=>frame({created_at:at(seconds),response_progress:{phase,run_id:"run-list",revision:++revision,after_message_id:863,started_at:at(0),tool_started_at:at(seconds),call_id,tool_name}});
+ await act(async()=>events.emit({...message(863,"a","List processes"),created_at:at(0)}));
+ await progress("thinking",0);
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await frame({call_id:"ack-text",run_id:"1",text:"I will check the processes.",created_at:at(6),after_message_id:863});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ // SSE stream completion can beat its durable replacement on the other queue.
+ await frame({call_id:"ack-text",run_id:"1",done:true});
+ await progress("thinking",6.28);
+ expect(element.textContent).toContain("I will check the processes.");
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ const toolTimes=[17.05,21.7,30.62];
+ for (let i=0;i<3;i++) {
+   const call_id=`tool-${i}`, seconds=toolTimes[i]!;
+   await progress("preparing_tool",seconds-0.2,call_id,"apteva-server_app_tool_call");
+   expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+   // Preparation stays in the same group as the preceding completed calls.
+   expect(element.querySelectorAll(".chat-tool-activity")).toHaveLength(1);
+   const tool={id:100+i,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id,name:"apteva-server_app_tool_call",reason:`Lookup ${i+1}`,status:"running",started_at:at(seconds),ended_at:"",revision:1};
+   await frame({tool_activity:tool}); await settle();
+   expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+   expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+   expect(element.textContent!.indexOf("I will check")).toBeLessThan(element.textContent!.indexOf(`Lookup ${i+1}`));
+   await frame({tool_activity:{...tool,status:"completed",ended_at:at(seconds+.018),revision:2}});
+   await progress("continuing",seconds+.02); await settle();
+   expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+   expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+   // A delayed preparing frame must not revive a completed call or go blank.
+   await progress("preparing_tool",seconds-.1,call_id,tool.name);
+   expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ }
+ await act(async()=>events.emit({...message(864,"a","I will check the processes."),role:"agent",agent_id:41,phase:"acknowledgement",created_at:at(6.27)}));
+ expect(element.textContent!.match(/I will check/g)).toHaveLength(1);
+ await progress("continuing",30.66);
+ await frame({call_id:"final-text",run_id:"2",text:"There is one",created_at:at(32.58),after_message_id:863});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await frame({call_id:"final-text",run_id:"2",text:"There is one process.",created_at:at(32.58),after_message_id:863});
+ await frame({call_id:"final-text",run_id:"2",done:true});
+ await progress("idle",35.59);
+ expect(element.textContent).toContain("There is one process.");
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await act(async()=>events.emit({...message(865,"a","There is one process."),role:"agent",agent_id:41,phase:"final",created_at:at(35.59)}));
+ expect(element.textContent!.match(/There is one process/g)).toHaveLength(1);
+ expect(element.textContent!.indexOf("Lookup 3")).toBeLessThan(element.textContent!.indexOf("There is one process"));
+});
+
+test("reconnect restores authoritative progress/text and ignores snapshot overlap and durable-first text", async () => {
+ await render();const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const progress={chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"thinking",run_id:"run",revision:4,after_message_id:10,started_at:"2026-09-23T14:36:42Z"}};
+ await frame(progress);
+ await act(async()=>events.listeners.get("error")?.({data:""}));
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ const text={chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"text",run_id:"1",text:"A complete reply",after_message_id:10,created_at:"2026-09-23T14:36:48Z"};
+ await frame({snapshot:true,frames:[progress,text]});
+ await frame({...text,text:"A complete"});
+ expect(element.textContent).toContain("A complete reply");
+ await act(async()=>events.emit({...message(11,"a","A complete reply"),role:"agent",agent_id:41}));
+ await frame({...text,call_id:"late-text"});
+ expect(element.textContent!.match(/A complete reply/g)).toHaveLength(1);
+ await frame({snapshot:true,frames:[]});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(element.textContent).toContain("A complete reply");
 });

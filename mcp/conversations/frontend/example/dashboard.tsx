@@ -3,8 +3,9 @@ import { useMemo, useState } from "react";
 import { AptevaClient } from "@apteva/web-sdk";
 import { conversationsExtension } from "../dist/index.js";
 import { ConversationChat, Inbox } from "../dist/react.js";
-import DashboardInbox from "../../ui/InboxWidget";
-import DashboardChat from "../../ui/AgentConversationsWidget";
+// Exercise the actual release artifacts loaded by dashboard installations.
+import DashboardInbox from "../../ui/InboxWidget.mjs";
+import DashboardChat from "../../ui/AgentConversationsWidget.mjs";
 const params=new URLSearchParams(location.search);
 // Credentials enter through a host login flow, never a URL or source file.
 const config=(window as any).CONVERSATIONS_EXAMPLE as {baseURL:string;projectId:string;installId:number;agentId:number;accessToken?:string};
