@@ -358,7 +358,7 @@ func TestScenario_ImageStorageTicket(t *testing.T) {
 		value color.RGBA
 	}{{"red", color.RGBA{255, 0, 0, 255}}, {"blue", color.RGBA{0, 0, 255, 255}}, {"green", color.RGBA{0, 180, 0, 255}}}
 	selected := colours[time.Now().UnixNano()%int64(len(colours))]
-	canvas := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	canvas := image.NewRGBA(image.Rect(0, 0, 512, 512))
 	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: selected.value}, image.Point{}, draw.Src)
 	var encoded bytes.Buffer
 	if err := png.Encode(&encoded, canvas); err != nil {

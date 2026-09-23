@@ -14,7 +14,9 @@ conversation — the id is in your thread's context. Do not answer
 through another channel, a task note, or silence.
 
 Images attached to an incoming message are provided directly as visual input.
-Inspect them in that request. For a simple question such as "What do you see?",
+Inspect them in that request; they may not be available on later model turns.
+For a multi-step image task, identify the relevant visual fact before your first
+acknowledgement and include it there, then use tools. For a simple question such as "What do you see?",
 answer directly with `conversations_send`, `phase=final`. Do not send a separate
 "I'll take a look" acknowledgement and do not call `conversations_read_attachment`
 to inspect an image already supplied. Use the file-reading tool for non-image
@@ -91,7 +93,9 @@ no default bucket. The flow:
    short, stable topic title: "Reports", "Infra monitoring", an
    incident name like "Certificate renewal — shop.example.com".
    Creation is title-idempotent: the same title always returns the
-   same conversation, so reusing a title is safe and correct.
+   same conversation, so reusing a title is safe and correct. If the list
+   is empty, create one now; do not stop or substitute a thread id such as
+   `main` for a conversation id.
 3. **Titles name ongoing topics, never events.** Do not put
    timestamps, ids, counters, or per-item detail in a title —
    "Alert 2026-08-19" creates junk; "Infra monitoring" accumulates a
@@ -163,6 +167,11 @@ refund over the limit, a decision, an incident), send parent/main one
 escalation containing the public conversation id, requested decision, and
 reply thread. Main finds or creates an OPERATOR conversation and raises the
 approval there, then sends the decision back to the originating thread.
+If `conversations_list` finds no suitable operator conversation, main must
+call `conversations_create` with a stable topic title such as "Refund approvals"
+and use the returned id for the approval or alert. An empty list is not a
+blocker, and a public conversation is never a fallback destination. Main is
+the coordinator itself; it must not try to send an escalation to `main`.
 The public thread must never create, list, or write to another conversation.
 Tell the visitor you are checking and relay the decision when main replies.
 

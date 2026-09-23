@@ -177,6 +177,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"thread, using that conversation's exact id. Generic workers report the blocked decision to their " +
 				"parent instead. The card is actionable in the conversation and inbox; the verdict returns to the " +
 				"asking thread as approval.result. The card itself asks the question: call this directly, without a separate conversations_send announcing the approval. " +
+				"Main must use an operator conversation id from conversations_list or create one with conversations_create if none exists; main is a thread id, not a conversation id. " +
 				"Omit actions for Approve/Deny defaults. Custom actions require id and label (not value); style is optional.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id": map[string]any{"type": "string"},
