@@ -1,7 +1,7 @@
 {
   "schema": "apteva-app-frontend/v1",
   "app": "conversations",
-  "version": "0.24.2",
+  "version": "0.24.3",
   "client": {
     "path": "/ui/frontend/client-ae0c5e2b6261bd9a.mjs",
     "sha256": "ae0c5e2b6261bd9abe456eadae42a262af182cb1908b5e1fb5f577382f0d3e16"

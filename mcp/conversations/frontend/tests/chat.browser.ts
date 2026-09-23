@@ -367,17 +367,18 @@ for (const host of ["dashboard","external","package"]) {
   expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
   await expect(row).toHaveAttribute("aria-label",/Done/);
-  // No blank/static gap while waiting for the next model event.
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
+  // A completed call settles; the next model step owns the indicator.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
   await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(row.getByText("42ms",{exact:true})).toBeVisible();
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row.getByText("42ms",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
   await phase("idle",5);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
   // An approval verdict begins a new turn. Existing tool history stays done.
   await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
@@ -404,7 +405,7 @@ for (const host of ["dashboard","external","package"]) {
   release();
   await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
  });
- test(`${host}: result groups keep pulsing through intermediate replies and parallel calls`,async({page,request})=>{
+ test(`${host}: running parallel calls pulse; completed groups yield to thinking`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
   await expect(page.getByTitle("Live")).toBeVisible();
   const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
@@ -419,15 +420,14 @@ for (const host of ["dashboard","external","package"]) {
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository",status:"completed",ended_at:new Date().toISOString(),duration_ms:64,revision:2}}});
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   // A durable intermediate reply moves the tail away from the tool group.
   await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
   await expect(page.getByText("I am checking the next step.")).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
-  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await request.post("/emit",{data:{...frame,response_progress:{phase:"idle",run_id:"ack-1",revision:2,started_at:start,after_message_id:0}}});
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
  });
@@ -449,7 +449,7 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row).toHaveCount(1);
   await expect(row.getByText("Verifying React project files",{exact:true})).toBeVisible();
   await expect(row.getByText("+1",{exact:true})).toBeVisible();
-  await expect(row.getByText("300ms",{exact:true})).toBeVisible();
+  await expect(row.getByText("300ms",{exact:true})).toHaveCount(0);
   await row.getByRole("button").first().click();
   await expect(row.locator("[id^=tools-] > div")).toHaveCount(2);
   await page.reload();await expect(row).toHaveCount(1);
