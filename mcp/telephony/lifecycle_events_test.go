@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,69 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+func TestCallGetIncludesProjectScopedCurrentSoftphoneOwner(t *testing.T) {
+	ctx := softphoneTestCtx(t)
+	app := &App{installID: 42}
+	call := insertSoftphoneCall(t, app, "ringing")
+	identity := phoneTestIdentity("alice")
+	if _, err := app.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?)`,
+		call.ID, "project-a", identity.key(), ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := result.(map[string]any)["call"].(map[string]any)
+	if got := public["owner_identity"]; got != identity {
+		t.Fatalf("owner_identity = %#v, want %#v", got, identity)
+	}
+	if got := public["peer_kind"]; got != peerKindHuman {
+		t.Fatalf("peer_kind = %#v", got)
+	}
+	bob := phoneTestIdentity("bob")
+	if _, err := app.db().db.Exec(`UPDATE telephony_call_owners SET principal=? WHERE call_id=? AND project_id=?`,
+		bob.key(), call.ID, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public = result.(map[string]any)["call"].(map[string]any)
+	if got := public["owner_identity"]; got != bob {
+		t.Fatalf("owner_identity after takeover = %#v, want %#v", got, bob)
+	}
+	other, err := app.toolCallGet(context.Background(), ctx.WithProject("project-b"), map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := other.(map[string]any)["call"]; ok {
+		t.Fatal("call or owner leaked into another project")
+	}
+}
+
+func TestCallGetIgnoresMalformedOptionalOwner(t *testing.T) {
+	ctx := softphoneTestCtx(t)
+	app := &App{installID: 42}
+	call := insertSoftphoneCall(t, app, "ringing")
+	if _, err := app.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?)`,
+		call.ID, "project-a", `{not-json`, ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := result.(map[string]any)["call"].(map[string]any)
+	if public["call_id"] != call.ID {
+		t.Fatalf("call_id = %#v, want %q", public["call_id"], call.ID)
+	}
+	if _, ok := public["owner_identity"]; ok {
+		t.Fatal("malformed owner identity was returned")
+	}
+}
 
 func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	diskBytes, err := os.ReadFile("apteva.yaml")
