@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: agent-worlds
 display_name: Agent Worlds
-version: 0.1.0
+version: 0.1.1
 description: Live visual scenes for Apteva agents on the main server, isolated environments, and a configured remote server.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
@@ -29,7 +29,7 @@ provides:
       entry: /ui/AgentWorldsPanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.0, entry: mcp/agent-worlds }
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.1, entry: mcp/agent-worlds }
   port: 8080
   health_check: /health
 config_schema:
