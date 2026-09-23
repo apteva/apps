@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: agent-worlds
 display_name: Agent Worlds
-version: 0.1.1
+version: 0.1.2
 description: Live visual scenes for Apteva agents on the main server, isolated environments, and a configured remote server.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
@@ -29,7 +29,20 @@ provides:
       entry: /ui/AgentWorldsPanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.1, entry: mcp/agent-worlds }
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.2, entry: mcp/agent-worlds }
+  artifacts:
+    darwin-arm64:
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.2/agent-worlds-v0.1.2-darwin-arm64.tar.gz
+      sha256: 28f2769ae236baa5b47339cf9fd983ce3194ffda21cffdf7762f5e5fe8062517
+    darwin-amd64:
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.2/agent-worlds-v0.1.2-darwin-amd64.tar.gz
+      sha256: d709037af8a41cd3be53607f474650fbf0fdeaa2b920fbc43a61942ee842c465
+    linux-amd64:
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.2/agent-worlds-v0.1.2-linux-amd64.tar.gz
+      sha256: b2db0aa5bdf2c387cd6bf751c496940322a552bf7bb61c264f4ba3e701c48a9b
+    linux-arm64:
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.2/agent-worlds-v0.1.2-linux-arm64.tar.gz
+      sha256: fad094e3b36bfa9bffd91d84ec5365ff08615d026ad91e89487d48c75a623592
   port: 8080
   health_check: /health
 config_schema:
