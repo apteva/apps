@@ -594,7 +594,25 @@ func (a *App) toolCallGet(_ context.Context, ctx *sdk.AppCtx, args map[string]an
 	if call == nil {
 		return mcpError("call not found"), nil
 	}
-	return map[string]any{"call": reconciliationCallPublic(*call)}, nil
+	public := reconciliationCallPublic(*call)
+	public["peer_kind"] = call.PeerKind
+	public["routing_flow_id"] = call.RoutingFlowID
+	var principal string
+	err = a.db().db.QueryRow(`SELECT principal FROM telephony_call_owners WHERE call_id=? AND project_id=?`, call.ID, projectID).Scan(&principal)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		// Ownership enriches the existing call response. Keep it best-effort so
+		// an optional/corrupt owner record can never make a previously valid
+		// reconciliation lookup fail.
+		ctx.Logger().Warn("get optional call owner", "call", call.ID, "err", err)
+	} else if principal != "" {
+		var owner phoneIdentity
+		if err := json.Unmarshal([]byte(principal), &owner); err != nil {
+			ctx.Logger().Warn("decode optional call owner", "call", call.ID, "err", err)
+		} else if owner.valid() {
+			public["owner_identity"] = owner
+		}
+	}
+	return map[string]any{"call": public}, nil
 }
 
 func (a *App) toolCallEventsList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {

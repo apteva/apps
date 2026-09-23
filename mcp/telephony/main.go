@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.1
+version: 0.6.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -130,7 +130,7 @@ provides:
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
     - { name: telephony_calls_list, description: "List calls updated since a cursor or timestamp for event reconciliation." }
-    - { name: telephony_call_get, description: "Get one call by Telephony or provider call id." }
+    - { name: telephony_call_get, description: "Get one project call, including its current verified softphone owner when present." }
     - { name: telephony_decisions_list, description: "Reconcile routing decisions and fallback reasons for a call." }
     - { name: telephony_call_events_list, description: "List durable lifecycle events for one call." }
     - { name: telephony_recording_settings_get, description: "Get the project's call recording policy." }
@@ -623,7 +623,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_call_get",
-			Description: "Get one project call by exactly one identifier. Args: call_id? or provider_call_id?.",
+			Description: "Get one project call by exactly one identifier, including peer_kind, routing_flow_id, and the current verified softphone owner_identity when present. Ownership may change after a supervisor takeover. Args: call_id? or provider_call_id?.",
 			InputSchema: schemaObject(map[string]any{
 				"call_id":          map[string]any{"type": "string"},
 				"provider_call_id": map[string]any{"type": "string"},
