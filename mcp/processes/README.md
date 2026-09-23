@@ -139,7 +139,23 @@ Records include assignment identity and the original assignment snapshot.
 
 ## Visual process editor
 
-Overview and Procedure show work steps and approval gates as connected cards. In the editor, add steps, select a card to edit its instructions, role and required output, and drag between its ports to set dependencies. Connections mean every predecessor must finish; cycles are rejected. Select a connection to remove it, or use the inspector’s dependency checklist. Drag cards to arrange them, use Auto layout to restore dependency order, and Fit flow to reset zoom. Layout positions are stored with each immutable procedure version. General instructions and execution settings are below the canvas.
+Overview and Procedure show work steps and approval gates as connected cards. In
+the editor, add steps, select a card to edit its instructions, role and required
+output, and drag between its ports to set dependencies. Connections mean every
+predecessor must finish; cycles are rejected. Select a connection to remove it,
+or use the inspector’s dependency checklist. Processes derives a deterministic
+layout from those dependencies, so agents and operators never author or persist
+graph coordinates. Fit flow resets zoom. Historical coordinates remain readable
+for compatibility but are ignored. General instructions and settings are below
+the canvas.
+
+The MCP authoring contract follows the same model. `validate_definition` checks
+and normalizes semantic procedure content without writing. `create` saves an
+unassigned draft. `assignment_create` separately selects executors and always
+starts paused. Process activation, assignment activation, and starting a run are
+separate actions that require explicit authorization. Readiness metadata and the
+Overview/Procedure readiness card flag approval prose that has no enforced
+`kind: approval` step.
 
 ## Collaborative workflows
 
@@ -251,7 +267,7 @@ checked every 5 seconds. Processes has one native execution path.
 ## Installation and limits
 
 Apteva >=0.52.0; app-sdk v0.85.0. Evals >=0.5.9 is optional. Source manifest pins
-`processes/v0.14.7`. Event triggers retain the durable app subscription requirement
+`processes/v0.15.0`. Event triggers retain the durable app subscription requirement
 introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
 Evaluation requires the optional Evals app and isolated Environments support.
 This release changes Processes only; Conversations is not modified.

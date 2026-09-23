@@ -15,7 +15,6 @@ import {
   MarkerType,
   BaseEdge,
   getSmoothStepPath,
-  applyNodeChanges,
   type Node,
   type NodeProps,
   type Edge,
@@ -200,14 +199,10 @@ export function ProcessFlow({
     [nodes, setNodes] = useState<Node[]>([]);
   const [notice, setNotice] = useState("");
   const positioned = useMemo(() => {
-    const arranged = layoutSteps(
+    return layoutSteps(
       steps,
       executions?.length || runExecutions?.length ? 280 : 192,
     );
-    return steps.map((s, i) => ({
-      ...s,
-      position: s.position || arranged[i].position!,
-    }));
   }, [steps, !!executions?.length, !!runExecutions?.length]);
   const minX = Math.min(0, ...positioned.map((s) => s.position.x)),
     maxX = Math.max(0, ...positioned.map((s) => s.position.x));
@@ -322,7 +317,8 @@ export function ProcessFlow({
       ...(!used.has(s.key) ? [edge(s.key, "__end", true)] : []),
     ]);
   }, [positioned, selectedEdge, editable, executions]);
-  // Refit when connections or available canvas width change; keep text edits and drags stable.
+  // Refit when connections or available canvas width change. Positions are a
+  // deterministic view of dependency semantics and are never procedure data.
   const inspectorOpen = steps.some((s) => s.key === selected);
   const topology = steps
     .map((s) => `${s.key}:${s.depends_on.join(",")}`)
@@ -356,10 +352,7 @@ export function ProcessFlow({
       expected_output: "",
       depends_on: predecessor ? [predecessor.key] : [],
     };
-    const draft = [...positioned, next];
-    const arranged = layoutSteps(draft);
-    next.position = arranged.at(-1)!.position;
-    onChange([...positioned, next]);
+    onChange([...steps, next]);
     setSelected(key);
     setSelectedEdge(null);
     setNotice("");
@@ -395,7 +388,7 @@ export function ProcessFlow({
           </h2>
           <p>
             {editable
-              ? "Connect steps to define the order. Select a card to edit it."
+              ? "Processes arranges the graph automatically. Connect steps to define execution order."
               : "Follow the connections. Select any step to see its instructions."}
           </p>
         </div>
@@ -415,24 +408,6 @@ export function ProcessFlow({
                 onClick={() => add("approval")}
               >
                 ◇ Add approval
-              </button>
-              <button
-                type="button"
-                disabled={!steps.length}
-                onClick={() => {
-                  onChange!(layoutSteps(steps));
-                  setTimeout(
-                    () =>
-                      flow?.fitView({
-                        padding: 0.18,
-                        maxZoom: 1,
-                        duration: 220,
-                      }),
-                    60,
-                  );
-                }}
-              >
-                Auto layout
               </button>
             </>
           )}
@@ -462,30 +437,12 @@ export function ProcessFlow({
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onInit={setFlow}
-              onNodesChange={(changes) =>
-                setNodes((current) => applyNodeChanges(changes, current))
-              }
               onNodeClick={(_, node) => {
                 if (node.type === "step") {
                   setSelected(node.id);
                   setSelectedEdge(null);
                 }
               }}
-              onNodeDragStop={(_, node) =>
-                onChange?.(
-                  positioned.map((s) =>
-                    s.key === node.id
-                      ? {
-                          ...s,
-                          position: {
-                            x: Math.round(node.position.x),
-                            y: Math.round(node.position.y),
-                          },
-                        }
-                      : s,
-                  ),
-                )
-              }
               onEdgeClick={(_, edge) => {
                 if (!edge.data?.virtual && editable)
                   setSelectedEdge({ source: edge.source, target: edge.target });
@@ -498,7 +455,7 @@ export function ProcessFlow({
               isValidConnection={(connection) =>
                 canConnect(steps, connection.source, connection.target)
               }
-              nodesDraggable={editable}
+              nodesDraggable={false}
               nodesConnectable={editable}
               elementsSelectable={true}
               connectOnClick={true}
@@ -547,7 +504,7 @@ export function ProcessFlow({
                     <button
                       type="button"
                       onClick={() => {
-                        onChange!(layoutSteps(structuredClone(examples)));
+                        onChange!(structuredClone(examples));
                         setSelected(examples[0].key);
                       }}
                     >
@@ -590,7 +547,7 @@ export function ProcessFlow({
           )}
           <div className="pf-canvas-caption">
             {editable
-              ? "Drag cards to arrange · Drag or click the ports to connect"
+              ? "Graph layout is automatic · Drag or click the ports to connect"
               : "Arrows show dependencies · All incoming steps must finish"}
             <span>Scroll the page · Pinch to zoom</span>
           </div>

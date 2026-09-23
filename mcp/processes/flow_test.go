@@ -1,11 +1,12 @@
 package main
 
 import (
-	"math"
+	"encoding/json"
+	"strings"
 	"testing"
 )
 
-func TestFlowPositionsPersistPerVersion(t *testing.T) {
+func TestFlowPositionsAreStrippedFromNewVersions(t *testing.T) {
 	a, _, _ := directSetup(t)
 	d := workflowDefinition()
 	d.Steps[0].Position = &StepPosition{X: -125.5, Y: 275}
@@ -18,19 +19,70 @@ func TestFlowPositionsPersistPerVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(versions) != 2 || *versions[0].Definition.Steps[0].Position != *d.Steps[0].Position || *versions[1].Definition.Steps[0].Position != (StepPosition{X: -125.5, Y: 275}) {
-		t.Fatalf("layout did not round trip in immutable versions: %+v", versions)
+	if len(versions) != 2 {
+		t.Fatalf("versions=%d", len(versions))
 	}
-	if versions[0].Definition.Steps[1].Position != nil {
-		t.Fatal("legacy auto layout was replaced")
+	for _, version := range versions {
+		for _, step := range version.Definition.Steps {
+			if step.Position != nil {
+				t.Fatalf("version retained presentation data: %+v", version)
+			}
+		}
 	}
 }
-func TestFlowRejectsInvalidCoordinates(t *testing.T) {
-	for _, position := range []StepPosition{{X: math.NaN()}, {Y: math.Inf(1)}, {X: 100001}, {Y: -100001}} {
-		d := workflowDefinition()
-		d.Steps[0].Position = &position
-		if err := validateSteps(d.Steps); err == nil {
-			t.Fatalf("accepted invalid position: %+v", position)
+
+func TestAgentSchemaDoesNotExposeGraphCoordinates(t *testing.T) {
+	properties := stepSchema()["properties"].(map[string]any)
+	if _, ok := properties["position"]; ok {
+		t.Fatal("agent-facing step schema exposes position")
+	}
+	raw, err := json.Marshal(definitionSchema())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"position"`) {
+		t.Fatal("definition schema contains graphical coordinates")
+	}
+}
+
+func TestValidateDefinitionReportsUnenforcedApproval(t *testing.T) {
+	a, _, _ := directSetup(t)
+	d := workflowDefinition()
+	d.ApprovalRequirements = "A manager must approve before sending."
+	for i := range d.Steps {
+		d.Steps[i].Kind = "work"
+	}
+	d.Steps[0].Position = &StepPosition{X: 0, Y: 0}
+	result, err := a.execute("project-a", "agent:7:thread", "validate_definition", map[string]any{"definition": d})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := result.(map[string]any)
+	normalized := out["definition"].(Definition)
+	if normalized.Steps[0].Position != nil {
+		t.Fatal("validation retained legacy position")
+	}
+	r := out["readiness"].(Readiness)
+	if !r.Valid || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "no enforced approval step") {
+		t.Fatalf("readiness=%+v", r)
+	}
+}
+
+func TestAgentCreationRecipeIsExplicit(t *testing.T) {
+	a, _, _ := directSetup(t)
+	descriptions := map[string]string{}
+	for _, tool := range a.MCPTools() {
+		descriptions[tool.Name] = tool.Description
+	}
+	for name, want := range map[string]string{
+		"create":              "No assignment or run is created",
+		"assignment_create":   "always created paused",
+		"activate":            "explicit user authorization",
+		"assignment_activate": "explicit user authorization",
+		"start":               "explicit user authorization",
+	} {
+		if !strings.Contains(descriptions[name], want) {
+			t.Fatalf("%s description does not explain safe deployment: %q", name, descriptions[name])
 		}
 	}
 }

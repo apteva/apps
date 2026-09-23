@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-test("view, edit, connect, move and persist the weather flow", async ({
+test("view, edit, connect and persist the semantic weather flow", async ({
   page,
 }, testInfo) => {
   const errors: string[] = [];
@@ -9,6 +9,13 @@ test("view, edit, connect, move and persist the weather flow", async ({
     .getByRole("button", { name: "Hourly weather alerts", exact: true })
     .click();
   await expect(page.locator(".pf-step")).toHaveCount(3);
+  const initialBoxes = await page.locator(".pf-step").evaluateAll((nodes) =>
+    nodes.map((node) => {
+      const box = node.getBoundingClientRect();
+      return { x: box.x, y: box.y };
+    }),
+  );
+  expect(new Set(initialBoxes.map(({ x, y }) => `${x}:${y}`)).size).toBe(3);
   await expect(page.locator(".react-flow__edge")).toHaveCount(5);
   await page.screenshot({
     path: testInfo.outputPath("weather-flow.png"),
@@ -51,17 +58,6 @@ test("view, edit, connect, move and persist the weather flow", async ({
   await expect(
     page.locator('[data-testid="rf__edge-post_conversations:send_pushover"]'),
   ).toHaveCount(1);
-  const node = page.getByRole("button", {
-    name: "Step 2: Post alert in Conversations",
-    exact: true,
-  });
-  // Wait for the topology fit animation before calculating drag coordinates.
-  await page.waitForTimeout(400);
-  const box = (await node.boundingBox())!;
-  await page.mouse.move(box.x + 50, box.y + 45);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 60, box.y + 125, { steps: 12 });
-  await page.mouse.up();
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   const saved = await page.evaluate(() =>
     JSON.parse(sessionStorage.getItem("process")!),
@@ -71,7 +67,7 @@ test("view, edit, connect, move and persist the weather flow", async ({
     "fetch_weather",
     "post_conversations",
   ]);
-  expect(saved.steps[1].position.y).toBeGreaterThan(150);
+  expect(saved.steps.every((step: Record<string, unknown>) => !("position" in step))).toBe(true);
   await page.reload();
   await page
     .getByRole("button", { name: "Hourly weather alerts", exact: true })

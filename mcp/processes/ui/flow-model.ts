@@ -3,6 +3,7 @@ import type { Step } from "./Workflow";
 export const NODE_WIDTH = 236;
 export const COLUMN_GAP = 328;
 export const ROW_GAP = 192;
+export type PositionedStep = Step & { position: { x: number; y: number } };
 export function stepRanks(steps: Step[]): Map<string, number> {
   const byKey = new Map(steps.map((s) => [s.key, s]));
   const ranks = new Map<string, number>();
@@ -22,7 +23,7 @@ export function stepRanks(steps: Step[]): Map<string, number> {
   steps.forEach((s) => visit(s.key));
   return ranks;
 }
-export function layoutSteps(steps: Step[], rowGap = ROW_GAP): Step[] {
+export function layoutSteps(steps: Step[], rowGap = ROW_GAP): PositionedStep[] {
   const ranks = stepRanks(steps),
     groups = new Map<number, Step[]>();
   steps.forEach((s) =>

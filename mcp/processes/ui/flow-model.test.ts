@@ -43,6 +43,14 @@ test("layout puts parallel work in a shared column and its join after both", () 
   expect(arranged[3].position!.x).toBeGreaterThan(arranged[2].position!.x);
   expect(arranged[0].position!.x).toBeLessThan(arranged[1].position!.x);
 });
+test("layout ignores overlapping legacy coordinates", () => {
+  const arranged = layoutSteps([
+    { ...step("fetch"), position: { x: 0, y: 0 } },
+    { ...step("send", ["fetch"]), position: { x: 0, y: 1 } },
+  ]);
+  expect(arranged[0].position).not.toEqual(arranged[1].position);
+  expect(arranged[1].position!.x).toBeGreaterThan(arranged[0].position!.x);
+});
 test("deleting a step clears references and new keys remain unique", () => {
   const steps = [
     step("step_1"),

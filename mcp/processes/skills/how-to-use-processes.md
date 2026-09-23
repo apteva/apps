@@ -7,10 +7,18 @@ output, evidence, approvals, retry metadata, and revision.
 
 ## Execution
 
-Create or update a procedure while it is a draft or paused. Create an
-assignment with an owner agent, optional schedule, parameters, and step roles.
-Activate the procedure and assignment, then start a run with a stable
-`idempotency_key`.
+Define procedures semantically: step keys, instructions, roles, outputs, and
+dependencies. Never supply graph coordinates; Processes lays out every graph
+automatically. Use `validate_definition` for a read-only readiness check, then
+`create` to save an unassigned draft. If the user names an executor, use
+`assignment_create` after creation; the new assignment is paused. Activate the
+reviewed procedure, activate the assignment, and start a run with a stable
+`idempotency_key` only when the user explicitly authorizes each deployment
+action.
+
+Text in `approval_requirements` is advisory. Use a `kind: approval` step at the
+exact point where execution must stop until an approved or rejected decision is
+recorded.
 
 Before acting, read `run_get` or `step_get`. Agents report meaningful progress
 and the terminal outcome with `run_update` or `step_update`. Completion requires
