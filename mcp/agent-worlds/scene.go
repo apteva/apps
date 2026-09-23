@@ -38,6 +38,16 @@ type SceneApp struct {
 	Status string `json:"status"`
 }
 
+type SceneDestination struct {
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	Name      string     `json:"name"`
+	Status    string     `json:"status"`
+	Tools     []string   `json:"tools,omitempty"`
+	CallCount int        `json:"call_count"`
+	LastCall  *time.Time `json:"last_call,omitempty"`
+}
+
 type SceneEvent struct {
 	ID       string    `json:"id"`
 	AgentID  string    `json:"agent_id"`
@@ -46,15 +56,19 @@ type SceneEvent struct {
 	Kind     string    `json:"kind"`
 	Label    string    `json:"label"`
 	Target   string    `json:"target,omitempty"`
+	TargetID string    `json:"target_id,omitempty"`
+	Success  *bool     `json:"success,omitempty"`
 	Time     time.Time `json:"time"`
+	toolName string
 }
 
 type Scene struct {
-	Source Source       `json:"source"`
-	Agents []SceneAgent `json:"agents"`
-	Apps   []SceneApp   `json:"apps"`
-	Events []SceneEvent `json:"events"`
-	At     time.Time    `json:"at"`
+	Source       Source             `json:"source"`
+	Agents       []SceneAgent       `json:"agents"`
+	Apps         []SceneApp         `json:"apps"`
+	Destinations []SceneDestination `json:"destinations"`
+	Events       []SceneEvent       `json:"events"`
+	At           time.Time          `json:"at"`
 }
 
 func (a *App) sources() ([]Source, error) {
@@ -137,6 +151,7 @@ func (a *App) mainScene() (*Scene, error) {
 	}
 	a.mu.RUnlock()
 	finishScene(scene)
+	a.enrichScene(scene)
 	return scene, nil
 }
 
@@ -170,6 +185,7 @@ func (a *App) runtimeScene(id string) (*Scene, error) {
 		}
 	}
 	finishScene(scene)
+	a.enrichScene(scene)
 	return scene, nil
 }
 
@@ -327,6 +343,7 @@ func (a *App) remoteRunScene(runID string) (*Scene, error) {
 		}
 	}
 	finishScene(scene)
+	a.enrichScene(scene)
 	return scene, nil
 }
 
@@ -352,6 +369,7 @@ func (a *App) remoteScene() (*Scene, error) {
 		}
 	}
 	finishScene(scene)
+	a.enrichScene(scene)
 	return scene, nil
 }
 
@@ -359,6 +377,7 @@ func normalizeEvent(id string, agentID int64, threadID, eventType string, at tim
 	var data map[string]any
 	_ = json.Unmarshal(raw, &data)
 	kind, label, target := "activity", eventType, ""
+	toolName := ""
 	switch eventType {
 	case "thread.spawn":
 		kind, label = "spawn", "started a thread"
@@ -377,8 +396,15 @@ func normalizeEvent(id string, agentID int64, threadID, eventType string, at tim
 		}
 		label = "called " + cleanLabel(name)
 		target = cleanLabel(name)
+		toolName = name
 	case "tool.result", "tool.after":
 		kind, label = "result", "tool returned"
+		name, _ := data["name"].(string)
+		if name == "" {
+			name, _ = data["tool"].(string)
+		}
+		target = cleanLabel(name)
+		toolName = name
 	case "llm.start":
 		kind, label = "thinking", "started thinking"
 	case "llm.done", "iteration.done":
@@ -400,7 +426,13 @@ func normalizeEvent(id string, agentID int64, threadID, eventType string, at tim
 	if id == "" {
 		id = fmt.Sprintf("%d:%s:%s:%d", agentID, threadID, eventType, at.UnixNano())
 	}
-	return SceneEvent{ID: id, AgentID: strconv.FormatInt(agentID, 10), ThreadID: threadID, Type: eventType, Kind: kind, Label: label, Target: target, Time: at}
+	event := SceneEvent{ID: id, AgentID: strconv.FormatInt(agentID, 10), ThreadID: threadID, Type: eventType, Kind: kind, Label: label, Target: target, Time: at, toolName: toolName}
+	if kind == "result" {
+		if success, ok := data["success"].(bool); ok {
+			event.Success = &success
+		}
+	}
+	return event
 }
 
 func cleanLabel(raw string) string {
