@@ -33,7 +33,11 @@ const process = {
   instructions: "Review",
   sync_pending: false,
 };
-async function mount(history: object, overrides: object = {}) {
+async function mount(
+  history: object,
+  overrides: object = {},
+  projectHistory: object = { runs: [] },
+) {
   const selectedProcess = { ...process, ...overrides };
   window.history.replaceState(null, "", "/");
   globalThis.fetch = (async (url: unknown) => {
@@ -43,6 +47,7 @@ async function mount(history: object, overrides: object = {}) {
         { id: 7, name: "Owner" },
         { id: 8, name: "Cooking agent" },
       ]);
+    if (path.endsWith("/processes/runs")) return Response.json(projectHistory);
     if (path.endsWith("/runs")) return Response.json(history);
     if (path.endsWith("/p"))
       return Response.json({
@@ -60,6 +65,13 @@ async function mount(history: object, overrides: object = {}) {
 async function click(text: string) {
   const button = Array.from(document.querySelectorAll("button")).find(
     (b) => b.textContent?.trim() === text,
+  );
+  expect(button).toBeTruthy();
+  await act(async () => button!.click());
+}
+async function clickContaining(text: string) {
+  const button = Array.from(document.querySelectorAll("button")).find(
+    (candidate) => candidate.textContent?.includes(text),
   );
   expect(button).toBeTruthy();
   await act(async () => button!.click());
@@ -96,6 +108,8 @@ test("run history renders native evidence without external task links", async ()
   });
   await click("Weekly review");
   await click("Runs");
+  expect(document.body.textContent).not.toContain("Direct report approved");
+  await clickContaining("Direct agent run");
   expect(document.body.textContent).toContain("Direct report approved");
   expect(document.querySelectorAll('a[href*="/apps/tasks/"]').length).toBe(0);
 });
@@ -214,8 +228,11 @@ test("run history filters independent assignments", async () => {
       new window.Event("change", { bubbles: true }) as unknown as Event,
     );
   });
+  const runList = document.querySelector('[aria-label="Weekly review runs"]')!;
+  expect(runList.textContent).toContain("Photography Patreon");
+  expect(runList.textContent).not.toContain("Cooking");
+  await clickContaining("Photography Patreon");
   expect(document.body.textContent).toContain("Photo result");
-  expect(document.body.textContent).not.toContain("Cooking approval needed");
 });
 test("editing a paused assignment preserves parameters and uses revision", async () => {
   await mount(
@@ -389,6 +406,7 @@ test("workflow history offers human review only after predecessor completion", a
   });
   await click("Weekly review");
   await click("Runs");
+  await clickContaining("Team workflow run");
   expect(document.body.textContent).toContain("Team workflow run");
   expect(document.body.textContent).toContain("Draft evidence");
   expect(
@@ -403,4 +421,44 @@ test("workflow history offers human review only after predecessor completion", a
     document.querySelector<HTMLButtonElement>("button.primary:disabled"),
   ).toBeTruthy();
   expect(document.body.textContent).toContain("Reject & stop run");
+});
+
+test("main Runs tab browses executions across processes", async () => {
+  await mount(
+    {},
+    {},
+    {
+      runs: [
+        {
+          id: "active-run",
+          process_id: "p",
+          process_name: "Weekly review",
+          version: 1,
+          state: "running",
+          current_step: "Checking evidence",
+          created_at: "2026-09-23T10:00:00Z",
+        },
+        {
+          id: "other-run",
+          process_id: "other",
+          process_name: "Publish digest",
+          version: 2,
+          state: "completed",
+          result: "Digest published",
+          created_at: "2026-09-23T09:00:00Z",
+        },
+      ],
+    },
+  );
+  expect(
+    Array.from(document.querySelectorAll("nav button")).map((button) =>
+      button.textContent?.trim(),
+    ),
+  ).toEqual(["Processes", "Runs", "Project map"]);
+  await click("Runs");
+  expect(document.body.textContent).toContain("Weekly review");
+  expect(document.body.textContent).toContain("Publish digest");
+  expect(document.body.textContent).not.toContain("Digest published");
+  await clickContaining("Publish digest");
+  expect(document.body.textContent).toContain("Digest published");
 });

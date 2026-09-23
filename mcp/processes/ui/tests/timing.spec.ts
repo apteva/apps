@@ -123,6 +123,7 @@ test("timed live step shows waiting time and updates when dispatched", async ({
     .getByRole("button", { name: "Hourly weather alerts", exact: true })
     .click();
   await page.getByRole("button", { name: "Runs", exact: true }).click();
+  await page.locator(".run-list > button").first().click();
   await expect(
     page.locator('.pf-execution[data-state="scheduled"]'),
   ).toContainText("Starts in 10 min");

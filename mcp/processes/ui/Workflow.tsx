@@ -1,6 +1,7 @@
 import { TimingDetails, type TimingRule } from "./Timing";
 import { useState } from "react";
 import { ProcessFlow } from "./ProcessFlow";
+import ExecutionTools, { type ToolSource } from "./ExecutionTools";
 export type Step = {
   start_after?: TimingRule;
   due_after?: TimingRule;
@@ -31,6 +32,8 @@ export type StepRun = {
   updated_by: string;
   updated_at: string;
   delivery_warning?: string;
+  target_thread_id?: string;
+  execution_id?: string;
 };
 const examples: Step[] = [
   {
@@ -153,6 +156,7 @@ export function RunSteps({
   projectId,
   api,
   onChanged,
+  toolSources = [],
 }: {
   steps: StepRun[];
   runID: string;
@@ -161,6 +165,7 @@ export function RunSteps({
   projectId: string;
   api: (path: string, method?: string, body?: unknown) => Promise<any>;
   onChanged: () => Promise<void>;
+  toolSources?: ToolSource[];
 }) {
   const [selected, setSelected] = useState(""),
     [output, setOutput] = useState(""),
@@ -292,6 +297,14 @@ export function RunSteps({
                 Recorded by {s.updated_by} ·{" "}
                 {new Date(s.updated_at).toLocaleString()}
               </p>
+            )}
+            {!human && (
+              <ExecutionTools
+                agentID={s.executor.agent_id}
+                threadID={s.target_thread_id}
+                executionID={s.execution_id}
+                sources={toolSources}
+              />
             )}
             {actionable && (
               <>

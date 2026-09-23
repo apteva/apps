@@ -130,6 +130,48 @@ func (a *App) runs(project, id string) (any, error) {
 	return map[string]any{"runs": direct, "direct_runs": direct, "dispatches": records, "has_more": false}, nil
 }
 
+type projectRun struct {
+	Run
+	ProcessName string `json:"process_name"`
+}
+
+// projectRuns is the bounded, read-only history used by the panel's main Runs
+// tab. Process identity is resolved from the same project-scoped list used by
+// the Processes page, so rows cannot cross the caller's project boundary.
+func (a *App) projectRuns(project string) (any, error) {
+	processes, err := a.list(project)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(processes))
+	for _, process := range processes {
+		names[process.ID] = process.Name
+	}
+	rows, err := a.db.Query(`SELECT `+runColumns+` FROM process_runs WHERE process_id IN (SELECT id FROM processes WHERE project_id=?) ORDER BY created_at DESC,id DESC LIMIT 200`, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []projectRun{}
+	for rows.Next() {
+		run, scanErr := scanRun(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		if run.Workflow {
+			run.Steps, scanErr = a.steps(run.ID)
+			if scanErr != nil {
+				return nil, scanErr
+			}
+		}
+		out = append(out, projectRun{Run: run, ProcessName: names[run.ProcessID]})
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"runs": out, "has_more": false}, nil
+}
+
 func (a *App) retryPending(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

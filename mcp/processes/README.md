@@ -21,9 +21,17 @@ The same idempotency key can be used independently on each assignment.
 
 ## Panel
 
-The project-page panel has **Processes** and **Runs** areas. Each process has
-Overview, Procedure, Assignments, and Runs tabs. Runs show native step state,
-approvals, evidence, timing, and delivery history.
+The project-page panel has **Processes**, **Runs**, and **Project map** areas.
+The project Runs browser lists recent and ongoing execution across every process,
+with state filters and a selected detail view. Each process also has Overview,
+Procedure, Assignments, Triggers, and Runs tabs; its Runs tab uses the same compact
+list-and-detail layout.
+
+Run details show native step state, approvals, evidence, timing, and delivery
+history. Agent steps also expose their execution-scoped tool calls on demand,
+including the tool's `_reason`, success/failure state, and the providing app or
+integration icon. Correlation uses the durable execution ID, so sequential steps
+sharing a persistent worker thread do not mix their tool activity.
 
 The **Processes overview** dashboard widget shows active runs, approval/blocker
 attention, upcoming assignments, and recent outcomes across the current project.
@@ -205,6 +213,7 @@ query matching the installation's scope. Route IDs cannot be overridden in JSON.
 - `GET/PUT /processes/{process}`
 - `POST /processes/{process}/activate|pause|archive|start`
 - `GET /processes/{process}/runs`
+- `GET /processes/runs`
 - `GET /processes/{process}/runs/{run}`
 - `GET/POST /processes/{process}/runs/{run}/steps/{step}`
 - `POST /processes/{process}/runs/{run}/cancel`
@@ -242,7 +251,7 @@ checked every 5 seconds. Processes has one native execution path.
 ## Installation and limits
 
 Apteva >=0.52.0; app-sdk v0.85.0. Evals >=0.5.9 is optional. Source manifest pins
-`processes/v0.14.5`. Event triggers retain the durable app subscription requirement
+`processes/v0.14.6`. Event triggers retain the durable app subscription requirement
 introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
 Evaluation requires the optional Evals app and isolated Environments support.
 This release changes Processes only; Conversations is not modified.
