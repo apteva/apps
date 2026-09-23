@@ -151,23 +151,33 @@ func (a *App) projectRuns(project string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []projectRun{}
 	for rows.Next() {
 		run, scanErr := scanRun(rows)
 		if scanErr != nil {
+			rows.Close()
 			return nil, scanErr
-		}
-		if run.Workflow {
-			run.Steps, scanErr = a.steps(run.ID)
-			if scanErr != nil {
-				return nil, scanErr
-			}
 		}
 		out = append(out, projectRun{Run: run, ProcessName: names[run.ProcessID]})
 	}
 	if err = rows.Err(); err != nil {
+		rows.Close()
 		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	// App databases intentionally serialize through one SQLite connection.
+	// Finish and close the run cursor before loading workflow steps, otherwise
+	// the nested query waits forever for the connection held by that cursor.
+	for i := range out {
+		if !out[i].Workflow {
+			continue
+		}
+		out[i].Steps, err = a.steps(out[i].ID)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return map[string]any{"runs": out, "has_more": false}, nil
 }

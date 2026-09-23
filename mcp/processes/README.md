@@ -251,7 +251,7 @@ checked every 5 seconds. Processes has one native execution path.
 ## Installation and limits
 
 Apteva >=0.52.0; app-sdk v0.85.0. Evals >=0.5.9 is optional. Source manifest pins
-`processes/v0.14.6`. Event triggers retain the durable app subscription requirement
+`processes/v0.14.7`. Event triggers retain the durable app subscription requirement
 introduced in v0.5.0; see [platform requirements](docs-release-0.5.0.md#platform-requirement).
 Evaluation requires the optional Evals app and isolated Environments support.
 This release changes Processes only; Conversations is not modified.
