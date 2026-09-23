@@ -73,6 +73,9 @@ export interface SoftphoneCallStatus {
   ended_at?: string;
   answered_by?: string;
   termination?: { reason?: string; cause?: string; code?: string; initiator?: string };
+  hold_state?: "active" | "starting" | "held" | "stopping" | "unknown" | "ended";
+  recording_state?: "off" | "active" | "pause_requested" | "paused" | "resume_requested" | "unknown" | "ended";
+  control_error?: string;
 }
 
 export interface SoftphoneCallbacks {
@@ -560,6 +563,9 @@ export class SoftphoneSession {
         try { this.callbacks.onState?.("ended", parsed.type); }
         finally { this.teardown(); }
       } else if (parsed.type === "call.status" && typeof parsed.call_id === "string" && typeof parsed.status === "string") {
+        if ((parsed as SoftphoneCallStatus).hold_state && (parsed as SoftphoneCallStatus).hold_state !== "active") {
+          this.worker?.postMessage({ type: "flush" });
+        }
         this.callbacks.onCallStatus?.(parsed as unknown as SoftphoneCallStatus);
       } else if (parsed.type === "call.error") {
         this.fail(parsed.detail || "The call could not be connected.");

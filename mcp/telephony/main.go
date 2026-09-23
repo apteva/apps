@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.3
+version: 0.6.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -70,7 +70,7 @@ requires:
     - name: storage
       version: ">=0.8.1"
       optional: true
-      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
+      reason: stores private durable copies of provider call recordings and optionally supplies signed hold music; without it recordings remain with the carrier and hold music requires a direct HTTPS URL
   integrations:
     - role: carrier
       kind: integration
@@ -90,6 +90,7 @@ provides:
     - { prefix: /calls/ }
     - { prefix: /recordings/ }
     - { prefix: /recording-settings }
+    - { prefix: /call-control-settings }
     - { prefix: /numbers/ }
     - { prefix: /routing/ }
     - { prefix: /access/ }
@@ -426,6 +427,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/calls/", Handler: a.handleCallAction},
 		{Pattern: "/recordings/", Handler: a.handleRecordings},
 		{Pattern: "/recording-settings", Handler: a.handleRecordingSettings},
+		{Pattern: "/call-control-settings", Handler: a.handleCallControlSettings},
 		// Provider-neutral phone-number discovery and confirmed purchase.
 		{Pattern: "/numbers/", Handler: a.handleNumbers},
 		{Pattern: "/routing/", Handler: a.handleRouting},
@@ -2955,6 +2957,10 @@ func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
 		a.handleCallRead(w, r, parts[1])
 		return
 	}
+	if len(parts) == 3 && parts[0] == "calls" && isCallControlAction(parts[2]) {
+		a.handleCallControl(w, r, parts[1], parts[2])
+		return
+	}
 	if len(parts) != 3 || parts[0] != "calls" || parts[2] != "hangup" {
 		http.NotFound(w, r)
 		return
@@ -3244,6 +3250,8 @@ func callsPublic(rows []callRow) []map[string]any {
 			"duration":               callDuration(r),
 			"recording_mode":         r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
+			"hold_state":       r.HoldState, "recording_state": effectiveRecordingControlState(r),
+			"control_error": r.ControlError, "capabilities": callControlCapabilities(r),
 		})
 	}
 	return out
@@ -3280,6 +3288,8 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
+			"hold_state":       r.HoldState, "recording_state": effectiveRecordingControlState(r),
+			"control_error": r.ControlError, "capabilities": callControlCapabilities(r),
 			// peer_kind lets the panel tell a softphone call (which it can
 			// answer and carry audio for) from an agent call (which it can only
 			// observe). peer_token is deliberately NOT exposed here — the
@@ -3541,68 +3551,83 @@ func newSecret() string {
 type callRow struct {
 	ApplicationUser *phonePrincipal // transient placement context, persisted separately before dialing
 
-	RingOffers              []ringOffer
-	ID                      string
-	ThreadID                string
-	Direction               string
-	AgentID                 int64
-	RouteID                 string
-	CarrierSID              string
-	CarrierRequestID        string
-	CarrierSlug             string
-	CarrierConnectionID     int64
-	CallbackSecret          string
-	ToNumber                string
-	FromNumber              string
-	ForwardedFrom           string
-	IngressPath             string
-	Directive               string
-	Voice                   string
-	AudioBridgeURL          string
-	Status                  string
-	PlacedAt                string
-	AnsweredAt              string
-	EndedAt                 string
-	ProjectID               string
-	ErrorMessage            string
-	IdempotencyKey          string
-	StateExpiresAt          string
-	DeadlineAt              string
-	RecordingMode           string
-	RecordingChannels       string
-	RecordingStorageMode    string
-	RecordingRetentionDays  int
-	RecordingCheckedAt      string
-	RecordingCount          int
-	RecordingStatus         string
-	UpdatedAt               string
-	ProviderOccurredAt      string
-	DurationSeconds         int
-	TalkDurationSeconds     int
-	TerminationCause        string
-	TerminationCode         string
-	TerminationInitiator    string
-	ProviderSequence        int64
-	ProviderEventID         string
-	LifecycleRevision       int64
-	MediaStatus             string
-	MediaErrorMessage       string
-	MediaConnectedAt        string
-	MediaDisconnectedAt     string
-	MediaCloseCode          int
-	MediaCloseReason        string
-	MediaCloseLeg           string
-	BrowserAudioDiagnostics string
-	CarrierAudioDiagnostics string
-	PeerKind                string
-	PeerToken               string
-	RoutingFlowID           string
-	RoutingFlowVersionID    string
-	RoutingDestinationID    string
-	AnsweredBy              string
-	TerminationReason       string
-	MachineDetection        string
-	MachineDetectionAction  string
+	RingOffers               []ringOffer
+	ID                       string
+	ThreadID                 string
+	Direction                string
+	AgentID                  int64
+	RouteID                  string
+	CarrierSID               string
+	CarrierRequestID         string
+	CarrierSlug              string
+	CarrierConnectionID      int64
+	CallbackSecret           string
+	ToNumber                 string
+	FromNumber               string
+	ForwardedFrom            string
+	IngressPath              string
+	Directive                string
+	Voice                    string
+	AudioBridgeURL           string
+	Status                   string
+	PlacedAt                 string
+	AnsweredAt               string
+	EndedAt                  string
+	ProjectID                string
+	ErrorMessage             string
+	IdempotencyKey           string
+	StateExpiresAt           string
+	DeadlineAt               string
+	RecordingMode            string
+	RecordingChannels        string
+	RecordingStorageMode     string
+	RecordingRetentionDays   int
+	RecordingCheckedAt       string
+	RecordingCount           int
+	RecordingStatus          string
+	UpdatedAt                string
+	ProviderOccurredAt       string
+	DurationSeconds          int
+	TalkDurationSeconds      int
+	TerminationCause         string
+	TerminationCode          string
+	TerminationInitiator     string
+	ProviderSequence         int64
+	ProviderEventID          string
+	LifecycleRevision        int64
+	MediaStatus              string
+	MediaErrorMessage        string
+	MediaConnectedAt         string
+	MediaDisconnectedAt      string
+	MediaCloseCode           int
+	MediaCloseReason         string
+	MediaCloseLeg            string
+	BrowserAudioDiagnostics  string
+	CarrierAudioDiagnostics  string
+	PeerKind                 string
+	PeerToken                string
+	RoutingFlowID            string
+	RoutingFlowVersionID     string
+	RoutingDestinationID     string
+	AnsweredBy               string
+	TerminationReason        string
+	MachineDetection         string
+	MachineDetectionAction   string
+	HoldState                string
+	RecordingControlState    string
+	ControlRevision          int64
+	ControlAction            string
+	ControlError             string
+	ControlRequestedAt       string
+	HoldClientState          string
+	HoldMusicURL             string // loaded from project settings, never sent to callers
+	HoldMusicStorageFileID   int64
+	HoldControlRevision      int64
+	HoldControlAction        string
+	HoldRequestedAt          string
+	RecordingControlRevision int64
+	RecordingControlAction   string
+	RecordingRequestedAt     string
 }
 
 type routeRow struct {
@@ -3669,7 +3694,13 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(routing_flow_id,''), COALESCE(routing_flow_version_id,''),
 	COALESCE(routing_destination_id,''),
 	COALESCE(answered_by,''), COALESCE(termination_reason,''),
-	COALESCE(machine_detection,'off'), COALESCE(machine_detection_action,'notify')`
+	COALESCE(machine_detection,'off'), COALESCE(machine_detection_action,'notify'),
+	COALESCE(hold_state,'active'), COALESCE(recording_control_state,'default'),
+	COALESCE(control_revision,0), COALESCE(control_action,''), COALESCE(control_error,''), COALESCE(control_requested_at,''), COALESCE(hold_client_state,''),
+	COALESCE(hold_control_revision,0), COALESCE(hold_control_action,''), COALESCE(hold_requested_at,''),
+	COALESCE(recording_control_revision,0), COALESCE(recording_control_action,''), COALESCE(recording_requested_at,''),
+	COALESCE((SELECT hold_music_url FROM call_control_settings WHERE project_id=calls.project_id),''),
+	COALESCE((SELECT hold_music_storage_file_id FROM call_control_settings WHERE project_id=calls.project_id),0)`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -3691,7 +3722,11 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
 		&r.PeerKind, &r.PeerToken, &r.RoutingFlowID, &r.RoutingFlowVersionID,
 		&r.RoutingDestinationID, &r.AnsweredBy, &r.TerminationReason,
-		&r.MachineDetection, &r.MachineDetectionAction); err != nil {
+		&r.MachineDetection, &r.MachineDetectionAction,
+		&r.HoldState, &r.RecordingControlState, &r.ControlRevision, &r.ControlAction, &r.ControlError, &r.ControlRequestedAt, &r.HoldClientState,
+		&r.HoldControlRevision, &r.HoldControlAction, &r.HoldRequestedAt,
+		&r.RecordingControlRevision, &r.RecordingControlAction, &r.RecordingRequestedAt,
+		&r.HoldMusicURL, &r.HoldMusicStorageFileID); err != nil {
 		return nil, err
 	}
 	return &r, nil

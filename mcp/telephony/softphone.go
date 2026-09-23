@@ -63,6 +63,7 @@ type softphoneHub struct {
 	captureSequenceGaps int
 	captureDropEvents   []audioDropEvent
 	closed              bool
+	held                bool
 }
 
 const softphoneAudioFrameMagic uint32 = 0x31545041
@@ -105,6 +106,15 @@ func (h *softphoneHub) setCallState(direction, status string) {
 	if status != "" {
 		h.status = status
 	}
+}
+
+func (h *softphoneHub) setHeld(held bool) {
+	h.mu.Lock()
+	h.held = held
+	if held && h.browser != nil {
+		h.browser.FlushAudio()
+	}
+	h.mu.Unlock()
 }
 
 func (h *softphoneHub) microphoneReady() bool {
@@ -195,17 +205,29 @@ func (h *softphoneHub) readyBrowserWriter() *websocketWriterPump {
 // toBrowser forwards caller audio. A missing or wedged browser is not an error
 // for the call — the carrier leg stays up regardless.
 func (h *softphoneHub) toBrowser(op ws.OpCode, data []byte) {
-	if w := h.browserWriter(); w != nil {
-		if op == ws.OpBinary {
-			w.QueueAudio(data)
-		} else {
-			_ = w.Write(op, data)
+	if op == ws.OpBinary {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if !h.held && h.browser != nil {
+			h.browser.QueueAudio(data)
 		}
+		return
+	}
+	if w := h.browserWriter(); w != nil {
+		_ = w.Write(op, data)
 	}
 }
 
 // toPeer forwards operator audio toward the carrier bridge.
 func (h *softphoneHub) toPeer(op ws.OpCode, data []byte) {
+	if op == ws.OpBinary {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if !h.held && h.peer != nil {
+			_ = h.peer.Write(op, data)
+		}
+		return
+	}
 	if w := h.peerWriter(); w != nil {
 		_ = w.Write(op, data)
 	}
@@ -365,6 +387,7 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 	closer := newGracefulWebSocket(conn, writer)
 	hub := a.softphones.hubFor(callID)
 	hub.setCallState(row.Direction, row.Status)
+	hub.setHeld(row.HoldState != "active")
 	// A fresh carrier bridge owns the peer side immediately. Stop a superseded
 	// socket so it cannot keep delivering stale audio after a fast reconnect.
 	if previous := hub.setPeer(writer); previous != nil {
@@ -457,6 +480,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		logSoftphone("softphone browser detached", "call", callID)
 	}()
 	hub.setCallState(row.Direction, row.Status)
+	hub.setHeld(row.HoldState != "active")
 	// A reconnecting tab replaces the previous socket. Close the old one so a
 	// stale session cannot keep injecting audio into a live call.
 	if previous := hub.setBrowser(writer); previous != nil {
@@ -510,6 +534,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = writer.Write(ws.OpText, softphoneEvent("ready", callID))
 	hub.markReady(writer)
+	_ = writer.Write(ws.OpText, softphoneStatusEvent(*row))
 	unlock()
 	unlock = nil
 
@@ -1171,11 +1196,14 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 // socket so a softphone learns progress without polling.
 func softphoneStatusEvent(row callRow) []byte {
 	payload := map[string]any{
-		"type":        "call.status",
-		"call_id":     row.ID,
-		"direction":   row.Direction,
-		"status":      row.Status,
-		"termination": terminationPublic(row),
+		"type":            "call.status",
+		"call_id":         row.ID,
+		"direction":       row.Direction,
+		"status":          row.Status,
+		"hold_state":      row.HoldState,
+		"recording_state": effectiveRecordingControlState(row),
+		"control_error":   row.ControlError,
+		"termination":     terminationPublic(row),
 	}
 	addOptionalString(payload, "answered_at", row.AnsweredAt)
 	addOptionalString(payload, "ended_at", row.EndedAt)

@@ -142,6 +142,10 @@ func phoneAction(r *http.Request) string {
 		return "call.answer"
 	case strings.HasPrefix(path, "/calls/") && strings.HasSuffix(path, "/hangup"):
 		return "call.hangup"
+	case strings.HasPrefix(path, "/calls/") && (strings.HasSuffix(path, "/hold") || strings.HasSuffix(path, "/resume")):
+		return "call.hold"
+	case strings.HasPrefix(path, "/calls/") && (strings.HasSuffix(path, "/pause-recording") || strings.HasSuffix(path, "/resume-recording")):
+		return "call.recording.control"
 	}
 	return ""
 }

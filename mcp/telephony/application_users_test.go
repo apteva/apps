@@ -31,7 +31,7 @@ func phoneTestRequest(app *App, identity *phoneIdentity, method, path string, bo
 		r.Header.Set("X-Apteva-Subject-Type", identity.SubjectType)
 		r.Header.Set("X-Apteva-Subject-ID", identity.SubjectID)
 		r.Header.Set("X-Apteva-Organization-ID", identity.OrganizationID)
-		r.Header.Set("X-Apteva-Scopes", `[{"type":"app_user","app":"telephony","actions":["call.read","call.dial","call.answer","call.attach","call.hangup","call.takeover"]}]`)
+		r.Header.Set("X-Apteva-Scopes", `[{"type":"app_user","app":"telephony","actions":["call.read","call.dial","call.answer","call.attach","call.hangup","call.takeover","call.hold","call.recording.control"]}]`)
 	}
 	mux := http.NewServeMux()
 	for _, route := range app.HTTPRoutes() {

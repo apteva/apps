@@ -184,6 +184,17 @@ func (p *websocketWriterPump) QueueAudio(data []byte) {
 	}
 }
 
+// FlushAudio discards browser-bound frames queued before a hold transition.
+func (p *websocketWriterPump) FlushAudio() {
+	for {
+		select {
+		case <-p.audio:
+		default:
+			return
+		}
+	}
+}
+
 func (p *websocketWriterPump) setError(err error) {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()

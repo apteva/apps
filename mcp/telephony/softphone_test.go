@@ -167,6 +167,55 @@ func TestSoftphoneHubBridgesAudioBothDirections(t *testing.T) {
 	}
 }
 
+func TestSoftphoneReconnectKeepsPersistedHoldGate(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	row := insertSoftphoneCall(t, app, "in-progress")
+	if _, err := app.db().db.Exec(`UPDATE calls SET hold_state='held' WHERE id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	server := softphoneTestServer(t, app)
+	peer := dialWS(t, server.URL+"/peer/call-soft-1/cb-secret")
+	browser := dialWS(t, server.URL+"/softphone/media/call-soft-1/peer-secret")
+	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
+	statusData, statusOp, statusErr := wsutil.ReadServerData(browser)
+	if statusErr != nil || statusOp != ws.OpText || !strings.Contains(string(statusData), `"hold_state":"held"`) {
+		t.Fatalf("initial hold status: %s %v", statusData, statusErr)
+	}
+	pcm := pcm16ToBytes([]int16{100, -100, 2000, -2000})
+	if err := wsutil.WriteClientBinary(peer, pcm); err != nil {
+		t.Fatal(err)
+	}
+	if err := wsutil.WriteClientBinary(browser, pcm); err != nil {
+		t.Fatal(err)
+	}
+	for _, conn := range []net.Conn{browser, peer} {
+		_ = conn.SetReadDeadline(time.Now().Add(120 * time.Millisecond))
+		if _, _, err := wsutil.ReadServerData(conn); err == nil {
+			t.Fatal("held call leaked audio")
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+	}
+	hub := app.softphones.lookup(row.ID)
+	if hub == nil {
+		t.Fatal("missing softphone hub")
+	}
+	hub.setHeld(false)
+	if err := wsutil.WriteClientBinary(peer, pcm); err != nil {
+		t.Fatal(err)
+	}
+	if got := readBinaryWithin(t, browser, 3*time.Second); string(got) != string(pcm) {
+		t.Fatal("caller audio did not resume")
+	}
+	if err := wsutil.WriteClientBinary(browser, pcm); err != nil {
+		t.Fatal(err)
+	}
+	if got := readBinaryWithin(t, peer, 3*time.Second); string(got) != string(pcm) {
+		t.Fatal("operator audio did not resume")
+	}
+}
+
 func TestOutboundSoftphoneHoldsMicrophoneUntilCarrierAnswers(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}
@@ -326,8 +375,8 @@ func TestSoftphoneHubDropsRealtimePacingControlFrames(t *testing.T) {
 			}
 			return
 		}
-		var event map[string]string
-		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected") {
+		var event map[string]any
+		if json.Unmarshal(data, &event) == nil && (event["type"] == "ready" || event["type"] == "peer.connected" || event["type"] == "call.status") {
 			continue // hub-owned connection state, not realtime pacing control
 		}
 		t.Fatalf("realtime pacing control leaked to the browser: %s", data)
