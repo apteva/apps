@@ -49,3 +49,12 @@ func TestLongToolNameMatchesWithoutExposingArguments(t *testing.T) {
 		t.Fatalf("sensitive content exposed: %s", encoded)
 	}
 }
+
+func TestDestinationSceneKeepsOnlyToolPreview(t *testing.T) {
+	scene := &Scene{Destinations: []SceneDestination{{ID: "app:many", Tools: []string{"one", "two", "three", "four"}}}}
+	attributeEvents(scene)
+	got := scene.Destinations[0]
+	if got.ToolCount != 4 || len(got.Tools) != 3 {
+		t.Fatalf("tool preview: count=%d tools=%v", got.ToolCount, got.Tools)
+	}
+}

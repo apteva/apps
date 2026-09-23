@@ -44,6 +44,7 @@ type SceneDestination struct {
 	Name      string     `json:"name"`
 	Status    string     `json:"status"`
 	Tools     []string   `json:"tools,omitempty"`
+	ToolCount int        `json:"tool_count"`
 	CallCount int        `json:"call_count"`
 	LastCall  *time.Time `json:"last_call,omitempty"`
 }
