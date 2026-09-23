@@ -186,6 +186,38 @@ func TestApplicationUserAnswerOwnershipAndTakeover(t *testing.T) {
 		t.Fatal("old user renewed after takeover")
 	}
 }
+
+func TestCanceledOfferAnswerReportsEndedToAuthorizedDestinationMembers(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	phoneTestPolicy(t, app)
+	row := phoneTestCall(t, app, "caller-canceled-before-answer", "pending")
+	when := time.Now().UTC().Format(time.RFC3339)
+	if _, err := app.db().db.Exec(`INSERT INTO call_offers(id,call_id,project_id,destination_id,status,offered_at,expires_at,kind) VALUES(?,?,?,?,?,?,?,?)`,
+		"offer-canceled", row.ID, row.ProjectID, "sales", "offered", when, when, "browser"); err != nil {
+		t.Fatal(err)
+	}
+	// The carrier cancels and the ring offer settles just before Answer arrives.
+	if _, err := app.db().db.Exec(`UPDATE calls SET status='canceled',ended_at=? WHERE id=?`, when, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db().db.Exec(`UPDATE call_offers SET status='canceled' WHERE call_id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
+	alice, bob, eve := phoneTestIdentity("alice"), phoneTestIdentity("bob"), phoneTestIdentity("eve")
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/answer/"+row.ID, map[string]any{"destination_id": "sales"}); w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "call has ended") {
+		t.Fatalf("authorized destination member: %d %s", w.Code, w.Body.String())
+	}
+	// Offers are destination-scoped, not browser-session-scoped. Another
+	// currently authorized sales member receives the same terminal result even
+	// if this test never presented that member with a browser notification.
+	if w := phoneTestRequest(app, &bob, "POST", "/softphone/answer/"+row.ID, map[string]any{}); w.Code != http.StatusGone || !strings.Contains(w.Body.String(), "call has ended") {
+		t.Fatalf("other authorized destination member: %d %s", w.Code, w.Body.String())
+	}
+	if w := phoneTestRequest(app, &eve, "POST", "/softphone/answer/"+row.ID, map[string]any{}); w.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized destination member: %d %s", w.Code, w.Body.String())
+	}
+}
 func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	softphoneTestCtx(t)
 	app := &App{installID: 42}

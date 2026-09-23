@@ -302,6 +302,53 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 	}
 	return ""
 }
+
+// A carrier cancellation can settle active offers before a browser's Answer
+// request acquires the call lock. Offers belong to destinations rather than
+// individual browser sessions, so any user who is still authorized for the
+// historically offered destination may receive the terminal outcome. Users
+// without current destination access must not learn it.
+func (a *App) phoneCanAccessSettledOffer(p *phonePrincipal, row *callRow, requested string) bool {
+	if p == nil || row.ProjectID != p.Project || row.Direction != "inbound" {
+		return false
+	}
+	rows, err := a.db().db.Query(`SELECT destination_id,kind,offered_at FROM call_offers WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID)
+	if err != nil {
+		return false
+	}
+	hasOffers := false
+	candidates := make([]string, 0, 1)
+	for rows.Next() {
+		hasOffers = true
+		var destination, kind, offeredAt string
+		if rows.Scan(&destination, &kind, &offeredAt) != nil {
+			_ = rows.Close()
+			return false
+		}
+		if kind == "browser" && offeredAt != "" && p.Destinations[destination] &&
+			(requested == "" || requested == destination) {
+			candidates = append(candidates, destination)
+		}
+	}
+	if rows.Err() != nil || rows.Close() != nil {
+		return false
+	}
+	// destinationAllowsIdentity performs its own query. Do not run it while
+	// the historical-offer rows are open: Telephony deliberately uses a
+	// single SQLite connection, so a nested query would deadlock.
+	for _, destination := range candidates {
+		if a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) {
+			return true
+		}
+	}
+	if hasOffers || row.PeerKind != peerKindHuman {
+		return false
+	}
+	destination := row.RoutingDestinationID
+	return destination != "" && p.Destinations[destination] &&
+		a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) &&
+		(requested == "" || requested == destination)
+}
 func (a *App) filterPhoneCalls(r *http.Request, rows []callRow) []callRow {
 	p := phoneUserFrom(r)
 	if p == nil {

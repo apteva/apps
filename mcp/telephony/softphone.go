@@ -839,9 +839,17 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 			}
 			request.DestinationID = dest
 		} else if !a.phoneCallAllowed(p, row, false) {
+			if isTerminalStatus(row.Status) && a.phoneCanAccessSettledOffer(p, row, request.DestinationID) {
+				http.Error(w, "call has ended", http.StatusGone)
+				return
+			}
 			http.Error(w, "call not owned; explicit supervisor takeover required", 403)
 			return
 		}
+	}
+	if isTerminalStatus(row.Status) {
+		http.Error(w, "call has ended", http.StatusGone)
+		return
 	}
 	offers, err := a.db().activeRingOffers(callID, project)
 	if err != nil {
