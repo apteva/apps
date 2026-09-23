@@ -4,16 +4,17 @@ import { PANEL_STYLES } from "./panel-styles";
 type Source = { id: string; label: string; kind: string; status: string; agents: number };
 type Agent = { id: string; name: string; status: string; model?: string; main_thread?: string };
 type AppNode = { id: string; name: string; status: string };
-type Event = { id: string; agent_id: string; thread_id?: string; type: string; kind: string; label: string; target?: string; time: string };
-type Scene = { source: Source; agents: Agent[]; apps: AppNode[]; events: Event[]; at: string };
+type Destination = { id: string; kind: "app" | "integration" | "other"; name: string; status: string; tools?: string[]; call_count: number; last_call?: string };
+type Event = { id: string; agent_id: string; thread_id?: string; type: string; kind: string; label: string; target?: string; target_id?: string; success?: boolean; time: string };
+type Scene = { source: Source; agents: Agent[]; apps: AppNode[]; destinations: Destination[]; events: Event[]; at: string };
 type Preset = "graph" | "operations" | "village" | "conversation";
 type Props = { installId: number; projectId: string };
 
 const API = "/api/apps/agent-worlds/api";
 const presets: { id: Preset; name: string; detail: string }[] = [
-  { id: "graph", name: "System graph", detail: "Agents, threads and tools" },
+  { id: "graph", name: "System graph", detail: "Agents, apps and integrations" },
   { id: "operations", name: "Operations", detail: "Live status board" },
-  { id: "village", name: "Pixel village", detail: "A playful agent world" },
+  { id: "village", name: "Pixel village", detail: "Agents visiting apps and integrations" },
   { id: "conversation", name: "Conversation", detail: "Messages and handoffs" },
 ];
 
@@ -70,6 +71,7 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
   const [scene, setScene] = useState<Scene | null>(null);
   const [preset, setPreset] = useState<Preset>("graph");
   const [selectedAgent, setSelectedAgent] = useState("");
+  const [selectedDestination, setSelectedDestination] = useState("");
   const [live, setLive] = useState(true);
   const [replayIndex, setReplayIndex] = useState(0);
   const [portrait, setPortrait] = useState(false);
@@ -99,7 +101,7 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
   }, [installId, projectId, sourceId]);
 
   useEffect(() => { void loadSources(); const timer = window.setInterval(loadSources, 15000); return () => window.clearInterval(timer); }, [loadSources]);
-  useEffect(() => { setScene(null); setSelectedAgent(""); void loadScene(); }, [loadScene]);
+  useEffect(() => { setScene(null); setSelectedAgent(""); setSelectedDestination(""); void loadScene(); }, [loadScene]);
   useEffect(() => { if (!live) return; const timer = window.setInterval(loadScene, 2500); return () => window.clearInterval(timer); }, [live, loadScene]);
   useEffect(() => { if (!live || preset !== "village") return; const timer = window.setInterval(() => setAnimationNow(Date.now()), 120); return () => window.clearInterval(timer); }, [live, preset]);
 
@@ -184,7 +186,9 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
   const activePreset = presets.find(item => item.id === preset)!;
   const threadCount = new Set(visibleEvents.filter(event => event.thread_id).map(event => `${event.agent_id}:${event.thread_id}`)).size;
   const runningCount = visibleAgents.filter(agent => agent.status === "running" || agent.status === "active").length;
-  const resources = [...new Set([...(scene?.apps || []).map(app => app.name), ...visibleEvents.filter(event => event.target).map(event => event.target!)])].slice(0, 6);
+  const destinations = scene?.destinations || [];
+  const destination = destinations.find(item => item.id === selectedDestination);
+  const destinationEvents = visibleEvents.filter(event => event.target_id === selectedDestination);
   return <div className="aw">
     <style>{PANEL_STYLES}</style>
     <header className="aw-header">
@@ -205,11 +209,12 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
           <section className="aw-scene" aria-label={activePreset.name}>
             <div className="aw-scene-head"><div><strong>{activePreset.name}</strong><span>{activePreset.detail}</span></div><div className="aw-scene-source"><span className="aw-stage-indicator" />{scene?.source.label || "Connecting"}</div></div>
             <div className="aw-canvas">
-              {scene ? preset === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={visibleAgents} events={visibleEvents} portrait={portrait} onSelect={setSelectedAgent} palette={palette} /> : preset === "village" ? <PixelVillage refNode={stageRef} agents={visibleAgents} events={visibleEvents} portrait={portrait} now={animationNow} seenAt={seenAtRef.current} onSelect={setSelectedAgent} palette={palette} /> : preset === "operations" ? <OperationsStage refNode={stageRef} agents={visibleAgents} events={visibleEvents} portrait={portrait} palette={palette} /> : <ConversationStage refNode={stageRef} agents={visibleAgents} events={visibleEvents} portrait={portrait} palette={palette} /> : <div className="aw-loading">Connecting to the scene…</div>}
+              {scene ? preset === "graph" ? <SystemGraph refNode={stageRef} source={scene.source} agents={visibleAgents} destinations={destinations} events={visibleEvents} portrait={portrait} onSelect={setSelectedAgent} onSelectDestination={setSelectedDestination} palette={palette} /> : preset === "village" ? <PixelVillage refNode={stageRef} agents={visibleAgents} destinations={destinations} events={visibleEvents} portrait={portrait} now={animationNow} seenAt={seenAtRef.current} onSelect={setSelectedAgent} onSelectDestination={setSelectedDestination} palette={palette} /> : preset === "operations" ? <OperationsStage refNode={stageRef} agents={visibleAgents} events={visibleEvents} portrait={portrait} palette={palette} /> : <ConversationStage refNode={stageRef} agents={visibleAgents} events={visibleEvents} portrait={portrait} palette={palette} /> : <div className="aw-loading">Connecting to the scene…</div>}
             </div>
-            <div className="aw-scene-foot"><span>{preset === "graph" ? "Select an agent to focus" : activePreset.detail}</span>{preset === "graph" && <div className="aw-resources"><span>Resources</span>{resources.length ? resources.map(name => <span className="aw-resource" key={name}>{short(name, 18)}</span>) : <em>None observed yet</em>}</div>}</div>
+            <div className="aw-scene-foot"><span>Select an agent or destination to inspect activity</span><div className="aw-resources"><span>Destinations</span><strong>{destinations.length}</strong></div></div>
           </section>
           <aside className="aw-sidebar">
+            <section className="aw-side-destinations"><div className="aw-side-head"><h3>Apps &amp; integrations</h3><span>{destinations.length}</span></div><div className="aw-destination-list">{destinations.map(item => <button key={item.id} className={`aw-destination-row ${selectedDestination === item.id ? "is-selected" : ""}`} onClick={() => setSelectedDestination(selectedDestination === item.id ? "" : item.id)}><span className={`aw-destination-icon is-${item.kind}`}>{item.kind === "app" ? "▣" : item.kind === "integration" ? "⌁" : "◇"}</span><span><strong>{item.name}</strong><small>{item.kind} · {item.status}</small></span><em>{item.call_count}</em></button>)}{!destinations.length && <div className="aw-plain-empty">No apps or integrations available for this source.</div>}</div>{destination && <div className="aw-destination-detail"><strong>{destination.name}</strong><span>{destination.kind} · {destination.status} · {destinationEvents.filter(event => event.kind === "tool").length} visible calls</span><span>{[...new Set(destinationEvents.map(event => scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id))].join(", ") || "No agents have visited yet"}</span>{destination.tools?.length ? <small>{destination.tools.length} mapped tools · {destination.tools.slice(0, 3).join(", ")}{destination.tools.length > 3 ? "…" : ""}</small> : null}{destinationEvents.filter(event => event.kind === "tool").slice(-3).reverse().map(event => <small key={event.id}>{clock(event.time)} · {scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id} · {short(event.target || "tool", 24)}</small>)}</div>}</section>
             <section className="aw-side-agents"><div className="aw-side-head"><h3>Agents</h3><span>{scene?.agents.length || 0}</span></div><div className="aw-agent-list">{(scene?.agents || []).map(agent => <button key={agent.id} onClick={() => setSelectedAgent(selectedAgent === agent.id ? "" : agent.id)} className={`aw-agent-row ${selectedAgent === agent.id ? "is-selected" : ""}`}><span className="aw-agent-avatar">{agent.name.slice(0,1).toUpperCase()}</span><span className="aw-agent-name"><strong>{agent.name}</strong><small>{agent.model || agent.main_thread || agent.status}</small></span><span className="aw-agent-status" style={{ background: statusColor(agent.status, palette) }} title={agent.status} /></button>)}{!scene?.agents.length && <div className="aw-plain-empty">No agents in this source</div>}</div></section>
             <section className="aw-side-activity"><div className="aw-side-head"><h3>Activity</h3><span>{live ? "Live feed" : "Replay"}</span></div><div className="aw-activity-list">{visibleEvents.slice(-10).reverse().map(event => <div key={event.id} className="aw-event"><span className="aw-event-mark" style={{ background: eventColor(event.kind, palette) }} /><div><div className="aw-event-line"><b>{scene?.agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id}</b> {event.label}</div><div className="aw-event-meta">{clock(event.time)}{event.thread_id ? ` · ${short(event.thread_id, 18)}` : ""}</div></div></div>)}{!visibleEvents.length && <div className="aw-plain-empty">Activity appears as agents work.</div>}</div></section>
           </aside>
@@ -222,27 +227,29 @@ export default function AgentWorldsPanel({ installId, projectId }: Props) {
 
 function SvgText({ x, y, children, size = 14, fill = "currentColor", anchor = "start", weight = 400 }: { x: number; y: number; children: React.ReactNode; size?: number; fill?: string; anchor?: "start" | "middle" | "end"; weight?: number }) { return <text x={x} y={y} fill={fill} fontSize={size} fontWeight={weight} textAnchor={anchor}>{children}</text>; }
 
-function SystemGraph({ refNode, source, agents, events, portrait, onSelect, palette }: { refNode: React.RefObject<SVGSVGElement | null>; source: Source; agents: Agent[]; events: Event[]; portrait: boolean; onSelect: (id: string) => void; palette: Palette }) {
+function SystemGraph({ refNode, source, agents, destinations, events, portrait, onSelect, onSelectDestination, palette }: { refNode: React.RefObject<SVGSVGElement | null>; source: Source; agents: Agent[]; destinations: Destination[]; events: Event[]; portrait: boolean; onSelect: (id: string) => void; onSelectDestination: (id: string) => void; palette: Palette }) {
   const width = portrait ? 540 : 1280, height = portrait ? 960 : 560;
+  const shownAgents = agents.slice(0, portrait ? 8 : 9), shownDestinations = destinations.slice(0, portrait ? 8 : 9);
   const latest = latestByAgent(events);
-  const shown = agents.slice(0, 12), rows = Math.max(1, Math.ceil(shown.length / 2));
-  const cardW = portrait ? 228 : 282;
-  const cardH = portrait ? Math.min(82, 620 / rows - 12) : Math.min(88, 480 / rows - 10);
-  const positions = shown.map((agent, i) => ({ agent, x: portrait ? (i % 2 ? 286 : 26) : (i % 2 ? 948 : 50), y: portrait ? 280 + Math.floor(i / 2) * (620 / rows) + (620 / rows - cardH) / 2 : 40 + Math.floor(i / 2) * (480 / rows) + (480 / rows - cardH) / 2 }));
-  const hubX = width / 2, hubY = portrait ? 162 : 280, hubW = portrait ? 246 : 260, hubH = 104;
-  return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="img" aria-label="Agent system graph" style={{ color: palette.text, background: palette.subtle, fontFamily: palette.font }}>
+  const agentX = portrait ? 22 : 42, destinationX = portrait ? 286 : 978;
+  const cardW = portrait ? 230 : 258, cardH = portrait ? 68 : 45;
+  const rowY = (i: number, count: number) => portrait ? 280 + i * 76 : 75 + i * Math.min(51, 430 / Math.max(1, count));
+  const agentPositions = new Map(shownAgents.map((item, i) => [item.id, { x: agentX, y: rowY(i, shownAgents.length) }]));
+  const destinationPositions = new Map(shownDestinations.map((item, i) => [item.id, { x: destinationX, y: rowY(i, shownDestinations.length) }]));
+  const observed = new Set(events.filter(item => item.kind === "tool" && item.target_id).map(item => `${item.agent_id}|${item.target_id}`));
+  const hubX = width / 2, hubY = portrait ? 143 : 280;
+  return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="img" aria-label="Agent and destination graph" style={{ color: palette.text, background: palette.subtle, fontFamily: palette.font }}>
     <defs><pattern id="awGraphDots" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill={palette.border} /></pattern></defs>
     <rect width={width} height={height} fill={palette.subtle} /><rect width={width} height={height} fill="url(#awGraphDots)" />
-    <circle cx={hubX} cy={hubY} r={portrait ? 112 : 145} fill="none" stroke={palette.border} strokeWidth="1" opacity=".65" /><circle cx={hubX} cy={hubY} r={portrait ? 160 : 205} fill="none" stroke={palette.border} strokeWidth="1" opacity=".3" />
-    {positions.map(({agent,x,y},i) => { const left = i % 2 === 0; const sx = portrait ? hubX + (left ? -38 : 38) : hubX + (left ? -hubW/2 : hubW/2); const sy = portrait ? hubY + hubH/2 : hubY; const ex = left ? x + cardW : x; const ey = y + cardH/2; const midX = (sx+ex)/2; return <g key={`edge:${agent.id}`}><path d={`M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ey}, ${ex} ${ey}`} fill="none" stroke={latest.has(agent.id) ? palette.accent : palette.strong} strokeWidth={latest.has(agent.id) ? 2 : 1.2} strokeDasharray={latest.has(agent.id) ? undefined : "4 6"} opacity={latest.has(agent.id) ? ".9" : ".65"} /><circle cx={ex} cy={ey} r="3" fill={latest.has(agent.id) ? palette.accent : palette.strong} /></g>; })}
-    <rect x={hubX-hubW/2} y={hubY-hubH/2} width={hubW} height={hubH} rx="9" fill={palette.card} stroke={palette.accent} strokeWidth="1.8" />
-    <rect x={hubX-hubW/2} y={hubY-hubH/2} width="4" height={hubH} fill={palette.accent} />
-    <SvgText x={hubX-hubW/2+23} y={hubY-19} size={10} fill={palette.accent} weight={700}>APTEVA · {source.kind.includes("runtime") ? "ENVIRONMENT" : "SERVER"}</SvgText>
-    <SvgText x={hubX-hubW/2+23} y={hubY+12} size={20} weight={700}>{short(source.label, 18)}</SvgText>
-    <SvgText x={hubX-hubW/2+23} y={hubY+35} size={11} fill={palette.dim}>{agents.length} connected agents</SvgText>
-    {positions.map(({agent,x,y}) => <g key={agent.id} onClick={() => onSelect(agent.id)} style={{ cursor: "pointer" }}><rect x={x} y={y} width={cardW} height={cardH} rx="7" fill={palette.card} stroke={palette.border} /><rect x={x} y={y} width="3" height={cardH} fill={statusColor(agent.status,palette)} /><circle cx={x+29} cy={y+30} r="15" fill={palette.subtle} stroke={palette.strong} /><SvgText x={x+29} y={y+35} size={14} fill={palette.accent} anchor="middle" weight={700}>{agent.name.slice(0,1).toUpperCase()}</SvgText><SvgText x={x+55} y={y+30} size={13} weight={700}>{short(agent.name,portrait?17:24)}</SvgText><circle cx={x+cardW-17} cy={y+25} r="4.5" fill={statusColor(agent.status,palette)} /><SvgText x={x+16} y={y+cardH-16} size={11} fill={palette.dim}>{short(latest.get(agent.id)?.label || agent.status,portrait?29:37)}</SvgText></g>)}
-    {!agents.length && <SvgText x={hubX} y={portrait?380:400} size={15} fill={palette.dim} anchor="middle">No agents in this source yet</SvgText>}
-    {agents.length > shown.length && <SvgText x={width-28} y={height-22} size={11} fill={palette.dim} anchor="end">+{agents.length-shown.length} more · select an agent to focus</SvgText>}
+    <SvgText x={agentX} y={portrait ? 258 : 42} size={11} fill={palette.dim} weight={700}>AGENTS · {agents.length}</SvgText><SvgText x={destinationX} y={portrait ? 258 : 42} size={11} fill={palette.dim} weight={700}>APPS &amp; INTEGRATIONS · {destinations.length}</SvgText>
+    {[...observed].map(key => { const [agentID, destinationID] = key.split("|"); const from = agentPositions.get(agentID), to = destinationPositions.get(destinationID); if (!from || !to) return null; const x1 = from.x + cardW, y1 = from.y + cardH/2, x2 = to.x, y2 = to.y + cardH/2; return <path key={key} d={`M ${x1} ${y1} C ${portrait ? 268 : 550} ${y1}, ${portrait ? 272 : 730} ${y2}, ${x2} ${y2}`} fill="none" stroke={palette.info} strokeWidth="1.6" opacity=".7" />; })}
+    {!portrait && shownAgents.map(agent => { const pos = agentPositions.get(agent.id)!; return <path key={`hub:${agent.id}`} d={`M ${pos.x+cardW} ${pos.y+cardH/2} L ${hubX-115} ${hubY}`} stroke={palette.border} fill="none" strokeWidth="1" />; })}
+    <rect x={hubX-115} y={hubY-49} width="230" height="98" rx="8" fill={palette.card} stroke={palette.accent} strokeWidth="1.7" /><rect x={hubX-115} y={hubY-49} width="4" height="98" fill={palette.accent} />
+    <SvgText x={hubX-94} y={hubY-17} size={10} fill={palette.accent} weight={700}>APTEVA · {source.kind.includes("runtime") ? "ENVIRONMENT" : "SERVER"}</SvgText><SvgText x={hubX-94} y={hubY+11} size={17} weight={700}>{short(source.label, 20)}</SvgText><SvgText x={hubX-94} y={hubY+31} size={10} fill={palette.dim}>{agents.length} connected agents</SvgText>
+    {shownAgents.map(agent => { const pos=agentPositions.get(agent.id)!; return <g key={agent.id} onClick={() => onSelect(agent.id)} style={{cursor:"pointer"}}><rect x={pos.x} y={pos.y} width={cardW} height={cardH} rx="5" fill={palette.card} stroke={palette.border}/><rect x={pos.x} y={pos.y} width="3" height={cardH} fill={statusColor(agent.status,palette)}/><SvgText x={pos.x+14} y={pos.y+20} size={12} weight={700}>{short(agent.name,portrait?22:24)}</SvgText><SvgText x={pos.x+14} y={pos.y+cardH-10} size={10} fill={palette.dim}>{short(latest.get(agent.id)?.label || agent.status,portrait?30:33)}</SvgText></g>; })}
+    {shownDestinations.map(item => { const pos=destinationPositions.get(item.id)!; const color=item.kind === "integration" ? palette.info : item.kind === "app" ? palette.accent : palette.dim; return <g key={item.id} onClick={() => onSelectDestination(item.id)} style={{cursor:"pointer"}}><rect x={pos.x} y={pos.y} width={cardW} height={cardH} rx="5" fill={palette.card} stroke={palette.border}/><rect x={pos.x} y={pos.y} width="3" height={cardH} fill={color}/><SvgText x={pos.x+14} y={pos.y+20} size={12} weight={700}>{short(item.name,portrait?19:22)}</SvgText><SvgText x={pos.x+14} y={pos.y+cardH-10} size={10} fill={palette.dim}>{item.kind} · {item.call_count} calls</SvgText></g>; })}
+    {!destinations.length && <SvgText x={destinationX+10} y={portrait?315:135} size={12} fill={palette.dim}>No destinations found</SvgText>}
+    {(agents.length>shownAgents.length || destinations.length>shownDestinations.length) && <SvgText x={width-22} y={height-17} size={10} fill={palette.dim} anchor="end">Showing {shownAgents.length} agents · {shownDestinations.length} destinations</SvgText>}
   </svg>;
 }
 
@@ -258,10 +265,11 @@ function ConversationStage({ refNode, agents, events, portrait, palette }: { ref
   return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="img" aria-label="Agent conversation stage" style={{ color: palette.text, background: palette.subtle, fontFamily: palette.font }}><rect width={width} height={height} fill={palette.subtle} /><SvgText x={30} y={48} size={22} weight={700}>Conversation</SvgText><SvgText x={30} y={72} size={11} fill={palette.dim}>AGENT HANDOFFS &amp; MILESTONES</SvgText><line x1={30} y1={88} x2={width-30} y2={88} stroke={palette.border} /><line x1={portrait ? 46 : 67} y1={110} x2={portrait ? 46 : 67} y2={height-35} stroke={palette.border} strokeWidth="2" />{messages.map((event, index) => { const bubbleW = portrait ? 430 : 1160, x = portrait ? 74 : 95, y = 112 + index * (portrait ? 88 : 75), name = agents.find(agent => agent.id === event.agent_id)?.name || event.agent_id; return <g key={event.id}><circle cx={portrait ? 46 : 67} cy={y+31} r="6" fill={eventColor(event.kind, palette)} /><rect x={x} y={y} width={bubbleW} height={portrait ? 70 : 64} rx="6" fill={palette.card} stroke={palette.border} /><rect x={x} y={y} width="3" height={portrait ? 70 : 64} fill={eventColor(event.kind, palette)} /><SvgText x={x + 16} y={y + 23} size={11} fill={palette.accent} weight={700}>{short(name, 30)}</SvgText><SvgText x={x + 16} y={y + 46} size={13}>{short(event.label, portrait ? 45 : 95)}</SvgText><SvgText x={x + bubbleW - 15} y={y + 23} size={10} fill={palette.dim} anchor="end">{clock(event.time)}</SvgText></g>; })}{!messages.length && <SvgText x={width / 2} y={height / 2} size={15} fill={palette.dim} anchor="middle">Agent messages and handoffs will appear here</SvgText>}</svg>;
 }
 
-function PixelVillage({ refNode, agents, events, portrait, now, seenAt, onSelect, palette }: { refNode: React.RefObject<SVGSVGElement | null>; agents: Agent[]; events: Event[]; portrait: boolean; now: number; seenAt: Map<string, number>; onSelect: (id: string) => void; palette: Palette }) {
+function PixelVillage({ refNode, agents, destinations, events, portrait, now, seenAt, onSelect, onSelectDestination, palette }: { refNode: React.RefObject<SVGSVGElement | null>; agents: Agent[]; destinations: Destination[]; events: Event[]; portrait: boolean; now: number; seenAt: Map<string, number>; onSelect: (id: string) => void; onSelectDestination: (id: string) => void; palette: Palette }) {
   const width = portrait ? 540 : 1280, height = portrait ? 960 : 560;
   const groundY = portrait ? 625 : 385;
-  const houses = portrait ? [{ x: 35, y: 195, label: "LIBRARY", color: "#d6a469" }, { x: 295, y: 195, label: "WORKSHOP", color: "#bd775c" }, { x: 165, y: 430, label: "MAILBOX", color: "#8c80bf" }] : [{ x: 85, y: 145, label: "LIBRARY", color: "#d6a469" }, { x: 530, y: 115, label: "WORKSHOP", color: "#bd775c" }, { x: 972, y: 150, label: "MAILBOX", color: "#8c80bf" }];
+  const visibleDestinations = destinations.slice(0, 4);
+  const houses = visibleDestinations.map((item, index) => ({ ...item, x: portrait ? 20 + (index % 2) * 265 : 36 + index * 305, y: portrait ? 162 + Math.floor(index / 2) * 215 : 145, color: item.kind === "integration" ? "#8c80bf" : item.kind === "other" ? "#9b9a87" : ["#d6a469", "#bd775c", "#9bac78", "#aa8aaf"][index % 4] }));
   return <svg ref={refNode} viewBox={`0 0 ${width} ${height}`} width="100%" height="100%" role="img" aria-label="Pixel village of live agents" shapeRendering="crispEdges" style={{ background: "#92c9d1", imageRendering: "pixelated", fontFamily: palette.font }}>
     <rect width={width} height={height} fill="#94cbd4" />
     <path d={`M 0 ${groundY - 110} L ${width * .2} ${groundY - 155} L ${width * .43} ${groundY - 108} L ${width * .68} ${groundY - 170} L ${width} ${groundY - 122} L ${width} ${groundY} L 0 ${groundY} Z`} fill="#78b6a8" />
@@ -270,24 +278,26 @@ function PixelVillage({ refNode, agents, events, portrait, now, seenAt, onSelect
     <rect y={groundY} width={width} height={height - groundY} fill="#6ea66c" /><rect y={groundY + 30} width={width} height="16" fill="#63995f" />
     <circle cx={width - 85} cy="78" r="33" fill="#f8e8a5" /><rect x="0" y={groundY - 24} width={width} height="26" fill="#83b475" />
     {Array.from({ length: portrait ? 20 : 36 }, (_, i) => { const x = (i * 127 + 27) % width, y = groundY + 56 + ((i * 47) % Math.max(80, height - groundY - 80)); return <g key={i}><rect x={x} y={y} width="7" height="3" fill="#e8dda2" /><rect x={x + 3} y={y - 4} width="2" height="4" fill="#477c4c" /></g>; })}
-    {houses.map((house, i) => <g key={house.label}><rect x={house.x + 15} y={house.y + 45} width="195" height="135" fill={house.color} stroke="#645b53" strokeWidth="5" /><path d={`M ${house.x} ${house.y + 50} L ${house.x + 112} ${house.y - 18} L ${house.x + 225} ${house.y + 50} Z`} fill={i === 1 ? "#704e5b" : i === 2 ? "#685985" : "#805d57"} stroke="#594d53" strokeWidth="5" /><rect x={house.x + 88} y={house.y + 101} width="45" height="79" fill="#634e49" /><rect x={house.x + 35} y={house.y + 85} width="35" height="35" fill="#d7e9d5" stroke="#5d6661" strokeWidth="5" /><rect x={house.x + 160} y={house.y + 85} width="35" height="35" fill="#d7e9d5" stroke="#5d6661" strokeWidth="5" /><rect x={house.x + 39} y={house.y + 165} width="150" height="22" fill="#e8d3a3" stroke="#61594c" strokeWidth="3" /><SvgText x={house.x + 114} y={house.y + 181} size={14} fill="#3c4b3e" anchor="middle" weight={700}>{house.label}</SvgText></g>)}
+    {houses.map((house, i) => <g key={house.id} onClick={() => onSelectDestination(house.id)} style={{cursor:"pointer"}}><rect x={house.x + 15} y={house.y + 45} width="195" height="135" fill={house.color} stroke="#645b53" strokeWidth="5" /><path d={`M ${house.x} ${house.y + 50} L ${house.x + 112} ${house.y - 18} L ${house.x + 225} ${house.y + 50} Z`} fill={i === 1 ? "#704e5b" : i === 2 ? "#685985" : "#805d57"} stroke="#594d53" strokeWidth="5" /><rect x={house.x + 88} y={house.y + 101} width="45" height="79" fill="#634e49" /><rect x={house.x + 35} y={house.y + 85} width="35" height="35" fill="#d7e9d5" stroke="#5d6661" strokeWidth="5" /><rect x={house.x + 160} y={house.y + 85} width="35" height="35" fill="#d7e9d5" stroke="#5d6661" strokeWidth="5" /><rect x={house.x + 39} y={house.y + 165} width="150" height="22" fill="#e8d3a3" stroke="#61594c" strokeWidth="3" /><SvgText x={house.x + 114} y={house.y + 181} size={14} fill="#3c4b3e" anchor="middle" weight={700}>{short(house.name.toUpperCase(), 17)}</SvgText></g>)}
     <path d={portrait ? `M 269 625 L 269 900 M 80 698 L 465 698` : `M 0 465 L 1280 465 M 640 385 L 640 560`} stroke="#c3b083" strokeWidth="48" fill="none" />
     {(portrait ? [{ x: 34, y: 750 }, { x: 493, y: 820 }] : [{ x: 36, y: 427 }, { x: 1245, y: 414 }]).map((tree, index) => <g key={index}><rect x={tree.x - 7} y={tree.y - 8} width="14" height="40" fill="#705c49" /><rect x={tree.x - 29} y={tree.y - 50} width="58" height="45" fill="#3e805b" /><rect x={tree.x - 20} y={tree.y - 69} width="40" height="20" fill="#4a9364" /><rect x={tree.x - 35} y={tree.y - 36} width="9" height="20" fill="#34704f" /><rect x={tree.x + 26} y={tree.y - 36} width="9" height="20" fill="#34704f" /><rect x={tree.x - 17} y={tree.y - 42} width="13" height="6" fill="#6db67b" /></g>)}
     {agents.slice(0, portrait ? 8 : 12).map((agent, index) => {
       const history = events.filter(item => item.agent_id === agent.id);
-      const event = history[history.length - 1], previous = history[history.length - 2];
-      const kind = event?.kind || "idle";
-      const place = (eventKind?: string) => eventKind === "tool" || eventKind === "result" ? houses[1] : eventKind === "message" || eventKind === "spawn" ? houses[2] : houses[0];
-      const base = place(kind), from = place(previous?.kind);
-      const row = Math.floor(index / 4), col = index % 4;
-      const targetX = Math.min(width - 30, Math.max(28, base.x + (portrait ? 50 + (index % 2) * 40 : 32 + col * 47)));
-      const targetY = Math.min(height - 80, portrait ? groundY + 105 + row * 70 : base.y + 270 + row * 88);
-      const startX = Math.min(width - 30, Math.max(28, from.x + (portrait ? 50 + (index % 2) * 40 : 32 + col * 47)));
-      const startY = Math.min(height - 80, portrait ? groundY + 105 + row * 70 : from.y + 270 + row * 88);
-      const progress = event ? Math.min(1, Math.max(0, (now - (seenAt.get(event.id) || now)) / 1800)) : 1;
-      const x = Math.round(startX + (targetX - startX) * progress);
-      const y = Math.round(startY + (targetY - startY) * progress);
-      const step = progress < 1 && Math.floor(now / 160) % 2 === 0 ? 4 : 0;
+      const event = [...history].reverse().find(item => item.kind === "tool" && item.target_id && houses.some(house => house.id === item.target_id));
+      const kind = history[history.length - 1]?.kind || "idle";
+      const col = index % (portrait ? 3 : 6), row = Math.floor(index / (portrait ? 3 : 6));
+      const idleX = portrait ? 92 + col * 175 : 170 + col * 190;
+      const idleY = portrait ? groundY + 105 + row * 92 : groundY + 83 + row * 88;
+      const house = houses.find(item => item.id === event?.target_id);
+      const age = event ? now - new Date(event.time).getTime() : Infinity;
+      const active = !!house && age >= 0 && age < 9000;
+      const progress = active && event ? Math.min(1, Math.max(0, (now - (seenAt.get(event.id) || now)) / 4500)) : 0;
+      const visit = progress < .5 ? progress * 2 : progress < .78 ? 1 : (1 - progress) / .22;
+      const targetX = house ? house.x + 111 : idleX;
+      const targetY = house ? house.y + 208 : idleY;
+      const x = Math.round(idleX + (targetX - idleX) * visit);
+      const y = Math.round(idleY + (targetY - idleY) * visit);
+      const step = active && progress < 1 && Math.floor(now / 160) % 2 === 0 ? 4 : 0;
       const shirt = ["#536bbc", "#c9685a", "#60a482", "#ab77b7", "#d6a65d"][index % 5];
       return <g key={agent.id} onClick={() => onSelect(agent.id)} style={{ cursor: "pointer" }}>
         <rect x={x - 12} y={y + 34} width="26" height="5" fill="#54765b" opacity=".6" />
@@ -298,10 +308,10 @@ function PixelVillage({ refNode, agents, events, portrait, now, seenAt, onSelect
         {kind === "message" && <rect x={x + 14} y={y + 13} width="12" height="8" fill="#f3e8cc" stroke="#7f755a" />}
         <rect x={x - 40} y={y - 53} width="80" height="22" rx="4" fill="#f5efd9" stroke="#6f755e" strokeWidth="2" />
         <SvgText x={x} y={y - 38} size={11} fill="#415449" anchor="middle" weight={700}>{short(agent.name, 11)}</SvgText>
-        <SvgText x={x} y={y + 54} size={10} fill="#2f5541" anchor="middle">{kind === "tool" ? "working" : kind === "message" ? "delivering" : kind === "thinking" ? "thinking" : agent.status}</SvgText>
+        <SvgText x={x} y={y + 54} size={10} fill="#2f5541" anchor="middle">{active && house ? short(house.name, 12) : kind === "thinking" ? "thinking" : agent.status}</SvgText>
       </g>;
     })}
-    {!agents.length && <SvgText x={width / 2} y={groundY + 93} size={17} fill="#315d43" anchor="middle">The village is waiting for agents</SvgText>}
+    {!agents.length && <SvgText x={width / 2} y={groundY + 93} size={17} fill="#315d43" anchor="middle">The village is waiting for agents</SvgText>}{!houses.length && <SvgText x={width / 2} y={groundY - 72} size={16} fill="#315d43" anchor="middle">Apps and integrations will appear here</SvgText>}{destinations.length > houses.length && <SvgText x={width - 20} y={height - 64} size={12} fill="#315d43" anchor="end">+{destinations.length - houses.length} more destinations in the sidebar</SvgText>}
     <rect x="16" y="17" width={portrait ? 508 : 340} height="48" rx="7" fill="#f2ebd5" stroke="#7d8b70" strokeWidth="3" /><SvgText x={31} y={49} size={20} fill="#3d5c51" weight={700}>AGENT VILLAGE</SvgText>
     <rect x="16" y={height - 52} width={width - 32} height="38" rx="5" fill="#f2ebd5" stroke="#7d8b70" strokeWidth="3" /><SvgText x={31} y={height - 28} size={12} fill="#496552">{short(events[events.length - 1]?.label || "A quiet moment in the village", portrait ? 55 : 100)}</SvgText>
   </svg>;

@@ -17,10 +17,12 @@ import (
 var manifestYAML []byte
 
 type App struct {
-	ctx    *sdk.AppCtx
-	cancel context.CancelFunc
-	mu     sync.RWMutex
-	events []sdk.TelemetryStreamEvent
+	ctx              *sdk.AppCtx
+	cancel           context.CancelFunc
+	mu               sync.RWMutex
+	events           []sdk.TelemetryStreamEvent
+	destinationMu    sync.Mutex
+	destinationCache map[string]cachedDestinations
 }
 
 func (a *App) Manifest() sdk.Manifest {
