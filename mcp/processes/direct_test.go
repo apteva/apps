@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -92,6 +93,38 @@ func TestDirectNoTasksAndOutcome(t *testing.T) {
 	history, e := a.runs("project-a", p.ID)
 	if e != nil || len(history.(map[string]any)["direct_runs"].([]Run)) != 1 || len(f.calls) != 0 {
 		t.Fatal("history depends on tasks", e)
+	}
+}
+
+func TestProjectRunsAreScopedAndIncludeProcessIdentity(t *testing.T) {
+	a, _, p := directSetup(t)
+	if _, err := a.start("project-a", p.ID, "project-history", "input"); err != nil {
+		t.Fatal(err)
+	}
+	other, err := a.save("other", "", "operator", 0, def())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Exec(`INSERT INTO process_runs(id,process_id,version,kind,request_key,created_at,backend,state,assignment_json,overrides_json) VALUES('hidden-run',?,1,'manual','hidden','2026-09-23T09:00:00Z','agent','completed','{}','{}')`, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	history, err := a.projectRuns("project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := history.(map[string]any)["runs"].([]projectRun)
+	if len(runs) != 1 || runs[0].ProcessID != p.ID || runs[0].ProcessName != p.Name {
+		t.Fatalf("unexpected project history: %+v", runs)
+	}
+	response := overviewGET(t, a, "/processes/runs?project_id=project-a", "project-a")
+	if response.Code != 200 {
+		t.Fatalf("project runs route: %d %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Runs []projectRun `json:"runs"`
+	}
+	if err = json.Unmarshal(response.Body.Bytes(), &payload); err != nil || len(payload.Runs) != 1 || payload.Runs[0].ProcessName != p.Name {
+		t.Fatalf("project runs response: %+v err=%v", payload, err)
 	}
 }
 func TestDirectRetryPinnedAndLifecycle(t *testing.T) {

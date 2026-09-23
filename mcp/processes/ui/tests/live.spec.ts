@@ -7,6 +7,7 @@ test("SSE refreshes graphical multi-agent progress, batches events and preserves
  await page.goto('/?live');
  await page.getByRole('button',{name:'Hourly weather alerts',exact:true}).click();
  await page.getByRole('button',{name:'Runs',exact:true}).click();
+ await page.locator('.run-list > button').first().click();
  await expect(page.locator('.pf-execution[data-state="running"]')).toHaveCount(1);
  await expect(page.getByRole('button',{name:'Step 1: Fetch current weather',exact:true})).toContainText('Weather agent');
  await expect(page.getByRole('button',{name:'Step 2: Post alert in Conversations',exact:true})).toContainText('Agent 8');
@@ -30,6 +31,7 @@ test("SSE refreshes graphical multi-agent progress, batches events and preserves
 test("reconnect reconciles a missed completion without waiting for polling",async({page,request})=>{
  await request.post('/fixture/runs',{data:[run()]});await page.goto('/?live');
  await page.getByRole('button',{name:'Hourly weather alerts',exact:true}).click();await page.getByRole('button',{name:'Runs',exact:true}).click();
+ await page.locator('.run-list > button').first().click();
  await expect(page.locator('.pf-execution[data-state="running"]')).toHaveCount(1);
  await page.waitForTimeout(300);
  await request.post('/fixture/runs',{data:[run(true)]});
@@ -52,6 +54,7 @@ test("flow labels keep human executors distinct and wrap long agent names", asyn
  await page.goto('/?live&long_agent');
  await page.getByRole('button', { name: 'Hourly weather alerts', exact: true }).click();
  await page.getByRole('button', { name: 'Runs', exact: true }).click();
+ await page.locator('.run-list > button').first().click();
  const first = page.getByRole('button', { name: 'Step 1: Fetch current weather', exact: true });
  await expect(first).toContainText('Barcelona weather operations coordinator');
  await expect(page.getByRole('button', { name: 'Step 2: Post alert in Conversations', exact: true }).locator('.pf-executor')).toHaveText('0% · Human');
@@ -68,6 +71,7 @@ test("detail flow shares themed statuses, borders and selection", async ({page,r
  await page.goto('/?live');
  await page.getByRole('button',{name:'Hourly weather alerts',exact:true}).click();
  await page.getByRole('button',{name:'Runs',exact:true}).click();
+ await page.locator('.run-list > button').first().click();
  await expect(page.locator('.pf-step[data-state="running"]')).toHaveCount(1);
  await expect(page.locator('.pf-step[data-state="completed"]')).toHaveCount(1);
  for(const theme of flowThemes) {

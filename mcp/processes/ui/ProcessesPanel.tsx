@@ -11,6 +11,7 @@ import Assignments, {
   type Assignment,
 } from "./Assignments";
 import Triggers from "./Triggers";
+import ExecutionTools, { type ToolSource } from "./ExecutionTools";
 type Props = {
   appName?: string;
   projectId?: string;
@@ -53,6 +54,8 @@ type Process = Definition & {
 };
 type Version = { version: number; definition: Definition };
 type Entry = {
+  process_id?: string;
+  process_name?: string;
   assignment_id?: string;
   assignment?: Partial<Assignment>;
   backend: "agent";
@@ -73,6 +76,8 @@ type Entry = {
     current_step?: string;
     result?: string;
     error?: string;
+    execution_id?: string;
+    target_thread_id?: string;
     created_at: string;
   };
 };
@@ -102,6 +107,7 @@ const historyEntries = (r: History): Entry[] =>
   (r.direct_runs || []).map((e) => ({
       backend: "agent" as const,
       version: e.version,
+      process_id: (e as typeof e & { process_id?: string }).process_id,
       assignment_id: e.assignment_id,
       assignment: e.assignment,
       record: {
@@ -111,6 +117,28 @@ const historyEntries = (r: History): Entry[] =>
     })).sort(
     (a, b) => Date.parse(b.record.created_at) - Date.parse(a.record.created_at),
   );
+type ProjectHistory = {
+  runs?: (Entry["record"] & {
+    process_id: string;
+    process_name: string;
+    version: number;
+    assignment_id?: string;
+    assignment?: Assignment;
+  })[];
+};
+const projectHistoryEntries = (history: ProjectHistory): Entry[] =>
+  (history.runs || []).map((run) => ({
+    backend: "agent" as const,
+    version: run.version,
+    process_id: run.process_id,
+    process_name: run.process_name,
+    assignment_id: run.assignment_id,
+    assignment: run.assignment,
+    record: {
+      ...run,
+      title: run.workflow ? "Team workflow run" : "Direct agent run",
+    },
+  }));
 const cadence = (s?: Schedule) =>
   !s
     ? "On demand"
@@ -124,6 +152,16 @@ const date = (s?: string) =>
         timeStyle: "short",
       })
     : "—";
+const terminalRunStates = new Set(["completed", "failed", "cancelled"]);
+const matchesProjectRunFilter = (run: Entry, filter: string) => {
+  const state = run.record.state;
+  if (!filter) return true;
+  if (filter === "ongoing") return !terminalRunStates.has(state);
+  if (filter === "attention")
+    return ["waiting", "blocked", "failed"].includes(state) ||
+      !!run.record.delivery_warning;
+  return state === filter;
+};
 const fields = [
   ["instructions", "General instructions"],
   ["required_inputs", "Required inputs / sources"],
@@ -134,16 +172,104 @@ const fields = [
 const css = `
 .ap-processes{--pc-bg:var(--color-bg,#101216);--pc-panel:var(--color-bg-card,#181b21);--pc-line:var(--color-border,#30343e);--pc-text:var(--color-text,#eceef2);--pc-muted:var(--color-text-muted,#969eac);--pc-accent:var(--color-accent,#ff6b00);color:var(--pc-text);background:var(--pc-bg);font-size:14px;line-height:1.55;min-height:100%;height:100%;overflow:auto;padding:28px;box-sizing:border-box}
 .ap-processes .pf-basics{display:grid;grid-template-columns:1fr 1fr;gap:20px}.ap-processes .pf-settings{margin:18px 0}.ap-processes .pf-settings>summary{cursor:pointer;color:var(--pc-muted);padding:10px 0 18px}.ap-processes .pf-basics .field{margin-bottom:0}@media(max-width:760px){.ap-processes .pf-basics{grid-template-columns:1fr}}.ap-processes *{box-sizing:border-box}.ap-processes h1{font-size:24px;line-height:1.25;margin:0;font-weight:650;letter-spacing:-.5px}.ap-processes h2{font-size:16px;margin:0 0 14px;font-weight:600}.ap-processes p{margin:6px 0}.ap-processes .muted{color:var(--pc-muted)}.ap-processes .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.ap-processes .between{justify-content:space-between}.ap-processes .head{margin-bottom:24px}.ap-processes button,.ap-processes .button{font:inherit;font-size:13px;border:1px solid var(--pc-line);background:var(--pc-panel);color:var(--pc-text);border-radius:8px;padding:9px 14px;cursor:pointer;text-decoration:none;display:inline-flex;gap:6px}.ap-processes button:hover{border-color:var(--pc-accent)}.ap-processes button:disabled{opacity:.45;cursor:default}.ap-processes .primary{background:var(--pc-accent);border-color:transparent;color:var(--pc-bg);font-weight:650}.ap-processes input,.ap-processes select,.ap-processes textarea{width:100%;border:1px solid var(--pc-line);border-radius:8px;background:var(--pc-bg);color:var(--pc-text);font:inherit;font-size:13px;padding:10px 12px}.ap-processes textarea{resize:vertical}.ap-processes :is(button,a,input,select,textarea):focus-visible{outline:2px solid var(--pc-accent);outline-offset:3px}.ap-processes label{display:block;font-size:12px;font-weight:600;margin-bottom:7px}.ap-processes .field{margin-bottom:19px}.ap-processes .card{background:var(--pc-panel);border:1px solid var(--pc-line);border-radius:12px;padding:22px}.ap-processes .grid{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(250px,1fr);gap:20px}.ap-processes .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.ap-processes .stat{border:1px solid var(--pc-line);border-radius:10px;padding:16px}.ap-processes .stat strong{display:block;font-size:25px}.ap-processes .stat span{font-size:12px;color:var(--pc-muted)}.ap-processes .pill{font-size:11px;padding:3px 9px;border-radius:999px;border:1px solid var(--pc-line);text-transform:capitalize;white-space:nowrap}.ap-processes .pill.active,.ap-processes .pill.completed{color:#62ccaa;background:#62ccaa14;border-color:#62ccaa40}.ap-processes .pill.blocked,.ap-processes .pill.failed,.ap-processes .pill.paused{color:#e3b86d;background:#e3b86d14;border-color:#e3b86d40}.ap-processes .notice{border:1px solid #e3b86d66;background:#e3b86d10;border-radius:9px;padding:12px 15px;margin:15px 0;overflow-wrap:anywhere}.ap-processes .filters{margin-bottom:16px}.ap-processes .filters input{flex:1;min-width:180px}.ap-processes .filters select{width:auto;max-width:240px}.ap-processes table{color:var(--pc-text);border-collapse:collapse;width:100%;text-align:left;font-size:13px}.ap-processes th{color:var(--pc-muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em;font-weight:500;padding:13px 16px;border-bottom:1px solid var(--pc-line)}.ap-processes td{padding:16px;border-bottom:1px solid var(--pc-line);vertical-align:top}.ap-processes tbody tr:last-child td{border-bottom:0}.ap-processes .table-wrap{overflow:auto;border:1px solid var(--pc-line);border-radius:10px}.ap-processes td button{border:0;padding:0;background:none;text-align:left;font-weight:600}.ap-processes .sub{font-size:12px;color:var(--pc-muted);margin-top:4px;max-width:390px}.ap-processes .tabs{display:flex;gap:20px;border-bottom:1px solid var(--pc-line);margin-bottom:23px}.ap-processes .tabs button{background:none;border:0;border-radius:0;padding:10px 0 13px;color:var(--pc-muted)}.ap-processes .tabs button.on{color:var(--pc-accent);border-bottom:2px solid var(--pc-accent)}.ap-processes .prose{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8}.ap-processes .block+.block{margin-top:26px}.ap-processes .empty{text-align:center;padding:60px 24px;border:1px dashed var(--pc-line);border-radius:12px}.ap-processes .empty p{margin:10px auto 20px;max-width:430px;color:var(--pc-muted)}.ap-processes .crumb{background:none;border:0;padding:0;color:var(--pc-muted);margin-bottom:18px}.ap-processes .small{font-size:12px}.ap-processes .toolbar{position:sticky;bottom:0;background:var(--pc-panel);padding:15px;border:1px solid var(--pc-line);border-radius:10px;margin-top:20px}.ap-processes .run{margin-bottom:12px}.ap-processes a{color:var(--pc-accent)}.ap-processes .run .prose{margin-top:12px}.ap-processes .overlay{position:fixed;inset:0;z-index:100;background:#0008;display:grid;place-items:center;padding:20px}.ap-processes .dialog{width:min(560px,100%);max-height:85vh;overflow:auto}@media(max-width:760px){.ap-processes{padding:18px}.ap-processes .grid{grid-template-columns:1fr}.ap-processes h1{font-size:21px}.ap-processes .stats{gap:7px}.ap-processes .stat{padding:12px}.ap-processes .hide-small{display:none}}
+.ap-processes .run-browser{display:grid;grid-template-columns:minmax(280px,.72fr) minmax(0,1.45fr);gap:16px;align-items:start}.ap-processes .run-list{display:flex;flex-direction:column;gap:8px}.ap-processes .run-list>button{display:block;width:100%;padding:14px;text-align:left}.ap-processes .run-list>button.on{border-color:var(--pc-accent);background:color-mix(in srgb,var(--pc-accent) 8%,var(--pc-panel))}.ap-processes .run-list-title{display:flex;align-items:center;justify-content:space-between;gap:10px}.ap-processes .run-detail{min-width:0}.ap-processes .tool-activity{margin-top:14px;border-top:1px solid var(--pc-line);padding-top:11px}.ap-processes .tool-activity>summary{cursor:pointer;color:var(--pc-muted);font-size:12px;font-weight:600}.ap-processes .tool-calls{list-style:none;margin:12px 0 0;padding:0}.ap-processes .tool-calls li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:10px;padding:10px 0;border-top:1px solid var(--pc-line)}.ap-processes .tool-icon{width:30px;height:30px;border-radius:7px;object-fit:contain;background:var(--pc-bg);padding:5px}.ap-processes .tool-icon.mono{filter:grayscale(1)}.ap-processes .tool-icon.fallback{display:grid;place-items:center;color:var(--pc-accent);font-size:20px}.ap-processes .tool-call-copy{min-width:0}.ap-processes .tool-call-copy strong,.ap-processes .tool-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ap-processes .tool-reason{display:block;margin-top:5px;font-size:12px;overflow-wrap:anywhere}.ap-processes .tool-reason code{color:var(--pc-accent)}.ap-processes .tool-unavailable{margin-top:12px}@media(max-width:900px){.ap-processes .run-browser{grid-template-columns:1fr}}
 `;
 const Pill = ({ state }: { state: string }) => (
   <span className={`pill ${state}`}>{state}</span>
 );
+
+function RunDetailCard({
+  entry,
+  ownerName,
+  agents,
+  projectId,
+  api,
+  onChanged,
+  onProcedure,
+  onOpenProcess,
+  toolSources,
+}: {
+  entry: Entry;
+  ownerName: (id: number) => string;
+  agents: { id: number; name: string }[];
+  projectId: string;
+  api: (path: string, method?: string, body?: unknown) => Promise<any>;
+  onChanged: () => Promise<void>;
+  onProcedure: () => void;
+  onOpenProcess?: () => void;
+  toolSources: ToolSource[];
+}) {
+  const run = entry.record;
+  return (
+    <article id={`run-${run.id}`} className="card run run-detail">
+      <div className="row between">
+        <div className="row">
+          <Pill state={run.state} />
+          <strong>{entry.process_name || run.title}</strong>
+        </div>
+        {onOpenProcess && <button onClick={onOpenProcess}>Open process</button>}
+      </div>
+      {entry.process_name && <p className="small muted">{run.title}</p>}
+      {entry.assignment && (
+        <p className="small muted">
+          {entry.assignment.name} · {entry.assignment.target || ""} ·{" "}
+          {ownerName(entry.assignment.owner_agent_id || 0)}
+        </p>
+      )}
+      <p className="muted small">
+        {run.trigger_event_id && <span>App event · </span>}
+        {date(run.created_at)} ·{" "}
+        <button className="crumb" style={{ margin: 0 }} onClick={onProcedure}>
+          Procedure v{entry.version}
+        </button>{" "}
+        · {run.scheduled_for ? "Scheduled" : "Manual"}
+      </p>
+      {run.progress !== undefined && (
+        <progress
+          style={{ width: "100%", accentColor: "var(--pc-accent)", height: 5 }}
+          max={100}
+          value={run.progress}
+        />
+      )}
+      <div className="prose">
+        {run.delivery_warning && (
+          <p className="notice">Delivery retry pending: {run.delivery_warning}</p>
+        )}
+        {run.result || run.error || run.current_step ||
+          (run.state === "scheduled"
+            ? "Waiting for the next step’s scheduled start."
+            : "Queued for the owner agent.")}
+      </div>
+      {run.workflow ? (
+        <RunSteps
+          steps={run.steps || []}
+          runID={run.id}
+          runState={run.state}
+          agents={agents}
+          projectId={projectId}
+          api={api}
+          onChanged={onChanged}
+          toolSources={toolSources}
+        />
+      ) : (
+        <ExecutionTools
+          agentID={entry.assignment?.owner_agent_id}
+          threadID={run.target_thread_id}
+          executionID={run.execution_id}
+          sources={toolSources}
+        />
+      )}
+    </article>
+  );
+}
 export default function ProcessesPanel(props: Props) {
   return <Panel key={`${props.projectId}:${props.installId}`} {...props} />;
 }
 function Panel(props: Props) {
   const [items, setItems] = useState<Process[]>([]),
+    [projectRuns, setProjectRuns] = useState<Entry[]>([]),
     [agents, setAgents] = useState<{ id: number; name: string }[]>([]),
+    [toolSources, setToolSources] = useState<ToolSource[]>([]),
     [selected, setSelected] = useState<string | null>(() =>
       new URLSearchParams(window.location.search).get("process_id"),
     ),
@@ -164,6 +290,10 @@ function Panel(props: Props) {
     [draft, setDraft] = useState<Definition>(empty);
   const [area, setArea] = useState("processes");
   const [runs, setRuns] = useState<Entry[]>([]),
+    [selectedRunID, setSelectedRunID] = useState(
+      new URLSearchParams(window.location.search).get("run_id") || "",
+    ),
+    [selectedProjectRunID, setSelectedProjectRunID] = useState(""),
     [search, setSearch] = useState(""),
     [filter, setFilter] = useState(""),
     [category, setCategory] = useState(""),
@@ -176,7 +306,8 @@ function Panel(props: Props) {
     [runParameters, setRunParameters] = useState<Record<string, unknown>>({}),
     [assignmentFilter, setAssignmentFilter] = useState(""),
     [runStateFilter, setRunStateFilter] = useState(""),
-    [runOwnerFilter, setRunOwnerFilter] = useState(0);
+    [runOwnerFilter, setRunOwnerFilter] = useState(0),
+    [projectRunStateFilter, setProjectRunStateFilter] = useState("");
   const categories = Array.from(new Set(items.map((p) => p.category).filter(Boolean) as string[])).sort();
   useEffect(() => {
     const id = new URLSearchParams(window.location.search).get("run_id");
@@ -206,12 +337,17 @@ function Panel(props: Props) {
   const liveEvents = useProcessEvents(props);
   const listRevision = useScopedRevision(e => /^(process|assignment)\./.test(e.topic), liveEvents);
   const detailRevision = useScopedRevision(e => e.data?.process_id === selected, liveEvents);
+  const runsRevision = useScopedRevision(e => /^(run|step|delivery)\./.test(e.topic), liveEvents);
   useEffect(() => {
     if (!props.projectId) return;
     let active = true;
     api().then(r => { if (active) setItems(r.processes || []); }).catch(e => { if (active) setError(e.message); });
     return () => { active = false; };
   }, [listRevision, props.projectId, props.installId]);
+  useEffect(() => {
+    if (!props.projectId || !runsRevision) return;
+    loadProjectRuns().catch((e) => setError(e.message));
+  }, [runsRevision, props.projectId, props.installId]);
   const load = async () => {
     const r = await api();
     setItems(r.processes || []);
@@ -224,11 +360,16 @@ function Panel(props: Props) {
     const r = await api(`/${encodeURIComponent(id)}/runs`);
     setRuns(historyEntries(r));
   };
+  const loadProjectRuns = async () => {
+    const history = await api("/runs");
+    setProjectRuns(projectHistoryEntries(history));
+  };
   useEffect(() => {
     let live = true;
     setItems([]);
     setDetail(null);
     setRuns([]);
+    setProjectRuns([]);
     setLoading(true);
     setError("");
     if (!props.projectId) {
@@ -237,6 +378,7 @@ function Panel(props: Props) {
     }
     Promise.all([
       api(),
+      api("/runs"),
       fetch(`/api/agents?project_id=${encodeURIComponent(props.projectId)}`, {
         credentials: "same-origin",
       }).then(async (r) => {
@@ -244,9 +386,10 @@ function Panel(props: Props) {
         return r.json();
       }),
     ])
-      .then(([data, owners]) => {
+      .then(([data, history, owners]) => {
         if (live) {
           setItems(data.processes || []);
+          setProjectRuns(projectHistoryEntries(history));
           setAgents(owners);
         }
       })
@@ -256,6 +399,37 @@ function Panel(props: Props) {
       live = false;
     };
   }, [props.projectId, props.installId]);
+  useEffect(() => {
+    if (!props.projectId) return;
+    let live = true;
+    const query = new URLSearchParams({ project_id: props.projectId });
+    Promise.all([
+      fetch(`/api/apps?${query}`, { credentials: "same-origin" })
+        .then((response) => response.ok ? response.json() : []),
+      fetch(`/api/connections?${query}&include_app_owned=1`, {
+        credentials: "same-origin",
+      }).then((response) => response.ok ? response.json() : []),
+    ]).then(([apps, connections]) => {
+      if (!live) return;
+      const appSources: ToolSource[] = (Array.isArray(apps) ? apps : []).map((app: any) => ({
+        key: `app:${app.install_id || app.name}`,
+        label: app.display_name || app.name,
+        icon: app.icon,
+        iconStyle: app.icon_style,
+        aliases: [app.name, app.display_name].filter(Boolean),
+        tools: app.surfaces?.mcp_tool_names || [],
+      }));
+      const integrationSources: ToolSource[] = (Array.isArray(connections) ? connections : []).map((connection: any) => ({
+        key: `integration:${connection.id}`,
+        label: connection.app_name || connection.name || connection.app_slug,
+        icon: connection.logo,
+        iconStyle: "image" as const,
+        aliases: [connection.app_slug, connection.app_name, connection.name].filter(Boolean),
+      }));
+      setToolSources([...appSources, ...integrationSources]);
+    }).catch(() => live && setToolSources([]));
+    return () => { live = false; };
+  }, [props.projectId]);
   useEffect(() => {
     let live = true;
     setDetail(null);
@@ -317,6 +491,7 @@ function Panel(props: Props) {
   };
   const open = (p: Process) => {
     setSelected(p.id);
+    setSelectedRunID("");
     setTab("overview");
     setVersion(0);
     setEditing(false);
@@ -326,6 +501,7 @@ function Panel(props: Props) {
   };
   const back = () => {
     setSelected(null);
+    setSelectedRunID("");
     setEditing(false);
     setCreating(false);
     setRunModal(false);
@@ -370,6 +546,16 @@ function Panel(props: Props) {
             s.executor.agent_id === runOwnerFilter,
         )),
   );
+  const filteredProjectRuns = projectRuns.filter(
+    (run) =>
+      !run.record.schedule_kind &&
+      matchesProjectRunFilter(run, projectRunStateFilter),
+  );
+  const selectedExecution =
+    filteredExecutions.find((run) => run.record.id === selectedRunID) || null;
+  const selectedProjectRun =
+    filteredProjectRuns.find((run) => run.record.id === selectedProjectRunID) ||
+    null;
   const prepareRun = (x: Assignment) => {
     setRunAssignment(x);
     setRunParameters({});
@@ -430,6 +616,12 @@ function Panel(props: Props) {
             Processes
           </button>
           <button
+            className={area === "runs" ? "on" : ""}
+            onClick={() => setArea("runs")}
+          >
+            Runs
+          </button>
+          <button
             className={area === "map" ? "on" : ""}
             onClick={() => setArea("map")}
           >
@@ -451,6 +643,92 @@ function Panel(props: Props) {
         <div className="empty">Select a project to manage its processes.</div>
       ) : loading ? (
         <p className="muted">Loading processes…</p>
+      ) : !selected && !creating && area === "runs" ? (
+        <>
+          <div className="row between head">
+            <div>
+              <h2 style={{ margin: 0 }}>Project runs</h2>
+              <p className="small muted">Latest and ongoing executions across every process.</p>
+            </div>
+            <button disabled={busy} onClick={() => work(loadProjectRuns)}>
+              Refresh runs
+            </button>
+          </div>
+          <div className="row filters">
+            <select
+              aria-label="Filter project run state"
+              value={projectRunStateFilter}
+              onChange={(event) => setProjectRunStateFilter(event.target.value)}
+            >
+              <option value="">All runs</option>
+              <option value="ongoing">Ongoing</option>
+              <option value="attention">Needs attention</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+          {filteredProjectRuns.length ? (
+            <div className="run-browser">
+              <div className="run-list" aria-label="Project runs">
+                {filteredProjectRuns.map((run) => (
+                  <button
+                    key={run.record.id}
+                    className={selectedProjectRunID === run.record.id ? "on" : ""}
+                    aria-pressed={selectedProjectRunID === run.record.id}
+                    onClick={() => setSelectedProjectRunID(run.record.id)}
+                  >
+                    <span className="run-list-title">
+                      <strong>{run.process_name || "Process run"}</strong>
+                      <Pill state={run.record.state} />
+                    </span>
+                    <span className="sub">
+                      {run.assignment?.name || run.record.title} · {date(run.record.created_at)}
+                    </span>
+                    <span className="sub">
+                      {run.record.current_step ||
+                        run.assignment?.target ||
+                        (run.record.workflow ? "Team workflow" : "Direct run")}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              {selectedProjectRun ? (
+                <RunDetailCard
+                  entry={selectedProjectRun}
+                  ownerName={ownerName}
+                  agents={agents}
+                  projectId={props.projectId}
+                  toolSources={toolSources}
+                  api={(path, method, body) =>
+                    api(`/${selectedProjectRun.process_id}${path}`, method, body)
+                  }
+                  onChanged={loadProjectRuns}
+                  onProcedure={() => {
+                    setSelected(selectedProjectRun.process_id || null);
+                    setVersion(selectedProjectRun.version);
+                    setTab("procedure");
+                  }}
+                  onOpenProcess={() => {
+                    setSelected(selectedProjectRun.process_id || null);
+                    setTab("overview");
+                    setVersion(0);
+                  }}
+                />
+              ) : (
+                <div className="empty">
+                  <h2>Select a run</h2>
+                  <p>Choose an execution to inspect its steps, outcomes, and tool activity.</p>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="empty">
+              <h2>No runs found</h2>
+              <p>Executions from every process will appear here.</p>
+            </div>
+          )}
+        </>
       ) : !selected && !creating && area === "map" ? (
         <ProjectMap projectId={props.projectId} installId={props.installId} appName={props.appName} eventRevision={liveEvents.eventRevision} agents={agents} />
       ) : creating || editing ? (
@@ -1101,79 +1379,53 @@ function Panel(props: Props) {
                 </select>
               </div>
               {filteredExecutions.length ? (
-                filteredExecutions.map((r) => (
-                  <article id={`run-${r.record.id}`} className="card run" key={r.record.id}>
-                    <div className="row between">
-                      <div className="row">
-                        <Pill state={r.record.state} />
-                        <strong>{r.record.title}</strong>
-                      </div>
-                    </div>
-                    {r.assignment && (
-                      <p className="small muted">
-                        {r.assignment.name} · {r.assignment.target || ""} ·{" "}
-                        {ownerName(r.assignment.owner_agent_id || 0)}
-                      </p>
-                    )}
-                    <p className="muted small">
-                      {r.record.trigger_event_id && <span>App event · </span>}
-                      {date(r.record.created_at)} ·{" "}
+                <div className="run-browser">
+                  <div className="run-list" aria-label={`${p.name} runs`}>
+                    {filteredExecutions.map((run) => (
                       <button
-                        style={{
-                          padding: 0,
-                          border: 0,
-                          background: "none",
-                          color: "var(--pc-accent)",
-                        }}
-                        onClick={() => {
-                          setVersion(r.version);
-                          setTab("procedure");
-                        }}
+                        key={run.record.id}
+                        className={selectedRunID === run.record.id ? "on" : ""}
+                        aria-pressed={selectedRunID === run.record.id}
+                        onClick={() => setSelectedRunID(run.record.id)}
                       >
-                        Procedure v{r.version}
-                      </button>{" "}
-                      ·{" "}
-                      {r.record.scheduled_for
-                        ? "Scheduled"
-                        : "Manual"}
-                    </p>
-                    {r.record.progress !== undefined && (
-                      <progress
-                        style={{
-                          width: "100%",
-                          accentColor: "var(--pc-accent)",
-                          height: 5,
-                        }}
-                        max={100}
-                        value={r.record.progress}
-                      />
-                    )}
-                    <div className="prose">
-                      {r.record.delivery_warning && (
-                        <p className="notice">
-                          Delivery retry pending: {r.record.delivery_warning}
-                        </p>
-                      )}
-                      {r.record.result ||
-                        r.record.error ||
-                        r.record.current_step ||
-                        (r.record.state === "scheduled" ? "Waiting for the next step’s scheduled start." : "Queued for the owner agent.")}
+                        <span className="run-list-title">
+                          <strong>{run.assignment?.name || run.record.title}</strong>
+                          <Pill state={run.record.state} />
+                        </span>
+                        <span className="sub">
+                          {date(run.record.created_at)} · Procedure v{run.version}
+                        </span>
+                        <span className="sub">
+                          {run.record.current_step ||
+                            run.assignment?.target ||
+                            (run.record.workflow ? "Team workflow" : "Direct run")}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  {selectedExecution ? (
+                    <RunDetailCard
+                      entry={selectedExecution}
+                      ownerName={ownerName}
+                      agents={agents}
+                      projectId={props.projectId!}
+                      toolSources={toolSources}
+                      api={(path, method, body) =>
+                        api(`/${p.id}${path}`, method, body)
+                      }
+                      onChanged={() => loadRuns(p.id)}
+                      onProcedure={() => {
+                        setVersion(selectedExecution.version);
+                        setTab("procedure");
+                      }}
+                    />
+                  ) : (
+                    <div className="empty">
+                      <h2>Select a run</h2>
+                      <p>Choose an execution to inspect its steps, outcome, and tool activity.</p>
                     </div>
-                    {r.record.workflow && (
-                      <RunSteps
-                        steps={r.record.steps || []}
-                        runID={r.record.id}
-                        runState={r.record.state}
-                        agents={agents}
-                        projectId={props.projectId!}
-                        api={(path, method, body) =>
-                          api(`/${p.id}${path}`, method, body)
-                        }
-                        onChanged={() => loadRuns(p.id)}
-                      />
-                    )}
-                  </article>
-                ))
+                  )}
+                </div>
               ) : (
                 <div className="empty">
                   <h2>No runs yet</h2>
@@ -1259,6 +1511,7 @@ function Panel(props: Props) {
                     );
                     setTab("runs");
                     await loadRuns(p.id);
+                    await loadProjectRuns();
                   })
                 }
               >

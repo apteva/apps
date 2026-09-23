@@ -287,6 +287,8 @@ func (a *App) execute(project, actor, action string, args map[string]any) (any, 
 		return a.stepAction(project, actor, id, str(args, "run_id"), str(args, "step_id"), action, args)
 	case "runs":
 		return a.runs(project, id)
+	case "project_runs":
+		return a.projectRuns(project)
 	case "run_get", "run_update":
 		return a.directRun(project, actor, id, str(args, "run_id"), action, args)
 	default:
@@ -332,6 +334,8 @@ func (a *App) handleHTTP(w http.ResponseWriter, r *http.Request) {
 			args["project_id"] = project
 			project = ""
 		}
+	} else if path == "runs" && r.Method == "GET" {
+		action = "project_runs"
 	} else if len(parts) == 1 {
 		args["process_id"] = parts[0]
 		if r.Method == "GET" {
