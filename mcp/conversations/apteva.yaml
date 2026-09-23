@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.3
+version: 0.24.4
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -165,7 +165,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.3, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.4, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

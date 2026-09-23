@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.24.4 — 2026-09-23
+
+- Keep grouped tool activity compact when many apps or integrations are involved: show the source for the visible latest action in front, with at most one earlier source peeking behind it. Expanding the group still shows every call and its own source icon.
+
 ## 0.24.3 — 2026-09-23
 
 - Make the shared dashboard and exported-chat tool display configurable. It now defaults to the source icon and activity text; completion checks and durations are optional.

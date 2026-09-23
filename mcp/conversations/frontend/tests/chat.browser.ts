@@ -49,6 +49,33 @@ for (const host of ["dashboard", "external"]) {
  });
 }
 
+for (const host of ["dashboard", "external", "package"]) {
+ test(`${host}: many tool sources keep the latest icon in front and expand to every source`, async ({page,request}) => {
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const names=["tasks_list","storage_files_list","apteva-server_apps_list","processes_start"];
+  for (const [index,name] of names.entries()) {
+   const activity={id:810+index,chat_id:chat,agent_id:41,thread_id:chat,call_id:`source-${index}`,name,reason:`Step ${index+1}`,status:index===3?"running":"completed",started_at:new Date(Date.now()+index*100).toISOString(),ended_at:index===3?"":new Date(Date.now()+index*100+20).toISOString(),revision:1};
+   await request.post("/emit",{data:{chat_id:chat,agent_id:41,tool_activity:activity}});
+  }
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await expect(row.locator(".chat-tool-copy").first()).toHaveText("Step 4");
+  const icons=row.getByRole("button").first().locator(".chat-tool-icon");
+  await expect(icons).toHaveCount(2);
+  await expect(icons.first()).toHaveAttribute("title","Apteva");
+  await expect(icons.last()).toHaveAttribute("title","Processes");
+  await page.setViewportSize({width:390,height:800});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:test.info().outputPath("tool-sources-stacked-mobile.png")});
+  await row.getByRole("button").first().click();
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(4);
+  await expect(row.locator("[id^=tools-] .chat-tool-icon")).toHaveCount(4);
+  expect(await row.locator("[id^=tools-] .chat-tool-icon").evaluateAll(icons=>icons.map(icon=>icon.getAttribute("title")))).toEqual(["Tasks","Storage","Apteva","Processes"]);
+ });
+}
+
 for (const host of ["dashboard", "external"]) {
  test(`${host}: composer switches between pause and sending during a response`, async ({page,request}) => {
   await request.post("/reset");

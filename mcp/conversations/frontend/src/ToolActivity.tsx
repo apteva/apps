@@ -154,7 +154,7 @@ export function ChatToolActivity({
         onClick={grouped ? onToggle : undefined}
         title={grouped ? `${title} · ${expanded ? t("chat.panel.hideToolCalls") : t("chat.panel.showToolCalls")}` : focusReason}
       >
-        <ToolIconStack tools={tools} registry={registry} />
+        <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
@@ -200,40 +200,30 @@ export function ChatToolActivity({
 
 function ToolIconStack({
   tools,
+  focusTool,
   registry,
 }: {
   tools: ToolActivity[];
+  focusTool: ToolActivity;
   registry: ToolVisualRegistry;
 }) {
-  const sources: Array<{ tool: ToolActivity; visual: ToolVisual }> = [];
-  for (const tool of tools) {
-    const visual = resolveToolVisual(tool.name, registry);
-    const existing = sources.find((source) => source.visual.key === visual.key);
-    if (existing) {
-      // Preserve first-seen source ordering, but let any active call for that
-      // source drive the single representative icon's running state.
-      if (existing.tool.state === "done" && tool.state !== "done") existing.tool = tool;
-      continue;
-    }
-    sources.push({ tool, visual });
-  }
-  const visible = sources.slice(0, 4);
-  const extra = Math.max(0, sources.length - visible.length);
+  const primary = resolveToolVisual(focusTool.name, registry);
+  const otherTools = tools.filter((tool) => resolveToolVisual(tool.name, registry).key !== primary.key);
+  const secondaryTool = otherTools.length ? summaryFocusTool(otherTools) : null;
+  const secondary = secondaryTool ? resolveToolVisual(secondaryTool.name, registry) : null;
   return (
     <span
-      className="flex min-w-[1.9rem] items-center py-0.5 pl-0.5"
+      className="relative inline-flex h-8 shrink-0 items-center pl-0.5"
       aria-hidden="true"
     >
-      {visible.map(({ tool, visual }, index) => (
-        <span key={visual.key} className={index === 0 ? "relative" : "relative -ml-1.5"} style={{ zIndex: visible.length - index }}>
-          <ToolSourceIcon tool={tool} visual={visual} />
-        </span>
-      ))}
-      {extra > 0 && (
-        <span className="relative -ml-1.5 inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-bg-hover px-1 text-[10px] font-semibold text-text-muted">
-          +{extra}
+      {secondaryTool && secondary && (
+        <span className="relative z-0 rounded-md opacity-65">
+          <ToolSourceIcon tool={secondaryTool} visual={secondary} />
         </span>
       )}
+      <span className={`relative z-10 rounded-md ring-2 ring-bg ${secondary ? "-ml-3" : ""}`}>
+        <ToolSourceIcon tool={focusTool} visual={primary} />
+      </span>
     </span>
   );
 }
