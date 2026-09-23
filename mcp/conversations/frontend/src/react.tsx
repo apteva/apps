@@ -17,6 +17,8 @@ export interface ChatProps extends ChatConfiguration {
   conversations: ConversationsClient;
   agentId: number;
   showNewConversation?: boolean;
+  showToolCompletion?: boolean;
+  showToolDuration?: boolean;
   className?: string;
 }
 function Surface({ conversations, children, className, pageContext, ...localization }: ChatConfiguration & { conversations: ConversationsClient; children: ReactNode; className?: string }) {
@@ -24,24 +26,26 @@ function Surface({ conversations, children, className, pageContext, ...localizat
     <ConversationLocaleRegion className={className}>{children}</ConversationLocaleRegion>
   </ConversationsProvider></PageContextProvider.Provider>;
 }
-export function ConversationChat({ conversations, agentId, showNewConversation = true, className, ...localization }: ChatProps) {
+export function ConversationChat({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, className, ...localization }: ChatProps) {
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{display_mode:"single",show_new_conversation:showNewConversation}}
+    instanceId={agentId} widgetSettings={{display_mode:"single",show_new_conversation:showNewConversation,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration}}
   /></Surface>;
 }
-export function AgentConversations({ conversations, agentId, showNewConversation = true, className, ...localization }: ChatProps) {
+export function AgentConversations({ conversations, agentId, showNewConversation = true, showToolCompletion = false, showToolDuration = false, className, ...localization }: ChatProps) {
   return <Surface conversations={conversations} className={className} {...localization}><AgentWidget
     appName="conversations" projectId={conversations.projectId} installId={conversations.installId ?? 0}
-    instanceId={agentId} widgetSettings={{display_mode:"browser",show_new_conversation:showNewConversation}}
+    instanceId={agentId} widgetSettings={{display_mode:"browser",show_new_conversation:showNewConversation,show_tool_completion:showToolCompletion,show_tool_duration:showToolDuration}}
   /></Surface>;
 }
-export function ConversationThread({ conversations, conversation, onChanged = () => {}, ...localization }: ChatConfiguration & {
+export function ConversationThread({ conversations, conversation, onChanged = () => {}, showToolCompletion = false, showToolDuration = false, ...localization }: ChatConfiguration & {
   conversations: ConversationsClient; conversation: Conversation; onChanged?: () => void;
+  showToolCompletion?: boolean; showToolDuration?: boolean;
 }) {
   if (conversation.project_id !== conversations.projectId) throw new Error("Conversation project does not match the host scope");
   return <Surface conversations={conversations} {...localization}><Thread key={conversation.id} conversation={conversation}
-    archived={Boolean(conversation.archived_at)} onActed={onChanged} onRemoved={onChanged}/></Surface>;
+    archived={Boolean(conversation.archived_at)} onActed={onChanged} onRemoved={onChanged}
+    showToolCompletion={showToolCompletion} showToolDuration={showToolDuration}/></Surface>;
 }
 
 import { useEffect, useState } from "react";

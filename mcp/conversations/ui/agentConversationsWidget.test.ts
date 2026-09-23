@@ -8,6 +8,8 @@ import {
   selectedConversationSeenInput,
   showNewConversation,
   showPageContext,
+  showToolCompletion,
+  showToolDuration,
   singleConversationListPath,
 } from "./agentConversations";
 import {
@@ -65,6 +67,10 @@ describe("AgentConversationsWidget scope", () => {
     expect(showNewConversation({ show_new_conversation: false })).toBe(false);
     expect(showPageContext()).toBe(true);
     expect(showPageContext({ show_page_context: false })).toBe(false);
+    expect(showToolCompletion()).toBe(false);
+    expect(showToolDuration()).toBe(false);
+    expect(showToolCompletion({ show_tool_completion: true })).toBe(true);
+    expect(showToolDuration({ show_tool_duration: true })).toBe(true);
   });
 
   test("owns its responsive geometry instead of depending on host Tailwind output", () => {

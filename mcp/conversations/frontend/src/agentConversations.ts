@@ -5,6 +5,8 @@ export interface AgentConversationWidgetSettings {
   display_mode?: ConversationDisplayMode;
   show_page_context?: boolean;
   show_new_conversation?: boolean;
+  show_tool_completion?: boolean;
+  show_tool_duration?: boolean;
   /** Presentation-only empty transcript text; never persisted as a message. */
   empty_message?: string;
 }
@@ -59,6 +61,14 @@ export function showPageContext(
   settings?: AgentConversationWidgetSettings,
 ): boolean {
   return settings?.show_page_context !== false;
+}
+
+export function showToolCompletion(settings?: AgentConversationWidgetSettings): boolean {
+  return settings?.show_tool_completion === true;
+}
+
+export function showToolDuration(settings?: AgentConversationWidgetSettings): boolean {
+  return settings?.show_tool_duration === true;
 }
 
 export function fixedAgentConversationInput(instanceId: number, projectId: string, title: string) {

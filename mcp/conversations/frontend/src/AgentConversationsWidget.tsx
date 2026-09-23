@@ -17,6 +17,8 @@ import {
   selectedConversationSeenInput,
   showNewConversation,
   showPageContext,
+  showToolCompletion,
+  showToolDuration,
   singleConversationListPath,
   type AgentConversationWidgetSettings,
 } from "./agentConversations";
@@ -251,6 +253,8 @@ function ConversationBrowser({
           }}
           emptyMessage={widgetSettings?.empty_message}
           showPageContext={showPageContext(widgetSettings)}
+          showToolCompletion={showToolCompletion(widgetSettings)}
+          showToolDuration={showToolDuration(widgetSettings)}
         />
       ) : (
         <section className="grid min-h-0 place-items-center p-6 text-center text-sm text-text-muted">
@@ -432,6 +436,8 @@ function SingleConversation({
           archived={false}
           emptyMessage={widgetSettings?.empty_message}
           showPageContext={showPageContext(widgetSettings)}
+          showToolCompletion={showToolCompletion(widgetSettings)}
+          showToolDuration={showToolDuration(widgetSettings)}
           headerActions={(
             <>
               {showCreate && (

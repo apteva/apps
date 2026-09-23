@@ -1382,6 +1382,8 @@ export function ConversationChat({
   archived,
   emptyMessage,
   showPageContext = true,
+  showToolCompletion = false,
+  showToolDuration = false,
   onOpenDetails,
   headerActions,
   onActed,
@@ -1391,6 +1393,8 @@ export function ConversationChat({
   archived: boolean;
   emptyMessage?: string;
   showPageContext?: boolean;
+  showToolCompletion?: boolean;
+  showToolDuration?: boolean;
   onOpenDetails?: () => void;
   headerActions?: ReactNode;
   onActed: () => void;
@@ -1600,6 +1604,7 @@ export function ConversationChat({
           continuing={continuingToolKeys.has(item.key)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
+          showCompletion={showToolCompletion} showDuration={showToolDuration}
         /> : (() => {const message=item.message;return <div key={message.id}><fieldset disabled={archived} className="min-w-0"><MessageRow message={message} agentName={message.role === "agent" ? agentName(message.agent_id) : undefined} onAction={onAction}/></fieldset>
  {deliveries.filter(d => d.message_id === message.id && ["failed", "ambiguous"].includes(d.status)).map(d => <div key={d.id} role="status" className={`mt-2 text-xs text-error ${message.role === "user" ? "text-right" : ""}`}>
    <span>{t(d.status === "ambiguous" ? "chat.deliveryUnconfirmed" : "chat.deliveryFailed")}</span>
@@ -1614,7 +1619,7 @@ export function ConversationChat({
             || activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running")) return null;
           if (p.phase === "preparing_tool" && p.tool_name) {
             if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;
-            return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry}/>;
+            return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry} showCompletion={showToolCompletion} showDuration={showToolDuration}/>;
           }
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase!=="thinking"}/>;
         })}
@@ -2016,6 +2021,20 @@ function TelegramTab({ projectId, conversations }: { projectId: string; conversa
 
 // ─── root panel ──────────────────────────────────────────────────────
 
+const TOOL_DISPLAY_STORAGE_KEY = "conversations:tool-display:v1";
+interface ToolDisplayPreferences {
+  showCompletion: boolean;
+  showDuration: boolean;
+}
+function readToolDisplayPreferences(): ToolDisplayPreferences {
+  const defaults = { showCompletion: false, showDuration: false };
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(TOOL_DISPLAY_STORAGE_KEY) || "null");
+    if (!saved || typeof saved !== "object") return defaults;
+    return { showCompletion: saved.showCompletion === true, showDuration: saved.showDuration === true };
+  } catch { return defaults; }
+}
+
 export default function ConversationsPanel({ projectId, instanceId, workspaceRail: WorkspaceRail }: NativePanelProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -2027,6 +2046,10 @@ export default function ConversationsPanel({ projectId, instanceId, workspaceRai
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [toolDisplay, setToolDisplay] = useState<ToolDisplayPreferences>(readToolDisplayPreferences);
+  useEffect(() => {
+    try { window.localStorage.setItem(TOOL_DISPLAY_STORAGE_KEY, JSON.stringify(toolDisplay)); } catch {}
+  }, [toolDisplay]);
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [agentsError, setAgentsError] = useState("");
   const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
@@ -2287,6 +2310,21 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
             <ConversationChat key={`${selected.project_id}:${selected.id}`}
               conversation={selected}
               archived={showArchived}
+              showToolCompletion={toolDisplay.showCompletion}
+              showToolDuration={toolDisplay.showDuration}
+              headerActions={<details className="relative">
+                <summary className="cursor-pointer rounded border border-border px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text">{t("chat.toolDisplay")}</summary>
+                <div className="absolute right-0 top-full z-40 mt-1 min-w-52 rounded-md border border-border bg-bg-card p-3 shadow-lg">
+                  <label className="flex cursor-pointer items-center gap-2 text-xs text-text">
+                    <input type="checkbox" checked={toolDisplay.showCompletion} onChange={event => setToolDisplay(current => ({...current, showCompletion: event.target.checked}))} />
+                    {t("chat.showToolCompletion")}
+                  </label>
+                  <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-text">
+                    <input type="checkbox" checked={toolDisplay.showDuration} onChange={event => setToolDisplay(current => ({...current, showDuration: event.target.checked}))} />
+                    {t("chat.showToolDuration")}
+                  </label>
+                </div>
+              </details>}
               onOpenDetails={openDetails}
               onActed={loadConversations}
               onRemoved={() => {

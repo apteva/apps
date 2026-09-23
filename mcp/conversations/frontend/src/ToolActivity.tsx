@@ -1,4 +1,4 @@
-// Port of dashboard/src/components/chat/ToolActivity.tsx; keep presentation in parity.
+// Conversations tool activity presentation, adapted from the dashboard chat.
 import { useEffect, useMemo, useState } from "react";
 import { useToolTranslation as useTranslation } from "./toolActivityAdapter";
 import { AppIcon } from "./toolAppIcon";
@@ -18,6 +18,8 @@ interface ToolActivityProps {
   onToggle?: () => void;
   registry: ToolVisualRegistry;
   detailsId?: string;
+  showCompletion?: boolean;
+  showDuration?: boolean;
 }
 
 type VisualState = "preparing" | "running" | "done" | "failed" | "interrupted";
@@ -96,9 +98,11 @@ export function ChatToolActivity({
   onToggle,
   registry,
   detailsId,
+  showCompletion = false,
+  showDuration = false,
 }: ToolActivityProps) {
   const { t } = useTranslation();
-  const running = tools.some(tool => tool.state === "running");
+  const running = showDuration && tools.some(tool => tool.state === "running");
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!running) return;
@@ -107,7 +111,7 @@ export function ChatToolActivity({
     return () => window.clearInterval(timer);
   }, [running]);
   if (tools.length === 0) return null;
-  const duration = durationLabel(toolGroupDurationMs(tools, now));
+  const duration = showDuration ? durationLabel(toolGroupDurationMs(tools, now)) : "";
 
   const grouped = tools.length > 1;
   const status = grouped
@@ -171,7 +175,7 @@ export function ChatToolActivity({
               <FailureIcon />
               <span>{visibleFailure}</span>
             </span>
-          ) : allSucceeded ? (
+          ) : showCompletion && allSucceeded ? (
             <span
               className="inline-flex shrink-0 items-center text-green"
               title={status.text}
@@ -189,7 +193,7 @@ export function ChatToolActivity({
       {grouped && expanded && (
         <div id={resolvedDetailsId} className="mt-1 grid min-w-0 sm:pl-9">
           {tools.map((tool) => (
-            <ToolCallRow key={tool.id} tool={tool} registry={registry} now={now} />
+            <ToolCallRow key={tool.id} tool={tool} registry={registry} now={now} showCompletion={showCompletion} showDuration={showDuration} />
           ))}
         </div>
       )}
@@ -244,16 +248,20 @@ function ToolCallRow({
   registry,
   standalone = false,
   now,
+  showCompletion,
+  showDuration,
 }: {
   tool: ToolActivity;
   registry: ToolVisualRegistry;
   standalone?: boolean;
   now: number;
+  showCompletion: boolean;
+  showDuration: boolean;
 }) {
   const { t } = useTranslation();
   const visual = useMemo(() => resolveToolVisual(tool.name, registry), [tool.name, registry]);
   const state = visualState(tool);
-  const duration = durationLabel(toolDurationMs(tool, now));
+  const duration = showDuration ? durationLabel(toolDurationMs(tool, now)) : "";
   const stateText = stateLabel(tool, t);
   const reason = reasonLabel(tool, t);
   return (
@@ -270,7 +278,7 @@ function ToolCallRow({
         {reason}
       </span>
       <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[10px] font-medium uppercase tracking-wide sm:text-[11px]">
-        {state === "done" && (
+        {showCompletion && state === "done" && (
           <span className="inline-flex text-green" title={stateText} aria-hidden="true">
             <CheckIcon />
           </span>

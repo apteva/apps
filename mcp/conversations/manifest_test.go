@@ -82,7 +82,7 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`, `"show_page_context"`} {
+		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`, `"show_page_context"`, `"show_tool_completion"`, `"show_tool_duration"`} {
 			if !strings.Contains(string(schema), required) {
 				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
 			}
@@ -95,7 +95,7 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 		// Keep release packaging from silently shipping an older bundle that
 		// ignores a setting already declared by the manifest and covered by
 		// source-level tests.
-		if !strings.Contains(string(bundle), "show_page_context") {
+		if !strings.Contains(string(bundle), "show_page_context") || !strings.Contains(string(bundle), "show_tool_completion") || !strings.Contains(string(bundle), "show_tool_duration") {
 			t.Fatal("agent-conversations bundle is stale: rebuild panels after changing widget settings")
 		}
 		return

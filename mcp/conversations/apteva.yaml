@@ -124,6 +124,14 @@ provides:
             type: boolean
             title: Show shared page context
             default: true
+          show_tool_completion:
+            type: boolean
+            title: Show completed tool checkmarks
+            default: false
+          show_tool_duration:
+            type: boolean
+            title: Show tool execution time
+            default: false
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.
