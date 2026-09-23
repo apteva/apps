@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { TelephonyClient, telephonyExtension, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -53,6 +53,18 @@ function deferred() {
 }
 
 describe("Telephony extension", () => {
+  test("call controls use the same authenticated project-scoped client", async () => {
+    const f = fixture();
+    const state: CallControlResult = { call_id: "call-1", hold_state: "held", recording_state: "pause_requested", control_error: "",
+      capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async () => state);
+    expect(await f.client.hold("call-1")).toEqual(state);
+    await f.client.resume("call-1");
+    await f.client.pauseRecording("call-1");
+    await f.client.resumeRecording("call-1");
+    expect(f.requests.map(r => r.url.pathname.split("/").at(-1))).toEqual(["hold", "resume", "pause-recording", "resume-recording"]);
+    expect(f.requests.every(r => r.url.searchParams.get("project_id") === "p1" && r.url.searchParams.get("install_id") === "42")).toBe(true);
+  });
   test("script-only client reuses live SDK auth and scopes every operation", async () => {
     const f = fixture();
     await f.client.listCalls();
@@ -106,6 +118,17 @@ describe("Telephony extension", () => {
     expect(f.muted).toBe(true);
     stale.onState?.("error", "old session");
     expect(f.phone.getSnapshot().audioState).toBe("live");
+    f.phone.dispose();
+  });
+  test("headless softphone controls its attached call and updates the snapshot", async () => {
+    const f = fixture();
+    const result: CallControlResult = { call_id: "call-1", hold_state: "starting", recording_state: "active",
+      control_error: "", capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async url => url.pathname.endsWith("/hold") ? result : f.session);
+    await f.phone.dial({ to: "+12025550100" });
+    expect(await f.phone.hold()).toEqual(result);
+    expect(f.phone.getSnapshot().holdState).toBe("starting");
+    expect(f.requests.at(-1)?.url.pathname).toEndWith("/calls/call-1/hold");
     f.phone.dispose();
   });
   test("audio setup failure hangs up an outbound leg", async () => {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.6.3
+version: 0.6.4
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -35,7 +35,7 @@ requires:
     - name: storage
       version: ">=0.8.1"
       optional: true
-      reason: stores private durable copies of provider call recordings; without it recordings remain with the carrier
+      reason: stores private durable copies of provider call recordings and optionally supplies signed hold music; without it recordings remain with the carrier and hold music requires a direct HTTPS URL
   integrations:
     - role: carrier
       kind: integration

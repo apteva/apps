@@ -40,6 +40,15 @@ type carrierAdapter interface {
 	Hangup(ctx *sdk.AppCtx, row *callRow) error
 }
 
+// Optional carrier contract. Other adapters remain valid but explicitly report
+// unsupported controls until they implement this interface.
+type carrierCallController interface {
+	StartHoldMusic(ctx *sdk.AppCtx, row *callRow, musicURL, commandID string) error
+	StopHoldMusic(ctx *sdk.AppCtx, row *callRow, commandID string) error
+	PauseRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error
+	ResumeRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error
+}
+
 func (a *App) carrierFor(bound *sdk.BoundIntegration, credentialSlug string, fields map[string]string) (carrierAdapter, error) {
 	slug := credentialSlug
 	if slug == "" && bound != nil {
@@ -301,6 +310,55 @@ func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 		"command_id":      telnyxCommandID(row.ID, "hangup"),
 	})
 	return err
+}
+
+func (c *telnyxCarrier) StartHoldMusic(ctx *sdk.AppCtx, row *callRow, musicURL, commandID string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "play_audio", map[string]any{
+		"call_control_id": row.CarrierSID, "audio_url": musicURL,
+		"loop": "infinity", "target_legs": "self", "command_id": commandID,
+		"client_state": row.HoldClientState,
+	})
+	return err
+}
+
+func (c *telnyxCarrier) StopHoldMusic(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	_, err := executeCarrierTool(ctx, c.connID, "stop_audio", map[string]any{
+		"call_control_id": row.CarrierSID, "stop": "all", "command_id": commandID,
+		"client_state": row.HoldClientState,
+	})
+	return err
+}
+
+func (c *telnyxCarrier) PauseRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	data, err := executeCarrierTool(ctx, c.connID, "pause_call_recording", map[string]any{
+		"call_control_id": row.CarrierSID, "command_id": commandID,
+	})
+	if err != nil {
+		return err
+	}
+	return telnyxRecordingControlConfirmed(data)
+}
+
+func (c *telnyxCarrier) ResumeRecording(ctx *sdk.AppCtx, row *callRow, commandID string) error {
+	data, err := executeCarrierTool(ctx, c.connID, "resume_call_recording", map[string]any{
+		"call_control_id": row.CarrierSID, "command_id": commandID,
+	})
+	if err != nil {
+		return err
+	}
+	return telnyxRecordingControlConfirmed(data)
+}
+
+func telnyxRecordingControlConfirmed(data json.RawMessage) error {
+	var response struct {
+		Data struct {
+			Result string `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil || response.Data.Result != "ok" {
+		return errors.New("Telnyx did not confirm the recording command")
+	}
+	return nil
 }
 
 type plivoCarrier struct {

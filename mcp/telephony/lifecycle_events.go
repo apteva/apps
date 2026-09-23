@@ -147,11 +147,15 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
         termination_reason = ?,
         provider_sequence = ?,
         provider_event_id = ?,
-        media_active = CASE WHEN ? THEN 0 ELSE media_active END
+        media_active = CASE WHEN ? THEN 0 ELSE media_active END,
+        hold_state = CASE WHEN ? THEN 'ended' ELSE hold_state END,
+        recording_control_state = CASE WHEN ? THEN 'ended' ELSE recording_control_state END,
+        control_action = CASE WHEN ? THEN '' ELSE control_action END
         WHERE id = ?`,
 		nextStatus, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
 		providerOccurredAt, durationSeconds, talkDurationSeconds, terminationCause,
 		terminationCode, terminationInitiator, terminationReason, providerSequence, providerEventID,
+		isTerminalStatus(nextStatus), isTerminalStatus(nextStatus), isTerminalStatus(nextStatus),
 		isTerminalStatus(nextStatus), id)
 	if err != nil {
 		return false, err

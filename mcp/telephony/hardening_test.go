@@ -39,6 +39,21 @@ type answerPlatform struct {
 	bindings             map[string]any
 	connection           *sdk.PlatformConnection
 	agents               map[int64]*sdk.PlatformAgent
+	appResponses         map[string]any
+	appCalls             []integrationCall
+}
+
+func (p *answerPlatform) CallAppResult(app, tool string, args map[string]any, out any) error {
+	p.appCalls = append(p.appCalls, integrationCall{Tool: app + "/" + tool, Input: args})
+	value, ok := p.appResponses[app+"/"+tool]
+	if !ok {
+		return errors.New("app is not bound: " + app)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, out)
 }
 
 type integrationCall struct {

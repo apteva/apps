@@ -88,6 +88,29 @@ func (a *App) handleTelnyxRecordingEvent(call *callRow, body []byte) (bool, erro
 	if err := json.Unmarshal(body, &event); err != nil {
 		return false, err
 	}
+	if event.Data.EventType == "call.playback.started" || event.Data.EventType == "call.playback.ended" {
+		payload := event.Data.Payload
+		callControlID := stringValue(payload["call_control_id"])
+		if callControlID == "" || (call.CarrierSID != "" && callControlID != call.CarrierSID) {
+			return true, errors.New("Telnyx playback does not match call")
+		}
+		if call.PeerKind != peerKindHuman {
+			return false, nil
+		}
+		state, updated, err := a.db().confirmHoldPlayback(call.ID, event.Data.EventType, stringValue(payload["client_state"]))
+		if err != nil {
+			return true, err
+		}
+		if updated {
+			a.softphones.hubFor(call.ID).setHeld(state != "active")
+			fresh, err := a.db().findCall(call.ID)
+			if err != nil {
+				return true, err
+			}
+			a.notifyCallControl(fresh)
+		}
+		return true, nil
+	}
 	if event.Data.EventType != "call.recording.saved" {
 		return false, nil
 	}

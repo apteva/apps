@@ -17,6 +17,17 @@ export interface Call {
   to_number: string;
   routing_waiting?: boolean;
   ring_offers?: Array<{ destination_id: string; kind: string }>;
+  hold_state?: "active" | "starting" | "held" | "stopping" | "unknown" | "ended";
+  recording_state?: "off" | "active" | "pause_requested" | "paused" | "resume_requested" | "unknown" | "ended";
+  control_error?: string;
+  capabilities?: { hold_music: boolean; recording_pause: boolean };
+}
+export interface CallControlResult {
+  call_id: string;
+  hold_state: NonNullable<Call["hold_state"]>;
+  recording_state: NonNullable<Call["recording_state"]>;
+  control_error: string;
+  capabilities: NonNullable<Call["capabilities"]>;
 }
 export interface CallSession {
   call_id: string;
@@ -185,6 +196,24 @@ export class TelephonyClient {
 
   async hangup(id: string): Promise<void> {
     await this.app.post(this.path(`/calls/${callID(id)}/hangup`), {});
+  }
+
+  /** Keep the same carrier call connected. Requires configured hold music. */
+  hold(id: string): Promise<CallControlResult> {
+    return this.app.post(this.path(`/calls/${callID(id)}/hold`), {});
+  }
+
+  resume(id: string): Promise<CallControlResult> {
+    return this.app.post(this.path(`/calls/${callID(id)}/resume`), {});
+  }
+
+  /** Resolves only after Telephony receives Telnyx's successful pause result. */
+  pauseRecording(id: string): Promise<CallControlResult> {
+    return this.app.post(this.path(`/calls/${callID(id)}/pause-recording`), {});
+  }
+
+  resumeRecording(id: string): Promise<CallControlResult> {
+    return this.app.post(this.path(`/calls/${callID(id)}/resume-recording`), {});
   }
 
   createSoftphone(options: SoftphoneOptions = {}): HeadlessSoftphone {
