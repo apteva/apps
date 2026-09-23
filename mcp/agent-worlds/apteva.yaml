@@ -1,0 +1,60 @@
+schema: apteva-app/v1
+name: agent-worlds
+display_name: Agent Worlds
+version: 0.1.0
+description: Live visual scenes for Apteva agents on the main server, isolated environments, and a configured remote server.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
+icon: /ui/icon.svg
+icon_style: monochrome
+tags: [agents, visualization, observability, environments]
+scopes: [project]
+min_apteva_version: "0.26.1"
+requires:
+  permissions:
+    - platform.instances.read
+    - platform.telemetry.read
+    - platform.runtimes.read
+    - net.egress
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: worlds_sources, description: "List live main, environment, and configured remote sources." }
+    - { name: worlds_scene, description: "Read a sanitized agent scene for one source. Args: source." }
+  ui_panels:
+    - slot: project.page
+      label: Agent Worlds
+      icon: network
+      entry: /ui/AgentWorldsPanel.mjs
+runtime:
+  kind: source
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.0, entry: mcp/agent-worlds }
+  port: 8080
+  health_check: /health
+config_schema:
+  - name: remote_url
+    type: text
+    default: ""
+    label: Remote Apteva server URL
+    description: Optional HTTPS URL of another Apteva server. Loopback HTTP is allowed for local development.
+  - name: remote_api_key
+    type: secret
+    default: ""
+    label: Remote API key
+    description: Optional API key for the remote server. It remains on the app backend and is never returned to the panel.
+  - name: remote_label
+    type: text
+    default: "Remote server"
+    label: Remote server label
+  - name: remote_project_id
+    type: text
+    default: ""
+    label: Remote project ID
+    description: Optional remote project filter, also used to find that project's Environments installation.
+  - name: remote_environments_install_id
+    type: text
+    default: ""
+    label: Remote Environments install ID
+    description: Optional install ID when the remote server has several Environments installations.
+upgrade_policy: auto-patch
