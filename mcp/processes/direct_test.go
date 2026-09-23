@@ -101,6 +101,12 @@ func TestProjectRunsAreScopedAndIncludeProcessIdentity(t *testing.T) {
 	if _, err := a.start("project-a", p.ID, "project-history", "input"); err != nil {
 		t.Fatal(err)
 	}
+	// Production app databases have one SQLite connection. Marking this as a
+	// workflow run proves projectRuns closes its outer cursor before querying
+	// step rows; the pre-0.14.7 implementation deadlocked here.
+	if _, err := a.db.Exec(`UPDATE process_runs SET workflow=1 WHERE process_id=?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
 	other, err := a.save("other", "", "operator", 0, def())
 	if err != nil {
 		t.Fatal(err)
