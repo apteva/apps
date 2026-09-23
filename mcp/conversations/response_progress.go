@@ -107,7 +107,7 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 			return
 		}
 		// The response remains active across the result-to-model gap. The UI
-		// keeps the tool group pulsing without extending execution durations.
+		// shows Thinking after the completed tool stops animating.
 		phase = "continuing"
 		p.ToolName = ""
 		p.CallID = ""

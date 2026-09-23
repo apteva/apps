@@ -90,6 +90,22 @@ func TestToolActivityLifecycleIsolationAndRecovery(t *testing.T) {
 	}
 }
 
+func TestMessageTimestampKeepsSubsecondPrecision(t *testing.T) {
+	a, _, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	message, err := a.store.AppendMessage(&Message{ConversationID: conv.ID, Role: "agent", AgentID: 41, Content: "I found it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := a.store.db.QueryRow(`SELECT created_at FROM messages WHERE id=?`, message.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored, ".") || message.CreatedAt.Nanosecond() == 0 {
+		t.Fatalf("message timestamp lost subsecond ordering: %q / %s", stored, message.CreatedAt)
+	}
+}
+
 func TestConversationsToolsHiddenFromLiveAndHistory(t *testing.T) {
 	a, _, _ := newTestEnv(t)
 	conv := mkConversation(t, a, 41)

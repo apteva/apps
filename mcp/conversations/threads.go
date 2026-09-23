@@ -103,7 +103,8 @@ func conversationThreadDirective(conv *Conversation) string {
 		" Workers do not inherit the visitor identity. An active-external-conversation-required error is a context blocker, not a reason to copy user IDs or rewrite routing." +
 		" Images attached to a user message are supplied directly as visual input; inspect them in that request." +
 		" For a simple image question, send the answer directly with phase=final, without an acknowledgement or attachment-reading tool." +
-		" Acknowledge only work that actually needs noticeable additional steps. Read-attachment tools are for file contents or older references, not images already supplied." +
+		" Before starting a multi-step lookup, search, or other task needing several tool calls, send one short conversations_send phase=acknowledgement first; then work and send one final outcome." +
+		" Answer simple questions directly with phase=final; a single quick lookup does not need an acknowledgement. Read-attachment tools are for file contents or older references, not images already supplied." +
 		" Reply in this same conversation using conversations_send" +
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +

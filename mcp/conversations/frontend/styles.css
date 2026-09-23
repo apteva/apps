@@ -174,12 +174,6 @@
   will-change: transform, opacity, filter;
 }
 
-.chat-tool-icon-stack-running {
-  animation: chat-tool-breathe 1.9s ease-in-out infinite;
-  transform-origin: center;
-  will-change: transform, opacity, filter;
-}
-
 .chat-tool-icon {
   transition: transform 180ms ease, opacity 180ms ease, filter 180ms ease;
 }
@@ -198,8 +192,7 @@
 .chat-thinking-dots > span:nth-child(3) { animation-delay: 240ms; }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-tool-icon-running,
-  .chat-tool-icon-stack-running {
+  .chat-tool-icon-running {
     animation: none;
     opacity: 1;
   }
@@ -213,18 +206,6 @@
   .chat-thinking-dots > span {
     animation: none;
     opacity: 0.65;
-  }
-}
-
-/* Integration logos are useful in roomy transcripts but crowd narrow chat
- * rows. Keep the status text and controls readable in compact embeds. */
-@media (max-width: 640px) {
-  .apteva-conversations .chat-tool-icon,
-  .apteva-conversations .chat-tool-icon-stack-running {
-    display: none;
-  }
-  .apteva-conversations .chat-tool-activity {
-    grid-template-columns: minmax(0, 1fr) auto;
   }
 }
 

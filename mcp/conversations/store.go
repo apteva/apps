@@ -735,11 +735,12 @@ func (s *store) AppendMessageWithDeliveries(m *Message, targets []string) (*Mess
 	res, err := tx.Exec(`
 		INSERT INTO messages (conversation_id, role, content, agent_id, user_id, external_sender,
 			thread_id, status, phase, action_status, component_kind, severity, inbox_only, components_json,
-			attachments_json, metadata_json, client_message_id, source_app, callback_tool)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			attachments_json, metadata_json, client_message_id, source_app, callback_tool, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ConversationID, m.Role, m.Content, m.AgentID, m.UserID, m.ExternalSender,
 		m.ThreadID, m.Status, m.Phase, m.ActionStatus, m.ComponentKind, m.Severity, boolToInt(m.InboxOnly),
-		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool)
+		string(componentsJSON), string(attachmentsJSON), string(metadataJSON), m.ClientID, m.SourceApp, m.CallbackTool,
+		time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		if m.ClientID != "" && strings.Contains(err.Error(), "UNIQUE") {
 			_ = tx.Rollback()

@@ -327,3 +327,27 @@ test("optimistic response survives send completion and hands off once to the ser
  await act(async()=>FakeEvents.instances[0].emit({...message(2,"a","Hello back"),role:"agent",agent_id:41}));
  expect(element.querySelectorAll('[role="status"]')).toHaveLength(0);
 });
+
+test("completed tool hands progress back to thinking without continuing to glow", async () => {
+ const user={...message(826,"a","Locate the client onboarding process"),created_at:"2026-09-23T12:12:34.761Z"};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:url.includes("/messages")?[user]:[],cursor:826,before:826,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const tool={id:64,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",name:"apteva-server_app_tool_call",reason:"Finding onboarding procedure",status:"running",started_at:"2026-09-23T12:12:49.260018Z",ended_at:"",revision:1};
+ const progress=(phase:string,revision:number)=>({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,response_progress:{phase,run_id:"run-1",revision,after_message_id:826,started_at:"2026-09-23T12:12:34.761Z"}});
+ await act(async()=>{
+   stream({data:JSON.stringify(progress("running",1))});
+   stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",text:"",done:false,tool_activity:tool})});
+ });
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await act(async()=>{
+   stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",text:"",done:false,tool_activity:{...tool,status:"completed",ended_at:"2026-09-23T12:12:49.306451Z",revision:2,duration_ms:46}})});
+   stream({data:JSON.stringify(progress("continuing",2))});
+ });
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+ expect(element.querySelector(".chat-tool-activity-continuing")).toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+});

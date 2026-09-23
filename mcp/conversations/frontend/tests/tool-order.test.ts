@@ -25,11 +25,12 @@ test("fast call/result bursts paint running first without blocking parallel star
  expect(splitActivityPaint(first.deferred).paint).toEqual([result]);
 });
 
-test("tool progress belongs to the response, not the last transcript item",()=>{
+test("only an executing tool owns the response indicator",()=>{
  const user={id:7,role:"user",created_at:new Date(900).toISOString()} as any;
- const timeline=[{kind:"toolGroup",key:"group",tools:[base]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
+ const timeline=[{kind:"toolGroup",key:"group",tools:[{...base,state:"running"}]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
  const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
  expect(responseToolGroup(response,timeline,[user])).toBe("group");
+ expect(responseToolGroup(response,[{kind:"toolGroup",key:"group",tools:[base]}] as any,[user])).toBeUndefined();
  expect(responseToolGroup({...response,agentId:42},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,threadId:"other"},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,afterMessageId:8,createdAt:3000},timeline,[user])).toBeUndefined();
@@ -47,6 +48,14 @@ test("consecutive tools keep one stable group across long gaps until a message",
  const message={id:1,role:"agent",content:"An intermediate update",created_at:new Date(60000).toISOString()} as any;
  const separated=buildChatTimeline([message], [base,later]).filter(item=>item.kind!=="day" && item.kind!=="time");
  expect(separated.map(item=>item.kind)).toEqual(["toolGroup","message","toolGroup"]);
+});
+
+test("subsecond message timestamps retain the order around a completed tool",()=>{
+ const user={id:826,role:"user",content:"Locate the client onboarding process",created_at:"2026-09-23T12:12:34.761Z"} as any;
+ const tool={...base,startedAt:Date.parse("2026-09-23T12:12:39.537Z"),finishedAt:Date.parse("2026-09-23T12:12:39.554Z")};
+ const acknowledgement={id:828,role:"agent",content:"I'll search",created_at:"2026-09-23T12:12:39.630Z"} as any;
+ const timeline=buildChatTimeline([user,acknowledgement],[tool]).filter(item=>item.kind!=="day" && item.kind!=="time");
+ expect(timeline.map(item=>item.kind)).toEqual(["message","toolGroup","message"]);
 });
 
 test("only the exact internal search_tools lookup is hidden",()=>{

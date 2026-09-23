@@ -1427,11 +1427,6 @@ export function ConversationChat({
   const responseProgress = progresses.find(p=>p.phase!=="idle");
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
   const timeline = buildChatTimeline(messages,activities.map(toChatToolActivity)).filter(item => item.kind !== "day" && item.kind !== "time");
-  const progressResponses = progresses.filter(p=>p.phase!=="idle").map(p=>({
-    agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at),
-  }));
-  const pendingResponses = [...progressResponses, ...bubbles.filter(b=>!b.text && !progresses.some(p=>p.agent_id===b.agentId))];
-  const continuingToolKeys = new Set(pendingResponses.map(response=>responseToolGroup(response,timeline,messages)).filter(Boolean));
   const ownsToolGroup = (response: Parameters<typeof responseToolGroup>[0]) => Boolean(responseToolGroup(response,timeline,messages));
   const [expandedToolGroups,setExpandedToolGroups]=useState<Set<string>>(()=>new Set());
   const toggleToolGroup=(key:string)=>setExpandedToolGroups(current=>{
@@ -1601,7 +1596,6 @@ export function ConversationChat({
         {timeline.map(item => item.kind === "toolGroup" || item.kind === "tool" ? <ChatToolActivity
           key={item.key} tools={item.kind === "toolGroup" ? item.tools : [item.tool]}
           parallel={item.kind === "toolGroup" && item.parallel}
-          continuing={continuingToolKeys.has(item.key)}
           expanded={expandedToolGroups.has(item.key)} onToggle={()=>toggleToolGroup(item.key)}
           registry={toolVisualRegistry} detailsId={`tools-${conversation.id}-${item.key.replace(/[^a-zA-Z0-9_-]/g,"-")}`}
           showCompletion={showToolCompletion} showDuration={showToolDuration}
@@ -1615,13 +1609,12 @@ export function ConversationChat({
       hasMessages={timeline.length > 0}
       streamNode={bubbles.length || progresses.some(p=>p.phase!=="idle") ? <>{bubbles.map(b => { const phase = pendingResponsePhase(b, activities, messages); if (!b.text && (phase === null || ownsToolGroup(b) || progresses.some(p=>p.agent_id===b.agentId))) return null; return <div key={`${b.agentId}:${b.callId}:${b.runId}`}>{agentName(b.agentId) && <p className="mb-2 text-[10px] font-semibold uppercase text-text-muted">{agentName(b.agentId)}</p>}{b.text ? <StreamingBubble text={b.text} /> : <ThinkingMessagePlaceholder preparing={b.optimistic || phase === "preparing"} />}</div>; })}
         {progresses.map(p => {
-          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text)
-            || activities.some(tool=>tool.agent_id===p.agent_id && tool.status==="running")) return null;
+          if (p.phase === "idle" || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text)) return null;
           if (p.phase === "preparing_tool" && p.tool_name) {
             if (!isVisibleChatTool(p.tool_name) || activities.some(tool=>tool.agent_id===p.agent_id && tool.call_id===p.call_id)) return null;
             return <ChatToolActivity key={`preparing-${p.agent_id}`} tools={[{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing",startedAt:Date.parse(p.started_at)}]} registry={toolVisualRegistry} showCompletion={showToolCompletion} showDuration={showToolDuration}/>;
           }
-          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase!=="thinking"}/>;
+          return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`} preparing={p.phase==="preparing" || p.phase==="preparing_tool"}/>;
         })}
       </> : null}
       emptyMessage={emptyMessage}

@@ -179,6 +179,8 @@ Dashboard panels and exported chat share the `ChatToolActivity` renderer, groupi
 
 The shared transcript displays conversation-bound tool starts and results. Activity is stored separately from messages and replayed through `/activity` on load, reconnect and periodic reconciliation. Live updates travel in `stream` frames under `tool_activity`, with stable IDs and revisions. The endpoint uses the same conversation and delegated `message.read` access checks as history. It carries display metadata only, never tool arguments or raw results, and does not create unread messages or outbound deliveries. Activity collected after this feature is installed survives refreshes; older platform telemetry is not imported automatically.
 
+Running calls animate until their result arrives. If the response continues after a result, the completed call stops animating and the transcript shows Thinking while the model prepares its next step. New message timestamps retain subsecond precision so messages and tool calls within the same second sort in their recorded order.
+
 The main composer action pauses an active reply or tool when the input is empty, and switches to send as soon as a draft is entered. Pausing remains an advisory request.
 
 ### Composer attachments
