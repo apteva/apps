@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.90
+version: 0.7.91
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.90 adds persistent
-  operator-owned scheduling constraints that reject immediate publication and
-  incorrect schedule times, with live Patreon LLM recovery coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.91 shows live sessions
+  first, loads past sessions on demand in pages, and folds browser settings
+  away from the session list.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
