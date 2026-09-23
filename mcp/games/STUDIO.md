@@ -70,9 +70,17 @@ entry is reused unchanged.
 | AdMob | Publisher ID, AdMob app ID, Network or mediation | Daily impressions, clicks and estimated earnings |
 | GA4 | Property ID and game stream ID | Daily active users, sessions and event counts |
 | App Store Connect | App ID and vendor number | Daily units and sales-report proceeds, separated by currency |
+| Google Play Developer | Android package ID; report bucket and report permissions on the connection | Monthly estimated buyer-paid sales or merchant-currency earnings, selected as separate sources |
 
-Scheduled imports refresh the last seven completed provider-local dates every six
-hours. Manual `games_metrics_sync` supports a bounded 1–31 day window. The worker
+For Google Play, set the Play Console report bucket on the connection and grant
+global report access. Existing OAuth connections may need reconnection to add the
+`devstorage.read_only` scope before reports can be downloaded. Bind the connection
+to Games' `reporting` role even if Deploy already uses it for publishing.
+
+Scheduled daily imports refresh the last seven completed provider-local dates every six
+hours. Google Play imports the two latest available sales months or the previous two
+earnings months; `games_metrics_sync {month: "YYYYMM"}` imports an exact older Play
+report. Manual daily sync supports a bounded 1–31 day window. The worker
 claims a durable lease; errors preserve last success and retry after 30 minutes.
 Incomplete or warning-bearing AdMob reports and thresholded/sampled GA4 reports
 fail visibly. They are not imported as zero. Empty **complete** daily reports
@@ -85,9 +93,11 @@ No float-based conversion is used for stored money. Dashboards show source facts
 separately: do not add Network to mediation totals, combine store proceeds with
 gross revenue, or sum daily unique users into monthly unique users.
 
-The current automatic import adapters are the three providers above. Play/Steam
-sales, Crashlytics/Play vitals and acquisition attribution require their own
-supported reporting mappings; this change does not fabricate those measurements.
+Google Play report ZIPs are filtered to the selected package ID before import. Sales
+remain buyer-paid estimates that include collected taxes and do not deduct Google fees. Earnings retain transaction type
+and merchant currency; do not treat a filtered sum as a payout statement. Play and
+Steam installs, Crashlytics/Play vitals and acquisition attribution require their
+own supported reporting mappings.
 Player-side `performance_summary` events support game-provided diagnostics but
 are not a replacement for a crash-reporting SDK or physical-device benchmarks.
 

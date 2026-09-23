@@ -852,6 +852,7 @@ function Metrics({
   const [zone, setZone] = useState("UTC");
   const [vendor, setVendor] = useState("");
   const [family, setFamily] = useState("network");
+  const [reportMonth, setReportMonth] = useState("");
   const [source, setSource] = useState("");
   const [events, setEvents] = useState<Item[]>([]);
   const [inventory, setInventory] = useState<any>();
@@ -879,9 +880,8 @@ function Metrics({
       <ErrorBox error={error} />
       <h3 className="font-medium">Game metrics</h3>
       <p className="text-text-muted">
-        Gameplay, publisher earnings and store proceeds retain their own
-        definitions. Reports import every six hours with a seven-day correction
-        window. AdMob is optional.
+        Gameplay, ad earnings and store reports retain their own definitions.
+        Daily reports refresh every six hours; Google Play reports are monthly.
       </p>
       <div className={card}>
         <h4>Reporting sources</h4>
@@ -898,7 +898,15 @@ function Metrics({
           aria-label="Reporting connection"
           className={input}
           value={connection}
-          onChange={(e) => setConnection(e.target.value)}
+          onChange={(e) => {
+            setConnection(e.target.value);
+            setFamily("network");
+            setExternal("");
+            setAccount("");
+            setStream("");
+            setVendor("");
+            setInventory(undefined);
+          }}
         >
           <option value="">Select connection</option>
           {connections.map((c) => (
@@ -910,7 +918,11 @@ function Metrics({
         {selected && (
           <>
             <Field
-              label="External app or GA4 property ID"
+              label={
+                selected.provider === "google-play-developer"
+                  ? "Android package ID"
+                  : "External app or GA4 property ID"
+              }
               value={external}
               onChange={setExternal}
             />
@@ -954,6 +966,22 @@ function Metrics({
                 onChange={setVendor}
               />
             )}
+            {selected.provider === "google-play-developer" && (
+              <>
+                <select
+                  aria-label="Google Play report family"
+                  className={input}
+                  value={family === "earnings" ? "earnings" : "sales"}
+                  onChange={(e) => setFamily(e.target.value)}
+                >
+                  <option value="sales">Estimated sales (buyer paid)</option>
+                  <option value="earnings">Earnings (merchant currency)</option>
+                </select>
+                <p className="text-text-muted text-xs">
+                  Configure the report bucket and report permissions on the Google Play connection.
+                </p>
+              </>
+            )}
             <button
               className={button}
               disabled={busy}
@@ -983,7 +1011,12 @@ function Metrics({
                     account_id: account,
                     stream_id: stream,
                     timezone: zone,
-                    family,
+                    family:
+                      selected.provider === "google-play-developer"
+                        ? family === "earnings"
+                          ? "earnings"
+                          : "sales"
+                        : family,
                     config: { vendor_number: vendor },
                   });
                   await load();
@@ -1008,14 +1041,31 @@ function Metrics({
                 : "No imported data yet"}
             </p>
             {s.last_error && <p className="text-red">{s.last_error}</p>}
+            {s.provider === "google-play-developer" && (
+              <Field
+                label="Exact report month (optional, YYYYMM)"
+                value={reportMonth}
+                onChange={setReportMonth}
+                placeholder="YYYYMM"
+              />
+            )}
             <button
               className={button}
               disabled={busy}
               onClick={() =>
                 run(async () => {
-                  await call("metrics_sync", { source_id: s.id });
+                  await call("metrics_sync", {
+                    source_id: s.id,
+                    ...(s.provider === "google-play-developer" && reportMonth
+                      ? { month: reportMonth }
+                      : {}),
+                  });
                   await load();
-                  notice("Seven-day report window refreshed.");
+                  notice(
+                    s.provider === "google-play-developer"
+                      ? "Monthly reports refreshed."
+                      : "Seven-day report window refreshed.",
+                  );
                 })
               }
             >
@@ -1047,6 +1097,7 @@ function Metrics({
         >
           {[
             "provider_daily",
+            "provider_monthly",
             "play.session_started",
             "play.run_completed",
             "play.run_failed",
@@ -1079,7 +1130,7 @@ function Metrics({
           return (
             <article className={card} key={e.id}>
               <p>
-                {p?.date || p?.event_time} · {p?.provider || "Gameplay"} ·{" "}
+                {p?.date || p?.month || p?.event_time} · {p?.provider || "Gameplay"} ·{" "}
                 {p?.family || e.topic}
               </p>
               {p?.facts?.map((f: Item, i: number) => (

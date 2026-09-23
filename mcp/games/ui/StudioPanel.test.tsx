@@ -109,6 +109,46 @@ test("portfolio is paginated and does not call reporting providers", async () =>
   await waitFor(() => expect(paths.length).toBe(2));
   expect(paths.every((p) => p.includes("/portfolio"))).toBe(true);
 });
+test("Google Play reporting maps a package and selects an exact report month", async () => {
+  const requests: Record<string, unknown>[] = [];
+  let connected = false;
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), "http://local").pathname;
+    if (path.endsWith("/sources") || path.endsWith("/targets")) return reply([]);
+    if (path.endsWith("/metric_sources"))
+      return reply(
+        connected
+          ? [{ id: "play-sales", provider: "google-play-developer", family: "earnings", external_id: "com.example.game" }]
+          : [],
+      );
+    if (path.endsWith("/discovery"))
+      return reply([{ connection_id: 10, provider: "google-play-developer" }]);
+    if (path.endsWith("/metric_source_set")) {
+      requests.push(JSON.parse(String(init?.body)));
+      connected = true;
+      return reply({ id: "play-sales" });
+    }
+    if (path.endsWith("/metrics_sync")) {
+      requests.push(JSON.parse(String(init?.body)));
+      return reply({ months: 1 });
+    }
+    return reply({});
+  }) as typeof fetch;
+  render(<StudioPanel projectId="p" gameId="a" view="metrics" />);
+  fireEvent.click(screen.getByText("Discover reporting connections"));
+  await waitFor(() => expect(screen.getByText("google-play-developer · #10")).toBeTruthy());
+  fireEvent.change(screen.getByLabelText("Reporting connection"), { target: { value: "10" } });
+  fireEvent.change(screen.getByLabelText("Android package ID"), { target: { value: "com.example.game" } });
+  fireEvent.change(screen.getByLabelText("Google Play report family"), { target: { value: "earnings" } });
+  fireEvent.click(screen.getByText("Connect reporting source"));
+  await waitFor(() => expect(requests.length).toBe(1));
+  expect(requests[0]).toMatchObject({ provider: "google-play-developer", external_id: "com.example.game", family: "earnings" });
+  await waitFor(() => expect(screen.getByLabelText("Exact report month (optional, YYYYMM)")).toBeTruthy());
+  fireEvent.change(screen.getByLabelText("Exact report month (optional, YYYYMM)"), { target: { value: "202608" } });
+  fireEvent.click(screen.getByText("Refresh reports"));
+  await waitFor(() => expect(requests.length).toBe(2));
+  expect(requests[1]).toMatchObject({ source_id: "play-sales", month: "202608" });
+});
 test("monetary micros retain precision beyond JavaScript safe integers", () => {
   expect(formatMicros("9007199254740993")).toBe("9007199254.740993");
   expect(formatMicros("-1250000")).toBe("-1.250000");

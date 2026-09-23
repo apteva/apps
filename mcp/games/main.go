@@ -1,4 +1,4 @@
-// Games v0.5 — game content studio, players and progression.
+// Games v0.6 — game content studio, players and progression.
 //
 // The Games app is the game-domain layer of Apteva: the pieces a studio
 // would otherwise get from PlayFab, Nakama, or Unity Gaming Services,
