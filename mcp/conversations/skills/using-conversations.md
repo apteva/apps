@@ -24,8 +24,9 @@ files or older attachment references when necessary. Describe only details you
 can actually see; the filename or byte count is not evidence of image quality.
 
 Before starting a multi-step lookup, search, or other task requiring several
-tool calls, send one short acknowledgement with `phase=acknowledgement` first.
-Then do the work and send exactly one outcome with
+tool calls, call `conversations_send` with `phase=acknowledgement` alone.
+Wait for its result before calling a work tool; never batch or parallelize
+the acknowledgement with the work. Then do the work and send exactly one outcome with
 `phase=final`. Between the two, send `phase=progress` only for a meaningful
 achievement, plan change, blocker, or
 request for input — never narrate individual tools, routine retries,

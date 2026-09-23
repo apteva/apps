@@ -157,7 +157,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"work stays there; never rewrite an app-owned chat with Core update/evolve or delegate its identity-dependent calls. " +
 				"Main returns escalated decisions/results to the originating thread; generic workers report to their parent and are " +
 				"never granted Conversations tools. Delivery updates every bound surface. Set phase to " +
-				"acknowledgement, progress, or final. Exception: main may acknowledge its own resolved approval " +
+				"acknowledgement, progress, or final. If sending a pre-work acknowledgement, call this tool alone and wait for its result before calling work tools; do not batch them. Exception: main may acknowledge its own resolved approval " +
 				"with phase=acknowledgement and approval_message_id from approval.result.",
 			InputSchema: schemaObject(map[string]any{
 				"conversation_id":     map[string]any{"type": "string"},

@@ -3,7 +3,7 @@
 ## 0.24.3 — 2026-09-23
 
 - Make the shared dashboard and exported-chat tool display configurable. It now defaults to the source icon and activity text; completion checks and durations are optional.
-- Hand progress back to Thinking when a tool finishes, retain subsecond message ordering alongside tool telemetry, and prompt a brief acknowledgement before multi-step work.
+- Hand progress back to Thinking when a tool finishes, retain subsecond message ordering alongside tool telemetry, and require a completed acknowledgement call before multi-step work tools.
 - Carry an attached image's visual finding into the first acknowledgement before its transient model input expires. Clarify operator-conversation creation for escalations and approvals.
 - Add a live acknowledgement-before-tool assertion; all 14 Tier 3 scenarios passed with GPT-6 Luna.
 

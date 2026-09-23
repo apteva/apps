@@ -214,7 +214,7 @@ func TestMixedAttachmentEventPreservesVisionAndFileAccess(t *testing.T) {
 	if images != 1 || !strings.Contains(text.String(), "attachment_id=notes") || !strings.Contains(text.String(), "Use conversations_read_attachment") || !strings.Contains(text.String(), "file_id=42") {
 		t.Fatal("mixed attachment routing lost image or file access")
 	}
-	if !strings.Contains(text.String(), "visual finding in your first conversations_send acknowledgement") {
+	if !strings.Contains(text.String(), "visual finding in your first conversations_send acknowledgement") || !strings.Contains(text.String(), "only tool call in this turn") {
 		t.Fatal("multi-step image instructions lost the first-turn visual handoff")
 	}
 	if strings.Contains(text.String(), "attachment_id=photo") {
