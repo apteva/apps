@@ -136,14 +136,30 @@ func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
 }
 
 func dbListSessionsPage(db *sql.DB, limit, offset int) ([]*ComputerSession, error) {
+	return dbListSessionsPageFiltered(db, limit, offset, false)
+}
+
+func dbListEndedSessionsPage(db *sql.DB, limit, offset int) ([]*ComputerSession, error) {
+	return dbListSessionsPageFiltered(db, limit, offset, true)
+}
+
+func dbListSessionsPageFiltered(db *sql.DB, limit, offset int, endedOnly bool) ([]*ComputerSession, error) {
 	if offset < 0 {
 		return nil, errors.New("history offset must not be negative")
 	}
 	if db == nil {
 		return nil, errors.New("computer session store is unavailable")
 	}
-	if limit <= 0 || limit > 500 {
+	maxLimit := 500
+	if endedOnly {
+		maxLimit++ // The history endpoint reads one extra row to detect another page.
+	}
+	if limit <= 0 || limit > maxLimit {
 		limit = 100
+	}
+	where := ""
+	if endedOnly {
+		where = "WHERE status <> 'active'"
 	}
 	rows, err := db.Query(`
 		SELECT id, backend, backend_session_id, app_context_id, context_name,
@@ -153,6 +169,7 @@ func dbListSessionsPage(db *sql.DB, limit, offset int) ([]*ComputerSession, erro
 		       proxy_profile_id, proxy_profile_name, proxy_country, proxy_sticky_scope,
 		       environment_json, proxy_bytes, usage_status, usage_measured_at
 		FROM computer_sessions
+		`+where+`
 		ORDER BY opened_at DESC, id DESC
 		LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
