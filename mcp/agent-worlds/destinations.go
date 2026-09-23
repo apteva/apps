@@ -275,6 +275,10 @@ func attributeEvents(scene *Scene) {
 	for i := range scene.Destinations {
 		dest := &scene.Destinations[i]
 		dest.CallCount = counts[dest.ID]
+		dest.ToolCount = len(dest.Tools)
+		if len(dest.Tools) > 3 {
+			dest.Tools = dest.Tools[:3]
+		}
 		if at, ok := last[dest.ID]; ok {
 			copy := at
 			dest.LastCall = &copy

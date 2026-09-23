@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: agent-worlds
 display_name: Agent Worlds
-version: 0.1.5
+version: 0.1.6
 description: Live agent scenes with real app and integration destinations on the main server, isolated environments, and a configured remote server.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/agent-worlds
@@ -31,20 +31,20 @@ provides:
       entry: /ui/AgentWorldsPanel.mjs
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.5, entry: mcp/agent-worlds }
+  source: { repo: github.com/apteva/apps, ref: agent-worlds/v0.1.6, entry: mcp/agent-worlds }
   artifacts:
     darwin-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.5/agent-worlds-v0.1.5-darwin-arm64.tar.gz
-      sha256: bc0965797a04ce1a7bef7896772711127768f9e67d58dcdf54d60cded93bf1d8
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-darwin-arm64.tar.gz
+      sha256: 340781c6c3508ddaf0cd5c10148624bb51ff9b64d1ed9a4ecbdb71ac4e985df9
     darwin-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.5/agent-worlds-v0.1.5-darwin-amd64.tar.gz
-      sha256: a45850e4e18a3f56bcb5686e7b760b54d8fd5ea515fc2886b69bc5f287fd75bb
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-darwin-amd64.tar.gz
+      sha256: b221d4a0aceb4c4ec1443f65682dc9871053ea89945c1ff7fb4d657eb4dc5aa7
     linux-amd64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.5/agent-worlds-v0.1.5-linux-amd64.tar.gz
-      sha256: ce236b2d88a76b96346aea8242a1525324908516d180cbe0194ef6665dbe7c42
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-linux-amd64.tar.gz
+      sha256: 84afef4d97878d565e16c26b9d527b4467a15e301a70d48f57db2cf58f11b873
     linux-arm64:
-      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.5/agent-worlds-v0.1.5-linux-arm64.tar.gz
-      sha256: 11fdcb13d0af80cb7d6a8a0ff61e3999ff9f5d2c1a9e8f8f819441ac6aa06e96
+      url: https://github.com/apteva/apps/releases/download/agent-worlds%2Fv0.1.6/agent-worlds-v0.1.6-linux-arm64.tar.gz
+      sha256: d39678e2e65a025b0be90e4f8b6438f754b19f4b197a1e786c1a399d514271b6
   port: 8080
   health_check: /health
 config_schema:
