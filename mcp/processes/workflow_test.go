@@ -13,10 +13,10 @@ func workflowDefinition() Definition {
 	d := def()
 	d.ExecutionMode = "agent"
 	d.Steps = []Step{
-		{Key: "research", Name: "Research", Role: "researcher", Kind: "work", Instructions: "Research topic", ExpectedOutput: "Research notes"},
-		{Key: "write", Name: "Write", Role: "writer", Kind: "work", Instructions: "Write draft", ExpectedOutput: "Draft text", DependsOn: []string{"research"}},
-		{Key: "review", Name: "Review", Role: "reviewer", Kind: "approval", Instructions: "Review draft", ExpectedOutput: "Decision and reason", DependsOn: []string{"write"}},
-		{Key: "publish", Name: "Publish", Role: "publisher", Kind: "work", Instructions: "Publish approved draft", ExpectedOutput: "Published URL", DependsOn: []string{"review"}},
+		{Key: "research", Name: "Research", Role: "researcher", Instructions: "Research topic", ExpectedOutput: "Research notes"},
+		{Key: "write", Name: "Write", Role: "writer", Instructions: "Write draft", ExpectedOutput: "Draft text", DependsOn: []string{"research"}},
+		{Key: "review", Name: "Review", Role: "reviewer", Instructions: "Review draft", ExpectedOutput: "Review findings", DependsOn: []string{"write"}},
+		{Key: "publish", Name: "Publish", Role: "publisher", Instructions: "Publish reviewed draft", ExpectedOutput: "Published URL", DependsOn: []string{"review"}},
 	}
 	return d
 }
@@ -68,14 +68,11 @@ func finishStep(t *testing.T, a *App, p *Process, r Run, key, actor, output, dec
 		actor = fmt.Sprintf("agent:%d:%s", s.Executor.AgentID, s.ThreadID)
 	}
 	args := map[string]any{"state": "completed", "output": output}
-	if decision != "" {
-		args["decision"] = decision
-	}
 	if _, e := a.stepAction(p.ProjectID, actor, p.ID, r.ID, s.ID, "step_update", args); e != nil {
 		t.Fatal(e)
 	}
 }
-func TestWorkflowHandoffsApprovalAndOutputs(t *testing.T) {
+func TestWorkflowHandoffsHumanStepAndOutputs(t *testing.T) {
 	a, f, p, r := workflowSetup(t)
 	if !r.Workflow || len(f.events) != 1 || f.events[0].AgentID != 8 {
 		t.Fatal("first role not dispatched")
@@ -101,16 +98,19 @@ func TestWorkflowHandoffsApprovalAndOutputs(t *testing.T) {
 	}
 	review := stepBy(t, a, r, "review")
 	if _, e := a.stepAction(p.ProjectID, "agent:7:t", p.ID, r.ID, review.ID, "step_update", map[string]any{"state": "completed", "output": "approved", "decision": "approved"}); e == nil {
-		t.Fatal("agent impersonated human approver")
+		t.Fatal("agent impersonated human executor")
+	}
+	if _, e := a.stepAction(p.ProjectID, "operator", p.ID, r.ID, review.ID, "step_update", map[string]any{"state": "completed", "output": "reviewed", "decision": "approved"}); e == nil || !strings.Contains(e.Error(), "not a Processes step field") {
+		t.Fatal("legacy decision field accepted", e)
 	}
 	finishStep(t, a, p, r, "review", "operator", "Approved", "approved")
 	if len(f.events) != 3 || f.events[2].AgentID != 8 || !strings.Contains(f.events[2].Message.(string), "Draft v1") {
-		t.Fatal("approval did not release publisher")
+		t.Fatal("human step did not release publisher")
 	}
-	// The draft used by approval cannot be edited after publication was released.
+	// The completed predecessor cannot be edited after downstream work was released.
 	write := stepBy(t, a, r, "write")
 	if _, e := a.stepAction(p.ProjectID, "agent:7:t", p.ID, r.ID, write.ID, "step_update", map[string]any{"state": "completed", "output": "Changed draft"}); e == nil {
-		t.Fatal("approved content mutable")
+		t.Fatal("completed content mutable")
 	}
 	finishStep(t, a, p, r, "publish", "agent:8:t", "https://patreon.com/posts/123", "")
 	fresh, _ := a.getRun(p.ProjectID, p.ID, r.ID)
@@ -119,12 +119,12 @@ func TestWorkflowHandoffsApprovalAndOutputs(t *testing.T) {
 	}
 	finishStep(t, a, p, r, "review", "operator", "Approved", "approved")
 	if len(f.events) != 3 {
-		t.Fatal("duplicate approval dispatched twice")
+		t.Fatal("duplicate completion dispatched twice")
 	}
 	var n int
-	a.db.QueryRow(`SELECT count(*) FROM process_step_events WHERE step_id=? AND decision='approved'`, review.ID).Scan(&n)
+	a.db.QueryRow(`SELECT count(*) FROM process_step_events WHERE step_id=? AND state='completed'`, review.ID).Scan(&n)
 	if n != 1 {
-		t.Fatal("approval audit duplicated")
+		t.Fatal("completion audit duplicated")
 	}
 }
 
@@ -174,18 +174,22 @@ func TestIndependentStepRejectsDefaultThreadCompletion(t *testing.T) {
 	}
 }
 
-func TestWorkflowRejectPreventsDownstream(t *testing.T) {
+func TestGenericHumanStepBehavesLikeAnyDependency(t *testing.T) {
 	a, f, p, r := workflowSetup(t)
 	finishStep(t, a, p, r, "research", "agent:8:t", "notes", "")
 	finishStep(t, a, p, r, "write", "agent:7:t", "draft", "")
-	finishStep(t, a, p, r, "review", "operator", "Needs changes", "rejected")
+	review := stepBy(t, a, r, "review")
+	if review.Definition.Kind != "" {
+		t.Fatalf("step kind was not normalized: %+v", review.Definition)
+	}
+	finishStep(t, a, p, r, "review", "operator", "Review complete", "")
 	fresh, _ := a.getRun(p.ProjectID, p.ID, r.ID)
-	if fresh.State != "failed" || len(f.events) != 2 || stepBy(t, a, r, "publish").State != "pending" {
-		t.Fatal("rejected run advanced")
+	if fresh.State == "failed" || len(f.events) != 3 || stepBy(t, a, r, "publish").State != "ready" {
+		t.Fatal("generic human step did not advance")
 	}
 	a.tickDirect(context.Background(), time.Now())
-	if len(f.events) != 2 {
-		t.Fatal("worker restarted rejected run")
+	if len(f.events) != 3 {
+		t.Fatal("generic step dispatched twice")
 	}
 }
 func TestWorkflowParallelJoinAndValidation(t *testing.T) {
@@ -209,7 +213,7 @@ func TestWorkflowParallelJoinAndValidation(t *testing.T) {
 		t.Fatal("join released early")
 	}
 	finishStep(t, a, p, r, "write", "agent:7:t", "draft", "")
-	if stepBy(t, a, r, "review").State != "waiting" {
+	if stepBy(t, a, r, "review").State != "ready" {
 		t.Fatal("join not released")
 	}
 	d.Steps[0].DependsOn = []string{"review"}
@@ -252,7 +256,7 @@ func TestWorkflowTasksScheduleAndStepCompletion(t *testing.T) {
 	f.tasks["task-2"]["result"] = "draft"
 	a.tickDirect(context.Background(), time.Now())
 	if f.creates != 2 || stepBy(t, a, r, "review").State != "waiting" {
-		t.Fatal("approval bypassed")
+		t.Fatal("human step bypassed")
 	}
 	finishStep(t, a, p, r, "review", "operator", "approved", "approved")
 	if f.creates != 3 {
@@ -338,7 +342,7 @@ func TestWorkflowCancellationAndLifecycle(t *testing.T) {
 		t.Fatal("cancel did not stop handoffs")
 	}
 }
-func TestWorkflowEvidenceAndApprovalRequired(t *testing.T) {
+func TestWorkflowEvidenceRequiredAndRolesDefaultToOwner(t *testing.T) {
 	a, _, p, r := workflowSetup(t)
 	s := stepBy(t, a, r, "research")
 	if _, e := a.stepAction(p.ProjectID, "agent:8:t", p.ID, r.ID, s.ID, "step_update", map[string]any{"state": "completed", "output": "  "}); e == nil {
@@ -347,13 +351,13 @@ func TestWorkflowEvidenceAndApprovalRequired(t *testing.T) {
 	finishStep(t, a, p, r, "research", "agent:8:t", "notes", "")
 	finishStep(t, a, p, r, "write", "agent:7:t", "draft", "")
 	s = stepBy(t, a, r, "review")
-	if _, e := a.stepAction(p.ProjectID, "operator", p.ID, r.ID, s.ID, "step_update", map[string]any{"state": "completed", "output": "reviewed"}); e == nil {
-		t.Fatal("missing decision accepted")
+	if _, e := a.stepAction(p.ProjectID, "operator", p.ID, r.ID, s.ID, "step_update", map[string]any{"state": "completed", "output": "reviewed"}); e != nil {
+		t.Fatal("generic human step required a decision", e)
 	}
 	d := workflowDefinition()
 	d.Steps[0].Role = "reviewer"
 	roles := resolvedRoles(d, AssignmentConfig{OwnerAgentID: 7})
-	if roles["reviewer"].Kind != "human" {
-		t.Fatal("mixed approval role did not default human")
+	if roles["reviewer"].Kind != "agent" || roles["reviewer"].AgentID != 7 {
+		t.Fatal("unbound role did not default to owner agent")
 	}
 }

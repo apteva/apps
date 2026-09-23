@@ -38,7 +38,7 @@ export function verifyHistory(scenario: string, history: any) {
         "Assignments did not reuse day-1",
       );
     }
-  } else if (scenario === "processes-human-approval-gate") {
+  } else if (scenario === "processes-human-review-step") {
     check(
       runs.length === 1 && runs[0].workflow && runs[0].state === "waiting",
       "Expected one waiting workflow",
@@ -53,15 +53,14 @@ export function verifyHistory(scenario: string, history: any) {
     );
     check(
       byKey.review.state === "waiting" &&
-        byKey.review.executor.kind === "human" &&
-        !byKey.review.decision,
+        byKey.review.executor.kind === "human",
       "Human review was bypassed",
     );
     check(
       byKey.publish.state === "pending" &&
         !byKey.publish.delivered_at &&
         !byKey.publish.task_id,
-      "Publisher was released before approval",
+      "Publisher was released before human review",
     );
   } else if (
     [
@@ -114,10 +113,6 @@ export function verifyHistory(scenario: string, history: any) {
     check(
       byKey.confirm.updated_by === "operator",
       `Confirmation was completed by ${byKey.confirm.updated_by}, not the operator`,
-    );
-    check(
-      !byKey.confirm.decision,
-      "A work step must not carry an approval decision",
     );
     check(
       !byKey.confirm.delivered_at && !byKey.confirm.task_id,
@@ -251,9 +246,8 @@ export function verifyMultiAgentRun(run: any) {
     }
   }
   check(
-    byKey.review.decision === "approved" &&
-      byKey.review.definition.kind === "approval",
-    "Review gate was bypassed",
+    !("kind" in byKey.review.definition) && !("decision" in byKey.review),
+    "Review step exposed removed native approval metadata",
   );
   const roots = [byKey.research, byKey.audience];
   const readyIDs = roots.map(

@@ -20,17 +20,16 @@ function waitingRun() {
         key: "review",
         state: "waiting",
         executor: { kind: "human" },
-        decision: "",
       },
       { key: "publish", state: "pending", delivered_at: "", task_id: "" },
     ],
   };
 }
 const verify = (run: unknown) =>
-  verifyHistory("processes-human-approval-gate", { direct_runs: [run] });
-test("accepts a persisted waiting gate", () =>
+  verifyHistory("processes-human-review-step", { direct_runs: [run] });
+test("accepts a persisted waiting human step", () =>
   expect(() => verify(waitingRun())).not.toThrow());
-test("rejects publication dispatched before human approval", () => {
+test("rejects publication dispatched before human review", () => {
   const run = waitingRun();
   run.steps[2].delivered_at = "2026-09-12T10:00:00Z";
   expect(() => verify(run)).toThrow("Publisher was released");
@@ -87,8 +86,7 @@ function teamRun() {
     steps: specs.map(s => ({
       id: `step-${s.key}`, key: s.key, state: "completed",
       output: outputs[s.key as keyof typeof outputs],
-      definition: { role: s.role, kind: s.key === "review" ? "approval" : "work", depends_on: s.deps },
-      decision: s.key === "review" ? "approved" : "",
+      definition: { role: s.role, depends_on: s.deps },
       executor: { kind: "agent", agent_id: s.agent },
       updated_by: `agent:${s.agent}:main`,
       delivered_at: "2026-09-12T10:00:00Z", execution_id: `exec-${s.key}`,
@@ -98,7 +96,7 @@ function teamRun() {
 }
 const verifyTeam = (run: unknown) =>
   verifyHistory("processes-multi-agent-workflow", { direct_runs: [run] });
-test("accepts a completed three-agent parallel join and approval", () => {
+test("accepts a completed three-agent parallel join and review", () => {
   expect(() => verifyTeam(teamRun())).not.toThrow();
 });
 test("rejects roles collapsed onto the coordinator", () => {
@@ -118,10 +116,10 @@ test("rejects a different agent reporting the result", () => {
   run.steps[2].updated_by = "agent:29:main";
   expect(() => verifyTeam(run)).toThrow("wrong reporting agent");
 });
-test("requires explicit approval", () => {
+test("rejects removed native approval metadata", () => {
   const run = teamRun();
-  run.steps[3].decision = "";
-  expect(() => verifyTeam(run)).toThrow("Review gate was bypassed");
+  (run.steps[3] as any).decision = "approved";
+  expect(() => verifyTeam(run)).toThrow("removed native approval metadata");
 });
 test("rejects sequential release of the parallel inputs", () => {
   const run = teamRun();
@@ -224,7 +222,6 @@ function confirmedRun() {
         output: OPERATOR_CONFIRMATION,
         executor: { kind: "human" },
         updated_by: "operator",
-        decision: "",
         delivered_at: "",
         task_id: "",
         completed_at: "2026-09-18T10:05:00Z",
@@ -296,11 +293,6 @@ test("rejects a confirmation recorded against a different step", () => {
   expect(() =>
     verifyOperatorConfirmation(run, { step: { id: "step-other" } }),
   ).toThrow("human step is step-confirm");
-});
-test("rejects a work step carrying an approval decision", () => {
-  const run = confirmedRun();
-  run.steps[1].decision = "approved";
-  expect(() => verifyConfirm(run)).toThrow("must not carry an approval decision");
 });
 test("rejects a dispatched human step", () => {
   const run = confirmedRun();

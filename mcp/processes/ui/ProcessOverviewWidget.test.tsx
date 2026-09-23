@@ -229,12 +229,11 @@ test("right column uses live step state and accounts for parallel work, review a
   });
   run.state = "running";
   run.steps = run.steps.slice(0, 2);
-  run.steps[1].kind = "approval";
   run.steps[1].executor = { kind: "human", agent_id: 0 };
   run.steps[1].state = "ready";
   expect(executionStatus(entry)).toMatchObject({
     label: "Post conversation",
-    state: "review",
+    state: "ready",
   });
   run.state = "blocked";
   run.steps[1].state = "blocked";

@@ -7,7 +7,6 @@ import {
   Clock3,
   LoaderCircle,
   Play,
-  ShieldCheck,
   Workflow,
 } from "lucide-react";
 
@@ -77,18 +76,11 @@ export function FlowStatus({
     </span>
   );
 }
-export function StepKind({
-  approval,
-  index,
-}: {
-  approval: boolean;
-  index?: number;
-}) {
-  const Icon = approval ? ShieldCheck : Workflow;
+export function StepKind({ index }: { index?: number }) {
   return (
     <span className="flow-kind">
-      <Icon size={14} aria-hidden="true" />
-      {approval ? "Approval" : "Work"}
+      <Workflow size={14} aria-hidden="true" />
+      Step
       {index !== undefined && (
         <span className="flow-number">
           {String(index + 1).padStart(2, "0")}

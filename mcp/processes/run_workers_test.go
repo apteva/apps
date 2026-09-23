@@ -22,7 +22,7 @@ func sequentialSetup(t *testing.T) (*App, *directPlatform, *Process, Run) {
 	return a, f, p, raw.(map[string]any)["run"].(Run)
 }
 
-func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
+func TestRunWorkerClaimsReuseAcrossGenericSteps(t *testing.T) {
 	a, f, p, r := sequentialSetup(t)
 	actor := "agent:7:" + stepBy(t, a, r, "research").ThreadID
 	claim := func(key string) map[string]any {
@@ -74,15 +74,16 @@ func TestRunWorkerClaimsReuseAndApprovalGate(t *testing.T) {
 	finishStep(t, a, p, r, "write", actor, "draft", "")
 	review := stepBy(t, a, r, "review")
 	publish := stepBy(t, a, r, "publish")
-	if review.State != "waiting" || publish.State != "pending" || len(f.events) != 2 {
-		t.Fatal("approval bypassed")
+	if review.State != "ready" || publish.State != "pending" || len(f.events) != 3 {
+		t.Fatal("review step not delivered generically")
 	}
 	if _, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, publish.ID, "step_claim", nil); err == nil {
-		t.Fatal("claimed before approval")
+		t.Fatal("claimed before review")
 	}
-	finishStep(t, a, p, r, "review", "operator", "approved", "approved")
-	if len(f.events) != 3 || f.events[2].ThreadID != strings.TrimPrefix(actor, "agent:7:") {
-		t.Fatal("approval lost run worker")
+	claim("review")
+	finishStep(t, a, p, r, "review", actor, "reviewed", "")
+	if len(f.events) != 4 || f.events[3].ThreadID != strings.TrimPrefix(actor, "agent:7:") {
+		t.Fatal("review lost run worker")
 	}
 	claim("publish")
 	raw, err := a.stepAction(p.ProjectID, actor, p.ID, r.ID, publish.ID, "step_update", map[string]any{"state": "completed", "output": "receipt"})

@@ -36,6 +36,9 @@ func TestAgentSchemaDoesNotExposeGraphCoordinates(t *testing.T) {
 	if _, ok := properties["position"]; ok {
 		t.Fatal("agent-facing step schema exposes position")
 	}
+	if _, ok := properties["kind"]; ok {
+		t.Fatal("agent-facing step schema exposes a native step kind")
+	}
 	raw, err := json.Marshal(definitionSchema())
 	if err != nil {
 		t.Fatal(err)
@@ -43,14 +46,26 @@ func TestAgentSchemaDoesNotExposeGraphCoordinates(t *testing.T) {
 	if strings.Contains(string(raw), `"position"`) {
 		t.Fatal("definition schema contains graphical coordinates")
 	}
+	a, _, _ := directSetup(t)
+	for _, tool := range a.MCPTools() {
+		if tool.Name != "step_update" {
+			continue
+		}
+		props := tool.InputSchema["properties"].(map[string]any)
+		if _, ok := props["decision"]; ok {
+			t.Fatal("step_update exposes a native approval decision")
+		}
+		return
+	}
+	t.Fatal("step_update tool missing")
 }
 
-func TestValidateDefinitionReportsUnenforcedApproval(t *testing.T) {
+func TestValidateDefinitionTreatsApprovalRequirementsAsPolicy(t *testing.T) {
 	a, _, _ := directSetup(t)
 	d := workflowDefinition()
 	d.ApprovalRequirements = "A manager must approve before sending."
 	for i := range d.Steps {
-		d.Steps[i].Kind = "work"
+		d.Steps[i].Kind = "approval"
 	}
 	d.Steps[0].Position = &StepPosition{X: 0, Y: 0}
 	result, err := a.execute("project-a", "agent:7:thread", "validate_definition", map[string]any{"definition": d})
@@ -63,7 +78,7 @@ func TestValidateDefinitionReportsUnenforcedApproval(t *testing.T) {
 		t.Fatal("validation retained legacy position")
 	}
 	r := out["readiness"].(Readiness)
-	if !r.Valid || len(r.Warnings) != 1 || !strings.Contains(r.Warnings[0], "no enforced approval step") {
+	if !r.Valid || len(r.Warnings) != 0 || normalized.Steps[0].Kind != "" {
 		t.Fatalf("readiness=%+v", r)
 	}
 }

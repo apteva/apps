@@ -37,7 +37,6 @@ func (a *App) taskTools() []sdk.Tool {
 			}
 			props["run_id"] = textField("Optional active run ID; omit for standalone work")
 			props["required"] = map[string]any{"type": "boolean", "description": "Whether an attached task gates completion of its run"}
-			props["kind"] = map[string]any{"type": "string", "enum": []string{"work", "approval"}}
 			props["depends_on"] = map[string]any{"type": "array", "items": textField("Existing task key in the attached run")}
 			props["idempotency_key"] = textField("Stable creation key; reuse with identical inputs on retry")
 			required = []string{"title", "instructions", "executor", "idempotency_key"}
@@ -48,11 +47,11 @@ func (a *App) taskTools() []sdk.Tool {
 			for k, v := range settings {
 				props[k] = v
 			}
-			for _, k := range []string{"state", "output", "error", "decision"} {
+			for _, k := range []string{"state", "output", "error"} {
 				props[k] = textField(k)
 			}
 			props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
-			desc = "Update your assigned task using its current revision. Completion needs output evidence; approval needs an explicit decision. Creator/coordinator/operator may edit settings; reassignment or text changes are allowed only before delivery attempts. Change settings and outcome in separate requests."
+			desc = "Update your assigned task using its current revision. Completion needs output evidence. Creator/coordinator/operator may edit settings; reassignment or text changes are allowed only before delivery attempts. Change settings and outcome in separate requests."
 		case "task_cancel":
 			props["reason"] = textField("Cancellation reason; already dispatched actions cannot be revoked")
 			required = append(required, "reason")

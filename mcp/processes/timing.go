@@ -77,7 +77,7 @@ func timingAt(rule *TimingRule, r Run, all []StepRun) (string, error) {
 	if rule.After == "step_completed" {
 		anchor = ""
 		for _, s := range all {
-			if s.Key == rule.StepKey && s.State == "completed" && (s.Definition.Kind != "approval" || s.Decision == "approved") {
+			if s.Key == rule.StepKey && s.State == "completed" {
 				anchor = s.CompletedAt
 			}
 		}

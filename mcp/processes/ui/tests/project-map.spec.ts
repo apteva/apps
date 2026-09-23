@@ -8,7 +8,6 @@ const step = (key: string, depends_on: string[] = []) => ({
   key,
   name: key.replaceAll("_", " "),
   role: "coordinator",
-  kind: "work",
   instructions: `Instructions for ${key}`,
   expected_output: "Evidence",
   depends_on,
@@ -36,10 +35,7 @@ const processes = [
       step("Prepare_brief"),
       step("Write_draft", ["Prepare_brief"]),
       step("Check_sources", ["Prepare_brief"]),
-      {
-        ...step("Approve_content", ["Write_draft", "Check_sources"]),
-        kind: "approval",
-      },
+      step("Approve_content", ["Write_draft", "Check_sources"]),
     ],
   },
   {

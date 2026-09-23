@@ -114,7 +114,6 @@ test("timed live step shows waiting time and updates when dispatched", async ({
       start_at: i ? start : "",
       output: "",
       error: "",
-      decision: "",
     })),
   };
   await request.post("/fixture/runs", { data: [run] });

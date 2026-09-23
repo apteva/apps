@@ -9,8 +9,8 @@ No Tasks integration is installed and no external publishing service is used.
 | --- | --- |
 | `01-direct-completion.yaml` | Exactly one direct occurrence completes with `Net: 800`. |
 | `02-assignment-parameters.yaml` | Two assignments reuse `day-1` independently and retain distinct page parameters and results. |
-| `03-human-approval-gate.yaml` | The agent finishes the draft; human review remains waiting and publication remains pending and undispatched. |
-| `04-multi-agent-workflow.yaml` | Three distinct agents complete five steps with parallel inputs, a dependency join, explicit agent approval, and a simulated receipt. |
+| `03-human-approval-gate.yaml` | The agent finishes the draft; a generic human review step remains waiting and publication remains pending and undispatched. |
+| `04-multi-agent-workflow.yaml` | Three distinct agents complete five generic steps with parallel inputs, a dependency join, review evidence, and a simulated receipt. |
 | `05-event-trigger-workflow.yaml` | A duplicate signup publication starts one five-step run across three agents through the real app bus. |
 | `06-sequential-worker.yaml` | Three simulated weather/receipt steps complete in order using exactly one persisted worker and one spawn. |
 | `07-operator-confirmation.yaml` | A run parks on a human work step, the operator confirms it mid-run over HTTP, and the agent publishes only afterwards. |
@@ -67,7 +67,7 @@ the model does not need to spawn or assign workers itself.
 
 This is a starter suite. Operator confirmation of a human step is covered by
 `07-operator-confirmation.yaml`. It does not yet cover operator *rejection*, the
-`kind: approval` decision path, Tasks-backed execution, scheduled dispatch, or
+native approval types, Tasks-backed execution, scheduled dispatch, or
 delivery fault injection. Those remain covered by deterministic integration
 tests, not by these live-LLM cases.
 
@@ -75,7 +75,7 @@ tests, not by these live-LLM cases.
 
 On 2026-09-12, all three scenarios and the post-run database checks passed using
 `openai-codex` / `gpt-5.6-terra`: direct completion (8 iterations), assignment
-parameters (11), and the human approval boundary (8). This is one passing smoke
+parameters (11), and the generic human boundary (8). This is one passing smoke
 run, not a measured reliability rate. The verifier unit tests also pass.
 
 The five-step, three-agent scenario also passed on 2026-09-12: 24 aggregate
@@ -90,7 +90,7 @@ the same signup twice through a separate test app and the real platform bus.
 Exactly one run must complete across three Terra agents. Direct `start` and
 `trigger_test_run` calls are forbidden in this scenario. Post-run checks require
 one persisted bus receipt, event-mapped parameters, and a linked completed run,
-as well as the five-step role/approval audit and per-agent tool traces.
+as well as the five-step role/review audit and per-agent tool traces.
 
 Use the updated server and a CLI with topology dependency support. The wrapper
 copies Processes into the report directory and adds the isolated test publisher
@@ -106,9 +106,9 @@ and agent-attribution checks with `openai-codex` / `gpt-5.6-terra`: 30 aggregate
 iterations, 484,305 reported tokens, approximately 144 seconds. Two publishes of
 the same signup produced one event record and one completed five-step run.
 
-Workers receive approval evidence directly in `step_get.dependencies`: ancestor
-IDs, kinds, states, decisions, outputs, and direct-dependency flags. They should
-not need `run_get` or parent confirmation to verify complete approval evidence.
+Workers receive dependency evidence directly in `step_get.dependencies`: ancestor
+IDs, states, outputs, and direct-dependency flags. They should not need `run_get`
+or parent confirmation to verify completed predecessor evidence.
 The worker verifier rejects completion on main, missing worker reads, and any
 model-facing assignment of an app-provisioned worker.
 
@@ -152,7 +152,7 @@ failed attempts are not counted as passing regressions.
 
 The clarified multi-agent regression passed on 2026-09-13: 122.055 s,
 38 iterations, 457,742 reported tokens. All five independent workers, three
-assigned agents, parallel inputs, dependency join, approval, saved outputs and
+assigned agents, parallel inputs, dependency join, review, saved outputs and
 tool-attribution checks passed. Report:
 `/private/tmp/processes-worker-multiagent-delimited/run-PGW9i9`.
 
@@ -165,7 +165,7 @@ needed; the topology regression used the existing topology-capable CLI binary.
 On 2026-09-13, the updated five-step scenario passed with `gpt-6-astra`:
 203 seconds, 40 iterations, 480,809 reported tokens. All five steps completed
 in distinct app-provisioned workers with inherited agent MCP scopes; persisted
-state, dependency ordering, approval and worker-read assertions passed. The
+state, dependency ordering, review and worker-read assertions passed. The
 publication worker used dependency evidence without tool discovery or a parent
 clarification. The preceding run stopped at 48 iterations after 242 seconds
 with only four steps complete. These are individual smoke runs, not a latency
@@ -175,7 +175,7 @@ benchmark or reliability estimate.
 
 `07-operator-confirmation.yaml` is the only scenario in which something other
 than the agent advances the run. The procedure is `draft` → `confirm` →
-`publish`, all `kind: work`; the assignment binds `confirmer` to
+`publish`, all generic steps; the assignment binds `confirmer` to
 `{"kind":"human"}`. The agent completes the draft and stops. Because
 `deliverStep` never dispatches a human executor, `confirm` parks in `waiting`
 and `publish` stays `pending`. The operator completes `confirm`, the app's own
@@ -207,7 +207,7 @@ in front of it — so no credentials are involved.
 
 `verifyHistory` checks the saved run: the human step completed with
 `updated_by=operator`, carrying the operator's evidence, never dispatched
-(`delivered_at` and `task_id` empty) and never holding a decision, since a work
+(`delivered_at` and `task_id` empty), since a human
 step has none. `publish` must be delivered strictly after the confirmation's
 `completed_at`.
 

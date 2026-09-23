@@ -24,7 +24,7 @@ func definitionSchema() map[string]any {
 	return object([]string{"name", "instructions", "completion_criteria"}, map[string]any{
 		"steps":      map[string]any{"type": "array", "maxItems": 30, "items": stepSchema()},
 		"parameters": map[string]any{"type": "array", "maxItems": 50, "items": object([]string{"key", "type"}, map[string]any{"key": textField("Unique parameter key"), "label": textField("Human-readable label"), "type": map[string]any{"type": "string", "enum": []string{"string", "number", "boolean"}}, "required": map[string]any{"type": "boolean"}, "default": map[string]any{}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}})},
-		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval instructions; use approval steps for enforced gates"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
+		"name":       textField("Procedure name"), "description": textField("Purpose"), "instructions": textField("Shared instructions for the procedure"), "required_inputs": textField("Inputs or sources execution requires"), "default_inputs": textField("Standing procedure context"), "completion_criteria": textField("Required outcomes and evidence"), "approval_requirements": textField("Approval requirements the assigned agents must follow during execution"), "category": textField("Optional project organization category"), "tags": map[string]any{"type": "array", "maxItems": 20, "items": textField("Organization tag")},
 	})
 }
 func (a *App) MCPTools() []sdk.Tool {
@@ -39,7 +39,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	descriptions["run_cancel"] = "Coordinator or operator: cancel a structured run and stop future handoffs. Already dispatched external work may continue."
 	descriptions["step_claim"] = "Claim and read a ready step as the persistent worker for a sequential same-agent run. Marks ready work running. Reuse this worker for later steps; finish only when worker.done is true."
 	descriptions["step_get"] = "Read a step, frozen executor, parameters, and completed dependency outputs before acting."
-	descriptions["step_update"] = "Assigned executor only: report step progress or output; approval steps require an explicit approved/rejected decision. A persistent worker must inspect the returned done field: call done immediately when true, otherwise wait for the next Processes event."
+	descriptions["step_update"] = "Assigned executor only: report step progress or output. A persistent worker must inspect the returned done field: call done immediately when true, otherwise wait for the next Processes event."
 	out := []sdk.Tool{}
 	for _, name := range []string{"list", "get", "validate_definition", "create", "update", "activate", "pause", "archive", "start", "runs", "run_get", "run_update", "assignments", "assignment_get", "assignment_create", "assignment_update", "assignment_activate", "assignment_pause", "assignment_archive", "step_get", "step_claim", "step_update", "run_cancel"} {
 		name := name
@@ -92,7 +92,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				props["progress"] = map[string]any{"type": "integer", "minimum": 0, "maximum": 100}
 				props["output"] = textField("Concrete result and evidence (required on completion)")
 				props["error"] = textField("Reason for waiting, block, failure or cancellation")
-				props["decision"] = map[string]any{"type": "string", "enum": []string{"approved", "rejected"}}
 				required = append(required, "state")
 			}
 		case "run_get", "run_update":
@@ -508,5 +507,5 @@ func executorSchema() map[string]any {
 	return object([]string{"kind"}, map[string]any{"kind": map[string]any{"type": "string", "enum": []string{"agent", "human"}}, "agent_id": map[string]any{"type": "integer", "minimum": 1}})
 }
 func stepSchema() map[string]any {
-	return object([]string{"key", "name", "role", "kind", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "kind": map[string]any{"type": "string", "enum": []string{"work", "approval"}}, "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "depends_on": map[string]any{"type": "array", "description": "Step keys that must complete before this step. Processes derives the graph layout automatically.", "items": map[string]any{"type": "string"}}, "start_after": timingSchema("Earliest start; Processes waits and notifies the executor when due. Never use agent sleep for a delay."), "due_after": timingSchema("Completion deadline; flags overdue work without delaying or cancelling execution.")})
+	return object([]string{"key", "name", "role", "instructions", "expected_output"}, map[string]any{"key": textField("Unique step key"), "name": textField("Step name"), "role": textField("Role key bound to an executor by each assignment"), "instructions": textField("Instructions for this step only"), "expected_output": textField("Required output and evidence"), "depends_on": map[string]any{"type": "array", "description": "Step keys that must complete before this step. Processes derives the graph layout automatically.", "items": map[string]any{"type": "string"}}, "start_after": timingSchema("Earliest start; Processes waits and notifies the executor when due. Never use agent sleep for a delay."), "due_after": timingSchema("Completion deadline; flags overdue work without delaying or cancelling execution.")})
 }

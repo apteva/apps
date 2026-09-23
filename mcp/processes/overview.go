@@ -19,7 +19,6 @@ type overviewStep struct {
 	ProjectName string   `json:"project_name,omitempty"`
 	Name        string   `json:"name"`
 	State       string   `json:"state"`
-	Kind        string   `json:"kind"`
 	Origin      string   `json:"origin"`
 	Executor    Executor `json:"executor"`
 	Progress    int      `json:"progress"`
@@ -82,7 +81,7 @@ func (a *App) overview(project string) (*processOverview, error) {
 	out := &processOverview{Active: []overviewItem{}, Upcoming: []overviewItem{}, Recent: []overviewItem{}, Attention: []overviewItem{}, LiveSteps: []overviewStep{}, Warnings: []string{}, GeneratedAt: timestamp()}
 	const direct = `(r.backend='agent' OR r.workflow=1)`
 	const active = `r.state NOT IN ('completed','failed','cancelled')`
-	const attention = `(r.state IN ('waiting','blocked') OR r.delivery_warning<>'' OR EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','cancelled') AND (s.state IN ('waiting','blocked','failed') OR (s.due_at<>'' AND julianday(s.due_at)<=julianday('now') AND s.state NOT IN ('completed','failed','cancelled')) OR s.delivery_warning<>'' OR (json_extract(s.definition_json,'$.kind')='approval' AND s.state IN ('ready','running')))))`
+	const attention = `(r.state IN ('waiting','blocked') OR r.delivery_warning<>'' OR EXISTS (SELECT 1 FROM process_step_runs s WHERE s.run_id=r.id AND s.state NOT IN ('completed','cancelled') AND (s.state IN ('waiting','blocked','failed') OR (s.due_at<>'' AND julianday(s.due_at)<=julianday('now') AND s.state NOT IN ('completed','failed','cancelled')) OR s.delivery_warning<>'')))`
 	base := ` FROM process_runs r JOIN processes p ON p.id=r.process_id WHERE p.project_id=? AND ` + direct
 	if e := a.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN `+attention+` THEN 1 ELSE 0 END),0)`+base+` AND `+active, project).Scan(&out.Counts.Active, &out.Counts.Attention); e != nil {
 		return nil, e
@@ -342,7 +341,7 @@ func (a *App) overviewSteps(x *overviewItem) error {
 	if e := a.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(CASE WHEN state='completed' THEN 1 ELSE 0 END),0) FROM process_step_runs WHERE run_id=?`, x.ID).Scan(&x.StepsTotal, &x.StepsCompleted); e != nil {
 		return e
 	}
-	rows, e := a.db.Query(`SELECT id,COALESCE(json_extract(definition_json,'$.name'),''),state,COALESCE(json_extract(definition_json,'$.kind'),'work'),origin,executor_json,progress,updated_at,substr(delivery_warning,1,500),start_at,due_at,completed_at FROM process_step_runs WHERE run_id=? ORDER BY position,id LIMIT 60`, x.ID)
+	rows, e := a.db.Query(`SELECT id,COALESCE(json_extract(definition_json,'$.name'),''),state,origin,executor_json,progress,updated_at,substr(delivery_warning,1,500),start_at,due_at,completed_at FROM process_step_runs WHERE run_id=? ORDER BY position,id LIMIT 60`, x.ID)
 	if e != nil {
 		return e
 	}
@@ -350,7 +349,7 @@ func (a *App) overviewSteps(x *overviewItem) error {
 	for rows.Next() {
 		var s overviewStep
 		var executor string
-		if e = rows.Scan(&s.ID, &s.Name, &s.State, &s.Kind, &s.Origin, &executor, &s.Progress, &s.UpdatedAt, &s.Warning, &s.StartAt, &s.DueAt, &s.CompletedAt); e != nil {
+		if e = rows.Scan(&s.ID, &s.Name, &s.State, &s.Origin, &executor, &s.Progress, &s.UpdatedAt, &s.Warning, &s.StartAt, &s.DueAt, &s.CompletedAt); e != nil {
 			return e
 		}
 		if e = json.Unmarshal([]byte(executor), &s.Executor); e != nil {

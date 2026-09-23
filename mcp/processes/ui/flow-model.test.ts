@@ -11,7 +11,6 @@ const step = (key: string, depends_on: string[] = []): Step => ({
   key,
   name: key,
   role: "worker",
-  kind: "work",
   instructions: "Do the work",
   expected_output: "Evidence",
   depends_on,

@@ -12,15 +12,15 @@ directive: |
   Create exactly one procedure named "Tier 3 confirmed publication", initially
   unassigned. Shared instructions: draft a line, wait for the project operator to
   confirm it, then publish. Completion criteria: a published line that the
-  operator confirmed. Define these three steps, all kind=work:
-  - key=draft, name=Write draft, role=writer, kind=work, depends_on=[],
+  operator confirmed. Define these three generic steps:
+  - key=draft, name=Write draft, role=writer, depends_on=[],
     instructions="Write a one-line draft: Golden hour flatters every portrait.",
     expected_output="The complete one-line draft".
-  - key=confirm, name=Operator confirmation, role=confirmer, kind=work,
+  - key=confirm, name=Operator confirmation, role=confirmer,
     depends_on=[draft],
     instructions="The project operator confirms the draft is cleared to publish.",
     expected_output="The operator's confirmation text".
-  - key=publish, name=Publish confirmed draft, role=publisher, kind=work,
+  - key=publish, name=Publish confirmed draft, role=publisher,
     depends_on=[confirm], instructions="Publish only the confirmed draft.",
     expected_output="Publication evidence".
   Create an assignment named "Confirmed", owned by you,

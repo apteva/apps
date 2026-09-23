@@ -100,29 +100,17 @@ function ReadinessCard({
 }) {
   const steps = definition.steps || [];
   const required = (definition.parameters || []).filter((p) => p.required).length;
-  const approvals = steps.filter((s) => s.kind === "approval").length;
-  const unenforced = !!definition.approval_requirements?.trim() && approvals === 0;
   return (
     <section className="card readiness" aria-label="Process readiness">
       <div className="row between">
         <h2>Readiness</h2>
-        <span className={`pill ${unenforced ? "paused" : "active"}`}>
-          {unenforced ? "Review needed" : "Definition ready"}
-        </span>
+        <span className="pill active">Definition ready</span>
       </div>
       <div className="readiness-counts">
         <span><strong>{steps.length}</strong> steps</span>
         <span><strong>{required}</strong> required parameters</span>
         <span><strong>{assignments.length}</strong> assignments</span>
-        <span><strong>{approvals}</strong> approval gates</span>
       </div>
-      {unenforced && (
-        <p className="notice">
-          Approval requirements are advisory only because this procedure has no
-          enforced approval step. Add an approval step where execution must stop
-          for a decision.
-        </p>
-      )}
       {status && !assignments.length && (
         <p className="small muted">
           Next: create a paused assignment to choose the executor and parameter values.
@@ -217,7 +205,7 @@ const fields = [
   ["instructions", "General instructions"],
   ["required_inputs", "Required inputs / sources"],
   ["default_inputs", "Standing context"],
-  ["approval_requirements", "Approval checkpoints"],
+  ["approval_requirements", "Approval policy"],
   ["completion_criteria", "Completion criteria & evidence"],
 ] as const;
 const css = `
@@ -892,7 +880,7 @@ function Panel(props: Props) {
               </section>
               <aside>
                 <section className="card" style={{ marginTop: 20 }}>
-                  <h2>Inputs & approvals</h2>
+                  <h2>Inputs & policy</h2>
                   {fields
                     .filter(
                       ([key]) =>
@@ -910,8 +898,8 @@ function Panel(props: Props) {
                       </div>
                     ))}
                   <p className="small muted">
-                    Agents must obtain the approvals described here before
-                    proceeding.
+                    Agents must follow any approval requirements described here
+                    using the appropriate tools or communication channel.
                   </p>
                 </section>
               </aside>
@@ -1387,8 +1375,7 @@ function Panel(props: Props) {
             <>
               <div className="row between head">
                 <p className="muted">
-                  Progress, approvals, and results from single-agent and team
-                  runs.
+                  Progress and results from single-agent and team runs.
                 </p>
                 <button
                   disabled={busy}
@@ -1517,7 +1504,7 @@ function Panel(props: Props) {
                   This run follows procedure version{" "}
                   {runAssignment.procedure_version} with its assigned roles.{" "}
                   {ownerName(runAssignment.owner_agent_id)} coordinates the run.
-                  Progress and approvals appear here in Processes.
+                  Progress and results appear here in Processes.
                 </>
               ) : (
                 <>

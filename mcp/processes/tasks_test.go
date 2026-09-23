@@ -296,7 +296,7 @@ func TestNativeTaskMigrationPreservesLegacyWorkAndForeignKeys(t *testing.T) {
 	if e = tx.Commit(); e != nil {
 		t.Fatal(e)
 	}
-	for _, file := range []string{"007_app_events.sql", "008_run_workers.sql", "009_step_timing.sql", "010_native_step_events.sql", "011_step_delivery_event.sql"} {
+	for _, file := range []string{"007_app_events.sql", "008_run_workers.sql", "009_step_timing.sql", "010_native_step_events.sql", "011_step_delivery_event.sql", "012_generic_steps.sql"} {
 		raw, err := os.ReadFile("migrations/" + file)
 		if err != nil {
 			t.Fatal(err)
@@ -309,6 +309,9 @@ func TestNativeTaskMigrationPreservesLegacyWorkAndForeignKeys(t *testing.T) {
 	s, e := a.task("project-a", "old-step")
 	if e != nil || s.ID != "old-step" || s.Output != "Preserved result" || s.ExecutionID != "exec-old" || !s.Required || s.Origin != "process_step" {
 		t.Fatal(s, e)
+	}
+	if s.Definition.Kind != "" {
+		t.Fatalf("legacy approval metadata survived migration: %+v", s)
 	}
 	var n int
 	db.QueryRow(`SELECT count(*) FROM process_step_events WHERE step_id='old-step'`).Scan(&n)
