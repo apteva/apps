@@ -78,13 +78,15 @@ func metricDiscover(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, err
 		return metricExecute(ctx, s, args, "list_apps", nil)
 	case "google-analytics":
 		return map[string]any{"required": []string{"external_id: GA4 property ID", "stream_id: game app stream ID"}}, nil
+	case "google-play-developer":
+		return map[string]any{"required": []string{"external_id: Android package ID", "family: sales or earnings", "Google Play connection: report bucket and report permissions"}}, nil
 	}
 	return nil, errors.New("unsupported reporting provider")
 }
 func metricSourceSet(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, error) {
 	provider := txt(args["provider"])
-	if provider != "admob" && provider != "google-analytics" && provider != "app-store-connect" {
-		return nil, errors.New("supported reporting providers: admob, google-analytics, app-store-connect")
+	if provider != "admob" && provider != "google-analytics" && provider != "app-store-connect" && provider != "google-play-developer" {
+		return nil, errors.New("supported reporting providers: admob, google-analytics, app-store-connect, google-play-developer")
 	}
 	external, e := requiredText(args, "external_id")
 	if e != nil {
@@ -151,6 +153,19 @@ func metricSourceSet(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, er
 			return nil, errors.New("store app not found in selected account")
 		}
 		source["timezone"] = "America/Los_Angeles"
+	case "google-play-developer":
+		if !validPlayPackage(external) {
+			return nil, errors.New("external_id must be an Android package ID")
+		}
+		source["platform"] = "android"
+		if source["family"] != "sales" && source["family"] != "earnings" {
+			return nil, errors.New("choose Google Play sales or earnings report family")
+		}
+		if source["family"] == "sales" {
+			source["timezone"] = "UTC"
+		} else {
+			source["timezone"] = "America/Los_Angeles"
+		}
 	}
 	if _, e = time.LoadLocation(txt(source["timezone"])); e != nil {
 		return nil, errors.New("valid provider reporting timezone required")
@@ -407,6 +422,9 @@ func parseAppleSales(data []byte, source map[string]any, day string) ([]map[stri
 	return out, nil
 }
 func syncMetricSource(ctx *sdk.AppCtx, s GameScope, id string, days int) (result any, err error) {
+	return syncMetricSourceMonth(ctx, s, id, days, "")
+}
+func syncMetricSourceMonth(ctx *sdk.AppCtx, s GameScope, id string, days int, month string) (result any, err error) {
 	source, err := linkGet(ctx, s, "metric", id)
 	if err != nil {
 		return nil, err
@@ -439,6 +457,12 @@ func syncMetricSource(ctx *sdk.AppCtx, s GameScope, id string, days int) (result
 			err = e
 		}
 	}()
+	if source["provider"] == "google-play-developer" {
+		return syncPlayReports(ctx, s, source, month, token)
+	}
+	if month != "" {
+		return nil, errors.New("month is only supported for Google Play reports")
+	}
 	zone, err := time.LoadLocation(txt(source["timezone"]))
 	if err != nil {
 		return nil, err
@@ -462,16 +486,9 @@ func syncMetricSource(ctx *sdk.AppCtx, s GameScope, id string, days int) (result
 		}
 		// One replaceable event per source/day contains the complete report result,
 		// including an empty result. Currency rows removed in corrections disappear.
-		props := map[string]any{"game_id": s.GameID, "source_id": id, "provider": source["provider"], "family": source["family"], "platform": source["platform"], "external_id": source["external_id"], "date": day, "facts": facts, "refreshed_at": nowRFC(), "timezone": source["timezone"]}
 		d, _ := time.ParseInLocation("2006-01-02", day, zone)
-		key := studioHash([]any{s.ProjectID, s.GameID, id, day})
-		var out map[string]any
-		err = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", map[string]any{"_project_id": s.ProjectID, "app": "games", "event": "provider_daily", "upsert_key": "games:report:" + key, "ts": d.UnixMilli(), "props": props}, &out)
-		if err != nil {
+		if err = writeMetricFacts(ctx, s, source, "provider_daily", day, d, facts); err != nil {
 			return nil, err
-		}
-		if out["reject"] == true || out["rejected"] == true || out["valid"] == false {
-			return nil, errors.New("Analytics rejected the report event")
 		}
 		count++
 		if _, err = ctx.AppDB().Exec(`UPDATE game_metric_syncs SET lease_until=? WHERE project_id=? AND game_id=? AND source_id=? AND lease_token=?`, time.Now().Add(30*time.Minute).UTC().Format(time.RFC3339), s.ProjectID, s.GameID, id, token); err != nil {
@@ -492,8 +509,8 @@ func gameMetricsQuery(ctx *sdk.AppCtx, s GameScope, args map[string]any) (any, e
 		where["props.source_id"] = id
 	}
 	topic := stringArg(args, "topic", "provider_daily")
-	if topic != "provider_daily" && !strings.HasPrefix(topic, "play.") {
-		return nil, errors.New("choose provider_daily or a play.* telemetry topic")
+	if topic != "provider_daily" && topic != "provider_monthly" && !strings.HasPrefix(topic, "play.") {
+		return nil, errors.New("choose provider_daily, provider_monthly or a play.* telemetry topic")
 	}
 	in := map[string]any{"app": "games", "topic": topic, "where": where, "limit": boundedArg(args, "limit", 100, 1, 500)}
 	for _, k := range []string{"since", "until"} {

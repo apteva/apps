@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/games
 go 1.25.12
 
 require (
-	github.com/apteva/app-sdk v0.77.0
+	github.com/apteva/app-sdk v0.87.0
 	golang.org/x/image v0.45.0
 	modernc.org/sqlite v1.50.0
 )
