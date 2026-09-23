@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -120,6 +121,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_stop", Description: "Stop a defined environment.", InputSchema: requiredSchema("id"), Handler: a.toolStop},
 		{Name: "environment_run_create", Description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions.", InputSchema: environmentRunCreateSchema, Handler: a.toolRunCreate},
 		{Name: "environment_run_get", Description: "Get a run and live runtime.", InputSchema: requiredSchema("id"), Handler: a.toolRunGet},
+		{Name: "environment_clock_get", Description: "Read a run's server-owned clock and advancement history.", InputSchema: requiredSchema("run_id"), Handler: a.toolClockGet},
+		{Name: "environment_clock_advance", Description: "Advance a manual run clock to an RFC3339 time.", InputSchema: requiredSchema("run_id", "to"), Handler: a.toolClockAdvance},
 		{Name: "environment_run_stop", Description: "Stop a run.", InputSchema: requiredSchema("id"), Handler: a.toolRunStop},
 		{Name: "environment_catalog", Description: "List selectable apps, managed MCP servers, connections, integrations, assertion types, web and protocol fixtures, agents, and snapshots.", InputSchema: objectSchema, Handler: a.toolCatalog},
 		{Name: "environment_seed", Description: "Call a tool on a runtime app to seed data.", InputSchema: requiredSchema("run_id", "app", "tool"), Handler: a.toolCall},
@@ -218,6 +221,51 @@ func (a *App) toolRunGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	rt, rtErr := a.svc.runtime().GetRuntime(r.RuntimeID)
 	return map[string]any{"run": r, "runtime": rt}, rtErr
 }
+
+func (a *App) clockClient() (sdk.RuntimeClockClient, error) {
+	clock, ok := a.svc.runtime().(sdk.RuntimeClockClient)
+	if !ok {
+		return nil, errors.New("platform runtime clock API unavailable")
+	}
+	return clock, nil
+}
+
+func (a *App) toolClockGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	clock, err := a.clockClient()
+	if err != nil {
+		return nil, err
+	}
+	return clock.GetRuntimeClock(r.RuntimeID)
+}
+
+func (a *App) toolClockAdvance(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	to, err := time.Parse(time.RFC3339Nano, str(args, "to"))
+	if err != nil {
+		return nil, errors.New("to must be an RFC3339 timestamp")
+	}
+	clock, err := a.clockClient()
+	if err != nil {
+		return nil, err
+	}
+	state, err := clock.AdvanceRuntimeClock(r.RuntimeID, to)
+	if err != nil {
+		return nil, err
+	}
+	if len(state.Advancements) == 0 {
+		return nil, errors.New("platform did not record clock advancement")
+	}
+	last := state.Advancements[len(state.Advancements)-1]
+	a.svc.ctx.Emit("environment.clock.advanced", map[string]any{"run_id": r.ID, "runtime_id": r.RuntimeID, "advance": last, "current_time": state.CurrentTime})
+	return state, nil
+}
 func (a *App) toolRunStop(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	r, err := a.runFor(args)
 	if err != nil {
@@ -263,7 +311,7 @@ func (a *App) toolInspect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"run": r, "runtime": rt, "edge_calls": edge, "web_fixtures": r.WebFixtures, "protocol_fixtures": r.ProtocolFixtures}
+	out := map[string]any{"run": r, "runtime": rt, "clock": rt.Clock, "clock_events": rt.Clock.Advancements, "edge_calls": edge, "web_fixtures": r.WebFixtures, "protocol_fixtures": r.ProtocolFixtures}
 	if agent := str(args, "agent"); agent != "" {
 		events, err := a.svc.runtime().ListRuntimeAgentTelemetry(r.RuntimeID, agent, time.Time{}, 500)
 		if err != nil {
@@ -344,12 +392,22 @@ func (a *App) toolAgentWait(_ *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	var req sdk.RuntimeAgentWaitRequest
+	scope := "thread"
 	if raw, ok := args["wait"].(map[string]any); ok {
+		if value, _ := raw["scope"].(string); strings.TrimSpace(value) != "" {
+			scope = strings.ToLower(strings.TrimSpace(value))
+		}
 		if err := decodeArgs(raw, &req); err != nil {
 			return nil, err
 		}
 	} else if err := decodeArgs(args, &req); err != nil {
 		return nil, err
+	}
+	if scope == "tree" {
+		return waitRuntimeAgentTree(a.svc.runtime(), r.RuntimeID, str(args, "agent"), req)
+	}
+	if scope != "thread" {
+		return nil, fmt.Errorf("wait scope must be thread or tree")
 	}
 	return a.svc.runtime().WaitRuntimeAgent(r.RuntimeID, str(args, "agent"), req)
 }

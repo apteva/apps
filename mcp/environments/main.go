@@ -15,15 +15,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.7.6
-description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.6 bounds failed reconciliation with exponential backoff and a persisted degraded state that requires an explicit retry or definition update.
+version: 0.7.10
+description: Isolated test environments with apps, managed MCP servers, connections, agents, web and voice fixtures, assertions, and snapshots. v0.7.10 adds server-owned manual clocks, dated fixtures, clock inspection, and snapshot restore.
 author: Apteva
 icon: /ui/icon.svg
 icon_style: monochrome
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
 tags: [environments, testing, agents, evals, mocks]
 scopes: [project]
-min_apteva_version: "0.26.1"
+min_apteva_version: "0.27.6"
 requires:
   permissions: [db.write.app, platform.runtimes.read, platform.runtimes.call, platform.runtimes.manage, platform.runtime_catalog.read, platform.connections.read]
 provides:
@@ -38,6 +38,8 @@ provides:
     - { name: environment_stop, description: "Stop an environment and destroy its runtime." }
     - { name: environment_run_create, description: "Start an isolated runtime from an EnvironmentSpec. This does not execute Evals cases or assertions." }
     - { name: environment_run_get, description: "Get a run and its live runtime state." }
+    - { name: environment_clock_get, description: "Get a run clock and advancement history." }
+    - { name: environment_clock_advance, description: "Advance a manual run clock." }
     - { name: environment_run_stop, description: "Stop an inline or definition-backed run." }
     - { name: environment_catalog, description: "List project apps, managed MCP servers, connections, fake integrations, supported assertion types, web fixtures, agents, and snapshots." }
     - { name: environment_seed, description: "Call a runtime app tool to seed or mutate test state." }
@@ -51,13 +53,14 @@ provides:
     - { name: environment_agent_spawn, description: "Spawn an agent inside a running environment." }
     - { name: environment_agent_send, description: "Send a message to a runtime agent." }
     - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
-    - { name: environment_agent_wait, description: "Wait for a runtime agent and return its normalized trace and metrics." }
+    - { name: environment_agent_wait, description: "Wait for one runtime agent thread or its complete delegated thread tree and return normalized traces and metrics." }
     - { name: environment_voice_call, description: "Run a full-duplex simulated caller against a realtime runtime agent, with optional deterministic background and line conditions." }
     - { name: environment_voice_call_get, description: "Get a simulated voice call, transcript, metrics, and recording handles." }
     - { name: environment_voice_recording_get, description: "Get a receptionist, clean caller, or delivered caller WAV recording from a simulated voice call." }
   publishes:
     - { name: environment.created, description: "An environment definition was created." }
     - { name: environment.started, description: "An environment runtime is running." }
+    - { name: environment.clock.advanced, description: "A manual environment clock advanced." }
     - { name: environment.stopped, description: "An environment runtime stopped." }
     - { name: environment.failed, description: "Environment startup or reconciliation failed." }
     - { name: environment.degraded, description: "Automatic reconciliation stopped after repeated failures." }
@@ -72,7 +75,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.7.6, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.7.10, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
