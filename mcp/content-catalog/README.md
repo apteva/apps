@@ -21,7 +21,8 @@ modify Storage files, Media records, Gigs, Social posts, or Patreon posts.
   the original from Storage for image, video, audio, and PDF playback; other
   files retain an open-original link. Legacy import candidates can be opened
   and previewed before linking them. Preview endpoints only redirect to
-  Storage bytes and never create derivatives.
+  Storage bytes and never create derivatives. Card previews use a fixed 16:9
+  frame and crop to fill it, with aligned file name and status rows.
 - Releases contain one or more destinations and ordered assets. Publication
   observations carry explicit evidence and actual time for published states.
   A planned release or a hosted video never becomes a verified post by itself.
