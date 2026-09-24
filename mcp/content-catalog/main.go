@@ -53,6 +53,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/overview", Handler: a.handleOverview},
+		{Pattern: "/search", Handler: a.handleSearch},
 		{Pattern: "/brands", Handler: a.handleList("content_catalog_brands_list")},
 		{Pattern: "/sessions", Handler: a.handleList("content_catalog_sessions_list")},
 		{Pattern: "/sessions/", Handler: a.handleSession},
@@ -71,9 +72,36 @@ func schema(required ...string) map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": true, "required": required}
 }
 
+func searchSchema() map[string]any {
+	field := func(description string) map[string]any {
+		return map[string]any{"type": "string", "description": description}
+	}
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{
+			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions", "releases"}, "description": "Result type; default all."},
+			"query":         field("Text in Catalog titles, file names, session notes, brand names, and release details."),
+			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
+			"session_id":    field("Limit asset results to one session ID."),
+			"date_from":     field("Inclusive YYYY-MM-DD session date or release date."),
+			"date_to":       field("Inclusive YYYY-MM-DD session date or release date."),
+			"kind":          field("Asset kind, such as video, image, or audio."),
+			"lineage":       map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
+			"sort":          map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
+			"review_status": map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
+			"destination":   field("Network or channel, such as instagram. Required for destination availability filters."),
+			"account_ref":   field("Specific destination account or tier reference; requires destination."),
+			"availability":  map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset use state. ready_to_publish requires approved review and no active target for the destination/account."},
+			"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
+			"cursors":       map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions"), "releases": field("next_cursor for releases")}, "additionalProperties": false},
+		},
+	}
+}
+
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "content_catalog_overview", Description: "Count brands, sessions, assets, releases, and hosting records.", InputSchema: schema(), Handler: a.overview},
+		{Name: "content_catalog_search", Description: "Read-only search of linked Catalog sessions, assets, and releases across sessions. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find the newest approved asset safe to release to one account. Results include publication uses and per-type next cursors. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
@@ -148,6 +176,19 @@ func (a *App) handleOverview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.callHTTP(w, r, "content_catalog_overview", map[string]any{})
+}
+func (a *App) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{}
+	for _, key := range []string{"entity_type", "query", "brand_id", "session_id", "date_from", "date_to", "kind", "lineage", "sort", "review_status", "destination", "account_ref", "availability", "limit", "assets_cursor", "sessions_cursor", "releases_cursor"} {
+		if v := r.URL.Query().Get(key); v != "" {
+			args[key] = v
+		}
+	}
+	a.callHTTP(w, r, "content_catalog_search", args)
 }
 func (a *App) handleVideoHosts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
