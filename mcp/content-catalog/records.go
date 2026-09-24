@@ -12,18 +12,19 @@ import (
 )
 
 type Asset struct {
-	ID               string `json:"id"`
-	SessionID        string `json:"session_id"`
-	StorageInstallID int64  `json:"storage_install_id"`
-	StorageFileID    string `json:"storage_file_id"`
-	Name             string `json:"name"`
-	Kind             string `json:"kind"`
-	ContentType      string `json:"content_type"`
-	SHA256           string `json:"sha256"`
-	SizeBytes        int64  `json:"size_bytes"`
-	ReviewStatus     string `json:"review_status"`
-	MediaStatus      string `json:"media_status"`
-	MediaRating      string `json:"media_rating"`
+	ID               string        `json:"id"`
+	SessionID        string        `json:"session_id"`
+	StorageInstallID int64         `json:"storage_install_id"`
+	StorageFileID    string        `json:"storage_file_id"`
+	Name             string        `json:"name"`
+	Kind             string        `json:"kind"`
+	ContentType      string        `json:"content_type"`
+	SHA256           string        `json:"sha256"`
+	SizeBytes        int64         `json:"size_bytes"`
+	ReviewStatus     string        `json:"review_status"`
+	MediaStatus      string        `json:"media_status"`
+	MediaRating      string        `json:"media_rating"`
+	Publications     []Publication `json:"publications"`
 }
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
@@ -88,7 +89,8 @@ func (a *App) assetAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	id := newID()
-	_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO assets(id,project_id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes) VALUES(?,?,?,?,?,?,?,?,?,?)`, id, pid, str(args, "session_id"), bound.InstallID, str(args, "storage_file_id"), result.File.Name, kind, result.File.ContentType, result.File.SHA256, result.File.SizeBytes)
+	attachedAt := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = ctx.AppDB().Exec(`INSERT OR IGNORE INTO assets(id,project_id,session_id,storage_install_id,storage_file_id,name,kind,content_type,sha256,size_bytes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, id, pid, str(args, "session_id"), bound.InstallID, str(args, "storage_file_id"), result.File.Name, kind, result.File.ContentType, result.File.SHA256, result.File.SizeBytes, attachedAt, attachedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +132,19 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out = append(out, item)
 	}
-	return map[string]any{"assets": out}, rows.Err()
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	if err = rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Publications, err = publicationsForAsset(ctx.AppDB(), pid, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]any{"assets": out}, nil
 }
 func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := project(ctx)
@@ -164,25 +178,11 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	uses := []map[string]any{}
-	usedRows, err := ctx.AppDB().Query(`SELECT r.id,r.title,t.id,t.destination,t.current_status FROM release_target_assets a JOIN release_targets t ON t.id=a.target_id AND t.project_id=a.project_id JOIN releases r ON r.id=t.release_id AND r.project_id=t.project_id WHERE a.project_id=? AND a.asset_id=? ORDER BY r.planned_at DESC,t.created_at DESC`, pid, asset.ID)
+	asset.Publications, err = publicationsForAsset(ctx.AppDB(), pid, asset.ID)
 	if err != nil {
 		return nil, err
 	}
-	for usedRows.Next() {
-		var releaseID, title, targetID, destination, status string
-		if err := usedRows.Scan(&releaseID, &title, &targetID, &destination, &status); err != nil {
-			usedRows.Close()
-			return nil, err
-		}
-		uses = append(uses, map[string]any{"release_id": releaseID, "release_title": title, "target_id": targetID, "destination": destination, "status": status})
-	}
-	err = usedRows.Err()
-	usedRows.Close()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "uses": uses}
+	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
 			Found bool           `json:"found"`
@@ -489,6 +489,9 @@ func (a *App) releaseTargetAdd(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if _, err = tx.Exec(`INSERT INTO release_target_assets(project_id,target_id,asset_id,position) VALUES(?,?,?,?)`, pid, targetID, id, i); err != nil {
 			return nil, err
 		}
+		if _, err = tx.Exec(`INSERT INTO asset_publications(id,project_id,asset_id,destination,account_ref,audience,status,planned_at,legacy_target_id) VALUES(?,?,?,?,?,?,'planned',?,?)`, targetID+":"+id, pid, id, str(args, "destination"), str(args, "account_ref"), r.Audience, planned, targetID); err != nil {
+			return nil, err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
@@ -535,6 +538,15 @@ func (a *App) publicationRecord(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	id := newID()
 	_, err = tx.Exec(`INSERT INTO publication_observations(id,project_id,target_id,status,external_post_id,external_url,actual_at,evidence_source,failure_details) VALUES(?,?,?,?,?,?,?,?,?)`, id, pid, str(args, "target_id"), state, str(args, "external_post_id"), str(args, "external_url"), str(args, "actual_at"), str(args, "evidence_source"), str(args, "failure_details"))
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`UPDATE asset_publications SET status=?,actual_at=?,external_post_id=?,external_url=?,evidence_source=?,failure_details=?,updated_at=? WHERE project_id=? AND legacy_target_id=?`, state, str(args, "actual_at"), str(args, "external_post_id"), str(args, "external_url"), str(args, "evidence_source"), str(args, "failure_details"), now(), pid, str(args, "target_id"))
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(`INSERT INTO asset_publication_events(id,project_id,publication_id,status,external_post_id,external_url,actual_at,evidence_source,failure_details)
+		SELECT ? || ':' || asset_id,project_id,id,?,?,?,?,?,? FROM asset_publications WHERE project_id=? AND legacy_target_id=?`, id, state, str(args, "external_post_id"), str(args, "external_url"), str(args, "actual_at"), str(args, "evidence_source"), str(args, "failure_details"), pid, str(args, "target_id"))
 	if err != nil {
 		return nil, err
 	}

@@ -1,10 +1,10 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.2.1
+version: 0.3.0
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
-  optional Gigs, cloud hosting, releases, and observed publication results.
+  optional Gigs, cloud hosting, and per-asset publication records.
   Storage owns bytes, Media owns processing, Gigs owns assignments, and Social
   owns posts. Hosting providers share one contract; Bunny Stream is the first.
 author: Apteva
@@ -53,8 +53,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: content_catalog_overview, description: "Counts of brands, sessions, assets, releases, and hosting work for the current project." }
-    - { name: content_catalog_search, description: "Search linked sessions, assets, and releases across sessions with text, brand, date, review, and destination availability filters. Read-only; no folder scan." }
+    - { name: content_catalog_overview, description: "Counts of brands, sessions, assets, asset publications, and hosting work for the current project." }
+    - { name: content_catalog_search, description: "Search linked sessions and assets with text, brand, date, review, and per-platform availability filters. Read-only; no folder scan." }
     - { name: content_catalog_brands_create, description: "Create a brand and its Storage path policy. Optional Bunny connection and collection." }
     - { name: content_catalog_brands_list, description: "List brands in the current project." }
     - { name: content_catalog_brands_update, description: "Update a brand name, Storage root, or video host settings." }
@@ -65,14 +65,11 @@ provides:
     - { name: content_catalog_assets_attach, description: "Attach an existing Storage file to a session after checking its file metadata. Never uploads or changes the file." }
     - { name: content_catalog_import_preview, description: "List reviewable Storage candidates under a brand root without changing any app data." }
     - { name: content_catalog_assets_list, description: "List session assets." }
-    - { name: content_catalog_assets_get, description: "Get an asset with source lineage and hosting records." }
+    - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
     - { name: content_catalog_assets_link_source, description: "Record a derivative's source asset. Supports multiple source assets." }
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
-    - { name: content_catalog_releases_create, description: "Plan a release for a brand; no external publication." }
-    - { name: content_catalog_releases_list, description: "List planned releases and observed target states." }
-    - { name: content_catalog_releases_get, description: "Get a release, its targets, and publication observations." }
-    - { name: content_catalog_release_targets_add, description: "Add a destination and ordered assets to a planned release." }
-    - { name: content_catalog_publications_record, description: "Append an observed publication result with explicit evidence. Does not publish externally." }
+    - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
+    - { name: content_catalog_asset_publications_record, description: "Create or update one asset's platform status with explicit evidence. Does not publish externally." }
     - { name: content_catalog_hosting_request, description: "REAL EXTERNAL HOSTING: request upload of an asset to the brand's configured video host. Bunny Stream supported now. Never publishes to Social or Patreon." }
     - { name: content_catalog_hosting_check, description: "Read the video host's readiness for a hosting operation and update Catalog's observation." }
     - { name: content_catalog_hosting_list, description: "List hosting records for an asset." }
@@ -84,7 +81,6 @@ provides:
   publishes:
     - { name: content-catalog.session.created, description: "A production session was created." }
     - { name: content-catalog.asset.attached, description: "A Storage file was linked to a session." }
-    - { name: content-catalog.release.created, description: "A release plan was created." }
     - { name: content-catalog.hosting.updated, description: "A cloud hosting record changed state." }
     - { name: content-catalog.publication.observed, description: "A publication observation was recorded." }
 
@@ -92,7 +88,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.2.1
+    ref: content-catalog/v0.3.0
     entry: mcp/content-catalog
   port: 8080
   health_check: /health
