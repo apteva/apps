@@ -105,9 +105,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
-		{Name: "content_catalog_sessions_create", Description: "Create a stable production session. Args: brand_id, title, session_date, notes?. Writes only Catalog.", InputSchema: schema("brand_id", "title", "session_date"), Handler: a.sessionCreate},
+		{Name: "content_catalog_sessions_create", Description: "Create a stable production session. Args: brand_id, title; optional session_date (YYYY-MM-DD, empty means unknown), notes, host_collection_id. Writes only Catalog.", InputSchema: schema("brand_id", "title"), Handler: a.sessionCreate},
 		{Name: "content_catalog_sessions_list", Description: "List sessions; brand_id optional.", InputSchema: schema(), Handler: a.sessionsList},
 		{Name: "content_catalog_sessions_get", Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: schema("id"), Handler: a.sessionGet},
+		{Name: "content_catalog_sessions_update", Description: "Edit an existing session's title, notes, recording date, or optional host_collection_id override. Args: id and fields to change. Empty session_date means unknown. Storage folder remains stable.", InputSchema: schema("id"), Handler: a.sessionUpdate},
 		{Name: "content_catalog_sessions_link_gig", Description: "Read an existing Gig, then link it to a Catalog session. Args: session_id, gig_id, role?. Does not change Gigs.", InputSchema: schema("session_id", "gig_id"), Handler: a.sessionLinkGig},
 		{Name: "content_catalog_assets_attach", Description: "Read an existing Storage file, then link it to a session. Args: session_id, storage_file_id, kind?. Does not upload or change Storage.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttach},
 		{Name: "content_catalog_session_upload_target", Description: "Return the exact Storage folder and install ID for explicit uploads into a session. Does not scan or upload. Args: session_id.", InputSchema: schema("session_id"), Handler: a.sessionUploadTarget},
@@ -124,6 +125,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
+		{Name: "content_catalog_hosting_link_existing", Description: "Backfill a video asset with an existing Bunny GUID using only get_video. Args: asset_id, remote_id, connection_id. Confirms library, collection, duration, and readiness; never calls fetch_video. Media checksum is supporting Storage evidence, not a Bunny source-file match.", InputSchema: schema("asset_id", "remote_id", "connection_id"), Handler: a.hostingLinkExisting},
 		{Name: "content_catalog_hosting_list", Description: "List hosting records for an asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.hostingsList},
 	}
 }
@@ -478,17 +480,19 @@ func (a *App) brandUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 type Session struct {
-	ID      string `json:"id"`
-	BrandID string `json:"brand_id"`
-	Title   string `json:"title"`
-	Date    string `json:"session_date"`
-	Status  string `json:"status"`
-	Notes   string `json:"notes"`
+	ID               string `json:"id"`
+	BrandID          string `json:"brand_id"`
+	Title            string `json:"title"`
+	Date             string `json:"session_date"`
+	Status           string `json:"status"`
+	Notes            string `json:"notes"`
+	StorageFolder    string `json:"storage_folder"`
+	HostCollectionID string `json:"host_collection_id"`
 }
 
 func sessionByID(db *sql.DB, pid, id string) (*Session, error) {
 	s := &Session{}
-	err := db.QueryRow(`SELECT id,brand_id,title,session_date,status,notes FROM sessions WHERE project_id=? AND id=?`, pid, id).Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes)
+	err := db.QueryRow(`SELECT id,brand_id,title,session_date,status,notes,storage_folder,host_collection_id FROM sessions WHERE project_id=? AND id=?`, pid, id).Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes, &s.StorageFolder, &s.HostCollectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("session not found")
 	}
@@ -499,30 +503,99 @@ func (a *App) sessionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err = required(args, "brand_id", "title", "session_date"); err != nil {
+	if err = required(args, "brand_id", "title"); err != nil {
 		return nil, err
 	}
-	if _, err = brandByID(ctx.AppDB(), pid, str(args, "brand_id")); err != nil {
+	brand, err := brandByID(ctx.AppDB(), pid, str(args, "brand_id"))
+	if err != nil {
 		return nil, err
 	}
 	date := str(args, "session_date")
-	if _, err = time.Parse("2006-01-02", date); err != nil {
+	if date != "" && !validSessionDate(date) {
 		return nil, errors.New("session_date must be YYYY-MM-DD")
 	}
+	collection := str(args, "host_collection_id")
+	if err = validateSessionCollection(brand, collection); err != nil {
+		return nil, err
+	}
 	id := newID()
-	_, err = ctx.AppDB().Exec(`INSERT INTO sessions(id,project_id,brand_id,title,session_date,notes) VALUES(?,?,?,?,?,?)`, id, pid, str(args, "brand_id"), str(args, "title"), date, str(args, "notes"))
+	s := Session{ID: id, BrandID: brand.ID, Title: str(args, "title"), Date: date, Status: "planned", Notes: str(args, "notes"), HostCollectionID: collection}
+	s.StorageFolder = sessionStorageFolder(brand.StorageRoot, &s)
+	_, err = ctx.AppDB().Exec(`INSERT INTO sessions(id,project_id,brand_id,title,session_date,notes,storage_folder,host_collection_id) VALUES(?,?,?,?,?,?,?,?)`, id, pid, brand.ID, s.Title, date, s.Notes, s.StorageFolder, collection)
 	if err != nil {
 		return nil, err
 	}
 	ctx.EmitWithProject("content-catalog.session.created", pid, map[string]any{"id": id, "brand_id": str(args, "brand_id")})
-	return map[string]any{"session": Session{ID: id, BrandID: str(args, "brand_id"), Title: str(args, "title"), Date: date, Status: "planned", Notes: str(args, "notes")}}, nil
+	return map[string]any{"session": s}, nil
+}
+
+func validSessionDate(date string) bool {
+	parsed, err := time.Parse("2006-01-02", date)
+	return err == nil && parsed.Format("2006-01-02") == date
+}
+
+func validateSessionCollection(brand *Brand, collection string) error {
+	if collection == "" {
+		return nil
+	}
+	if brand.HostProvider == "" || brand.HostConnectionID <= 0 || brand.HostLibraryID == "" {
+		return errors.New("session collection override requires a configured brand video host")
+	}
+	if len(collection) > 128 || strings.ContainsAny(collection, " /\\\r\n\t") {
+		return errors.New("invalid host_collection_id")
+	}
+	return nil
+}
+
+func (a *App) sessionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := project(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err = required(args, "id"); err != nil {
+		return nil, err
+	}
+	s, err := sessionByID(ctx.AppDB(), pid, str(args, "id"))
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := args["title"]; ok {
+		if str(args, "title") == "" {
+			return nil, errors.New("title cannot be empty")
+		}
+		s.Title = str(args, "title")
+	}
+	if _, ok := args["notes"]; ok {
+		s.Notes = str(args, "notes")
+	}
+	if _, ok := args["session_date"]; ok {
+		s.Date = str(args, "session_date")
+		if s.Date != "" && !validSessionDate(s.Date) {
+			return nil, errors.New("session_date must be YYYY-MM-DD")
+		}
+	}
+	if _, ok := args["host_collection_id"]; ok {
+		brand, e := brandByID(ctx.AppDB(), pid, s.BrandID)
+		if e != nil {
+			return nil, e
+		}
+		s.HostCollectionID = str(args, "host_collection_id")
+		if e = validateSessionCollection(brand, s.HostCollectionID); e != nil {
+			return nil, e
+		}
+	}
+	_, err = ctx.AppDB().Exec(`UPDATE sessions SET title=?,notes=?,session_date=?,host_collection_id=?,updated_at=? WHERE project_id=? AND id=?`, s.Title, s.Notes, s.Date, s.HostCollectionID, now(), pid, s.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"session": s}, nil
 }
 func (a *App) sessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
 	}
-	q := `SELECT id,brand_id,title,session_date,status,notes FROM sessions WHERE project_id=?`
+	q := `SELECT id,brand_id,title,session_date,status,notes,storage_folder,host_collection_id FROM sessions WHERE project_id=?`
 	params := []any{pid}
 	if v := str(args, "brand_id"); v != "" {
 		q += " AND brand_id=?"
@@ -537,7 +610,7 @@ func (a *App) sessionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []Session{}
 	for rows.Next() {
 		var s Session
-		if err = rows.Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes); err != nil {
+		if err = rows.Scan(&s.ID, &s.BrandID, &s.Title, &s.Date, &s.Status, &s.Notes, &s.StorageFolder, &s.HostCollectionID); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

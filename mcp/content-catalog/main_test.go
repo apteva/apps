@@ -15,9 +15,11 @@ import (
 
 type catalogPlatform struct {
 	tk.BasePlatformClient
-	starts int
-	files  []map[string]any
-	folder string
+	starts          int
+	files           []map[string]any
+	folder          string
+	videoCollection string
+	videoLibrary    string
 }
 
 func (*catalogPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -46,7 +48,7 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 	case "gigs/gigs_status":
 		data = map[string]any{"gig": map[string]any{"id": input["id"]}}
 	case "media/media_get":
-		data = map[string]any{"found": true, "media": map[string]any{"file_id": input["file_id"], "probe_status": "ok", "audience_rating": "general", "derivations": []map[string]any{{"kind": "thumbnail", "status": "ok", "storage_file_id": "901"}}}}
+		data = map[string]any{"found": true, "media": map[string]any{"file_id": input["file_id"], "source_sha256": "sha-1", "probe_status": "ok", "audience_rating": "general", "derivations": []map[string]any{{"kind": "thumbnail", "status": "ok", "storage_file_id": "901"}}}}
 	default:
 		return fmt.Errorf("unexpected app call %s/%s", app, tool)
 	}
@@ -62,7 +64,12 @@ func (p *catalogPlatform) ExecuteIntegrationTool(id int64, tool string, _ map[st
 		p.starts++
 		return &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"id":"video-1"}`)}, nil
 	case "get_video":
-		return &sdk.ExecuteResult{Success: true, Data: json.RawMessage(`{"guid":"video-1","videoLibraryId":42,"status":4}`)}, nil
+		library := p.videoLibrary
+		if library == "" {
+			library = "42"
+		}
+		body, _ := json.Marshal(map[string]any{"guid": "video-1", "videoLibraryId": library, "collectionId": p.videoCollection, "length": 34, "status": 4})
+		return &sdk.ExecuteResult{Success: true, Data: body}, nil
 	}
 	return nil, fmt.Errorf("unexpected tool %s", tool)
 }
@@ -293,6 +300,90 @@ func TestHostingIsIdempotentAndProviderNeutralRecord(t *testing.T) {
 	shared, err := a.hostingRequest(ctx, map[string]any{"asset_id": otherAsset})
 	if err != nil || p.starts != 1 || shared.(map[string]any)["reused_remote"] != true {
 		t.Fatalf("checksum reuse failed: starts=%d, shared=%v, err=%v", p.starts, shared, err)
+	}
+}
+
+func TestExistingBunnyBackfillNeverFetches(t *testing.T) {
+	a, ctx, provider, _, session := setupCatalog(t)
+	asset := attach(t, a, ctx, session, 1)
+	provider.videoCollection = "tanya-collection"
+	if _, err := a.sessionUpdate(ctx, map[string]any{"id": session, "host_collection_id": "different-collection"}); err != nil {
+		t.Fatal(err)
+	}
+	args := map[string]any{"asset_id": asset, "remote_id": "video-1", "connection_id": int64(21)}
+	if _, err := a.hostingLinkExisting(ctx, args); err == nil {
+		t.Fatal("wrong collection accepted")
+	}
+	if _, err := a.sessionUpdate(ctx, map[string]any{"id": session, "host_collection_id": "tanya-collection"}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := a.hostingLinkExisting(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := result.(map[string]any)["hosting"].(*Hosting)
+	if h.LinkOrigin != "existing_link" || h.ProviderSourceMatch != "unverified" || h.SourceEvidence != "media_storage_checksum_agrees" || h.DurationSeconds != 34 || h.CollectionID != "tanya-collection" || h.Status != "ready" || provider.starts != 0 {
+		t.Fatalf("backfill provenance or provider calls wrong: %+v, starts=%d", h, provider.starts)
+	}
+	again, err := a.hostingLinkExisting(ctx, args)
+	if err != nil || again.(map[string]any)["was_existing"] != true {
+		t.Fatalf("duplicate backfill: %v, %v", again, err)
+	}
+	if _, err := a.assetReview(ctx, map[string]any{"asset_id": asset, "review_status": "approved"}); err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := a.hostingRequest(ctx, map[string]any{"asset_id": asset})
+	if err != nil || blocked.(map[string]any)["was_existing"] != true || provider.starts != 0 {
+		t.Fatalf("hosting started duplicate transfer: %v, %v", blocked, err)
+	}
+	provider.videoLibrary = "999"
+	if _, err := a.hostingLinkExisting(ctx, map[string]any{"asset_id": attach(t, a, ctx, session, 2), "remote_id": "video-1", "connection_id": int64(21)}); err == nil {
+		t.Fatal("wrong library accepted")
+	}
+}
+
+func TestUnknownRecordingDateCanBeFilledWithoutMovingFolder(t *testing.T) {
+	a, ctx, _, brand, _ := setupCatalog(t)
+	created, err := a.sessionCreate(ctx, map[string]any{"brand_id": brand, "title": "Historical shoot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := created.(map[string]any)["session"].(Session)
+	if s.Date != "" || !strings.Contains(s.StorageFolder, "/sessions/undated/") {
+		t.Fatalf("unknown date not preserved: %+v", s)
+	}
+	asset := attach(t, a, ctx, s.ID, 2)
+	for _, hit := range assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "date_to": "2026-09-24"}) {
+		if hit.ID == asset {
+			t.Fatalf("unknown date leaked into filter: %+v", hit)
+		}
+	}
+	pageAny, err := a.search(ctx, map[string]any{"entity_type": "sessions", "limit": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := pageAny.(map[string]any)["sessions"].(searchPage[sessionSearchHit])
+	if page.NextCursor == "" {
+		t.Fatal("missing cursor before unknown-date session")
+	}
+	secondAny, err := a.search(ctx, map[string]any{"entity_type": "sessions", "limit": 1, "sessions_cursor": page.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := secondAny.(map[string]any)["sessions"].(searchPage[sessionSearchHit])
+	if len(second.Items) != 1 || second.Items[0].ID != s.ID || second.Items[0].Date != "" {
+		t.Fatalf("unknown-date page = %#v", second)
+	}
+	updated, err := a.sessionUpdate(ctx, map[string]any{"id": s.ID, "session_date": "2024-03-10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := updated.(map[string]any)["session"].(*Session)
+	if u.Date != "2024-03-10" || u.StorageFolder != s.StorageFolder {
+		t.Fatalf("date edit changed folder: %+v", u)
+	}
+	if _, err := a.sessionUpdate(ctx, map[string]any{"id": s.ID, "session_date": "2024-99-99"}); err == nil {
+		t.Fatal("invalid date accepted")
 	}
 }
 
