@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.2.0
+version: 0.2.1
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
   optional Gigs, cloud hosting, releases, and observed publication results.
@@ -92,7 +92,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.2.0
+    ref: content-catalog/v0.2.1
     entry: mcp/content-catalog
   port: 8080
   health_check: /health
