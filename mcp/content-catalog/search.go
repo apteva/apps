@@ -156,10 +156,10 @@ func decodeSearchCursor(value string) (searchCursor, error) {
 	}
 	var c searchCursor
 	b, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil || json.Unmarshal(b, &c) != nil || c.ID == "" || len(c.Date) != 10 {
+	if err != nil || json.Unmarshal(b, &c) != nil || c.ID == "" || (c.Date != "" && len(c.Date) != 10) {
 		return c, errors.New("invalid search cursor")
 	}
-	if _, err := time.Parse("2006-01-02", c.Date); err != nil {
+	if c.Date != "" && !validSessionDate(c.Date) {
 		return c, errors.New("invalid search cursor")
 	}
 	return c, nil
@@ -258,7 +258,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		values = append(values, o.DateFrom)
 	}
 	if o.DateTo != "" {
-		q += ` AND s.session_date<=?`
+		q += ` AND s.session_date<>'' AND s.session_date<=?`
 		values = append(values, o.DateTo)
 	}
 	if o.Kind != "" {
@@ -414,7 +414,7 @@ func (a *App) searchSessions(db *sql.DB, o searchOptions, cursor searchCursor) (
 		values = append(values, o.DateFrom)
 	}
 	if o.DateTo != "" {
-		q += ` AND s.session_date<=?`
+		q += ` AND s.session_date<>'' AND s.session_date<=?`
 		values = append(values, o.DateTo)
 	}
 	if cursor.ID != "" {

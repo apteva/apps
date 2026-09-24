@@ -45,7 +45,14 @@ func (a *App) assetAttachUploaded(ctx *sdk.AppCtx, args map[string]any) (any, er
 }
 
 func sessionStorageFolder(root string, s *Session) string {
-	return strings.TrimSuffix(root, "/") + "/sessions/" + s.Date + "/" + s.ID + "/"
+	if s.StorageFolder != "" {
+		return s.StorageFolder
+	}
+	segment := s.Date
+	if segment == "" {
+		segment = "undated"
+	}
+	return strings.TrimSuffix(root, "/") + "/sessions/" + segment + "/" + s.ID + "/"
 }
 
 func (a *App) sessionUploadTarget(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -4,7 +4,7 @@ Content Catalog coordinates production sessions, Storage files, Media metadata, 
 
 ## Sessions and files
 
-A brand has an explicit Storage root. Each session has an explicit brand, date, and stable ID. In **Add file**, users can drop or select several local files. The panel uploads each selected file through Storage into `<brand root>/sessions/<date>/<session ID>/`, then Catalog verifies the returned Storage file ID and exact folder before linking it. Progress, cancellation, and retry are shown per file. If upload succeeds but linking fails, the file remains in Storage and its ID is shown for a link retry. Existing Storage files can still be attached by ID or chosen from the explicit read-only import preview.
+A brand has an explicit Storage root. Each session has an explicit brand and stable ID; its recording date can be unknown and filled in later. In **Add file**, users can drop or select several local files. The panel uploads each selected file through Storage into `<brand root>/sessions/<date or undated>/<session ID>/`, then Catalog verifies the returned Storage file ID and exact folder before linking it. The folder stays fixed when a recording date is edited. Progress, cancellation, and retry are shown per file. If upload succeeds but linking fails, the file remains in Storage and its ID is shown for a link retry. Existing Storage files can still be attached by ID or chosen from the explicit read-only import preview.
 
 Catalog never automatically scans Storage folders. Upload happens only after a user selects files and clicks **Upload selected**. Session cards and asset details show available image or Media previews, with original file playback for supported formats. `media.completed` updates cached state only for already linked assets.
 
@@ -16,6 +16,6 @@ The old per-asset publication MCP tools remain as a compatibility interface. Mig
 
 ## Boundaries
 
-Cloud hosting remains an explicit request for an approved video. Bunny Stream is the first provider. Catalog does not automatically host based on size, discover Media derivatives, sync Social or Patreon results, or publish externally. A human or external workflow records post evidence through the UI or MCP tool.
+Cloud hosting remains an explicit request for an approved video. Bunny Stream is the first provider. A session may override its brand video-host collection through the session create/update MCP tools. The `content_catalog_hosting_link_existing` MCP tool backfills an existing Bunny video by GUID, verifies it through `get_video`, and records its library, collection, duration, ready status, and source evidence. It never calls `fetch_video`. A linked existing video blocks a later hosting request for the same asset. Media's source checksum can corroborate the Storage asset record; Bunny supplies no cryptographic proof that its video matches those bytes. The backfill action has no UI control. Catalog does not automatically host based on size, discover Media derivatives, sync Social or Patreon results, or publish externally. A human or external workflow records post evidence through the UI or MCP tool.
 
 Run checks from this directory with `GOWORK=off go test ./...` and `GOWORK=off go build ./...`. Build the panel from the `apps` repo with `bun run scripts/build-panels.ts --app content-catalog`.
