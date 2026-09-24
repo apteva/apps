@@ -24,9 +24,7 @@ type searchPage[T any] struct {
 }
 
 type searchUse struct {
-	ReleaseID      string `json:"release_id"`
-	ReleaseTitle   string `json:"release_title"`
-	TargetID       string `json:"target_id"`
+	PublicationID  string `json:"publication_id"`
 	Destination    string `json:"destination"`
 	AccountRef     string `json:"account_ref"`
 	Status         string `json:"status"`
@@ -193,7 +191,7 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"assets": searchPage[assetSearchHit]{Items: []assetSearchHit{}}, "sessions": searchPage[sessionSearchHit]{Items: []sessionSearchHit{}}, "releases": searchPage[releaseSearchHit]{Items: []releaseSearchHit{}}}
+	out := map[string]any{"assets": searchPage[assetSearchHit]{Items: []assetSearchHit{}}, "sessions": searchPage[sessionSearchHit]{Items: []sessionSearchHit{}}}
 	if o.EntityType == "all" || o.EntityType == "assets" {
 		cursor, err := decodeSearchCursor(searchCursorArg(args, "assets"))
 		if err != nil {
@@ -221,7 +219,9 @@ func (a *App) search(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		out["sessions"] = page
 	}
-	if !assetOnly && (o.EntityType == "all" || o.EntityType == "releases") {
+	// Explicit legacy queries remain readable during migration; ordinary search
+	// no longer surfaces the retired release workflow.
+	if !assetOnly && o.EntityType == "releases" {
 		cursor, err := decodeSearchCursor(searchCursorArg(args, "releases"))
 		if err != nil {
 			return nil, err
@@ -286,18 +286,18 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		q += ` AND (` + sortDate + `<? OR (` + sortDate + `=? AND (a.created_at<? OR (a.created_at=? AND a.id<?))))`
 		values = append(values, cursor.Date, cursor.Date, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
 	}
-	target := `SELECT 1 FROM release_target_assets ra JOIN release_targets t ON t.id=ra.target_id AND t.project_id=ra.project_id JOIN releases r ON r.id=t.release_id AND r.project_id=t.project_id WHERE ra.project_id=a.project_id AND ra.asset_id=a.id`
+	target := `SELECT 1 FROM asset_publications p WHERE p.project_id=a.project_id AND p.asset_id=a.id`
 	matchingTarget := target
 	matchingValues := []any{}
 	if o.Destination != "" {
-		matchingTarget += ` AND t.destination=?`
-		matchingValues = append(matchingValues, o.Destination)
+		matchingTarget += ` AND LOWER(p.destination) LIKE LOWER(?)`
+		matchingValues = append(matchingValues, o.Destination+"%")
 	}
 	if o.AccountRef != "" {
-		matchingTarget += ` AND t.account_ref=?`
+		matchingTarget += ` AND p.account_ref=?`
 		matchingValues = append(matchingValues, o.AccountRef)
 	}
-	wasPublished := `t.current_status IN ('provider_reported_published','verified_published') OR EXISTS (SELECT 1 FROM publication_observations po WHERE po.project_id=t.project_id AND po.target_id=t.id AND po.status IN ('provider_reported_published','verified_published'))`
+	wasPublished := `p.status='verified_published' OR EXISTS (SELECT 1 FROM asset_publication_events pe WHERE pe.project_id=p.project_id AND pe.publication_id=p.id AND pe.status='verified_published')`
 	switch o.Availability {
 	case "never_used":
 		q += ` AND NOT EXISTS (` + target + `)`
@@ -305,13 +305,13 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		q += ` AND NOT EXISTS (` + matchingTarget + ` AND (` + wasPublished + `))`
 		values = append(values, matchingValues...)
 	case "ready_to_publish":
-		q += ` AND a.review_status='approved' AND NOT EXISTS (` + matchingTarget + ` AND ((r.approval_status!='cancelled' AND t.current_status NOT IN ('failed','removed')) OR (` + wasPublished + `)))`
+		q += ` AND a.review_status='approved' AND NOT EXISTS (` + matchingTarget + ` AND (p.status NOT IN ('failed','removed') OR (` + wasPublished + `)))`
 		values = append(values, matchingValues...)
 	case "scheduled", "failed":
-		q += ` AND EXISTS (` + matchingTarget + ` AND t.current_status=?)`
+		q += ` AND EXISTS (` + matchingTarget + ` AND p.status=?)`
 		values = append(values, append(matchingValues, o.Availability)...)
 	case "published":
-		q += ` AND EXISTS (` + matchingTarget + ` AND t.current_status IN ('provider_reported_published','verified_published'))`
+		q += ` AND EXISTS (` + matchingTarget + ` AND (` + wasPublished + `))`
 		values = append(values, matchingValues...)
 	case "any":
 		if o.Destination != "" {
@@ -353,11 +353,11 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		h := &page.Items[i]
 		switch o.Availability {
 		case "ready_to_publish":
-			h.MatchReason = "Approved; no active release for this destination and account"
+			h.MatchReason = "Approved; no active publication for this destination and account"
 		case "never_used":
-			h.MatchReason = "No release uses"
+			h.MatchReason = "No platform use recorded"
 		case "not_published":
-			h.MatchReason = "No reported or verified publication history for this destination and account"
+			h.MatchReason = "No verified publication history for this destination and account"
 		default:
 			h.MatchReason = "Matches Catalog search filters"
 		}
@@ -377,12 +377,8 @@ func loadSearchUses(db *sql.DB, pid string, hits []assetSearchHit) error {
 		values = append(values, hits[i].ID)
 		byID[hits[i].ID] = i
 	}
-	q := `SELECT ra.asset_id,r.id,r.title,t.id,t.destination,t.account_ref,t.current_status,
-		COALESCE(o.external_post_id,''),COALESCE(o.external_url,''),COALESCE(o.actual_at,'')
-		FROM release_target_assets ra JOIN release_targets t ON t.id=ra.target_id AND t.project_id=ra.project_id
-		JOIN releases r ON r.id=t.release_id AND r.project_id=t.project_id
-		LEFT JOIN publication_observations o ON o.id=(SELECT id FROM publication_observations WHERE project_id=ra.project_id AND target_id=t.id ORDER BY observed_at DESC,id DESC LIMIT 1)
-		WHERE ra.project_id=? AND ra.asset_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY t.created_at DESC,t.id DESC`
+	q := `SELECT asset_id,id,destination,account_ref,status,external_post_id,external_url,actual_at
+		FROM asset_publications WHERE project_id=? AND asset_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC,id DESC`
 	rows, err := db.Query(q, values...)
 	if err != nil {
 		return err
@@ -391,7 +387,7 @@ func loadSearchUses(db *sql.DB, pid string, hits []assetSearchHit) error {
 	for rows.Next() {
 		var assetID string
 		var use searchUse
-		if err := rows.Scan(&assetID, &use.ReleaseID, &use.ReleaseTitle, &use.TargetID, &use.Destination, &use.AccountRef, &use.Status, &use.ExternalPostID, &use.ExternalURL, &use.ActualAt); err != nil {
+		if err := rows.Scan(&assetID, &use.PublicationID, &use.Destination, &use.AccountRef, &use.Status, &use.ExternalPostID, &use.ExternalURL, &use.ActualAt); err != nil {
 			return err
 		}
 		hits[byID[assetID]].Uses = append(hits[byID[assetID]].Uses, use)

@@ -60,8 +60,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/assets", Handler: a.handleList("content_catalog_assets_list")},
 		{Pattern: "/import-preview", Handler: a.handleList("content_catalog_import_preview")},
 		{Pattern: "/assets/", Handler: a.handleAsset},
-		{Pattern: "/releases", Handler: a.handleList("content_catalog_releases_list")},
-		{Pattern: "/releases/", Handler: a.handleRelease},
+		{Pattern: "/publications", Handler: a.handleList("content_catalog_asset_publications_list")},
 		{Pattern: "/hostings", Handler: a.handleList("content_catalog_hosting_list")},
 		{Pattern: "/video-hosts", Handler: a.handleVideoHosts},
 		{Pattern: "/action", Handler: a.handleAction},
@@ -79,29 +78,29 @@ func searchSchema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions", "releases"}, "description": "Result type; default all."},
-			"query":         field("Text in Catalog titles, file names, session notes, brand names, and release details."),
+			"entity_type":   map[string]any{"type": "string", "enum": []string{"all", "assets", "sessions"}, "description": "Result type; default all."},
+			"query":         field("Text in Catalog file names and session notes or titles."),
 			"brand_id":      field("Limit results to one explicit Catalog brand ID."),
 			"session_id":    field("Limit asset results to one session ID."),
-			"date_from":     field("Inclusive YYYY-MM-DD session date or release date."),
-			"date_to":       field("Inclusive YYYY-MM-DD session date or release date."),
+			"date_from":     field("Inclusive YYYY-MM-DD session date."),
+			"date_to":       field("Inclusive YYYY-MM-DD session date."),
 			"kind":          field("Asset kind, such as video, image, or audio."),
 			"lineage":       map[string]any{"type": "string", "enum": []string{"source", "derivative"}, "description": "Asset without or with linked parent sources."},
 			"sort":          map[string]any{"type": "string", "enum": []string{"session_newest", "asset_newest"}, "description": "Asset order; default session_newest. Other result types sort by their own date."},
 			"review_status": map[string]any{"type": "string", "enum": []string{"pending", "approved", "rejected"}},
 			"destination":   field("Network or channel, such as instagram. Required for destination availability filters."),
 			"account_ref":   field("Specific destination account or tier reference; requires destination."),
-			"availability":  map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset use state. ready_to_publish requires approved review and no active target for the destination/account."},
+			"availability":  map[string]any{"type": "string", "enum": []string{"any", "never_used", "not_published", "ready_to_publish", "scheduled", "published", "failed"}, "description": "Asset publication state. published means verified live; ready_to_publish requires approved review and no active publication for the destination/account."},
 			"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 100, "description": "Maximum items per result type; default 30."},
-			"cursors":       map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions"), "releases": field("next_cursor for releases")}, "additionalProperties": false},
+			"cursors":       map[string]any{"type": "object", "properties": map[string]any{"assets": field("next_cursor for assets"), "sessions": field("next_cursor for sessions")}, "additionalProperties": false},
 		},
 	}
 }
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "content_catalog_overview", Description: "Count brands, sessions, assets, releases, and hosting records.", InputSchema: schema(), Handler: a.overview},
-		{Name: "content_catalog_search", Description: "Read-only search of linked Catalog sessions, assets, and releases across sessions. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find the newest approved asset safe to release to one account. Results include publication uses and per-type next cursors. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
+		{Name: "content_catalog_overview", Description: "Count brands, sessions, assets, per-asset publication records, and hosting records.", InputSchema: schema(), Handler: a.overview},
+		{Name: "content_catalog_search", Description: "Read-only search of linked sessions and assets. Use brand_id, destination, account_ref, availability=ready_to_publish, entity_type=assets to find approved assets with no active publication for that account. Published means verified live. No Storage scan or external write.", InputSchema: searchSchema(), Handler: a.search},
 		{Name: "content_catalog_brands_create", Description: "Create a brand. Args: slug, name, storage_root; optional host_provider, host_connection_id, host_library_id, host_collection_id. Writes only Catalog.", InputSchema: schema("slug", "name", "storage_root"), Handler: a.brandCreate},
 		{Name: "content_catalog_brands_list", Description: "List brands.", InputSchema: schema(), Handler: a.brandsList},
 		{Name: "content_catalog_brands_update", Description: "Update a brand's name, storage_root, or host settings. Args: id and fields to change. Writes only Catalog.", InputSchema: schema("id"), Handler: a.brandUpdate},
@@ -112,14 +111,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_assets_attach", Description: "Read an existing Storage file, then link it to a session. Args: session_id, storage_file_id, kind?. Does not upload or change Storage.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttach},
 		{Name: "content_catalog_import_preview", Description: "Read up to 200 Storage files under a session brand root. Return candidates needing human review; no files or Catalog records are changed. Args: session_id.", InputSchema: schema("session_id"), Handler: a.importPreview},
 		{Name: "content_catalog_assets_list", Description: "List assets; session_id required.", InputSchema: schema("session_id"), Handler: a.assetsList},
-		{Name: "content_catalog_assets_get", Description: "Get an asset with source lineage and hosting records. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
+		{Name: "content_catalog_assets_get", Description: "Get an asset with source lineage, hosting, and per-asset publication records. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
 		{Name: "content_catalog_assets_link_source", Description: "Record one source relationship, supporting multi-input derivatives. Args: child_asset_id, source_asset_id, relation?, source_order?, media_render_id?.", InputSchema: schema("child_asset_id", "source_asset_id"), Handler: a.assetLinkSource},
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
-		{Name: "content_catalog_releases_create", Description: "Plan a release under a brand. Args: brand_id, title, phase?, audience?, planned_at?. Does not publish.", InputSchema: schema("brand_id", "title"), Handler: a.releaseCreate},
-		{Name: "content_catalog_releases_list", Description: "List releases; brand_id optional.", InputSchema: schema(), Handler: a.releasesList},
-		{Name: "content_catalog_releases_get", Description: "Get a release with targets and publication observations. Args: id.", InputSchema: schema("id"), Handler: a.releaseGet},
-		{Name: "content_catalog_release_targets_add", Description: "Add a release destination and ordered asset_ids. Args: release_id, destination, account_ref?, planned_at?, asset_ids[]. Does not publish.", InputSchema: schema("release_id", "destination", "asset_ids"), Handler: a.releaseTargetAdd},
-		{Name: "content_catalog_publications_record", Description: "Append one observed result for a release target. Args: target_id, status, evidence_source, external_post_id?, external_url?, actual_at?, failure_details?. Does not publish.", InputSchema: schema("target_id", "status", "evidence_source"), Handler: a.publicationRecord},
+		{Name: "content_catalog_asset_publications_list", Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
+		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
 		{Name: "content_catalog_hosting_list", Description: "List hosting records for an asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.hostingsList},
@@ -349,7 +345,7 @@ func (a *App) overview(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		return nil, err
 	}
 	out := map[string]any{}
-	for key, table := range map[string]string{"brands": "brands", "sessions": "sessions", "assets": "assets", "releases": "releases", "hostings": "hostings"} {
+	for key, table := range map[string]string{"brands": "brands", "sessions": "sessions", "assets": "assets", "publications": "asset_publications", "hostings": "hostings"} {
 		var n int64
 		if err := ctx.AppDB().QueryRow("SELECT COUNT(*) FROM "+table+" WHERE project_id=?", pid).Scan(&n); err != nil {
 			return nil, err

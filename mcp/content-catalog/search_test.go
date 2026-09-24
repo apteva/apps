@@ -108,8 +108,18 @@ func TestSearchAcrossSessionsAndPublicationAvailability(t *testing.T) {
 		t.Fatal(err)
 	}
 	hits = assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "not_published"})
+	if len(hits) != 2 {
+		t.Fatalf("reported post is not verified: %#v", hits)
+	}
+	if got := assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "published"}); len(got) != 0 {
+		t.Fatalf("reported post must not count as verified: %#v", got)
+	}
+	if _, err = a.publicationRecord(ctx, map[string]any{"target_id": targetID, "status": "verified_published", "evidence_source": "creator_page_manual", "external_post_id": "ig-123", "actual_at": actual}); err != nil {
+		t.Fatal(err)
+	}
+	hits = assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "not_published"})
 	if len(hits) != 1 || hits[0].ID != firstAsset {
-		t.Fatalf("reported post must block not_published: %#v", hits)
+		t.Fatalf("verified post must block not_published: %#v", hits)
 	}
 	published := assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "published"})
 	if len(published) != 1 || published[0].ID != secondAsset || len(published[0].Uses) != 1 || published[0].Uses[0].ExternalPostID != "ig-123" {
@@ -168,10 +178,17 @@ func TestSearchSessionsAndReleasesByTextAndBrand(t *testing.T) {
 	}
 	sections := result.(map[string]any)
 	sessions := sections["sessions"].(searchPage[sessionSearchHit]).Items
-	releases := sections["releases"].(searchPage[releaseSearchHit]).Items
 	if len(sessions) != 1 || sessions[0].ID != other || sessions[0].AssetCount != 1 {
 		t.Fatalf("session text results = %#v", sessions)
 	}
+	if _, exposed := sections["releases"]; exposed {
+		t.Fatal("ordinary search exposed retired release records")
+	}
+	result, err = a.search(ctx, map[string]any{"entity_type": "releases", "query": "Autumn", "brand_id": brand})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releases := result.(map[string]any)["releases"].(searchPage[releaseSearchHit]).Items
 	if len(releases) != 1 || releases[0].ID != release.ID || releases[0].TargetCount != 1 {
 		t.Fatalf("release text results = %#v", releases)
 	}
