@@ -419,6 +419,45 @@ func TestMobileSigningSetupProvisionsAppleAndCodemagic(t *testing.T) {
 	}
 }
 
+func TestMacSigningUsesMacAppleResources(t *testing.T) {
+	platform := &mobileSigningPlatform{appExists: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"), tk.WithPlatform(platform))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "mac-app", TargetKind: "macos", SourceKind: "local", SourceRef: t.TempDir(),
+		Framework: "macos", BuildBackend: "codemagic",
+		BuildBackendJSON: `{"app_id":"runner-app","workflow_id":"macos","branch":"main","source_mode":"bundle"}`,
+		TargetConfigJSON: `{"bundle_id":"com.example.app","scheme":"Example"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := dbGetEnvironmentByName(ctx.AppDB(), d.ID, defaultEnvironmentName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&App{dataDir: t.TempDir()}).setupMobileSigning(t.Context(), effectiveDeploymentForEnvironment(d, env), "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Ready || result.Identity == nil || result.Identity.Platform != "macos" {
+		t.Fatalf("Mac signing result: %+v", result)
+	}
+	want := map[string]string{"register_bundle_id": "MAC_OS", "create_certificate": "MAC_APP_DISTRIBUTION", "create_profile": "MAC_APP_STORE"}
+	for tool, value := range want {
+		call := firstSigningCall(platform.calls, tool)
+		if call == nil {
+			t.Fatalf("missing %s", tool)
+		}
+		key := map[string]string{"register_bundle_id": "platform", "create_certificate": "certificateType", "create_profile": "profileType"}[tool]
+		if call.Input[key] != value {
+			t.Fatalf("%s %s=%v, want %s", tool, key, call.Input[key], value)
+		}
+	}
+}
+
 func TestMobileSigningRepairsProfileWhenSourceRequirementsChange(t *testing.T) {
 	platform := &mobileSigningPlatform{appExists: true}
 	_, d := newIOSSigningDeployment(t, platform)

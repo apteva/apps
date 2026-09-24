@@ -129,6 +129,24 @@ func looksLikeIOSProject(root string) bool {
 	return false
 }
 
+func looksLikeMacOSProject(root string) bool {
+	if body, err := os.ReadFile(filepath.Join(root, "project.yml")); err == nil &&
+		strings.Contains(string(body), "platform: macOS") {
+		return true
+	}
+	entries, _ := os.ReadDir(root)
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".xcodeproj") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(root, entry.Name(), "project.pbxproj"))
+		if err == nil && strings.Contains(string(body), "SDKROOT = macosx") {
+			return true
+		}
+	}
+	return false
+}
+
 type androidBuilder struct{}
 
 func (*androidBuilder) Framework() string { return "android" }
@@ -215,9 +233,21 @@ func (*androidBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW
 
 type iosBuilder struct{}
 
-func (*iosBuilder) Framework() string { return "ios" }
+type macOSBuilder struct{}
+
+func (*iosBuilder) Framework() string   { return "ios" }
+func (*macOSBuilder) Framework() string { return "macos" }
+
+func (b *macOSBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
+	return buildAppleApp("macos", srcDir, artifactDir, ov, logW)
+}
 
 func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
+	return buildAppleApp("ios", srcDir, artifactDir, ov, logW)
+}
+
+func buildAppleApp(kind, srcDir, artifactDir string, ov BuildOverrides, logW io.Writer) (string, error) {
+	platform, _ := appPlatformFor(kind)
 	cfg, err := parseMobileTargetConfig(ov.TargetConfigJSON)
 	if err != nil {
 		return "", err
@@ -228,16 +258,16 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	buildEnv := mobileVersionBuildEnv(ov.Env, cfg)
 	if strings.TrimSpace(ov.BuildCmd) != "" {
 		if err := runMobileBuildCommand(buildContext(ov), srcDir, "sh", []string{"-c", ov.BuildCmd}, buildEnv, logW); err != nil {
-			return "", fmt.Errorf("ios build_cmd: %w", err)
+			return "", fmt.Errorf("%s build_cmd: %w", kind, err)
 		}
-		ipa, err := findMobileArtifact(srcDir, ".ipa", "")
+		ipa, err := findMobileArtifact(srcDir, platform.ArtifactExt, "")
 		if err != nil {
-			return "", errors.New("iOS build_cmd succeeded but produced no .ipa")
+			return "", fmt.Errorf("%s build_cmd succeeded but produced no %s", kind, platform.ArtifactExt)
 		}
-		return stageIPA(ipa, artifactDir, cfg, logW)
+		return stageAppleArtifact(kind, ipa, artifactDir, cfg, "", "", logW)
 	}
 	if runtime.GOOS != "darwin" {
-		return "", errors.New("iOS App Store builds require a macOS Deploy host with Xcode; set build_cmd to delegate to a remote runner")
+		return "", fmt.Errorf("%s App Store builds require a macOS Deploy host with Xcode; use a remote runner", kind)
 	}
 	if _, err := exec.LookPath("xcodebuild"); err != nil {
 		return "", errors.New("xcodebuild not found; install Xcode")
@@ -264,6 +294,9 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	}
 	configuration := defaultStr(cfg.Configuration, "Release")
 	if cfg.SmokeOnly {
+		if kind == "macos" {
+			return "", errors.New("macOS smoke_only is not supported; use a signed package build")
+		}
 		return buildIOSSimulatorSmoke(buildContext(ov), srcDir, artifactDir, containerFlag, containerPath, scheme, configuration, buildEnv, cfg, logW)
 	}
 
@@ -278,7 +311,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 		return "", errors.New("App Store Connect connection requires issuer_id, key_id, and private_key")
 	}
 
-	tmp, err := os.MkdirTemp("", "apteva-ios-build-*")
+	tmp, err := os.MkdirTemp("", "apteva-apple-build-*")
 	if err != nil {
 		return "", err
 	}
@@ -286,7 +319,7 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	profileUUID := ""
 	if len(ov.Credentials.IOSSigning) > 0 {
 		var cleanup func()
-		profileUUID, cleanup, err = prepareIOSSigningAssets(buildContext(ov), tmp, ov.Credentials.IOSSigning)
+		profileUUID, cleanup, err = prepareIOSSigningAssets(buildContext(ov), tmp, ov.Credentials.IOSSigning, kind)
 		if err != nil {
 			return "", err
 		}
@@ -303,15 +336,25 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	archivePath := filepath.Join(tmp, scheme+".xcarchive")
 	derivedPath := filepath.Join(tmp, "DerivedData")
 	authArgs := []string{"-allowProvisioningUpdates", "-authenticationKeyPath", keyPath, "-authenticationKeyID", keyID, "-authenticationKeyIssuerID", issuerID}
+	destination := "generic/platform=iOS"
+	if kind == "macos" {
+		destination = "generic/platform=macOS"
+	}
 	archiveArgs := []string{containerFlag, containerPath, "-scheme", scheme, "-configuration", configuration,
-		"-destination", "generic/platform=iOS", "-archivePath", archivePath, "-derivedDataPath", derivedPath}
+		"-destination", destination, "-archivePath", archivePath, "-derivedDataPath", derivedPath}
 	archiveArgs = append(archiveArgs, authArgs...)
 	if cfg.TeamID != "" {
 		archiveArgs = append(archiveArgs, "DEVELOPMENT_TEAM="+cfg.TeamID)
 	}
 	if profileUUID != "" {
+		identity := "Apple Distribution"
+		if block, _ := pem.Decode([]byte(normalizePEM(ov.Credentials.IOSSigning["certificate_pem"]))); block != nil {
+			if cert, parseErr := x509.ParseCertificate(block.Bytes); parseErr == nil && cert.Subject.CommonName != "" {
+				identity = cert.Subject.CommonName
+			}
+		}
 		archiveArgs = append(archiveArgs,
-			"CODE_SIGN_STYLE=Manual", "CODE_SIGN_IDENTITY=Apple Distribution",
+			"CODE_SIGN_STYLE=Manual", "CODE_SIGN_IDENTITY="+identity,
 			"PROVISIONING_PROFILE="+profileUUID,
 		)
 	}
@@ -336,19 +379,54 @@ func (*iosBuilder) Build(srcDir, artifactDir string, ov BuildOverrides, logW io.
 	if err := runMobileBuildCommand(buildContext(ov), srcDir, "xcodebuild", exportArgs, buildEnv, logW); err != nil {
 		return "", fmt.Errorf("xcodebuild export: %w", err)
 	}
-	ipa, err := findMobileArtifact(exportDir, ".ipa", "")
+	ipa, err := findMobileArtifact(exportDir, platform.ArtifactExt, "")
 	if err != nil {
-		return "", errors.New("xcodebuild export succeeded but produced no .ipa")
+		return "", fmt.Errorf("xcodebuild export succeeded but produced no %s", platform.ArtifactExt)
 	}
 	if cfg.BundleID == "" {
 		cfg.BundleID = plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleIdentifier")
 	}
 	version := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleShortVersionString")
 	buildNumber := plistValue(filepath.Join(archivePath, "Info.plist"), "ApplicationProperties.CFBundleVersion")
-	return stageIPAWithVersion(ipa, artifactDir, cfg, version, buildNumber, logW)
+	return stageAppleArtifact(kind, ipa, artifactDir, cfg, version, buildNumber, logW)
 }
 
-func prepareIOSSigningAssets(ctx context.Context, tmp string, fields map[string]string) (string, func(), error) {
+func stageAppleArtifact(kind, path, artifactDir string, cfg mobileTargetConfig, version, buildNumber string, logW io.Writer) (string, error) {
+	if kind == "ios" {
+		return stageIPAWithVersion(path, artifactDir, cfg, version, buildNumber, logW)
+	}
+	if version != "" {
+		cfg.VersionName = version
+	}
+	if buildNumber != "" {
+		cfg.BuildNumber = buildNumber
+	}
+	actual, err := verifyMobileBinaryIdentity(path, kind, cfg)
+	if err != nil {
+		return "", err
+	}
+	primary := filepath.Base(path)
+	dst := filepath.Join(artifactDir, primary)
+	if err := copyMobileFile(path, dst); err != nil {
+		return "", err
+	}
+	manifest := artifactManifest{
+		Platform: kind, Primary: primary, BundleID: actual.Identifier,
+		VersionName: actual.Version, BuildNumber: actual.Build,
+		SigningVerified: true, Files: []artifactFile{mobileArtifactFile(dst, "pkg")},
+	}
+	if err := writeArtifactManifest(artifactDir, manifest); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(logW, "=== macOS archive export: %s ===\n", dst)
+	return primary, nil
+}
+
+func prepareIOSSigningAssets(ctx context.Context, tmp string, fields map[string]string, targetKind ...string) (string, func(), error) {
+	extension := ".mobileprovision"
+	if len(targetKind) > 0 && targetKind[0] == "macos" {
+		extension = ".provisionprofile"
+	}
 	unlock, lockErr := lockIOSSigningResources(ctx)
 	if lockErr != nil {
 		return "", func() {}, lockErr
@@ -401,7 +479,7 @@ func prepareIOSSigningAssets(ctx context.Context, tmp string, fields map[string]
 	if err != nil {
 		return "", cleanup, errors.New("decode managed iOS provisioning profile")
 	}
-	profilePath := filepath.Join(tmp, "profile.mobileprovision")
+	profilePath := filepath.Join(tmp, "profile"+extension)
 	if err := os.WriteFile(profilePath, profile, 0o600); err != nil {
 		return "", cleanup, err
 	}
@@ -423,7 +501,7 @@ func prepareIOSSigningAssets(ctx context.Context, tmp string, fields map[string]
 	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
 		return "", cleanup, err
 	}
-	installedProfile := filepath.Join(profilesDir, profileMetadata.UUID+".mobileprovision")
+	installedProfile := filepath.Join(profilesDir, profileMetadata.UUID+extension)
 	previousProfile, previousErr := os.ReadFile(installedProfile)
 	if previousErr != nil && !os.IsNotExist(previousErr) {
 		return "", cleanup, previousErr

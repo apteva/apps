@@ -91,14 +91,22 @@ func (a *App) setupMobileSigning(ctx context.Context, d *Deployment, providerNam
 	switch d.TargetKind {
 	case "android":
 		return a.setupAndroidMobileSigning(ctx, d, providerName, rotate)
-	case "ios":
-		return a.setupIOSMobileSigning(ctx, d, providerName, rotate)
+	case "ios", "macos":
+		return a.setupAppleMobileSigning(ctx, d, providerName, rotate)
 	default:
-		return nil, errors.New("mobile signing setup requires an Android or iOS deployment")
+		return nil, errors.New("mobile signing setup requires an Android, iOS, or macOS deployment")
 	}
 }
 
 func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, providerName string, rotate bool) (*mobileSigningSetupResult, error) {
+	return a.setupAppleMobileSigning(ctx, d, providerName, rotate)
+}
+
+func (a *App) setupAppleMobileSigning(ctx context.Context, d *Deployment, providerName string, rotate bool) (*mobileSigningSetupResult, error) {
+	platform, ok := appPlatformFor(d.TargetKind)
+	if !ok || platform.ApplePlatform == "" {
+		return nil, fmt.Errorf("%s is not an Apple app platform", d.TargetKind)
+	}
 	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
 	if err != nil {
 		return nil, err
@@ -140,7 +148,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	if issuerID == "" || keyID == "" || apiPrivateKey == "" {
 		return nil, errors.New("app_store integration requires issuer_id, key_id, and private_key")
 	}
-	identity, err := dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, "ios", issuerID, target.BundleID)
+	identity, err := dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, d.TargetKind, issuerID, target.BundleID)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +174,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 		providerConnectionID = providerBound.ConnectionID
 	}
 	setup := &MobileSigningSetup{
-		DeploymentID: d.ID, EnvironmentID: d.EnvironmentID, Platform: "ios",
+		DeploymentID: d.ID, EnvironmentID: d.EnvironmentID, Platform: d.TargetKind,
 		Provider: providerName, ProviderConnectionID: providerConnectionID,
 		BundleID: target.BundleID, Status: "provisioning",
 		RequiredFeaturesJSON: mobileFeaturesJSON(requirements.Features),
@@ -228,7 +236,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	bundleResourceID := setup.AppleBundleResourceID
 	if bundleResourceID == "" {
 		listed, callErr := executeIntegration(appleBound, "list_bundle_ids", map[string]any{
-			"identifier": target.BundleID, "platform": "IOS", "limit": 2,
+			"identifier": target.BundleID, "platform": platform.ApplePlatform, "limit": 2,
 		})
 		if callErr != nil {
 			return nil, failSetup(callErr)
@@ -239,7 +247,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 		created, callErr := executeIntegration(appleBound, "register_bundle_id", map[string]any{
 			"identifier": target.BundleID,
 			"name":       appleResourceName(d),
-			"platform":   "IOS",
+			"platform":   platform.ApplePlatform,
 		})
 		if callErr != nil {
 			return nil, failSetup(callErr)
@@ -252,7 +260,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	setup.AppleBundleResourceID = bundleResourceID
 
 	apps, callErr := executeIntegration(appleBound, "list_apps", map[string]any{
-		"bundle_id": target.BundleID, "platform": "IOS", "limit": 2,
+		"bundle_id": target.BundleID, "limit": 2,
 	})
 	if callErr != nil {
 		return nil, failSetup(callErr)
@@ -340,7 +348,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 
 	if identity != nil && !rotate {
 		certificateID := defaultStr(setup.AppleCertificateID, identityState.CertificateID)
-		available, checkErr := appleCertificateAvailable(appleBound, certificateID)
+		available, checkErr := appleCertificateAvailable(appleBound, certificateID, platform.Certificate)
 		if checkErr != nil {
 			return nil, failSetup(checkErr)
 		}
@@ -352,7 +360,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 			if profileID == "" || !requirementsMatch || capabilities.Changed {
 				profile, createErr := executeIntegration(appleBound, "create_profile", map[string]any{
 					"name":            appleReplacementProfileName(d, identityState.KeyFingerprint, requirements.Hash),
-					"profileType":     "IOS_APP_STORE",
+					"profileType":     platform.Profile,
 					"bundle_id":       bundleResourceID,
 					"certificate_ids": []string{certificateID},
 				})
@@ -386,7 +394,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 					return nil, failSetup(decryptErr)
 				}
 				providerResult, err = provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
-					Platform: "ios", IdentityID: identity.ID, IdentityRevision: identity.Revision,
+					Platform: d.TargetKind, IdentityID: identity.ID, IdentityRevision: identity.Revision,
 					ApplicationIdentifier: target.BundleID,
 					AppStoreIssuerID:      issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
 					CertificatePrivateKey: secretPayload.PrivateKeyPEM, BundleID: target.BundleID,
@@ -481,7 +489,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 		return nil, failSetup(err)
 	}
 	certificate, err := executeIntegration(appleBound, "create_certificate", map[string]any{
-		"certificateType": "IOS_DISTRIBUTION",
+		"certificateType": platform.Certificate,
 		"csrContent":      csr,
 	})
 	if err != nil {
@@ -501,7 +509,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 
 	profile, err := executeIntegration(appleBound, "create_profile", map[string]any{
 		"name":            appleReplacementProfileName(d, fingerprint, requirements.Hash),
-		"profileType":     "IOS_APP_STORE",
+		"profileType":     platform.Profile,
 		"bundle_id":       bundleResourceID,
 		"certificate_ids": []string{certificateID},
 	})
@@ -521,7 +529,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	}
 
 	providerResult, err := provider.ProvisionSigningSecrets(ctx, providerBound, cfg, d, mobileSigningSecrets{
-		Platform: "ios", ApplicationIdentifier: target.BundleID,
+		Platform: d.TargetKind, ApplicationIdentifier: target.BundleID,
 		AppStoreIssuerID: issuerID, AppStoreKeyID: keyID, AppStorePrivateKey: apiPrivateKey,
 		CertificatePrivateKey: certificatePrivateKey, BundleID: target.BundleID,
 		AppStoreAppID: appStoreAppID, Scheme: target.Scheme,
@@ -568,7 +576,7 @@ func (a *App) setupIOSMobileSigning(ctx context.Context, d *Deployment, provider
 	setup.LastError = ""
 	certificatePEM, certificateSHA1, certificateSHA256, certificateExpiresAt := appleCertificateMetadata(certificate)
 	identityInput := mobileSigningIdentityInput{
-		ProjectID: d.ProjectID, Platform: "ios", AuthorityScope: issuerID,
+		ProjectID: d.ProjectID, Platform: d.TargetKind, AuthorityScope: issuerID,
 		ApplicationIdentifier: target.BundleID, Format: "pem", Source: "generated",
 		CertificatePEM: certificatePEM, CertificateSHA1: certificateSHA1,
 		CertificateSHA256: certificateSHA256, ExpiresAt: certificateExpiresAt,
@@ -842,7 +850,7 @@ func codemagicSigningGroupName(d *Deployment, secrets mobileSigningSecrets) stri
 		env = d.EnvironmentName
 	}
 	platform := "mobile"
-	if d != nil && (d.TargetKind == "android" || d.TargetKind == "ios") {
+	if d != nil && isAppPlatform(d.TargetKind) {
 		platform = d.TargetKind
 	}
 	name := ""

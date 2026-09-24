@@ -558,7 +558,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 }
 
 func (a *App) runBuildWithOptions(d *Deployment, releaseOpts *releaseOptions) (*Build, error) {
-	if d != nil && (d.TargetKind == "android" || d.TargetKind == "ios") {
+	if d != nil && isAppPlatform(d.TargetKind) {
 		target, err := parseMobileTargetConfig(d.TargetConfigJSON)
 		if err != nil {
 			return nil, err
@@ -666,21 +666,27 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 		fmt.Fprintf(logF, "fetch source failed: %v\n", err)
 		return a.failBuild(build, "fetch source: "+err.Error()), nil
 	}
+	appSrcDir, err := sourceBuildRoot(d, srcDir)
+	if err != nil {
+		return a.failBuild(build, "source layout: "+err.Error()), nil
+	}
 	var localBuildCfg cloudBuildConfig
 	_ = json.Unmarshal([]byte(defaultStr(d.BuildBackendJSON, "{}")), &localBuildCfg)
 	if localBuildCfg.Preflight != "off" && !hasCommandPipeline(d.TargetConfigJSON) && isMobileDeployment(d, build) {
 		localBuildCfg.SourceMode = "bundle"
 		localBuildCfg.ArtifactMode = "file"
-		if err := validateMobileSource(srcDir, d, localBuildCfg); err != nil {
+		if err := validateMobileSource(appSrcDir, d, localBuildCfg); err != nil {
 			return a.failBuild(build, "mobile source preflight: "+err.Error()), nil
 		}
 	}
 	sha, err := hashTree(srcDir)
-	if receipt, readErr := os.ReadFile(filepath.Join(buildDir, "source-receipt.json")); readErr == nil {
-		var r sourceReceipt
-		if json.Unmarshal(receipt, &r) == nil {
-			sha = r.SHA256
-			err = nil
+	if appSrcDir == srcDir {
+		if receipt, readErr := os.ReadFile(filepath.Join(buildDir, "source-receipt.json")); readErr == nil {
+			var r sourceReceipt
+			if json.Unmarshal(receipt, &r) == nil {
+				sha = r.SHA256
+				err = nil
+			}
 		}
 	}
 	if err != nil {
@@ -690,7 +696,7 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 
 	// Detect framework if needed.
 	if fw == "" {
-		fw = detectFramework(srcDir)
+		fw = detectFramework(appSrcDir)
 		if fw == "" {
 			return a.failBuild(build, "framework not detected; set framework on the deployment"), nil
 		}
@@ -707,7 +713,7 @@ func (a *App) runLocalBuildRecord(d *Deployment, build *Build) (*Build, error) {
 		return a.failBuild(build, "signing credentials: "+err.Error()), nil
 	}
 	defer clearRunnerCredentials(&credentials)
-	entrypoint, err := buildWithPipeline(builder, srcDir, distDir, BuildOverrides{
+	entrypoint, err := buildWithPipeline(builder, appSrcDir, distDir, BuildOverrides{
 		Context:          buildCtx,
 		BuildCmd:         d.BuildCmd,
 		StartCmd:         d.StartCmd,

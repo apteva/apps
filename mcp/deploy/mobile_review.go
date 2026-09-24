@@ -203,7 +203,7 @@ func (a *App) observeAppleReviewOutcome(bound *sdk.BoundIntegration, rel *Releas
 	}
 	if outcome.SubmissionID == "" && meta.AppID != "" {
 		raw, err := executeIntegration(bound, "list_review_submissions", map[string]any{
-			"app_id": meta.AppID, "platform": "IOS", "include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
+			"app_id": meta.AppID, "platform": appleStorePlatform(meta.Platform), "include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
 			"submission_fields": "platform,submittedDate,state,items,appStoreVersionForReview",
 			"item_fields":       "state,appStoreVersion", "version_fields": "versionString,appStoreState,build",
 		})
@@ -429,7 +429,7 @@ func (a *App) toolReleaseSync(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		response["store_sync_error"] = deploymentErr.Error()
 		return response, nil
 	}
-	if base == nil || (base.TargetKind != "ios" && base.TargetKind != "android") {
+	if base == nil || !isAppPlatform(base.TargetKind) {
 		return response, nil
 	}
 	d := base

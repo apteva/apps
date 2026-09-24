@@ -44,6 +44,7 @@ type mobileDistributionState struct {
 }
 
 type distributionTarget struct {
+	Platform          string
 	TargetConfigJSON  string
 	Channel           string
 	AppID             string
@@ -79,12 +80,12 @@ func (a *App) mobileDistributionStatus(d *Deployment, args map[string]any) (*mob
 	}
 	var state *mobileDistributionState
 	switch d.TargetKind {
-	case "ios":
+	case "ios", "macos":
 		state, err = a.iosDistributionStatus(target)
 	case "android":
 		state, err = a.androidDistributionStatus(target)
 	default:
-		return nil, errors.New("distribution audiences apply only to Android and iOS deployments")
+		return nil, errors.New("distribution audiences apply only to Android or Apple deployments")
 	}
 	if err != nil {
 		return nil, err
@@ -109,7 +110,7 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 	if err != nil {
 		return nil, err
 	}
-	if d.TargetKind == "ios" && len(audience) == 0 {
+	if isApplePlatform(d.TargetKind) && len(audience) == 0 {
 		return nil, errors.New("an empty TestFlight audience cannot be reconciled safely with the available App Store Connect operations")
 	}
 	installURL := target.InstallURL
@@ -130,12 +131,12 @@ func (a *App) updateMobileDistribution(d *Deployment, args map[string]any) (*mob
 	target.InstallURL = installURL
 	var state *mobileDistributionState
 	switch d.TargetKind {
-	case "ios":
+	case "ios", "macos":
 		state, err = a.updateIOSDistribution(target, audience)
 	case "android":
 		state, err = a.updateAndroidDistribution(target, audience)
 	default:
-		err = errors.New("distribution audiences apply only to Android and iOS deployments")
+		err = errors.New("distribution audiences apply only to Android or Apple deployments")
 	}
 	if err != nil {
 		_ = a.persistDistributionFailure(d, target.Channel, err)
@@ -155,14 +156,14 @@ func (a *App) resolveDistributionTarget(d *Deployment, args map[string]any) (dis
 	if d == nil {
 		return distributionTarget{}, errors.New("deployment required")
 	}
-	if d.TargetKind != "ios" && d.TargetKind != "android" {
-		return distributionTarget{}, errors.New("distribution audiences apply only to Android and iOS deployments")
+	if !isAppPlatform(d.TargetKind) {
+		return distributionTarget{}, errors.New("distribution audiences apply only to Android or Apple deployments")
 	}
 	target := distributionTarget{
-		TargetConfigJSON: d.TargetConfigJSON,
-		Channel:          strArg(args, "channel"),
-		BetaGroupID:      strArg(args, "beta_group_id"),
-		BetaGroupName:    strArg(args, "group_name"),
+		Platform: d.TargetKind, TargetConfigJSON: d.TargetConfigJSON,
+		Channel:       strArg(args, "channel"),
+		BetaGroupID:   strArg(args, "beta_group_id"),
+		BetaGroupName: strArg(args, "group_name"),
 	}
 	var releaseMeta mobileReleaseMeta
 	if releaseID := int64(intArg(args, "release_id")); releaseID > 0 {
@@ -295,7 +296,7 @@ func validateDistributionAudienceForPlatform(platform string, audience []distrib
 			if member.Kind != "group" {
 				return errors.New("Google Play's publishing API supports Google Group addresses only; use kind=group")
 			}
-		case "ios":
+		case "ios", "macos":
 			if member.Kind != "individual" {
 				return errors.New("App Store Connect audiences support individual tester emails; use kind=individual")
 			}
@@ -514,7 +515,7 @@ func finalizeDistributionState(state *mobileDistributionState, target distributi
 	}
 	if state.Platform == "android" {
 		state.ConsoleURL = "https://play.google.com/console/"
-	} else if state.Platform == "ios" {
+	} else if isApplePlatform(state.Platform) {
 		state.ConsoleURL = "https://appstoreconnect.apple.com/apps"
 	}
 	return state
@@ -582,7 +583,7 @@ func (a *App) iosDistributionStatus(target distributionTarget) (*mobileDistribut
 		return nil, err
 	}
 	state := &mobileDistributionState{
-		Platform: "ios", Provider: "app_store_connect", Channel: target.Channel,
+		Platform: defaultStr(target.Platform, "ios"), Provider: "app_store_connect", Channel: target.Channel,
 		AppID: target.AppID, Audience: []distributionAudienceMember{},
 	}
 	if group.ID == "" {
@@ -1117,7 +1118,7 @@ func (a *App) applyDesiredTesting(d *Deployment, doc StoreDocument) error {
 			if _, err := a.reconcileConfiguredGoogleTesting(d, target.PackageName, channel); err != nil {
 				return err
 			}
-		case "ios":
+		case "ios", "macos":
 			target, err := a.resolveDistributionTarget(d, map[string]any{"channel": channel})
 			if err != nil {
 				return err

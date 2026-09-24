@@ -256,11 +256,8 @@ type StoreScopeResult struct {
 }
 
 func mobileStoreProvider(platform string) string {
-	if platform == "ios" {
-		return "app_store_connect"
-	}
-	if platform == "android" {
-		return "google_play"
+	if p, ok := appPlatformFor(platform); ok {
+		return p.Provider
 	}
 	return ""
 }
@@ -339,7 +336,7 @@ func parseStoreDocument(raw string, platform string) (StoreDocument, error) {
 
 func normalizeStoreReleaseMode(platform, raw string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
-	if platform == "ios" {
+	if isApplePlatform(platform) {
 		mode = defaultStr(mode, "manual")
 		if mode == "automatic" {
 			mode = "after_approval"
@@ -495,7 +492,7 @@ func providerStoreStateFullyVerified(d *Deployment, cfg *MobileStoreConfig) bool
 	}
 	var keys []string
 	switch d.TargetKind {
-	case "ios":
+	case "ios", "macos":
 		keys = []string{"listing", "media", "review", "classification", "copyright", "content_rights", "pricing", "availability"}
 	case "android":
 		keys = []string{"listing", "review", "media", "privacy", "pricing", "availability"}
@@ -543,7 +540,7 @@ func appendProviderReadinessFindings(out *StorePreflight, d *Deployment, cfg *Mo
 		appendGoogleProviderReadinessFindings(out, cfg)
 		return
 	}
-	if d.TargetKind != "ios" {
+	if !isApplePlatform(d.TargetKind) {
 		return
 	}
 	checks := []struct {
@@ -677,7 +674,7 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 		for _, finding := range validateStoreAssets(dataDir, d, build, doc) {
 			findings = append(findings, finding)
 		}
-		if d.TargetKind == "ios" {
+		if isApplePlatform(d.TargetKind) {
 			if strings.TrimSpace(doc.Copyright) == "" {
 				add("copyright.required", "error", "version", "", "copyright", "Copyright is required for App Store review.", "Set the copyright for this App Store version.", true)
 			}
@@ -742,15 +739,15 @@ func validateStoreDocument(dataDir string, d *Deployment, build *Build, cfg *Mob
 		pricingVerified := providerReadinessVerified(cfg, "pricing") || boolMapValue(providerDistribution, "pricing_configured")
 		availabilityConfigured := storeAvailabilityConfigured(doc.Distribution)
 		if !availabilityConfigured && !availabilityVerified {
-			add("availability.required", "error", "distribution", "", "territories", "Store availability has not been configured or verified.", "Set territories or attest the existing provider availability.", d.TargetKind == "ios")
+			add("availability.required", "error", "distribution", "", "territories", "Store availability has not been configured or verified.", "Set territories or attest the existing provider availability.", isApplePlatform(d.TargetKind))
 		}
 		if doc.Distribution.PriceTier == "" && !pricingVerified {
-			add("pricing.required", "error", "distribution", "", "price_tier", "Store pricing has not been configured or verified.", "Set FREE/a provider price point or attest the existing provider pricing.", d.TargetKind == "ios")
+			add("pricing.required", "error", "distribution", "", "price_tier", "Store pricing has not been configured or verified.", "Set FREE/a provider price point or attest the existing provider pricing.", isApplePlatform(d.TargetKind))
 		}
 		if availabilityConfigured && !validStoreAvailability(doc.Distribution) {
 			add("availability.invalid", "error", "distribution", "", "availability", "Availability mode or territory selection is invalid.", "Choose all, all except selected territories, or only selected territories.", true)
 		}
-		if doc.Distribution.PriceTier != "" && doc.Distribution.PriceTier != "FREE" && d.TargetKind == "ios" &&
+		if doc.Distribution.PriceTier != "" && doc.Distribution.PriceTier != "FREE" && isApplePlatform(d.TargetKind) &&
 			providerExtensionBody(doc, "app_store_connect", "price_schedule_body") == nil &&
 			!pricingVerified {
 			add("pricing.apple_payload", "error", "distribution", "", "provider_extensions", "Paid Apple pricing requires an AppPriceSchedule provider payload.", "Provide app_store_connect.price_schedule_body or attest the current pricing.", true)
@@ -836,7 +833,7 @@ func (a *App) storePlan(d *Deployment, build *Build, strict bool) (StorePlan, er
 		plan.Operations = append(plan.Operations, StorePlanOp{Scope: "testing", Action: "synchronize", Count: len(doc.Testing.Channels)})
 	}
 	complianceAction := "verify"
-	if d.TargetKind == "ios" {
+	if isApplePlatform(d.TargetKind) {
 		complianceAction = "reconcile"
 	}
 	plan.Operations = append(plan.Operations, StorePlanOp{Scope: "compliance", Action: complianceAction})
@@ -865,7 +862,7 @@ func (a *App) observeStoreConfig(d *Deployment) (*MobileStoreConfig, map[string]
 	}
 	var observed map[string]any
 	switch d.TargetKind {
-	case "ios":
+	case "ios", "macos":
 		observed, err = a.observeAppleStoreConfig(d, doc)
 	case "android":
 		observed, err = a.observeGoogleStoreConfig(d, doc, cfg)
@@ -937,7 +934,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 		return nil, errors.New("App Store Connect app record not found")
 	}
 	versions, err := executeIntegration(bound, "list_app_versions", map[string]any{
-		"app_id": appID, "platform": "IOS", "version_string": doc.VersionName, "limit": 10,
+		"app_id": appID, "platform": appleStorePlatform(d.TargetKind), "version_string": doc.VersionName, "limit": 10,
 	})
 	if err != nil {
 		return nil, err
@@ -950,7 +947,7 @@ func (a *App) observeAppleStoreConfig(d *Deployment, doc StoreDocument) (map[str
 	if versionID == "" {
 		observed["readiness"].(map[string]any)["listing"] = readinessCheck(false, "provider", "The configured store version does not exist yet.")
 		allVersions, listErr := executeIntegration(bound, "list_app_versions", map[string]any{
-			"app_id": appID, "platform": "IOS", "limit": 50,
+			"app_id": appID, "platform": appleStorePlatform(d.TargetKind), "limit": 50,
 		})
 		if listErr != nil {
 			observed["versions_error"] = storeObservationError(listErr, false, "retry_sync")
@@ -1769,7 +1766,7 @@ func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc Store
 	}
 	versionID := ""
 	if scopes.any("version", "localizations", "media", "review") {
-		versionID, err = ensureAppleStoreVersion(bound, appID, doc)
+		versionID, err = ensureAppleStoreVersion(bound, appID, doc, d.TargetKind)
 		if err != nil {
 			return nil, err
 		}
@@ -1809,7 +1806,7 @@ func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc Store
 	if err := a.applyAppleMetadata(bound, appID, doc, scopes); err != nil {
 		return nil, err
 	}
-	if scopes.has("media") && (mediaKinds.has("phone_screenshot") || mediaKinds.has("tablet_screenshot")) {
+	if scopes.has("media") && (mediaKinds.has("phone_screenshot") || mediaKinds.has("tablet_screenshot") || mediaKinds.has("desktop_screenshot")) {
 		if err := a.reconcileAppleScreenshots(bound, d, localizationIDs, doc, mediaKinds); err != nil {
 			return nil, err
 		}
@@ -1847,9 +1844,13 @@ func (a *App) applyAppleStoreConfigScopesWithMediaKinds(d *Deployment, doc Store
 	}, nil
 }
 
-func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc StoreDocument) (string, error) {
+func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc StoreDocument, platform ...string) (string, error) {
+	applePlatform := "IOS"
+	if len(platform) > 0 {
+		applePlatform = appleStorePlatform(platform[0])
+	}
 	versions, err := executeIntegration(bound, "list_app_versions", map[string]any{
-		"app_id": appID, "platform": "IOS", "limit": 50,
+		"app_id": appID, "platform": applePlatform, "limit": 50,
 	})
 	if err != nil {
 		return "", err
@@ -1892,7 +1893,7 @@ func ensureAppleStoreVersion(bound *sdk.BoundIntegration, appID string, doc Stor
 	}
 	input := appleVersionSettingsInput("", doc)
 	input["app_id"] = appID
-	input["platform"] = "IOS"
+	input["platform"] = applePlatform
 	input["versionString"] = doc.VersionName
 	created, err := executeIntegration(bound, "create_app_version", input)
 	if err != nil {

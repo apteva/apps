@@ -92,7 +92,7 @@ interface NativePanelProps {
 interface Deployment {
   id: number;
   name: string;
-  target_kind: "service" | "android" | "ios" | "artifact";
+  target_kind: "service" | "android" | "ios" | "macos" | "artifact";
   description?: string;
   source_kind: string;
   source_ref: string;
@@ -229,7 +229,7 @@ interface MobileSigningSetup {
 
 interface MobileSigningIdentity {
   id: number;
-  platform: "android" | "ios";
+  platform: "android" | "ios" | "macos";
   application_identifier: string;
   format: string;
   revision: number;
@@ -250,7 +250,7 @@ interface DistributionAudienceMember {
 }
 
 interface MobileDistributionState {
-  platform: "android" | "ios";
+  platform: "android" | "ios" | "macos";
   provider: string;
   channel: string;
   group_id?: string;
@@ -507,9 +507,9 @@ interface UnhealthyEntry {
 
 const API = "/api/apps/deploy/api";
 
-const FRAMEWORKS = ["command", "", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
+const FRAMEWORKS = ["command", "", "go", "node", "bun", "static", "blank", "android", "ios", "macos"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
-const TARGET_KINDS = ["service", "android", "ios", "artifact"] as const;
+const TARGET_KINDS = ["service", "android", "ios", "macos", "artifact"] as const;
 const BUILD_BACKENDS = ["local", "runner", "codemagic", "github_actions"] as const;
 
 function statusColor(s: string): string {
@@ -618,6 +618,8 @@ function releaseReviewOutcome(release: Release): MobileReviewOutcome | null {
   }
 }
 
+function isAppleTarget(kind: string): kind is "ios" | "macos" { return kind === "ios" || kind === "macos"; }
+
 function isProductionMobileChannel(platform: Deployment["target_kind"], channel: string): boolean {
   const normalized = channel.trim().toLowerCase();
   return normalized === "production" || (platform === "android" && normalized.endsWith(":production"));
@@ -638,14 +640,16 @@ function mobileBuildVersion(build: Build): string {
 function artifactDownloadLabel(deployment: Deployment, build: Build): string {
   let format = deployment.target_kind === "android"
     ? "AAB"
-    : deployment.target_kind === "ios"
+    : deployment.target_kind === "macos"
+      ? "PKG"
+    : isAppleTarget(deployment.target_kind)
       ? "IPA"
       : "ZIP";
   try {
     const manifest = JSON.parse(build.artifact_manifest_json || "{}");
     const primary = String(manifest.primary || "");
     const extension = primary.includes(".") ? primary.split(".").pop()?.toUpperCase() : "";
-    if (extension && ["AAB", "APK", "IPA", "ZIP"].includes(extension)) format = extension;
+    if (extension && ["AAB", "APK", "IPA", "PKG", "ZIP"].includes(extension)) format = extension;
   } catch {}
   return `Download ${format}`;
 }
@@ -743,7 +747,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       const d = await api<DeploymentDetail>("GET", `/deployments/${id}`, undefined, {}, request.signal);
       let signing: { setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[] } | null = null;
       let store: StoreConfigState | null = null;
-      if (d.deployment.target_kind === "ios" || d.deployment.target_kind === "android") {
+      if (isAppleTarget(d.deployment.target_kind) || d.deployment.target_kind === "android") {
         [signing, store] = await Promise.all([
           api<{setups?: MobileSigningSetup[]; identities?: MobileSigningIdentity[]}>("GET", `/deployments/${id}/mobile-signing`, undefined, {}, request.signal),
           api<StoreConfigState>("GET", `/deployments/${id}/store-config`, undefined, {}, request.signal),
@@ -919,7 +923,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
         "POST", `/deployments/${detail.deployment.id}/build`, {
           release,
           channel: detail.deployment.target_kind === "service" ? undefined : mobileChannel,
-          submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+          submit_for_review: isAppleTarget(detail.deployment.target_kind) && mobileChannel === "production" && submitForReview,
         },
       );
       // Switch log target to the freshly-created build first.
@@ -940,7 +944,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
         "POST", `/deployments/${detail.deployment.id}/release`, {
           build_id: buildId,
           channel: detail.deployment.target_kind === "service" ? undefined : mobileChannel,
-          submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+          submit_for_review: isAppleTarget(detail.deployment.target_kind) && mobileChannel === "production" && submitForReview,
         },
       );
       setLogKind("release");
@@ -967,7 +971,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
       const r = await api<{ release: Release }>("POST", `/deployments/${detail.deployment.id}/promote`, {
         release_id: releaseId,
         target_channel: mobileChannel,
-        submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+        submit_for_review: isAppleTarget(detail.deployment.target_kind) && mobileChannel === "production" && submitForReview,
       });
       setLogKind("release");
       setLogTargetId(r.release.id);
@@ -987,7 +991,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
         release_id: releaseId,
         target_channel: mobileChannel,
         validate_only: true,
-        submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+        submit_for_review: isAppleTarget(detail.deployment.target_kind) && mobileChannel === "production" && submitForReview,
       });
       setPromotionValidations((current) => ({ ...current, [releaseId]: r.validation }));
       setError("");
@@ -1031,7 +1035,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 	const handleMobileSigningRotation = () => {
 		const platform = detail?.deployment.target_kind;
 		setConfirmState({
-			title: platform === "android" ? "Rotate Android upload key" : "Rotate iOS signing",
+			title: platform === "android" ? "Rotate Android upload key" : "Rotate Apple signing",
 			body: platform === "android"
 				? "Replace the managed Android upload key? Google Play must accept the new upload certificate before builds signed with it can be published."
 				: "Create a replacement Apple distribution certificate and profile, update the build provider secrets, then revoke the previous resources?",
@@ -1278,7 +1282,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     });
   };
 
-  const mobile = detail?.deployment.target_kind === "android" || detail?.deployment.target_kind === "ios";
+  const mobile = detail?.deployment.target_kind === "android" || isAppleTarget(detail?.deployment.target_kind || "");
   const latestMobileRelease = mobile ? detail?.releases[0] : null;
 
   return (
@@ -1449,7 +1453,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   Store listing
                 </button>
               )}
-              {detail.deployment.target_kind === "ios" && mobileChannel === "production" && (
+              {isAppleTarget(detail.deployment.target_kind) && mobileChannel === "production" && (
                 <label className="flex items-center gap-1 text-xs text-text-muted">
                   <input
                     type="checkbox"
@@ -1919,7 +1923,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                               <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">halt</button>
                             </span>
                           )}
-                          {detail.deployment.target_kind === "ios" && rel.channel !== "production" && rel.status === "live" && (
+                          {isAppleTarget(detail.deployment.target_kind) && rel.channel !== "production" && rel.status === "live" && (
                             <button type="button" disabled={busy} onClick={() => handleHaltMobileRelease(rel)} className="text-red hover:underline disabled:opacity-40">expire</button>
                           )}
                         </td>
@@ -2210,7 +2214,7 @@ function CreateDeploymentDialog({
         const parsed = JSON.parse(targetJSON) as Record<string, unknown>;
         if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("must be an object");
         if (targetKind === "android" && !String(parsed.package_name || "").trim()) throw new Error("package_name is required");
-        if (targetKind === "ios" && !String(parsed.bundle_id || "").trim()) throw new Error("bundle_id is required");
+        if (isAppleTarget(targetKind) && !String(parsed.bundle_id || "").trim()) throw new Error("bundle_id is required");
       } catch (e) {
         setErr("Mobile target config: " + (e as Error).message);
         return;
@@ -2303,7 +2307,7 @@ function CreateDeploymentDialog({
             <select
               value={framework}
               onChange={(e) => setFramework(e.target.value as (typeof FRAMEWORKS)[number])}
-              disabled={targetKind === "android" || targetKind === "ios"}
+              disabled={targetKind === "android" || isAppleTarget(targetKind)}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               {FRAMEWORKS.map((f) => (
@@ -2415,7 +2419,7 @@ function CreateDeploymentDialog({
           </div>
           {(
             <div className="col-span-2">
-              {(targetKind === "android" || targetKind === "ios") && <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />}
+              {(targetKind === "android" || isAppleTarget(targetKind)) && <MobileTargetFields targetKind={targetKind} value={targetConfig} onChange={setTargetConfig} />}
               <details className="mt-3 text-xs text-text-muted">
                 <summary className="cursor-pointer">Target configuration (commands, publisher and policy)</summary>
                 <textarea
@@ -2650,8 +2654,8 @@ function StoreListingDialog({
   const [tab, setTab] = useState<"listing" | "media" | "review" | "compliance" | "distribution">("listing");
   const [locale, setLocale] = useState(initial.desired.default_locale || "en-US");
   const [newLocale, setNewLocale] = useState("");
-  const [assetKind, setAssetKind] = useState("phone_screenshot");
-  const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "ios" ? "APP_IPHONE_69" : "");
+  const [assetKind, setAssetKind] = useState(deployment.target_kind === "macos" ? "desktop_screenshot" : "phone_screenshot");
+  const [displayTarget, setDisplayTarget] = useState(deployment.target_kind === "macos" ? "APP_DESKTOP" : isAppleTarget(deployment.target_kind) ? "APP_IPHONE_69" : "");
   const [reviewPassword, setReviewPassword] = useState("");
   const [hasConfig, setHasConfig] = useState(Boolean(initial.config));
   const [readiness, setReadiness] = useState(() => storeReadiness(initial.config?.observed_json));
@@ -2827,7 +2831,7 @@ function StoreListingDialog({
           <div className="min-w-0 flex-1">
             <h2 className="text-text font-semibold">Store listing</h2>
             <div className="text-xs text-text-dim">
-              {deployment.target_kind === "ios" ? "App Store Connect" : "Google Play"}
+              {isAppleTarget(deployment.target_kind) ? "App Store Connect" : "Google Play"}
               {initial.config?.status
                 ? ` · ${initial.config.desired_hash === initial.config.applied_hash && initial.config.applied_hash ? "applied and verified" : initial.config.status}`
                 : " · not configured"}
@@ -2906,13 +2910,13 @@ function StoreListingDialog({
                   </select>
                 </label>
                 <label className="text-xs text-text-muted">
-                  {deployment.target_kind === "ios" ? "Release mode" : "Production rollout"}
+                  {isAppleTarget(deployment.target_kind) ? "Release mode" : "Production rollout"}
                   <select
                     value={doc.release_mode}
                     onChange={(e) => setDoc({ ...doc, release_mode: e.target.value })}
                     className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                   >
-                    {deployment.target_kind === "ios" ? (
+                    {isAppleTarget(deployment.target_kind) ? (
                       <>
                         <option value="manual">Manual</option>
                         <option value="after_approval">After approval</option>
@@ -2928,7 +2932,7 @@ function StoreListingDialog({
                 </label>
               </section>
 
-              {deployment.target_kind === "ios" && (
+              {isAppleTarget(deployment.target_kind) && (
                 <section className="grid grid-cols-1 sm:grid-cols-3 gap-3 border-t border-border pt-4">
                   <TextField label="Copyright" value={doc.copyright} onChange={(copyright) => setDoc({ ...doc, copyright })} />
                   <label className="flex items-center gap-2 text-xs text-text-muted">
@@ -2978,9 +2982,9 @@ function StoreListingDialog({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <TextField label="Title" value={localization.title} onChange={(title) => updateLocalization({ title })} />
                   <TextField
-                    label={deployment.target_kind === "ios" ? "Subtitle" : "Short description"}
-                    value={deployment.target_kind === "ios" ? localization.subtitle : localization.short_description}
-                    onChange={(value) => updateLocalization(deployment.target_kind === "ios"
+                    label={isAppleTarget(deployment.target_kind) ? "Subtitle" : "Short description"}
+                    value={isAppleTarget(deployment.target_kind) ? localization.subtitle : localization.short_description}
+                    onChange={(value) => updateLocalization(isAppleTarget(deployment.target_kind)
                       ? { subtitle: value }
                       : { short_description: value })}
                   />
@@ -2993,7 +2997,7 @@ function StoreListingDialog({
                       className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                     />
                   </label>
-                  {deployment.target_kind === "ios" && (
+                  {isAppleTarget(deployment.target_kind) && (
                     <TextField
                       label="Keywords"
                       value={(localization.keywords || []).join(", ")}
@@ -3022,7 +3026,9 @@ function StoreListingDialog({
                     onChange={(e) => {
                       const kind = e.target.value;
                       setAssetKind(kind);
-                      if (deployment.target_kind === "ios") {
+                      if (deployment.target_kind === "macos") {
+                        setDisplayTarget("APP_DESKTOP");
+                      } else if (isAppleTarget(deployment.target_kind)) {
                         setDisplayTarget(kind === "tablet_screenshot" ? "APP_IPAD_PRO_13" : kind === "app_preview" ? "IPHONE_67" : "APP_IPHONE_69");
                       } else {
                         setDisplayTarget(kind === "tablet_screenshot" ? "tablet_7" : "");
@@ -3030,10 +3036,11 @@ function StoreListingDialog({
                     }}
                     className="mt-1 block bg-bg-input border border-border rounded px-2 py-1 text-sm"
                   >
-                    <option value="phone_screenshot">Phone screenshot</option>
-                    <option value="tablet_screenshot">Tablet screenshot</option>
+                    {deployment.target_kind !== "macos" && <option value="phone_screenshot">Phone screenshot</option>}
+                    {deployment.target_kind !== "macos" && <option value="tablet_screenshot">Tablet screenshot</option>}
+                    {deployment.target_kind === "macos" && <option value="desktop_screenshot">Mac screenshot</option>}
                     {deployment.target_kind === "ios" && <option value="app_preview">App preview</option>}
-                    {deployment.target_kind === "ios" && <option value="review_attachment">Review attachment</option>}
+                    {isAppleTarget(deployment.target_kind) && <option value="review_attachment">Review attachment</option>}
                     {deployment.target_kind === "android" && <option value="icon">App icon</option>}
                     {deployment.target_kind === "android" && <option value="feature_graphic">Feature graphic</option>}
                     {deployment.target_kind === "android" && <option value="tv_screenshot">TV screenshot</option>}
@@ -3042,13 +3049,15 @@ function StoreListingDialog({
                 </label>
                 <label className="text-xs text-text-muted">
                   Display target
-                  {deployment.target_kind === "ios" && assetKind !== "review_attachment" ? (
+                  {isAppleTarget(deployment.target_kind) && assetKind !== "review_attachment" ? (
                     <select
                       value={displayTarget}
                       onChange={(e) => setDisplayTarget(e.target.value)}
                       className="mt-1 block w-52 bg-bg-input border border-border rounded px-2 py-1 text-sm"
                     >
-                      {assetKind === "tablet_screenshot" ? (
+                      {assetKind === "desktop_screenshot" ? (
+                        <option value="APP_DESKTOP">Mac desktop</option>
+                      ) : assetKind === "tablet_screenshot" ? (
                         <>
                           <option value="APP_IPAD_PRO_13">iPad 13-inch</option>
                           <option value="APP_IPAD_PRO_3GEN_129">iPad Pro 12.9-inch</option>
@@ -3156,7 +3165,7 @@ function StoreListingDialog({
               {doc.review.demo_account_required && (
                 <>
                   <TextField label="Demo username" value={doc.review.demo_username} onChange={(demo_username) => setDoc({ ...doc, review: { ...doc.review, demo_username } })} />
-                  {deployment.target_kind === "ios" ? (
+                  {isAppleTarget(deployment.target_kind) ? (
                       <label className="text-xs text-text-muted">
                         Demo password {doc.review.demo_password_set && <span className="text-green">configured</span>}
                         <input
@@ -3216,12 +3225,12 @@ function StoreListingDialog({
                     className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
                   >
                     <option value="">Select category</option>
-                    {(deployment.target_kind === "ios" ? APPLE_CATEGORIES : GOOGLE_CATEGORIES).map((category) => (
+                    {(isAppleTarget(deployment.target_kind) ? APPLE_CATEGORIES : GOOGLE_CATEGORIES).map((category) => (
                       <option key={category} value={category}>{category.replaceAll("_", " ")}</option>
                     ))}
                   </select>
                 </label>
-                {deployment.target_kind === "ios" && (
+                {isAppleTarget(deployment.target_kind) && (
                   <label className="text-xs text-text-muted">
                     Secondary category
                     <select
@@ -3292,14 +3301,14 @@ function StoreListingDialog({
                     </label>
                   ))}
                 </div>
-                {deployment.target_kind === "ios" && (
+                {isAppleTarget(deployment.target_kind) && (
                   <details className="text-xs text-text-muted">
                     <summary className="cursor-pointer">Advanced Apple declaration fields</summary>
                     <textarea value={ageJSON} onChange={(e) => setAgeJSON(e.target.value)} rows={6} className="mt-2 w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono" />
                   </details>
                 )}
               </section>
-              {deployment.target_kind === "ios" ? (
+              {isAppleTarget(deployment.target_kind) ? (
                 <>
                   <label className="flex items-center gap-2 text-xs text-text-muted">
                     <input
@@ -3539,7 +3548,7 @@ function MobileTargetFields({
   value,
   onChange,
 }: {
-  targetKind: "android" | "ios";
+  targetKind: "android" | "ios" | "macos";
   value: string;
   onChange: (value: string) => void;
 }) {
@@ -3568,14 +3577,14 @@ function MobileTargetFields({
           <TextField label="Marketing version" value={String(config.version_name || "")} onChange={(version_name) => set({ version_name })} />
           <TextField label="Apple Team ID" value={String(config.team_id || "")} onChange={(team_id) => set({ team_id })} />
           <TextField label="App Store app ID" value={String(config.app_store_app_id || "")} onChange={(app_store_app_id) => set({ app_store_app_id })} />
-          <div className="flex items-end gap-4 pb-1">
+          {targetKind === "ios" && <div className="flex items-end gap-4 pb-1">
             {(["iphone", "ipad"] as const).map((family) => (
               <label key={family} className="flex items-center gap-2 text-xs text-text-muted">
                 <input type="checkbox" checked={families.includes(family)} onChange={(e) => toggleFamily(family, e.target.checked)} />
                 {family === "iphone" ? "iPhone" : "iPad"}
               </label>
             ))}
-          </div>
+          </div>}
         </>
       )}
       <label className="text-xs text-text-muted">
@@ -3587,9 +3596,9 @@ function MobileTargetFields({
       </label>
       {strategy === "manual" && (
         <TextField
-          label={targetKind === "ios" ? "Build number" : "Version code"}
-          value={String(config[targetKind === "ios" ? "build_number" : "version_code"] || "")}
-          onChange={(next) => set({ [targetKind === "ios" ? "build_number" : "version_code"]: next })}
+          label={isAppleTarget(targetKind) ? "Build number" : "Version code"}
+          value={String(config[isAppleTarget(targetKind) ? "build_number" : "version_code"] || "")}
+          onChange={(next) => set({ [isAppleTarget(targetKind) ? "build_number" : "version_code"]: next })}
         />
       )}
     </div>
@@ -3916,7 +3925,7 @@ function EditConfigDialog({
           {(
             <div className="col-span-2">
               <label className="text-xs text-text-muted block mb-1">Source options</label><textarea value={sourceOptions} onChange={e=>setSourceOptions(e.target.value)} rows={2} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono" />
-              {(deployment.target_kind === "android" || deployment.target_kind === "ios") && <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />}
+              {(deployment.target_kind === "android" || isAppleTarget(deployment.target_kind)) && <MobileTargetFields targetKind={deployment.target_kind} value={targetConfigJSON} onChange={setTargetConfigJSON} />}
               <details className="mt-3 text-xs text-text-muted">
                 <summary className="cursor-pointer">Target configuration (commands, publisher and policy)</summary>
                 <textarea

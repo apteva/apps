@@ -73,13 +73,17 @@ func (a *App) prepareSourceCapsule(ctx context.Context, d *Deployment, build *Bu
 	if err := fetchSource(globalCtx, d, srcDir, sourceCfg); err != nil {
 		return nil, fmt.Errorf("fetch source capsule: %w", err)
 	}
+	appSrcDir, err := sourceBuildRoot(d, srcDir)
+	if err != nil {
+		return nil, fmt.Errorf("source layout: %w", err)
+	}
 	if d.TargetKind == "ios" && !hasCommandPipeline(d.TargetConfigJSON) {
-		if err := a.snapshotIOSDeviceFamilies(srcDir, d, build); err != nil {
+		if err := a.snapshotIOSDeviceFamilies(appSrcDir, d, build); err != nil {
 			return nil, fmt.Errorf("detect iOS device families: %w", err)
 		}
 	}
 	if cfg.Preflight != "off" && !hasCommandPipeline(d.TargetConfigJSON) && isMobileDeployment(d, build) {
-		if err := validateMobileSource(srcDir, d, cfg); err != nil {
+		if err := validateMobileSource(appSrcDir, d, cfg); err != nil {
 			return nil, fmt.Errorf("mobile source preflight: %w", err)
 		}
 	}

@@ -71,6 +71,9 @@ func detectFramework(srcDir string) string {
 	if looksLikeAndroidProject(srcDir) {
 		return "android"
 	}
+	if looksLikeMacOSProject(srcDir) {
+		return "macos"
+	}
 	if looksLikeIOSProject(srcDir) {
 		return "ios"
 	}
@@ -95,10 +98,12 @@ func builderFor(framework string) (Builder, error) {
 		return &androidBuilder{}, nil
 	case "ios":
 		return &iosBuilder{}, nil
+	case "macos":
+		return &macOSBuilder{}, nil
 	case "":
 		return nil, errors.New("framework not detected; set framework explicitly on the deployment")
 	default:
-		return nil, fmt.Errorf("framework %q not supported (supported: go, node, bun, static, blank, android, ios)", framework)
+		return nil, fmt.Errorf("framework %q not supported (supported: go, node, bun, static, blank, android, ios, macos)", framework)
 	}
 }
 
