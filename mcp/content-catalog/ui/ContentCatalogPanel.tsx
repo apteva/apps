@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 const API = "/api/apps/content-catalog";
 type Brand = { id: string; slug: string; name: string; storage_root: string; host_provider: string; host_connection_id: number; host_library_id: string; host_collection_id: string };
@@ -14,6 +14,13 @@ type GigLink = { gigs_install_id: number; gig_id: number; role: string };
 type MediaDetails = { title?: string; description?: string; duration_ms?: number; width?: number; height?: number; audience_rating?: string; transcript_status?: string; probe_status?: string };
 type Host = { connection_id: number; provider: string; default: boolean };
 type ImportCandidate = { storage_file_id: string; storage_install_id: number; name: string; folder: string; content_type: string; linked_session_ids: string[]; needs_review: boolean };
+type SearchUse = AssetUse & { account_ref: string; external_url: string; external_post_id: string; actual_at: string };
+type AssetHit = Asset & { brand_id: string; session_title: string; session_date: string; is_derivative: boolean; uses: SearchUse[]; match_reason: string };
+type SessionHit = Session & { brand_name: string; asset_count: number };
+type ReleaseHit = Release & { brand_name: string; target_count: number; sort_date: string };
+type SearchPage<T> = { items: T[]; next_cursor?: string };
+type SearchResults = { assets: SearchPage<AssetHit>; sessions: SearchPage<SessionHit>; releases: SearchPage<ReleaseHit> };
+const emptySearch = (): SearchResults => ({ assets: { items: [] }, sessions: { items: [] }, releases: { items: [] } });
 
 function errorText(err: unknown): string { return err instanceof Error ? err.message : String(err); }
 function short(id: string): string { return id.slice(0, 8); }
@@ -22,11 +29,40 @@ function storageContentURL(projectId: string, asset: Asset): string { return sto
 function previewURL(projectId: string, kind: "sessions" | "assets", id: string): string { return `${API}/${kind}/${encodeURIComponent(id)}/preview?${new URLSearchParams({ project_id: projectId })}`; }
 function mediaGlyph(kind: string): string { return kind === "video" ? "▶" : kind === "audio" ? "♫" : kind === "image" ? "▣" : "▤"; }
 function assetMediaKind(asset: Asset): string { return asset.content_type.startsWith("image/") ? "image" : asset.content_type.startsWith("video/") ? "video" : asset.content_type.startsWith("audio/") ? "audio" : asset.kind; }
+function publicationLabel(status: string): string {
+  return ({ verified_published: "Verified live", provider_reported_published: "Reported live", scheduled: "Scheduled", submitted: "Submitted", failed: "Failed", removed: "Removed", unknown: "Unverified", planned: "Planned" } as Record<string, string>)[status] || status.replaceAll("_", " ");
+}
+function publicationColor(status: string): string {
+  if (status === "verified_published") return "#22c55e";
+  if (status === "provider_reported_published") return "#86efac";
+  if (status === "failed" || status === "removed") return "#f87171";
+  if (status === "scheduled" || status === "submitted") return "#fbbf24";
+  return "#a1a1aa";
+}
 
-function PreviewImage({ src, alt, fallback, className = "" }: { src: string; alt: string; fallback: string; className?: string }) {
+function ReleaseUseList({ uses }: { uses: AssetUse[] }) {
+  if (!uses.length) return <p className="text-xs text-text-muted">No release yet</p>;
+  return <div className="space-y-2" aria-label="Release destinations">{uses.map(use => <div key={use.target_id} className="text-xs"><div className="flex flex-wrap items-center justify-between gap-x-2"><span className="min-w-0 truncate">{use.destination}</span><span style={{ color: publicationColor(use.status) }}>{publicationLabel(use.status)}</span></div><div className="truncate text-text-muted" title={use.release_title}>{use.release_title}</div></div>)}</div>;
+}
+
+function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+  return <div role="presentation" style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20, background: "rgba(0, 0, 0, .72)" }} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+    <section role="dialog" aria-modal="true" aria-label={title} className="rounded-xl border border-border bg-bg p-4 shadow-2xl" style={{ width: "min(100%, 560px)", maxHeight: "90vh", overflowY: "auto" }}>
+      <div className="mb-2 flex justify-end"><button type="button" className="rounded border border-border px-2 py-1 text-sm" onClick={onClose} aria-label="Close dialog">Close</button></div>
+      {children}
+    </section>
+  </div>;
+}
+
+function PreviewImage({ src, alt, fallback, className = "", style }: { src: string; alt: string; fallback: string; className?: string; style?: { width?: number; height?: number; flexShrink?: number } }) {
   const [failed, setFailed] = useState(false);
   useEffect(() => { setFailed(false); }, [src]);
-  return <div className={`relative overflow-hidden bg-gradient-to-br from-accent/15 via-bg-input to-bg ${className}`}>{failed ? <div className="absolute inset-0 flex items-center justify-center text-3xl text-text-muted" aria-label="No preview available">{fallback}</div> : <img src={src} alt={alt} loading="lazy" className="absolute inset-0 h-full w-full object-cover" onError={() => setFailed(true)} />}</div>;
+  return <div className={`relative overflow-hidden bg-gradient-to-br from-accent/15 via-bg-input to-bg ${className}`} style={style}>{failed ? <div className="absolute inset-0 flex items-center justify-center text-3xl text-text-muted" aria-label="No preview available">{fallback}</div> : <img src={src} alt={alt} loading="lazy" className="absolute inset-0 h-full w-full object-cover" onError={() => setFailed(true)} />}</div>;
 }
 
 function AssetViewer({ asset, projectId }: { asset: Asset; projectId: string }) {
@@ -49,7 +85,24 @@ function CandidateViewer({ candidate, projectId }: { candidate: ImportCandidate;
 }
 
 export default function ContentCatalogPanel({ projectId, installId }: { projectId: string; installId: number }) {
-  const [tab, setTab] = useState<"brands" | "sessions" | "releases">("sessions");
+  const [tab, setTab] = useState<"brands" | "sessions" | "search" | "releases">("sessions");
+  const [returnTab, setReturnTab] = useState<"sessions" | "search">("sessions");
+  const [searchText, setSearchText] = useState("");
+  const [searchType, setSearchType] = useState("all");
+  const [searchBrand, setSearchBrand] = useState("");
+  const [searchDateFrom, setSearchDateFrom] = useState("");
+  const [searchDateTo, setSearchDateTo] = useState("");
+  const [searchKind, setSearchKind] = useState("");
+  const [searchLineage, setSearchLineage] = useState("");
+  const [searchSort, setSearchSort] = useState("session_newest");
+  const [searchReview, setSearchReview] = useState("");
+  const [searchDestination, setSearchDestination] = useState("");
+  const [searchAccount, setSearchAccount] = useState("");
+  const [searchAvailability, setSearchAvailability] = useState("any");
+  const [searchResults, setSearchResults] = useState<SearchResults>(emptySearch);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [searchReload, setSearchReload] = useState(0);
   const [overview, setOverview] = useState<Record<string, number>>({});
   const [brands, setBrands] = useState<Brand[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -67,6 +120,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
   const [importLimitReached, setImportLimitReached] = useState(false);
   const [selectedRelease, setSelectedRelease] = useState<Release | null>(null);
   const [observations, setObservations] = useState<Record<string, PublicationObservation[]>>({});
+  const [modal, setModal] = useState<"new-session" | "add-file" | "link-gig" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -88,7 +142,7 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
       get<{ sessions: Session[] }>("/sessions"), get<{ releases: Release[] }>("/releases"),
       get<{ hosts: Host[] }>("/video-hosts"),
     ]);
-    setOverview(o); setBrands(b.brands || []); setSessions(s.sessions || []); setReleases(r.releases || []); setHosts(h.hosts || []);
+    setOverview(o); setBrands(b.brands || []); setSessions(s.sessions || []); setReleases(r.releases || []); setHosts(h.hosts || []); setSearchReload(n => n + 1);
   }, [get]);
   useEffect(() => { refresh().catch(e => setError(errorText(e))); }, [refresh]);
   const run = useCallback(async (task: () => Promise<void>, message: string) => {
@@ -99,6 +153,31 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     setSelectedSession(s); setSelectedAsset(null); setCandidates([]); setError("");
     try { const result = await get<{ assets: Asset[]; gigs: GigLink[] }>(`/sessions/${s.id}`); setAssets(result.assets || []); setGigs(result.gigs || []); } catch (e) { setError(errorText(e)); }
   }, [get]);
+  const showSession = useCallback(async (s: Session, origin: "sessions" | "search" = "sessions") => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("catalog_session", s.id);
+    window.history.pushState(null, "", url);
+    setReturnTab(origin); setTab("sessions");
+    setModal(null);
+    await openSession(s);
+  }, [openSession]);
+  const backToSessions = useCallback(() => {
+    const url = new URL(window.location.href);
+    url.searchParams.delete("catalog_session");
+    window.history.replaceState(null, "", url);
+    setSelectedSession(null); setSelectedAsset(null); setModal(null); setTab(returnTab);
+  }, [returnTab]);
+  useEffect(() => {
+    const syncFromURL = () => {
+      const id = new URLSearchParams(window.location.search).get("catalog_session");
+      if (!id) { setSelectedSession(null); setSelectedAsset(null); return; }
+      const session = sessions.find(s => s.id === id);
+      if (session) openSession(session);
+    };
+    window.addEventListener("popstate", syncFromURL);
+    syncFromURL();
+    return () => window.removeEventListener("popstate", syncFromURL);
+  }, [sessions, openSession]);
   const previewImport = useCallback(async (s: Session) => {
     try { const result = await get<{ candidates: ImportCandidate[]; limit_reached: boolean }>("/import-preview", { session_id: s.id }); setCandidates(result.candidates || []); setImportLimitReached(result.limit_reached); setError(""); } catch (e) { setError(errorText(e)); }
   }, [get]);
@@ -110,6 +189,30 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     try { const result = await get<{ release: Release; observations: Record<string, PublicationObservation[]> }>(`/releases/${release.id}`); setSelectedRelease(result.release); setObservations(result.observations || {}); setError(""); } catch (e) { setError(errorText(e)); }
   }, [get]);
   const brandName = (id: string) => brands.find(b => b.id === id)?.name || short(id);
+  const usesForAsset = (id: string): AssetUse[] => releases.flatMap(release => (release.targets || []).filter(target => target.asset_ids?.includes(id)).map(target => ({ release_id: release.id, release_title: release.title, target_id: target.id, destination: target.destination, status: target.current_status })));
+  const searchParams = useCallback(() => ({ entity_type: searchType, query: searchText, brand_id: searchBrand, date_from: searchDateFrom, date_to: searchDateTo, kind: searchKind, lineage: searchLineage, sort: searchSort, review_status: searchReview, destination: searchDestination, account_ref: searchAccount, availability: searchAvailability, limit: "24" }), [searchType, searchText, searchBrand, searchDateFrom, searchDateTo, searchKind, searchLineage, searchSort, searchReview, searchDestination, searchAccount, searchAvailability]);
+  useEffect(() => {
+    if (tab !== "search") return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      setSearchLoading(true); setSearchError("");
+      get<SearchResults>("/search", searchParams()).then(result => { if (active) setSearchResults(result); }).catch(err => { if (active) setSearchError(errorText(err)); }).finally(() => { if (active) setSearchLoading(false); });
+    }, 180);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [tab, get, searchParams, searchReload]);
+  const loadMore = useCallback(async (kind: "assets" | "sessions" | "releases", cursor: string) => {
+    setSearchLoading(true); setSearchError("");
+    try {
+      const result = await get<SearchResults>("/search", { ...searchParams(), entity_type: kind, [`${kind}_cursor`]: cursor });
+      setSearchResults(prev => ({ ...prev, [kind]: { items: [...prev[kind].items, ...result[kind].items], next_cursor: result[kind].next_cursor } }));
+    } catch (err) { setSearchError(errorText(err)); } finally { setSearchLoading(false); }
+  }, [get, searchParams]);
+  const openSearchAsset = useCallback(async (hit: AssetHit) => {
+    const result = await get<{ session: Session }>(`/sessions/${hit.session_id}`);
+    await showSession(result.session, "search");
+    await openAsset(hit);
+  }, [get, showSession, openAsset]);
+  const assetSearchOnly = !!searchKind || !!searchLineage || !!searchReview || searchAvailability !== "any";
 
   return <div className="h-full overflow-y-auto bg-bg text-text p-5 space-y-5">
     <header className="flex flex-wrap justify-between gap-3 items-center">
@@ -119,33 +222,69 @@ export default function ContentCatalogPanel({ projectId, installId }: { projectI
     <div className="flex flex-wrap gap-2">{["brands", "sessions", "assets", "releases", "hostings"].map(k => <span key={k} className="rounded border border-border px-3 py-1 text-sm"><strong>{overview[k] ?? 0}</strong> {k}</span>)}</div>
     {error && <div className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{error}</div>}
     {notice && <div className="rounded border border-green-500/50 bg-green-500/10 p-3 text-sm">{notice}</div>}
-    <nav className="flex gap-1 border-b border-border">{(["sessions", "releases", "brands"] as const).map(t => <button key={t} onClick={() => setTab(t)} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
+    <nav className="flex gap-1 border-b border-border">{(["sessions", "search", "releases", "brands"] as const).map(t => <button key={t} onClick={() => { setSelectedSession(null); setTab(t); }} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-accent text-accent" : "text-text-muted"}`}>{t}</button>)}</nav>
+
+    {tab === "search" && <section className="space-y-4">
+      <div><h2 className="text-lg font-semibold">Search Catalog</h2><p className="text-sm text-text-muted">Searches sessions, linked files, and releases. Storage folders are never scanned automatically.</p></div>
+      <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        <input className={`${inputClass} md:col-span-2`} type="search" value={searchText} onChange={e => setSearchText(e.target.value)} placeholder="Search titles, file names, notes…" aria-label="Search Catalog" />
+        <select className={inputClass} value={searchType} onChange={e => { setSearchType(e.target.value); if (e.target.value === "sessions" || e.target.value === "releases") { setSearchKind(""); setSearchLineage(""); setSearchReview(""); setSearchAvailability("any"); } }} aria-label="Result type"><option value="all">All records</option><option value="assets">Files</option><option value="sessions">Sessions</option><option value="releases">Releases</option></select>
+        <select className={inputClass} value={searchBrand} onChange={e => setSearchBrand(e.target.value)} aria-label="Brand"><option value="">All brands</option>{brands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}</select>
+        <select className={inputClass} value={searchKind} disabled={searchType === "sessions" || searchType === "releases"} onChange={e => setSearchKind(e.target.value)} aria-label="File type"><option value="">All file types</option>{["video", "image", "audio", "other"].map(kind => <option key={kind} value={kind}>{kind}</option>)}</select>
+        <select className={inputClass} value={searchLineage} disabled={searchType === "sessions" || searchType === "releases"} onChange={e => setSearchLineage(e.target.value)} aria-label="File lineage"><option value="">Sources and derivatives</option><option value="source">Source files</option><option value="derivative">Derivatives</option></select>
+        <select className={inputClass} value={searchReview} disabled={searchType === "sessions" || searchType === "releases"} onChange={e => setSearchReview(e.target.value)} aria-label="Review status"><option value="">Any review state</option>{["pending", "approved", "rejected"].map(state => <option key={state} value={state}>{state}</option>)}</select>
+        <select className={inputClass} value={searchSort} disabled={searchType === "sessions" || searchType === "releases"} onChange={e => setSearchSort(e.target.value)} aria-label="Sort files"><option value="session_newest">Newest session first</option><option value="asset_newest">Recently linked first</option></select>
+        <label className="text-xs text-text-muted">From session date<input className={inputClass} type="date" value={searchDateFrom} onChange={e => setSearchDateFrom(e.target.value)} /></label>
+        <label className="text-xs text-text-muted">Through session date<input className={inputClass} type="date" value={searchDateTo} onChange={e => setSearchDateTo(e.target.value)} /></label>
+        <input className={inputClass} value={searchDestination} onChange={e => { setSearchDestination(e.target.value); if (!e.target.value) { setSearchAccount(""); if (searchAvailability !== "never_used") setSearchAvailability("any"); } }} placeholder="Destination, e.g. instagram" aria-label="Destination" />
+        <input className={inputClass} value={searchAccount} disabled={!searchDestination} onChange={e => setSearchAccount(e.target.value)} placeholder="Account reference (optional)" aria-label="Account reference" />
+        <select className={inputClass} value={searchAvailability} disabled={searchType === "sessions" || searchType === "releases"} onChange={e => setSearchAvailability(e.target.value)} aria-label="Availability"><option value="any">Any use state</option><option value="never_used">Never used</option><option value="not_published" disabled={!searchDestination}>Not published here</option><option value="ready_to_publish" disabled={!searchDestination}>Ready to publish here</option><option value="scheduled" disabled={!searchDestination}>Scheduled here</option><option value="published" disabled={!searchDestination}>Published here</option><option value="failed" disabled={!searchDestination}>Failed here</option></select>
+      </div>
+      <p className="text-xs text-text-muted">Ready to publish means approved and no active plan or observed post for the selected destination{searchAccount ? " and account" : ""}. Results reflect evidence recorded in Catalog.</p>
+      {searchError && <p className="rounded border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">{searchError}</p>}
+      {searchLoading && <p className="text-sm text-text-muted">Searching…</p>}
+      {(searchType === "all" || searchType === "assets") && <div className="space-y-2"><h3 className="font-semibold">Files <span className="text-text-muted font-normal">{searchResults.assets.items.length}</span></h3>{searchResults.assets.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching linked files.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 12 }}>{searchResults.assets.items.map(hit => <button key={hit.id} type="button" className="min-w-0 overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => openSearchAsset(hit).catch(e => setSearchError(errorText(e)))}><PreviewImage src={previewURL(projectId, "assets", hit.id)} alt={`Preview of ${hit.name}`} fallback={mediaGlyph(assetMediaKind(hit))} className="aspect-video" /><div className="space-y-2 p-3 text-sm"><div className="truncate font-medium" title={hit.name}>{hit.name}</div><div className="text-xs text-text-muted">{hit.session_title} · {hit.session_date}</div><div className="text-xs text-text-muted">{brandName(hit.brand_id)} · {hit.review_status} · {hit.is_derivative ? "derivative" : "source"}</div><div className="border-t border-border pt-2"><ReleaseUseList uses={hit.uses} /></div><p className="text-xs text-text-muted">{hit.match_reason}</p></div></button>)}</div>{searchResults.assets.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("assets", searchResults.assets.next_cursor!)}>More files</button>}</div>}
+      {!assetSearchOnly && !searchDestination && (searchType === "all" || searchType === "sessions") && <div className="space-y-2"><h3 className="font-semibold">Sessions <span className="text-text-muted font-normal">{searchResults.sessions.items.length}</span></h3>{searchResults.sessions.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching sessions.</p>}<div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>{searchResults.sessions.items.map(hit => <button key={hit.id} type="button" className="min-w-0 overflow-hidden rounded-xl border border-border text-left hover:border-accent/60" onClick={() => showSession(hit, "search")}><PreviewImage src={previewURL(projectId, "sessions", hit.id)} alt={`Preview of ${hit.title}`} fallback="▣" className="aspect-video" /><div className="p-3 text-sm"><div className="font-medium line-clamp-2">{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {hit.session_date} · {hit.asset_count} files</div></div></button>)}</div>{searchResults.sessions.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("sessions", searchResults.sessions.next_cursor!)}>More sessions</button>}</div>}
+      {!assetSearchOnly && (searchType === "all" || searchType === "releases") && <div className="space-y-2"><h3 className="font-semibold">Releases <span className="text-text-muted font-normal">{searchResults.releases.items.length}</span></h3>{searchResults.releases.items.length === 0 && !searchLoading && <p className="text-sm text-text-muted">No matching releases.</p>}<div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">{searchResults.releases.items.map(hit => <button key={hit.id} type="button" className="rounded-xl border border-border p-3 text-left text-sm hover:border-accent/60" onClick={() => { setTab("releases"); openRelease(hit).catch(e => setError(errorText(e))); }}><div className="font-medium">{hit.title}</div><div className="mt-1 text-xs text-text-muted">{hit.brand_name} · {hit.planned_at || "Unscheduled"} · {hit.target_count} destinations</div></button>)}</div>{searchResults.releases.next_cursor && <button disabled={searchLoading} className="text-sm text-accent underline" onClick={() => loadMore("releases", searchResults.releases.next_cursor!)}>More releases</button>}</div>}
+    </section>}
 
     {tab === "brands" && <div className="grid gap-5 lg:grid-cols-2">
       <section className="space-y-3"><h2 className="font-semibold">Brands</h2>{brands.map(b => <div key={b.id} className="rounded border border-border p-3 space-y-2 text-sm"><div className="font-medium">{b.name}</div><div className="text-text-muted">{b.storage_root}</div><div>{b.host_provider ? `${b.host_provider} · connection ${b.host_connection_id} · library ${b.host_library_id}` : "No cloud host configured"}</div><EditBrand key={`${b.id}:${b.host_connection_id}:${b.host_library_id}`} brand={b} hosts={hosts} busy={busy} onSubmit={input => run(async () => { await action("content_catalog_brands_update", { id: b.id, ...input }); }, "Brand updated")} /></div>)}</section>
       <CreateBrand busy={busy} hosts={hosts} onSubmit={input => run(async () => { await action("content_catalog_brands_create", input); }, "Brand created")} />
     </div>}
 
-    {tab === "sessions" && <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]">
-      <aside className="space-y-3"><CreateSession busy={busy} brands={brands} onSubmit={input => run(async () => { await action("content_catalog_sessions_create", input); }, "Session created")} />
-        <h2 className="font-semibold">Sessions</h2>{sessions.map(s => <button key={s.id} className={`block w-full overflow-hidden text-left rounded-xl border text-sm transition-colors hover:border-accent/60 ${selectedSession?.id === s.id ? "border-accent" : "border-border"}`} onClick={() => openSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" className="aspect-video" /><div className="p-3"><div className="font-medium line-clamp-2">{s.title}</div><div className="mt-1 text-text-muted">{brandName(s.brand_id)} · {s.session_date}</div></div></button>)}</aside>
-      <section className="space-y-4">{selectedSession ? <>
-        <div className="overflow-hidden rounded-xl border border-border"><PreviewImage src={previewURL(projectId, "sessions", selectedSession.id)} alt={`Preview of ${selectedSession.title}`} fallback="▣" className="h-52 sm:h-64" /><div className="p-4"><h2 className="font-semibold text-lg">{selectedSession.title}</h2><p className="text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {selectedSession.session_date} · {selectedSession.status}</p><p className="text-sm mt-2">{selectedSession.notes}</p><p className="text-xs text-text-muted mt-2">Gigs: {gigs.length ? gigs.map(g => `#${g.gig_id}${g.role ? ` (${g.role})` : ""}`).join(", ") : "none linked"}</p></div></div>
-        <div className="grid md:grid-cols-2 gap-4"><AttachAsset busy={busy} onSubmit={input => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, ...input }); await openSession(selectedSession); }, "Asset linked to session")} /><LinkGig busy={busy} onSubmit={input => run(async () => { await action("content_catalog_sessions_link_gig", { session_id: selectedSession.id, ...input }); await openSession(selectedSession); }, "Gig linked to session")} /></div>
-        <div className="rounded border border-border p-3 space-y-2 text-sm"><button className="text-accent underline" onClick={() => previewImport(selectedSession)}>Review Storage files under brand root</button><p className="text-xs text-text-muted">These are candidates only. Check the session before linking any file.</p>{importLimitReached && <p className="text-xs text-yellow-400">Showing the first 200 files. Narrow the brand root to inspect more.</p>}{candidates.map(c => <div key={c.storage_file_id} className="border-t border-border pt-2"><div className="flex flex-wrap items-center gap-2"><span className="flex-1 min-w-40 break-all">{c.folder}{c.name}</span><span className="text-text-muted">#{c.storage_file_id}{c.linked_session_ids.length ? ` · linked to ${c.linked_session_ids.length} session(s)` : " · needs review"}</span><button className="text-accent underline disabled:opacity-40" disabled={busy || c.linked_session_ids.includes(selectedSession.id)} onClick={() => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, storage_file_id: c.storage_file_id }); await openSession(selectedSession); await previewImport(selectedSession); }, "Asset linked to session")}>Link here</button></div><details className="mt-1"><summary className="cursor-pointer text-accent">Preview file</summary><CandidateViewer candidate={c} projectId={projectId} /></details></div>)}</div>
-        <h3 className="font-semibold">Assets</h3>{assets.length === 0 && <p className="text-sm text-text-muted">No files linked yet.</p>}
-        <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3">{assets.map(asset => <button key={asset.id} onClick={() => openAsset(asset)} className={`overflow-hidden rounded-xl border text-left text-sm transition-colors hover:border-accent/60 ${selectedAsset?.id === asset.id ? "border-accent" : "border-border"}`}><PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} className="aspect-video" /><div className="p-3"><div className="font-medium truncate" title={asset.name}>{asset.name}</div><div className="mt-1 text-xs text-text-muted">{asset.kind} · #{asset.storage_file_id} · {asset.review_status}</div></div></button>)}</div>
-        {selectedAsset && <div className="rounded border border-border p-4 space-y-3"><h3 className="font-semibold break-all">{selectedAsset.name}</h3><AssetViewer asset={selectedAsset} projectId={projectId} />{assetMedia && <div className="text-sm space-y-1"><div>{assetMedia.title || "Media metadata"} · {assetMedia.probe_status || "unknown"} · {assetMedia.audience_rating || "unrated"}</div>{assetMedia.description && <p className="text-text-muted">{assetMedia.description}</p>}<div className="text-xs text-text-muted">{assetMedia.duration_ms ? `${Math.round(assetMedia.duration_ms / 1000)}s · ` : ""}{assetMedia.width && assetMedia.height ? `${assetMedia.width} × ${assetMedia.height} · ` : ""}Transcript: {assetMedia.transcript_status || "not available"}</div></div>}<div className="text-xs text-text-muted">Sources: {assetSources.length ? assetSources.map(s => `${short(s.asset_id)} (${s.relation})`).join(", ") : "original / none linked"}</div><div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openSession(selectedSession); setSelectedAsset({ ...selectedAsset, review_status: state }); }, `Review set to ${state}`)}>{state}</button>)}</div>
-          <button disabled={busy || selectedAsset.review_status !== "approved"} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
-          <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
-          <div className="text-sm"><h4 className="font-medium">Used in releases</h4>{assetUses.length === 0 ? <p className="text-text-muted">No release target yet.</p> : assetUses.map(u => <div key={u.target_id} className="text-text-muted">{u.release_title} · {u.destination} · {u.status}</div>)}</div>
-        </div>}
-      </> : <p className="text-sm text-text-muted">Select a session to see its assets and linked production work.</p>}</section>
+    {tab === "sessions" && !selectedSession && <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Sessions</h2><p className="text-sm text-text-muted">Select a session to see its assets and release history.</p></div><button type="button" className={buttonClass} onClick={() => setModal("new-session")}>+ New session</button></div>
+      {sessions.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No sessions yet.</p>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(190px, 1fr))", gap: 12 }}>{sessions.map(s => <button key={s.id} className="min-w-0 overflow-hidden rounded-xl border border-border text-left text-sm transition-colors hover:border-accent/60" onClick={() => showSession(s)}><PreviewImage src={previewURL(projectId, "sessions", s.id)} alt={`Preview of ${s.title}`} fallback="▣" className="aspect-video" /><div className="p-3"><div className="font-medium line-clamp-2">{s.title}</div><div className="mt-1 text-xs text-text-muted">{brandName(s.brand_id)} · {s.session_date}</div></div></button>)}</div>
+    </div>}
+
+    {tab === "sessions" && selectedSession && <div className="space-y-5">
+      <div className="border-b border-border pb-4">
+        <button type="button" className="mb-3 text-sm text-accent underline" onClick={backToSessions}>← All sessions</button>
+        <div className="flex flex-wrap items-start justify-between gap-4"><div className="min-w-0"><h2 className="text-2xl font-semibold">{selectedSession.title}</h2><p className="mt-1 text-sm text-text-muted">{brandName(selectedSession.brand_id)} · {selectedSession.session_date} · {selectedSession.status}</p></div><div className="flex flex-wrap gap-2"><button type="button" className={buttonClass} onClick={() => setModal("add-file")}>+ Add file</button><button type="button" className="rounded border border-border px-3 py-1.5 text-sm" onClick={() => setModal("link-gig")}>Link Gig</button></div></div>
+      </div>
+      <section className="space-y-3"><div className="flex items-center justify-between gap-3"><h3 className="text-lg font-semibold">Assets</h3><span className="text-xs text-text-muted">{assets.length} file{assets.length === 1 ? "" : "s"}</span></div><p className="text-xs text-text-muted">Each file shows its release destinations. Only “Verified live” confirms a published post.</p>
+        {assets.length === 0 && <p className="rounded border border-border p-5 text-sm text-text-muted">No files linked yet. Use Add file to link one from Storage.</p>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>{assets.map(asset => <button key={asset.id} onClick={() => openAsset(asset)} className={`min-w-0 overflow-hidden rounded-xl border text-left text-sm transition-colors hover:border-accent/60 ${selectedAsset?.id === asset.id ? "border-accent" : "border-border"}`}><PreviewImage src={previewURL(projectId, "assets", asset.id)} alt={`Preview of ${asset.name}`} fallback={mediaGlyph(assetMediaKind(asset))} className="aspect-video" /><div className="space-y-2 p-3"><div className="font-medium truncate" title={asset.name}>{asset.name}</div><div className="text-xs text-text-muted">{asset.kind} · #{asset.storage_file_id} · {asset.review_status}</div><div className="border-t border-border pt-2"><ReleaseUseList uses={usesForAsset(asset.id)} /></div></div></button>)}</div>
+      </section>
+      {selectedAsset && <section className="rounded-xl border border-border p-4 space-y-3"><div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold break-all">{selectedAsset.name}</h3><button type="button" className="text-sm text-accent underline" onClick={() => setSelectedAsset(null)}>Close file</button></div><AssetViewer asset={selectedAsset} projectId={projectId} />
+        {assetMedia && <div className="text-sm space-y-1"><div>{assetMedia.title || "Media metadata"} · {assetMedia.probe_status || "unknown"} · {assetMedia.audience_rating || "unrated"}</div>{assetMedia.description && <p className="text-text-muted">{assetMedia.description}</p>}<div className="text-xs text-text-muted">{assetMedia.duration_ms ? `${Math.round(assetMedia.duration_ms / 1000)}s · ` : ""}{assetMedia.width && assetMedia.height ? `${assetMedia.width} × ${assetMedia.height} · ` : ""}Transcript: {assetMedia.transcript_status || "not available"}</div></div>}
+        <div className="text-xs text-text-muted">Sources: {assetSources.length ? assetSources.map(s => `${short(s.asset_id)} (${s.relation})`).join(", ") : "original / none linked"}</div>
+        <div className="flex flex-wrap gap-2 text-sm">{(["pending", "approved", "rejected"] as const).map(state => <button disabled={busy || selectedAsset.review_status === state} key={state} className="border border-border rounded px-2 py-1 disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_review", { asset_id: selectedAsset.id, review_status: state }); await openSession(selectedSession); setSelectedAsset({ ...selectedAsset, review_status: state }); }, `Review set to ${state}`)}>{state}</button>)}</div>
+        <button disabled={busy || selectedAsset.review_status !== "approved"} className="rounded border border-accent px-3 py-1.5 text-sm disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_hosting_request", { asset_id: selectedAsset.id }); await openAsset(selectedAsset); }, "Hosting request recorded")}>Host approved asset</button>
+        <div className="space-y-2">{hostings.map(h => <div key={h.id} className="rounded border border-border p-2 text-sm"><span className="font-medium">{h.provider}: {h.status}</span>{h.remote_id && <span className="ml-2 text-text-muted">{short(h.remote_id)}</span>}{h.embed_url && <a className="ml-2 text-accent underline" href={h.embed_url} target="_blank" rel="noreferrer">Open host</a>}{h.error && <p className="text-red-400">{h.error}</p>}{h.remote_id && h.status !== "ready" && <button className="text-accent underline" onClick={() => run(async () => { await action("content_catalog_hosting_check", { id: h.id }); await openAsset(selectedAsset); }, "Host checked")}>Check readiness</button>}</div>)}</div>
+        <div className="text-sm"><h4 className="font-medium">Release destinations</h4><ReleaseUseList uses={assetUses.length ? assetUses : usesForAsset(selectedAsset.id)} /></div>
+      </section>}
+      <section className="rounded-xl border border-border p-4 space-y-2 text-sm"><h3 className="font-semibold">Session info</h3>{selectedSession.notes && <p className="text-text-muted">{selectedSession.notes}</p>}<p className="text-text-muted">Gigs: {gigs.length ? gigs.map(g => `#${g.gig_id}${g.role ? ` (${g.role})` : ""}`).join(", ") : "none linked"}</p></section>
     </div>}
 
     {tab === "releases" && <div className="grid gap-5 xl:grid-cols-[300px_minmax(0,1fr)]"><aside className="space-y-3"><CreateRelease busy={busy} brands={brands} onSubmit={input => run(async () => { await action("content_catalog_releases_create", input); }, "Release planned")} /><h2 className="font-semibold">Release plans</h2>{releases.map(r => <button key={r.id} onClick={() => openRelease(r)} className={`block w-full text-left rounded border p-3 text-sm ${selectedRelease?.id === r.id ? "border-accent" : "border-border"}`}><div className="font-medium">{r.title}</div><div className="text-text-muted">{brandName(r.brand_id)} · {r.planned_at || "Unscheduled"}</div></button>)}</aside>
       <section className="space-y-4">{selectedRelease ? <><div className="rounded border border-border p-4"><h2 className="font-semibold">{selectedRelease.title}</h2><p className="text-sm text-text-muted">{brandName(selectedRelease.brand_id)} · {selectedRelease.phase || "No phase"} · {selectedRelease.audience || "No audience"}</p></div><AddTarget key={selectedRelease.id} busy={busy} sessions={sessions.filter(s => s.brand_id === selectedRelease.brand_id)} loadAssets={async id => (await get<{ assets: Asset[] }>("/assets", { session_id: id })).assets} onSubmit={input => run(async () => { await action("content_catalog_release_targets_add", { release_id: selectedRelease.id, ...input }); await openRelease(selectedRelease); }, "Destination added")} /><h3 className="font-semibold">Destinations and evidence</h3>{selectedRelease.targets?.map(t => <div key={t.id} className="rounded border border-border p-4 space-y-2"><div className="font-medium">{t.destination} <span className="text-text-muted font-normal">{t.account_ref}</span></div><div className="text-sm">Planned: {t.planned_at || "—"} · Observed: {t.current_status}</div><div className="text-xs text-text-muted">{t.asset_ids?.length || 0} assets</div>{(observations[t.id] || []).map(o => <div key={o.id} className="border-l-2 border-border pl-2 text-xs text-text-muted"><span className="font-medium text-text">{o.status.replaceAll("_", " ")}</span> · {o.evidence_source} · {o.actual_at || o.observed_at}{o.external_url && <a className="ml-2 text-accent underline" href={o.external_url} target="_blank" rel="noreferrer">View post</a>}{o.external_post_id && <span className="ml-2">ID {o.external_post_id}</span>}{o.failure_details && <p className="text-red-400">{o.failure_details}</p>}</div>)}<RecordObservation busy={busy} onSubmit={input => run(async () => { await action("content_catalog_publications_record", { target_id: t.id, ...input }); await openRelease(selectedRelease); }, "Publication evidence recorded")} /></div>)}</> : <p className="text-sm text-text-muted">Select a release to inspect each destination.</p>}</section>
     </div>}
+    {modal === "new-session" && <Modal title="New session" onClose={() => setModal(null)}><CreateSession busy={busy} brands={brands} onSubmit={input => run(async () => { const result = await action<{ session: Session }>("content_catalog_sessions_create", input); setModal(null); await showSession(result.session); }, "Session created")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
+    {modal === "add-file" && selectedSession && <Modal title="Add file to session" onClose={() => setModal(null)}><div className="space-y-4"><AttachAsset busy={busy} onSubmit={input => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, ...input }); setModal(null); await openSession(selectedSession); }, "File linked to session")} /><div className="rounded border border-border p-3 text-sm"><button type="button" className="text-accent underline" onClick={() => previewImport(selectedSession)}>Browse Storage candidates</button><p className="mt-1 text-xs text-text-muted">Lists files only when clicked. Check each file before linking it.</p>{importLimitReached && <p className="mt-1 text-xs text-yellow-400">Showing the first 200 files.</p>}{candidates.map(candidate => <div key={candidate.storage_file_id} className="flex flex-wrap items-center gap-2 border-t border-border py-2"><span className="min-w-0 flex-1 break-all">{candidate.folder}{candidate.name}</span><button type="button" disabled={busy || candidate.linked_session_ids.includes(selectedSession.id)} className="text-accent underline disabled:opacity-40" onClick={() => run(async () => { await action("content_catalog_assets_attach", { session_id: selectedSession.id, storage_file_id: candidate.storage_file_id }); setModal(null); await openSession(selectedSession); }, "File linked to session")}>Link</button></div>)}</div>{error && <p className="text-sm text-red-400">{error}</p>}</div></Modal>}
+    {modal === "link-gig" && selectedSession && <Modal title="Link Gig to session" onClose={() => setModal(null)}><LinkGig busy={busy} onSubmit={input => run(async () => { await action("content_catalog_sessions_link_gig", { session_id: selectedSession.id, ...input }); setModal(null); await openSession(selectedSession); }, "Gig linked to session")} />{error && <p className="mt-2 text-sm text-red-400">{error}</p>}</Modal>}
   </div>;
 }
 

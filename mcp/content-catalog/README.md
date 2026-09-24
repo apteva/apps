@@ -25,6 +25,15 @@ modify Storage files, Media records, Gigs, Social posts, or Patreon posts.
 - Releases contain one or more destinations and ordered assets. Publication
   observations carry explicit evidence and actual time for published states.
   A planned release or a hosted video never becomes a verified post by itself.
+- Search reads only explicitly linked Catalog sessions, assets, and releases.
+  It supports text, brand, date, review, file type, source/derivative,
+  destination, account, and newest-session/newest-attachment sorting
+  filters with independent cursor pagination for each result type. The
+  `ready_to_publish` asset filter requires an approved asset and excludes
+  active release targets for the chosen destination and account. Search never
+  scans Storage folders or publishes to a network. Its publication summaries
+  reflect observations already recorded in Catalog; Social ingestion remains
+  a future integration.
 - `HostProvider` isolates cloud-host operations from Catalog records. Bunny
   Stream is the first adapter. Upload starts only from an explicit hosting
   request for an approved video. A reservation and checksum/destination
