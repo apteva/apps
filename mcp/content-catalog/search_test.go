@@ -77,16 +77,11 @@ func TestSearchAcrossSessionsAndPublicationAvailability(t *testing.T) {
 		t.Fatalf("second page = %#v", secondPage)
 	}
 
-	releaseAny, err := a.releaseCreate(ctx, map[string]any{"brand_id": brand, "title": "Instagram clip"})
+	postAny, err := a.postsRecord(ctx, map[string]any{"asset_ids": []string{secondAsset}, "destination": "instagram", "account_ref": "account-1", "status": "planned"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	releaseID := releaseAny.(map[string]any)["release"].(*Release).ID
-	targetAny, err := a.releaseTargetAdd(ctx, map[string]any{"release_id": releaseID, "destination": "instagram", "account_ref": "account-1", "asset_ids": []string{secondAsset}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	targetID := targetAny.(map[string]any)["target"].(ReleaseTarget).ID
+	postID := postAny.(map[string]any)["post_id"].(string)
 	hits = assetHits(t, a, ctx, base)
 	if len(hits) != 1 || hits[0].ID != firstAsset {
 		t.Fatalf("planned target must reserve asset: %#v", hits)
@@ -104,7 +99,7 @@ func TestSearchAcrossSessionsAndPublicationAvailability(t *testing.T) {
 		t.Fatalf("planned is not published: %#v", hits)
 	}
 	actual := time.Now().UTC().Format(time.RFC3339)
-	if _, err = a.publicationRecord(ctx, map[string]any{"target_id": targetID, "status": "provider_reported_published", "evidence_source": "social_post_list", "external_post_id": "ig-123", "actual_at": actual}); err != nil {
+	if _, err = a.postsRecord(ctx, map[string]any{"post_id": postID, "status": "provider_reported_published", "evidence_source": "social_post_list", "external_post_id": "ig-123", "actual_at": actual}); err != nil {
 		t.Fatal(err)
 	}
 	hits = assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "not_published"})
@@ -114,7 +109,7 @@ func TestSearchAcrossSessionsAndPublicationAvailability(t *testing.T) {
 	if got := assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "published"}); len(got) != 0 {
 		t.Fatalf("reported post must not count as verified: %#v", got)
 	}
-	if _, err = a.publicationRecord(ctx, map[string]any{"target_id": targetID, "status": "verified_published", "evidence_source": "creator_page_manual", "external_post_id": "ig-123", "actual_at": actual}); err != nil {
+	if _, err = a.postsRecord(ctx, map[string]any{"post_id": postID, "status": "verified_published", "evidence_source": "creator_page_manual", "external_post_id": "ig-123", "actual_at": actual}); err != nil {
 		t.Fatal(err)
 	}
 	hits = assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "not_published"})
@@ -125,7 +120,7 @@ func TestSearchAcrossSessionsAndPublicationAvailability(t *testing.T) {
 	if len(published) != 1 || published[0].ID != secondAsset || len(published[0].Uses) != 1 || published[0].Uses[0].ExternalPostID != "ig-123" {
 		t.Fatalf("published evidence = %#v", published)
 	}
-	if _, err = a.publicationRecord(ctx, map[string]any{"target_id": targetID, "status": "removed", "evidence_source": "social_post_list"}); err != nil {
+	if _, err = a.postsRecord(ctx, map[string]any{"post_id": postID, "status": "removed", "evidence_source": "social_post_list"}); err != nil {
 		t.Fatal(err)
 	}
 	if hits = assetHits(t, a, ctx, map[string]any{"entity_type": "assets", "destination": "instagram", "availability": "not_published"}); len(hits) != 1 || hits[0].ID != firstAsset {

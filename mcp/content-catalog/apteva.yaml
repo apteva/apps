@@ -1,10 +1,10 @@
 schema: apteva-app/v1
 name: content-catalog
 display_name: Content Catalog
-version: 0.3.0
+version: 0.4.0
 description: |
   Coordinate brands, production sessions, Storage assets, Media derivatives,
-  optional Gigs, cloud hosting, and per-asset publication records.
+  optional Gigs, cloud hosting, and shared platform posts.
   Storage owns bytes, Media owns processing, Gigs owns assignments, and Social
   owns posts. Hosting providers share one contract; Bunny Stream is the first.
 author: Apteva
@@ -63,6 +63,8 @@ provides:
     - { name: content_catalog_sessions_get, description: "Get a session with linked assets and Gigs." }
     - { name: content_catalog_sessions_link_gig, description: "Link an existing Gig to a session without changing the Gig." }
     - { name: content_catalog_assets_attach, description: "Attach an existing Storage file to a session after checking its file metadata. Never uploads or changes the file." }
+    - { name: content_catalog_session_upload_target, description: "Get the session's exact Storage upload folder and bound Storage install ID. Does not scan or upload." }
+    - { name: content_catalog_assets_attach_uploaded, description: "Attach an explicitly uploaded Storage file after verifying its exact session folder. Idempotent." }
     - { name: content_catalog_import_preview, description: "List reviewable Storage candidates under a brand root without changing any app data." }
     - { name: content_catalog_assets_list, description: "List session assets." }
     - { name: content_catalog_assets_get, description: "Get an asset with source lineage, hosting, and publication records." }
@@ -70,6 +72,9 @@ provides:
     - { name: content_catalog_assets_review, description: "Set editorial review state on a Catalog asset." }
     - { name: content_catalog_asset_publications_list, description: "List the platform publication records on one asset." }
     - { name: content_catalog_asset_publications_record, description: "Create or update one asset's platform status with explicit evidence. Does not publish externally." }
+    - { name: content_catalog_posts_list, description: "List posts shared by one or more assets, optionally filtered by session, asset, or brand." }
+    - { name: content_catalog_posts_get, description: "Get a post and its member asset IDs." }
+    - { name: content_catalog_posts_record, description: "Create or update a shared post and its asset membership with explicit publication evidence. Does not publish externally." }
     - { name: content_catalog_hosting_request, description: "REAL EXTERNAL HOSTING: request upload of an asset to the brand's configured video host. Bunny Stream supported now. Never publishes to Social or Patreon." }
     - { name: content_catalog_hosting_check, description: "Read the video host's readiness for a hosting operation and update Catalog's observation." }
     - { name: content_catalog_hosting_list, description: "List hosting records for an asset." }
@@ -88,7 +93,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: content-catalog/v0.3.0
+    ref: content-catalog/v0.4.0
     entry: mcp/content-catalog
   port: 8080
   health_check: /health

@@ -286,7 +286,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		q += ` AND (` + sortDate + `<? OR (` + sortDate + `=? AND (a.created_at<? OR (a.created_at=? AND a.id<?))))`
 		values = append(values, cursor.Date, cursor.Date, cursor.CreatedAt, cursor.CreatedAt, cursor.ID)
 	}
-	target := `SELECT 1 FROM asset_publications p WHERE p.project_id=a.project_id AND p.asset_id=a.id`
+	target := `SELECT 1 FROM post_assets pa JOIN posts p ON p.id=pa.post_id AND p.project_id=pa.project_id WHERE pa.project_id=a.project_id AND pa.asset_id=a.id`
 	matchingTarget := target
 	matchingValues := []any{}
 	if o.Destination != "" {
@@ -297,7 +297,7 @@ func (a *App) searchAssets(db *sql.DB, o searchOptions, cursor searchCursor) (se
 		matchingTarget += ` AND p.account_ref=?`
 		matchingValues = append(matchingValues, o.AccountRef)
 	}
-	wasPublished := `p.status='verified_published' OR EXISTS (SELECT 1 FROM asset_publication_events pe WHERE pe.project_id=p.project_id AND pe.publication_id=p.id AND pe.status='verified_published')`
+	wasPublished := `p.status='verified_published' OR EXISTS (SELECT 1 FROM post_events pe WHERE pe.project_id=p.project_id AND pe.post_id=p.id AND pe.status='verified_published')`
 	switch o.Availability {
 	case "never_used":
 		q += ` AND NOT EXISTS (` + target + `)`
@@ -377,8 +377,9 @@ func loadSearchUses(db *sql.DB, pid string, hits []assetSearchHit) error {
 		values = append(values, hits[i].ID)
 		byID[hits[i].ID] = i
 	}
-	q := `SELECT asset_id,id,destination,account_ref,status,external_post_id,external_url,actual_at
-		FROM asset_publications WHERE project_id=? AND asset_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC,id DESC`
+	q := `SELECT pa.asset_id,p.id,p.destination,p.account_ref,p.status,p.external_post_id,p.external_url,p.actual_at
+		FROM post_assets pa JOIN posts p ON p.project_id=pa.project_id AND p.id=pa.post_id
+		WHERE pa.project_id=? AND pa.asset_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY p.created_at DESC,p.id DESC`
 	rows, err := db.Query(q, values...)
 	if err != nil {
 		return err

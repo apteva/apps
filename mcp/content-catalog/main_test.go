@@ -17,6 +17,7 @@ type catalogPlatform struct {
 	tk.BasePlatformClient
 	starts int
 	files  []map[string]any
+	folder string
 }
 
 func (*catalogPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -37,7 +38,7 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 		if id == 2 {
 			contentType = "image/jpeg"
 		}
-		data = map[string]any{"found": true, "file": map[string]any{"id": id, "name": fmt.Sprintf("clip-%d.mp4", id), "sha256": fmt.Sprintf("sha-%d", id), "size_bytes": 1000, "content_type": contentType, "project_id": "project-a"}}
+		data = map[string]any{"found": true, "file": map[string]any{"id": id, "name": fmt.Sprintf("clip-%d.mp4", id), "sha256": fmt.Sprintf("sha-%d", id), "size_bytes": 1000, "content_type": contentType, "project_id": "project-a", "folder": p.folder}}
 	case "storage/files_get_url":
 		data = map[string]any{"url": "https://storage.example/signed"}
 	case "storage/files_list":
@@ -111,6 +112,67 @@ func TestManifestToolsAndMigrations(t *testing.T) {
 	}
 	if _, err := ctx.AppDB().Exec(`INSERT INTO brands(id,project_id,slug,name,storage_root) VALUES('test','p','test','Test','/')`); err != nil {
 		t.Fatalf("migration not applied: %v", err)
+	}
+}
+
+func TestExplicitUploadTargetAndStrictAttach(t *testing.T) {
+	a, ctx, platform, _, session := setupCatalog(t)
+	targetAny, err := a.sessionUploadTarget(ctx, map[string]any{"session_id": session})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := targetAny.(map[string]any)
+	folder := target["folder"].(string)
+	if folder != "/brand/sessions/2026-09-24/"+session+"/" || target["storage_install_id"] != int64(11) {
+		t.Fatalf("target = %#v", target)
+	}
+	platform.folder = "/brand/other/"
+	if _, err := a.assetAttachUploaded(ctx, map[string]any{"session_id": session, "storage_file_id": "55"}); err == nil {
+		t.Fatal("wrong folder was accepted")
+	}
+	platform.folder = folder
+	first, err := a.assetAttachUploaded(ctx, map[string]any{"session_id": session, "storage_file_id": "55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.(map[string]any)["was_existing"] != false {
+		t.Fatal("first attachment must be new")
+	}
+	second, err := a.assetAttachUploaded(ctx, map[string]any{"session_id": session, "storage_file_id": "55"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.(map[string]any)["was_existing"] != true {
+		t.Fatal("retry must return the same asset")
+	}
+}
+
+func TestSharedPostProjectsOntoEveryAsset(t *testing.T) {
+	a, ctx, _, _, session := setupCatalog(t)
+	first, second := attach(t, a, ctx, session, 1), attach(t, a, ctx, session, 2)
+	created, err := a.postsRecord(ctx, map[string]any{"asset_ids": []string{first, second}, "destination": "patreon", "status": "planned", "title": "Full session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := created.(map[string]any)["post_id"].(string)
+	for _, assetID := range []string{first, second} {
+		items, err := publicationsForAsset(ctx.AppDB(), "project-a", assetID)
+		if err != nil || len(items) != 1 || items[0].ID != id || len(items[0].AssetIDs) != 2 {
+			t.Fatalf("asset %s post = %#v, %v", assetID, items, err)
+		}
+	}
+	when := time.Now().UTC().Format(time.RFC3339)
+	if _, err := a.postsRecord(ctx, map[string]any{"post_id": id, "status": "verified_published", "actual_at": when, "external_url": "https://patreon.example/posts/123", "evidence_source": "creator_page_manual"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, assetID := range []string{first, second} {
+		items, err := publicationsForAsset(ctx.AppDB(), "project-a", assetID)
+		if err != nil || len(items) != 1 || items[0].Status != "verified_published" {
+			t.Fatalf("asset %s status = %#v, %v", assetID, items, err)
+		}
+	}
+	if _, err := a.postsRecord(ctx, map[string]any{"post_id": id, "status": "verified_published", "asset_ids": []string{first}}); err == nil {
+		t.Fatal("historically verified member could be removed")
 	}
 }
 

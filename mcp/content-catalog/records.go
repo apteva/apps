@@ -37,6 +37,38 @@ func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
 }
 
 func (a *App) assetAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.attachAsset(ctx, args, false)
+}
+
+func (a *App) assetAttachUploaded(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.attachAsset(ctx, args, true)
+}
+
+func sessionStorageFolder(root string, s *Session) string {
+	return strings.TrimSuffix(root, "/") + "/sessions/" + s.Date + "/" + s.ID + "/"
+}
+
+func (a *App) sessionUploadTarget(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := project(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s, err := sessionByID(ctx.AppDB(), pid, str(args, "session_id"))
+	if err != nil {
+		return nil, err
+	}
+	b, err := brandByID(ctx.AppDB(), pid, s.BrandID)
+	if err != nil {
+		return nil, err
+	}
+	bound := ctx.IntegrationFor("storage")
+	if bound == nil || bound.InstallID <= 0 {
+		return nil, errors.New("Storage app is not bound")
+	}
+	return map[string]any{"folder": sessionStorageFolder(b.StorageRoot, s), "storage_install_id": bound.InstallID, "project_id": pid}, nil
+}
+
+func (a *App) attachAsset(ctx *sdk.AppCtx, args map[string]any, uploaded bool) (any, error) {
 	pid, err := project(ctx)
 	if err != nil {
 		return nil, err
@@ -44,7 +76,8 @@ func (a *App) assetAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = required(args, "session_id", "storage_file_id"); err != nil {
 		return nil, err
 	}
-	if _, err = sessionByID(ctx.AppDB(), pid, str(args, "session_id")); err != nil {
+	session, err := sessionByID(ctx.AppDB(), pid, str(args, "session_id"))
+	if err != nil {
 		return nil, err
 	}
 	bound := ctx.IntegrationFor("storage")
@@ -63,6 +96,7 @@ func (a *App) assetAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			SHA256      string `json:"sha256"`
 			SizeBytes   int64  `json:"size_bytes"`
 			ContentType string `json:"content_type"`
+			Folder      string `json:"folder"`
 			ProjectID   string `json:"project_id"`
 		} `json:"file"`
 	}
@@ -74,6 +108,15 @@ func (a *App) assetAttach(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if result.File.ProjectID != "" && result.File.ProjectID != pid {
 		return nil, errors.New("Storage file belongs to another project")
+	}
+	if uploaded {
+		brand, err := brandByID(ctx.AppDB(), pid, session.BrandID)
+		if err != nil {
+			return nil, err
+		}
+		if expected := sessionStorageFolder(brand.StorageRoot, session); result.File.Folder != expected {
+			return nil, fmt.Errorf("Storage file is in %q; expected this session's folder %q", result.File.Folder, expected)
+		}
 	}
 	kind := str(args, "kind")
 	if kind == "" {
