@@ -40,6 +40,7 @@ type runnerBuildSpec struct {
 	TargetKind       string            `json:"target_kind,omitempty"`
 	Framework        string            `json:"framework,omitempty"`
 	BuildCmd         string            `json:"build_cmd,omitempty"`
+	BuildSubdir      string            `json:"build_subdir,omitempty"`
 	Env              map[string]string `json:"env,omitempty"`
 	TargetConfigJSON string            `json:"target_config_json,omitempty"`
 	MachineClass     string            `json:"machine_class,omitempty"`
@@ -88,6 +89,10 @@ func (runnerBuildBackend) Submit(ctx context.Context, _ *sdk.BoundIntegration, c
 	if err != nil {
 		return nil, err
 	}
+	buildSubdir, err := sourceBuildSubdir(d)
+	if err != nil {
+		return nil, err
+	}
 	request := runnerJobRequest{
 		Protocol:       runnerProtocolVersion,
 		IdempotencyKey: hex.EncodeToString(idempotencyHash[:]),
@@ -98,7 +103,8 @@ func (runnerBuildBackend) Submit(ctx context.Context, _ *sdk.BoundIntegration, c
 			BuildID: build.ID, ProjectID: d.ProjectID, Deployment: d.Name,
 			Environment: d.EnvironmentName, TargetKind: d.TargetKind,
 			Framework: d.Framework, BuildCmd: d.BuildCmd,
-			Env: parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
+			BuildSubdir: buildSubdir,
+			Env:         parseEnvJSON(d.EnvJSON), TargetConfigJSON: defaultStr(d.TargetConfigJSON, "{}"),
 			MachineClass: resolvedMachineClass(cfg), SoftwareVersions: cfg.SoftwareVersions,
 		},
 		Credentials: credentials,
@@ -266,7 +272,7 @@ func (a *App) mobileSigningBuildCredentials(d *Deployment) (runnerCredentials, e
 			return out, nil
 		}
 	}
-	if d.TargetKind == "ios" || d.Framework == "ios" {
+	if isApplePlatform(d.TargetKind) || isApplePlatform(d.Framework) {
 		if _, credErr := selectedCredentials("app_store", d.TargetConfigJSON); credErr != nil {
 			return out, credErr
 		}

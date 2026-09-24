@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.26.0
+version: 0.27.0
 description: |
   Build and release services, mobile apps, and arbitrary artifacts from Code
   or local sources using local and external build backends. Generic command
@@ -10,18 +10,18 @@ description: |
   Service deployments run as supervised processes with server-proxied ingress.
 
   Supports source kinds {code, local} and frameworks
-  {go, node, bun, static, blank, android, ios, command}.
-  v0.26.0 adds verified, resumable Code snapshots, per-target publisher accounts,
-  integration-driven artifact publishing, separate availability observations,
-  and release policies tied to the exact tested artifact. Includes a Steamworks
-  integration configuration example; engine exports and uploads use commands.
+  {go, node, bun, static, blank, android, ios, macos, command}.
+  v0.27.0 adds native macOS builds, signing, and App Store releases while one
+  universal iOS deployment continues to cover iPhone and iPad. Apple build
+  lookup and version allocation are platform-specific. Pinned Code repository
+  dependencies can be bundled beside the app for isolated cloud builds.
   GitHub workflows must declare apteva_deploy_run_id and use it as their run-name.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [deploy, build, runtime, artifacts, android, ios, app-store, google-play, steam, agent]
+tags: [deploy, build, runtime, artifacts, android, ios, macos, app-store, google-play, steam, agent]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -61,7 +61,7 @@ requires:
       compatible_slugs: [app-store-connect]
       capabilities: []
       label: App Store Connect
-      hint: Required to sign, upload, publish, and monitor iOS releases.
+      hint: Required to sign, upload, publish, and monitor iOS and macOS releases.
     - role: publisher
       kind: integration
       mode: multiple
@@ -87,7 +87,7 @@ provides:
     - name: deploy_release_approve
       description: Approve an exact artifact and destination using an authorized policy approver.
     - name: deploy_init
-      description: Bind a source to a service, Android, or iOS deployment.
+      description: Bind a source to a service, Android, iOS, or macOS deployment.
     - name: deploy_list
       description: List deployments in this project with current build/release status.
     - name: deploy_get
@@ -101,7 +101,7 @@ provides:
     - name: deploy_env_destroy
       description: Archive a non-production environment.
     - name: deploy_build
-      description: Build a service artifact, Android AAB, or iOS IPA.
+      description: Build a service artifact, Android AAB, iOS IPA, or macOS PKG.
     - name: deploy_build_cancel
       description: Cancel a pending or running cloud build.
     - name: deploy_artifact_download
@@ -109,7 +109,7 @@ provides:
     - name: deploy_cloud_backend_setup
       description: Discover or create a provider's shared build adapter and configure a deployment environment.
     - name: deploy_mobile_signing_setup
-      description: Create, reconcile, repair, or explicitly rotate Deploy-managed Android or iOS signing and prepare the selected build provider without exposing private keys.
+      description: Create, reconcile, repair, or explicitly rotate Deploy-managed Android or Apple signing and prepare the selected build provider without exposing private keys.
     - name: deploy_mobile_signing_status
       description: Return non-secret signing provisioning status for a mobile deployment environment.
     - name: deploy_store_get
@@ -179,7 +179,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: deploy/v0.26.0
+    ref: deploy/v0.27.0
     entry: mcp/deploy
   port: 8080
   health_check: /health

@@ -251,10 +251,10 @@ func recordStoreProviderValidation(rel *Release, platform string, evidence provi
 }
 
 func isMobileDeployment(d *Deployment, b *Build) bool {
-	if d != nil && (d.TargetKind == "android" || d.TargetKind == "ios") {
+	if d != nil && isAppPlatform(d.TargetKind) {
 		return true
 	}
-	return b != nil && (b.Framework == "android" || b.Framework == "ios")
+	return b != nil && isAppPlatform(b.Framework)
 }
 
 func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
@@ -289,6 +289,12 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	if platform == "" {
 		platform = b.Framework
 	}
+	if platform != d.TargetKind {
+		return nil, fmt.Errorf("build platform %q does not match deployment platform %q", platform, d.TargetKind)
+	}
+	if spec, ok := appPlatformFor(platform); ok && manifest.Primary != "" && !strings.EqualFold(filepath.Ext(manifest.Primary), spec.ArtifactExt) {
+		return nil, fmt.Errorf("%s release requires a %s artifact", platform, spec.ArtifactExt)
+	}
 	channel, err := normalizeMobileChannel(platform, opts.Channel)
 	if err != nil {
 		return nil, err
@@ -314,7 +320,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 		return nil, err
 	}
 	defer logFile.Close()
-	provider := map[string]string{"android": "google_play", "ios": "app_store_connect"}[platform]
+	provider := mobileStoreProvider(platform)
 	meta := mobileReleaseMeta{
 		Platform: platform, PackageName: manifest.PackageName, BundleID: manifest.BundleID,
 		VersionName: manifest.VersionName, BuildNumber: manifest.BuildNumber, VersionCode: manifest.VersionCode,
@@ -349,7 +355,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 					err = newStorePreflightError(preflight)
 				}
 			}
-		} else if platform == "ios" && meta.SubmitForReview {
+		} else if isApplePlatform(platform) && meta.SubmitForReview {
 			err = errors.New("configure and validate the App Store listing before submitting for review")
 		}
 		if err != nil {
@@ -439,7 +445,7 @@ func (a *App) runMobileRelease(d *Deployment, b *Build, opts releaseOptions) (*R
 	switch platform {
 	case "android":
 		err = a.publishAndroidRelease(rel.ID, b, manifest, channel, &meta, logFile)
-	case "ios":
+	case "ios", "macos":
 		err = a.publishIOSRelease(rel.ID, b, manifest, channel, &meta, logFile)
 	default:
 		err = fmt.Errorf("unsupported mobile platform %q", platform)
@@ -632,8 +638,9 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a *App) publishIOSRelease(releaseID int64, b *Build, manifest artifactManifest, channel string, meta *mobileReleaseMeta, logW io.Writer) error {
+	platform := defaultStr(meta.Platform, "ios")
 	if runtime.GOOS != "darwin" {
-		return errors.New("iOS upload requires a macOS Deploy host with Xcode")
+		return errors.New("Apple App Store upload requires a macOS Deploy host with Xcode")
 	}
 	if meta.BundleID == "" {
 		return errors.New("iOS release requires a bundle_id in the artifact or target_config_json")
@@ -666,6 +673,9 @@ func (a *App) publishIOSRelease(releaseID int64, b *Build, manifest artifactMani
 		return errors.New("App Store Connect connection requires issuer_id, key_id, and private_key")
 	}
 	primary := filepath.Join(b.ArtifactPath, manifest.Primary)
+	if _, err := verifyMobileBinaryIdentity(primary, platform, mobileTargetConfig{BundleID: meta.BundleID, VersionName: meta.VersionName, BuildNumber: meta.BuildNumber}); err != nil {
+		return fmt.Errorf("verify %s package before upload: %w", platform, err)
+	}
 	tmp, err := os.MkdirTemp("", "apteva-appstore-upload-*")
 	if err != nil {
 		return err
@@ -746,7 +756,7 @@ func (a *App) syncIOSRelease(rel *Release) error {
 		}
 		return a.syncAppStoreVersionState(bound, rel, &meta)
 	}
-	input := map[string]any{"app_id": meta.AppID, "limit": 20, "sort": "-uploadedDate"}
+	input := map[string]any{"app_id": meta.AppID, "platform": appleStorePlatform(meta.Platform), "limit": 20, "sort": "-uploadedDate"}
 	if meta.BuildNumber != "" {
 		input["version"] = meta.BuildNumber
 	}
@@ -870,7 +880,7 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	}
 	versionID := meta.AppStoreVersionID
 	if versionID == "" {
-		versions, err := executeIntegration(bound, "list_app_versions", map[string]any{"app_id": meta.AppID, "platform": "IOS", "version_string": meta.VersionName, "limit": 10})
+		versions, err := executeIntegration(bound, "list_app_versions", map[string]any{"app_id": meta.AppID, "platform": appleStorePlatform(meta.Platform), "version_string": meta.VersionName, "limit": 10})
 		if err != nil {
 			return err
 		}
@@ -878,7 +888,7 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 		if versionID == "" {
 			releaseType := strings.ToUpper(defaultStr(meta.ReleaseType, "MANUAL"))
 			created, err := executeIntegration(bound, "create_app_version", map[string]any{
-				"app_id": meta.AppID, "platform": "IOS", "versionString": meta.VersionName, "releaseType": releaseType,
+				"app_id": meta.AppID, "platform": appleStorePlatform(meta.Platform), "versionString": meta.VersionName, "releaseType": releaseType,
 			})
 			if err != nil {
 				return err
@@ -901,7 +911,7 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 	})
 	status := "ready_for_review"
 	if meta.SubmitForReview {
-		submission, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID)
+		submission, err := ensureAppleReviewSubmission(bound, meta.AppID, versionID, meta.Platform)
 		if err != nil {
 			return err
 		}
@@ -930,7 +940,7 @@ func (a *App) prepareIOSProductionRelease(bound *sdk.BoundIntegration, rel *Rele
 			Status: "accepted", ExternalID: submission.ID, VersionName: meta.VersionName, ValidatedAt: nowUTC(),
 		}
 		meta.ProviderValidations["app_privacy"] = evidence
-		if err := recordStoreProviderValidation(rel, "ios", evidence); err != nil {
+		if err := recordStoreProviderValidation(rel, defaultStr(meta.Platform, "ios"), evidence); err != nil {
 			return fmt.Errorf("record provider validation: %w", err)
 		}
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "provider_validation_accepted", mustJSON(evidence))
@@ -952,9 +962,13 @@ type appleReviewSubmissionSelection struct {
 	State        string
 }
 
-func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string) (appleReviewSubmissionSelection, error) {
+func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID string, releasePlatform ...string) (appleReviewSubmissionSelection, error) {
+	platform := "IOS"
+	if len(releasePlatform) > 0 {
+		platform = appleStorePlatform(releasePlatform[0])
+	}
 	listed, err := executeIntegration(bound, "list_review_submissions", map[string]any{
-		"app_id": appID, "platform": "IOS",
+		"app_id": appID, "platform": platform,
 		"include": "items,appStoreVersionForReview", "limit": 200, "limit_items": 50,
 	})
 	if err != nil {
@@ -965,7 +979,7 @@ func ensureAppleReviewSubmission(bound *sdk.BoundIntegration, appID, versionID s
 	} else if conflictingID != "" {
 		return appleReviewSubmissionSelection{}, fmt.Errorf("App Store Connect active review submission %s already contains another version", conflictingID)
 	}
-	created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": appID, "platform": "IOS"})
+	created, err := executeIntegration(bound, "create_review_submission", map[string]any{"app_id": appID, "platform": platform})
 	if err != nil {
 		return appleReviewSubmissionSelection{}, err
 	}
@@ -1310,7 +1324,7 @@ func (a *App) validateMobilePromotion(d *Deployment, build *Build, source *Relea
 	if err != nil {
 		return nil, err
 	}
-	provider := map[string]string{"android": "google_play", "ios": "app_store_connect"}[d.TargetKind]
+	provider := mobileStoreProvider(d.TargetKind)
 	result := &mobilePromotionValidation{
 		Platform: d.TargetKind, Provider: provider, TargetChannel: channel, ProductionAccess: "not_applicable", CommitPerformed: false,
 	}
@@ -1633,7 +1647,7 @@ func normalizeMobileChannel(platform, channel string) (string, error) {
 		}
 		return channel, nil
 	}
-	if platform != "ios" || (channel != "internal" && channel != "external" && channel != "production") {
+	if !isApplePlatform(platform) || (channel != "internal" && channel != "external" && channel != "production") {
 		return "", fmt.Errorf("channel %q is not supported for %s", channel, platform)
 	}
 	return channel, nil

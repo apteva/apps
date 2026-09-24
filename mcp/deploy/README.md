@@ -1,6 +1,6 @@
 # Deploy
 
-Build and release services, Android apps, and iOS apps for Apteva projects.
+Build and release services, Android, universal iOS, and native macOS apps for Apteva projects.
 
 Takes a code repo (from the **Code** app or a local path) and turns it
 into a built, supervised, URL-addressable process. Builds can run on
@@ -36,6 +36,7 @@ or GitHub Actions.
 | `blank`   | optional `build_cmd`                                   | requires `start_cmd`                     |
 | `android` | Gradle bundle task or `build_cmd` -> signed `.aab`       | Google Play track                        |
 | `ios`     | Xcode archive/export or `build_cmd` -> `.ipa`            | TestFlight or App Store                  |
+| `macos`   | Xcode archive/export or `build_cmd` -> signed `.pkg`     | TestFlight or Mac App Store              |
 
 Auto-detected from the source tree (`go.mod` → `go`, `package.json` →
 `node`, `index.html` → `static`, etc.) when `framework` is empty. The
@@ -45,9 +46,38 @@ otherwise npm.
 
 ## Mobile releases
 
-Set `target_kind` and `framework` to `android` or `ios`. Mobile targets
+Set `target_kind` and `framework` to `android`, `ios`, or `macos`. App targets
 reuse the existing deployment -> environment -> build -> release records;
 they do not create a parallel deployment model.
+
+One universal `ios` deployment covers iPhone and iPad when the Xcode target
+supports device families 1 and 2. A native Mac app uses a distinct `macos`
+deployment and signed `.pkg`; it may share the App Store Connect app record
+and bundle ID with iOS. Build numbers, processed builds, store versions, and
+review submissions are selected by platform.
+
+For Code app sources that refer to sibling repositories, `source_extra_json`
+can assemble independently verified snapshots into one capsule:
+
+```json
+{
+  "dependencies": [
+    {"slug": "apteva-client-sdk", "path": "apteva-client-sdk", "snapshot_id": "<pinned Code snapshot ID>"}
+  ]
+}
+```
+
+The application is built from `app/`; dependencies are extracted beside it.
+Thus `../apteva-client-sdk` resolves in Xcode and Gradle without a local
+checkout or package-registry credentials. A dependency can also select a
+`subdir`. Omitting `snapshot_id` captures the current Code snapshot at build
+start. The signed capsule includes all selected repositories, and runner
+contracts receive `build_subdir: app` or `APTEVA_SOURCE_BUILD_SUBDIR=app`.
+
+For macOS, Codemagic defaults to uploading the signed `.pkg` on its macOS
+runner and Deploy tracks the `MAC_OS` build in App Store Connect. An explicit
+`artifact_mode: file` requires a macOS Deploy host to inspect the downloaded
+package with `pkgutil` before it can be used for a local upload.
 
 Android `target_config_json` supports:
 
@@ -261,7 +291,7 @@ Codemagic example:
 }
 ```
 
-For iOS, `deploy_mobile_signing_setup` automates the provider setup that can
+For iOS and macOS, `deploy_mobile_signing_setup` automates the provider setup that can
 be automated:
 
 1. Register or reuse the Apple Bundle ID.
@@ -319,8 +349,8 @@ GitHub Actions example:
 | Mode | Contract |
 |------|----------|
 | `bundle` | The named ZIP artifact is unpacked as the service/static build output. |
-| `file` | The named artifact is staged as one file; use for Android AAB or iOS IPA. Runner/GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. Deploy can apply Android upload signing after retrieval. |
-| `store_upload` | The workflow signs and uploads iOS to App Store Connect or Android to Google Play. Deploy adopts the result. Android requires `target_config_json.version_code`; direct Play upload also records the exact `store_channel`. |
+| `file` | The named artifact is staged as one file; use for Android AAB, iOS IPA, or macOS PKG. Runner/GitHub ZIP containers are unpacked and `artifact_file` selects the output when they contain multiple files. Deploy can apply Android upload signing after retrieval. Mac package inspection requires a macOS Deploy host. |
+| `store_upload` | The workflow signs and uploads iOS or macOS to App Store Connect, or Android to Google Play. Deploy adopts the result. Android requires `target_config_json.version_code`; direct Play upload also records the exact `store_channel`. |
 | `none` | The workflow has no deployable output. |
 
 The capsule runner serves authenticated artifact and log routes directly.

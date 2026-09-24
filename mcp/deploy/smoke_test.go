@@ -512,6 +512,7 @@ var testMigrationFiles = []string{
 	"migrations/011_cloud_build_lifecycle.sql",
 	"migrations/012_mobile_signing_identities.sql",
 	"migrations/013_operation_safety.sql",
+	"migrations/014_macos_platform.sql",
 }
 
 // openSchemaDB opens an in-memory SQLite and applies every app migration.

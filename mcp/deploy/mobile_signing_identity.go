@@ -215,7 +215,7 @@ func (a *App) createMobileSigningIdentity(db *sql.DB, input mobileSigningIdentit
 	input.Platform = strings.ToLower(strings.TrimSpace(input.Platform))
 	input.AuthorityScope = strings.TrimSpace(input.AuthorityScope)
 	input.ApplicationIdentifier = strings.TrimSpace(input.ApplicationIdentifier)
-	if input.ProjectID == "" || input.ApplicationIdentifier == "" || (input.Platform != "android" && input.Platform != "ios") {
+	if input.ProjectID == "" || input.ApplicationIdentifier == "" || !isAppPlatform(input.Platform) {
 		return nil, errors.New("invalid mobile signing identity scope")
 	}
 	encrypted, err := a.encryptMobileSigningPayload(input, 1, payload)

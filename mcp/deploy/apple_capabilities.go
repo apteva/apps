@@ -13,15 +13,20 @@ import (
 
 var appleCapabilityForMobileFeature = map[string]string{
 	mobileFeatureIOSPushNotifications: "PUSH_NOTIFICATIONS",
+	"macos.push_notifications":        "PUSH_NOTIFICATIONS",
 }
 
-func appleCertificateAvailable(bound *sdk.BoundIntegration, certificateID string) (bool, error) {
+func appleCertificateAvailable(bound *sdk.BoundIntegration, certificateID string, certificateType ...string) (bool, error) {
 	certificateID = strings.TrimSpace(certificateID)
 	if certificateID == "" {
 		return false, nil
 	}
+	kind := "IOS_DISTRIBUTION"
+	if len(certificateType) > 0 {
+		kind = certificateType[0]
+	}
 	raw, err := executeIntegration(bound, "list_certificates", map[string]any{
-		"certificate_type": "IOS_DISTRIBUTION",
+		"certificate_type": kind,
 		"limit":            200,
 	})
 	if err != nil {

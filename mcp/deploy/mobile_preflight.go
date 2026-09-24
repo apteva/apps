@@ -20,8 +20,14 @@ func validateMobileSource(root string, d *Deployment, cloudCfg cloudBuildConfig)
 		platform = strings.ToLower(strings.TrimSpace(d.Framework))
 	}
 	switch platform {
-	case "ios":
-		if err := validateIOSSource(root, target, cloudCfg); err != nil {
+	case "ios", "macos":
+		var sourceErr error
+		if platform == "ios" {
+			sourceErr = validateIOSSource(root, target, cloudCfg)
+		} else {
+			sourceErr = validateMacOSSource(root, target, cloudCfg)
+		}
+		if err := sourceErr; err != nil {
 			return err
 		}
 		if target.SmokeOnly || normalizeBuildBackend(d.BuildBackend) == buildBackendLocal || globalCtx == nil {
@@ -41,7 +47,7 @@ func validateMobileSource(root string, d *Deployment, cloudCfg cloudBuildConfig)
 			if len(requirements.Features) == 0 {
 				return nil
 			}
-			return errors.New("iOS signing requirements are not reconciled; run mobile signing setup before submitting the build")
+			return fmt.Errorf("%s signing requirements are not reconciled; run mobile signing setup before submitting the build", platform)
 		}
 		if setup.Status != mobileSigningStatusReady ||
 			setup.RequirementsHash != requirements.Hash ||
@@ -71,7 +77,7 @@ func validateMobileSource(root string, d *Deployment, cloudCfg cloudBuildConfig)
 }
 
 func validateMobileCloudContract(d *Deployment, cloudCfg cloudBuildConfig) error {
-	if d == nil || (d.TargetKind != "ios" && d.TargetKind != "android") {
+	if d == nil || !isAppPlatform(d.TargetKind) {
 		return nil
 	}
 	target, err := parseMobileTargetConfig(d.TargetConfigJSON)
@@ -80,15 +86,15 @@ func validateMobileCloudContract(d *Deployment, cloudCfg cloudBuildConfig) error
 	}
 	mode := resolvedCloudArtifactMode(cloudCfg, d)
 	switch d.TargetKind {
-	case "ios":
+	case "ios", "macos":
 		if !target.SmokeOnly && strings.TrimSpace(target.BundleID) == "" {
-			return errors.New("iOS cloud builds require target_config_json.bundle_id")
+			return fmt.Errorf("%s cloud builds require target_config_json.bundle_id", d.TargetKind)
 		}
 		if mode == "store_upload" &&
 			(strings.TrimSpace(target.VersionName) == "" || strings.TrimSpace(target.BuildNumber) == "") {
-			return errors.New("iOS store_upload requires target_config_json.version_name and build_number")
+			return fmt.Errorf("%s store_upload requires target_config_json.version_name and build_number", d.TargetKind)
 		}
-		if mode == "store_upload" && cloudCfg.SourceMode != "bundle" && len(target.DeviceFamilies) == 0 {
+		if d.TargetKind == "ios" && mode == "store_upload" && cloudCfg.SourceMode != "bundle" && len(target.DeviceFamilies) == 0 {
 			return errors.New("iOS repository store_upload requires target_config_json.device_families so App Store media can be validated")
 		}
 	case "android":
@@ -140,6 +146,30 @@ func validateIOSSource(root string, cfg mobileTargetConfig, cloudCfg cloudBuildC
 	}
 	if !hasOrientations {
 		return errors.New("iOS source does not declare supported interface orientations")
+	}
+	return nil
+}
+
+func validateMacOSSource(root string, cfg mobileTargetConfig, cloudCfg cloudBuildConfig) error {
+	if cfg.SmokeOnly {
+		return errors.New("macOS smoke_only is not supported; use a signed package build")
+	}
+	if !looksLikeMacOSProject(root) {
+		return errors.New("target is macOS but the source has no macOS Xcode project")
+	}
+	if strings.TrimSpace(cfg.BundleID) == "" {
+		return errors.New("macOS App Store builds require target_config_json.bundle_id")
+	}
+	if resolvedCloudArtifactMode(cloudCfg, &Deployment{TargetKind: "macos"}) == "store_upload" &&
+		(strings.TrimSpace(cfg.VersionName) == "" || strings.TrimSpace(cfg.BuildNumber) == "") {
+		return errors.New("macOS store_upload requires target_config_json.version_name and build_number")
+	}
+	iconSet, err := findIOSAppIconSet(root)
+	if err != nil {
+		return err
+	}
+	if iconSet == "" {
+		return errors.New("macOS source has no populated .appiconset asset catalog")
 	}
 	return nil
 }
