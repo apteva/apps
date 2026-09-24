@@ -61,6 +61,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/import-preview", Handler: a.handleList("content_catalog_import_preview")},
 		{Pattern: "/assets/", Handler: a.handleAsset},
 		{Pattern: "/publications", Handler: a.handleList("content_catalog_asset_publications_list")},
+		{Pattern: "/posts", Handler: a.handleList("content_catalog_posts_list")},
 		{Pattern: "/hostings", Handler: a.handleList("content_catalog_hosting_list")},
 		{Pattern: "/video-hosts", Handler: a.handleVideoHosts},
 		{Pattern: "/action", Handler: a.handleAction},
@@ -109,6 +110,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_sessions_get", Description: "Get one session with assets and linked Gigs. Args: id.", InputSchema: schema("id"), Handler: a.sessionGet},
 		{Name: "content_catalog_sessions_link_gig", Description: "Read an existing Gig, then link it to a Catalog session. Args: session_id, gig_id, role?. Does not change Gigs.", InputSchema: schema("session_id", "gig_id"), Handler: a.sessionLinkGig},
 		{Name: "content_catalog_assets_attach", Description: "Read an existing Storage file, then link it to a session. Args: session_id, storage_file_id, kind?. Does not upload or change Storage.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttach},
+		{Name: "content_catalog_session_upload_target", Description: "Return the exact Storage folder and install ID for explicit uploads into a session. Does not scan or upload. Args: session_id.", InputSchema: schema("session_id"), Handler: a.sessionUploadTarget},
+		{Name: "content_catalog_assets_attach_uploaded", Description: "Attach a file uploaded to the session's exact Storage folder after verifying its Storage metadata. Idempotent. Args: session_id, storage_file_id.", InputSchema: schema("session_id", "storage_file_id"), Handler: a.assetAttachUploaded},
 		{Name: "content_catalog_import_preview", Description: "Read up to 200 Storage files under a session brand root. Return candidates needing human review; no files or Catalog records are changed. Args: session_id.", InputSchema: schema("session_id"), Handler: a.importPreview},
 		{Name: "content_catalog_assets_list", Description: "List assets; session_id required.", InputSchema: schema("session_id"), Handler: a.assetsList},
 		{Name: "content_catalog_assets_get", Description: "Get an asset with source lineage, hosting, and per-asset publication records. Args: id.", InputSchema: schema("id"), Handler: a.assetGet},
@@ -116,6 +119,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "content_catalog_assets_review", Description: "Set a Catalog asset's editorial review_status to pending, approved, or rejected. Args: asset_id, review_status.", InputSchema: schema("asset_id", "review_status"), Handler: a.assetReview},
 		{Name: "content_catalog_asset_publications_list", Description: "List the platforms and observed post details for one asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.assetPublicationsList},
 		{Name: "content_catalog_asset_publications_record", Description: "Create or update a publication record on one asset. Args: asset_id, destination (new record), status, publication_id? (update), account_ref?, audience?, planned_at?, actual_at?, external_post_id?, external_url?, evidence_source?, failure_details?. Verified live requires evidence and URL or post ID. Writes only Catalog; never publishes externally.", InputSchema: schema("asset_id", "status"), Handler: a.assetPublicationRecord},
+		{Name: "content_catalog_posts_list", Description: "List shared platform posts; optional session_id, asset_id, brand_id. Each post contains its asset IDs and one observed outcome.", InputSchema: schema(), Handler: a.postsList},
+		{Name: "content_catalog_posts_get", Description: "Get one shared platform post and its asset IDs. Args: id.", InputSchema: schema("id"), Handler: a.postsGet},
+		{Name: "content_catalog_posts_record", Description: "Create or update a shared platform post. Args: asset_ids (one or more same-brand Catalog assets), destination and status for new posts; post_id for updates. Supports title, account_ref, audience, planned_at, actual_at, external_post_id, external_url, evidence_source, failure_details. Writes Catalog evidence only; does not publish externally.", InputSchema: schema("status"), Handler: a.postsRecord},
 		{Name: "content_catalog_hosting_request", Description: "REAL EXTERNAL HOSTING: request an approved asset's video upload to the brand's video host. Bunny Stream is supported. Does not publish to a channel.", InputSchema: schema("asset_id"), Handler: a.hostingRequest},
 		{Name: "content_catalog_hosting_check", Description: "Fetch provider readiness for one hosting id and update Catalog's observation. Args: id.", InputSchema: schema("id"), Handler: a.hostingCheck},
 		{Name: "content_catalog_hosting_list", Description: "List hosting records for an asset. Args: asset_id.", InputSchema: schema("asset_id"), Handler: a.hostingsList},
@@ -345,7 +351,7 @@ func (a *App) overview(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		return nil, err
 	}
 	out := map[string]any{}
-	for key, table := range map[string]string{"brands": "brands", "sessions": "sessions", "assets": "assets", "publications": "asset_publications", "hostings": "hostings"} {
+	for key, table := range map[string]string{"brands": "brands", "sessions": "sessions", "assets": "assets", "publications": "posts", "hostings": "hostings"} {
 		var n int64
 		if err := ctx.AppDB().QueryRow("SELECT COUNT(*) FROM "+table+" WHERE project_id=?", pid).Scan(&n); err != nil {
 			return nil, err
