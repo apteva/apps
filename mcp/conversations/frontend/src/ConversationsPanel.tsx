@@ -515,7 +515,6 @@ function NewConversationDialog({
   const [selected, setSelected] = useState<number[]>([]);
   const [leadId, setLeadId] = useState<number | null>(null);
   const [title, setTitle] = useState("");
-  const [audience, setAudience] = useState<"operator" | "public">("operator");
   const [filter, setFilter] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -530,7 +529,6 @@ function NewConversationDialog({
     setSelected([]);
     setLeadId(null);
     setTitle("");
-    setAudience("operator");
     setFilter("");
     setError("");
   };
@@ -560,7 +558,7 @@ function NewConversationDialog({
         agent_ids: selected,
         lead_agent_id: leadId ?? selected[0],
         title: title.trim() || undefined,
-        audience,
+        audience: "operator",
         project_id: projectId,
       }, projectId);
       reset();
@@ -594,17 +592,6 @@ function NewConversationDialog({
             placeholder={t("common.optional")}
             className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
           />
-        </label>
-        <label className="block">
-          <span className="mb-1 block text-xs uppercase text-text-muted">{t("chat.audience")}</span>
-          <select
-            value={audience}
-            onChange={(e) => setAudience(e.target.value as "operator" | "public")}
-            className="w-full rounded border border-border bg-bg-input px-3 py-2 text-sm text-text focus:border-accent focus:outline-none"
-          >
-            <option value="operator">{t("chat.operatorOption")}</option>
-            <option value="public">{t("chat.publicOption")}</option>
-          </select>
         </label>
         <div>
           <div className="mb-1 text-xs uppercase text-text-muted">{t("common.agents")}</div>

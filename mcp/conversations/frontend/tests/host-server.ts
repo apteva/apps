@@ -64,6 +64,9 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",attached:true},{id:42,name:"Scheduling assistant",attached:true}]);
+ if(path==="/unread-summary")return Response.json([]);
+ if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;return Response.json({...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience});}
+ if(path==="/chats"&&url.searchParams.has("page"))return Response.json({conversations:[],next_cursor:""});
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/messages"&&req.method==="POST"){

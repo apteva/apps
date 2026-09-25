@@ -99,8 +99,6 @@ export const catalog = {
   "common.title": ["Title", "Titre", "Título"],
   "common.optional": ["Optional", "Facultatif", "Opcional"],
   "chat.audience": ["Audience", "Public cible", "Audiencia"],
-  "chat.operatorOption": ["Operator — approvals and internal inbox items allowed", "Opérateur — approbations et éléments internes autorisés", "Operador — aprobaciones y elementos internos permitidos"],
-  "chat.publicOption": ["Public visitor — replies only, no internal inbox items", "Visiteur public — réponses uniquement, aucun élément interne", "Visitante público — solo respuestas, sin elementos internos"],
   "common.agents": ["Agents", "Agents", "Agentes"],
   "chat.loadingAgents": ["Loading agents…", "Chargement des agents…", "Cargando agentes…"],
   "chat.noAgents": ["No agents in this project yet.", "Aucun agent dans ce projet pour le moment.", "Todavía no hay agentes en este proyecto."],

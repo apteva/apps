@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.6 — 2026-09-25
+
+- Create conversations from the in-app panel as operator conversations without an audience selector. Public conversations for external sites remain unchanged.
+- Add a packaged-panel browser regression test for the modal and its create request.
+
 ## 0.24.5 — 2026-09-23
 
 - Keep streamed replies, preparing tools, executing tools, and saved messages in one chronological transcript. Retain completed streamed text until its durable replacement arrives.
