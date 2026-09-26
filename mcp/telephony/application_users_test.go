@@ -246,6 +246,24 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	server := softphoneTestServer(t, app)
 	browser := dialWS(t, server.URL+strings.Replace(session.MediaURL, "/api/apps/telephony/_install/42", "", 1))
 	readSoftphoneEventWithin(t, browser, "ready", 3*time.Second)
+	// Adding a different agent changes the project revision but not Alice's
+	// ownership or grants. Her live socket and lease must survive that edit.
+	policy.Users = append(policy.Users, phoneUser{Identity: phoneTestIdentity("hamza"), Enabled: true,
+		phoneGrant: phoneGrant{Role: "user", Destinations: []string{"support"}}})
+	w = phoneTestRequest(app, nil, "PUT", "/access/policy", policy)
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &policy) != nil {
+		t.Fatalf("add unrelated user: %d %s", w.Code, w.Body)
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "" {
+		t.Fatalf("unrelated policy edit invalidated media: %s", reason)
+	}
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/renew/"+row.ID, map[string]any{"session_token": session.SessionToken}); w.Code != 200 {
+		t.Fatalf("unrelated policy edit blocked renewal: %d %s", w.Code, w.Body)
+	}
+	time.Sleep(1200 * time.Millisecond) // Cross the live socket's grant-check tick.
+	if hub := app.softphones.lookup(row.ID); hub == nil || hub.browserWriter() == nil {
+		t.Fatal("unrelated policy edit disconnected live media")
+	}
 	for i := range policy.Users {
 		if policy.Users[i].Identity == alice {
 			policy.Users[i].Enabled = false
@@ -256,6 +274,9 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	}
 	if app.validPhoneMedia(&row, session.SessionToken) {
 		t.Fatal("revocation retained media grant")
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "user_access_revoked" {
+		t.Fatalf("revocation reason: %s", reason)
 	}
 	_ = browser.SetReadDeadline(time.Now().Add(3 * time.Second))
 	for {
@@ -273,6 +294,36 @@ func TestApplicationUserBackendAssignmentAndLease(t *testing.T) {
 	_, _, _, err := ws.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+strings.Replace(session.MediaURL, "/api/apps/telephony/_install/42", "", 1))
 	if err == nil {
 		t.Fatal("revoked media reconnected")
+	}
+}
+func TestApplicationUserMediaGrantRemovalWithoutDisablingUser(t *testing.T) {
+	softphoneTestCtx(t)
+	app := &App{installID: 42}
+	policy := phoneTestPolicy(t, app)
+	row := phoneTestCall(t, app, "grant-removed-call", "in-progress")
+	alice := phoneTestIdentity("alice")
+	if err := app.setPhoneOwner(&row, &phonePrincipal{Identity: alice, Project: row.ProjectID,
+		Destinations: map[string]bool{"sales": true}, Numbers: map[string]bool{}}, "sales"); err != nil {
+		t.Fatal(err)
+	}
+	w := phoneTestRequest(app, &alice, "POST", "/softphone/attach/"+row.ID, nil)
+	var session softphoneSession
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &session) != nil {
+		t.Fatalf("attach: %d %s", w.Code, w.Body)
+	}
+	for i := range policy.Users {
+		if policy.Users[i].Identity == alice {
+			policy.Users[i].Groups = nil
+		}
+	}
+	if w := phoneTestRequest(app, nil, "PUT", "/access/policy", policy); w.Code != 200 {
+		t.Fatalf("remove grant: %d %s", w.Code, w.Body)
+	}
+	if reason := app.phoneMediaDenialReason(&row, session.SessionToken); reason != "call_permission_revoked" {
+		t.Fatalf("grant removal reason: %s", reason)
+	}
+	if w := phoneTestRequest(app, &alice, "POST", "/softphone/renew/"+row.ID, map[string]any{"session_token": session.SessionToken}); w.Code < 400 {
+		t.Fatalf("removed grant renewed media: %d %s", w.Code, w.Body)
 	}
 }
 func TestApplicationUserMCPAndIncompleteScopesDenied(t *testing.T) {

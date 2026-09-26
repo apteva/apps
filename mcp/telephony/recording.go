@@ -159,7 +159,7 @@ func recordingCarrierSupport(ctx *sdk.AppCtx) (string, bool) {
 
 func providerSupportsRecording(slug string) bool {
 	switch strings.ToLower(strings.TrimSpace(slug)) {
-	case "twilio", "telnyx", "plivo":
+	case "twilio", "telnyx", "plivo", "bandwidth":
 		return true
 	default:
 		return false

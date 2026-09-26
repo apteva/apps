@@ -1761,7 +1761,11 @@ func (a *App) writeTwilioRoutingPlan(w http.ResponseWriter, row *callRow, route 
 		_, _ = fmt.Fprintf(w, `<Response><Say>%s</Say><Record maxLength="180" playBeep="true" recordingStatusCallback="%s" recordingStatusCallbackMethod="POST"/><Hangup/></Response>`, xmlEscape(firstNonEmpty(plan.Prompt, "Please leave a message after the tone.")), xmlEscape(a.twilioRecordingStatusURL(row.ID, row.CallbackSecret, row.ProjectID)))
 		return nil
 	case "reject", "hangup":
-		writeTwilioHangup(w)
+		if prompt := terminalAnnouncementText(plan); prompt != "" {
+			writeTwilioSayHangup(w, prompt)
+		} else {
+			writeTwilioHangup(w)
+		}
 		return nil
 	default:
 		return fmt.Errorf("unsupported routing terminal %q", plan.TerminalType)
@@ -1937,6 +1941,14 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 			return err
 		}
 	case "reject", "hangup":
+		if prompt := terminalAnnouncementText(plan); prompt != "" {
+			if _, err := a.db().db.Exec(`UPDATE calls SET announcement_state='awaiting_answer',announcement_text=?,handling_reason=? WHERE id=?`, prompt, routeHandlingReason(plan), row.ID); err != nil {
+				return err
+			}
+			row.AnnouncementState = "awaiting_answer"
+			row.AnnouncementText = prompt
+			return a.startTelnyxTerminalAnnouncement(ctx, row)
+		}
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{"call_control_id": row.CarrierSID, "command_id": telnyxCommandID(row.ID, "ivr-hangup")})
 		return err
 	case "voicemail":

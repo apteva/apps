@@ -40,11 +40,12 @@ func effectiveRecordingControlState(row callRow) string {
 }
 
 func callControlCapabilities(row callRow) map[string]bool {
-	carrier := row.CarrierSlug == "telnyx" && row.CarrierSID != "" && row.IngressPath != "sip_direct"
+	features := carrierControlFeaturesForSlug(row.CarrierSlug)
+	carrier := row.CarrierSID != "" && row.IngressPath != "sip_direct"
 	human := row.PeerKind == peerKindHuman
 	return map[string]bool{
-		"hold_music":      carrier && human && (row.HoldMusicURL != "" || row.HoldMusicStorageFileID > 0),
-		"recording_pause": carrier && human && row.RecordingMode == recordingModeAlways,
+		"hold_music":      features.HoldMusic && carrier && human && (row.HoldMusicURL != "" || row.HoldMusicStorageFileID > 0),
+		"recording_pause": features.RecordingPause && carrier && human && row.RecordingMode == recordingModeAlways,
 	}
 }
 

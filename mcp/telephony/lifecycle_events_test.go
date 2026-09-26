@@ -108,6 +108,15 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		t.Fatalf("carrier dependency declares a provider-specific tool as generic: disk=%#v embedded=%#v",
 			disk.Requires.Integrations[0].Tools, embedded.Requires.Integrations[0].Tools)
 	}
+	if !reflect.DeepEqual(disk.Requires.Integrations[0].CompatibleSlugs, embedded.Requires.Integrations[0].CompatibleSlugs) {
+		t.Fatalf("carrier compatibility drift: disk=%#v embedded=%#v",
+			disk.Requires.Integrations[0].CompatibleSlugs, embedded.Requires.Integrations[0].CompatibleSlugs)
+	}
+	for _, slug := range []string{"telnyx", "bandwidth", "sinch", "didww"} {
+		if !containsString(embedded.Requires.Integrations[0].CompatibleSlugs, slug) {
+			t.Fatalf("carrier %s is unavailable in the install picker", slug)
+		}
+	}
 	if !containsString(embeddedTools, "telephony_routes_set_transport") {
 		t.Fatal("direct SIP transport tool is not declared in the manifest")
 	}
@@ -131,7 +140,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		"telephony.routing.call.busy",
 		"telephony.routing.call.no-answer",
 		"telephony.routing.call.canceled",
-		"call.routing.started", "call.routing.node_entered", "call.offered",
+		"call.routing.started", "call.routing.node_entered", "call.offered", "telephony.burst.suppressed",
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
 		"call.canceled", "call.machine_detected", "recording.ready", "recording.stored", "recording.deleted",

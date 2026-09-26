@@ -61,6 +61,8 @@ type phonePrincipal struct {
 }
 type phonePrincipalKey struct{}
 
+var errPhoneAccessDenied = errors.New("application user has no Telephony access")
+
 func phoneUserFrom(r *http.Request) *phonePrincipal {
 	p, _ := r.Context().Value(phonePrincipalKey{}).(*phonePrincipal)
 	return p
@@ -86,6 +88,9 @@ func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrin
 	if err != nil {
 		return nil, err
 	}
+	return phonePrincipalFromPolicy(project, identity, policy)
+}
+func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy phonePolicy) (*phonePrincipal, error) {
 	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
 	add := func(g phoneGrant) {
 		p.Supervisor = p.Supervisor || g.Role == "supervisor"
@@ -109,7 +114,7 @@ func (a *App) phonePrincipal(project string, identity phoneIdentity) (*phonePrin
 			return p, nil
 		}
 	}
-	return nil, errors.New("application user has no Telephony access")
+	return nil, errPhoneAccessDenied
 }
 func phoneRequestIdentity(r *http.Request) (phoneIdentity, bool) {
 	p := phoneIdentity{r.Header.Get("X-Apteva-Issuer-App"), r.Header.Get("X-Apteva-Issuer-Install-ID"), r.Header.Get("X-Apteva-Subject-Type"), r.Header.Get("X-Apteva-Subject-ID"), r.Header.Get("X-Apteva-Organization-ID")}
@@ -383,15 +388,12 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 	principal := ""
 	revision := int64(0)
 	if p != nil {
-		if !a.phoneCallAllowed(p, row, false) {
+		fresh, err := a.phonePrincipal(row.ProjectID, p.Identity)
+		if err != nil || !a.phoneCallAllowed(fresh, row, false) {
 			return nil, errors.New("call not owned by user")
 		}
-		fresh, err := a.phonePrincipal(row.ProjectID, p.Identity)
-		if err != nil || fresh.Revision != p.Revision {
-			return nil, errors.New("access changed; retry")
-		}
 		principal = p.Identity.key()
-		revision = p.Revision
+		revision = fresh.Revision
 	}
 	token := newSecret()
 	_, err := a.db().db.Exec(`INSERT INTO telephony_media_sessions(call_id,project_id,token_hash,principal,policy_revision,expires_at) VALUES(?,?,?,?,?,?) ON CONFLICT(call_id) DO UPDATE SET token_hash=excluded.token_hash,principal=excluded.principal,policy_revision=excluded.policy_revision,expires_at=excluded.expires_at`, row.ID, row.ProjectID, phoneHash(token), principal, revision, time.Now().Unix()+phoneLeaseSeconds)
@@ -401,25 +403,60 @@ func (a *App) issuePhoneSession(row *callRow, p *phonePrincipal) (*softphoneSess
 	return &softphoneSession{CallID: row.ID, MediaURL: a.softphoneMediaURL(row.ID, token), SessionToken: token, To: row.ToNumber, From: row.FromNumber, LeaseSeconds: phoneLeaseSeconds}, nil
 }
 func (a *App) validPhoneMedia(row *callRow, token string) bool {
+	return a.phoneMediaDenialReason(row, token) == ""
+}
+
+// The project policy revision is an audit marker, not a media revocation
+// epoch. Recheck the current user's call grant so edits to other users do not
+// disconnect an unrelated live call while an actual revocation still does.
+func (a *App) phoneMediaDenialReason(row *callRow, token string) string {
 	var hash, principal string
 	var revision, expires int64
 	err := a.db().db.QueryRow(`SELECT token_hash,principal,policy_revision,expires_at FROM telephony_media_sessions WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&hash, &principal, &revision, &expires)
 	if err == sql.ErrNoRows {
 		owner, _, e := a.phoneOwner(row.ID)
-		return e == nil && owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken)
+		if e != nil {
+			return "owner_lookup_failed"
+		}
+		if owner == "" && row.PeerToken != "" && secureEqual(token, row.PeerToken) {
+			return ""
+		}
+		return "media_session_missing"
 	}
-	if err != nil || expires <= time.Now().Unix() || !secureEqual(phoneHash(token), hash) {
-		return false
+	if err != nil {
+		return "media_session_lookup_failed"
+	}
+	if expires <= time.Now().Unix() {
+		return "media_lease_expired"
+	}
+	if !secureEqual(phoneHash(token), hash) {
+		return "media_token_replaced"
 	}
 	if principal == "" {
-		return true
+		return ""
 	}
 	var identity phoneIdentity
-	if json.Unmarshal([]byte(principal), &identity) != nil {
-		return false
+	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
+		return "media_principal_invalid"
 	}
 	p, err := a.phonePrincipal(row.ProjectID, identity)
-	return err == nil && p.Revision == revision && a.phoneCallAllowed(p, row, false)
+	if err != nil {
+		if errors.Is(err, errPhoneAccessDenied) {
+			return "user_access_revoked"
+		}
+		return "policy_lookup_failed"
+	}
+	if !a.phoneCallAllowed(p, row, false) {
+		owner, _, ownerErr := a.phoneOwner(row.ID)
+		if ownerErr != nil {
+			return "owner_lookup_failed"
+		}
+		if owner != identity.key() {
+			return "call_ownership_changed"
+		}
+		return "call_permission_revoked"
+	}
+	return ""
 }
 func (a *App) handlePhoneSession(w http.ResponseWriter, r *http.Request, project, action, id string) {
 	unlock := a.softphones.lockClaim(id)

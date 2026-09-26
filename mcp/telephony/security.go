@@ -94,6 +94,34 @@ func (a *App) authorizeCallRequest(r *http.Request, row *callRow) error {
 	if strings.HasPrefix(r.URL.Path, "/media/") {
 		return nil
 	}
+	if row.CarrierSlug == "bandwidth" {
+		username, password, ok := r.BasicAuth()
+		if !ok || username != "apteva" || !secureEqual(password, row.CallbackSecret) {
+			return errors.New("invalid Bandwidth callback credentials")
+		}
+		return nil
+	}
+	if row.CarrierSlug == "sinch" {
+		if globalCtx == nil || globalCtx.PlatformAPI() == nil {
+			return errors.New("Sinch credential service is unavailable")
+		}
+		body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+		if err != nil || len(body) > 1<<20 {
+			return errors.New("invalid Sinch callback body")
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		creds, err := globalCtx.PlatformAPI().GetConnectionCredentials(row.CarrierConnectionID)
+		if err != nil || creds == nil {
+			return errors.New("load Sinch signing credential")
+		}
+		serviceID := strings.TrimSpace(creds.Fields["service_id"])
+		serviceSecret := strings.TrimSpace(creds.Fields["service_secret"])
+		callbackURL, err := url.Parse(a.statusCallbackURL(row.ID, row.CallbackSecret, row.ProjectID))
+		if err != nil {
+			return err
+		}
+		return verifySinchWebhook(r, body, serviceID, serviceSecret, callbackURL.EscapedPath(), time.Now())
+	}
 	if row.CarrierSlug == "plivo" {
 		return a.verifyPlivoRequest(r, row.CarrierConnectionID)
 	}

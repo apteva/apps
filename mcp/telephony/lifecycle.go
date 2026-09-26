@@ -43,15 +43,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
 		call.ForwardedFrom, call.IngressPath, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
 		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
 		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
 		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays,
-		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken)
+		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage)
 	if err != nil {
 		return nil, false, err
 	}
@@ -67,7 +67,7 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	}); err != nil {
 		return nil, false, err
 	}
-	if len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil) {
+	if call.HandlingReason != handlingBurstSuppressed && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {
@@ -265,6 +265,8 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
 		  AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id AND r.deleted_at = '')`,
 		project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
+	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_attempts WHERE project_id=? AND received_at<?`, project, now.Add(-24*time.Hour).Unix())
+	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_cooldowns WHERE project_id=? AND expires_at<?`, project, now.Unix())
 	return nil
 }
 

@@ -381,6 +381,24 @@ func TestSIPAdmissionCapacityIsAtomic(t *testing.T) {
 		t.Fatal("reservation leaked")
 	}
 }
+func TestSIPAdmissionCapacitySharedWithOutbound(t *testing.T) {
+	g := &sipGateway{cfg: sipGatewayConfig{MaxSessions: 2},
+		byCall:         map[string]*sipSession{"inbound": {}},
+		outboundByCall: map[string]*outboundSIPSession{"outbound": {}},
+	}
+	if status := g.reserveSession("another-inbound"); status != 503 {
+		t.Fatalf("inbound exceeded shared capacity: %d", status)
+	}
+	delete(g.outboundByCall, "outbound")
+	g.outboundReserved = map[string]bool{"placing-outbound": true}
+	if status := g.reserveSession("another-inbound"); status != 503 {
+		t.Fatalf("outbound reservation did not consume capacity: %d", status)
+	}
+	delete(g.outboundReserved, "placing-outbound")
+	if status := g.reserveSession("another-inbound"); status != 0 {
+		t.Fatalf("capacity was not released: %d", status)
+	}
+}
 func TestSIPSessionTimerValidation(t *testing.T) {
 	for _, tc := range []struct {
 		value  string

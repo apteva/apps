@@ -27,6 +27,20 @@ func validPhoneProvider(p phoneAuthProvider) bool {
 	u, e := url.Parse(p.URL)
 	return e == nil && u.Host != "" && u.User == nil && u.Fragment == "" && (u.Scheme == "https" || (u.Scheme == "http" && (u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost" || u.Hostname() == "::1"))) && p.ID != "" && p.IssuerApp != "" && p.IssuerInstallID != "" && (p.Format == "apteva-auth" || p.Format == "userinfo")
 }
+func phoneProviderStillAllows(policy phonePolicy, selected phoneAuthProvider, action string) bool {
+	for _, current := range policy.Providers {
+		if current.ID != selected.ID || current.URL != selected.URL || current.Format != selected.Format ||
+			current.IssuerApp != selected.IssuerApp || current.IssuerInstallID != selected.IssuerInstallID {
+			continue
+		}
+		for _, allowed := range current.Actions {
+			if allowed == action {
+				return true
+			}
+		}
+	}
+	return false
+}
 func identityScalar(v any) string {
 	switch s := v.(type) {
 	case string:
@@ -141,8 +155,18 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if !identity.valid() {
 		return nil, 401, errors.New("verified user identity required")
 	}
-	p, e := a.phonePrincipal(project, identity)
-	if e != nil || p.Revision != policy.Revision {
+	// Authentication may take seconds. A policy write during that interval
+	// must not revoke this request unless it changes this provider/action or
+	// the caller's own access. Derive both decisions from one fresh snapshot.
+	freshPolicy, e := a.phonePolicy(project)
+	if e != nil {
+		return nil, 503, errors.New("access unavailable")
+	}
+	if !phoneProviderStillAllows(freshPolicy, *provider, action) {
+		return nil, 403, errors.New("authentication provider access changed")
+	}
+	p, e := phonePrincipalFromPolicy(project, identity, freshPolicy)
+	if e != nil {
 		return nil, 403, errors.New("Telephony access denied")
 	}
 	if action == "call.takeover" && !p.Supervisor {

@@ -6,6 +6,19 @@ Run the deterministic app tests on every change:
 apteva test --tier 1,2 .
 ```
 
+For a checkout outside the root Go workspace overlay, set `GOWORK=off` for
+direct Go commands. The inbound incident regressions are in
+`inbound_protection_test.go`: Saturday open and after-hours simulation,
+answer/speak/hangup command ordering, duplicate webhook IDs, repeated callers,
+rotating caller IDs, and suppression before adviser delivery.
+
+Before a live release, call a test route during closed hours and listen until
+the complete announcement ends. Inspect the carrier command and callback
+sequence, confirm the call has `handling_reason=closed_hours`, and verify no
+missed-call pool entry. Then verify a Saturday open call reaches the intended
+destination. Use dedicated test numbers; the deterministic tests cannot prove
+that Telnyx actually played audible speech.
+
 Tier 1 runs the fast in-process suite. Tier 2 compiles and starts the real
 sidecar while deterministic carrier and browser peers exercise HTTP,
 WebSockets, audio, reconnection, recording, lifecycle persistence, and app-bus
