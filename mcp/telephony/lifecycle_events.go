@@ -262,29 +262,31 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 		}
 	}
 	payload := map[string]any{
-		"schema_version":   lifecycleSchemaVersion,
-		"event_id":         eventID,
-		"topic":            topic,
-		"call_id":          call.ID,
-		"provider":         call.CarrierSlug,
-		"provider_call_id": firstNonEmpty(call.CarrierSID, call.CarrierRequestID),
-		"direction":        call.Direction,
-		"from_number":      call.FromNumber,
-		"to_number":        call.ToNumber,
-		"status":           eventStatus,
-		"carrier_status":   call.Status,
-		"media_status":     firstNonEmpty(call.MediaStatus, "idle"),
-		"previous_status":  facts.PreviousStatus,
-		"agent_id":         call.AgentID,
-		"route_id":         call.RouteID,
-		"occurred_at":      occurredAt,
-		"placed_at":        call.PlacedAt,
-		"revision":         call.LifecycleRevision,
-		"source":           source,
+		"schema_version":       lifecycleSchemaVersion,
+		"event_id":             eventID,
+		"topic":                topic,
+		"call_id":              call.ID,
+		"provider":             call.CarrierSlug,
+		"provider_call_id":     firstNonEmpty(call.CarrierSID, call.CarrierRequestID),
+		"direction":            call.Direction,
+		"from_number":          call.FromNumber,
+		"to_number":            call.ToNumber,
+		"status":               eventStatus,
+		"carrier_status":       call.Status,
+		"media_status":         firstNonEmpty(call.MediaStatus, "idle"),
+		"previous_status":      facts.PreviousStatus,
+		"agent_id":             call.AgentID,
+		"route_id":             call.RouteID,
+		"occurred_at":          occurredAt,
+		"placed_at":            call.PlacedAt,
+		"revision":             call.LifecycleRevision,
+		"source":               source,
+		"missed_pool_eligible": call.Direction == "inbound" && call.HandlingReason == "",
 	}
 	addOptionalString(payload, "answered_at", call.AnsweredAt)
 	addOptionalString(payload, "ended_at", call.EndedAt)
 	addOptionalString(payload, "answered_by", call.AnsweredBy)
+	addOptionalString(payload, "handling_reason", call.HandlingReason)
 	if facts.Synthesized {
 		payload["synthesized"] = true
 	}
@@ -750,11 +752,12 @@ func decodeLifecycleCursor(raw string) (lifecycleCursor, error) {
 }
 
 type callbackUpdate struct {
-	Status      string
-	Error       string
-	MediaStatus string
-	MediaError  string
-	CarrierSID  string
+	Status        string
+	ProviderEvent string
+	Error         string
+	MediaStatus   string
+	MediaError    string
+	CarrierSID    string
 	// AnsweredBy is a normalized answering machine detection result, empty
 	// when the callback carries none.
 	AnsweredBy string
@@ -762,6 +765,12 @@ type callbackUpdate struct {
 }
 
 func callbackUpdateFor(carrier string, r *http.Request) callbackUpdate {
+	if carrier == "sinch" {
+		return sinchCallbackUpdate(r)
+	}
+	if carrier == "bandwidth" {
+		return bandwidthCallbackUpdate(r)
+	}
 	if carrier == "telnyx" {
 		return telnyxCallbackUpdate(r)
 	}

@@ -525,15 +525,31 @@ func (p *sipRTPPacer) clear(ctx context.Context) (int, error) {
 
 func (p *sipRTPPacer) Err() <-chan error { return p.errCh }
 
+type sipBridgeSession struct {
+	callID string
+	ctx    context.Context
+	media  *sipRTPMedia
+	finish func(string, error)
+	hangup func() error
+}
+
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
-	row, err := a.db().findCall(session.call.ID)
+	session.answerMu.Lock()
+	media := session.media
+	session.answerMu.Unlock()
+	a.bridgeSIPMedia(sipBridgeSession{
+		callID: session.call.ID, ctx: session.ctx, media: media,
+		finish: session.finish, hangup: session.hangup,
+	})
+}
+
+func (a *App) bridgeSIPMedia(session sipBridgeSession) {
+	row, err := a.db().findCall(session.callID)
 	if err != nil {
 		session.finish("local_error", err)
 		return
 	}
-	session.answerMu.Lock()
 	media := session.media
-	session.answerMu.Unlock()
 	if row == nil || media == nil {
 		return
 	}

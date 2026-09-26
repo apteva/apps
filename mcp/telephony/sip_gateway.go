@@ -20,24 +20,28 @@ import (
 var e164InSIPValue = regexp.MustCompile(`\+[1-9][0-9]{7,14}`)
 
 type sipGateway struct {
-	app     *App
-	appCtx  *sdk.AppCtx
-	cfg     sipGatewayConfig
-	ua      *sipgo.UserAgent
-	client  *sipgo.Client
-	server  *sipgo.Server
-	dialogs *sipgo.DialogServerCache
-	ctx     context.Context
-	cancel  context.CancelFunc
+	app             *App
+	appCtx          *sdk.AppCtx
+	cfg             sipGatewayConfig
+	ua              *sipgo.UserAgent
+	client          *sipgo.Client
+	server          *sipgo.Server
+	dialogs         *sipgo.DialogServerCache
+	outboundDialogs *sipgo.DialogClientCache
+	ctx             context.Context
+	cancel          context.CancelFunc
 
-	mu             sync.RWMutex
-	byProviderCall map[string]*sipSession
-	byCall         map[string]*sipSession
-	reserved       map[string]bool
-	ackTimeout     time.Duration
-	work           sync.WaitGroup
-	stopping       bool
-	stopDeadline   time.Time
+	mu                     sync.RWMutex
+	byProviderCall         map[string]*sipSession
+	byCall                 map[string]*sipSession
+	outboundByCall         map[string]*outboundSIPSession
+	outboundByProviderCall map[string]*outboundSIPSession
+	outboundReserved       map[string]bool
+	reserved               map[string]bool
+	ackTimeout             time.Duration
+	work                   sync.WaitGroup
+	stopping               bool
+	stopDeadline           time.Time
 }
 
 type sipSession struct {
@@ -177,11 +181,19 @@ func newSIPGateway(app *App, appCtx *sdk.AppCtx, cfg sipGatewayConfig) (*sipGate
 		Scheme: "sip", User: "apteva", Host: cfg.PublicHost, Port: port, UriParams: params,
 	}}
 	dialogs := sipgo.NewDialogServerCache(client, contact)
+	outboundContact := contact
+	if cfg.Transport == "tls" {
+		outboundContact.Address.Scheme = "sips"
+	}
+	outboundDialogs := sipgo.NewDialogClientCache(client, outboundContact)
 	gatewayCtx, cancel := context.WithCancel(context.Background())
 	gateway := &sipGateway{
-		app: app, appCtx: appCtx, cfg: cfg, ua: ua, client: client, server: server, dialogs: dialogs,
+		app: app, appCtx: appCtx, cfg: cfg, ua: ua, client: client, server: server, dialogs: dialogs, outboundDialogs: outboundDialogs,
 		ctx: gatewayCtx, cancel: cancel,
-		byProviderCall: make(map[string]*sipSession), byCall: make(map[string]*sipSession), reserved: make(map[string]bool), ackTimeout: 32 * time.Second,
+		byProviderCall: make(map[string]*sipSession), byCall: make(map[string]*sipSession),
+		outboundByCall: make(map[string]*outboundSIPSession), outboundByProviderCall: make(map[string]*outboundSIPSession),
+		outboundReserved: make(map[string]bool),
+		reserved:         make(map[string]bool), ackTimeout: 32 * time.Second,
 	}
 	gateway.registerHandlers()
 	return gateway, nil
@@ -249,6 +261,15 @@ func (g *sipGateway) Stop() {
 		}()
 	}
 	finishing.Wait()
+	g.mu.RLock()
+	outbound := make([]*outboundSIPSession, 0, len(g.outboundByCall))
+	for _, session := range g.outboundByCall {
+		outbound = append(outbound, session)
+	}
+	g.mu.RUnlock()
+	for _, session := range outbound {
+		session.finish("local_error", errors.New("SIP gateway stopped"))
+	}
 	if g.ua != nil {
 		_ = g.ua.Close()
 	}
@@ -265,6 +286,14 @@ func (g *sipGateway) registerHandlers() {
 			return
 		}
 		providerCallID := sipCallID(request)
+		if outbound := g.outboundSessionByProviderCall(providerCallID); outbound != nil {
+			if err := g.outboundDialogs.ReadBye(request, transaction); err != nil {
+				_ = transaction.Respond(sip.NewResponseFromRequest(request, sip.StatusCallTransactionDoesNotExists, "Call Does Not Exist", nil))
+				return
+			}
+			outbound.finish("carrier", nil)
+			return
+		}
 		session := g.sessionByProviderCall(providerCallID)
 		if session == nil || request.CSeq() == nil || request.CSeq().SeqNo <= session.remoteSeq.Load() {
 			_ = transaction.Respond(sip.NewResponseFromRequest(request, 481, "Call Does Not Exist", nil))
@@ -365,6 +394,12 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	if !created {
 		_ = dialog.Respond(sip.StatusLoopDetected, "Duplicate Call", nil)
+		_ = dialog.Close()
+		return
+	}
+	if call.HandlingReason == handlingBurstSuppressed {
+		_ = g.app.db().updateStatus(call.ID, "canceled", call.ErrorMessage)
+		_ = dialog.Respond(sip.StatusBusyHere, "Burst Suppressed", nil)
 		_ = dialog.Close()
 		return
 	}
@@ -635,7 +670,7 @@ func (g *sipGateway) sessionByCall(id string) *sipSession {
 func (g *sipGateway) sessionCount() int {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	return len(g.byCall)
+	return len(g.byCall) + len(g.outboundByCall)
 }
 
 func sipCallID(request *sip.Request) string {

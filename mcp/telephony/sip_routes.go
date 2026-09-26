@@ -22,6 +22,8 @@ type directSIPProviderConfig struct {
 	PhoneAssociationID     string `json:"phone_association_id,omitempty"`
 	FQDNConnectionID       string `json:"fqdn_connection_id,omitempty"`
 	FQDNID                 string `json:"fqdn_id,omitempty"`
+	PreviousTrunkID        string `json:"previous_trunk_id,omitempty"`
+	PreviousTrunkGroupID   string `json:"previous_trunk_group_id,omitempty"`
 }
 
 func (a *App) toolRoutesSetTransport(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -60,10 +62,10 @@ func (a *App) setRouteTransport(ctx *sdk.AppCtx, routeID, transport string, agen
 	if route.ProjectID != currentProject(ctx) || (agentID != 0 && route.AgentID != agentID) {
 		return nil, errors.New("route belongs to another agent or project")
 	}
+	if !supportsInboundTransport(route.CarrierSlug, normalized) {
+		return nil, fmt.Errorf("%s inbound routing is not implemented for provider %s", normalized, route.CarrierSlug)
+	}
 	if normalized == inboundTransportSIPDirect {
-		if route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx" {
-			return nil, fmt.Errorf("automatic direct SIP routing is not implemented for provider %s", route.CarrierSlug)
-		}
 		if err := a.ensureSIPGateway(ctx); err != nil {
 			return nil, fmt.Errorf("prepare direct SIP: %w", err)
 		}
@@ -119,6 +121,8 @@ func (a *App) configureDirectSIPCarrierRoute(ctx *sdk.AppCtx, route *routeRow) e
 		return a.configureTwilioDirectSIP(ctx, route, gateway.cfg)
 	case "telnyx":
 		return a.configureTelnyxDirectSIP(ctx, route, gateway.cfg)
+	case "didww":
+		return a.configureDIDWWDirectSIP(ctx, route, gateway.cfg)
 	default:
 		return fmt.Errorf("direct SIP carrier configuration is not implemented for provider %s", route.CarrierSlug)
 	}
@@ -309,6 +313,16 @@ func (a *App) deconfigureDirectSIPCarrierRoute(ctx *sdk.AppCtx, route *routeRow)
 		}
 		if state.FQDNConnectionID != "" {
 			_, _ = executeCarrierTool(ctx, route.CarrierConnectionID, "delete_fqdn_connection", map[string]any{"id": state.FQDNConnectionID})
+		}
+	case "didww":
+		if route.PhoneNumberSID == "" || state.TrunkID == "" {
+			return errors.New("saved DIDWW direct SIP routing state is incomplete")
+		}
+		if err := restoreDIDWWDIDTrunk(ctx, route.CarrierConnectionID, route.PhoneNumberSID, state); err != nil {
+			return fmt.Errorf("restore DIDWW DID trunk: %w", err)
+		}
+		if _, err := executeCarrierTool(ctx, route.CarrierConnectionID, "delete_inbound_trunk", map[string]any{"id": state.TrunkID}); err != nil {
+			return fmt.Errorf("delete DIDWW inbound trunk: %w", err)
 		}
 	default:
 		return fmt.Errorf("unsupported direct SIP provider %s", state.Provider)

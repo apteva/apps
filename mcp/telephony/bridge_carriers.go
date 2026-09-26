@@ -32,7 +32,21 @@ type jsonMediaBridgeConfig struct {
 }
 
 type carrierMediaFrame struct {
-	Event               string `json:"event"`
+	Event     string `json:"event"`
+	EventType string `json:"eventType,omitempty"`
+	Track     string `json:"track,omitempty"`
+	Payload   string `json:"payload,omitempty"`
+	Metadata  *struct {
+		CallID   string `json:"callId"`
+		StreamID string `json:"streamId"`
+		Tracks   []struct {
+			Name        string `json:"name"`
+			MediaFormat struct {
+				Encoding   string `json:"encoding"`
+				SampleRate int    `json:"sampleRate"`
+			} `json:"mediaFormat"`
+		} `json:"tracks"`
+	} `json:"metadata,omitempty"`
 	StreamSID           string `json:"streamSid,omitempty"`
 	StreamID            string `json:"stream_id,omitempty"`
 	SequenceNumber      any    `json:"sequenceNumber,omitempty"`
@@ -82,6 +96,14 @@ func (a *App) handlePlivoMediaStream(w http.ResponseWriter, r *http.Request) {
 	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
 		Provider: "plivo", PathPrefix: "/media/plivo/", InputCodec: carrierCodecPCMU8, OutputCodec: carrierCodecPCMU8,
 		RequireStreamSID: true, OutboundShape: "plivo",
+	})
+}
+
+func (a *App) handleBandwidthMediaStream(w http.ResponseWriter, r *http.Request) {
+	a.handleJSONMediaStream(w, r, jsonMediaBridgeConfig{
+		Provider: "bandwidth", PathPrefix: "/media/bandwidth/",
+		InputCodec: carrierCodecPCMU8, OutputCodec: carrierCodecPCMU8,
+		RequireStreamSID: true, OutboundShape: "bandwidth",
 	})
 }
 
@@ -196,6 +218,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 
 	go func() {
 		defer cancel()
+		bandwidthStarted := false
 		for {
 			data, op, err := readWebSocketData(carrierReadConn, ws.StateServerSide, carrierWriter)
 			if err != nil {
@@ -214,6 +237,17 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
 			}
+			if cfg.Provider == "bandwidth" {
+				f.Event = f.EventType
+				if f.Event == "media" {
+					if f.Track != "inbound" || f.Payload == "" {
+						continue
+					}
+					f.Media = &struct {
+						Payload string `json:"payload"`
+					}{Payload: f.Payload}
+				}
+			}
 			switch f.Event {
 			case "start":
 				if err := validateCarrierStartFormat(cfg, f); err != nil {
@@ -230,12 +264,19 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 				if sid := frameStreamID(f); sid != "" {
+					if cfg.Provider == "bandwidth" {
+						bandwidthStarted = true
+					}
 					select {
 					case streamSidCh <- sid:
 					default:
 					}
 				}
 			case "media":
+				if cfg.Provider == "bandwidth" && !bandwidthStarted {
+					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "Bandwidth media arrived before a verified start frame")
+					return
+				}
 				if sequence, ok := frameSequenceNumber(f); ok {
 					inputSequences.observe(sequence, "carrier_to_operator")
 				}
@@ -442,6 +483,21 @@ func frameSequenceNumber(frame carrierMediaFrame) (uint64, bool) {
 }
 
 func validateCarrierStartFormat(cfg jsonMediaBridgeConfig, frame carrierMediaFrame) error {
+	if cfg.Provider == "bandwidth" {
+		if frame.Metadata == nil || frame.Metadata.CallID == "" || frame.Metadata.StreamID == "" {
+			return errors.New("Bandwidth stream start is missing call or stream identity")
+		}
+		for _, track := range frame.Metadata.Tracks {
+			if track.Name != "inbound" {
+				continue
+			}
+			if !strings.EqualFold(track.MediaFormat.Encoding, "PCMU") || track.MediaFormat.SampleRate != 8000 {
+				return errors.New("Bandwidth negotiated unsupported inbound media format")
+			}
+			return nil
+		}
+		return errors.New("Bandwidth stream has no inbound track")
+	}
 	if cfg.Provider != "telnyx" || frame.Start == nil {
 		return nil
 	}
@@ -484,7 +540,15 @@ func carrierCodecSampleRate(codec string) int {
 }
 
 func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
-	callID := callIDFromMediaPath(r.URL.Path, "/media/vonage/")
+	a.handleBinaryMediaStream(w, r, "vonage")
+}
+
+func (a *App) handleSinchMediaStream(w http.ResponseWriter, r *http.Request) {
+	a.handleBinaryMediaStream(w, r, "sinch")
+}
+
+func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, provider string) {
+	callID := callIDFromMediaPath(r.URL.Path, "/media/"+provider+"/")
 	if callID == "" {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
@@ -498,7 +562,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	if row.CarrierSlug != "vonage" || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
+	if row.CarrierSlug != provider || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
 		return
 	}
@@ -521,8 +585,8 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 
 	vonage, vonageReadConn, err := upgradeBuffered(w, r)
 	if err != nil {
-		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "Vonage websocket upgrade failed", string(mediaCloseLegCarrier))
-		globalCtx.Logger().Warn("vonage ws upgrade", "err", err, "call", callID)
+		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, provider+" websocket upgrade failed", string(mediaCloseLegCarrier))
+		globalCtx.Logger().Warn("carrier ws upgrade", "provider", provider, "err", err, "call", callID)
 		return
 	}
 	closeState := &websocketCloseState{}
@@ -537,7 +601,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "invalid realtime bridge URL")
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "invalid realtime bridge URL", string(mediaCloseLegLocalError))
-		globalCtx.Logger().Warn("parse audio bridge url", "provider", "vonage", "err", err, "url", redactURL(row.AudioBridgeURL))
+		globalCtx.Logger().Warn("parse audio bridge url", "provider", provider, "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
@@ -545,7 +609,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "realtime bridge rejected")
 		_ = a.db().updateMediaStatusWithLeg(callID, "error", err.Error(), 1011, "core audio bridge rejected", string(mediaCloseLegCore))
-		globalCtx.Logger().Warn("dial core audio bridge", "provider", "vonage", "err", err, "url", redactURL(coreURL.String()))
+		globalCtx.Logger().Warn("dial core audio bridge", "provider", provider, "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
 	if buffered != nil {
@@ -558,7 +622,23 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		coreCloser.Close(code, reason)
 	}()
 
-	globalCtx.Logger().Info("bridge up", "provider", "vonage", "call", callID, "thread", row.ThreadID)
+	if provider == "sinch" {
+		creds, credentialErr := globalCtx.PlatformAPI().GetConnectionCredentials(row.CarrierConnectionID)
+		if credentialErr != nil || creds == nil {
+			closeState.SetLeg(mediaCloseLegLocalError, ws.StatusInternalServerError, "Sinch service credential unavailable")
+			return
+		}
+		data, op, err := readWebSocketData(vonageReadConn, ws.StateServerSide, vonageWriter)
+		if err != nil || op != ws.OpText || len(data) > maxCarrierFrameBytes || validateSinchConnect(data, creds.Fields["service_id"]) != nil {
+			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "invalid Sinch stream connect request")
+			return
+		}
+		if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"answer"}`)); err != nil {
+			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "answer Sinch stream")
+			return
+		}
+	}
+	globalCtx.Logger().Info("bridge up", "provider", provider, "call", callID, "thread", row.ThreadID)
 	_ = a.db().updateMediaStatus(callID, "connected", "", 0, "")
 	_ = a.db().clearStateExpiry(callID)
 
@@ -582,18 +662,36 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 		vonageCloser.Close(code, reason)
 		coreCloser.Close(code, reason)
 	}()
+	if provider == "sinch" {
+		go func() {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"heartbeat"}`)); err != nil {
+						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "send Sinch heartbeat")
+						cancel()
+						return
+					}
+				}
+			}
+		}()
+	}
 
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
 	defer func() {
-		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "vonage", carrierCodecL16_16, 0, 0)
+		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, provider, carrierCodecL16_16, 0, 0)
 		var preAnswerDroppedMS int64
 		if hub := a.softphones.lookup(callID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
 			InputAudio: audioFrontend.transportSnapshot(),
-			Provider:   "vonage", Codec: carrierCodecL16_16, SampleRate: 16000,
+			Provider:   provider, Codec: carrierCodecL16_16, SampleRate: 16000,
 			PacerMode: "direct_live", PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 		})
 	}()
@@ -609,7 +707,7 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(data) > maxCarrierFrameBytes {
-				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, "Vonage media frame too large")
+				closeState.SetLeg(mediaCloseLegCarrier, ws.StatusMessageTooBig, provider+" media frame too large")
 				return
 			}
 			if op != ws.OpBinary || len(data) == 0 {
@@ -645,6 +743,12 @@ func (a *App) handleVonageMediaStream(w http.ResponseWriter, r *http.Request) {
 			control, ok := parseRealtimeBridgeControl(data)
 			if ok && control.Type == "interrupt" {
 				audioFrontend.markInterrupt(control.Source)
+				if provider == "sinch" {
+					if err := vonageWriter.Write(ws.OpText, []byte(`{"command":"clear"}`)); err != nil {
+						closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "clear Sinch playback")
+						return
+					}
+				}
 			}
 			continue
 		}
@@ -680,6 +784,9 @@ func mediaTokenFromPath(path string) string {
 }
 
 func frameStreamID(f carrierMediaFrame) string {
+	if f.Metadata != nil && f.Metadata.StreamID != "" {
+		return f.Metadata.StreamID
+	}
 	if f.StreamSID != "" {
 		return f.StreamSID
 	}
@@ -696,6 +803,9 @@ func frameStreamID(f carrierMediaFrame) string {
 }
 
 func frameCallID(f carrierMediaFrame) string {
+	if f.Metadata != nil {
+		return f.Metadata.CallID
+	}
 	if f.Start == nil {
 		return ""
 	}
@@ -784,6 +894,10 @@ func encodeCarrierPayload(pcm24Bytes []byte, codec string, streaming ...*pcmResa
 
 func buildCarrierOutbound(shape, streamSID, payload string) any {
 	switch shape {
+	case "bandwidth":
+		return map[string]any{"eventType": "playAudio", "media": map[string]string{
+			"contentType": "audio/pcmu", "payload": payload,
+		}}
 	case "plivo":
 		return map[string]any{
 			"event": "playAudio",
@@ -813,6 +927,8 @@ func buildCarrierOutbound(shape, streamSID, payload string) any {
 
 func buildCarrierClear(shape, streamSID string) any {
 	switch shape {
+	case "bandwidth":
+		return map[string]string{"eventType": "clear"}
 	case "signalwire":
 		return map[string]string{"event": "clear", "streamSid": streamSID}
 	case "plivo":

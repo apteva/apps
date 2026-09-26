@@ -431,6 +431,10 @@ func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]owned
 		input = map[string]any{"PageSize": 1000}
 	case "telnyx":
 		return listPaginatedTelnyxNumbers(ctx, provider)
+	case "sinch":
+		return listPaginatedSinchNumbers(ctx, provider)
+	case "didww":
+		return listPaginatedDIDWWNumbers(ctx, provider)
 	case "plivo":
 		return listPaginatedPlivoNumbers(ctx, provider)
 	case "vonage":
@@ -448,6 +452,69 @@ func listOwnedCarrierNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]owned
 		return nil, fmt.Errorf("decode %s owned phone numbers: %w", provider.Slug, err)
 	}
 	return owned, nil
+}
+
+func listPaginatedSinchNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
+	var owned []ownedNumber
+	pageToken := ""
+	for page := 0; page < maxOwnedNumberPages; page++ {
+		input := map[string]any{"pageSize": 100}
+		if pageToken != "" {
+			input["pageToken"] = pageToken
+		}
+		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_active_numbers", input)
+		if err != nil {
+			return nil, err
+		}
+		items, err := parseOwnedCarrierNumbers("sinch", raw)
+		if err != nil {
+			return nil, err
+		}
+		owned = append(owned, items...)
+		var response struct {
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		if response.NextPageToken == "" {
+			return owned, nil
+		}
+		if response.NextPageToken == pageToken {
+			return nil, errors.New("Sinch owned-number listing repeated a page token")
+		}
+		pageToken = response.NextPageToken
+	}
+	return nil, fmt.Errorf("Sinch owned-number listing exceeded %d pages", maxOwnedNumberPages)
+}
+
+func listPaginatedDIDWWNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
+	const pageSize = 100
+	var owned []ownedNumber
+	for page := 1; page <= maxOwnedNumberPages; page++ {
+		raw, err := executeCarrierTool(ctx, provider.ConnID, "list_dids", map[string]any{"page_number": page, "page_size": pageSize})
+		if err != nil {
+			return nil, err
+		}
+		items, err := parseOwnedCarrierNumbers("didww", raw)
+		if err != nil {
+			return nil, err
+		}
+		owned = append(owned, items...)
+		var response struct {
+			Data []json.RawMessage `json:"data"`
+			Meta struct {
+				TotalPages int `json:"total_pages"`
+			} `json:"meta"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil {
+			return nil, err
+		}
+		if response.Meta.TotalPages > 0 && page >= response.Meta.TotalPages || len(response.Data) < pageSize {
+			return owned, nil
+		}
+	}
+	return nil, fmt.Errorf("DIDWW owned-number listing exceeded %d pages", maxOwnedNumberPages)
 }
 
 func listPaginatedTelnyxNumbers(ctx *sdk.AppCtx, provider *numberProvider) ([]ownedNumber, error) {
@@ -546,6 +613,10 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 		values = anyList(root["objects"])
 	case "vonage":
 		values = anyList(root["numbers"])
+	case "sinch":
+		values = anyList(root["activeNumbers"])
+	case "didww":
+		values = anyList(root["data"])
 	default:
 		return nil, fmt.Errorf("unsupported provider %s", provider)
 	}
@@ -596,6 +667,30 @@ func parseOwnedCarrierNumbers(provider string, raw json.RawMessage) ([]ownedNumb
 			number.Capabilities = normalizedCapabilities(item["features"])
 			number.CarrierStatus = stringValue(item["status"])
 			number.ApplicationID = stringValue(item["application_id"])
+		case "sinch":
+			number.PhoneNumber = normalizedOwnedPhone(stringValue(item["phoneNumber"]))
+			number.ProviderNumberID = number.PhoneNumber
+			number.FriendlyName = stringValue(item["displayName"])
+			number.Capabilities = normalizedCapabilities(item["capability"])
+			number.CarrierStatus = "active"
+		case "didww":
+			attributes, _ := item["attributes"].(map[string]any)
+			if boolValue(attributes["terminated"]) {
+				continue
+			}
+			number.PhoneNumber = normalizedOwnedPhone(stringValue(attributes["number"]))
+			number.ProviderNumberID = stringValue(item["id"])
+			number.FriendlyName = stringValue(attributes["description"])
+			number.Capabilities = []string{"voice"}
+			if boolValue(attributes["blocked"]) {
+				number.CarrierStatus = "blocked"
+			} else {
+				number.CarrierStatus = "active"
+			}
+			relationships, _ := item["relationships"].(map[string]any)
+			trunk, _ := relationships["voice_in_trunk"].(map[string]any)
+			trunkData, _ := trunk["data"].(map[string]any)
+			number.ConnectionID = stringValue(trunkData["id"])
 		}
 		if number.PhoneNumber == "" {
 			continue

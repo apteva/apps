@@ -4,7 +4,7 @@
 // Architecture:
 //   - Manifest declares one integration dep: carrier (required,
 //     kind=integration, compatible_slugs=[twilio, telnyx, plivo,
-//     signalwire, vonage]).
+//     signalwire, vonage, bandwidth, sinch, didww]).
 //   - Agent invokes telephony_place_call(to, directive). The app:
 //     1. Reads the carrier connection's phone_number (From=).
 //     2. Spawns a realtime thread in core via SDK
@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.4
+version: 0.6.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -74,7 +74,7 @@ requires:
   integrations:
     - role: carrier
       kind: integration
-      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
+      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
       required: true
       label: "Voice carrier"
@@ -183,6 +183,7 @@ provides:
     - { name: call.routing.started, description: "A call began a published routing flow.", payload: { call_id: string, flow_id: string, flow_version_id: string, occurred_at: string } }
     - { name: call.routing.node_entered, description: "A call entered a routing node.", payload: { call_id: string, node_id: string, node_type: string, outcome: string } }
     - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
+    - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload
@@ -214,6 +215,8 @@ provides:
         duration_seconds: integer
         talk_duration_seconds: integer
         error_message: string
+        handling_reason: string
+        missed_pool_eligible: boolean
         termination: object
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
@@ -266,6 +269,11 @@ db:
   path: /data/telephony.db
   migrations: migrations/
 config_schema:
+  - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
+  - { name: inbound_burst_per_caller, type: text, default: "12", label: "New calls per caller and number in window", description: "0 disables this limit. Counts distinct carrier call IDs." }
+  - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this limit. Protects against rotating displayed caller IDs." }
+  - { name: inbound_burst_cooldown_seconds, type: text, default: "300", label: "Burst suppression cooldown (seconds)" }
+  - { name: inbound_burst_trusted_numbers, type: text, label: "Trusted caller numbers", description: "Comma-separated E.164 caller numbers exempt from the per-caller limit; destination-wide protection still applies." }
   - { name: human_audio_send_ahead_ms, type: select, default: "40", label: "Human audio send-ahead (ms)", options: ["20", "40", "60", "80"], description: "Carrier pacing cushion for new human/external bridges. Keep 40 unless measurements justify a change. Stale-audio limits remain enabled." }
   - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
   - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }
@@ -289,6 +297,7 @@ type App struct {
 	decisionWG       sync.WaitGroup
 	decisionStopping bool
 	dispatchMu       sync.Mutex
+	burstMu          sync.Mutex
 	dispatcher       *routingDispatcher
 	callChanges      callChangeHub
 	installID        int64
@@ -407,13 +416,17 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/media/telnyx/", Handler: a.handleTelnyxMediaStream, NoAuth: true},
 		{Pattern: "/media/plivo/", Handler: a.handlePlivoMediaStream, NoAuth: true},
 		{Pattern: "/media/vonage/", Handler: a.handleVonageMediaStream, NoAuth: true},
+		{Pattern: "/media/sinch/", Handler: a.handleSinchMediaStream, NoAuth: true},
+		{Pattern: "/media/bandwidth/", Handler: a.handleBandwidthMediaStream, NoAuth: true},
 		// Plivo fetches XML call control from an answer_url.
 		{Pattern: "/xml/plivo/", Handler: a.handlePlivoXML, NoAuth: true},
+		{Pattern: "/xml/bandwidth/", Handler: a.handleBandwidthXML, NoAuth: true},
 		// Carrier status callbacks (initiated, ringing, in-progress, completed, ...).
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback, NoAuth: true},
 		{Pattern: "/webhook/stream/twilio/", Handler: a.handleTwilioStreamStatus, NoAuth: true},
 		{Pattern: "/webhook/recording/twilio/", Handler: a.handleTwilioRecordingStatus, NoAuth: true},
 		{Pattern: "/webhook/recording/plivo/", Handler: a.handlePlivoRecordingStatus, NoAuth: true},
+		{Pattern: "/webhook/recording/bandwidth/", Handler: a.handleBandwidthRecordingStatus, NoAuth: true},
 		// Twilio inbound call control. The route id maps a phone number
 		// to the agent that should receive the incoming-call event.
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
@@ -1127,6 +1140,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 		unwind()
 		return errors.New("persist call initiation: " + err.Error())
 	}
+	if post, ok := carrier.(carrierPostPlacement); ok {
+		if err := post.StartPlacedCall(ctx, row); err != nil {
+			_ = a.db().updateStatus(row.ID, "failed", err.Error())
+			unwind()
+			return err
+		}
+	}
 	return nil
 }
 
@@ -1363,22 +1383,24 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 	if slug == "" {
 		return nil, "", errors.New("could not determine carrier slug")
 	}
-	if slug != "twilio" && slug != "telnyx" && slug != "plivo" {
-		return nil, "", errors.New("inbound call routing is not implemented for provider " + slug)
-	}
 	transport, err := normalizeInboundTransport(strArg(args, "inbound_transport", inboundTransportProgrammable))
 	if err != nil {
 		return nil, "", err
 	}
 	if transport == inboundTransportSIPDirect {
-		if slug != "twilio" && slug != "telnyx" {
+		if !supportsInboundTransport(slug, transport) {
 			return nil, "", errors.New("automatic direct SIP routing is not implemented for provider " + slug)
 		}
 		if err := a.ensureSIPGateway(ctx); err != nil {
 			return nil, "", errors.New("prepare direct SIP: " + err.Error())
 		}
-	} else if err := a.validatePublicEndpoint(); err != nil {
-		return nil, "", err
+	} else {
+		if !supportsInboundTransport(slug, transport) {
+			return nil, "", errors.New("inbound call routing is not implemented for provider " + slug)
+		}
+		if err := a.validatePublicEndpoint(); err != nil {
+			return nil, "", err
+		}
 	}
 	projectID := currentProject(ctx)
 	if projectID == "" {
@@ -1446,6 +1468,17 @@ func (a *App) createInboundRoute(ctx *sdk.AppCtx, agentID int64, args map[string
 		next = "Call telephony_routes_configure_carrier with route_id to assign the carrier number to this installation's direct SIP endpoint."
 	}
 	return &route, next, nil
+}
+
+func supportsInboundTransport(slug, transport string) bool {
+	switch transport {
+	case inboundTransportSIPDirect:
+		return slug == "twilio" || slug == "telnyx" || slug == "didww"
+	case inboundTransportProgrammable:
+		return slug == "twilio" || slug == "telnyx" || slug == "plivo"
+	default:
+		return false
+	}
 }
 
 func (a *App) toolRoutesSetAnswerMode(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2176,6 +2209,14 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(strings.NewReader(string(body)))
 	}
 	update := callbackUpdateFor(row.CarrierSlug, r)
+	if row.CarrierSlug == "sinch" && (update.Status == "" || update.CarrierSID == "") {
+		http.Error(w, "invalid Sinch callback", http.StatusBadRequest)
+		return
+	}
+	if (row.CarrierSlug == "bandwidth" || row.CarrierSlug == "sinch") && update.CarrierSID != "" && row.CarrierSID != "" && update.CarrierSID != row.CarrierSID {
+		http.Error(w, "carrier call ID mismatch", http.StatusForbidden)
+		return
+	}
 	if update.Status == "" && update.Error == "invalid Telnyx callback" {
 		http.Error(w, update.Error, http.StatusBadRequest)
 		return
@@ -2254,6 +2295,15 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		if row != nil && row.ThreadID != "" && globalCtx != nil {
 			_ = a.killCallThread(globalCtx, row)
 		}
+	}
+	if row.CarrierSlug == "sinch" {
+		commands := []any{map[string]any{"command": "hangup"}}
+		if update.ProviderEvent == "call.webhook.answered" && !isTerminalStatus(row.Status) {
+			commands = sinchAnswerCommands(a.publicWSStreamURL("sinch", row.ID, row.CallbackSecret))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"commands": commands})
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -2360,6 +2410,15 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if stored.HandlingReason == handlingBurstSuppressed {
+		writeSuppressedTwilioCall(w)
+		_ = a.db().updateStatus(stored.ID, "canceled", stored.ErrorMessage)
+		return
+	}
+	if stored.AnnouncementState != "" {
+		writeTwilioSayHangup(w, stored.AnnouncementText)
 		return
 	}
 	if stored.RoutingFlowVersionID != "" {
@@ -2493,7 +2552,18 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		applyRoutingPlanToRoute(route, plan)
 		return existing, false, nil
 	}
-	plan, err := a.resolveInboundRoutingPlan(route, from, nil)
+	policy := loadInboundBurstPolicy(nil)
+	if globalCtx != nil {
+		policy = loadInboundBurstPolicy(globalCtx.WithProject(route.ProjectID).Config())
+	}
+	suppression, err := a.registerInboundAttempt(route, carrierSID, from, to, time.Now().UTC(), policy)
+	if err != nil {
+		return nil, false, fmt.Errorf("check inbound burst: %w", err)
+	}
+	var plan *inboundRoutingPlan
+	if suppression == "" {
+		plan, err = a.resolveInboundRoutingPlan(route, from, nil)
+	}
 	if err != nil {
 		return nil, false, fmt.Errorf("resolve published routing flow: %w", err)
 	}
@@ -2557,6 +2627,14 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		RecordingStorageMode:   recordingPolicy.StorageMode,
 		RecordingRetentionDays: recordingPolicy.RetentionDays,
 		PeerKind:               inboundPeerKind(route.AnswerMode),
+		HandlingReason:         routeHandlingReason(plan),
+	}
+	if suppression != "" {
+		call.HandlingReason = handlingBurstSuppressed
+		call.ErrorMessage = suppression
+	} else if plan != nil && plan.TerminalType == "hangup" && terminalAnnouncementText(plan) != "" {
+		call.AnnouncementState = "awaiting_answer"
+		call.AnnouncementText = terminalAnnouncementText(plan)
 	}
 	if plan != nil {
 		call.RoutingFlowID = plan.FlowID
@@ -2712,6 +2790,14 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 			ctx := globalCtx.WithProject(row.ProjectID)
 			switch event.Data.EventType {
 			case "call.answered":
+				if row.AnnouncementState != "" {
+					if err := a.startTelnyxTerminalAnnouncement(ctx, row); err != nil {
+						ctx.Logger().Warn("speak Telnyx terminal announcement", "call", row.ID, "err", err)
+						http.Error(w, "terminal announcement pending; retry", http.StatusServiceUnavailable)
+						return
+					}
+					break
+				}
 				_, plan, planErr := a.routingPlanForCall(row, nil)
 				if planErr == nil && plan != nil && plan.TerminalType == "dtmf_menu" {
 					if err := a.startTelnyxGather(ctx, row, plan); err != nil {
@@ -2720,6 +2806,12 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 					}
 				} else if planErr != nil {
 					ctx.Logger().Warn("resolve Telnyx IVR after answer", "call", row.ID, "err", planErr)
+				}
+			case "call.speak.ended", "call.playback.ended":
+				if err := a.finishTelnyxTerminalAnnouncement(ctx, row); err != nil {
+					ctx.Logger().Warn("finish Telnyx terminal announcement", "call", row.ID, "err", err)
+					http.Error(w, "terminal hangup pending; retry", http.StatusServiceUnavailable)
+					return
 				}
 			case "call.gather.ended":
 				defer lockRoutingCall(row.ID)()
@@ -2769,9 +2861,30 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+	if created && stored.HandlingReason == handlingBurstSuppressed {
+		if globalCtx != nil {
+			ctx := globalCtx.WithProject(route.ProjectID)
+			if err := a.suppressInboundCall(ctx, stored); err != nil {
+				ctx.Logger().Warn("suppress inbound burst", "call", stored.ID, "reason", stored.ErrorMessage, "err", err)
+			} else {
+				ctx.Logger().Warn("suppressed inbound burst", "call", stored.ID, "reason", stored.ErrorMessage)
+			}
+		}
+		return
+	}
 	if created && (route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject") {
 		if globalCtx != nil {
-			_ = a.expireCall(globalCtx.WithProject(route.ProjectID), stored)
+			ctx := globalCtx.WithProject(route.ProjectID)
+			if stored.AnnouncementState != "" {
+				go func() {
+					if err := a.answerTelnyxIVR(ctx, stored); err != nil {
+						ctx.Logger().Warn("answer terminal announcement", "call", stored.ID, "err", err)
+						_ = a.db().updateStatus(stored.ID, "failed", "answer terminal announcement: "+err.Error())
+					}
+				}()
+			} else {
+				_ = a.suppressTerminalRoutingCall(ctx, stored)
+			}
 		}
 		return
 	}
@@ -3114,6 +3227,11 @@ func (a *App) plivoXMLURL(callID, secret, projectID string) string {
 	return a.publicAppURL() + "/xml/plivo/" + url.PathEscape(callID) + "?" + query
 }
 
+func (a *App) bandwidthXMLURL(callID, secret, projectID string) string {
+	query := url.Values{"token": {secret}, "project_id": {projectID}}.Encode()
+	return a.publicAppURL() + "/xml/bandwidth/" + url.PathEscape(callID) + "?" + query
+}
+
 func (a *App) inboundRouteURL(route routeRow) string {
 	query := url.Values{"secret": {route.Secret}, "project_id": {route.ProjectID}}.Encode()
 	return fmt.Sprintf("%s/inbound/%s/%s?%s",
@@ -3282,6 +3400,8 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
 			"termination_initiator": r.TerminationInitiator,
 			"termination_reason":    r.TerminationReason,
+			"handling_reason":       r.HandlingReason,
+			"missed_pool_eligible":  r.Direction == "inbound" && r.HandlingReason == "",
 			"termination":           terminationPublic(r),
 			"answered_by":           r.AnsweredBy,
 			"machine_detection":     r.MachineDetection,
@@ -3611,6 +3731,9 @@ type callRow struct {
 	RoutingDestinationID     string
 	AnsweredBy               string
 	TerminationReason        string
+	HandlingReason           string
+	AnnouncementState        string
+	AnnouncementText         string
 	MachineDetection         string
 	MachineDetectionAction   string
 	HoldState                string
@@ -3694,6 +3817,7 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(routing_flow_id,''), COALESCE(routing_flow_version_id,''),
 	COALESCE(routing_destination_id,''),
 	COALESCE(answered_by,''), COALESCE(termination_reason,''),
+	COALESCE(handling_reason,''), COALESCE(announcement_state,''), COALESCE(announcement_text,''),
 	COALESCE(machine_detection,'off'), COALESCE(machine_detection_action,'notify'),
 	COALESCE(hold_state,'active'), COALESCE(recording_control_state,'default'),
 	COALESCE(control_revision,0), COALESCE(control_action,''), COALESCE(control_error,''), COALESCE(control_requested_at,''), COALESCE(hold_client_state,''),
@@ -3722,6 +3846,7 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
 		&r.PeerKind, &r.PeerToken, &r.RoutingFlowID, &r.RoutingFlowVersionID,
 		&r.RoutingDestinationID, &r.AnsweredBy, &r.TerminationReason,
+		&r.HandlingReason, &r.AnnouncementState, &r.AnnouncementText,
 		&r.MachineDetection, &r.MachineDetectionAction,
 		&r.HoldState, &r.RecordingControlState, &r.ControlRevision, &r.ControlAction, &r.ControlError, &r.ControlRequestedAt, &r.HoldClientState,
 		&r.HoldControlRevision, &r.HoldControlAction, &r.HoldRequestedAt,

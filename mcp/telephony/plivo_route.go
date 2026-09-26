@@ -181,9 +181,17 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" {
-		_ = a.db().updateStatus(stored.ID, "completed", "")
+	if stored.HandlingReason == handlingBurstSuppressed {
+		_ = a.db().updateStatus(stored.ID, "canceled", stored.ErrorMessage)
 		writePlivoHangup(w)
+		return
+	}
+	if route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" {
+		if stored.AnnouncementState != "" {
+			writePlivoSayHangup(w, stored.AnnouncementText)
+		} else {
+			writePlivoHangup(w)
+		}
 		return
 	}
 	if route.AnswerMode == answerModeRealtimeImmediate {
@@ -316,6 +324,11 @@ func writePlivoWait(w http.ResponseWriter, waitURL string) {
 func writePlivoHangup(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/xml")
 	_, _ = w.Write([]byte(`<Response><Hangup/></Response>`))
+}
+
+func writePlivoSayHangup(w http.ResponseWriter, prompt string) {
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = fmt.Fprintf(w, `<Response><Speak language="fr-FR">%s</Speak><Hangup/></Response>`, xmlEscape(prompt))
 }
 
 func plivoApplicationID(value any) string {

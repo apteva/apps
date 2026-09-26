@@ -28,6 +28,29 @@ func callControlFixture(t *testing.T) (*App, *answerPlatform, string) {
 	return app, platform, row.ID
 }
 
+func TestCarrierControlCapabilitiesAreAdapterDriven(t *testing.T) {
+	row := callRow{CarrierSlug: "telnyx", CarrierSID: "call-control-id", PeerKind: peerKindHuman,
+		RecordingMode: recordingModeAlways, HoldMusicURL: "https://media.example.test/hold.mp3"}
+	if got := callControlCapabilities(row); !got["hold_music"] || !got["recording_pause"] {
+		t.Fatalf("Telnyx capabilities: %#v", got)
+	}
+	row.CarrierSlug = "bandwidth"
+	if got := callControlCapabilities(row); got["hold_music"] || !got["recording_pause"] {
+		t.Fatalf("Bandwidth capabilities: %#v", got)
+	}
+	for _, slug := range []string{"twilio", "signalwire", "plivo", "vonage", "sinch", "didww", "unknown"} {
+		row.CarrierSlug = slug
+		if got := callControlCapabilities(row); got["hold_music"] || got["recording_pause"] {
+			t.Fatalf("unsupported %s controls were advertised: %#v", slug, got)
+		}
+	}
+	row.CarrierSlug = "telnyx"
+	row.IngressPath = "sip_direct"
+	if got := callControlCapabilities(row); got["hold_music"] || got["recording_pause"] {
+		t.Fatalf("direct SIP controls were advertised: %#v", got)
+	}
+}
+
 func TestStorageHoldMusicIsValidatedAndSignedForEachHold(t *testing.T) {
 	app, platform, id := callControlFixture(t)
 	alice := phoneTestIdentity("alice")

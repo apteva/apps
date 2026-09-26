@@ -456,7 +456,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "call is not a softphone call", http.StatusConflict)
 		return
 	}
-	if !a.validPhoneMedia(row, token) {
+	if reason := a.phoneMediaDenialReason(row, token); reason != "" {
+		logSoftphone("softphone browser media session rejected", "call", callID, "reason", reason)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -552,7 +553,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 			case <-done:
 				return
 			case <-ticker.C:
-				if !a.validPhoneMedia(row, token) {
+				if reason := a.phoneMediaDenialReason(row, token); reason != "" {
+					logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
 					_ = conn.Close()
 					return
 				}
