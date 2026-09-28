@@ -474,5 +474,16 @@ func (a *App) handleCallRead(w http.ResponseWriter, r *http.Request, callID stri
 		http.Error(w, "call not found", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"call": callsPanelPublic(detail, phoneUserFrom(r) == nil)[0]})
+	call := callsPanelPublic(detail, phoneUserFrom(r) == nil)[0]
+	if phoneUserFrom(r) == nil {
+		startup, err := a.aiHandoffPublic(callID)
+		if err != nil {
+			http.Error(w, "load AI startup diagnostics", http.StatusInternalServerError)
+			return
+		}
+		if startup != nil {
+			call["ai_startup"] = startup
+		}
+	}
+	writeJSON(w, map[string]any{"call": call})
 }

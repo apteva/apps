@@ -207,7 +207,7 @@ func TestRealtimePreparationSlowWebhookWaitsWithoutHangupAndResumes(t *testing.T
 
 func TestRealtimePreparationFailedSpawnReleasesOnlyItsClaim(t *testing.T) {
 	a, ctx, p, route, row, unblock := preparationFixture(t, true)
-	p.failure = errors.New("Core spawn unavailable")
+	p.failure = errors.New("platform /api/apps/callback/threads/spawn-realtime: http 503: unavailable")
 	responses := make(chan *httptest.ResponseRecorder, 2)
 	go func() { responses <- preparationWebhook(t, a, route) }()
 	first := waitPreparationEntered(t, p)
@@ -227,6 +227,9 @@ func TestRealtimePreparationFailedSpawnReleasesOnlyItsClaim(t *testing.T) {
 	p.mu.Lock()
 	p.failure = nil
 	p.mu.Unlock()
+	if _, err := a.db().db.Exec(`UPDATE ai_handoffs SET next_attempt_at='' WHERE call_id=?`, row.ID); err != nil {
+		t.Fatal(err)
+	}
 	thread, err := a.prepareInboundRealtime(ctx, current, "Retry.", "", "")
 	if err != nil || thread == first.ThreadID {
 		t.Fatalf("retry thread=%s err=%v", thread, err)

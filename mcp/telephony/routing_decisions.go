@@ -818,6 +818,11 @@ func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	if e != nil {
 		return e
 	}
+	if row != nil && row.Status == "answering" {
+		// A bounded HTTP wait may finish before the background startup. Do not
+		// mark delivery applied until preparation has actually resolved.
+		return errAnswerPreparationInProgress
+	}
 	var p inboundRoutingPlan
 	if e = json.Unmarshal([]byte(d.PlanJSON), &p); e != nil {
 		return e

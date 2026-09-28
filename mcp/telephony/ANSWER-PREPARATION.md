@@ -29,7 +29,8 @@ The regular regressions are in `realtime_preparation_test.go`.
   Follow-up wait requests reuse the prepared thread and resume the media stream.
 - A failed spawn remains distinguishable from work in progress. The winning
   attempt cleans up its own thread and conditionally releases its claim. The
-  webhook keeps the caller waiting for a retry under the existing route deadline.
+  webhook waits for the durable startup coordinator. Since 0.7.2, only explicit
+  temporary failures are retried, with backoff and a call-wide attempt/deadline budget.
 - A unique pending thread identity identifies each claim. Attach and release
   require that identity to still match. Unique spawned thread names keep late
   cleanup from killing a replacement attempt.
@@ -58,3 +59,11 @@ still use Telephony's internal call ID. Realtime requests still use
 This reproduction confirms a failure path, not which production requests took
 it. The reported WebSocket handshake failure and missing booking tools still
 require correlated carrier/bridge/Core logs and the effective realtime tool list.
+
+## AI startup recovery (0.7.2)
+
+See [AI handoff policy](docs/ai-handoff.md) for the durable retry budget,
+error classification, failure branches and operator diagnostics. Claim ownership
+and request wait cancellation above remain unchanged. Preparation attach and
+journal readiness now commit atomically; terminal call transitions fence pending
+startup in the same transaction.
