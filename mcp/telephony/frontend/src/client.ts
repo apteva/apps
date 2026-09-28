@@ -13,6 +13,8 @@ export interface Call {
   termination?: CallTermination;
   direction: string;
   peer_kind: string;
+  /** Advisory at list time; Answer checks the current offer again. */
+  answerable?: boolean;
   from_number: string;
   to_number: string;
   routing_waiting?: boolean;
@@ -44,8 +46,13 @@ export interface DialRequest {
   idempotency_key: string;
 }
 export interface AnswerRequest { destination_id?: string; rejoin?: boolean }
-export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | "peer_kind" | "routing_waiting" | "ring_offers">): boolean {
-  return call.direction === "inbound" && call.status === "pending" && !call.routing_waiting &&
+export class TelephonyOfferExpiredError extends Error {
+  readonly code = "offer_expired";
+  readonly status = 409;
+  constructor() { super("Call offer expired"); this.name = "TelephonyOfferExpiredError"; }
+}
+export function isIncomingBrowserCall(call: Pick<Call, "direction" | "status" | "peer_kind" | "answerable" | "routing_waiting" | "ring_offers">): boolean {
+  return call.direction === "inbound" && call.status === "pending" && call.answerable !== false && !call.routing_waiting &&
     (call.peer_kind === "human" || Boolean(call.ring_offers?.some(offer => offer.kind === "browser")));
 }
 export interface WatchCallsOptions {
@@ -173,7 +180,17 @@ export class TelephonyClient {
   }
 
   async answer(id: string, request: AnswerRequest = {}): Promise<CallSession> {
-    return this.session(await this.app.post(this.path(`/softphone/answer/${callID(id)}`), request), id);
+    try {
+      return this.session(await this.app.post(this.path(`/softphone/answer/${callID(id)}`), request), id);
+    } catch (error) {
+      const response = error as { status?: number; body?: string };
+      if (response.status === 409 && typeof response.body === "string") {
+        let payload: { code?: string } | undefined;
+        try { payload = JSON.parse(response.body); } catch { /* Other 409 responses retain their original error. */ }
+        if (payload?.code === "offer_expired") throw new TelephonyOfferExpiredError();
+      }
+      throw error;
+    }
   }
 
   /** Attach an assigned human call; never dials or takes another user's call. */

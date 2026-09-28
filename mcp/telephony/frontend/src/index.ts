@@ -1,4 +1,4 @@
-export { TelephonyClient, telephonyExtension, isTerminalCall, isIncomingBrowserCall } from "./client";
+export { TelephonyClient, TelephonyOfferExpiredError, telephonyExtension, isTerminalCall, isIncomingBrowserCall } from "./client";
 export type { TelephonyClientOptions, Call, CallSession, CallTermination, DialRequest, AnswerRequest, WatchCallsOptions } from "./client";
 export { HeadlessSoftphone, phaseForStatus } from "./softphone";
 export type { SoftphoneSnapshot, SoftphoneOptions, SoftphonePhase, RingbackOptions } from "./softphone";

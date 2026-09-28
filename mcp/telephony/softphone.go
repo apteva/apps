@@ -861,6 +861,10 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		if row.Status == "pending" {
 			dest := a.phoneOfferDestination(p, row, request.DestinationID)
 			if dest == "" {
+				if a.phoneHadOfferedDestination(p, row, request.DestinationID) {
+					writePhoneOfferExpired(w)
+					return
+				}
 				http.Error(w, "call not offered to user", 404)
 				return
 			}
@@ -939,6 +943,19 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		return
 	}
 	if !claimed {
+		if p != nil && a.phoneHadOfferedDestination(p, row, request.DestinationID) {
+			current, reloadErr := a.db().findCall(callID)
+			if reloadErr == nil && current != nil {
+				if isTerminalStatus(current.Status) {
+					http.Error(w, "call has ended", http.StatusGone)
+					return
+				}
+				if a.phoneOfferDestination(p, current, request.DestinationID) == "" {
+					writePhoneOfferExpired(w)
+					return
+				}
+			}
+		}
 		http.Error(w, "call was already answered", http.StatusConflict)
 		return
 	}
@@ -981,6 +998,12 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 		To:           row.ToNumber,
 		From:         row.FromNumber,
 	})
+}
+
+func writePhoneOfferExpired(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(w).Encode(map[string]string{"code": "offer_expired", "error": "call offer expired"})
 }
 
 // softphoneReleaseAnswer makes a browser-side setup failure retryable. The
