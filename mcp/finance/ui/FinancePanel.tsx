@@ -12,6 +12,7 @@
 // fill / stroke utilities would render as black.
 
 import { createContext, useContext, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import BankPayments from "./BankPayments";
 import EnableBankingConnect from "./EnableBankingConnect";
 
@@ -356,6 +357,10 @@ function fmtDate(s: string): string {
   return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+function fmtHistoryDate(s: string): string {
+  return new Date(s).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
 const KIND_LABEL: Record<string, string> = {
   cash: "Cash",
   brokerage: "Brokerage",
@@ -447,7 +452,7 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [recentTxns, setRecentTxns] = useState<Transaction[]>([]);
   const [allocation, setAllocation] = useState<AllocationReport | null>(null);
-  const [netWorthSeries, setNetWorthSeries] = useState<NetWorthSeries | null>(null);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [budgetStatus, setBudgetStatus] = useState<{ budgets: BudgetStatus[]; period_start: string; period_end: string } | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [showNewAccount, setShowNewAccount] = useState(false);
@@ -457,13 +462,12 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const [s, a, h, t, alloc, nw, bs, cats] = await Promise.all([
+      const [s, a, h, t, alloc, bs, cats] = await Promise.all([
         api<Settings>("/settings"),
         api<{ accounts: Account[] }>("/accounts"),
         api<{ holdings: Holding[] }>("/holdings"),
         api<{ transactions: Transaction[] }>("/txns?limit=20"),
         api<AllocationReport>("/reports/allocation"),
-        api<NetWorthSeries>(`/reports/net-worth?series=monthly&from=${encodeURIComponent(monthsAgo(12))}&to=${encodeURIComponent(now())}`),
         api<{ budgets: BudgetStatus[]; period_start: string; period_end: string }>("/budgets/status?period=monthly"),
         api<{ categories: Category[] }>("/categories"),
       ]);
@@ -472,7 +476,7 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
       setHoldings((h.holdings ?? []).filter(x => !x.closed_at));
       setRecentTxns(t.transactions ?? []);
       setAllocation(alloc);
-      setNetWorthSeries(nw);
+      setHistoryRevision(n => n + 1);
       setBudgetStatus(bs);
       setCategories(cats.categories ?? []);
       setError("");
@@ -545,7 +549,7 @@ function FinancePanelContent({ projectId, installId }: NativePanelProps) {
             holdings={holdings}
             recentTxns={recentTxns}
             allocation={allocation}
-            netWorth={netWorthSeries}
+            historyRevision={historyRevision}
             budgetStatus={budgetStatus}
             base={base}
             onSetBudget={() => setShowNewBudget(true)}
@@ -595,26 +599,72 @@ interface AllocationReport {
 interface NetWorthSeries {
   series: string;
   base_currency: string;
+  from: string;
+  to: string;
   points: Array<{ as_of: string; total: number }>;
 }
 
+type HistoryRange = "1M" | "3M" | "1Y" | "5Y" | "All" | "Custom";
+type HistoryResolution = "daily" | "weekly" | "monthly";
+const HISTORY_RANGES: HistoryRange[] = ["1M", "3M", "1Y", "5Y", "All", "Custom"];
+
 function OverviewTab({
-  accounts, holdings, recentTxns, allocation, netWorth, budgetStatus, base, onSetBudget,
+  accounts, holdings, recentTxns, allocation, historyRevision, budgetStatus, base, onSetBudget,
 }: {
   accounts: Account[];
   holdings: Holding[];
   recentTxns: Transaction[];
   allocation: AllocationReport | null;
-  netWorth: NetWorthSeries | null;
+  historyRevision: number;
   budgetStatus: { budgets: BudgetStatus[]; period_start: string; period_end: string } | null;
   base: string;
   onSetBudget: () => void;
 }) {
+  const api = useFinanceAPI();
   const total = allocation?.total ?? 0;
-  const lastDelta = useMemo(() => {
+  const [range, setRange] = useState<HistoryRange>("1Y");
+  const [resolution, setResolution] = useState<HistoryResolution>("weekly");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [netWorth, setNetWorth] = useState<NetWorthSeries | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  useEffect(() => {
+    if (!historyRevision) return;
+    if (range === "Custom" && (!/^\d{4}-\d{2}-\d{2}$/.test(customFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(customTo))) {
+      setHistoryError("Choose both dates to show a custom range.");
+      setNetWorth(null);
+      return;
+    }
+    const to = range === "Custom" ? `${customTo}T23:59:59Z` : now();
+    const from = range === "All" ? "all" : range === "Custom" ? `${customFrom}T00:00:00Z`
+      : monthsAgo({ "1M": 1, "3M": 3, "1Y": 12, "5Y": 60 }[range]);
+    if (range === "Custom" && customFrom > customTo) {
+      setHistoryError("The start date must be on or before the end date.");
+      setNetWorth(null);
+      return;
+    }
+    let cancelled = false;
+    setHistoryLoading(true);
+    setHistoryError("");
+    setNetWorth(null);
+    const query = new URLSearchParams({ series: resolution, from, to });
+    api<NetWorthSeries>(`/reports/net-worth?${query.toString()}`)
+      .then(result => { if (!cancelled) setNetWorth(result); })
+      .catch((e: unknown) => { if (!cancelled) setHistoryError(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (!cancelled) setHistoryLoading(false); });
+    return () => { cancelled = true; };
+  }, [api, historyRevision, range, resolution, customFrom, customTo]);
+
+  const selectRange = (next: HistoryRange) => {
+    setRange(next);
+    setResolution(next === "1M" || next === "3M" ? "daily" : next === "1Y" || next === "Custom" ? "weekly" : "monthly");
+  };
+  const periodDelta = useMemo(() => {
     const pts = netWorth?.points ?? [];
-    if (pts.length < 2) return 0;
-    return pts[pts.length - 1].total - pts[pts.length - 2].total;
+    if (pts.length < 2) return null;
+    return pts[pts.length - 1].total - pts[0].total;
   }, [netWorth]);
 
   // Top movers from current holdings (by unrealized_pct).
@@ -626,20 +676,58 @@ function OverviewTab({
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-      <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card lg:col-span-2">
-        <div className="flex items-start justify-between">
+      <section className="min-w-0 rounded-lg border border-border bg-bg-card p-4 lg:col-span-2">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <div className="text-xs uppercase tracking-wide text-text-muted">Net worth</div>
-            <div className="mt-1 text-3xl font-semibold">{fmtMoney(total, base)}</div>
-            {lastDelta !== 0 && (
-              <div className={`mt-1 flex items-center gap-1 text-sm ${lastDelta > 0 ? "text-success" : "text-error"}`}>
-                <Icon name={lastDelta > 0 ? "trending-up" : "trending-down"} size={14} />
-                {fmtMoney(Math.abs(lastDelta), base)} this month
+            <div className="mt-1 text-3xl font-semibold tabular-nums">{fmtMoney(total, base)}</div>
+            {periodDelta !== null && (
+              <div className={`mt-1 flex items-center gap-1 text-sm ${periodDelta > 0 ? "text-success" : periodDelta < 0 ? "text-error" : "text-text-muted"}`}>
+                <Icon name={periodDelta >= 0 ? "trending-up" : "trending-down"} size={14} />
+                {fmtMoney(periodDelta, base, { signed: true })} over selected range
               </div>
             )}
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap rounded-md border border-border p-0.5" role="group" aria-label="Net worth date range">
+              {HISTORY_RANGES.map(option => <button key={option} type="button" onClick={() => selectRange(option)}
+                aria-pressed={range === option}
+                className={`rounded px-2 py-1 text-xs ${range === option ? "bg-accent text-bg" : "text-text-muted hover:bg-bg-hover hover:text-text"}`}>
+                {option}
+              </button>)}
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-text-muted">
+              Resolution
+              <select value={resolution} onChange={e => setResolution(e.target.value as HistoryResolution)}
+                className="rounded-md border border-border bg-bg-card px-2 py-1 text-text">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+            </label>
+          </div>
         </div>
-        <Sparkline points={(netWorth?.points ?? []).map(p => p.total)} height={80} />
+        {range === "Custom" && <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-text-muted">
+          <label>From <input type="date" value={customFrom} onChange={e => setCustomFrom(e.target.value)} onInput={e => setCustomFrom(e.currentTarget.value)}
+            className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
+          <label>To <input type="date" value={customTo} onChange={e => setCustomTo(e.target.value)} onInput={e => setCustomTo(e.currentTarget.value)}
+            className="ml-1 rounded-md border border-border bg-bg-card px-2 py-1 text-text" /></label>
+        </div>}
+        {historyError ? <div role="alert" className="mt-6 rounded-md border border-error/30 bg-error/10 p-3 text-sm text-error">{historyError}</div>
+          : historyLoading || !netWorth ? <div className="grid h-64 place-items-center text-sm text-text-muted">Loading history…</div>
+          : <NetWorthChart points={netWorth.points} currency={base} />}
+        {netWorth && !historyLoading && !historyError && <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+          <span>{fmtHistoryDate(netWorth.from)} – {fmtHistoryDate(netWorth.to)} · {netWorth.points.length} {resolution} values</span>
+          <span>Historical values are estimates where market prices are missing.</span>
+        </div>}
+        {netWorth && netWorth.points.length > 0 && <details className="mt-3 border-t border-border pt-2 text-xs">
+          <summary className="cursor-pointer text-text-muted hover:text-text">View history values</summary>
+          <div className="mt-2 max-h-60 overflow-auto rounded-md border border-border">
+            <table className="w-full text-left tabular-nums"><thead className="sticky top-0 bg-bg-card text-text-muted"><tr><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Net worth</th></tr></thead>
+              <tbody className="divide-y divide-border-subtle">{netWorth.points.map(p => <tr key={p.as_of}><td className="px-3 py-1.5">{fmtHistoryDate(p.as_of)}</td><td className="px-3 py-1.5 text-right">{fmtMoney(p.total, base)}</td></tr>)}</tbody>
+            </table>
+          </div>
+        </details>}
       </section>
 
       <section className="rounded-lg border border-border bg-bg-card p-4 border-border bg-bg-card">
@@ -771,24 +859,46 @@ function BudgetBar({ b, base }: { b: BudgetStatus; base: string }) {
   );
 }
 
-function Sparkline({ points, height = 60 }: { points: number[]; height?: number }) {
-  if (points.length < 2) return <div style={{ height }} className="mt-3 text-xs text-text-dim">Not enough data</div>;
-  const min = Math.min(...points);
-  const max = Math.max(...points);
-  const range = Math.max(1, max - min);
-  const w = 600;
-  const h = height;
-  const pts = points.map((p, i) => {
-    const x = (i / (points.length - 1)) * w;
-    const y = h - ((p - min) / range) * (h - 4) - 2;
-    return `${x},${y}`;
-  }).join(" ");
-  // Color via CSS var so dashboard's Tailwind JIT doesn't need to scan us.
-  return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="mt-3 w-full" preserveAspectRatio="none" style={{ height }}>
-      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth={2} />
-    </svg>
-  );
+function NetWorthChart({ points, currency }: { points: NetWorthSeries["points"]; currency: string }) {
+  if (points.length === 0) return <div className="grid h-64 place-items-center text-sm text-text-muted">No history in this range.</div>;
+  if (points.length === 1) return <div className="grid h-64 place-items-center text-center text-sm text-text-muted">
+    <div><div>{fmtHistoryDate(points[0].as_of)}</div><div className="mt-1 text-lg font-semibold text-text">{fmtMoney(points[0].total, currency)}</div></div>
+  </div>;
+  const data = points.map(p => ({ ...p, time: Date.parse(p.as_of) }));
+  const values = data.map(p => p.total);
+  const low = Math.min(...values);
+  const high = Math.max(...values);
+  const padding = Math.max(100, (high - low) * 0.12);
+  const axisLow = low >= 0 ? Math.max(0, low - padding) : low - padding;
+  const compact = new Intl.NumberFormat(undefined, { style: "currency", currency, notation: "compact", maximumFractionDigits: 1 });
+  return <div className="mt-4 h-64 w-full min-w-0" role="img" aria-label={`Net worth from ${fmtHistoryDate(points[0].as_of)} to ${fmtHistoryDate(points[points.length - 1].as_of)}`}>
+    <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={256} initialDimension={{ width: 720, height: 256 }}>
+      <AreaChart data={data} margin={{ top: 12, right: 12, bottom: 4, left: 0 }}>
+        <defs><linearGradient id="financeNetWorthFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="var(--accent)" stopOpacity={0.24} />
+          <stop offset="100%" stopColor="var(--accent)" stopOpacity={0.015} />
+        </linearGradient></defs>
+        <CartesianGrid stroke="var(--border)" strokeDasharray="3 4" vertical={false} />
+        <XAxis dataKey="time" type="number" domain={["dataMin", "dataMax"]} tickCount={5}
+          tickFormatter={value => fmtHistoryDate(new Date(value).toISOString())}
+          tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={28} />
+        <YAxis width={70} domain={[axisLow, high + padding]}
+          tickFormatter={value => compact.format(Number(value) / 100)}
+          tick={{ fill: "var(--text-muted)", fontSize: 11 }} axisLine={false} tickLine={false} tickCount={5} />
+        <Tooltip cursor={{ stroke: "var(--text-muted)", strokeDasharray: "3 3" }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const point = payload[0].payload as (typeof data)[number];
+            return <div className="rounded-md border border-border bg-bg-card px-3 py-2 text-xs shadow-lg">
+              <div className="text-text-muted">{fmtHistoryDate(point.as_of)}</div>
+              <div className="mt-0.5 font-semibold tabular-nums text-text">{fmtMoney(point.total, currency)}</div>
+            </div>;
+          }} />
+        <Area type="linear" dataKey="total" name="Net worth" stroke="var(--accent)" strokeWidth={2.5}
+          fill="url(#financeNetWorthFill)" dot={false} activeDot={{ r: 5, fill: "var(--accent)", stroke: "var(--bg-card)" }} isAnimationActive={false} />
+      </AreaChart>
+    </ResponsiveContainer>
+  </div>;
 }
 
 function AllocationDonut({ groups, total }: { groups: AllocationGroup[]; total: number }) {

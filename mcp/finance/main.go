@@ -445,10 +445,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"base", "quote", "rate"}),
 			Handler: a.toolFXSet},
 
-		{Name: "reports_net_worth", Description: "Net worth at a point or as a series. Args: at?, series? ('weekly'|'monthly'), from?, to?.",
+		{Name: "reports_net_worth", Description: "Net worth at a point or as a series. Args: at?, series? ('daily'|'weekly'|'monthly'), from? (date or 'all'), to?.",
 			InputSchema: schemaObject(map[string]any{
 				"at":     map[string]any{"type": "string"},
-				"series": map[string]any{"type": "string", "enum": []string{"weekly", "monthly"}},
+				"series": map[string]any{"type": "string", "enum": []string{"daily", "weekly", "monthly"}},
 				"from":   map[string]any{"type": "string"},
 				"to":     map[string]any{"type": "string"},
 			}, nil),
@@ -3395,25 +3395,7 @@ func (a *App) toolReportsNetWorth(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	if series := strArg(args, "series", ""); series != "" {
-		from := strArg(args, "from", time.Now().UTC().AddDate(-1, 0, 0).Format(time.RFC3339))
-		to := strArg(args, "to", time.Now().UTC().Format(time.RFC3339))
-		fromT, err := parseFlexibleTime(from)
-		if err != nil {
-			return nil, fmt.Errorf("from: %w", err)
-		}
-		toT, err := parseFlexibleTime(to)
-		if err != nil {
-			return nil, fmt.Errorf("to: %w", err)
-		}
-		buckets := buildBuckets(fromT, toT, series)
-		points := make([]map[string]any, 0, len(buckets))
-		for _, b := range buckets {
-			points = append(points, map[string]any{
-				"as_of": b.Format(time.RFC3339),
-				"total": netWorthAt(ctx, b, base),
-			})
-		}
-		return map[string]any{"series": series, "base_currency": base, "points": points}, nil
+		return reportNetWorthSeries(ctx, args, series, base)
 	}
 	at := strArg(args, "at", time.Now().UTC().Format(time.RFC3339))
 	atT, err := parseFlexibleTime(at)
