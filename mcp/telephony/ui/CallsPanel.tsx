@@ -1145,7 +1145,11 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
 
   useEffect(() => {
     const watcher = telephony.watchCalls(receiveCalls, {
-      onError: error => { setLoading(false); setStatus((error as Error).message || "Load failed"); },
+      onFailure: sample => {
+        setLoading(false);
+        const response = sample.status === undefined ? "network" : `HTTP ${sample.status}`;
+        setStatus(`Call refresh failed (${response}, ${Math.round(sample.fetchMs)} ms, ${sample.trigger}): ${(sample.error as Error).message || "request failed"}`);
+      },
     });
     return () => watcher.close();
   }, [telephony, receiveCalls]);

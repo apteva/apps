@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -733,15 +734,88 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-// Apply visibility before the result limit. A busy project cannot crowd an
-// authorized incoming call out of the user's first page with other users' calls.
+func phoneGrantKeys(grants map[string]bool) []string {
+	keys := make([]string, 0, len(grants))
+	for key, allowed := range grants {
+		if allowed {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func phonePlaceholders(count int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+// Select only calls with an indexed path to this principal. The permission
+// checks below remain authoritative: a historical offer or a destination
+// grant alone does not make a call visible or answerable.
+func phoneCallCandidates(p *phonePrincipal, project string) (string, []any) {
+	sources := []string{`SELECT call_id FROM telephony_call_owners WHERE project_id=? AND principal=?`}
+	args := []any{project, p.Identity.key()}
+	destinations := phoneGrantKeys(p.Destinations)
+	if len(destinations) > 0 {
+		placeholders := phonePlaceholders(len(destinations))
+		sources = append(sources, `SELECT o.call_id FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id
+			WHERE o.project_id=? AND o.destination_id IN (`+placeholders+`)
+			AND o.kind='browser' AND o.status='offered' AND o.expires_at>?
+			AND r.status='ringing'`)
+		args = append(args, project)
+		for _, destination := range destinations {
+			args = append(args, destination)
+		}
+		args = append(args, ringTime(time.Now()))
+		// A direct browser destination can be answerable without a ring run.
+		// Pending calls are the only such calls not covered by ownership.
+		sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='inbound'
+			AND status='pending' AND peer_kind='human' AND routing_destination_id IN (`+placeholders+`)`)
+		args = append(args, project)
+		for _, destination := range destinations {
+			args = append(args, destination)
+		}
+		if p.Supervisor {
+			sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='inbound'
+				AND routing_destination_id IN (`+placeholders+`)`)
+			args = append(args, project)
+			for _, destination := range destinations {
+				args = append(args, destination)
+			}
+			sources = append(sources, `SELECT call_id FROM telephony_call_owners
+				WHERE project_id=? AND destination_id IN (`+placeholders+`)`)
+			args = append(args, project)
+			for _, destination := range destinations {
+				args = append(args, destination)
+			}
+		}
+	}
+	if p.Supervisor {
+		numbers := phoneGrantKeys(p.Numbers)
+		if len(numbers) > 0 {
+			sources = append(sources, `SELECT id FROM calls WHERE project_id=? AND direction='outbound'
+				AND from_number IN (`+phonePlaceholders(len(numbers))+`)`)
+			args = append(args, project)
+			for _, number := range numbers {
+				args = append(args, number)
+			}
+		}
+	}
+	return strings.Join(sources, " UNION "), args
+}
+
+// Apply visibility before the result limit. Paging here traverses only calls
+// with an indexed ownership, offer, or destination candidate for this user.
 func (a *App) recentPhoneCalls(r *http.Request, project string, limit int) ([]callRow, error) {
-	if phoneUserFrom(r) == nil {
+	p := phoneUserFrom(r)
+	if p == nil {
 		return a.db().recent(project, limit)
 	}
+	candidates, args := phoneCallCandidates(p, project)
 	out := []callRow{}
 	for offset := 0; len(out) < limit; offset += 200 {
-		rows, err := a.db().listWhere(`project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), project)
+		queryArgs := append(append([]any{}, args...), project)
+		rows, err := a.db().listWhere(`id IN (`+candidates+`) AND project_id=? AND ingress_path<>'ring_group' ORDER BY placed_at DESC,id DESC LIMIT 200 OFFSET `+fmt.Sprint(offset), queryArgs...)
 		if err != nil {
 			return nil, err
 		}
