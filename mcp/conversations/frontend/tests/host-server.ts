@@ -4,6 +4,7 @@ const result=await Bun.build({entrypoints:[join(root,"example/main.tsx"),join(ro
 if(!result.success)throw new AggregateError(result.logs,"example build");
 const uploaded=new Map<string,any>();
 const rows=new Map<string,any[]>();const calls:any[]=[];
+let panelRows:any[]=[],panelOlderRows:any[]=[];
 const activityRows=new Map<string,any[]>();
 const resolved=new Set<string>();
 let room=false;let deliveryStatus="delivered";
@@ -15,7 +16,8 @@ const approval=(user:string)=>({id:92,conversation_id:`chat-${user}`,role:"agent
 const conversation=(user:string)=>({id:`chat-${user}`,project_id:"project",lead_agent_id:41,lead_agent_name:"Assistant",title:"Support chat",kind:room?"room":"direct",origin:"web",audience:"public",created_at:"",updated_at:""});
 Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
- if(url.pathname==="/reset" && req.method==="POST"){rows.clear();activityRows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activityRows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
  if(url.pathname==="/seed" && req.method==="POST") {
   const options=await req.json();room=Boolean(options.room);deliveryStatus=options.deliveryStatus || "delivered";
   for(const user of ["operator","visitor-a"]) rows.set(user,[
@@ -65,8 +67,9 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/activity")return Response.json(activityRows.get(`chat-${user}`)??[]);
  if(path==="/agents")return Response.json([{id:41,name:"Assistant",attached:true},{id:42,name:"Scheduling assistant",attached:true}]);
  if(path==="/unread-summary")return Response.json([]);
- if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;return Response.json({...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience});}
- if(path==="/chats"&&url.searchParams.has("page"))return Response.json({conversations:[],next_cursor:""});
+ if(path==="/chats"&&req.method==="POST") {const body=await req.json();calls.at(-1).body=body;const created={...conversation(user),id:"new-operator-chat",title:body.title||"New conversation",lead_agent_id:body.lead_agent_id,audience:body.audience};panelRows=[created,...panelRows];return Response.json(created);}
+ if(path==="/chats"&&url.searchParams.has("id"))return Response.json(panelRows.find(item=>item.id===url.searchParams.get("id"))??conversation(user));
+ if(path==="/chats"&&url.searchParams.has("page"))return Response.json(url.searchParams.get("archived")==="1"?{conversations:[],next_cursor:""}:url.searchParams.get("cursor")==="older"?{conversations:panelOlderRows,next_cursor:""}:{conversations:panelRows,next_cursor:panelOlderRows.length?"older":""});
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/messages"&&req.method==="POST"){

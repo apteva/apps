@@ -27,7 +27,7 @@ import { AttachmentContent, GenericComponents, reportSectionsText } from "./mess
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
@@ -247,6 +247,7 @@ const GLYPH_ARCHIVE = "M21 8v13H3V8 M1 3h22v5H1z M10 12h4";
 const GLYPH_TRASH =
   "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2";
 const GLYPH_RESTORE = "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5";
+const GLYPH_BACK = "M15 18l-6-6 6-6";
 
 // PublicTag marks conversations whose human side is a product's end
 // users (site chatbot visitors behind a gateway) rather than
@@ -1358,33 +1359,37 @@ function useConversationTransport(conversationID: string, projectId: string) {
 }
 
 // Refresh every loaded page so deleted/archived rows cannot linger behind page one.
-export async function refreshConversationList(path:string, conversations:ConversationsClient, count=100, selectedId="") {
+async function refreshConversationPage(path:string, conversations:ConversationsClient, count=100, selectedId="") {
  const { apiGet } = conversations; const projectId=conversations.projectId;
- const out:Conversation[]=[];let cursor="";
+ const out:Conversation[]=[];let cursor="",nextCursor="";
  do {
   const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&limit=100&cursor=${encodeURIComponent(cursor)}`,projectId);
   for(const row of page.conversations)if(!out.some(old=>old.id===row.id))out.push(row);
-  if(!page.next_cursor||page.next_cursor===cursor)break;cursor=page.next_cursor;
+  if(!page.next_cursor||page.next_cursor===cursor){nextCursor="";break;}cursor=page.next_cursor;nextCursor=cursor;
  }while(out.length<Math.max(100,count));
  if(selectedId&&!out.some(row=>row.id===selectedId)) {
   try {const row=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(selectedId)}`,projectId);if(Boolean(row.archived_at)===path.includes("archived=1"))out.unshift(row);}catch{}
  }
- return out;
+ return {rows:out,nextCursor};
 }
 
-export function MoreConversations({path,projectId,rows,onRows}: {path:string;projectId:string;rows:Conversation[];onRows:(rows:Conversation[])=>void}) {
-  const { t } = useConversationLocalization();
-  const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
+export async function refreshConversationList(path:string, conversations:ConversationsClient, count=100, selectedId="") {
+ return (await refreshConversationPage(path,conversations,count,selectedId)).rows;
+}
+
+export function MoreConversations({path,projectId,rows,cursor,onRows,onCursor}: {path:string;projectId:string;rows:Conversation[];cursor?:string;onRows:(rows:Conversation[])=>void;onCursor?:(cursor:string)=>void}) {
+ const { t } = useConversationLocalization();
+ const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
  const [busy,setBusy]=useState(false),[error,setError]=useState("");
  const [exhausted,setExhausted]=useState(false);
  const scopeRef=useRef("");scopeRef.current=projectId+":"+path;
  const more=async()=>{if(busy||!rows.length)return;const scope=scopeRef.current;setBusy(true);setExhausted(false);try{
   const last=rows.at(-1)!;
-  const cursor=btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
-  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(cursor)}`,projectId);
+  const requestCursor=cursor ?? btoa(JSON.stringify({updated:last.updated_at,id:last.id})).replace(/=+$/g,"").replace(/\+/g,"-").replace(/\//g,"_");
+  const page=await apiGet<{conversations:Conversation[];next_cursor:string}>(`${path}${path.includes("?")?"&":"?"}page=1&cursor=${encodeURIComponent(requestCursor)}`,projectId);
   if(scope!==scopeRef.current)return;
-  if(!page.conversations.length){setExhausted(true);setError("");return}
-  onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);setError("");
+  if(!page.conversations.length && !onCursor){setExhausted(true);setError("");return;}
+  onRows([...rows,...page.conversations.filter(c=>!rows.some(old=>old.id===c.id))]);onCursor?.(page.next_cursor && page.next_cursor!==requestCursor ? page.next_cursor : "");setError("");
  }catch(err){setError(String(err));}finally{setBusy(false)}};
  return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?t("common.loading"):t("chat.loadEarlier")}</button>{(error||exhausted)&&<p role="status">{error || t("chat.noEarlierStatus")}</p>}</div>;
 }
@@ -1397,6 +1402,7 @@ export function ConversationChat({
   showToolCompletion = false,
   showToolDuration = false,
   onOpenDetails,
+  leadingAction,
   headerActions,
   onActed,
   onRemoved,
@@ -1408,6 +1414,7 @@ export function ConversationChat({
   showToolCompletion?: boolean;
   showToolDuration?: boolean;
   onOpenDetails?: () => void;
+  leadingAction?: ReactNode;
   headerActions?: ReactNode;
   onActed: () => void;
   onRemoved: () => void;
@@ -1630,6 +1637,7 @@ export function ConversationChat({
         })}
       </> : null}
       emptyMessage={emptyMessage}
+      leadingAction={leadingAction}
       headerActions={headerActions}
       bottomRef={bottomRef}
       inputRef={inputRef}
@@ -1675,18 +1683,23 @@ function InboxTab({
   onOpenConversation,
   projectId,
   instanceId,
+  visible = true,
 }: {
   onOpenConversation: (conversationID: string) => void;
   projectId: string;
   instanceId?: number;
+  visible?: boolean;
 }) {
   const { t, relativeTime, statusLabel } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [items, setItems] = useState<InboxItem[]>([]);
   const [note, setNote] = useState("");
  const [total, setTotal] = useState<number | null>(null);
- const [cursor,setCursor]=useState("");
- const expandedRef=useRef(false);
+  const [cursor,setCursor]=useState("");
+  const expandedRef=useRef(false);
+  const scrollRef=useRef<HTMLDivElement|null>(null);
+  const scrollPositionRef=useRef(0);
+  useLayoutEffect(() => {if(visible && scrollRef.current)scrollRef.current.scrollTop=scrollPositionRef.current;},[visible,items.length]);
 
   const load = useCallback(async () => {
     try {
@@ -1724,7 +1737,7 @@ function InboxTab({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col">
-      <div className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
+      <div ref={scrollRef} onScroll={event=>{scrollPositionRef.current=event.currentTarget.scrollTop;}} className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-3">
  <div className="flex gap-3 text-xs"><button className="text-accent" onClick={load}>{t("inbox.refresh")}</button>{cursor&&<button className="text-accent" onClick={loadMore}>{t("inbox.loadMore")}</button>}</div>
         {items.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
@@ -2045,8 +2058,15 @@ export default function ConversationsPanel({ projectId, instanceId, workspaceRai
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const [tab, setTab] = useState<"chats" | "inbox" | "telegram">("chats");
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [nextConversationCursor, setNextConversationCursor] = useState("");
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
+  const [mobileDetail, setMobileDetail] = useState(false);
+  const listScrollRef = useRef<HTMLDivElement | null>(null);
+  const listScrollPositionRef = useRef(0);
+  const mobileBackRef = useRef<HTMLButtonElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const wasMobileDetailRef = useRef(false);
   const [showArchived, setShowArchived] = useState(false);
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -2063,33 +2083,47 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
   // Same breakpoint the dashboard chat page uses for its right-hand
   // context column.
   const hasContextColumn = useMediaQuery("(min-width: 1024px)");
+  const isMobile = useMediaQuery("(max-width: 767px)");
+  useEffect(() => { if (!isMobile) setMobileDetail(false); }, [isMobile]);
+  useLayoutEffect(() => {
+    if (isMobile && !mobileDetail && tab === "chats" && listScrollRef.current) listScrollRef.current.scrollTop = listScrollPositionRef.current;
+  }, [isMobile, mobileDetail, tab, conversations.length]);
+  useLayoutEffect(() => {
+    if (!isMobile) { wasMobileDetailRef.current = false; return; }
+    if (mobileDetail) mobileBackRef.current?.focus();
+    else if (wasMobileDetailRef.current) {
+      const row = Array.from(listScrollRef.current?.querySelectorAll<HTMLButtonElement>("button[data-conversation-id]") ?? []).find(button => button.dataset.conversationId === selectedId);
+      (returnFocusRef.current?.isConnected ? returnFocusRef.current : row)?.focus();
+    }
+    wasMobileDetailRef.current = mobileDetail;
+  }, [isMobile, mobileDetail, selectedId, tab]);
 
-  useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,showArchived]);
+  useEffect(()=>{setConversations([]);setNextConversationCursor("");setSelectedId("");setMobileDetail(false);},[projectId,instanceId,showArchived]);
   const listStateRef=useRef({scope:"",count:0,selected:""});
   const listScope=`${projectId}:${instanceId}:${showArchived}`;
   listStateRef.current=listStateRef.current.scope===listScope ? {scope:listScope,count:conversations.length,selected:selectedId} : {scope:listScope,count:0,selected:""};
   const loadConversations = useCallback(async () => {
     const snapshot={...listStateRef.current};
     try {
-      const [chats, unreadEntries, inbox] = await Promise.all([
-        refreshConversationList(agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),conversationsClient,snapshot.count,snapshot.selected),
+      const [page, unreadEntries, inbox] = await Promise.all([
+        refreshConversationPage(agentScopedPath(`/chats${showArchived ? "?archived=1" : ""}`, instanceId),conversationsClient,snapshot.count,snapshot.selected),
         apiGet<UnreadEntry[]>(agentScopedPath("/unread-summary", instanceId), projectId),
         apiGet<InboxPage>(agentScopedPath("/inbox?page=1&limit=100", instanceId), projectId),
       ]);
       if(snapshot.scope!==listStateRef.current.scope)return;
       const scoped = projectId
-        ? chats.filter((c) => !c.project_id || c.project_id === projectId)
-        : chats;
-      if(listStateRef.current.count<=Math.max(100,snapshot.count))setConversations(scoped);
+        ? page.rows.filter((c) => !c.project_id || c.project_id === projectId)
+        : page.rows;
+      if(listStateRef.current.count<=Math.max(100,snapshot.count)){setConversations(scoped);setNextConversationCursor(page.nextCursor);}
       setUnread(new Map(unreadEntries.map((e) => [e.conversation_id, e])));
       setInboxItems(inbox.items);setInboxTotal(inbox.total);setInboxAttention(inbox.attention ?? {});
       setSelectedId((current) =>
-        (scoped.some(row=>row.id===current) ? current : scoped[0]?.id) || "",
+        (scoped.some(row=>row.id===current) ? current : isMobile ? "" : scoped[0]?.id) || "",
       );
     } catch {
       /* transient */
     }
-  }, [projectId, instanceId, showArchived]);
+  }, [projectId, instanceId, showArchived, isMobile]);
 
   useEffect(() => {
     loadConversations();
@@ -2113,6 +2147,9 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
     () => conversations.find((c) => c.id === selectedId) ?? null,
     [conversations, selectedId],
   );
+  useEffect(() => {
+    if (isMobile && mobileDetail && !selected && !newOpen) setMobileDetail(false);
+  }, [isMobile, mobileDetail, selected, newOpen]);
 
   // Pending inbox items become attention markers: a severity dot on
   // the conversation row and a count badge on the Inbox tab. Ranks:
@@ -2147,20 +2184,42 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
 
   const openConversation = async (conversationID: string) => {
     try {
+      if (isMobile) returnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       const conv=await apiGet<Conversation>(`/chats?id=${encodeURIComponent(conversationID)}`,projectId);
       setConversations(current => current.some(c=>c.id===conv.id) ? current : [conv,...current]);
-      setTab("chats");setSelectedId(conversationID);
+      if (!isMobile) setTab("chats");
+      setSelectedId(conversationID);
+      if (isMobile) setMobileDetail(true);
     } catch(err) {setAgentsError(String(err));}
   };
 
   return (
     <div className="h-full min-h-0 flex flex-col bg-bg text-text">
-      <header className="shrink-0 border-b border-border px-4 py-3 flex items-center gap-3">
-        <div>
-          <h1 className="text-sm font-semibold">{t("panel.title")}</h1>
-          <p className="text-xs text-text-muted">{t("panel.description")}</p>
+      <header className={`${isMobile && mobileDetail ? "hidden" : "flex"} shrink-0 border-b border-border px-3 py-2 md:px-4 md:py-3 items-center gap-2 md:gap-3`}>
+        {isMobile && tab === "telegram" && (
+          <button type="button" onClick={() => setTab("chats")} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t("panel.backToChats")}>
+            <Glyph d={GLYPH_BACK} size={18} />
+          </button>
+        )}
+        <div className="min-w-0">
+          <h1 className="text-sm font-semibold">{isMobile && tab === "telegram" ? t("panel.telegram") : t("panel.title")}</h1>
+          <p className="hidden md:block text-xs text-text-muted">{t("panel.description")}</p>
         </div>
-        <nav className="ml-auto flex items-center gap-1">
+        {isMobile && tab === "chats" && !showArchived && (
+          <button type="button" onClick={() => { ensureAgents(); setNewOpen(true); }} className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded bg-accent text-bg" aria-label={t("chat.new")}>
+            <Glyph d={GLYPH_PLUS} size={18} />
+          </button>
+        )}
+        {isMobile && (
+          <details className={`relative ${tab === "chats" ? "" : "ml-auto"}`}>
+            <summary role="button" className="flex h-11 w-11 cursor-pointer list-none items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t("panel.moreOptions")}><Glyph d={GLYPH_MORE} size={18} /></summary>
+            <div className="absolute right-0 top-full z-40 mt-2 min-w-52 rounded-md border border-border bg-bg-card p-1 shadow-lg">
+              {tab !== "telegram" && <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; setTab("telegram"); }} className="block w-full rounded px-3 py-2 text-left text-sm text-text hover:bg-bg-input">{t("panel.telegram")}</button>}
+              <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; setTab("chats"); setMobileDetail(false); setShowArchived(value => !value); }} className="block w-full rounded px-3 py-2 text-left text-sm text-text hover:bg-bg-input">{t(showArchived ? "chat.backToActive" : "chat.archivedTitle")}</button>
+            </div>
+          </details>
+        )}
+        <nav className="ml-auto hidden md:flex items-center gap-1">
           {(
             [
               { id: "chats", label: t("panel.chats"), glyph: GLYPH_CHAT },
@@ -2192,15 +2251,31 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
         </nav>
       </header>
 
-      {tab === "inbox" ? (
-        <InboxTab
+      {isMobile && tab !== "telegram" && !mobileDetail && (
+        <nav className="flex shrink-0 border-b border-border" aria-label={t("panel.title")}>
+          {(["chats", "inbox"] as const).map(entry => (
+            <button key={entry} type="button" onClick={() => setTab(entry)} aria-current={tab === entry ? "page" : undefined} className={`flex min-h-11 flex-1 items-center justify-center gap-2 border-b-2 px-3 text-sm ${tab === entry ? "border-accent text-text" : "border-transparent text-text-muted"}`}>
+              {entry === "chats" ? t("panel.chats") : t("inbox.title")}
+              {entry === "inbox" && inboxTotal > 0 && <span className={`rounded-full px-1.5 py-0.5 text-xs text-bg ${inboxHasError ? "bg-error" : "bg-accent"}`}>{inboxTotal}</span>}
+            </button>
+          ))}
+        </nav>
+      )}
+
+      {tab === "inbox" && (
+        <div className={`${isMobile && mobileDetail ? "hidden" : "flex"} flex-1 min-h-0 flex-col`} aria-hidden={isMobile && mobileDetail}>
+          <InboxTab
           onOpenConversation={openConversation}
           projectId={projectId}
           instanceId={instanceId}
+          visible={!(isMobile && mobileDetail)}
         />
-      ) : tab === "telegram" ? (
+        </div>
+      )}
+      {tab === "telegram" && !mobileDetail && (
         <TelegramTab projectId={projectId} conversations={conversations.filter((item) => !item.project_id || item.project_id === projectId)} />
-      ) : (
+      )}
+      {(tab === "chats" || (isMobile && mobileDetail)) && (
         <main
           className={`flex-1 min-h-0 grid grid-cols-1 md:grid-cols-[260px_minmax(0,1fr)] md:divide-x md:divide-border ${
             hasContextColumn && selected
@@ -2210,8 +2285,8 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
               : ""
           }`}
         >
-          <aside className="min-h-0 flex flex-col">
-            <div className="shrink-0 border-b border-border p-3 flex items-center gap-2">
+          <aside className={`${isMobile && mobileDetail ? "hidden" : "flex"} min-h-0 flex-col`} aria-hidden={isMobile && mobileDetail}>
+            <div className="hidden md:flex shrink-0 border-b border-border p-3 items-center gap-2">
               <button
                 type="button"
                 onClick={() => {
@@ -2245,7 +2320,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 {t("common.archived")}
               </div>
             )}
-            <div className="flex-1 min-h-0 overflow-auto">
+            <div ref={listScrollRef} onScroll={event=>{listScrollPositionRef.current=event.currentTarget.scrollTop;}} className="flex-1 min-h-0 overflow-auto">
             {conversations.length === 0 ? (
               <div className="p-6 text-sm text-text-muted flex flex-col items-center gap-3 text-center">
                 <span className="text-text-dim">
@@ -2259,15 +2334,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                 )}
               </div>
             ) : (
-              <ul className="divide-y divide-border">
-                <li><MoreConversations path={agentScopedPath(`/chats${showArchived?"?archived=1":""}`,instanceId)} projectId={projectId} rows={conversations} onRows={setConversations}/></li>
+              <ul className="m-0 list-none divide-y divide-border p-0">
                 {conversations.map((c) => {
                   const unreadCount = unread.get(c.id)?.unread ?? 0;
                   return (
                     <li key={c.id}>
                       <button
                         type="button"
-                        onClick={() => setSelectedId(c.id)}
+                        data-conversation-id={c.id}
+                        onClick={event => { listScrollPositionRef.current=listScrollRef.current?.scrollTop ?? 0; returnFocusRef.current=event.currentTarget; setSelectedId(c.id); if (isMobile) setMobileDetail(true); }}
                         className={`w-full text-left px-4 py-3 border-l-2 transition-colors ${
                           c.id === selectedId
                             ? "border-accent bg-bg-hover"
@@ -2307,19 +2382,23 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                     </li>
                   );
                 })}
+                {nextConversationCursor && <li><MoreConversations path={agentScopedPath(`/chats${showArchived?"?archived=1":""}`,instanceId)} projectId={projectId} rows={conversations} cursor={nextConversationCursor} onRows={setConversations} onCursor={setNextConversationCursor}/></li>}
               </ul>
             )}
             </div>
           </aside>
-          {selected ? (
+          {selected && (!isMobile || mobileDetail) ? (
             <ConversationChat key={`${selected.project_id}:${selected.id}`}
               conversation={selected}
               archived={showArchived}
               showToolCompletion={toolDisplay.showCompletion}
               showToolDuration={toolDisplay.showDuration}
+              leadingAction={isMobile && <button ref={mobileBackRef} type="button" onClick={() => setMobileDetail(false)} className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded text-text-muted hover:bg-bg-input hover:text-text" aria-label={t(tab === "inbox" ? "panel.backToInbox" : "panel.backToChats")}><Glyph d={GLYPH_BACK} size={18} /></button>}
               headerActions={<details className="relative">
-                <summary className="cursor-pointer rounded border border-border px-2 py-1.5 text-xs text-text-muted hover:bg-bg-input hover:text-text">{t("chat.toolDisplay")}</summary>
+                <summary role="button" className={`flex cursor-pointer list-none items-center rounded text-xs text-text-muted hover:bg-bg-input hover:text-text ${isMobile ? "h-11 w-11 justify-center border border-border" : "border border-border px-2 py-1.5"}`} aria-label={isMobile ? t("panel.conversationOptions") : undefined}>{isMobile ? <Glyph d={GLYPH_MORE} size={16} /> : t("chat.toolDisplay")}</summary>
                 <div className="absolute right-0 top-full z-40 mt-1 min-w-52 rounded-md border border-border bg-bg-card p-3 shadow-lg">
+                  {isMobile && <button type="button" onClick={event => { event.currentTarget.closest("details")!.open = false; openDetails(); }} className="mb-3 block w-full rounded py-1 text-left text-xs text-text hover:bg-bg-input">{WorkspaceRail ? t("panel.workspace") : t("common.details")}</button>}
+                  {isMobile && <p className="mb-2 text-xs font-medium text-text-muted">{t("chat.toolDisplay")}</p>}
                   <label className="flex cursor-pointer items-center gap-2 text-xs text-text">
                     <input type="checkbox" checked={toolDisplay.showCompletion} onChange={event => setToolDisplay(current => ({...current, showCompletion: event.target.checked}))} />
                     {t("chat.showToolCompletion")}
@@ -2330,21 +2409,22 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                   </label>
                 </div>
               </details>}
-              onOpenDetails={openDetails}
+              onOpenDetails={isMobile ? undefined : openDetails}
               onActed={loadConversations}
               onRemoved={() => {
                 setConversations(current=>current.filter(c=>c.id!==selectedId));
                 setSelectedId("");
+                setMobileDetail(false);
               }}
             />
-          ) : (
+          ) : !isMobile ? (
             <section className="flex-1 flex flex-col items-center justify-center gap-3 text-text-muted">
               <span className="text-text-dim">
                 <Glyph d={GLYPH_CHECK} size={32} />
               </span>
               <p className="text-sm">{t("chat.select")}</p>
             </section>
-          )}
+          ) : null}
           {hasContextColumn && selected && (
             <div className="h-full min-h-0 overflow-hidden">
               {WorkspaceRail ? (
@@ -2431,12 +2511,15 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
         onClose={() => setNewOpen(false)}
         onCreated={(conversation) => {
           setNewOpen(false);
+          returnFocusRef.current = null;
+          setConversations(current => [conversation, ...current.filter(item => item.id !== conversation.id)]);
           setSelectedId(conversation.id);
+          if (isMobile) setMobileDetail(true);
           // Leaving archived view retriggers the load via the effect;
           // calling loadConversations here too would race the stale
           // archived query against the fresh one.
           if (showArchived) setShowArchived(false);
-          else loadConversations();
+          else if (!isMobile) loadConversations();
         }}
       />
 

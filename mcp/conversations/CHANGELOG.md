@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.7 — 2026-09-28
+
+- Give the full Conversations panel a mobile list-to-detail flow instead of stacking the list above an automatically selected chat. Keep the composer in a full-height chat view and restore list position and focus on Back.
+- Reduce mobile chrome to Chats and Inbox; move Telegram and archived chats into the overflow menu. Show older-conversation pagination only when a next page exists.
+- Leave desktop columns and exported widget navigation unchanged. Add packaged-panel browser coverage for phone widths, navigation, pagination, and widget isolation.
+
 ## 0.24.6 — 2026-09-25
 
 - Create conversations from the in-app panel as operator conversations without an audience selector. Public conversations for external sites remain unchanged.
