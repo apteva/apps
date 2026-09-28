@@ -43,7 +43,7 @@ Use `telephony_call_get` to inspect separate carrier leg/session IDs, allowliste
 routing SIP headers and recent command outcomes. These records help correlate
 repeated sessions with carrier traces; displayed caller ID alone is insufficient.
 
-## Default protection and termination (local follow-up)
+## Default protection and termination (0.7.1)
 
 There is no special burst-announcement mode. Default thresholds admit the first
 12 distinct carrier call IDs from the same displayed caller to the same
@@ -74,4 +74,4 @@ avoidable ambiguous termination paths. They cannot prevent an external carrier
 from originating a new session or establish who owns a Diversion number. The
 final upstream SIP response and retry behavior still require carrier traces and
 a controlled call through the actual forwarding path. No production changes or
-live calls are included in this local follow-up.
+live calls are included in this source release.
