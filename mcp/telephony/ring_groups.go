@@ -129,6 +129,9 @@ func advanceRingRunTx(tx *sql.Tx, runID string, now time.Time) error {
 			return err
 		}
 	}
+	if _, err := tx.Exec(`DELETE FROM phone_capacity WHERE call_id=? AND expires_at<>'' AND NOT EXISTS(SELECT 1 FROM call_offers o WHERE o.call_id=phone_capacity.call_id AND o.capacity_principal=phone_capacity.principal AND o.status='offered' AND o.expires_at>?)`, callID, ringTime(now)); err != nil {
+		return err
+	}
 	var active int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM call_offers WHERE run_id=? AND status='offered'`, runID).Scan(&active); err != nil {
 		return err
@@ -421,6 +424,51 @@ func (a *App) tickRingRun(ctx *sdk.AppCtx, runID, callID string) error {
 	if err != nil {
 		return err
 	}
+	// A decision offer can lose its destination or verified access while it is
+	// ringing. Release it now so the policy can select another adviser.
+	var decisionRun int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM call_ring_runs r JOIN routing_decisions d ON d.id=r.ring_group_id AND d.call_id=r.call_id WHERE r.id=? AND r.call_id=? AND d.status='accepted'`, runID, callID).Scan(&decisionRun); err != nil {
+		return err
+	}
+	if decisionRun != 0 {
+		for _, offer := range offers {
+			dest, lookupErr := a.findRoutingDestination(ctx.CurrentProject(), offer.DestinationID)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if a.validateDecisionDestination(ctx.CurrentProject(), dest) == nil {
+				continue
+			}
+			tx, beginErr := ctx.AppDB().Begin()
+			if beginErr != nil {
+				return beginErr
+			}
+			result, updateErr := tx.Exec(`UPDATE call_offers SET status='failed' WHERE id=? AND status='offered' AND EXISTS(SELECT 1 FROM calls WHERE id=? AND status='pending')`, offer.ID, callID)
+			if updateErr != nil {
+				tx.Rollback()
+				return updateErr
+			}
+			changed, updateErr := result.RowsAffected()
+			if updateErr != nil {
+				tx.Rollback()
+				return updateErr
+			}
+			if changed != 0 {
+				if updateErr = advanceRingRunTx(tx, runID, time.Now()); updateErr != nil {
+					tx.Rollback()
+					return updateErr
+				}
+			}
+			if updateErr = tx.Commit(); updateErr != nil {
+				return updateErr
+			}
+			if changed != 0 {
+				a.routingCommitted(ctx.CurrentProject())
+				return a.tickRingRun(ctx, runID, callID)
+			}
+			return nil
+		}
+	}
 	parent, err := a.db().findCall(callID)
 	if err != nil || parent == nil {
 		return err
@@ -492,16 +540,34 @@ func (a *App) finishRingRun(ctx *sdk.AppCtx, runID, callID, overflow string) err
 	if err = json.Unmarshal([]byte(raw), &execution); err != nil {
 		return err
 	}
-	plan, err := a.resolveRoutingDefinition(&execution.Route, row.FromNumber, execution.Digits, &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}, execution.Definition, overflow)
+	var plan *inboundRoutingPlan
+	var current string
+	if err = ctx.AppDB().QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=?`, callID).Scan(&current); err != nil {
+		return err
+	}
+	if overflow == current {
+		var d decisionRecord
+		d, err = scanDecision(ctx.AppDB().QueryRow(`SELECT `+decisionColumns+` FROM routing_decisions WHERE call_id=? AND node_id=? AND status='accepted'`, callID, current))
+		if err != nil {
+			return err
+		}
+		plan, _, err = a.nextDecisionPlan(row, d, 0)
+	} else {
+		plan, err = a.resolveRoutingDefinition(&execution.Route, row.FromNumber, execution.Digits, &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}, execution.Definition, overflow)
+	}
 	if err != nil {
 		return err
 	}
 	if err = a.persistRoutingProgress(callID, row.ProjectID, plan, runID); err != nil {
 		return err
 	}
+	row, err = a.db().findCall(callID)
+	if err != nil || row == nil || row.Status != "pending" {
+		return err
+	}
 	// XML providers pick up the new pinned node on their next wait callback.
 	if plan.TerminalType == "hangup" || plan.TerminalType == "reject" {
-		return a.expireCall(ctx, row)
+		return a.finishTerminalRoutingPlan(ctx, row, &execution.Route, plan)
 	}
 	if row.CarrierSlug == "telnyx" {
 		route := execution.Route

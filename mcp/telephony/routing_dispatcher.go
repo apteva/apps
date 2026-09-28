@@ -176,7 +176,7 @@ func (a *App) startRoutingDispatcher(ctx *sdk.AppCtx) {
 
 		var raw string
 		err := ctx.AppDB().QueryRow(`SELECT COALESCE(MIN(deadline),'') FROM (
-   SELECT deadline_at AS deadline FROM routing_decisions WHERE project_id=? AND status IN ('pending','running')
+   SELECT CASE WHEN status='pending' AND not_before<>'' THEN MIN(not_before,deadline_at) ELSE deadline_at END AS deadline FROM routing_decisions WHERE project_id=? AND status IN ('pending','running')
    UNION ALL SELECT o.expires_at FROM call_offers o JOIN calls c ON c.id=o.call_id WHERE o.project_id=? AND o.status='offered' AND c.status='pending'
   )`, project, project).Scan(&raw)
 		if err != nil || raw == "" {

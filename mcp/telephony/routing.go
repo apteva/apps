@@ -111,6 +111,9 @@ type inboundRoutingPlan struct {
 	Group                                                       *ringGroupRow
 	GroupDestinations                                           map[string]routingDestinationRow
 	OverflowNodeID                                              string
+	DecisionNotBefore                                           string
+	RoutingResolution                                           string
+	CallbackOnAI                                                bool
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
@@ -161,7 +164,6 @@ func validateRoutingDefinition(def routingDefinition) []string {
 	if !routingIDPattern.MatchString(def.Entry) {
 		errs = append(errs, "entry must reference a valid node id")
 	}
-	decisionCount := 0
 	nodes := make(map[string]routingNode, len(def.Nodes))
 	for _, node := range def.Nodes {
 		if !routingIDPattern.MatchString(node.ID) {
@@ -176,15 +178,11 @@ func validateRoutingDefinition(def routingDefinition) []string {
 			errs = append(errs, fmt.Sprintf("node %q has unsupported type %q", node.ID, node.Type))
 		}
 		if node.Type == "decision" {
-			decisionCount++
 			if _, err := parseDecisionConfig(node); err != nil {
 				errs = append(errs, fmt.Sprintf("decision node %s: %v", node.ID, err))
 			}
 		}
 		nodes[node.ID] = node
-	}
-	if decisionCount > 4 {
-		errs = append(errs, "flows support at most four decision nodes")
 	}
 	if _, ok := nodes[def.Entry]; !ok {
 		errs = append(errs, "entry node does not exist")
@@ -1485,6 +1483,15 @@ func persistRoutingExecutionTx(tx *sql.Tx, callID, project string, plan *inbound
 	if _, err := tx.Exec(`UPDATE calls SET routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=? WHERE id=? AND project_id=? AND (routing_flow_version_id='' OR routing_flow_version_id=?)`, plan.FlowID, plan.VersionID, plan.DestinationID, callID, project, plan.VersionID); err != nil {
 		return err
 	}
+	if plan.TerminalType == "decision" {
+		expires, err := decisionCallExpiryTx(tx, callID, plan, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=? AND project_id=? AND status='pending'`, expires.Format(time.RFC3339), callID, project); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO call_route_executions(id,call_id,project_id,flow_id,flow_version_id,status,current_node_id,selected_destination_id,started_at,context_json) VALUES(?,?,?,?,?,'selected',?,?,?,?)`, executionID, callID, project, plan.FlowID, plan.VersionID, lastTraceNode(plan.Trace), plan.DestinationID, now, plan.ContextJSON); err != nil {
 		return err
 	}
@@ -1546,8 +1553,10 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 			input[current] = value
 		}
 		version := &routingFlowVersionRow{ID: row.RoutingFlowVersionID, FlowID: row.RoutingFlowID}
-		plan, err = a.resolveRoutingDefinition(route, row.FromNumber, input, version, execution.Definition, current)
+		base, _ := decisionRuntimeNode(current)
+		plan, err = a.resolveRoutingDefinition(route, row.FromNumber, input, version, execution.Definition, base)
 		if err == nil && plan.TerminalType == "decision" {
+			plan.NodeID = current
 			if selected, e := a.acceptedDecisionPlan(row, current); e != nil {
 				return nil, nil, e
 			} else if selected != nil {
@@ -1643,18 +1652,26 @@ func writeRoutingProgressTx(tx *sql.Tx, callID, project string, plan *inboundRou
 		}
 	}
 	if currentNode != plan.NodeID && plan.Group == nil {
-		seconds := plan.TimeoutSec
+		now := time.Now().UTC()
+		expires := now.Add(time.Duration(max(plan.TimeoutSec, 5)) * time.Second)
 		if plan.TerminalType == "voicemail" {
-			seconds = 190
+			expires = now.Add(190 * time.Second)
 		}
 		if plan.TerminalType == "dtmf_menu" {
-			seconds = max(seconds, 30)
+			expires = now.Add(time.Duration(max(plan.TimeoutSec, 30)) * time.Second)
 		}
-		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=?`, time.Now().UTC().Add(time.Duration(max(seconds, 5))*time.Second).Format(time.RFC3339), callID); err != nil {
+		if plan.TerminalType == "decision" {
+			var err error
+			expires, err = decisionCallExpiryTx(tx, callID, plan, now)
+			if err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=?`, expires.Format(time.RFC3339), callID); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
+	if _, err := tx.Exec(`UPDATE calls SET agent_id=?,peer_kind=?,directive=?,voice=?,routing_flow_id=?,routing_flow_version_id=?,routing_destination_id=?,routing_resolution=CASE WHEN ?<>'' THEN ? ELSE routing_resolution END,callback_on_ai=CASE WHEN ? THEN 1 ELSE callback_on_ai END,updated_at=? WHERE id=? AND project_id=?`, plan.AgentID, inboundPeerKind(plan.AnswerMode), firstNonEmpty(plan.Directive, "inbound pending"), plan.Voice, plan.FlowID, plan.VersionID, plan.DestinationID, plan.RoutingResolution, plan.RoutingResolution, plan.CallbackOnAI, time.Now().UTC().Format(time.RFC3339Nano), callID, project); err != nil {
 		return err
 	}
 	if plan.Group == nil && plan.AnswerMode == answerModeAgent && plan.DestinationID != "" {
@@ -1903,6 +1920,9 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 		return err
 	}
 	row, _ = a.db().findCall(row.ID)
+	if row == nil || isTerminalStatus(row.Status) {
+		return nil
+	}
 	switch plan.TerminalType {
 	case "decision":
 		return nil
@@ -1956,6 +1976,21 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 	default:
 		return fmt.Errorf("unsupported Telnyx routing terminal %q", plan.TerminalType)
 	}
+}
+
+// A terminal node can follow media nodes. Let the carrier render the selected
+// announcement before ending the call instead of expiring it at plan commit.
+func (a *App) finishTerminalRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
+	if terminalAnnouncementText(plan) != "" {
+		if row.CarrierSlug == "telnyx" {
+			applyRoutingPlanToRoute(route, plan)
+			return a.executeTelnyxRoutingPlan(ctx, row, route, plan)
+		}
+		if row.CarrierSlug == "twilio" {
+			return nil // Its next wait callback renders Say, then Hangup.
+		}
+	}
+	return a.expireCall(ctx, row)
 }
 
 type routingNumberValidation struct {

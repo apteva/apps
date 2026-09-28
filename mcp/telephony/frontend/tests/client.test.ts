@@ -206,8 +206,8 @@ describe("Telephony extension", () => {
     const base = { direction: "inbound", status: "pending", from_number: "", to_number: "", peer_kind: "human" };
     const result = f.client.incomingCalls([
       { ...base, id: "human" },
-      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ kind: "browser", destination_id: "desk" }] },
-      { ...base, id: "moved", answerable: false, ring_offers: [{ kind: "browser", destination_id: "other" }] },
+      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ id: "offer-desk", kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "moved", answerable: false, ring_offers: [{ id: "offer-other", kind: "browser", destination_id: "other" }] },
       { ...base, id: "supervisor", answerable: false },
       { ...base, id: "ai", peer_kind: "agent" },
       { ...base, id: "waiting", routing_waiting: true },

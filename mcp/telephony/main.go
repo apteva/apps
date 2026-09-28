@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.8
+version: 0.6.9
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -166,8 +166,12 @@ provides:
     - { name: telephony.routing.rejected, description: "Durable correlated routing outcome: rejected.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.timed_out, description: "Durable correlated routing outcome: timed_out.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.fallback, description: "Durable correlated routing outcome: fallback.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.exhausted, description: "Durable correlated routing outcome: exhausted.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.waiting, description: "Durable correlated routing outcome: waiting.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.canceled, description: "Durable correlated routing outcome: canceled.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.offer.offered, description: "Durable correlated routing outcome: offer.offered.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.declined, description: "Durable correlated routing outcome: offer.declined.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
+    - { name: telephony.routing.offer.acknowledged, description: "Durable correlated routing outcome: offer.acknowledged.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.offer.claimed, description: "Durable correlated routing outcome: offer.claimed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.offer.answerer, description: "Durable correlated routing outcome: offer.answerer.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
     - { name: telephony.routing.offer.failed, description: "Durable correlated routing outcome: offer.failed.", payload: { event_id: string, revision: integer, call_id: string, decision_id: string, reservation_id: string, destination_id: string, answering_identity: object, occurred_at: string } }
@@ -218,6 +222,9 @@ provides:
         error_message: string
         handling_reason: string
         missed_pool_eligible: boolean
+        call_classification: string
+        routing_resolution: string
+        callback_opportunity_id: string
         termination: object
     - { name: call.initiated, description: "A carrier accepted an outbound call request.", payload: *call_event_payload }
     - { name: call.ringing, description: "The destination is ringing.", payload: *call_event_payload }
@@ -3403,14 +3410,17 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"routing_destination_id": r.RoutingDestinationID,
 			"placed_at":              r.PlacedAt, "answered_at": r.AnsweredAt, "ended_at": r.EndedAt,
 			"termination_cause": r.TerminationCause, "termination_code": r.TerminationCode,
-			"termination_initiator": r.TerminationInitiator,
-			"termination_reason":    r.TerminationReason,
-			"handling_reason":       r.HandlingReason,
-			"missed_pool_eligible":  r.Direction == "inbound" && r.HandlingReason == "",
-			"termination":           terminationPublic(r),
-			"answered_by":           r.AnsweredBy,
-			"machine_detection":     r.MachineDetection,
-			"project_id":            r.ProjectID, "error_message": callsPanelErrorMessage(r),
+			"termination_initiator":   r.TerminationInitiator,
+			"termination_reason":      r.TerminationReason,
+			"handling_reason":         r.HandlingReason,
+			"routing_resolution":      r.RoutingResolution,
+			"call_classification":     callClassification(r),
+			"callback_opportunity_id": callbackOpportunityID(r),
+			"missed_pool_eligible":    callbackEligible(r),
+			"termination":             terminationPublic(r),
+			"answered_by":             r.AnsweredBy,
+			"machine_detection":       r.MachineDetection,
+			"project_id":              r.ProjectID, "error_message": callsPanelErrorMessage(r),
 			"recording_mode": r.RecordingMode, "recording_count": r.RecordingCount,
 			"recording_status": r.RecordingStatus,
 			"hold_state":       r.HoldState, "recording_state": effectiveRecordingControlState(r),
@@ -3747,6 +3757,8 @@ type callRow struct {
 	AnsweredBy               string
 	TerminationReason        string
 	HandlingReason           string
+	RoutingResolution        string
+	CallbackOnAI             bool
 	AnnouncementState        string
 	AnnouncementText         string
 	MachineDetection         string
@@ -3832,7 +3844,7 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(routing_flow_id,''), COALESCE(routing_flow_version_id,''),
 	COALESCE(routing_destination_id,''),
 	COALESCE(answered_by,''), COALESCE(termination_reason,''),
-	COALESCE(handling_reason,''), COALESCE(announcement_state,''), COALESCE(announcement_text,''),
+	COALESCE(handling_reason,''), COALESCE(routing_resolution,''), COALESCE(callback_on_ai,0), COALESCE(announcement_state,''), COALESCE(announcement_text,''),
 	COALESCE(machine_detection,'off'), COALESCE(machine_detection_action,'notify'),
 	COALESCE(hold_state,'active'), COALESCE(recording_control_state,'default'),
 	COALESCE(control_revision,0), COALESCE(control_action,''), COALESCE(control_error,''), COALESCE(control_requested_at,''), COALESCE(hold_client_state,''),
@@ -3861,7 +3873,7 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.BrowserAudioDiagnostics, &r.CarrierAudioDiagnostics,
 		&r.PeerKind, &r.PeerToken, &r.RoutingFlowID, &r.RoutingFlowVersionID,
 		&r.RoutingDestinationID, &r.AnsweredBy, &r.TerminationReason,
-		&r.HandlingReason, &r.AnnouncementState, &r.AnnouncementText,
+		&r.HandlingReason, &r.RoutingResolution, &r.CallbackOnAI, &r.AnnouncementState, &r.AnnouncementText,
 		&r.MachineDetection, &r.MachineDetectionAction,
 		&r.HoldState, &r.RecordingControlState, &r.ControlRevision, &r.ControlAction, &r.ControlError, &r.ControlRequestedAt, &r.HoldClientState,
 		&r.HoldControlRevision, &r.HoldControlAction, &r.HoldRequestedAt,
