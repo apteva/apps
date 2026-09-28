@@ -375,6 +375,9 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 	if id == 2 {
 		slug = "twilio"
 	}
+	if id == 3 {
+		slug = "gmail"
+	}
 	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
 }
 func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {

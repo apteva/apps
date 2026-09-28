@@ -42,22 +42,23 @@ import (
 )
 
 type sendersCreateReq struct {
-	Address     string `json:"address"`       // required: email | domain | E.164 phone
-	Channel     string `json:"channel"`       // optional: 'email' | 'sms' | 'whatsapp'. Auto-detected if blank.
-	Inbound     string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
-	PublishDNS  *bool  `json:"publish_dns"`   // domain only; default true
-	SPF         *bool  `json:"spf"`           // domain only; default true
-	DMARC       *bool  `json:"dmarc"`         // domain only; default true
-	MailFrom    *bool  `json:"mail_from"`     // domain only; default true
-	Region      string `json:"region"`        // default eu-west-1 (inbound only)
-	MailFromSub string `json:"mail_from_sub"` // default "mail"
-	BucketName  string `json:"bucket_name"`   // auto-named if blank
-	TopicName   string `json:"topic_name"`    // auto-named if blank
-	RuleSetName string `json:"rule_set_name"` // default "apteva-default"
-	RuleName    string `json:"rule_name"`     // default "messaging-inbound"
-	DisplayName string `json:"display_name"`  // optional friendly name persisted on the local row
-	SetDefault  bool   `json:"set_default"`   // make this the default sender for (project, channel)
-	ProjectID   string `json:"-"`             // resolved from args / env; not user-supplied
+	Address      string `json:"address"`       // required: email | domain | E.164 phone
+	Channel      string `json:"channel"`       // optional: 'email' | 'sms' | 'whatsapp'. Auto-detected if blank.
+	Inbound      string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
+	PublishDNS   *bool  `json:"publish_dns"`   // domain only; default true
+	SPF          *bool  `json:"spf"`           // domain only; default true
+	DMARC        *bool  `json:"dmarc"`         // domain only; default true
+	MailFrom     *bool  `json:"mail_from"`     // domain only; default true
+	Region       string `json:"region"`        // default eu-west-1 (inbound only)
+	MailFromSub  string `json:"mail_from_sub"` // default "mail"
+	BucketName   string `json:"bucket_name"`   // auto-named if blank
+	TopicName    string `json:"topic_name"`    // auto-named if blank
+	RuleSetName  string `json:"rule_set_name"` // default "apteva-default"
+	RuleName     string `json:"rule_name"`     // default "messaging-inbound"
+	DisplayName  string `json:"display_name"`  // optional friendly name persisted on the local row
+	SetDefault   bool   `json:"set_default"`   // make this the default sender for (project, channel)
+	ConnectionID int64  `json:"connection_id"` // bound email connection; default binding when omitted
+	ProjectID    string `json:"-"`             // resolved from args / env; not user-supplied
 }
 
 type bootstrapStep struct {
@@ -127,16 +128,17 @@ func (a *App) handleSendersCreate(w http.ResponseWriter, r *http.Request) {
 // MCP entry point — args mirror sendersCreateReq.
 func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	body := sendersCreateReq{
-		Address:     strArg(args, "address"),
-		Channel:     strArg(args, "channel"),
-		Inbound:     strArg(args, "inbound"),
-		Region:      strArg(args, "region"),
-		MailFromSub: strArg(args, "mail_from_sub"),
-		BucketName:  strArg(args, "bucket_name"),
-		TopicName:   strArg(args, "topic_name"),
-		RuleSetName: strArg(args, "rule_set_name"),
-		RuleName:    strArg(args, "rule_name"),
-		DisplayName: strArg(args, "display_name"),
+		Address:      strArg(args, "address"),
+		Channel:      strArg(args, "channel"),
+		Inbound:      strArg(args, "inbound"),
+		Region:       strArg(args, "region"),
+		MailFromSub:  strArg(args, "mail_from_sub"),
+		BucketName:   strArg(args, "bucket_name"),
+		TopicName:    strArg(args, "topic_name"),
+		RuleSetName:  strArg(args, "rule_set_name"),
+		RuleName:     strArg(args, "rule_name"),
+		DisplayName:  strArg(args, "display_name"),
+		ConnectionID: int64Arg(args, "connection_id"),
 	}
 	if v, ok := args["publish_dns"].(bool); ok {
 		body.PublishDNS = &v
@@ -219,15 +221,31 @@ func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (result *
 	if err != nil {
 		return nil, err
 	}
-	sesBound := ctx.IntegrationFor("email_provider")
-	if sesBound == nil {
-		return nil, errors.New("email_provider (aws-ses) not bound")
+	emailBound, err := chooseEmailBinding(ctx, req.ConnectionID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if normalised := canonicalSenderAddress(kind, raw); normalised != "" {
+		if existing, err := dbFindSender(ctx.AppDB(), pid, "email", normalised); err != nil {
+			return nil, err
+		} else if existing != nil && existing.DeletedAt == nil && (existing.Provider != emailBound.AppSlug || (existing.ProviderConnectionID != 0 && existing.ProviderConnectionID != emailBound.ConnectionID)) {
+			return nil, fmt.Errorf("sender %s already belongs to %s connection %d", normalised, existing.Provider, existing.ProviderConnectionID)
+		}
 	}
 	normalisedKind := normaliseSenderKind(kind)
 	resp := &sendersCreateResp{
 		Address: canonicalSenderAddress(kind, raw),
 		Kind:    normalisedKind,
 		Pending: true,
+	}
+	if emailBound.AppSlug == "gmail" {
+		if normalisedKind != "email" {
+			return nil, errors.New("Gmail registers mailboxes, not whole domains")
+		}
+		return a.sendersCreateGmail(ctx, pid, emailBound.ConnectionID, raw, req, resp)
+	}
+	if emailBound.AppSlug != "aws-ses" {
+		return nil, fmt.Errorf("unsupported email provider %q", emailBound.AppSlug)
 	}
 	if normalisedKind == "email" {
 		// When the Domains app is bound, drive verification through the
@@ -237,11 +255,11 @@ func (a *App) sendersCreateImpl(ctx *sdk.AppCtx, req sendersCreateReq) (result *
 		// app, fall back to the legacy verify_email path (still useful
 		// for mailboxes at domains the operator doesn't control).
 		if isAppDepBound(ctx, "domains") {
-			return a.sendersCreateEmailViaParentDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
+			return a.sendersCreateEmailViaParentDomain(ctx, pid, emailBound.ConnectionID, raw, req, resp)
 		}
-		return a.sendersCreateEmail(ctx, pid, sesBound.ConnectionID, raw, req, resp)
+		return a.sendersCreateEmail(ctx, pid, emailBound.ConnectionID, raw, req, resp)
 	}
-	return a.sendersCreateDomain(ctx, pid, sesBound.ConnectionID, raw, req, resp)
+	return a.sendersCreateDomain(ctx, pid, emailBound.ConnectionID, raw, req, resp)
 }
 
 // sendersCreateEmailViaParentDomain handles the "alice@acme.com" case
@@ -308,19 +326,20 @@ func (a *App) sendersCreateEmailViaParentDomain(ctx *sdk.AppCtx, pid string, ses
 		}
 	}
 	a.persistSenderRow(ctx, pid, &senderUpsert{
-		ProjectID:          pid,
-		Channel:            "email",
-		Address:            addr,
-		Kind:               "email_mailbox",
-		DisplayName:        req.DisplayName,
-		Provider:           "aws-ses",
-		ProviderIdentityID: addr,
-		Verified:           parentVerified,
-		VerificationStatus: mboxStatus,
-		SendingEnabled:     true,
-		DkimStatus:         mboxDkim,
-		ParentIdentityID:   parentID,
-		MarkSyncedNow:      true,
+		ProjectID:            pid,
+		Channel:              "email",
+		Address:              addr,
+		Kind:                 "email_mailbox",
+		DisplayName:          req.DisplayName,
+		Provider:             "aws-ses",
+		ProviderConnectionID: sesConnID,
+		ProviderIdentityID:   addr,
+		Verified:             parentVerified,
+		VerificationStatus:   mboxStatus,
+		SendingEnabled:       true,
+		DkimStatus:           mboxDkim,
+		ParentIdentityID:     parentID,
+		MarkSyncedNow:        true,
 	}, resp)
 	if parentVerified {
 		resp.Pending = false
@@ -384,17 +403,18 @@ func (a *App) sendersCreateEmail(ctx *sdk.AppCtx, pid string, connID int64, addr
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_email", OK: true})
 	resp.NextStep = verifyNextStepHint("email")
 	a.persistSenderRow(ctx, pid, &senderUpsert{
-		ProjectID:          pid,
-		Channel:            "email",
-		Address:            addr,
-		Kind:               "email_mailbox",
-		DisplayName:        req.DisplayName,
-		Provider:           "aws-ses",
-		ProviderIdentityID: addr,
-		Verified:           false,
-		VerificationStatus: "pending",
-		SendingEnabled:     true,
-		MarkSyncedNow:      true,
+		ProjectID:            pid,
+		Channel:              "email",
+		Address:              addr,
+		Kind:                 "email_mailbox",
+		DisplayName:          req.DisplayName,
+		Provider:             "aws-ses",
+		ProviderConnectionID: connID,
+		ProviderIdentityID:   addr,
+		Verified:             false,
+		VerificationStatus:   "pending",
+		SendingEnabled:       true,
+		MarkSyncedNow:        true,
 	}, resp)
 	return resp, nil
 }
@@ -588,7 +608,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: true, Detail: detail})
 	metadata := domainSetupMetadata(domain, region, mailFromSub, mailFromDomain, publishDMARC, configureMailFrom)
-	persistDomainIdentityWithMetadata(ctx, pid, domain, resp, false, metadata, "persist_domain_identity")
+	persistDomainIdentityWithMetadata(ctx, pid, sesConnID, domain, resp, false, metadata, "persist_domain_identity")
 
 	if configureMailFrom {
 		resp.Steps = append(resp.Steps, bootstrapSetMailFrom(ctx, sesConnID, domain, mailFromDomain))
@@ -800,7 +820,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 
 	if resp.Inbound != nil && resp.Inbound.Bootstrapped {
-		persistDomainIdentityWithMetadata(ctx, pid, domain, resp, true, metadata, "persist_domain_identity_inbound")
+		persistDomainIdentityWithMetadata(ctx, pid, sesConnID, domain, resp, true, metadata, "persist_domain_identity_inbound")
 	}
 	return resp, nil
 }
@@ -809,10 +829,6 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 // domain verification state. Inbound/SNS bootstrap happens later and
 // may fail independently; the mailbox inheritance path must still see
 // a verified parent domain when DKIM is already SUCCESS.
-func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, stepName string) {
-	persistDomainIdentityWithMetadata(ctx, pid, domain, resp, includeInbound, "", stepName)
-}
-
 func persistSNSTopicAuthorization(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp) {
 	if resp == nil {
 		return
@@ -862,7 +878,7 @@ func persistSNSTopicAuthorization(ctx *sdk.AppCtx, pid, domain string, resp *sen
 	resp.Steps = append(resp.Steps, step)
 }
 
-func persistDomainIdentityWithMetadata(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, metadata string, stepName string) {
+func persistDomainIdentityWithMetadata(ctx *sdk.AppCtx, pid string, connectionID int64, domain string, resp *sendersCreateResp, includeInbound bool, metadata string, stepName string) {
 	inboundBootstrapped := false
 	inboundConfig := ""
 	if includeInbound && resp.Inbound != nil {
@@ -870,18 +886,19 @@ func persistDomainIdentityWithMetadata(ctx *sdk.AppCtx, pid, domain string, resp
 		inboundConfig = inboundConfigJSON(resp.Inbound)
 	}
 	identityID, persistErr := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
-		ProjectID:           pid,
-		Kind:                "email_domain",
-		Address:             domain,
-		Provider:            "aws-ses",
-		ProviderIdentityID:  domain,
-		Verified:            strings.EqualFold(resp.DkimStatus, "SUCCESS"),
-		VerificationStatus:  domainVerificationStatus(resp.DkimStatus),
-		DkimStatus:          resp.DkimStatus,
-		InboundBootstrapped: inboundBootstrapped,
-		InboundConfig:       inboundConfig,
-		Metadata:            metadata,
-		MarkSyncedNow:       true,
+		ProjectID:            pid,
+		Kind:                 "email_domain",
+		Address:              domain,
+		Provider:             "aws-ses",
+		ProviderConnectionID: connectionID,
+		ProviderIdentityID:   domain,
+		Verified:             strings.EqualFold(resp.DkimStatus, "SUCCESS"),
+		VerificationStatus:   domainVerificationStatus(resp.DkimStatus),
+		DkimStatus:           resp.DkimStatus,
+		InboundBootstrapped:  inboundBootstrapped,
+		InboundConfig:        inboundConfig,
+		Metadata:             metadata,
+		MarkSyncedNow:        true,
 	})
 	if persistErr != nil {
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: stepName, OK: false, Error: persistErr.Error()})
