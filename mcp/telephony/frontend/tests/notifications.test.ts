@@ -6,6 +6,7 @@ function fixture(authProvider?: string) {
   let state = "pending", active = 0, peak = 0, listCount = 0, cancelCount = 0;
   let beforeList = async () => {};
   let streamStatus = 200;
+  let listStatus = 200;
   const controllers: ReadableStreamDefaultController<Uint8Array>[] = [];
   const requests: Array<{url: URL; headers: Headers}> = [];
   const sdk = new AptevaClient({baseURL:"https://gateway.example",accessToken:"first",fetch: (async (url,init) => {
@@ -16,10 +17,10 @@ function fixture(authProvider?: string) {
       return new Response(body,{headers:{"Content-Type":"text/event-stream"}});
     }
     listCount++;active++;peak=Math.max(peak,active);
-    try{await beforeList();return Response.json({calls:[{id:"one",direction:"inbound",status:state,peer_kind:"human",from_number:"",to_number:""}]});}finally{active--;}
+    try{await beforeList();if(listStatus!==200)return new Response("call list unavailable",{status:listStatus});return Response.json({calls:[{id:"one",direction:"inbound",status:state,peer_kind:"human",from_number:"",to_number:""}]});}finally{active--;}
   }) as typeof fetch});
   const client=new TelephonyClient(sdk.app("telephony",{projectId:"p1",installId:42}),{authProvider});
-  return {sdk,client,requests,controllers,setState(value:string){state=value;},setBeforeList(value:()=>Promise<void>){beforeList=value;},setStreamStatus(value:number){streamStatus=value;},
+  return {sdk,client,requests,controllers,setState(value:string){state=value;},setBeforeList(value:()=>Promise<void>){beforeList=value;},setStreamStatus(value:number){streamStatus=value;},setListStatus(value:number){listStatus=value;},
     emit(type="calls.changed"){controllers.at(-1)!.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({type})}\n\n`));},
     get listCount(){return listCount;},get peak(){return peak;},get cancelCount(){return cancelCount;}};
 }
@@ -62,4 +63,16 @@ test("push can be disabled and abort suppresses late responses",async()=>{
 test("revocation closes the stream and forces an authorized refresh",async()=>{
  const f=fixture();let seen=0;const watch=f.client.watchCalls(()=>seen++,{intervalMs:10000});
  try{await until(()=>seen===1&&f.controllers.length===1);f.emit("access.revoked");await until(()=>f.cancelCount===1&&seen===2);await Bun.sleep(300);expect(f.controllers).toHaveLength(1);}finally{watch.close();}
+});
+
+test("failed refresh reports HTTP status, elapsed time, and trigger without stopping recovery",async()=>{
+ const f=fixture();f.setListStatus(503);
+ const failures:Array<{trigger:string;fetchMs:number;status?:number}>=[];
+ const watch=f.client.watchCalls(()=>{}, {push:false,intervalMs:100,onFailure:sample=>failures.push(sample)});
+ try {
+  await until(()=>failures.length>=1);
+  expect(failures[0].trigger).toBe("poll");expect(failures[0].status).toBe(503);
+  expect(failures[0].fetchMs).toBeGreaterThanOrEqual(0);
+  f.setListStatus(200);await until(()=>f.listCount>=2);
+ } finally {watch.close();}
 });

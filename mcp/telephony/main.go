@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.7
+version: 0.6.8
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -3030,19 +3030,6 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
-	rows, err := a.recentPhoneCalls(r, project, 100)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := a.db().attachRingOffers(project, rows); err != nil {
-		http.Error(w, "load ring offers", 500)
-		return
-	}
-	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
-		http.Error(w, "load recording summaries", http.StatusInternalServerError)
-		return
-	}
 	if id := r.URL.Query().Get("call_id"); id != "" {
 		row, err := a.db().findCall(id)
 		if err != nil || row == nil || row.ProjectID != project {
@@ -3054,12 +3041,29 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "load ring offers", 500)
 			return
 		}
+		if err := a.db().attachRecordingSummaries(project, detail); err != nil {
+			http.Error(w, "load recording summaries", 500)
+			return
+		}
 		detail = a.filterPhoneCalls(r, detail)
 		if len(detail) == 0 {
 			http.Error(w, "call not found", 404)
 			return
 		}
 		writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, detail, phoneUserFrom(r) == nil)})
+		return
+	}
+	rows, err := a.recentPhoneCalls(r, project, 100)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.db().attachRingOffers(project, rows); err != nil {
+		http.Error(w, "load ring offers", 500)
+		return
+	}
+	if err := a.db().attachRecordingSummaries(project, rows); err != nil {
+		http.Error(w, "load recording summaries", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, a.filterPhoneCalls(r, rows), false)})

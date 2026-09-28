@@ -62,6 +62,8 @@ export interface WatchCallsOptions {
   push?: boolean;
   /** Local request timing, without assumptions about server/client clock skew. */
   onTiming?: (sample: { trigger: "poll" | "push"; fetchMs: number }) => void;
+  /** Failed list request, including its HTTP status when one was received. */
+  onFailure?: (sample: { trigger: "poll" | "push"; fetchMs: number; status?: number; error: unknown }) => void;
   signal?: AbortSignal;
   onError?: (error: unknown) => void;
 }
@@ -141,7 +143,11 @@ export class TelephonyClient {
           try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
         }
       } catch (error) {
-        if (!controller.signal.aborted) report(error);
+        if (!controller.signal.aborted) {
+          const status = (error as { status?: unknown })?.status;
+          try { options.onFailure?.({ trigger, fetchMs: performance.now() - started, status: typeof status === "number" ? status : undefined, error }); } catch {}
+          report(error);
+        }
       } finally {
         running = false;
         if (!controller.signal.aborted) {
