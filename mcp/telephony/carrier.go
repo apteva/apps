@@ -32,6 +32,8 @@ type carrierPlaceRequest struct {
 type carrierPlaceResult struct {
 	CarrierSID       string
 	CarrierRequestID string
+	CarrierLegID     string
+	CarrierSessionID string
 }
 
 type carrierAdapter interface {
@@ -202,6 +204,11 @@ func (c *bandwidthCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {
 
 func executeCarrierTool(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (json.RawMessage, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	if res != nil {
+		recordCarrierCommand(ctx, connID, tool, input, res.Status, err == nil && res.Success)
+	} else {
+		recordCarrierCommand(ctx, connID, tool, input, 0, false)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -402,6 +409,7 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		Data struct {
 			CallControlID string `json:"call_control_id"`
 			CallLegID     string `json:"call_leg_id"`
+			CallSessionID string `json:"call_session_id"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
@@ -409,12 +417,9 @@ func (c *telnyxCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 	}
 	sid := out.Data.CallControlID
 	if sid == "" {
-		sid = out.Data.CallLegID
-	}
-	if sid == "" {
 		return nil, errors.New("telnyx dial_call returned no call control id")
 	}
-	return &carrierPlaceResult{CarrierSID: sid}, nil
+	return &carrierPlaceResult{CarrierSID: sid, CarrierLegID: out.Data.CallLegID, CarrierSessionID: out.Data.CallSessionID}, nil
 }
 
 func (c *telnyxCarrier) Hangup(ctx *sdk.AppCtx, row *callRow) error {

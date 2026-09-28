@@ -1509,7 +1509,7 @@ func persistRoutingExecutionTx(tx *sql.Tx, callID, project string, plan *inbound
 	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
 		return err
 	}
-	return nil
+	return enqueueRoutingEffectTx(tx, callID, project, plan)
 }
 
 func lastTraceNode(trace []routingTraceStep) string {
@@ -1542,6 +1542,29 @@ func (a *App) routingPlanForCall(row *callRow, digits map[string]string) (*route
 	}
 	var execution routingExecutionContext
 	var plan *inboundRoutingPlan
+	// A terminal node's preceding announcements cannot be reconstructed by
+	// starting the graph at that node. Reuse the full committed terminal plan.
+	var terminalJSON string
+	terminalErr := a.db().db.QueryRow(`SELECT plan_json FROM routing_effects WHERE call_id=? AND project_id=? AND node_id=?`, row.ID, row.ProjectID, current).Scan(&terminalJSON)
+	if terminalErr != nil && !errors.Is(terminalErr, sql.ErrNoRows) {
+		return nil, nil, terminalErr
+	}
+	if terminalErr == nil {
+		var saved inboundRoutingPlan
+		if err := json.Unmarshal([]byte(terminalJSON), &saved); err != nil {
+			return nil, nil, err
+		}
+		if saved.TerminalType == "hangup" || saved.TerminalType == "reject" {
+			if err := json.Unmarshal([]byte(saved.ContextJSON), &execution); err != nil {
+				return nil, nil, err
+			}
+			if execution.Route.ID != "" {
+				route = &execution.Route
+			}
+			applyRoutingPlanToRoute(route, &saved)
+			return route, &saved, nil
+		}
+	}
 	if json.Unmarshal([]byte(contextJSON), &execution) == nil && execution.Definition.Entry != "" {
 		route = &execution.Route
 
@@ -1698,7 +1721,7 @@ func writeRoutingProgressTx(tx *sql.Tx, callID, project string, plan *inboundRou
 	if err := initRingRunTx(tx, callID, project, plan, time.Now()); err != nil {
 		return err
 	}
-	return nil
+	return enqueueRoutingEffectTx(tx, callID, project, plan)
 }
 
 func (a *App) emitRoutingTrace(project, callID string, plan *inboundRoutingPlan, started bool) {
@@ -1917,18 +1940,30 @@ func (a *App) startTelnyxStream(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
+	if row == nil || plan == nil {
+		return errors.New("routing plan unavailable")
+	}
+	if plan.TerminalType == "hangup" || plan.TerminalType == "reject" || plan.TerminalType == "dtmf_menu" {
+		if err := a.updateCallRoutingPlan(row, plan); err != nil {
+			return err
+		}
+		if err := a.ensureRoutingEffect(row, plan); err != nil {
+			return err
+		}
+		return a.driveRoutingEffect(ctx.WithProject(row.ProjectID), row.ID, plan.NodeID)
+	}
+	unlock := a.softphones.lockClaim(row.ID)
+	defer unlock()
 	if err := a.updateCallRoutingPlan(row, plan); err != nil {
 		return err
 	}
 	row, _ = a.db().findCall(row.ID)
-	if row == nil || isTerminalStatus(row.Status) {
+	if !routingMayControlCall(row) {
 		return nil
 	}
 	switch plan.TerminalType {
 	case "decision":
 		return nil
-	case "dtmf_menu":
-		return a.startTelnyxGather(ctx, row, plan)
 	case "destination", "ring_group":
 		switch plan.AnswerMode {
 		case answerModeRealtimeImmediate:
@@ -1955,55 +1990,17 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 			// The carrier leg is already answered by the IVR. Return it to the
 			// project's browser-offer state; softphoneAnswer starts streaming
 			// after the operator atomically claims it.
-			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',peer_kind=?,state_expires_at=?,updated_at=? WHERE id=?`, peerKindHuman, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
+			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',peer_kind=?,state_expires_at=?,updated_at=? WHERE id=? AND status IN ('pending','answered') AND peer_token='' AND media_connected_at=''`, peerKindHuman, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
 			return err
 		default:
-			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',state_expires_at=?,updated_at=? WHERE id=?`, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
+			_, err := a.db().db.Exec(`UPDATE calls SET status='pending',state_expires_at=?,updated_at=? WHERE id=? AND status IN ('pending','answered') AND peer_token='' AND media_connected_at=''`, time.Now().UTC().Add(time.Duration(route.TimeoutSec)*time.Second).Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339Nano), row.ID)
 			return err
 		}
-	case "reject", "hangup":
-		if prompt := terminalAnnouncementText(plan); prompt != "" {
-			if _, err := a.db().db.Exec(`UPDATE calls SET announcement_state='awaiting_answer',announcement_text=?,handling_reason=? WHERE id=?`, prompt, routeHandlingReason(plan), row.ID); err != nil {
-				return err
-			}
-			row.AnnouncementState = "awaiting_answer"
-			row.AnnouncementText = prompt
-			return a.startTelnyxTerminalAnnouncement(ctx, row)
-		}
-		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{"call_control_id": row.CarrierSID, "command_id": telnyxCommandID(row.ID, "ivr-hangup")})
-		return err
 	case "voicemail":
 		return errors.New("Telnyx voicemail destination is not enabled yet")
 	default:
 		return fmt.Errorf("unsupported Telnyx routing terminal %q", plan.TerminalType)
 	}
-}
-
-// A terminal node can follow media nodes. Let the carrier render the selected
-// announcement before ending the call instead of expiring it at plan commit.
-func (a *App) finishTerminalRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
-	if terminalAnnouncementText(plan) != "" {
-		if a.callUsesDirectSIP(row) {
-			return errors.New("direct SIP cannot play a terminal routing announcement")
-		}
-		if row.CarrierSlug == "telnyx" {
-			applyRoutingPlanToRoute(route, plan)
-			return a.executeTelnyxRoutingPlan(ctx, row, route, plan)
-		}
-		if row.CarrierSlug == "twilio" {
-			return nil // Its next wait callback renders Say, then Hangup.
-		}
-		if row.CarrierSlug == "bandwidth" {
-			if _, err := a.db().db.Exec(`UPDATE calls SET announcement_state='awaiting_redirect',announcement_text=?,handling_reason=? WHERE id=?`, terminalAnnouncementText(plan), routeHandlingReason(plan), row.ID); err != nil {
-				return err
-			}
-			_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
-				"callId": row.CarrierSID, "state": "active", "redirectUrl": a.bandwidthWaitURL(*route, row.ID), "redirectMethod": "POST",
-			})
-			return err
-		}
-	}
-	return a.expireCall(ctx, row)
 }
 
 type routingNumberValidation struct {

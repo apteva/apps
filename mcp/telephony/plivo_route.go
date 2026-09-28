@@ -161,6 +161,10 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if !route.Enabled {
+		http.NotFound(w, r)
+		return
+	}
 	callUUID := strings.TrimSpace(r.FormValue("CallUUID"))
 	from := strings.TrimSpace(r.FormValue("From"))
 	to := strings.TrimSpace(firstNonEmpty(r.FormValue("To"), route.PhoneNumber))
@@ -229,7 +233,7 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) authorizedPlivoRoute(r *http.Request, routeID string) (*routeRow, error) {
 	route, err := a.db().findRoute(routeID)
-	if err != nil || route == nil || route.CarrierSlug != "plivo" || !route.Enabled || route.Secret == "" ||
+	if err != nil || route == nil || route.CarrierSlug != "plivo" || route.Secret == "" ||
 		!secureEqual(r.URL.Query().Get("secret"), route.Secret) || r.URL.Query().Get("project_id") != route.ProjectID {
 		return nil, errors.New("route unavailable")
 	}

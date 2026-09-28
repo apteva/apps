@@ -102,7 +102,7 @@ func (a *App) authorizeCallRequest(r *http.Request, row *callRow) error {
 			if err != nil {
 				return err
 			}
-			validPassword = route != nil && route.Enabled && route.ProjectID == row.ProjectID && secureEqual(password, route.Secret)
+			validPassword = route != nil && route.ProjectID == row.ProjectID && secureEqual(password, route.Secret)
 		}
 		if !ok || username != "apteva" || !validPassword {
 			return errors.New("invalid Bandwidth callback credentials")

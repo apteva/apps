@@ -274,42 +274,48 @@ func terminalAnnouncementText(plan *inboundRoutingPlan) string {
 
 // Telnyx reports answer and speech completion as separate callbacks. Never
 // queue hangup with speak: doing so can cut off the announcement mid-sentence.
+func terminalAnnouncementClientState(callID string) string {
+	return base64.StdEncoding.EncodeToString([]byte("terminal-announcement:" + callID))
+}
+
 func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) error {
-	if row == nil || row.AnnouncementState != "awaiting_answer" {
+	if row != nil {
+		fresh, err := a.db().findCall(row.ID)
+		if err != nil {
+			return err
+		}
+		row = fresh
+	}
+	if row == nil || row.AnnouncementState != "awaiting_answer" || isTerminalStatus(row.Status) {
 		return nil
+	}
+	if row.AnsweredAt == "" && row.Status != "answered" {
+		return errors.New("terminal announcement is waiting for carrier answer")
 	}
 	prompt := strings.TrimSpace(row.AnnouncementText)
 	if prompt == "" {
 		return errors.New("terminal announcement has no text")
 	}
-	result, err := a.db().db.Exec(`UPDATE calls SET announcement_state='speaking' WHERE id=? AND announcement_state='awaiting_answer' AND status NOT IN ('completed','failed','no-answer','canceled')`, row.ID)
-	if err != nil {
-		return err
-	}
-	changed, err := result.RowsAffected()
-	if err != nil || changed == 0 {
-		return err
-	}
-	_, err = executeCarrierTool(ctx, row.CarrierConnectionID, "speak_text", map[string]any{
-		"call_control_id": row.CarrierSID,
-		"payload":         prompt,
-		"payload_type":    "text",
-		"voice":           "Telnyx.NaturalHD.Astra",
-		"language":        "fr-FR",
-		"client_state":    base64.StdEncoding.EncodeToString([]byte("terminal-announcement:" + row.ID)),
-		"command_id":      telnyxCommandID(row.ID, "terminal-announcement"),
+	// Store speaking only after command acceptance. If the process dies between
+	// acceptance and persistence, replay uses the same carrier idempotency key.
+	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "speak_text", map[string]any{
+		"call_control_id": row.CarrierSID, "payload": prompt, "payload_type": "text",
+		"voice": "Telnyx.NaturalHD.Astra", "language": "fr-FR",
+		"client_state": terminalAnnouncementClientState(row.ID),
+		"command_id":   telnyxCommandID(row.ID, "terminal-announcement"),
 	})
 	if err != nil {
-		_, _ = a.db().db.Exec(`UPDATE calls SET announcement_state='awaiting_answer' WHERE id=? AND announcement_state='speaking'`, row.ID)
+		return err
 	}
+	_, err = a.db().db.Exec(`UPDATE calls SET announcement_state='speaking' WHERE id=? AND announcement_state='awaiting_answer' AND status NOT IN ('completed','failed','no-answer','busy','canceled')`, row.ID)
 	return err
 }
 
 func (a *App) finishTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) error {
-	if row == nil || row.AnnouncementState != "speaking" {
+	if row == nil || (row.AnnouncementState != "speaking" && row.AnnouncementState != "finishing") || isTerminalStatus(row.Status) {
 		return nil
 	}
-	result, err := a.db().db.Exec(`UPDATE calls SET announcement_state='finished' WHERE id=? AND announcement_state='speaking'`, row.ID)
+	result, err := a.db().db.Exec(`UPDATE calls SET announcement_state='finishing' WHERE id=? AND announcement_state IN ('speaking','finishing') AND status NOT IN ('completed','failed','no-answer','busy','canceled')`, row.ID)
 	if err != nil {
 		return err
 	}
@@ -318,12 +324,67 @@ func (a *App) finishTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) er
 		return err
 	}
 	_, err = executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{
-		"call_control_id": row.CarrierSID,
-		"command_id":      telnyxCommandID(row.ID, "terminal-announcement-hangup"),
+		"call_control_id": row.CarrierSID, "command_id": telnyxCommandID(row.ID, "terminal-announcement-hangup"),
 	})
 	if err != nil {
-		_, _ = a.db().db.Exec(`UPDATE calls SET announcement_state='speaking' WHERE id=? AND announcement_state='finished'`, row.ID)
+		return err
 	}
+	_, err = a.db().db.Exec(`UPDATE calls SET announcement_state='finished' WHERE id=? AND announcement_state='finishing'`, row.ID)
+	return err
+}
+
+func (a *App) completeTelnyxAnnouncementEvent(ctx *sdk.AppCtx, row *callRow) error {
+	unlock := a.softphones.lockClaim(row.ID)
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	current, err := a.db().findCall(row.ID)
+	if err != nil {
+		return err
+	}
+	if !routingMayControlCall(current) || current.AnnouncementState == "finished" {
+		return nil
+	}
+	if current.AnnouncementState != "speaking" && current.AnnouncementState != "finishing" {
+		// Recover a completion delivered after a crash between carrier acceptance
+		// of speak and saving the speaking state.
+		var count int
+		if err = a.db().db.QueryRow(`SELECT COUNT(*) FROM routing_effects WHERE call_id=? AND stage='speak' AND attempts>0`, row.ID).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return nil
+		}
+	}
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`UPDATE calls SET announcement_state='finishing' WHERE id=? AND status NOT IN ('completed','failed','no-answer','busy','canceled')`, row.ID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE routing_effects SET status='pending',attempts=CASE WHEN stage='hangup' THEN attempts ELSE 0 END,stage='hangup',next_attempt_at=? WHERE call_id=? AND status NOT IN ('done','canceled')`, ringTime(time.Now()), row.ID); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	var nodeID string
+	if effectErr := a.db().db.QueryRow(`SELECT node_id FROM routing_effects WHERE call_id=? AND stage='hangup' AND status='pending' LIMIT 1`, row.ID).Scan(&nodeID); effectErr == nil {
+		unlock()
+		unlock = nil
+		return a.driveRoutingEffect(ctx.WithProject(row.ProjectID), row.ID, nodeID)
+	} else if !errors.Is(effectErr, sql.ErrNoRows) {
+		return effectErr
+	}
+	current.AnnouncementState = "finishing"
+	if err = a.finishTelnyxTerminalAnnouncement(ctx, current); err != nil {
+		return err
+	}
+	_, err = a.db().db.Exec(`UPDATE routing_effects SET status='done',updated_at=? WHERE call_id=? AND stage='hangup'`, ringTime(time.Now()), row.ID)
 	return err
 }
 
@@ -334,10 +395,11 @@ func (a *App) suppressInboundCall(ctx *sdk.AppCtx, row *callRow) error {
 	if ctx == nil {
 		return errors.New("app context unavailable for inbound suppression")
 	}
-	if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
+	plan := &inboundRoutingPlan{NodeID: "suppression", TerminalType: "reject"}
+	if err := a.ensureRoutingEffect(row, plan); err != nil {
 		return err
 	}
-	return a.db().updateStatus(row.ID, "canceled", row.ErrorMessage)
+	return a.driveRoutingEffect(ctx.WithProject(row.ProjectID), row.ID, plan.NodeID)
 }
 
 func (a *App) suppressTerminalRoutingCall(ctx *sdk.AppCtx, row *callRow) error {
