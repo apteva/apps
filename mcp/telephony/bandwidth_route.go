@@ -144,7 +144,7 @@ func (a *App) handleBandwidthInbound(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "persist inbound call", http.StatusServiceUnavailable)
 			return
 		}
-		if call.HandlingReason == handlingBurstSuppressed {
+		if isSuppressedHandlingReason(call.HandlingReason) {
 			_ = a.db().updateStatus(call.ID, "canceled", call.ErrorMessage)
 			writeBandwidthEnd(w, "")
 			return

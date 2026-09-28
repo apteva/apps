@@ -189,6 +189,7 @@ provides:
     - { name: call.offered, description: "A ring group offered a call.", payload: { call_id: string, ring_group_id: string } }
     - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - { name: telephony.burst.detected, description: "A destination-wide inbound burst was detected and alerted without blocking access to the number.", payload: { provider_call_id: string, to_number: string, reason: string, occurred_at: string } }
+    - { name: telephony.spam.suppressed, description: "A displayed caller number matched the configured explicit block list; the call was rejected before adviser delivery.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload
@@ -282,6 +283,7 @@ config_schema:
   - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this alert. Detects rotating caller IDs without blocking the destination." }
   - { name: inbound_burst_cooldown_seconds, type: text, default: "300", label: "Burst suppression cooldown (seconds)" }
   - { name: inbound_burst_trusted_numbers, type: text, label: "Trusted caller numbers", description: "Comma-separated E.164 caller numbers exempt from the per-caller limit; destination-wide protection still applies." }
+  - { name: inbound_spam_blocked_callers, type: text, label: "Blocked displayed caller numbers", description: "Comma-separated E.164 caller numbers, optionally scoped as caller@destination. Rejects matching calls before adviser delivery; never disables the destination number. Displayed caller ID can be spoofed." }
   - { name: human_audio_send_ahead_ms, type: select, default: "40", label: "Human audio send-ahead (ms)", options: ["20", "40", "60", "80"], description: "Carrier pacing cushion for new human/external bridges. Keep 40 unless measurements justify a change. Stale-audio limits remain enabled." }
   - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
   - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }
@@ -1731,6 +1733,9 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 		if current == nil || isTerminalStatus(current.Status) {
 			return errAnswerCallEnded
 		}
+		if isSuppressedHandlingReason(current.HandlingReason) {
+			return errors.New("inbound call is being suppressed")
+		}
 		if current.Status != "pending" {
 			*owned = *current
 		}
@@ -2452,7 +2457,7 @@ func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if stored.HandlingReason == handlingBurstSuppressed {
+	if isSuppressedHandlingReason(stored.HandlingReason) {
 		writeSuppressedTwilioCall(w)
 		_ = a.db().updateStatus(stored.ID, "canceled", stored.ErrorMessage)
 		return
@@ -2671,6 +2676,9 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 	}
 	if suppression != "" {
 		call.HandlingReason = handlingBurstSuppressed
+		if suppression == blockedCaller {
+			call.HandlingReason = handlingSpamSuppressed
+		}
 		call.ErrorMessage = suppression
 	} else if plan != nil && plan.TerminalType == "hangup" && terminalAnnouncementText(plan) != "" {
 		call.AnnouncementState = "awaiting_answer"
@@ -2900,18 +2908,22 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
-	if created && stored.HandlingReason == handlingBurstSuppressed {
-		if globalCtx != nil {
-			ctx := globalCtx.WithProject(route.ProjectID)
-			if err := a.suppressInboundCall(ctx, stored); err != nil {
-				ctx.Logger().Warn("suppress inbound burst", "call", stored.ID, "reason", stored.ErrorMessage, "err", err)
-			} else {
-				ctx.Logger().Warn("suppressed inbound burst", "call", stored.ID, "reason", stored.ErrorMessage)
-			}
+	if isSuppressedHandlingReason(stored.HandlingReason) && !isTerminalStatus(stored.Status) {
+		if globalCtx == nil {
+			http.Error(w, "inbound suppression unavailable; retry", http.StatusServiceUnavailable)
+			return
 		}
+		ctx := globalCtx.WithProject(route.ProjectID)
+		if err := a.suppressInboundCall(ctx, stored); err != nil {
+			ctx.Logger().Warn("suppress inbound call", "call", stored.ID, "reason", stored.ErrorMessage, "err", err)
+			http.Error(w, "inbound suppression pending; retry", http.StatusServiceUnavailable)
+			return
+		}
+		ctx.Logger().Warn("suppressed inbound call", "call", stored.ID, "reason", stored.ErrorMessage)
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	w.WriteHeader(http.StatusNoContent)
 	if created && (route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject") {
 		if globalCtx != nil {
 			ctx := globalCtx.WithProject(route.ProjectID)
@@ -4031,7 +4043,7 @@ func (c *callsDB) claimPendingCall(id string, agentID int64, project string) (bo
 		return claimed, err
 	}
 	res, err := c.db.Exec(`UPDATE calls SET status = 'answering'
-        WHERE id = ? AND direction = 'inbound' AND status = 'pending' AND agent_id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
+	        WHERE id = ? AND direction = 'inbound' AND status = 'pending' AND COALESCE(handling_reason,'')='' AND agent_id = ? AND project_id = ? AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
 		id, agentID, project)
 	if err != nil {
 		return false, err
@@ -4059,8 +4071,8 @@ func (c *callsDB) claimPendingCallForHuman(id, project string, destinations ...s
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(`UPDATE calls SET status = 'answering'
-        WHERE id = ? AND direction = 'inbound' AND status = 'pending'
-          AND project_id = ? AND peer_kind = 'human' AND (routing_flow_version_id='' OR routing_destination_id<>'') AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
+	        WHERE id = ? AND direction = 'inbound' AND status = 'pending'
+	          AND COALESCE(handling_reason,'')='' AND project_id = ? AND peer_kind = 'human' AND (routing_flow_version_id='' OR routing_destination_id<>'') AND NOT EXISTS (SELECT 1 FROM call_ring_runs WHERE call_id=calls.id AND status IN ('ringing','exhausted','claimed'))`,
 		id, project)
 	if err != nil {
 		return false, err
@@ -4167,11 +4179,11 @@ func (c *callsDB) attachCall(id, threadID, audioBridgeURL, directive, voice stri
 
 func (c *callsDB) listActiveForAgent(agentID int64, project string) ([]callRow, error) {
 	return c.listWhere(`status IN ('initiated','ringing','in-progress','answered','pending','answering')
-        AND agent_id = ? AND project_id = ? ORDER BY placed_at DESC`, agentID, project)
+	        AND COALESCE(handling_reason,'')='' AND agent_id = ? AND project_id = ? ORDER BY placed_at DESC`, agentID, project)
 }
 
 func (c *callsDB) listPending(agentID int64, project string) ([]callRow, error) {
-	return c.listWhere(`direction = 'inbound' AND status IN ('pending','answering') AND project_id = ? AND (agent_id = ? OR EXISTS (SELECT 1 FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id WHERE o.call_id=calls.id AND o.agent_id=? AND o.kind IN ('agent','ai') AND o.status='offered' AND r.status='ringing' AND o.expires_at>?)) ORDER BY placed_at DESC`,
+	return c.listWhere(`direction = 'inbound' AND status IN ('pending','answering') AND COALESCE(handling_reason,'')='' AND project_id = ? AND (agent_id = ? OR EXISTS (SELECT 1 FROM call_offers o JOIN call_ring_runs r ON r.id=o.run_id WHERE o.call_id=calls.id AND o.agent_id=? AND o.kind IN ('agent','ai') AND o.status='offered' AND r.status='ringing' AND o.expires_at>?)) ORDER BY placed_at DESC`,
 		project, agentID, agentID, ringTime(time.Now()))
 }
 

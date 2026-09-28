@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -103,6 +104,153 @@ func TestInboundBurstCountsNewCarrierIDsAndRotatingCallers(t *testing.T) {
 	check("id6", "+33612345678", "", false, now) // trusted caller also reaches the IVR
 	check("id7", "+33644444444", "", false, now.Add(61*time.Second))
 	check("id8", "+33644444444", "", false, now.Add(181*time.Second))
+}
+
+func TestExplicitCallerBlockCanBeScopedToOneDestination(t *testing.T) {
+	db := testCallsDB(t)
+	app := &App{}
+	withRoutingTestDB(t, app, db)
+	policy := loadInboundBurstPolicy(sdk.Config{
+		"inbound_burst_per_caller": "0", "inbound_burst_per_number": "0",
+		"inbound_burst_trusted_numbers": "+33611111111",
+		"inbound_spam_blocked_callers":  "+33611111111@+33189000001,+33622222222,invalid,+33633333333@bad",
+	})
+	route := &routeRow{ID: "one", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9, PhoneNumber: "+33189000001"}
+	now := time.Now().UTC()
+	check := func(id, from, to, want string) {
+		t.Helper()
+		reason, _, err := app.registerInboundAttemptLocked(route, id, from, to, now, policy)
+		if err != nil || reason != want {
+			t.Fatalf("%s from %s to %s: reason=%q err=%v, want %q", id, from, to, reason, err, want)
+		}
+	}
+	check("blocked-scoped", "+33611111111", "+33189000001", blockedCaller) // explicit block wins over trust
+	check("allowed-other-ivr", "+33611111111", "+33189000002", "")
+	check("blocked-global", "+33622222222", "+33189000002", blockedCaller)
+	check("invalid-rule-ignored", "+33633333333", "+33189000001", "")
+	check("blocked-scoped", "+33611111111", "+33189000001", blockedCaller)
+}
+
+func TestSignedTelnyxExplicitCallerBlockRejectsWithoutDisablingIVR(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := testCallsDB(t)
+	platform := &answerPlatform{credentials: &sdk.ConnectionCredentials{Slug: "telnyx", Fields: map[string]string{
+		"public_key": base64.StdEncoding.EncodeToString(publicKey),
+	}}}
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{
+		"inbound_spam_blocked_callers": "+33611111111@+33189000001",
+		"inbound_burst_per_caller":     "0", "inbound_burst_per_number": "0",
+	}, platform, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	app := &App{}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{ID: "blocked-caller-route", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		PhoneNumber: "+33189000001", AgentID: 7, Enabled: true, TimeoutSec: 60,
+		AnswerMode: answerModeHumanBrowser, Secret: "route-secret", CreatedAt: now, UpdatedAt: now,
+		PreviousVoiceURL: `{"application_id":"app-123"}`, InboundTransport: inboundTransportProgrammable}
+	if err := db.insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	send := func(eventID, callID, from string, wantStatus int) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"data": map[string]any{
+			"id": eventID, "event_type": "call.initiated", "occurred_at": now,
+			"payload": map[string]any{"call_control_id": callID, "connection_id": "app-123", "direction": "incoming", "to": route.PhoneNumber, "from": from},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+		signature := ed25519.Sign(privateKey, append([]byte(timestamp+"|"), body...))
+		req := httptest.NewRequest(http.MethodPost, "/inbound/telnyx/"+route.ID+"?secret="+route.Secret+"&project_id="+route.ProjectID, strings.NewReader(string(body)))
+		req.Header.Set("Telnyx-Timestamp", timestamp)
+		req.Header.Set("Telnyx-Signature-Ed25519", base64.StdEncoding.EncodeToString(signature))
+		response := httptest.NewRecorder()
+		app.handleTelnyxInbound(response, req)
+		if response.Code != wantStatus {
+			t.Fatalf("Telnyx webhook %s: %d %s", eventID, response.Code, response.Body.String())
+		}
+	}
+	platform.failTool = "reject_call"
+	send("event-blocked", "carrier-blocked", "+33611111111", http.StatusServiceUnavailable)
+	pendingBlock, err := db.findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "carrier-blocked")
+	if err != nil || pendingBlock == nil || pendingBlock.Status != "pending" || pendingBlock.HandlingReason != handlingSpamSuppressed {
+		t.Fatalf("failed carrier reject lost suppression state: %+v %v", pendingBlock, err)
+	}
+	visible, err := db.listPending(route.AgentID, route.ProjectID)
+	if err != nil || len(visible) != 0 {
+		t.Fatalf("suppressed call reached adviser pending list: %+v %v", visible, err)
+	}
+	claimed, err := db.claimPendingCall(pendingBlock.ID, route.AgentID, route.ProjectID)
+	if err != nil || claimed {
+		t.Fatalf("suppressed call was claimable: %t %v", claimed, err)
+	}
+	if _, err := app.answerCall(ctx.WithProject(route.ProjectID), pendingBlock, "answer", "", "", false); err == nil {
+		t.Fatal("suppressed call was answerable before carrier retry")
+	}
+	platform.failTool = ""
+	send("event-blocked", "carrier-blocked", "+33611111111", http.StatusNoContent) // retry completes suppression
+	send("event-blocked", "carrier-blocked", "+33611111111", http.StatusNoContent) // completed retry is inert
+	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "reject_call" || platform.integrationCalls[1].Tool != "reject_call" ||
+		platform.integrationCalls[1].Input["call_control_id"] != "carrier-blocked" {
+		t.Fatalf("blocked caller carrier commands: %+v", platform.integrationCalls)
+	}
+	blocked, err := db.findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "carrier-blocked")
+	if err != nil || blocked == nil || blocked.Status != "canceled" || blocked.HandlingReason != handlingSpamSuppressed || blocked.ErrorMessage != blockedCaller {
+		t.Fatalf("blocked call: %+v %v", blocked, err)
+	}
+	var offers int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM inbound_event_outbox WHERE call_id=?`, blocked.ID).Scan(&offers); err != nil || offers != 0 {
+		t.Fatalf("blocked call offers=%d err=%v", offers, err)
+	}
+	if callbackEligible(*blocked) || callClassification(*blocked) != handlingSpamSuppressed {
+		t.Fatal("blocked caller entered missed pool")
+	}
+	send("event-allowed", "carrier-allowed", "+33622222222", http.StatusNoContent)
+	allowed, err := db.findInboundCallByCarrierSID(route.ID, route.CarrierConnectionID, "carrier-allowed")
+	if err != nil || allowed == nil || allowed.Status != "pending" || allowed.HandlingReason != "" || len(platform.integrationCalls) != 2 {
+		t.Fatalf("IVR number was disabled for other callers: %+v %v, commands=%+v", allowed, err, platform.integrationCalls)
+	}
+}
+
+func TestSuppressedPendingCallCannotBeRecoveredByAutoAnswer(t *testing.T) {
+	db := testCallsDB(t)
+	platform := &answerPlatform{}
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p")
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	app := &App{}
+	now := time.Now().UTC()
+	route := routeRow{ID: "auto-route", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		PhoneNumber: "+33189000001", AgentID: 7, Enabled: true, Secret: "route-secret",
+		AnswerMode: answerModeRealtimeImmediate, AutoDirective: "Answer", TimeoutSec: 60,
+		InboundTransport: inboundTransportProgrammable, CreatedAt: now.Format(time.RFC3339), UpdatedAt: now.Format(time.RFC3339)}
+	if err := db.insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	call := callRow{ID: "pending-blocked", ThreadID: "pending-pending-blocked", Direction: "inbound", AgentID: 7,
+		RouteID: route.ID, CarrierSID: "carrier-pending-blocked", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		ToNumber: route.PhoneNumber, FromNumber: "+33611111111", Status: "pending", ProjectID: "p",
+		PlacedAt: now.Format(time.RFC3339), StateExpiresAt: now.Add(time.Minute).Format(time.RFC3339),
+		HandlingReason: handlingSpamSuppressed, ErrorMessage: blockedCaller}
+	if _, _, err := db.insertInboundCallWithEvent(call, "suppressed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.runAutoAnswerTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.answerImmediateCall(ctx, &route, call.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.spawned) != 0 || len(platform.integrationCalls) != 0 {
+		t.Fatalf("suppressed call reached realtime/carrier: spawned=%d calls=%+v", len(platform.spawned), platform.integrationCalls)
+	}
 }
 
 func TestOldDestinationCooldownCannotBlockIVR(t *testing.T) {

@@ -74,4 +74,8 @@ func TestCallClassificationAndOneCallbackKey(t *testing.T) {
 	if callbackEligible(base) || callClassification(base) != handlingBurstSuppressed {
 		t.Fatal("suppressed call projected as missed")
 	}
+	base.HandlingReason = handlingSpamSuppressed
+	if callbackEligible(base) || callClassification(base) != handlingSpamSuppressed {
+		t.Fatal("blocked caller projected as missed")
+	}
 }

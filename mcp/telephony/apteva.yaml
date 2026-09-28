@@ -159,6 +159,7 @@ provides:
     - { name: call.offered, description: "A ring group offered a call to eligible destinations.", payload: { call_id: string, flow_id: string, flow_version_id: string, ring_group_id: string, occurred_at: string } }
     - { name: telephony.burst.suppressed, description: "A new carrier call ID was suppressed before adviser delivery by the configured inbound burst guard.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - { name: telephony.burst.detected, description: "A destination-wide inbound burst was detected and alerted without blocking access to the number.", payload: { provider_call_id: string, to_number: string, reason: string, occurred_at: string } }
+    - { name: telephony.spam.suppressed, description: "A displayed caller number matched the configured explicit block list; the call was rejected before adviser delivery.", payload: { provider_call_id: string, to_number: string, from_number: string, reason: string, occurred_at: string } }
     - name: call.incoming
       description: An inbound call reached a configured route.
       payload: &call_event_payload
@@ -257,6 +258,7 @@ config_schema:
   - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this alert. Detects rotating caller IDs without blocking the destination." }
   - { name: inbound_burst_cooldown_seconds, type: text, default: "300", label: "Burst suppression cooldown (seconds)" }
   - { name: inbound_burst_trusted_numbers, type: text, label: "Trusted caller numbers", description: "Comma-separated E.164 caller numbers exempt from the per-caller limit; destination-wide protection still applies." }
+  - { name: inbound_spam_blocked_callers, type: text, label: "Blocked displayed caller numbers", description: "Comma-separated E.164 caller numbers, optionally scoped as caller@destination. Rejects matching calls before adviser delivery; never disables the destination number. Displayed caller ID can be spoofed." }
   - { name: human_audio_send_ahead_ms, type: select, default: "40", label: "Human audio send-ahead (ms)", options: ["20", "40", "60", "80"], description: "Carrier pacing cushion for new human/external bridges. Keep 40 unless measurements justify a change. Stale-audio limits remain enabled." }
   - { name: sip_transport, type: select, default: "tls", label: "SIP signaling transport", options: [tls, tcp, udp] }
   - { name: sip_listen, type: text, default: "0.0.0.0:5061", label: "SIP listen address" }

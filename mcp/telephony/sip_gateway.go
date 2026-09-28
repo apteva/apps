@@ -402,7 +402,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		_ = dialog.Close()
 		return
 	}
-	if call.HandlingReason == handlingBurstSuppressed {
+	if isSuppressedHandlingReason(call.HandlingReason) {
 		_ = g.app.db().updateStatus(call.ID, "canceled", call.ErrorMessage)
 		_ = dialog.Respond(sip.StatusBusyHere, "Burst Suppressed", nil)
 		_ = dialog.Close()

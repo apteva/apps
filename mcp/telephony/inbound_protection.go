@@ -17,8 +17,10 @@ import (
 const (
 	handlingClosedHours     = "closed_hours"
 	handlingBurstSuppressed = "burst_suppressed"
+	handlingSpamSuppressed  = "spam_suppressed"
 	burstPerCaller          = "caller_burst"
 	burstPerNumber          = "destination_burst"
+	blockedCaller           = "caller_blocked"
 )
 
 type inboundBurstPolicy struct {
@@ -27,6 +29,8 @@ type inboundBurstPolicy struct {
 	PerNumber       int64
 	CooldownSeconds int64
 	TrustedNumbers  map[string]bool
+	BlockedNumbers  map[string]bool
+	BlockedPairs    map[string]bool
 }
 
 func boundedBurstSetting(config sdk.Config, key string, fallback, maximum int64) int64 {
@@ -48,6 +52,8 @@ func loadInboundBurstPolicy(config sdk.Config) inboundBurstPolicy {
 		PerNumber:       boundedBurstSetting(config, "inbound_burst_per_number", 60, 100000),
 		CooldownSeconds: boundedBurstSetting(config, "inbound_burst_cooldown_seconds", 300, 86400),
 		TrustedNumbers:  map[string]bool{},
+		BlockedNumbers:  map[string]bool{},
+		BlockedPairs:    map[string]bool{},
 	}
 	if policy.WindowSeconds == 0 {
 		policy.WindowSeconds = 60
@@ -57,7 +63,25 @@ func loadInboundBurstPolicy(config sdk.Config) inboundBurstPolicy {
 			policy.TrustedNumbers[normalized] = true
 		}
 	}
+	for _, entry := range strings.Split(config.Get("inbound_spam_blocked_callers"), ",") {
+		caller, destination, scoped := strings.Cut(strings.TrimSpace(entry), "@")
+		caller, destination = strings.TrimSpace(caller), strings.TrimSpace(destination)
+		if !validE164(caller) {
+			continue
+		}
+		if scoped {
+			if validE164(destination) {
+				policy.BlockedPairs[compactPhoneNumber(caller)+"@"+compactPhoneNumber(destination)] = true
+			}
+		} else {
+			policy.BlockedNumbers[compactPhoneNumber(caller)] = true
+		}
+	}
 	return policy
+}
+
+func isSuppressedHandlingReason(reason string) bool {
+	return reason == handlingBurstSuppressed || reason == handlingSpamSuppressed
 }
 
 // registerInboundAttempt serializes the decision in SQLite. The primary key
@@ -74,7 +98,15 @@ func (a *App) registerInboundAttempt(route *routeRow, carrierSID, from, to strin
 			"reason": burstPerNumber, "occurred_at": now.UTC().Format(time.RFC3339Nano),
 		})
 	}
-	if reason != "" && err == nil && globalCtx != nil {
+	if reason == blockedCaller && err == nil && globalCtx != nil {
+		ctx := globalCtx.WithProject(route.ProjectID)
+		ctx.Logger().Warn("inbound caller blocked by displayed number", "provider_call_id", carrierSID, "to", to, "from", from)
+		ctx.Emit("telephony.spam.suppressed", map[string]any{
+			"provider_call_id": carrierSID, "to_number": to, "from_number": from,
+			"reason": reason, "occurred_at": now.UTC().Format(time.RFC3339Nano),
+		})
+	}
+	if reason != "" && reason != blockedCaller && err == nil && globalCtx != nil {
 		ctx := globalCtx.WithProject(route.ProjectID)
 		ctx.Logger().Warn("inbound burst suppressed", "provider_call_id", carrierSID, "to", to, "from", from, "reason", reason)
 		ctx.Emit("telephony.burst.suppressed", map[string]any{
@@ -89,7 +121,7 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 	if route == nil || carrierSID == "" {
 		return "", false, errors.New("inbound burst identity is unavailable")
 	}
-	if policy.PerCaller == 0 && policy.PerNumber == 0 {
+	if policy.PerCaller == 0 && policy.PerNumber == 0 && len(policy.BlockedNumbers) == 0 && len(policy.BlockedPairs) == 0 {
 		return "", false, nil
 	}
 	to = compactPhoneNumber(to)
@@ -120,6 +152,13 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 			return "", false, err
 		}
 		return existing, false, tx.Commit()
+	}
+	if from != "" && (policy.BlockedNumbers[from] || policy.BlockedPairs[from+"@"+to]) {
+		if _, err := tx.Exec(`UPDATE inbound_burst_attempts SET suppression_reason=? WHERE project_id=? AND carrier_slug=? AND carrier_connection_id=? AND carrier_sid=?`,
+			blockedCaller, route.ProjectID, route.CarrierSlug, route.CarrierConnectionID, carrierSID); err != nil {
+			return "", false, err
+		}
+		return blockedCaller, false, tx.Commit()
 	}
 	trusted := policy.TrustedNumbers[from]
 	reason := ""
@@ -289,10 +328,16 @@ func (a *App) finishTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) er
 }
 
 func (a *App) suppressInboundCall(ctx *sdk.AppCtx, row *callRow) error {
-	if row == nil || row.HandlingReason != handlingBurstSuppressed {
+	if row == nil || !isSuppressedHandlingReason(row.HandlingReason) {
 		return nil
 	}
-	return a.suppressTerminalRoutingCall(ctx, row)
+	if ctx == nil {
+		return errors.New("app context unavailable for inbound suppression")
+	}
+	if err := a.rejectInboundCarrierCall(ctx, row); err != nil {
+		return err
+	}
+	return a.db().updateStatus(row.ID, "canceled", row.ErrorMessage)
 }
 
 func (a *App) suppressTerminalRoutingCall(ctx *sdk.AppCtx, row *callRow) error {
