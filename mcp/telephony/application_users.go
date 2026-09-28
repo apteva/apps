@@ -306,10 +306,49 @@ func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested s
 			return offer.DestinationID
 		}
 	}
-	if len(offers) == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
+	// A ring-group offer can expire while the call remains pending. Only a
+	// direct destination may use the fallback when no offer is active.
+	var ringRuns int
+	if err := a.db().db.QueryRow(`SELECT COUNT(*) FROM call_ring_runs WHERE call_id=? AND project_id=?`, row.ID, row.ProjectID).Scan(&ringRuns); err != nil {
+		return ""
+	}
+	if len(offers) == 0 && ringRuns == 0 && row.PeerKind == peerKindHuman && p.Destinations[row.RoutingDestinationID] && a.destinationAllowsIdentity(row.ProjectID, row.RoutingDestinationID, p.Identity) && (requested == "" || requested == row.RoutingDestinationID) {
 		return row.RoutingDestinationID
 	}
 	return ""
+}
+
+// An expired offer is disclosed only to a caller who still has access to a
+// destination that was actually offered. The offer record is destination
+// scoped, just like the live claim; it does not identify a browser session.
+func (a *App) phoneHadOfferedDestination(p *phonePrincipal, row *callRow, requested string) bool {
+	if p == nil || row.ProjectID != p.Project || row.Direction != "inbound" {
+		return false
+	}
+	rows, err := a.db().db.Query(`SELECT destination_id FROM call_offers WHERE call_id=? AND project_id=? AND kind='browser' AND offered_at<>''`, row.ID, row.ProjectID)
+	if err != nil {
+		return false
+	}
+	candidates := make([]string, 0, 1)
+	for rows.Next() {
+		var destination string
+		if rows.Scan(&destination) != nil {
+			_ = rows.Close()
+			return false
+		}
+		if p.Destinations[destination] && (requested == "" || requested == destination) {
+			candidates = append(candidates, destination)
+		}
+	}
+	if rows.Err() != nil || rows.Close() != nil {
+		return false
+	}
+	for _, destination := range candidates {
+		if a.destinationAllowsIdentity(row.ProjectID, destination, p.Identity) {
+			return true
+		}
+	}
+	return false
 }
 
 // A carrier cancellation can settle active offers before a browser's Answer

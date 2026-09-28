@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.6
+version: 0.6.7
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -3059,10 +3059,10 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "call not found", 404)
 			return
 		}
-		writeJSON(w, map[string]any{"calls": callsPanelPublic(detail, phoneUserFrom(r) == nil)})
+		writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, detail, phoneUserFrom(r) == nil)})
 		return
 	}
-	writeJSON(w, map[string]any{"calls": callsPanelPublic(a.filterPhoneCalls(r, rows))})
+	writeJSON(w, map[string]any{"calls": a.callsPanelForRequest(r, a.filterPhoneCalls(r, rows), false)})
 }
 
 func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
@@ -3419,6 +3419,16 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"routing_waiting": r.RoutingFlowVersionID != "" && r.RoutingDestinationID == "" && !ringHasBrowser(r.RingOffers),
 			"ring_offers":     r.RingOffers,
 		})
+	}
+	return out
+}
+
+func (a *App) callsPanelForRequest(r *http.Request, rows []callRow, diagnostics bool) []map[string]any {
+	out := callsPanelPublic(rows, diagnostics)
+	if principal := phoneUserFrom(r); principal != nil {
+		for i := range rows {
+			out[i]["answerable"] = a.phoneOfferDestination(principal, &rows[i], "") != ""
+		}
 	}
 	return out
 }

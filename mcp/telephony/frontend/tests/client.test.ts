@@ -16,7 +16,8 @@ function fixture() {
     const parsed = new URL(String(url));
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ url: parsed, headers: new Headers(init?.headers), body });
-    return Response.json(await response(parsed, body));
+    const value = await response(parsed, body);
+    return value instanceof Response ? value : Response.json(value);
   }) as typeof fetch });
   const client = sdk.use(telephonyExtension, { projectId: "p1", installId: 42 });
   let callbacks: SoftphoneCallbacks = {};
@@ -200,17 +201,24 @@ describe("Telephony extension", () => {
     expect(f.stopped).toBe(1);
     expect(f.requests).toHaveLength(1); // dispose does not hang up an established call
   });
-  test("incoming list includes browser ring offers but excludes AI and completed calls", () => {
+  test("incoming list includes answerable browser offers but excludes stale and supervisor-visible calls", () => {
     const f = fixture();
     const base = { direction: "inbound", status: "pending", from_number: "", to_number: "", peer_kind: "human" };
     const result = f.client.incomingCalls([
       { ...base, id: "human" },
       { ...base, id: "group", peer_kind: "agent", ring_offers: [{ kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "moved", answerable: false, ring_offers: [{ kind: "browser", destination_id: "other" }] },
+      { ...base, id: "supervisor", answerable: false },
       { ...base, id: "ai", peer_kind: "agent" },
       { ...base, id: "waiting", routing_waiting: true },
       { ...base, id: "finished", status: "completed" },
     ]);
     expect(result.map(c => c.id)).toEqual(["human", "group"]);
+  });
+  test("Answer exposes offer_expired as a stable error code", async () => {
+    const f = fixture();
+    f.setResponse(async () => Response.json({ code: "offer_expired", error: "call offer expired" }, { status: 409 }));
+    await expect(f.client.answer("call-1")).rejects.toMatchObject({ code: "offer_expired", status: 409 });
   });
   test("watch cancellation suppresses late responses and overlapping requests", async () => {
     const f = fixture(), gate = deferred();
