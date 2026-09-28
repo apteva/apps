@@ -175,8 +175,8 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 	destinationAlert := false
 	if policy.PerNumber > 0 {
 		var count int64
-		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND received_at>=?`,
-			route.ProjectID, to, now.Unix()-policy.WindowSeconds+1).Scan(&count)
+		err = tx.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND received_at>=? LIMIT ?)`,
+			route.ProjectID, to, now.Unix()-policy.WindowSeconds+1, policy.PerNumber+1).Scan(&count)
 		if err != nil {
 			return "", false, err
 		}
@@ -198,8 +198,8 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 	}
 	if reason == "" && policy.PerCaller > 0 && from != "" && !trusted {
 		var count int64
-		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND from_number=? AND received_at>=?`,
-			route.ProjectID, to, from, now.Unix()-policy.WindowSeconds+1).Scan(&count)
+		err = tx.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND from_number=? AND received_at>=? LIMIT ?)`,
+			route.ProjectID, to, from, now.Unix()-policy.WindowSeconds+1, policy.PerCaller+1).Scan(&count)
 		if err != nil {
 			return "", false, err
 		}
@@ -406,17 +406,14 @@ func (a *App) suppressTerminalRoutingCall(ctx *sdk.AppCtx, row *callRow) error {
 	if ctx == nil {
 		return errors.New("app context unavailable for terminal routing")
 	}
-	carrier, err := a.carrierForRow(ctx, nil, row)
-	if err != nil {
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
 		return err
 	}
-	if err := carrier.Hangup(ctx, row); err != nil {
-		return err
-	}
+
 	return a.db().updateStatus(row.ID, "canceled", row.ErrorMessage)
 }
 
 func writeSuppressedTwilioCall(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/xml")
-	_, _ = w.Write([]byte(`<Response><Hangup/></Response>`))
+	_, _ = w.Write([]byte(`<Response><Reject reason="rejected"/></Response>`))
 }

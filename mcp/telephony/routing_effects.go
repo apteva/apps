@@ -70,6 +70,7 @@ func (a *App) ensureRoutingEffect(row *callRow, plan *inboundRoutingPlan) error 
 
 type routingEffect struct {
 	ID, CallID, Project, Node, Status, Stage string
+	NextAttempt, LastError                   string
 	Attempts                                 int
 	Plan                                     inboundRoutingPlan
 }
@@ -118,7 +119,7 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 	defer unlock()
 	var e routingEffect
 	var raw string
-	err := a.db().db.QueryRow(`SELECT id,call_id,project_id,node_id,status,stage,attempts,plan_json FROM routing_effects WHERE id=? AND project_id=?`, callID+":"+nodeID, ctx.CurrentProject()).Scan(&e.ID, &e.CallID, &e.Project, &e.Node, &e.Status, &e.Stage, &e.Attempts, &raw)
+	err := a.db().db.QueryRow(`SELECT id,call_id,project_id,node_id,status,stage,attempts,plan_json,next_attempt_at,last_error FROM routing_effects WHERE id=? AND project_id=?`, callID+":"+nodeID, ctx.CurrentProject()).Scan(&e.ID, &e.CallID, &e.Project, &e.Node, &e.Status, &e.Stage, &e.Attempts, &raw, &e.NextAttempt, &e.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -191,6 +192,13 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 			stage = "answer"
 		}
 	}
+	// An accepted answer waits for its callback. Duplicate delivery must not
+	// exhaust the command budget before the carrier has time to confirm it.
+	if stage == "answer" && stage == e.Stage && e.Attempts > 0 && e.LastError == "" {
+		if due, parseErr := time.Parse(time.RFC3339Nano, e.NextAttempt); parseErr == nil && time.Now().Before(due) {
+			return nil
+		}
+	}
 	// Command retries have independent budgets per phase. Waiting for speech
 	// completion does not consume that budget.
 	if stage != e.Stage {
@@ -246,7 +254,8 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 		return err
 	}
 	if stage == "answer" || stage == "speak" {
-		return nil
+		_, err = a.db().db.Exec(`UPDATE routing_effects SET last_error='' WHERE id=?`, e.ID)
+		return err
 	}
 	return a.completeRoutingEffect(e.ID)
 }
@@ -264,21 +273,10 @@ func (a *App) endRoutingCall(ctx *sdk.AppCtx, row *callRow, plan *inboundRouting
 	if _, err := a.db().db.Exec(`UPDATE calls SET routing_resolution=? WHERE id=? AND status IN ('pending','answered')`, reason, row.ID); err != nil {
 		return err
 	}
-	if a.callUsesDirectSIP(row) {
-		if gateway := a.directSIPGateway(); gateway != nil {
-			if err := gateway.Hangup(row); err != nil {
-				return err
-			}
-		}
-	} else if row.CarrierSID != "" {
-		carrier, err := a.carrierForRow(ctx, nil, row)
-		if err != nil {
-			return err
-		}
-		if err = carrier.Hangup(ctx, row); err != nil {
-			return err
-		}
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
+		return err
 	}
+
 	if err := a.killCallThread(ctx, row); err != nil {
 		return err
 	}

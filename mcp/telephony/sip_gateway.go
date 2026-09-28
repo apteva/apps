@@ -17,6 +17,9 @@ import (
 	"github.com/emiago/sipgo/sip"
 )
 
+// RFC 3261: the call is declined; alternate destinations should not be tried.
+const sipStatusDecline = 603
+
 var e164InSIPValue = regexp.MustCompile(`\+[1-9][0-9]{7,14}`)
 
 type sipGateway struct {
@@ -404,7 +407,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	}
 	if isSuppressedHandlingReason(call.HandlingReason) {
 		_ = g.app.db().updateStatus(call.ID, "canceled", call.ErrorMessage)
-		_ = dialog.Respond(sip.StatusBusyHere, "Burst Suppressed", nil)
+		_ = dialog.Respond(sipStatusDecline, "Decline", nil)
 		_ = dialog.Close()
 		return
 	}
@@ -503,7 +506,7 @@ func (g *sipGateway) Reject(row *callRow) error {
 	if answered {
 		return errors.New("direct SIP call has already been answered")
 	}
-	if err := session.dialog.Respond(sip.StatusBusyHere, "Busy Here", nil); err != nil {
+	if err := session.dialog.Respond(sipStatusDecline, "Decline", nil); err != nil {
 		return err
 	}
 	session.finish("local_error", errors.New("call rejected"))

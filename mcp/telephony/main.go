@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.7.0
+version: 0.7.1
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -2154,6 +2154,12 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 }
 
 func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
+	if row == nil {
+		return errors.New("call unavailable")
+	}
+	if carrierAnswerObserved(row) {
+		return a.terminateCarrierCall(ctx, row)
+	}
 	if a.callUsesDirectSIP(row) {
 		gateway := a.directSIPGateway()
 		if gateway == nil {

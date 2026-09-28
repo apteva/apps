@@ -46,7 +46,7 @@ func reliabilityEvent(t *testing.T, a *App, route *routeRow, row *callRow, key e
 			payload[key] = value
 		}
 	}
-	raw, e := json.Marshal(map[string]any{"data": map[string]any{"id": event, "event_type": event, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": payload}})
+	raw, e := json.Marshal(map[string]any{"data": map[string]any{"id": event + ":" + row.CarrierSID, "event_type": event, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": payload}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -161,7 +161,7 @@ func TestReliabilityNormalRoutingEndMustNotBecomeDeadlineFailure(t *testing.T) {
 
 func TestReliabilityFailedRingFallbackMustRemainRetryable(t *testing.T) {
 	a, db, plan := ringFixture(t, "sequential")
-	platform := &answerPlatform{failTool: "hangup_call"}
+	platform := &answerPlatform{failTool: "reject_call"}
 	previous := globalCtx
 	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p1")
 	globalCtx = ctx
