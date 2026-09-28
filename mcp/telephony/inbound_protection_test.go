@@ -87,22 +87,39 @@ func TestInboundBurstCountsNewCarrierIDsAndRotatingCallers(t *testing.T) {
 	route := &routeRow{ID: "r", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9, PhoneNumber: "+33189000001"}
 	policy := inboundBurstPolicy{WindowSeconds: 60, PerCaller: 2, PerNumber: 4, CooldownSeconds: 120, TrustedNumbers: map[string]bool{"33612345678": true}}
 	now := time.Unix(1_800_000_000, 0)
-	check := func(id, caller, want string, at time.Time) {
+	check := func(id, caller, want string, wantAlert bool, at time.Time) {
 		t.Helper()
-		got, err := app.registerInboundAttempt(route, id, caller, route.PhoneNumber, at, policy)
-		if err != nil || got != want {
-			t.Fatalf("attempt %s caller %s: reason=%q err=%v, want %q", id, caller, got, err, want)
+		got, alert, err := app.registerInboundAttemptLocked(route, id, caller, route.PhoneNumber, at, policy)
+		if err != nil || got != want || alert != wantAlert {
+			t.Fatalf("attempt %s caller %s: reason=%q alert=%v err=%v, want %q/%v", id, caller, got, alert, err, want, wantAlert)
 		}
 	}
-	check("id1", "+33611111111", "", now)
-	check("id1", "+33611111111", "", now) // webhook retry does not count
-	check("id2", "+33611111111", "", now)
-	check("id3", "+33611111111", burstPerCaller, now)
-	check("id4", "+33622222222", "", now)
-	check("id5", "+33633333333", burstPerNumber, now)
-	check("id6", "+33612345678", burstPerNumber, now)                     // trusted caller still counts toward destination
-	check("id7", "+33644444444", burstPerNumber, now.Add(61*time.Second)) // cooldown remains
-	check("id8", "+33644444444", "", now.Add(181*time.Second))
+	check("id1", "+33611111111", "", false, now)
+	check("id1", "+33611111111", "", false, now) // webhook retry does not count
+	check("id2", "+33611111111", "", false, now)
+	check("id3", "+33611111111", burstPerCaller, false, now)
+	check("id4", "+33622222222", "", false, now)
+	check("id5", "+33633333333", "", true, now)  // alerts, but caller reaches the IVR
+	check("id6", "+33612345678", "", false, now) // trusted caller also reaches the IVR
+	check("id7", "+33644444444", "", false, now.Add(61*time.Second))
+	check("id8", "+33644444444", "", false, now.Add(181*time.Second))
+}
+
+func TestOldDestinationCooldownCannotBlockIVR(t *testing.T) {
+	db := testCallsDB(t)
+	app := &App{}
+	withRoutingTestDB(t, app, db)
+	route := &routeRow{ID: "r", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9, PhoneNumber: "+33189000001"}
+	now := time.Unix(1_800_000_000, 0)
+	if _, err := db.db.Exec(`INSERT INTO inbound_burst_cooldowns(project_id,to_number,from_number,reason,expires_at) VALUES(?,?,'*',?,?)`,
+		route.ProjectID, compactPhoneNumber(route.PhoneNumber), burstPerNumber, now.Add(time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	policy := inboundBurstPolicy{WindowSeconds: 60, PerCaller: 12, PerNumber: 60, CooldownSeconds: 300, TrustedNumbers: map[string]bool{}}
+	reason, err := app.registerInboundAttempt(route, "new-call", "+33612345678", route.PhoneNumber, now, policy)
+	if err != nil || reason != "" {
+		t.Fatalf("old destination cooldown blocked new caller: reason=%q err=%v", reason, err)
+	}
 }
 
 func TestConcurrentInboundBurstAdmitsOnlyThreshold(t *testing.T) {
@@ -141,6 +158,38 @@ func TestConcurrentInboundBurstAdmitsOnlyThreshold(t *testing.T) {
 	}
 	if admitted != 4 || suppressed != 16 {
 		t.Fatalf("concurrent decisions admitted=%d suppressed=%d", admitted, suppressed)
+	}
+}
+
+func TestDestinationBurstKeepsPublicNumberReachable(t *testing.T) {
+	db := testCallsDB(t)
+	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, &answerPlatform{}, nil)
+	previous := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = previous })
+	app := &App{}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{ID: "public-ivr", ProjectID: "p", CarrierSlug: "telnyx", CarrierConnectionID: 9,
+		PhoneNumber: "+33189000001", AgentID: 7, Enabled: true, TimeoutSec: 60,
+		AnswerMode: answerModeHumanBrowser, Secret: "secret", CreatedAt: now, UpdatedAt: now,
+		RecordingMode: recordingModeInherit, InboundTransport: inboundTransportProgrammable}
+	if err := db.insertRoute(route); err != nil {
+		t.Fatal(err)
+	}
+	var last *callRow
+	for i := 0; i < 65; i++ {
+		var err error
+		last, _, err = app.recordInboundCall(&route, fmt.Sprintf("rotating-%d", i), fmt.Sprintf("+336%08d", i), route.PhoneNumber)
+		if err != nil {
+			t.Fatalf("rotating call %d: %v", i, err)
+		}
+	}
+	if last.HandlingReason != "" {
+		t.Fatalf("public number was suppressed for rotating callers: %+v", last)
+	}
+	var offers int
+	if err := db.db.QueryRow(`SELECT COUNT(*) FROM inbound_event_outbox WHERE call_id=?`, last.ID).Scan(&offers); err != nil || offers != 1 {
+		t.Fatalf("legitimate caller offer after destination alert=%d err=%v", offers, err)
 	}
 }
 

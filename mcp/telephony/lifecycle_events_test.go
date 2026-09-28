@@ -140,7 +140,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		"telephony.routing.call.busy",
 		"telephony.routing.call.no-answer",
 		"telephony.routing.call.canceled",
-		"call.routing.started", "call.routing.node_entered", "call.offered", "telephony.burst.suppressed",
+		"call.routing.started", "call.routing.node_entered", "call.offered", "telephony.burst.suppressed", "telephony.burst.detected",
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
 		"call.canceled", "call.machine_detected", "recording.ready", "recording.stored", "recording.deleted",
