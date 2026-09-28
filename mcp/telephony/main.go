@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.7.1
+version: 0.7.2
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -278,6 +278,8 @@ db:
   path: /data/telephony.db
   migrations: migrations/
 config_schema:
+  - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
+  - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
   - { name: inbound_burst_per_caller, type: text, default: "12", label: "New calls per caller and number in window", description: "0 disables this limit. Counts distinct carrier call IDs." }
   - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this alert. Detects rotating caller IDs without blocking the destination." }
@@ -306,6 +308,7 @@ var globalCtx *sdk.AppCtx
 type App struct {
 	decisionWG       sync.WaitGroup
 	decisionStopping bool
+	aiRecovering     map[string]bool
 	dispatchMu       sync.Mutex
 	burstMu          sync.Mutex
 	dispatcher       *routingDispatcher
@@ -394,6 +397,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
 		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
 		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
 		{Name: "ring-legs", Schedule: "@every 1s", Run: a.runRingLegTick},
