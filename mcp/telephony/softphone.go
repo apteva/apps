@@ -982,13 +982,13 @@ func (a *App) softphoneAnswer(w http.ResponseWriter, r *http.Request, project, c
 	}
 	if p != nil {
 		if e := a.setPhoneOwner(row, p, row.RoutingDestinationID); e != nil {
-			_ = a.db().releaseAnswerClaim(callID)
+			_ = a.db().resetAnswerClaim(callID, peerToken)
 			http.Error(w, "ownership unavailable", 500)
 			return
 		}
 		session, e := a.issuePhoneSession(row, p)
 		if e != nil {
-			_ = a.db().releaseAnswerClaim(callID)
+			_ = a.db().resetAnswerClaim(callID, peerToken)
 			http.Error(w, e.Error(), 403)
 			return
 		}

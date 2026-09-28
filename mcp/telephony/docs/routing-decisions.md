@@ -232,3 +232,18 @@ refresh; recreate the watcher after logging in again to restore push.
 
 This reduces scheduling and detection waits; it does not change microphone,
 playback or carrier audio latency. Browser presence is still a separate feature.
+
+## Terminal action reliability (0.7.0)
+
+Routing progress and terminal carrier actions commit together. The complete
+selected plan is retained so a later callback still includes announcements that
+preceded its final node. Telnyx executes answer, answer confirmation, speech,
+matching successful speech completion, then hangup. Failed commands are retried
+with stable command IDs, with five attempts per phase; waiting for speech does
+not consume retries. Existing call deadlines still bound missing callbacks.
+
+Caller termination cancels pending work. Carrier actions share the browser
+answer claim lock and recheck current ownership before executing. Exhausting
+carrier retries records `routing_error`; ordinary routing exhaustion retains its
+routing classification. A process restart recovers pending actions and older
+active terminal announcements from persisted state.

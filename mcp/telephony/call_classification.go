@@ -35,11 +35,14 @@ func callClassification(call callRow) string {
 	if !isTerminalStatus(call.Status) {
 		return "routing"
 	}
-	if call.TerminationInitiator == "caller" || call.Status == "canceled" {
+	if call.TerminationInitiator == "caller" {
 		return "caller_abandoned"
 	}
 	if call.RoutingResolution != "" {
 		return call.RoutingResolution
+	}
+	if call.Status == "canceled" {
+		return "caller_abandoned"
 	}
 	return "unhandled"
 }

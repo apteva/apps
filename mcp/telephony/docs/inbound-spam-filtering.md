@@ -31,3 +31,14 @@ Displayed caller ID is not proof of origin and may be spoofed. Use this rule
 only for a specific displayed number whose legitimate traffic can tolerate
 being rejected. Carrier signaling data is needed to identify the upstream
 source of a rotating or spoofed-number campaign.
+
+## Carrier rejection and evidence (0.7.0)
+
+Telnyx rejection sends `cause=CALL_REJECTED` (documented SIP 603), with a stable
+command ID. Failed rejection commands remain in a durable bounded retry queue;
+webhook failures also receive a retryable response. This does not establish how
+an upstream dialer reacts or prevent new carrier sessions from arriving.
+
+Use `telephony_call_get` to inspect separate carrier leg/session IDs, allowlisted
+routing SIP headers and recent command outcomes. These records help correlate
+repeated sessions with carrier traces; displayed caller ID alone is insufficient.

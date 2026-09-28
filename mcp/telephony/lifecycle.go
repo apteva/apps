@@ -43,15 +43,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message,carrier_leg_id,carrier_session_id,carrier_signaling_json,provider_event_id,provider_occurred_at)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
 		call.ForwardedFrom, call.IngressPath, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
 		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
 		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
 		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays,
-		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage)
+		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage, call.CarrierLegID, call.CarrierSessionID, firstNonEmpty(call.CarrierSignalingJSON, "{}"), call.ProviderEventID, call.ProviderOccurredAt)
 	if err != nil {
 		return nil, false, err
 	}
@@ -60,10 +60,10 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	if _, err := tx.Exec(`UPDATE calls SET updated_at = ? WHERE id = ?`, now, call.ID); err != nil {
 		return nil, false, err
 	}
-	if _, err := enqueueLifecycleEventTx(tx, &call, "call.incoming", call.PlacedAt, lifecycleFacts{
-		OccurredAt:      call.PlacedAt,
+	if _, err := enqueueLifecycleEventTx(tx, &call, "call.incoming", firstNonEmpty(call.ProviderOccurredAt, call.PlacedAt), lifecycleFacts{
+		OccurredAt:      firstNonEmpty(call.ProviderOccurredAt, call.PlacedAt),
 		Source:          "provider",
-		ProviderEventID: firstNonEmpty(call.CarrierSID, call.ID) + ":incoming",
+		ProviderEventID: firstNonEmpty(call.ProviderEventID, firstNonEmpty(call.CarrierSID, call.ID)+":incoming"),
 	}); err != nil {
 		return nil, false, err
 	}
@@ -71,6 +71,11 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {
+			return nil, false, err
+		}
+	}
+	if isSuppressedHandlingReason(call.HandlingReason) {
+		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, &inboundRoutingPlan{NodeID: "suppression", TerminalType: "reject"}); err != nil {
 			return nil, false, err
 		}
 	}
@@ -208,6 +213,9 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 }
 
 func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
+	if err := a.runRoutingEffects(context.Background(), ctx); err != nil {
+		return err
+	}
 	project := ctx.CurrentProject()
 	if project == "" {
 		return nil
@@ -298,6 +306,10 @@ func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row.Status == "pending" || row.Status == "answering" || row.Status == "initiated" || row.Status == "ringing" {
 		status = "no-answer"
 		reason = "call was not connected before its deadline"
+	}
+	if row.RoutingResolution == "routing_error" && row.ErrorMessage == "carrier action retry limit exceeded" {
+		status = "failed"
+		reason = row.ErrorMessage
 	}
 	return a.db().updateStatus(row.ID, status, reason)
 }

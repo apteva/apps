@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.6.10
+version: 0.7.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -1142,6 +1142,12 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 			return errors.New("persist carrier call id: " + err.Error())
 		}
 		row.CarrierSID = placed.CarrierSID
+		if err := a.recordCarrierSignaling(row, placed.CarrierLegID, placed.CarrierSessionID, nil); err != nil {
+			_ = carrier.Hangup(ctx, row)
+			unwind()
+			_ = a.db().updateStatus(row.ID, "failed", "persist carrier signaling")
+			return fmt.Errorf("persist carrier signaling: %w", err)
+		}
 		row.CarrierRequestID = placed.CarrierRequestID
 	}
 	if err := a.db().updateStatus(row.ID, "initiated", ""); err != nil {
@@ -2165,6 +2171,7 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "reject_call", map[string]any{
 			"call_control_id": row.CarrierSID,
 			"command_id":      telnyxCommandID(row.ID, "reject"),
+			"cause":           "CALL_REJECTED",
 		})
 		return err
 	case "plivo":
@@ -2241,6 +2248,26 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil || len(body) > 1<<20 {
 			http.Error(w, "invalid Telnyx callback", http.StatusBadRequest)
 			return
+		}
+		var signal struct {
+			Data struct {
+				Payload struct {
+					ControlID string          `json:"call_control_id"`
+					LegID     string          `json:"call_leg_id"`
+					SessionID string          `json:"call_session_id"`
+					Headers   json.RawMessage `json:"sip_headers"`
+				} `json:"payload"`
+			} `json:"data"`
+		}
+		if json.Unmarshal(body, &signal) == nil {
+			if signal.Data.Payload.ControlID != "" && row.CarrierSID != "" && signal.Data.Payload.ControlID != row.CarrierSID {
+				http.Error(w, "carrier call ID mismatch", 403)
+				return
+			}
+			if err := a.recordCarrierSignaling(row, signal.Data.Payload.LegID, signal.Data.Payload.SessionID, signal.Data.Payload.Headers); err != nil {
+				http.Error(w, "persist carrier signaling", 500)
+				return
+			}
 		}
 		handled, recordingErr := a.handleTelnyxRecordingEvent(row, body)
 		if recordingErr != nil {
@@ -2577,8 +2604,13 @@ func (a *App) handleTwilioInboundStatus(w http.ResponseWriter, r *http.Request, 
 }
 
 type inboundCallMetadata struct {
-	ForwardedFrom string
-	IngressPath   string
+	ForwardedFrom        string
+	IngressPath          string
+	CarrierLegID         string
+	CarrierSessionID     string
+	CarrierSignalingJSON string
+	ProviderEventID      string
+	ProviderOccurredAt   string
 }
 
 func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, metadata ...inboundCallMetadata) (*callRow, bool, error) {
@@ -2646,18 +2678,20 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		meta.IngressPath = firstNonEmpty(meta.IngressPath, "direct_or_unreported")
 	}
 	call := callRow{
-		ID:                     callID,
-		ThreadID:               "pending-" + callID,
-		Direction:              "inbound",
-		AgentID:                route.AgentID,
-		RouteID:                route.ID,
-		CarrierSID:             carrierSID,
-		CarrierSlug:            route.CarrierSlug,
-		CarrierConnectionID:    route.CarrierConnectionID,
-		CallbackSecret:         newSecret(),
-		ToNumber:               to,
-		FromNumber:             from,
-		ForwardedFrom:          meta.ForwardedFrom,
+		ID:                  callID,
+		ThreadID:            "pending-" + callID,
+		Direction:           "inbound",
+		AgentID:             route.AgentID,
+		RouteID:             route.ID,
+		CarrierSID:          carrierSID,
+		CarrierSlug:         route.CarrierSlug,
+		CarrierConnectionID: route.CarrierConnectionID,
+		CallbackSecret:      newSecret(),
+		ToNumber:            to,
+		FromNumber:          from,
+		ForwardedFrom:       meta.ForwardedFrom,
+		CarrierLegID:        meta.CarrierLegID, CarrierSessionID: meta.CarrierSessionID, CarrierSignalingJSON: meta.CarrierSignalingJSON,
+		ProviderEventID: meta.ProviderEventID, ProviderOccurredAt: meta.ProviderOccurredAt,
 		IngressPath:            meta.IngressPath,
 		Directive:              "inbound pending",
 		Voice:                  "",
@@ -2755,7 +2789,7 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if route == nil || route.CarrierSlug != "telnyx" || !route.Enabled || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
+	if route == nil || route.CarrierSlug != "telnyx" || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
 		http.Error(w, "route not found", http.StatusNotFound)
 		return
 	}
@@ -2778,17 +2812,21 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 			EventType  string `json:"event_type"`
 			OccurredAt string `json:"occurred_at"`
 			Payload    struct {
-				CallControlID string `json:"call_control_id"`
-				CallLegID     string `json:"call_leg_id"`
-				ConnectionID  string `json:"connection_id"`
-				Direction     string `json:"direction"`
-				From          string `json:"from"`
-				To            string `json:"to"`
-				HangupCause   string `json:"hangup_cause"`
-				HangupSource  string `json:"hangup_source"`
-				SIPCode       string `json:"sip_hangup_cause"`
-				Digits        string `json:"digits"`
-				GatherID      string `json:"gather_id"`
+				CallControlID string          `json:"call_control_id"`
+				CallLegID     string          `json:"call_leg_id"`
+				CallSessionID string          `json:"call_session_id"`
+				SIPHeaders    json.RawMessage `json:"sip_headers"`
+				ClientState   string          `json:"client_state"`
+				MediaResult   string          `json:"status"`
+				ConnectionID  string          `json:"connection_id"`
+				Direction     string          `json:"direction"`
+				From          string          `json:"from"`
+				To            string          `json:"to"`
+				HangupCause   string          `json:"hangup_cause"`
+				HangupSource  string          `json:"hangup_source"`
+				SIPCode       string          `json:"sip_hangup_cause"`
+				Digits        string          `json:"digits"`
+				GatherID      string          `json:"gather_id"`
 			} `json:"payload"`
 		} `json:"data"`
 	}
@@ -2803,7 +2841,11 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "webhook connection does not match route", http.StatusForbidden)
 		return
 	}
-	carrierSID := firstNonEmpty(event.Data.Payload.CallControlID, event.Data.Payload.CallLegID)
+	if event.Data.EventType == "call.initiated" && !route.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+	carrierSID := event.Data.Payload.CallControlID
 	if carrierSID == "" {
 		http.Error(w, "missing call control id", http.StatusBadRequest)
 		return
@@ -2813,6 +2855,12 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, "load call", http.StatusInternalServerError)
 			return
+		}
+		if row != nil {
+			if err := a.recordCarrierSignaling(row, event.Data.Payload.CallLegID, event.Data.Payload.CallSessionID, event.Data.Payload.SIPHeaders); err != nil {
+				http.Error(w, "persist carrier signaling", 500)
+				return
+			}
 		}
 		status := telnyxStatusFromEvent(event.Data.EventType, event.Data.Payload.HangupCause)
 		if row != nil && status != "" {
@@ -2834,31 +2882,49 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				_ = a.killCallThread(globalCtx.WithProject(row.ProjectID), row)
 			}
 		}
-		if row != nil && row.RoutingFlowVersionID != "" && globalCtx != nil {
+		if row != nil {
+			row, err = a.db().findCall(row.ID)
+			if err != nil {
+				http.Error(w, "reload call", 500)
+				return
+			}
+		}
+		if row != nil && !isTerminalStatus(row.Status) && row.RoutingFlowVersionID != "" && globalCtx != nil {
 			ctx := globalCtx.WithProject(row.ProjectID)
 			switch event.Data.EventType {
 			case "call.answered":
-				if row.AnnouncementState != "" {
-					if err := a.startTelnyxTerminalAnnouncement(ctx, row); err != nil {
-						ctx.Logger().Warn("speak Telnyx terminal announcement", "call", row.ID, "err", err)
-						http.Error(w, "terminal announcement pending; retry", http.StatusServiceUnavailable)
+				_, plan, planErr := a.routingPlanForCall(row, nil)
+				if planErr == nil && plan != nil && (plan.TerminalType == "dtmf_menu" || plan.TerminalType == "hangup" || plan.TerminalType == "reject") {
+					if err := a.ensureRoutingEffect(row, plan); err != nil {
+						http.Error(w, "persist routing effect", 500)
 						return
 					}
+					if err := a.driveRoutingEffect(ctx, row.ID, plan.NodeID); err != nil {
+						http.Error(w, "carrier action pending; retry", 503)
+						return
+					}
+				} else if row.AnnouncementState != "" {
+					// Recovery for calls admitted before the durable-effect migration.
+					legacy, legacyErr := a.legacyAnnouncementPlan(row)
+					if legacyErr != nil {
+						http.Error(w, "legacy routing plan unavailable", 500)
+						return
+					}
+					if err := a.ensureRoutingEffect(row, legacy); err != nil {
+						http.Error(w, "persist legacy effect", 500)
+						return
+					}
+					if err := a.driveRoutingEffect(ctx, row.ID, legacy.NodeID); err != nil {
+						http.Error(w, "terminal announcement pending; retry", 503)
+						return
+					}
+				}
+			case "call.speak.ended":
+				if event.Data.Payload.ClientState != terminalAnnouncementClientState(row.ID) || event.Data.Payload.MediaResult != "completed" {
 					break
 				}
-				_, plan, planErr := a.routingPlanForCall(row, nil)
-				if planErr == nil && plan != nil && plan.TerminalType == "dtmf_menu" {
-					if err := a.startTelnyxGather(ctx, row, plan); err != nil {
-						ctx.Logger().Warn("start Telnyx IVR gather", "call", row.ID, "node", plan.NodeID, "err", err)
-						_ = a.db().updateStatus(row.ID, "failed", "start IVR gather: "+err.Error())
-					}
-				} else if planErr != nil {
-					ctx.Logger().Warn("resolve Telnyx IVR after answer", "call", row.ID, "err", planErr)
-				}
-			case "call.speak.ended", "call.playback.ended":
-				if err := a.finishTelnyxTerminalAnnouncement(ctx, row); err != nil {
-					ctx.Logger().Warn("finish Telnyx terminal announcement", "call", row.ID, "err", err)
-					http.Error(w, "terminal hangup pending; retry", http.StatusServiceUnavailable)
+				if err := a.completeTelnyxAnnouncementEvent(ctx, row); err != nil {
+					http.Error(w, "terminal hangup pending; retry", 503)
 					return
 				}
 			case "call.gather.ended":
@@ -2903,9 +2969,13 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "called number does not match route", http.StatusForbidden)
 		return
 	}
-	stored, created, err := a.recordInboundCall(route, carrierSID, event.Data.Payload.From, to)
+	stored, created, err := a.recordInboundCall(route, carrierSID, event.Data.Payload.From, to, inboundCallMetadata{CarrierLegID: boundedCarrierID(event.Data.Payload.CallLegID), CarrierSessionID: boundedCarrierID(event.Data.Payload.CallSessionID), CarrierSignalingJSON: filteredCarrierSignaling(event.Data.Payload.SIPHeaders), ProviderEventID: boundedCarrierID(event.Data.ID), ProviderOccurredAt: normalizedEventTime(event.Data.OccurredAt, time.Now().UTC())})
 	if err != nil {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := a.recordCarrierSignaling(stored, event.Data.Payload.CallLegID, event.Data.Payload.CallSessionID, event.Data.Payload.SIPHeaders); err != nil {
+		http.Error(w, "persist carrier signaling", 500)
 		return
 	}
 	if isSuppressedHandlingReason(stored.HandlingReason) && !isTerminalStatus(stored.Status) {
@@ -2923,36 +2993,28 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	if !isTerminalStatus(stored.Status) && (route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject" || route.RoutingTerminalType == "dtmf_menu") {
+		if globalCtx == nil {
+			http.Error(w, "routing unavailable; retry", 503)
+			return
+		}
+		_, plan, err := a.routingPlanForCall(stored, nil)
+		if err != nil || plan == nil {
+			http.Error(w, "routing plan unavailable; retry", 503)
+			return
+		}
+		if err := a.ensureRoutingEffect(stored, plan); err != nil {
+			http.Error(w, "persist routing effect", 500)
+			return
+		}
+		if err := a.driveRoutingEffect(globalCtx.WithProject(route.ProjectID), stored.ID, plan.NodeID); err != nil {
+			http.Error(w, "carrier action pending; retry", 503)
+			return
+		}
+	} else if created {
+		a.enqueueImmediateAnswer(route, stored.ID)
+	}
 	w.WriteHeader(http.StatusNoContent)
-	if created && (route.RoutingTerminalType == "hangup" || route.RoutingTerminalType == "reject") {
-		if globalCtx != nil {
-			ctx := globalCtx.WithProject(route.ProjectID)
-			if stored.AnnouncementState != "" {
-				go func() {
-					if err := a.answerTelnyxIVR(ctx, stored); err != nil {
-						ctx.Logger().Warn("answer terminal announcement", "call", stored.ID, "err", err)
-						_ = a.db().updateStatus(stored.ID, "failed", "answer terminal announcement: "+err.Error())
-					}
-				}()
-			} else {
-				_ = a.suppressTerminalRoutingCall(ctx, stored)
-			}
-		}
-		return
-	}
-	if created {
-		if route.RoutingTerminalType == "dtmf_menu" && globalCtx != nil {
-			ctx := globalCtx.WithProject(route.ProjectID)
-			go func() {
-				if err := a.answerTelnyxIVR(ctx, stored); err != nil {
-					ctx.Logger().Warn("answer Telnyx IVR", "call", stored.ID, "err", err)
-					_ = a.db().updateStatus(stored.ID, "failed", "answer IVR: "+err.Error())
-				}
-			}()
-		} else {
-			a.enqueueImmediateAnswer(route, stored.ID)
-		}
-	}
 }
 
 func decodeTelnyxSignatureValue(value string) ([]byte, error) {
@@ -2969,6 +3031,9 @@ func (a *App) verifyTelnyxInboundRequest(r *http.Request, route *routeRow, body 
 	creds, err := bound.PlatformAPI().GetConnectionCredentials(route.CarrierConnectionID)
 	if err != nil {
 		return fmt.Errorf("read Telnyx credentials: %w", err)
+	}
+	if creds == nil {
+		return errors.New("Telnyx credentials unavailable")
 	}
 	publicKeyText := strings.TrimSpace(creds.Fields["public_key"])
 	if publicKeyText == "" {
@@ -3005,7 +3070,7 @@ func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, ro
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if route == nil || !route.Enabled || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
+	if route == nil || route.Secret == "" || !secureEqual(r.URL.Query().Get("secret"), route.Secret) {
 		http.Error(w, "route not found", http.StatusNotFound)
 		return
 	}
@@ -3441,6 +3506,7 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 		}
 		out = append(out, map[string]any{
 			"id": r.ID, "thread_id": r.ThreadID, "carrier_sid": r.CarrierSID,
+			"carrier_leg_id": r.CarrierLegID, "carrier_session_id": r.CarrierSessionID,
 			"direction": r.Direction, "to_number": r.ToNumber, "from_number": r.FromNumber,
 			"directive": r.Directive, "voice": r.Voice, "status": r.Status,
 			"carrier_status": r.Status, "media_status": r.MediaStatus,
@@ -3748,6 +3814,9 @@ type callRow struct {
 	RouteID                  string
 	CarrierSID               string
 	CarrierRequestID         string
+	CarrierLegID             string
+	CarrierSessionID         string
+	CarrierSignalingJSON     string
 	CarrierSlug              string
 	CarrierConnectionID      int64
 	CallbackSecret           string
@@ -3864,7 +3933,7 @@ type callsDB struct {
 
 const callSelectColumns = `id, thread_id,
     COALESCE(direction,'outbound'), COALESCE(agent_id,0), COALESCE(route_id,''),
-    COALESCE(carrier_sid,''), COALESCE(carrier_request_id,''),
+    COALESCE(carrier_sid,''), COALESCE(carrier_request_id,''), COALESCE(carrier_leg_id,''), COALESCE(carrier_session_id,''), COALESCE(carrier_signaling_json,'{}'),
 	    COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0), COALESCE(callback_secret,''),
 	    to_number, from_number, COALESCE(forwarded_from,''), COALESCE(ingress_path,''),
 	    directive, voice, audio_bridge_url, status,
@@ -3902,7 +3971,7 @@ type rowScanner interface{ Scan(dest ...any) error }
 func scanCall(row rowScanner) (*callRow, error) {
 	var r callRow
 	if err := row.Scan(&r.ID, &r.ThreadID, &r.Direction, &r.AgentID, &r.RouteID,
-		&r.CarrierSID, &r.CarrierRequestID, &r.CarrierSlug, &r.CarrierConnectionID, &r.CallbackSecret,
+		&r.CarrierSID, &r.CarrierRequestID, &r.CarrierLegID, &r.CarrierSessionID, &r.CarrierSignalingJSON, &r.CarrierSlug, &r.CarrierConnectionID, &r.CallbackSecret,
 		&r.ToNumber, &r.FromNumber, &r.ForwardedFrom, &r.IngressPath,
 		&r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 		&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage,
@@ -4143,20 +4212,32 @@ func (c *callsDB) resetAnswerClaim(id string, sessionTokens ...string) error {
 		predicate = " AND peer_token = ?"
 		args = append(args, sessionTokens[0])
 	}
-	res, err := c.db.Exec(`UPDATE calls SET status = 'pending', thread_id = 'pending-' || id,
-            audio_bridge_url = 'pending', peer_token = '', directive = 'inbound pending', voice = ''
-            WHERE id = ? AND status = 'answering' AND media_active = 0`+predicate, args...)
+	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
-	if len(sessionTokens) > 0 {
-		n, err := res.RowsAffected()
-		if err != nil {
-			return err
-		}
-		if n != 1 {
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE calls SET status='pending',thread_id='pending-'||id,audio_bridge_url='pending',peer_token='',directive='inbound pending',voice='' WHERE id=? AND status='answering' AND media_active=0 AND COALESCE(media_connected_at,'')=''`+predicate, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		if len(sessionTokens) > 0 {
 			return errors.New("answer session is no longer releasable")
 		}
+		return nil
+	}
+	for _, table := range []string{"telephony_media_sessions", "telephony_call_owners", "phone_capacity"} {
+		if _, err = tx.Exec(`DELETE FROM `+table+` WHERE call_id=?`, id); err != nil {
+			return err
+		}
+	}
+	if err = c.commitCall(tx, id); err != nil {
+		return err
 	}
 	return c.releaseRingClaim(id)
 }

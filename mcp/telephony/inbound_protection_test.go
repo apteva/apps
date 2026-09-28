@@ -51,7 +51,7 @@ func TestSignedTelnyxAnnouncementWebhooksWaitForSpeechEnd(t *testing.T) {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{"data": map[string]any{
 			"id": eventType, "event_type": eventType, "occurred_at": now,
-			"payload": map[string]any{"call_control_id": call.CarrierSID, "connection_id": "app-123"},
+			"payload": map[string]any{"call_control_id": call.CarrierSID, "connection_id": "app-123", "client_state": terminalAnnouncementClientState(call.ID), "status": "completed"},
 		}})
 		if err != nil {
 			t.Fatal(err)
@@ -196,6 +196,9 @@ func TestSignedTelnyxExplicitCallerBlockRejectsWithoutDisablingIVR(t *testing.T)
 	platform.failTool = ""
 	send("event-blocked", "carrier-blocked", "+33611111111", http.StatusNoContent) // retry completes suppression
 	send("event-blocked", "carrier-blocked", "+33611111111", http.StatusNoContent) // completed retry is inert
+	if len(platform.integrationCalls) > 0 && platform.integrationCalls[0].Input["cause"] != "CALL_REJECTED" {
+		t.Fatal("suppression omitted explicit rejection cause")
+	}
 	if len(platform.integrationCalls) != 2 || platform.integrationCalls[0].Tool != "reject_call" || platform.integrationCalls[1].Tool != "reject_call" ||
 		platform.integrationCalls[1].Input["call_control_id"] != "carrier-blocked" {
 		t.Fatalf("blocked caller carrier commands: %+v", platform.integrationCalls)
@@ -429,7 +432,7 @@ func TestTelnyxAnnouncementRetriesFailedCarrierCommands(t *testing.T) {
 		t.Fatal("failed hangup command was accepted")
 	}
 	stored, err = db.findCall(call.ID)
-	if err != nil || stored.AnnouncementState != "speaking" {
+	if err != nil || stored.AnnouncementState != "finishing" {
 		t.Fatalf("failed hangup state=%+v err=%v", stored, err)
 	}
 	platform.failTool = ""
@@ -524,6 +527,7 @@ func TestTerminalAnnouncementPlaysBeforeTelnyxHangup(t *testing.T) {
 	ivr.AnnouncementState = ""
 	ivr.AnnouncementText = ""
 	ivr.Status = "answered"
+	ivr.AnsweredAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if _, _, err := db.insertInboundCallWithEvent(ivr, "pending"); err != nil {
 		t.Fatal(err)
 	}

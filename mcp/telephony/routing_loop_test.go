@@ -25,7 +25,7 @@ func loopFixture(t *testing.T, call string, config map[string]any) (*App, *calls
 }
 
 func TestDecisionFallbackKeepsTerminalAnnouncementAudible(t *testing.T) {
-	a, _, original := decisionFixture(t)
+	a, db, original := decisionFixture(t)
 	var ex routingExecutionContext
 	if err := json.Unmarshal([]byte(original.ContextJSON), &ex); err != nil {
 		t.Fatal(err)
@@ -39,8 +39,11 @@ func TestDecisionFallbackKeepsTerminalAnnouncementAudible(t *testing.T) {
 	if plan.TerminalType != "hangup" || terminalAnnouncementText(plan) == "" {
 		t.Fatalf("announcement lost: %+v", plan)
 	}
-	row := &callRow{ID: "fallback-announcement", CarrierSlug: "twilio", Status: "pending"}
-	if err := a.finishTerminalRoutingPlan(nil, row, &ex.Route, plan); err != nil {
+	row := &callRow{ID: "fallback-announcement", CarrierSlug: "twilio", Status: "pending", ProjectID: "p1", ThreadID: "pending-fallback-announcement", Direction: "inbound"}
+	if _, _, err := db.insertInboundCallWithEvent(*row, "pending"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.finishTerminalRoutingPlan(globalCtx, row, &ex.Route, plan); err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()

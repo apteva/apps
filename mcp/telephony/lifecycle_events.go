@@ -180,6 +180,9 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		}
 	}
 	if isTerminalStatus(nextStatus) {
+		if _, err := tx.Exec(`UPDATE routing_effects SET status='canceled',updated_at=? WHERE call_id=? AND status='pending'`, ringTime(now), id); err != nil {
+			return false, err
+		}
 		if _, err := tx.Exec(`UPDATE inbound_event_outbox
             SET delivered_at = COALESCE(NULLIF(delivered_at, ''), ?), last_error = ''
             WHERE call_id = ?`, now.Format(time.RFC3339Nano), id); err != nil {
@@ -286,6 +289,8 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 		"callback_opportunity_id": callbackOpportunityID(call),
 		"routing_resolution":      call.RoutingResolution,
 	}
+	addOptionalString(payload, "provider_leg_id", call.CarrierLegID)
+	addOptionalString(payload, "provider_session_id", call.CarrierSessionID)
 	addOptionalString(payload, "answered_at", call.AnsweredAt)
 	addOptionalString(payload, "ended_at", call.EndedAt)
 	addOptionalString(payload, "answered_by", call.AnsweredBy)
@@ -606,6 +611,15 @@ func (a *App) toolCallGet(_ context.Context, ctx *sdk.AppCtx, args map[string]an
 	public := reconciliationCallPublic(*call)
 	public["peer_kind"] = call.PeerKind
 	public["routing_flow_id"] = call.RoutingFlowID
+	var signaling map[string][]string
+	if json.Unmarshal([]byte(call.CarrierSignalingJSON), &signaling) == nil && len(signaling) > 0 {
+		public["carrier_signaling"] = signaling
+	}
+	commands, commandErr := a.carrierCommandHistory(projectID, call.ID)
+	if commandErr != nil {
+		return mcpError("get carrier command history: " + commandErr.Error()), nil
+	}
+	public["carrier_commands"] = commands
 	var principal string
 	err = a.db().db.QueryRow(`SELECT principal FROM telephony_call_owners WHERE call_id=? AND project_id=?`, call.ID, projectID).Scan(&principal)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -98,7 +98,7 @@ func (a *App) handleBandwidthInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "load route", http.StatusInternalServerError)
 		return
 	}
-	if route == nil || !route.Enabled || route.CarrierSlug != "bandwidth" || route.InboundTransport != inboundTransportProgrammable ||
+	if route == nil || route.CarrierSlug != "bandwidth" || route.InboundTransport != inboundTransportProgrammable ||
 		!secureEqual(r.URL.Query().Get("secret"), route.Secret) || r.URL.Query().Get("project_id") != route.ProjectID {
 		http.NotFound(w, r)
 		return
@@ -135,6 +135,10 @@ func (a *App) handleBandwidthInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	switch phase {
 	case "initiate":
+		if !route.Enabled {
+			http.NotFound(w, r)
+			return
+		}
 		if event.EventType != "initiate" {
 			http.Error(w, "invalid Bandwidth initiate event", http.StatusBadRequest)
 			return
