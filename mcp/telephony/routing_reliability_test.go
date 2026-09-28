@@ -161,7 +161,7 @@ func TestReliabilityNormalRoutingEndMustNotBecomeDeadlineFailure(t *testing.T) {
 
 func TestReliabilityFailedRingFallbackMustRemainRetryable(t *testing.T) {
 	a, db, plan := ringFixture(t, "sequential")
-	platform := &answerPlatform{failTool: "hangup_call"}
+	platform := &answerPlatform{failTool: "reject_call"}
 	previous := globalCtx
 	ctx := sdk.NewAppCtxForTest(&sdk.Manifest{}, db.db, sdk.Config{}, platform, nil).WithProject("p1")
 	globalCtx = ctx

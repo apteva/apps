@@ -551,7 +551,7 @@ func testSIPGatewayPendingDialog(t *testing.T, reject bool) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- gateway.Reject(call) }()
-		response := readSIPResponseContaining(t, conn, "486 Busy Here")
+		response := readSIPResponseContaining(t, conn, "603 Decline")
 		ack := strings.ReplaceAll(strings.Split(invite, "Content-Type:")[0], "INVITE", "ACK")
 		for _, line := range strings.Split(response, "\r\n") {
 			if strings.HasPrefix(line, "To:") {

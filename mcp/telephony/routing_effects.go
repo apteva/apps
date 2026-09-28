@@ -51,7 +51,7 @@ func enqueueRoutingEffectTx(tx *sql.Tx, callID, project string, plan *inboundRou
 		if terminalAnnouncementText(plan) != "" {
 			seconds = 180
 		}
-		_, err = tx.Exec(`UPDATE calls SET state_expires_at=CASE WHEN deadline_at<>'' AND deadline_at<? THEN deadline_at ELSE ? END WHERE id=? AND status='pending'`, ringTime(now.Add(time.Duration(seconds)*time.Second)), ringTime(now.Add(time.Duration(seconds)*time.Second)), callID)
+		_, err = tx.Exec(`UPDATE calls SET state_expires_at=? WHERE id=? AND status='pending'`, ringTime(now.Add(time.Duration(seconds)*time.Second)), callID)
 	}
 	return err
 }
@@ -162,19 +162,6 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 		}
 	}
 	prompt := terminalAnnouncementText(&e.Plan)
-	burstDeadline := time.Time{}
-	burstExpired := false
-	if e.Plan.SuppressionAction == burstAnswerAnnouncement {
-		burstDeadline, err = time.Parse(time.RFC3339Nano, row.DeadlineAt)
-		burstExpired = err != nil || !time.Now().Before(burstDeadline)
-	}
-	nextAttempt := func(delay time.Duration) string {
-		at := time.Now().Add(delay)
-		if !burstExpired && !burstDeadline.IsZero() && burstDeadline.Before(at) {
-			at = burstDeadline
-		}
-		return ringTime(at)
-	}
 	stage := "end"
 	if e.Plan.TerminalType == "dtmf_menu" {
 		stage = "gather"
@@ -186,8 +173,8 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 			}
 			if row.AnnouncementState == "finishing" {
 				stage = "hangup"
-			} else if row.AnnouncementState == "speaking" && !burstExpired {
-				_, err = a.db().db.Exec(`UPDATE routing_effects SET next_attempt_at=? WHERE id=?`, nextAttempt(15*time.Second), e.ID)
+			} else if row.AnnouncementState == "speaking" {
+				_, err = a.db().db.Exec(`UPDATE routing_effects SET next_attempt_at=? WHERE id=?`, ringTime(time.Now().Add(15*time.Second)), e.ID)
 				return err
 			} else {
 				stage = "speak"
@@ -205,19 +192,8 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 			stage = "answer"
 		}
 	}
-	// Suppressed announcement calls have a short absolute budget, including
-	// waiting for a missing answer/speech callback. Never re-answer at the limit.
-	if e.Plan.SuppressionAction == burstAnswerAnnouncement {
-		if burstExpired {
-			stage = "hangup"
-			if _, err = a.db().db.Exec(`UPDATE calls SET announcement_state='finishing' WHERE id=?`, row.ID); err != nil {
-				return err
-			}
-			row.AnnouncementState = "finishing"
-		}
-	}
-	// Duplicate initiated webhooks are acknowledgements, not a reason to
-	// exhaust the answer budget while its confirmation is still in flight.
+	// An accepted answer waits for its callback. Duplicate delivery must not
+	// exhaust the command budget before the carrier has time to confirm it.
 	if stage == "answer" && stage == e.Stage && e.Attempts > 0 && e.LastError == "" {
 		if due, parseErr := time.Parse(time.RFC3339Nano, e.NextAttempt); parseErr == nil && time.Now().Before(due) {
 			return nil
@@ -237,12 +213,12 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 		ctx.Emit("telephony.routing.error", map[string]any{"call_id": row.ID, "reason": "carrier_action_retry_exhausted", "stage": stage})
 		return err
 	}
-	_, err = a.db().db.Exec(`UPDATE routing_effects SET stage=?,attempts=?,next_attempt_at=?,updated_at=? WHERE id=?`, stage, e.Attempts+1, nextAttempt(15*time.Second), ringTime(time.Now()), e.ID)
+	_, err = a.db().db.Exec(`UPDATE routing_effects SET stage=?,attempts=?,next_attempt_at=?,updated_at=? WHERE id=?`, stage, e.Attempts+1, ringTime(time.Now().Add(15*time.Second)), ringTime(time.Now()), e.ID)
 	if err != nil {
 		return err
 	}
 	switch {
-	case isSuppressedHandlingReason(row.HandlingReason) && e.Plan.SuppressionAction != burstAnswerAnnouncement:
+	case isSuppressedHandlingReason(row.HandlingReason):
 		err = a.rejectInboundCarrierCall(ctx, row)
 		if err == nil {
 			err = a.db().updateStatus(row.ID, "canceled", row.ErrorMessage)
@@ -250,7 +226,7 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 	case row.CarrierSlug == "telnyx" && stage == "answer":
 		err = a.answerTelnyxIVR(ctx, row)
 	case row.CarrierSlug == "telnyx" && stage == "speak":
-		err = a.startTelnyxTerminalAnnouncement(ctx, row, &e.Plan)
+		err = a.startTelnyxTerminalAnnouncement(ctx, row)
 	case row.CarrierSlug == "telnyx" && stage == "hangup":
 		err = a.finishTelnyxTerminalAnnouncement(ctx, row)
 	case row.CarrierSlug == "telnyx" && stage == "gather":
@@ -271,7 +247,7 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 	}
 	if err != nil {
 		// Persist only the category here. Carrier responses can contain customer data.
-		_, saveErr := a.db().db.Exec(`UPDATE routing_effects SET last_error='carrier action failed',next_attempt_at=?,updated_at=? WHERE id=?`, nextAttempt(time.Duration(1<<min(e.Attempts, 4))*time.Second), ringTime(time.Now()), e.ID)
+		_, saveErr := a.db().db.Exec(`UPDATE routing_effects SET last_error='carrier action failed',next_attempt_at=?,updated_at=? WHERE id=?`, ringTime(time.Now().Add(time.Duration(1<<min(e.Attempts, 4))*time.Second)), ringTime(time.Now()), e.ID)
 		if saveErr != nil {
 			return saveErr
 		}
@@ -297,21 +273,10 @@ func (a *App) endRoutingCall(ctx *sdk.AppCtx, row *callRow, plan *inboundRouting
 	if _, err := a.db().db.Exec(`UPDATE calls SET routing_resolution=? WHERE id=? AND status IN ('pending','answered')`, reason, row.ID); err != nil {
 		return err
 	}
-	if a.callUsesDirectSIP(row) {
-		if gateway := a.directSIPGateway(); gateway != nil {
-			if err := gateway.Hangup(row); err != nil {
-				return err
-			}
-		}
-	} else if row.CarrierSID != "" {
-		carrier, err := a.carrierForRow(ctx, nil, row)
-		if err != nil {
-			return err
-		}
-		if err = carrier.Hangup(ctx, row); err != nil {
-			return err
-		}
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
+		return err
 	}
+
 	if err := a.killCallThread(ctx, row); err != nil {
 		return err
 	}

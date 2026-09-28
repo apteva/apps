@@ -620,17 +620,6 @@ func (a *App) toolCallGet(_ context.Context, ctx *sdk.AppCtx, args map[string]an
 		return mcpError("get carrier command history: " + commandErr.Error()), nil
 	}
 	public["carrier_commands"] = commands
-	if isSuppressedHandlingReason(call.HandlingReason) {
-		var raw, status, stage string
-		effectErr := a.db().db.QueryRow(`SELECT plan_json,status,stage FROM routing_effects WHERE call_id=? AND project_id=? AND node_id='suppression'`, call.ID, projectID).Scan(&raw, &status, &stage)
-		if effectErr != nil && !errors.Is(effectErr, sql.ErrNoRows) {
-			return mcpError("get suppression disposition"), nil
-		}
-		var plan inboundRoutingPlan
-		if effectErr == nil && json.Unmarshal([]byte(raw), &plan) == nil {
-			public["suppression"] = map[string]any{"action": firstNonEmpty(plan.SuppressionAction, "reject"), "reason": plan.SuppressionReason, "status": status, "stage": stage}
-		}
-	}
 	var principal string
 	err = a.db().db.QueryRow(`SELECT principal FROM telephony_call_owners WHERE call_id=? AND project_id=?`, call.ID, projectID).Scan(&principal)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

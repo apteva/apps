@@ -114,8 +114,6 @@ type inboundRoutingPlan struct {
 	DecisionNotBefore                                           string
 	RoutingResolution                                           string
 	CallbackOnAI                                                bool
-
-	SuppressionAction, SuppressionReason, TerminalMessage, TerminalLanguage string
 }
 
 var routingIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)

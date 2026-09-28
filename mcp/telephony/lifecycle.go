@@ -19,10 +19,6 @@ type outboxRow struct {
 }
 
 func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans ...*inboundRoutingPlan) (*callRow, bool, error) {
-	return c.insertInboundCallWithPolicy(call, message, loadBurstHandlingPolicy(nil), plans...)
-}
-
-func (c *callsDB) insertInboundCallWithPolicy(call callRow, message string, policy burstHandlingPolicy, plans ...*inboundRoutingPlan) (*callRow, bool, error) {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return nil, false, err
@@ -39,14 +35,6 @@ func (c *callsDB) insertInboundCallWithPolicy(call callRow, message string, poli
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err
-	}
-
-	var suppressionPlan *inboundRoutingPlan
-	if isSuppressedHandlingReason(call.HandlingReason) {
-		suppressionPlan, err = burstHandlingPlanTx(tx, &call, policy)
-		if err != nil {
-			return nil, false, err
-		}
 	}
 
 	_, err = tx.Exec(`INSERT INTO calls
@@ -87,7 +75,7 @@ func (c *callsDB) insertInboundCallWithPolicy(call callRow, message string, poli
 		}
 	}
 	if isSuppressedHandlingReason(call.HandlingReason) {
-		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, suppressionPlan); err != nil {
+		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, &inboundRoutingPlan{NodeID: "suppression", TerminalType: "reject"}); err != nil {
 			return nil, false, err
 		}
 	}
@@ -295,21 +283,35 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 }
 
 func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
-	if a.callUsesDirectSIP(row) {
-		if gateway := a.directSIPGateway(); gateway != nil {
-			if err := gateway.Hangup(row); err != nil {
-				return err
-			}
-		}
-	} else if row.CarrierSID != "" {
-		carrier, err := a.carrierForRow(ctx, nil, row)
-		if err != nil {
-			return err
-		}
-		if err := carrier.Hangup(ctx, row); err != nil {
-			return fmt.Errorf("carrier hangup: %w", err)
+	if row == nil {
+		return nil
+	}
+	unlock := a.softphones.lockClaim(row.ID)
+	defer unlock()
+	fresh, err := a.db().findCall(row.ID)
+	if err != nil {
+		return err
+	}
+	if fresh == nil || isTerminalStatus(fresh.Status) {
+		return nil
+	}
+	// The worker's snapshot may predate a successful adviser claim or a routing
+	// transition that extended the deadline. Recheck while holding the claim lock.
+	now := time.Now()
+	expired := false
+	for _, raw := range []string{fresh.StateExpiresAt, fresh.DeadlineAt} {
+		if deadline, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil && !now.Before(deadline) {
+			expired = true
 		}
 	}
+	if !expired {
+		return nil
+	}
+	row = fresh
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
+		return fmt.Errorf("carrier termination: %w", err)
+	}
+
 	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill expired call thread", "call", row.ID, "err", err)
 	}

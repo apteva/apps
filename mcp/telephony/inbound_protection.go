@@ -175,8 +175,8 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 	destinationAlert := false
 	if policy.PerNumber > 0 {
 		var count int64
-		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND received_at>=?`,
-			route.ProjectID, to, now.Unix()-policy.WindowSeconds+1).Scan(&count)
+		err = tx.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND received_at>=? LIMIT ?)`,
+			route.ProjectID, to, now.Unix()-policy.WindowSeconds+1, policy.PerNumber+1).Scan(&count)
 		if err != nil {
 			return "", false, err
 		}
@@ -198,8 +198,8 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 	}
 	if reason == "" && policy.PerCaller > 0 && from != "" && !trusted {
 		var count int64
-		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND from_number=? AND received_at>=?`,
-			route.ProjectID, to, from, now.Unix()-policy.WindowSeconds+1).Scan(&count)
+		err = tx.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND from_number=? AND received_at>=? LIMIT ?)`,
+			route.ProjectID, to, from, now.Unix()-policy.WindowSeconds+1, policy.PerCaller+1).Scan(&count)
 		if err != nil {
 			return "", false, err
 		}
@@ -250,9 +250,6 @@ func planHasAnnouncement(plan *inboundRoutingPlan) bool {
 }
 
 func terminalAnnouncementText(plan *inboundRoutingPlan) string {
-	if plan != nil && plan.TerminalMessage != "" {
-		return plan.TerminalMessage
-	}
 	if plan == nil || !planHasAnnouncement(plan) {
 		return ""
 	}
@@ -281,7 +278,7 @@ func terminalAnnouncementClientState(callID string) string {
 	return base64.StdEncoding.EncodeToString([]byte("terminal-announcement:" + callID))
 }
 
-func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow, plans ...*inboundRoutingPlan) error {
+func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) error {
 	if row != nil {
 		fresh, err := a.db().findCall(row.ID)
 		if err != nil {
@@ -299,15 +296,11 @@ func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow, pla
 	if prompt == "" {
 		return errors.New("terminal announcement has no text")
 	}
-	language := "fr-FR"
-	if len(plans) > 0 && plans[0] != nil && plans[0].TerminalLanguage != "" {
-		language = plans[0].TerminalLanguage
-	}
 	// Store speaking only after command acceptance. If the process dies between
 	// acceptance and persistence, replay uses the same carrier idempotency key.
 	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "speak_text", map[string]any{
 		"call_control_id": row.CarrierSID, "payload": prompt, "payload_type": "text",
-		"voice": "Telnyx.NaturalHD.Astra", "language": language,
+		"voice": "Telnyx.NaturalHD.Astra", "language": "fr-FR",
 		"client_state": terminalAnnouncementClientState(row.ID),
 		"command_id":   telnyxCommandID(row.ID, "terminal-announcement"),
 	})
@@ -337,9 +330,6 @@ func (a *App) finishTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) er
 		return err
 	}
 	_, err = a.db().db.Exec(`UPDATE calls SET announcement_state='finished' WHERE id=? AND announcement_state='finishing'`, row.ID)
-	if err == nil && isSuppressedHandlingReason(row.HandlingReason) {
-		_, err = a.db().updateStatusWithFacts(row.ID, "canceled", row.ErrorMessage, lifecycleFacts{Source: "telephony", TerminationInitiator: "telephony"})
-	}
 	return err
 }
 
@@ -416,17 +406,14 @@ func (a *App) suppressTerminalRoutingCall(ctx *sdk.AppCtx, row *callRow) error {
 	if ctx == nil {
 		return errors.New("app context unavailable for terminal routing")
 	}
-	carrier, err := a.carrierForRow(ctx, nil, row)
-	if err != nil {
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
 		return err
 	}
-	if err := carrier.Hangup(ctx, row); err != nil {
-		return err
-	}
+
 	return a.db().updateStatus(row.ID, "canceled", row.ErrorMessage)
 }
 
 func writeSuppressedTwilioCall(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/xml")
-	_, _ = w.Write([]byte(`<Response><Hangup/></Response>`))
+	_, _ = w.Write([]byte(`<Response><Reject reason="rejected"/></Response>`))
 }

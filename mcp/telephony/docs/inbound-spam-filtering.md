@@ -21,8 +21,8 @@ caller exception used by the burst detector. No caller is blocked by default.
 
 The rule is provider independent. Telnyx receives the initial signed
 `call.initiated` webhook and Telephony calls `reject_call`; a failed carrier
-command yields a retryable webhook response. Twilio, Plivo, and Bandwidth
-return their carrier hangup response; direct SIP rejects the INVITE. The
+command yields a retryable webhook response. Twilio returns a Reject response; Plivo and Bandwidth
+use their carrier termination response; direct SIP rejects the INVITE. The
 original per-caller burst guard still applies to new carrier call IDs. A
 destination-wide burst across rotating caller IDs remains alert only, so it
 cannot close the public IVR to unrelated callers.
@@ -43,48 +43,35 @@ Use `telephony_call_get` to inspect separate carrier leg/session IDs, allowliste
 routing SIP headers and recent command outcomes. These records help correlate
 repeated sessions with carrier traces; displayed caller ID alone is insufficient.
 
-## Optional completion of suspected retry bursts (local follow-up)
+## Default protection and termination (local follow-up)
 
-A burst is evidence of repeated attempts, not proof of malicious callers. An
-upstream forwarding service may retry unanswered calls. For controlled testing,
-`inbound_burst_action=answer_announcement` can answer a suppressed call, wait for
-carrier answer confirmation, play a short configured message, then hang up only
-after matching speech completion. The policy is generic; this mode currently
-supports programmable Telnyx. Other transports retain rejection and report
-`announcement_unsupported` in call diagnostics.
+There is no special burst-announcement mode. Default thresholds admit the first
+12 distinct carrier call IDs from the same displayed caller to the same
+project destination within 60 seconds; attempt 13 and excess attempts during
+the cooldown are suppressed before adviser offers. Suppression never starts a
+message or AI thread. Duplicate webhooks do not count as new attempts. Explicit
+caller blocks apply immediately. Destination-wide rotating-caller bursts stay
+alert-only, preserving the chosen public-IVR availability policy.
 
-The default remains `reject`. Answering may incur carrier charges and may change
-Google/tracking-provider call reporting. Explicit caller block rules always
-reject. Destination-wide bursts remain alert-only. This mode does not offer the
-call to an adviser, start an AI thread, record it, or add it to the missed-call
-pool. It preserves `burst_suppressed` classification.
+Normal routing executes configured announcements before ending a call. When
+routing or lifecycle cleanup ends an unanswered inbound attempt, the shared
+termination helper selects carrier rejection; after an observed answer it uses
+hangup. Telnyx supplies `CALL_REJECTED`. Direct SIP sends 603 Decline, and initial
+Twilio suppression returns `<Reject reason="rejected"/>`. Other adapters retain
+their supported termination operations; identical SIP responses across carriers
+are not assumed. An unanswered call can be deliberately rejected before any
+burst exists, without classifying it as spam or suppressing its callback
+opportunity. This respects explicit no-announcement flows.
 
-Settings:
+Repeated initial webhooks cannot exhaust an accepted answer's retry budget while
+its confirmation is pending. Expiry processing locks and reloads the call before
+terminating it, so a stale worker snapshot cannot end a call whose claim/routing
+transition extended its deadline. Burst threshold queries stop after the limit
+plus one indexed rows instead of counting every attempt in a growing flood.
 
-| Setting | Default | Bounds / purpose |
-| --- | --- | --- |
-| `inbound_burst_action` | `reject` | `reject` or `answer_announcement` |
-| `inbound_burst_message` | We cannot take your call right now. Goodbye. | At most 240 characters |
-| `inbound_burst_language` | `en-US` | Telnyx speech language, e.g. `fr-FR` |
-| `inbound_burst_max_seconds` | `20` | 5–60 seconds from admission to deadline cleanup |
-| `inbound_burst_max_concurrent` | `3` | 1–50 active suppressed announcements per project |
-
-Disposition, message and language are pinned at admission. Capacity is reserved
-transactionally through active call records and survives restart. Excess
-suppressed calls use explicit rejection with reason `announcement_capacity`;
-this limit never excludes unrelated callers. Migration 034 indexes active burst
-announcements so capacity checks do not scan completed call history.
-
-Duplicate initiated webhooks do not reissue an accepted answer while waiting for
-its confirmation. Failed commands use the existing bounded retry queue. Missing
-answer/speech callbacks trigger hangup at the configured deadline; carrier
-outages can still delay physical disconnection. Call diagnostics expose the
-selected action, reason and execution stage under `suppression`.
-
-This removes pre-answer rejection from the selected bounded burst path. It does
-not promise to stop an independent upstream retry loop, and it cannot establish
-whether Google, Telnyx or another provider originates repeats. Verify using one
-originating direct call and one through the actual forwarding path, with carrier
-SIP traces and a count of new sessions after completion. Local tests cannot
-substitute for that network verification. No automatic deployment or live call
-is part of this change.
+These controls prevent excess detected calls from reaching advisers and remove
+avoidable ambiguous termination paths. They cannot prevent an external carrier
+from originating a new session or establish who owns a Diversion number. The
+final upstream SIP response and retry behavior still require carrier traces and
+a controlled call through the actual forwarding path. No production changes or
+live calls are included in this local follow-up.
