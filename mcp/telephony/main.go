@@ -439,6 +439,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// to the agent that should receive the incoming-call event.
 		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound, NoAuth: true},
 		{Pattern: "/inbound/telnyx/", Handler: a.handleTelnyxInbound, NoAuth: true},
+		{Pattern: "/inbound/bandwidth/", Handler: a.handleBandwidthInbound, NoAuth: true},
 		{Pattern: "/inbound/plivo/", Handler: a.handlePlivoInbound, NoAuth: true},
 		{Pattern: "/ivr/", Handler: a.handleIVRCallback, NoAuth: true},
 		// Panel data endpoint — lists active + recent calls.
@@ -548,7 +549,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_routes_configure_carrier",
-			Description: "Configure the bound carrier for an inbound route. Programmable transport configures provider webhooks/applications. Direct SIP configures a Twilio SIP trunk or Telnyx FQDN connection. Args: route_id (required).",
+			Description: "Configure the bound carrier for an inbound route. Twilio, Telnyx, and Plivo configure provider resources; Bandwidth returns manual setup for a dedicated Voice Application and Location; direct SIP configures a Twilio SIP trunk, Telnyx FQDN connection, or DIDWW inbound trunk. Args: route_id (required).",
 			InputSchema: schemaObject(map[string]any{
 				"route_id": map[string]any{"type": "string", "description": "Route id returned by telephony_routes_create."},
 			}, []string{"route_id"}),
@@ -1483,7 +1484,7 @@ func supportsInboundTransport(slug, transport string) bool {
 	case inboundTransportSIPDirect:
 		return slug == "twilio" || slug == "telnyx" || slug == "didww"
 	case inboundTransportProgrammable:
-		return slug == "twilio" || slug == "telnyx" || slug == "plivo"
+		return slug == "twilio" || slug == "telnyx" || slug == "plivo" || slug == "bandwidth"
 	default:
 		return false
 	}
@@ -1532,11 +1533,26 @@ func (a *App) toolRoutesConfigureCarrier(callerCtx context.Context, ctx *sdk.App
 	if err := a.configureRouteCarrier(ctx, route); err != nil {
 		return mcpError(err.Error()), nil
 	}
-	return map[string]any{
+	result := map[string]any{
 		"ok":          true,
 		"route":       routePublic(a, *route),
 		"inbound_url": a.inboundRouteURL(*route),
-	}, nil
+	}
+	if route.CarrierSlug == "bandwidth" {
+		var binding bandwidthRouteConfig
+		_ = json.Unmarshal([]byte(route.PreviousVoiceURL), &binding)
+		result["manual_setup"] = map[string]any{
+			"required":               true,
+			"carrier_setup_verified": false,
+			"reason":                 "Bandwidth Voice Applications are assigned to Locations; Telephony will not modify a shared Location",
+			"initiate_url":           a.inboundRouteURL(*route),
+			"disconnect_url":         a.bandwidthRouteStatusURL(*route),
+			"callback_username":      "apteva",
+			"callback_password":      route.Secret,
+			"application_id":         binding.ApplicationID,
+		}
+	}
+	return result, nil
 }
 
 func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
@@ -1567,6 +1583,8 @@ func (a *App) configureRouteCarrier(ctx *sdk.AppCtx, route *routeRow) error {
 			err = a.configureTelnyxRoute(ctx, route)
 		case "plivo":
 			err = a.configurePlivoRoute(ctx, route)
+		case "bandwidth":
+			err = a.configureBandwidthRoute(ctx, route)
 		default:
 			err = fmt.Errorf("carrier webhook configuration is not implemented for provider %s", route.CarrierSlug)
 		}
@@ -1603,6 +1621,8 @@ func (a *App) disableInboundRoute(ctx *sdk.AppCtx, route *routeRow) (map[string]
 			err = a.disableTelnyxRoute(ctx, route)
 		case "plivo":
 			err = a.disablePlivoRoute(ctx, route)
+		case "bandwidth":
+			err = nil // The operator owns the shared Bandwidth Location assignment.
 		default:
 			err = fmt.Errorf("route cannot be safely disabled for provider %s", route.CarrierSlug)
 		}
@@ -1614,7 +1634,11 @@ func (a *App) disableInboundRoute(ctx *sdk.AppCtx, route *routeRow) (map[string]
 		return nil, fmt.Errorf("persist disabled route: %w", err)
 	}
 	route.Enabled = false
-	return map[string]any{"ok": true, "route_id": route.ID, "carrier": route.CarrierSlug}, nil
+	result := map[string]any{"ok": true, "route_id": route.ID, "carrier": route.CarrierSlug}
+	if route.CarrierSlug == "bandwidth" {
+		result["manual_restore_required"] = true
+	}
+	return result, nil
 }
 
 func (a *App) toolRoutesList(callerCtx context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -2108,6 +2132,11 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 			"aleg_method": "POST",
 		})
 		return err
+	case "bandwidth":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+			"callId": row.CarrierSID, "state": "active", "redirectUrl": a.bandwidthXMLURL(row.ID, row.CallbackSecret, row.ProjectID), "redirectMethod": "POST",
+		})
+		return err
 	default:
 		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)
 	}
@@ -2135,6 +2164,9 @@ func (a *App) rejectInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		return err
 	case "plivo":
 		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "hangup_call", map[string]any{"call_uuid": row.CarrierSID})
+		return err
+	case "bandwidth":
+		_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{"callId": row.CarrierSID, "state": "completed"})
 		return err
 	default:
 		return fmt.Errorf("unsupported inbound provider %s", row.CarrierSlug)

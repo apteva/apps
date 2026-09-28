@@ -832,6 +832,11 @@ func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 			if e = json.Unmarshal([]byte(p.ContextJSON), &ex); e == nil {
 				e = a.finishTerminalRoutingPlan(ctx, row, &ex.Route, &p)
 			}
+		} else if (a.callUsesDirectSIP(row) || row.CarrierSlug == "bandwidth") && (p.TerminalType == "destination" || p.TerminalType == "ring_group") && p.AnswerMode == answerModeRealtimeImmediate {
+			// The decision and offer journal are carrier-independent. Direct SIP
+			// keeps the INVITE ringing; Bandwidth keeps a BXML wait loop. Either
+			// transport starts AI media only after the decision commits.
+			_, e = a.answerCall(ctx, row, p.Directive, p.Voice, p.Greeting, true)
 		} else if row.CarrierSlug == "telnyx" && !((p.TerminalType == "destination" || p.TerminalType == "ring_group") && p.AnswerMode == answerModeHumanBrowser) {
 			var ex routingExecutionContext
 			if e = json.Unmarshal([]byte(p.ContextJSON), &ex); e == nil {

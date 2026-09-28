@@ -12,7 +12,10 @@ func TestDIDWWOnlyOffersImplementedInboundTransport(t *testing.T) {
 	if supportsInboundTransport("didww", inboundTransportProgrammable) {
 		t.Fatal("DIDWW programmable routing was advertised without an adapter")
 	}
-	for _, slug := range []string{"bandwidth", "sinch"} {
+	if !supportsInboundTransport("bandwidth", inboundTransportProgrammable) || supportsInboundTransport("bandwidth", inboundTransportSIPDirect) {
+		t.Fatal("Bandwidth must use the programmable inbound adapter")
+	}
+	for _, slug := range []string{"sinch"} {
 		if supportsInboundTransport(slug, inboundTransportSIPDirect) || supportsInboundTransport(slug, inboundTransportProgrammable) {
 			t.Fatalf("unfinished %s inbound route was advertised", slug)
 		}

@@ -96,7 +96,15 @@ func (a *App) authorizeCallRequest(r *http.Request, row *callRow) error {
 	}
 	if row.CarrierSlug == "bandwidth" {
 		username, password, ok := r.BasicAuth()
-		if !ok || username != "apteva" || !secureEqual(password, row.CallbackSecret) {
+		validPassword := secureEqual(password, row.CallbackSecret)
+		if row.Direction == "inbound" && row.RouteID != "" {
+			route, err := a.db().findRoute(row.RouteID)
+			if err != nil {
+				return err
+			}
+			validPassword = route != nil && route.Enabled && route.ProjectID == row.ProjectID && secureEqual(password, route.Secret)
+		}
+		if !ok || username != "apteva" || !validPassword {
 			return errors.New("invalid Bandwidth callback credentials")
 		}
 		return nil

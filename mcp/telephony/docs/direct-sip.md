@@ -15,9 +15,14 @@ default to `programmable_websocket`; direct SIP is opt-in.
 |---|---|---|
 | Twilio | Telephony creates an Elastic SIP Trunk, origination URI, and number association | G.711 PCMU/PCMA over RTP or SDES SRTP |
 | Telnyx | Telephony creates an FQDN connection and assigns the number | G.711 PCMU/PCMA over RTP or SDES SRTP |
+| DIDWW | Telephony creates an inbound voice trunk and assigns the DID, retaining the previous trunk for restoration | G.711 PCMU/PCMA over RTP or SDES SRTP |
 
-Outbound calls continue to use the provider's programmable voice API. Direct
-SIP currently targets the high-volume inbound cost path.
+Twilio and Telnyx outbound calls continue to use their programmable voice
+APIs. DIDWW outbound calls use its configured SIP trunk. Direct SIP inbound
+transport targets the high-volume inbound cost path.
+Bandwidth uses the programmable inbound callback adapter with a manually
+assigned Voice Application and dedicated Location; it does not use this direct
+SIP gateway.
 
 ## Network requirements
 
@@ -68,7 +73,7 @@ UDP or TCP signaling is rejected unless
 
 ## Route setup
 
-In the Numbers panel, select **Direct SIP** for a routed Twilio or Telnyx
+In the Numbers panel, select **Direct SIP** for a routed Twilio, Telnyx, or DIDWW
 number and apply it. Telephony runs the host/certificate/network preflight,
 starts the listener if necessary, and configures the provider. The
 project-scoped endpoint is:
@@ -105,6 +110,11 @@ Transport changes are blocked while the route has an active call.
   barge-in as a fallback to provider turn detection.
 - Direct SIP routes do not currently record calls. Telephony forces recording
   off for this transport because provider-cloud call control is bypassed.
+- Direct SIP routes can keep the INVITE ringing through the shared bounded
+  adviser decision loop. The selected browser adviser or AI fallback answers
+  the same SIP dialog. Routing announcements, DTMF menus, voicemail, and
+  external ring destinations are rejected at flow assignment because the SIP
+  transport cannot execute those nodes yet.
 
 ## Dialog and media recovery
 
