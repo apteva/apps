@@ -2757,6 +2757,11 @@ func syncTrading212Positions(ctx *sdk.AppCtx, app *App, acc Account, connID int6
 	n, skipped := 0, 0
 	for _, item := range items {
 		info := t212InstrumentInfo(item, acc.Currency)
+		// walletImpact values are denominated in the brokerage account's
+		// currency. Store the derived per-unit price in that same currency.
+		if wallet := childMap(item, "walletImpact"); firstFloat(wallet, "currentValue", "marketValue", "value") > 0 && strings.EqualFold(firstString(wallet, "currency", "currencyCode"), acc.Currency) {
+			info.Currency = acc.Currency
+		}
 		if info.Symbol == "" {
 			skipped++
 			continue
@@ -2866,10 +2871,36 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 			skipped++
 			continue
 		}
-		externalID := "trading212:order:" + stableBrokerID(item, order, postedAt, info.Symbol, side, qty, price)
+		amount := math.Abs(firstFloat(fill, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
+		if amount == 0 {
+			amount = math.Abs(firstFloat(order, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
+		}
+		if amount == 0 {
+			amount = qty * price
+		}
+		amountMinor := int64(math.Round(amount * 100))
+		legacyID := "trading212:order:" + stableBrokerID(item, order, postedAt, info.Symbol, side, qty, price)
+		externalID := legacyID
+		if fillID := firstString(fill, "id"); fillID != "" {
+			externalID = "trading212:fill:" + fillID
+		}
 		if txnExternalIDExists(ctx, acc.ID, externalID) {
 			skipped++
 			continue
+		}
+		if externalID != legacyID {
+			legacyPostedAt := firstTime(order, item)
+			if legacyPostedAt == "" {
+				legacyPostedAt = postedAt
+			}
+			migrated, err := migrateLegacyOrderFill(ctx, acc.ID, legacyID, externalID, side, amountMinor, qty, legacyPostedAt, postedAt, dry)
+			if err != nil {
+				return n, skipped, err
+			}
+			if migrated {
+				skipped++
+				continue
+			}
 		}
 		inst, err := ensureBrokerInstrument(ctx, app, info)
 		if err != nil {
@@ -2879,18 +2910,11 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 			n++
 			continue
 		}
-		amount := math.Abs(firstFloat(fill, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
-		if amount == 0 {
-			amount = math.Abs(firstFloat(order, "walletImpact.netValue", "walletImpact.totalCost", "walletImpact.currentValue"))
-		}
-		if amount == 0 {
-			amount = qty * price
-		}
 		args := map[string]any{
 			"account_id":    float64(acc.ID),
 			"instrument_id": float64(inst.ID),
 			"quantity":      qty,
-			"amount":        float64(int64(math.Round(amount * 100))),
+			"amount":        float64(amountMinor),
 			"posted_at":     postedAt,
 			"memo":          "Trading 212 " + side + " " + info.Symbol,
 			"external_id":   externalID,
@@ -2910,6 +2934,34 @@ func syncTrading212Orders(ctx *sdk.AppCtx, app *App, acc Account, connID int64, 
 		n++
 	}
 	return n, skipped, nil
+}
+
+// Older imports used the order ID as their transaction key. An order can
+// produce several fills, so move the matching legacy row to its fill ID before
+// adding any missing fills. Match the economics as well as the order ID to
+// avoid assigning a legacy row to the wrong partial execution.
+func migrateLegacyOrderFill(ctx *sdk.AppCtx, accountID int64, legacyID, fillID, side string, amountMinor int64, qty float64, legacyPostedAt, fillPostedAt string, dry bool) (bool, error) {
+	var id, existingAmount int64
+	var existingKind, existingPostedAt string
+	var existingQty float64
+	err := ctx.AppDB().QueryRow(
+		`SELECT id, kind, amount, quantity, posted_at FROM transactions WHERE account_id=? AND external_id=?`,
+		accountID, legacyID,
+	).Scan(&id, &existingKind, &existingAmount, &existingQty, &existingPostedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if existingKind != side || absInt64(existingAmount) != amountMinor || math.Abs(math.Abs(existingQty)-qty) > 1e-8 || existingPostedAt != legacyPostedAt {
+		return false, nil
+	}
+	if dry {
+		return true, nil
+	}
+	_, err = ctx.AppDB().Exec(`UPDATE transactions SET external_id=?, posted_at=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, fillID, fillPostedAt, id)
+	return err == nil, err
 }
 
 func syncTrading212Dividends(ctx *sdk.AppCtx, app *App, acc Account, connID int64, dry bool) (int, int, error) {
@@ -3180,10 +3232,10 @@ func findBrokerInstrument(ctx *sdk.AppCtx, info brokerInstrumentInfo) (Instrumen
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, project_id, kind, symbol, name, COALESCE(isin,''), COALESCE(exchange,''), quote_currency, metadata, created_at
 		 FROM instruments
-		 WHERE kind=? AND (UPPER(symbol)=UPPER(?) OR (isin IS NOT NULL AND isin=?))
-		 ORDER BY CASE WHEN quote_currency=? THEN 0 ELSE 1 END, id
+		 WHERE kind=? AND quote_currency=? AND (UPPER(symbol)=UPPER(?) OR (isin IS NOT NULL AND isin=?))
+		 ORDER BY id
 		 LIMIT 1`,
-		info.Kind, info.Symbol, info.ISIN, info.Currency,
+		info.Kind, info.Currency, info.Symbol, info.ISIN,
 	)
 	if err != nil {
 		return Instrument{}, false
@@ -3292,7 +3344,7 @@ func floatAny(v any) (float64, bool) {
 }
 
 func firstTime(maps ...map[string]any) string {
-	keys := []string{"bookingDateTime", "bookingDate", "made_on", "posted_at", "valueDate", "date", "dateTime", "date_time", "created", "createdAt", "created_at", "executedAt", "paidOn", "paid_on", "time", "timestamp"}
+	keys := []string{"bookingDateTime", "bookingDate", "made_on", "posted_at", "valueDate", "date", "dateTime", "date_time", "filledAt", "executedAt", "created", "createdAt", "created_at", "paidOn", "paid_on", "time", "timestamp"}
 	for _, m := range maps {
 		for _, k := range keys {
 			if s := firstString(m, k); s != "" {
@@ -4450,11 +4502,17 @@ func insertTxn(ctx *sdk.AppCtx, in txnIn) (int64, error) {
 		}
 	}
 	if in.HoldingID != 0 {
-		h, err := readHolding(ctx, in.HoldingID)
-		if err != nil {
+		// A transaction only needs to verify ownership. readHolding also
+		// values every holding and may fetch live stock quotes, which turns
+		// a broker dividend import into repeated external API calls.
+		var holdingAccountID int64
+		if err := ctx.AppDB().QueryRow(`SELECT account_id FROM holdings WHERE id=?`, in.HoldingID).Scan(&holdingAccountID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, fmt.Errorf("holding %d not found", in.HoldingID)
+			}
 			return 0, err
 		}
-		if h.AccountID != in.AccountID {
+		if holdingAccountID != in.AccountID {
 			return 0, errors.New("holding belongs to a different account")
 		}
 	}
