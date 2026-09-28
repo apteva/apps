@@ -140,6 +140,10 @@ func phoneAction(r *http.Request) string {
 		return "call.dial"
 	case strings.HasPrefix(path, "/softphone/answer/"):
 		return "call.answer"
+	case strings.HasPrefix(path, "/softphone/offer/ack/"):
+		return "call.read"
+	case strings.HasPrefix(path, "/softphone/offer/decline/"):
+		return "call.answer"
 	case strings.HasPrefix(path, "/softphone/attach/"), strings.HasPrefix(path, "/softphone/renew/"):
 		return "call.attach"
 	case strings.HasPrefix(path, "/softphone/takeover/"):

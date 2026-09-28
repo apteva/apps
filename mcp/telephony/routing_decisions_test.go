@@ -506,13 +506,32 @@ func TestDecisionReselectionPreservesDigitsAndPriorOutcomes(t *testing.T) {
 	if e != nil || len(offers) != 1 || offers[0].DestinationID != "alias" {
 		t.Fatalf("next offer %v %v", offers, e)
 	}
-	for i := 0; i < 4; i++ {
-		n := second
-		n.ID = fmt.Sprint("extra", i)
+}
+
+func TestMoreThanFourReachableDecisionNodesRemainBoundedByAcyclicFlow(t *testing.T) {
+	_, _, p := decisionFixture(t)
+	var ex routingExecutionContext
+	if err := json.Unmarshal([]byte(p.ContextJSON), &ex); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= 6; i++ {
+		id := fmt.Sprintf("select%d", i)
+		next := "end"
+		if i < 6 {
+			next = fmt.Sprintf("select%d", i+1)
+		}
+		n := ex.Definition.Nodes[0]
+		n.ID = id
+		n.Branches = map[string]string{"fallback": next}
 		ex.Definition.Nodes = append(ex.Definition.Nodes, n)
 	}
-	if len(validateRoutingDefinition(ex.Definition)) == 0 {
-		t.Fatal("unbounded decisions allowed")
+	ex.Definition.Nodes[0].Branches["fallback"] = "select2"
+	if errs := validateRoutingDefinition(ex.Definition); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	ex.Definition.Nodes[len(ex.Definition.Nodes)-1].Branches["fallback"] = "select"
+	if errs := validateRoutingDefinition(ex.Definition); len(errs) == 0 {
+		t.Fatal("cycle accepted")
 	}
 }
 

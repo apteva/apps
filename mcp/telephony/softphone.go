@@ -734,6 +734,10 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		a.softphonePlace(w, r, project)
 	case strings.HasPrefix(action, "answer/"):
 		a.softphoneAnswer(w, r, project, strings.TrimPrefix(action, "answer/"))
+	case strings.HasPrefix(action, "offer/ack/"):
+		a.softphoneOfferResponse(w, r, project, strings.TrimPrefix(action, "offer/ack/"), false)
+	case strings.HasPrefix(action, "offer/decline/"):
+		a.softphoneOfferResponse(w, r, project, strings.TrimPrefix(action, "offer/decline/"), true)
 	case strings.HasPrefix(action, "release/"):
 		a.softphoneReleaseAnswer(w, r, project, strings.TrimPrefix(action, "release/"))
 	default:

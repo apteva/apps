@@ -18,7 +18,10 @@ export interface Call {
   from_number: string;
   to_number: string;
   routing_waiting?: boolean;
-  ring_offers?: Array<{ destination_id: string; kind: string }>;
+  ring_offers?: Array<{ id: string; destination_id: string; kind: string }>;
+  call_classification?: string;
+  callback_opportunity_id?: string;
+  routing_resolution?: string;
   hold_state?: "active" | "starting" | "held" | "stopping" | "unknown" | "ended";
   recording_state?: "off" | "active" | "pause_requested" | "paused" | "resume_requested" | "unknown" | "ended";
   control_error?: string;
@@ -123,6 +126,7 @@ export class TelephonyClient {
     let stream: { close(): void } | undefined;
     let running = false;
     let queued = false;
+    const acknowledged = new Set<string>();
     const close = () => {
       clearTimeout(timer); controller.abort(); stream?.close();
       options.signal?.removeEventListener("abort", close);
@@ -139,6 +143,16 @@ export class TelephonyClient {
         const calls = await this.listCalls(controller.signal);
         if (!controller.signal.aborted) {
           onCalls(calls);
+          for (const call of calls) {
+            if (call.answerable !== true || call.status !== "pending") continue;
+            for (const offer of call.ring_offers ?? []) {
+              if (offer.kind !== "browser" || !offer.id || acknowledged.has(offer.id)) continue;
+              acknowledged.add(offer.id);
+              void this.acknowledgeOffer(call.id, offer.id).catch(error => {
+                if (![404, 405].includes((error as { status?: number })?.status ?? 0)) acknowledged.delete(offer.id);
+              });
+            }
+          }
           // Diagnostic observers cannot interrupt call detection.
           try { options.onTiming?.({ trigger, fetchMs: performance.now() - started }); } catch {}
         }
@@ -197,6 +211,14 @@ export class TelephonyClient {
       }
       throw error;
     }
+  }
+
+  async acknowledgeOffer(callIDValue: string, offerID: string): Promise<void> {
+    await this.app.post(this.path(`/softphone/offer/ack/${callID(callIDValue)}`), { offer_id: offerID });
+  }
+
+  async declineOffer(callIDValue: string, offerID: string): Promise<void> {
+    await this.app.post(this.path(`/softphone/offer/decline/${callID(callIDValue)}`), { offer_id: offerID });
   }
 
   /** Attach an assigned human call; never dials or takes another user's call. */
