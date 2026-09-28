@@ -1,3 +1,29 @@
+# Apteva Code 0.14.4
+
+This patch release lets `repos_git_import` pin an import to any reachable Git
+commit SHA as well as a branch or tag. Branch imports retain their local branch
+and upstream tracking; tag and commit imports use detached HEAD so the working
+tree is exactly the requested immutable revision.
+
+Unknown or unreachable refs fail before Code creates a repository record, with
+an actionable error that distinguishes the accepted ref forms.
+
+It also adds reviewed ZIP import through MCP. Agents can preview an archive
+against a new or existing repository, inspect additions and overwrites, then
+apply the same staged bytes with `import_id` and `confirm=true`. Overlay imports
+preserve files absent from the archive. Destination changes or repository
+replacement after preview reject the apply without modifying files. ZIP import
+does not require Git or create a native checkpoint automatically.
+
+## Validation
+
+Smart-HTTP regression coverage verifies tracking-branch, tag, full commit SHA,
+and missing-ref imports against a real disposable Git remote. ZIP regression
+coverage exercises preview/apply identity, stale destinations, invalid archives,
+and both new-repository and overlay imports.
+
+---
+
 # Apteva Code 0.14.3
 
 This patch release makes agent patching compatible with both unified diffs and

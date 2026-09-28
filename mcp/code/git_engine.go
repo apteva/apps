@@ -178,10 +178,7 @@ func (g *gitEngine) clone(ctx context.Context, remoteURL, ref, workTree, gitDir 
 		"-c", "protocol.ext.allow=never",
 		"-c", "core.symlinks=false",
 		"-c", "core.hooksPath=" + g.hooksDir,
-		"clone", "--no-recurse-submodules", "--separate-git-dir=" + gitDir,
-	}
-	if ref != "" {
-		args = append(args, "--branch", ref)
+		"clone", "--no-checkout", "--no-recurse-submodules", "--separate-git-dir=" + gitDir,
 	}
 	args = append(args, "--", remoteURL, workTree)
 	if _, err := g.run(ctx, "", "", auth, args...); err != nil {
@@ -190,10 +187,81 @@ func (g *gitEngine) clone(ctx context.Context, remoteURL, ref, workTree, gitDir 
 		}
 		return err
 	}
+	if err := g.configure(ctx, workTree, gitDir); err != nil {
+		return err
+	}
+	if ref != "" {
+		if err := g.checkoutCloneRef(ctx, workTree, gitDir, ref); err != nil {
+			return err
+		}
+	} else if _, err := g.run(ctx, workTree, gitDir, nil, "checkout", "--no-recurse-submodules"); err != nil {
+		return err
+	}
 	if treeBytes(workTree)+treeBytes(gitDir) > maxRepoBytes() {
 		return errors.New("clone exceeds configured repository size limit")
 	}
-	return g.configure(ctx, workTree, gitDir)
+	return nil
+}
+
+// checkoutCloneRef preserves a local tracking branch when ref names a remote
+// branch. Tags and other reachable commits are checked out detached so the
+// imported working tree stays pinned to the exact requested revision.
+func (g *gitEngine) checkoutCloneRef(ctx context.Context, workTree, gitDir, ref string) error {
+	branch := cloneBranchName(ref)
+	if branch != "" {
+		localRef := "refs/heads/" + branch
+		if _, err := g.resolveCommit(ctx, workTree, gitDir, localRef); err == nil {
+			if _, err := g.run(ctx, workTree, gitDir, nil,
+				"checkout", "--no-recurse-submodules", branch); err != nil {
+				return err
+			}
+			return nil
+		}
+		remoteRef := "refs/remotes/origin/" + branch
+		if _, err := g.resolveCommit(ctx, workTree, gitDir, remoteRef); err == nil {
+			if _, err := g.run(ctx, workTree, gitDir, nil,
+				"checkout", "--no-recurse-submodules", "-b", branch, "--track", remoteRef); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+
+	resolved, err := g.resolveCommit(ctx, workTree, gitDir, ref)
+	if err != nil {
+		return fmt.Errorf("git ref %q is not a remote branch, tag, or reachable commit", ref)
+	}
+	_, err = g.run(ctx, workTree, gitDir, nil,
+		"checkout", "--no-recurse-submodules", "--detach", resolved)
+	return err
+}
+
+func cloneBranchName(ref string) string {
+	switch {
+	case strings.HasPrefix(ref, "refs/heads/"):
+		return strings.TrimPrefix(ref, "refs/heads/")
+	case strings.HasPrefix(ref, "refs/remotes/origin/"):
+		return strings.TrimPrefix(ref, "refs/remotes/origin/")
+	case strings.HasPrefix(ref, "origin/"):
+		return strings.TrimPrefix(ref, "origin/")
+	case strings.HasPrefix(ref, "refs/"):
+		return ""
+	default:
+		return ref
+	}
+}
+
+func (g *gitEngine) resolveCommit(ctx context.Context, workTree, gitDir, ref string) (string, error) {
+	out, err := g.run(ctx, workTree, gitDir, nil,
+		"rev-parse", "--verify", "--quiet", "--end-of-options", ref+"^{commit}")
+	if err != nil {
+		return "", err
+	}
+	sha := strings.TrimSpace(out)
+	if sha == "" {
+		return "", errors.New("empty resolved Git revision")
+	}
+	return sha, nil
 }
 
 func (g *gitEngine) configure(ctx context.Context, workTree, gitDir string) error {

@@ -1,5 +1,20 @@
 # Apteva Code
 
+## v0.14.4
+
+`repos_git_import` accepts branches, tags, and reachable commit SHAs. Branch
+imports preserve origin tracking, while tags and commits use detached HEAD to
+keep the imported working tree pinned to the exact requested revision.
+
+`repos_import_zip` lets an agent import a ZIP without Git or a remote. Preview
+with `dry_run=true`, an `archive` (base64 ZIP or a Core `blobref://` handle),
+`target_mode` (`create` or `overlay`), and a target name/slug. The response
+includes a 30-minute `import_id`, archive checksum, change counts, and the
+overwritten-path list. Apply with `import_id` and `confirm=true`. Code rechecks
+the exact staged ZIP and destination before writing; overlay keeps files not
+present in the archive. Imported files are ordinary working-tree edits, so a
+native checkpoint is optional and can be made after inspection.
+
 ## v0.13.1
 
 Uses a unique workspace name for each preview attempt, including retries after

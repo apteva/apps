@@ -378,10 +378,48 @@ func TestRecoveryGitRemoteLifecycle(t *testing.T) {
 	if err := g.push(ctx, w, d, "origin", "main", true, nil); err != nil {
 		t.Fatal(err)
 	}
+	initialSHA, err := g.run(ctx, w, d, nil, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialSHA = strings.TrimSpace(initialSHA)
+	if _, err := g.run(ctx, w, d, nil, "tag", "pinned", initialSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.run(ctx, w, d, nil, "push", "origin", "refs/tags/pinned"); err != nil {
+		t.Fatal(err)
+	}
 	cloned := t.TempDir()
 	cw, cd := filepath.Join(cloned, "work"), filepath.Join(cloned, "metadata.git")
 	if err := g.clone(ctx, remote, "main", cw, cd, nil); err != nil {
 		t.Fatal(err)
+	}
+	branchStatus, err := g.status(ctx, cw, cd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branchStatus.Branch != "main" || branchStatus.Upstream != "origin/main" || branchStatus.Detached {
+		t.Fatalf("branch clone did not preserve tracking: %+v", branchStatus)
+	}
+	for name, ref := range map[string]string{"tag": "pinned", "commit": initialSHA} {
+		t.Run("clone_"+name, func(t *testing.T) {
+			root := t.TempDir()
+			work, metadata := filepath.Join(root, "work"), filepath.Join(root, "metadata.git")
+			if err := g.clone(ctx, remote, ref, work, metadata, nil); err != nil {
+				t.Fatal(err)
+			}
+			status, err := g.status(ctx, work, metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !status.Detached || status.HeadSHA != initialSHA {
+				t.Fatalf("pinned clone resolved incorrectly: %+v", status)
+			}
+		})
+	}
+	missing := t.TempDir()
+	if err := g.clone(ctx, remote, "missing-ref", filepath.Join(missing, "work"), filepath.Join(missing, "metadata.git"), nil); err == nil || !strings.Contains(err.Error(), "not a remote branch, tag, or reachable commit") {
+		t.Fatalf("unexpected missing ref error: %v", err)
 	}
 	os.WriteFile(filepath.Join(w, "a"), []byte("upstream"), 0644)
 	if _, err := g.commit(ctx, w, d, "upstream", []string{"a"}, "Test", "test@example.invalid"); err != nil {

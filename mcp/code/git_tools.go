@@ -12,9 +12,10 @@ func (a *App) gitMCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "repos_git_import",
-			Description: "Clone a standard HTTPS Git remote into a new Code repository, preserving history and upstream tracking. Args: remote_url, ref?, name?, slug?, description?, framework?, connection_id?. Public remotes do not require a connection.",
+			Description: "Clone a standard HTTPS Git remote into a new Code repository, preserving history. An optional ref may name a branch, tag, or reachable commit SHA; branches retain upstream tracking while tags and commits are pinned with detached HEAD. Args: remote_url, ref?, name?, slug?, description?, framework?, connection_id?. Public remotes do not require a connection.",
 			InputSchema: schemaObject(map[string]any{
-				"remote_url": map[string]any{"type": "string"}, "ref": map[string]any{"type": "string"},
+				"remote_url": map[string]any{"type": "string"},
+				"ref":        map[string]any{"type": "string", "description": "Optional remote branch, tag, or reachable commit SHA."},
 				"name": map[string]any{"type": "string"}, "slug": map[string]any{"type": "string"},
 				"description": map[string]any{"type": "string"}, "framework": map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},

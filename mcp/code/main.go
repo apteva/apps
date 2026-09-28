@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -27,15 +28,16 @@ var manifestYAML string
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	store     FileStore
-	dataDir   string
-	dev       *devSupervisor
-	commands  commandCoordinator
-	git       *gitService
-	syncer    *autoSyncSupervisor
-	native    *nativeVCS
-	locks     *repoLockSet
-	summaries summaryCache
+	store      FileStore
+	dataDir    string
+	dev        *devSupervisor
+	commands   commandCoordinator
+	git        *gitService
+	syncer     *autoSyncSupervisor
+	native     *nativeVCS
+	locks      *repoLockSet
+	summaries  summaryCache
+	zipImports sync.Mutex
 }
 
 var globalCtx *sdk.AppCtx
@@ -327,14 +329,23 @@ func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 	return withRepoWrite(store, slug, func(raw FileStore) (int, error) { return readZipIntoUnlocked(raw, slug, zr) })
 }
 func readZipIntoUnlocked(store FileStore, slug string, zr *zip.Reader) (int, error) {
+	changes, err := zipFileMutations(zr)
+	if err != nil {
+		return 0, err
+	}
+	if err := applyFileMutations(store, slug, changes); err != nil {
+		return 0, err
+	}
+	return len(changes), nil
+}
+
+// zipFileMutations is shared by HTTP upload and reviewed MCP import. Parse and
+// validate the complete archive before either path changes a working tree.
+func zipFileMutations(zr *zip.Reader) ([]fileMutation, error) {
 	count := 0
 	var total int64
 	limits := currentImportLimits()
-	type pendingFile struct {
-		path string
-		body []byte
-	}
-	pending := make([]pendingFile, 0, len(zr.File))
+	changes := make([]fileMutation, 0, len(zr.File))
 	modes := map[string]os.FileMode{}
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
@@ -351,13 +362,13 @@ func readZipIntoUnlocked(store FileStore, slug string, zr *zip.Reader) (int, err
 		_ = filepath.Base(name) // touch filepath to ensure import for future use
 		clean, err := normalisePath(name)
 		if err != nil {
-			return count, fmt.Errorf("zip entry %q: %w", f.Name, err)
+			return nil, fmt.Errorf("zip entry %q: %w", f.Name, err)
 		}
 		if _, exists := modes[clean]; exists {
-			return 0, fmt.Errorf("duplicate archive path %q", clean)
+			return nil, fmt.Errorf("duplicate archive path %q", clean)
 		}
 		if f.Mode()&os.ModeSymlink != 0 {
-			return 0, errors.New("ZIP symlinks are not supported; use Git or workspace transfer")
+			return nil, errors.New("ZIP symlinks are not supported; use Git or workspace transfer")
 		}
 		modes[clean] = f.Mode().Perm()
 		if modes[clean] == 0 {
@@ -366,32 +377,25 @@ func readZipIntoUnlocked(store FileStore, slug string, zr *zip.Reader) (int, err
 		count++
 		size := int64(f.UncompressedSize64)
 		if err := checkImportEntry(limits, clean, size, total, count); err != nil {
-			return count - 1, err
+			return nil, err
 		}
 		rc, err := f.Open()
 		if err != nil {
-			return count, err
+			return nil, err
 		}
 		body, err := io.ReadAll(io.LimitReader(rc, size+1))
 		if err != nil {
 			rc.Close()
-			return count, err
+			return nil, err
 		}
 		rc.Close()
 		if int64(len(body)) != size {
-			return count - 1, fmt.Errorf("zip entry %q size mismatch", clean)
+			return nil, fmt.Errorf("zip entry %q size mismatch", clean)
 		}
-		pending = append(pending, pendingFile{path: clean, body: body})
+		changes = append(changes, fileMutation{Path: clean, Body: body, Mode: modes[clean]})
 		total += size
 	}
-	changes := make([]fileMutation, 0, len(pending))
-	for _, file := range pending {
-		changes = append(changes, fileMutation{Path: file.path, Body: file.body, Mode: modes[file.path]})
-	}
-	if err := applyFileMutations(store, slug, changes); err != nil {
-		return 0, err
-	}
-	return count, nil
+	return changes, nil
 }
 
 func readFull(r interface{ Read([]byte) (int, error) }, buf []byte) (int, error) {

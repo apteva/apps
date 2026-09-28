@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.3
+version: 0.14.4
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.4 imports an exact Git branch, tag, or reachable commit SHA while
+  preserving branch tracking and pinning tags and commits to detached HEAD.
   v0.14.3 accepts both unified diffs and Codex-style patches, safely
   normalizes bounded hunk counts, and reports actionable parser diagnostics.
   v0.6.2 adds atomic human and agent issue claims so collaborators can
@@ -175,10 +177,12 @@ provides:
       description: Read a bounded authenticated byte range from an immutable source snapshot.
     - name: repos_export
       description: Capture immutable ZIP source with revision, checksum, size and optional subdirectory; small exports include base64, large exports support chunk reads.
+    - name: repos_import_zip
+      description: Preview then apply a ZIP archive to a new or existing repository through MCP; staged bytes and destination changes are verified before applying.
     - name: repos_import_github
       description: Import a GitHub repository as a local repo (gzip tarball snapshot via the bound github connection).
     - name: repos_git_import
-      description: Clone a standard HTTPS Git remote into a new Code repository with history and upstream tracking.
+      description: Clone a standard HTTPS Git remote at a branch, tag, or reachable commit SHA; branches retain upstream tracking and pinned refs use detached HEAD.
     - name: repos_git_connect
       description: Safely connect an existing Code repository to a Git remote without overwriting differing local files.
     - name: repos_git_status

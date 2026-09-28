@@ -20,8 +20,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 71 {
-		t.Errorf("expected 71 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 72 {
+		t.Errorf("expected 72 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if len(m.Provides.UIComponents) != 3 {
 		t.Errorf("expected 3 UI components in manifest, got %d", len(m.Provides.UIComponents))
@@ -132,7 +132,7 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		got[tool.Name] = true
 	}
 	must := []string{
-		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints", "repos_set_workspace_image",
+		"repos_list", "repos_create", "repos_get", "repos_archive", "repos_set_deploy_hints", "repos_set_workspace_image", "repos_import_zip",
 		"repos_run_command", "repos_workspace_changes", "repos_workspace_apply", "repos_workspace_destroy",
 		"code_list_files", "code_glob", "code_grep",
 		"code_read_file", "code_read_excerpt", "code_file_outline",

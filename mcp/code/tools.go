@@ -543,6 +543,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 	}
 	tools = append(tools, a.gitMCPTools()...)
+	tools = append(tools, a.zipImportTools()...)
 	tools = append(tools, a.nativeMCPTools()...)
 	tools = append(tools, a.executionTools()...)
 	return authenticatedTools(append(tools, a.autoSyncTools()...))
