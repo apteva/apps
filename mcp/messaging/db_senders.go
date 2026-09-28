@@ -25,23 +25,24 @@ import (
 // fields the DB allows NULL on so we can distinguish "unknown" from
 // "empty string".
 type senderRow struct {
-	ID                  int64
-	ProjectID           string
-	Channel             string
-	Address             string
-	Kind                string
-	DisplayName         string
-	Provider            string
-	ProviderIdentityID  string
-	Verified            bool
-	VerificationStatus  string
-	SendingEnabled      bool
-	DkimStatus          string
-	InboundBootstrapped bool
-	InboundConfig       string // JSON
-	IsDefault           bool
-	Notes               string
-	Metadata            string // JSON
+	ID                   int64
+	ProjectID            string
+	Channel              string
+	Address              string
+	Kind                 string
+	DisplayName          string
+	Provider             string
+	ProviderConnectionID int64
+	ProviderIdentityID   string
+	Verified             bool
+	VerificationStatus   string
+	SendingEnabled       bool
+	DkimStatus           string
+	InboundBootstrapped  bool
+	InboundConfig        string // JSON
+	IsDefault            bool
+	Notes                string
+	Metadata             string // JSON
 	// ParentIdentityID is the inheritance edge: a mailbox whose parent
 	// domain is verified at SES gets this set on senders_create. Used
 	// by refresh to keep inheritance mailboxes alive even though SES
@@ -57,20 +58,21 @@ type senderRow struct {
 // senderUpsert is the input shape for upsertSender — leaves the
 // id/timestamps/synced fields to the helper itself.
 type senderUpsert struct {
-	ProjectID           string
-	Channel             string
-	Address             string
-	Kind                string
-	DisplayName         string
-	Provider            string
-	ProviderIdentityID  string
-	Verified            bool
-	VerificationStatus  string
-	SendingEnabled      bool
-	DkimStatus          string
-	InboundBootstrapped bool
-	InboundConfig       string
-	Metadata            string
+	ProjectID            string
+	Channel              string
+	Address              string
+	Kind                 string
+	DisplayName          string
+	Provider             string
+	ProviderConnectionID int64
+	ProviderIdentityID   string
+	Verified             bool
+	VerificationStatus   string
+	SendingEnabled       bool
+	DkimStatus           string
+	InboundBootstrapped  bool
+	InboundConfig        string
+	Metadata             string
 	// ParentIdentityID points to the anchor identity this sender
 	// inherits from (mailbox → email_domain in identities table).
 	// Zero means standalone.
@@ -84,7 +86,7 @@ type senderUpsert struct {
 
 const senderColumns = `id, project_id, channel, address, kind,
 	COALESCE(display_name,''),
-	provider, COALESCE(provider_identity_id,''),
+	provider, COALESCE(provider_connection_id,0), COALESCE(provider_identity_id,''),
 	verified, COALESCE(verification_status,''), sending_enabled,
 	COALESCE(dkim_status,''),
 	inbound_bootstrapped, COALESCE(inbound_config,''),
@@ -103,7 +105,7 @@ func scanSender(row interface {
 	err := row.Scan(
 		&s.ID, &s.ProjectID, &s.Channel, &s.Address, &s.Kind,
 		&s.DisplayName,
-		&s.Provider, &s.ProviderIdentityID,
+		&s.Provider, &s.ProviderConnectionID, &s.ProviderIdentityID,
 		&s.Verified, &s.VerificationStatus, &s.SendingEnabled,
 		&s.DkimStatus,
 		&s.InboundBootstrapped, &s.InboundConfig,
@@ -139,6 +141,17 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 		return 0, errors.New("project_id + channel + address required")
 	}
 	addr := strings.ToLower(strings.TrimSpace(u.Address))
+	// A sender address belongs to exactly one upstream connection. Never let a
+	// second binding silently steal it through the address upsert constraint.
+	var existingProvider string
+	var existingConnection int64
+	err := db.QueryRow(`SELECT provider, provider_connection_id FROM senders WHERE project_id=? AND channel=? AND address=? AND deleted_at IS NULL`, u.ProjectID, u.Channel, addr).Scan(&existingProvider, &existingConnection)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if err == nil && (existingProvider != u.Provider || (existingConnection != 0 && u.ProviderConnectionID != 0 && existingConnection != u.ProviderConnectionID)) {
+		return 0, fmt.Errorf("sender %s already belongs to %s connection %d; remove it before assigning another provider", addr, existingProvider, existingConnection)
+	}
 	syncedClause := ""
 	if u.MarkSyncedNow {
 		syncedClause = ", last_synced_at = CURRENT_TIMESTAMP, last_sync_error = ?"
@@ -147,21 +160,22 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 	// NULLIF(?, 0) for parent_identity_id so a caller passing 0 (the
 	// zero value of int64) means "no parent" without us tripping the
 	// FK on a row that never had one.
-	_, err := db.Exec(
+	result, err := db.Exec(
 		`INSERT INTO senders (
 			project_id, channel, address, kind, display_name,
-			provider, provider_identity_id,
+			provider, provider_connection_id, provider_identity_id,
 			verified, verification_status, sending_enabled, dkim_status,
 			inbound_bootstrapped, inbound_config,
 			metadata,
 			parent_identity_id,
 			last_synced_at, last_sync_error
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0), `+
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, 0), `+
 			conditionalTS(u.MarkSyncedNow)+`, ?)
 		ON CONFLICT (project_id, channel, address) DO UPDATE SET
 			kind = excluded.kind,
 			display_name = COALESCE(NULLIF(excluded.display_name,''), display_name),
 			provider = excluded.provider,
+			provider_connection_id = CASE WHEN excluded.provider_connection_id=0 THEN senders.provider_connection_id ELSE excluded.provider_connection_id END,
 			provider_identity_id = excluded.provider_identity_id,
 			verified = excluded.verified,
 			verification_status = excluded.verification_status,
@@ -174,9 +188,12 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 			last_synced_at = excluded.last_synced_at,
 			last_sync_error = excluded.last_sync_error,
 			updated_at = CURRENT_TIMESTAMP,
-			deleted_at = NULL`,
+			deleted_at = NULL
+		WHERE senders.deleted_at IS NOT NULL OR
+			(senders.provider = excluded.provider AND
+			 (senders.provider_connection_id = 0 OR excluded.provider_connection_id = 0 OR senders.provider_connection_id = excluded.provider_connection_id))`,
 		u.ProjectID, u.Channel, addr, u.Kind, u.DisplayName,
-		u.Provider, u.ProviderIdentityID,
+		u.Provider, u.ProviderConnectionID, u.ProviderIdentityID,
 		boolInt(u.Verified), u.VerificationStatus, boolInt(u.SendingEnabled), u.DkimStatus,
 		boolInt(u.InboundBootstrapped), u.InboundConfig,
 		u.Metadata,
@@ -185,6 +202,9 @@ func dbUpsertSender(db *sql.DB, u *senderUpsert) (int64, error) {
 	)
 	if err != nil {
 		return 0, fmt.Errorf("upsert sender: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return 0, fmt.Errorf("sender %s already belongs to a different provider connection", addr)
 	}
 	_ = syncedClause // already inlined via conditionalTS
 	// Fetch the id (rowid changes between INSERT and UPDATE paths).
@@ -471,20 +491,21 @@ func dbProjectsWithNonTerminalVerifications(db *sql.DB, maxAge time.Duration) ([
 // inbound_config / metadata as nested objects when present.
 func senderRowToMap(s *senderRow) map[string]any {
 	out := map[string]any{
-		"id":                   s.ID,
-		"channel":              s.Channel,
-		"address":              s.Address,
-		"kind":                 s.Kind,
-		"display_name":         s.DisplayName,
-		"provider":             s.Provider,
-		"provider_identity_id": s.ProviderIdentityID,
-		"verified":             s.Verified,
-		"verification_status":  s.VerificationStatus,
-		"sending_enabled":      s.SendingEnabled,
-		"dkim_status":          s.DkimStatus,
-		"inbound_bootstrapped": s.InboundBootstrapped,
-		"is_default":           s.IsDefault,
-		"notes":                s.Notes,
+		"id":                     s.ID,
+		"channel":                s.Channel,
+		"address":                s.Address,
+		"kind":                   s.Kind,
+		"display_name":           s.DisplayName,
+		"provider":               s.Provider,
+		"provider_connection_id": s.ProviderConnectionID,
+		"provider_identity_id":   s.ProviderIdentityID,
+		"verified":               s.Verified,
+		"verification_status":    s.VerificationStatus,
+		"sending_enabled":        s.SendingEnabled,
+		"dkim_status":            s.DkimStatus,
+		"inbound_bootstrapped":   s.InboundBootstrapped,
+		"is_default":             s.IsDefault,
+		"notes":                  s.Notes,
 	}
 	if s.LastSyncedAt != nil {
 		out["last_synced_at"] = s.LastSyncedAt.Format(time.RFC3339)
