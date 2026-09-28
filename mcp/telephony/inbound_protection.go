@@ -250,6 +250,9 @@ func planHasAnnouncement(plan *inboundRoutingPlan) bool {
 }
 
 func terminalAnnouncementText(plan *inboundRoutingPlan) string {
+	if plan != nil && plan.TerminalMessage != "" {
+		return plan.TerminalMessage
+	}
 	if plan == nil || !planHasAnnouncement(plan) {
 		return ""
 	}
@@ -278,7 +281,7 @@ func terminalAnnouncementClientState(callID string) string {
 	return base64.StdEncoding.EncodeToString([]byte("terminal-announcement:" + callID))
 }
 
-func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) error {
+func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow, plans ...*inboundRoutingPlan) error {
 	if row != nil {
 		fresh, err := a.db().findCall(row.ID)
 		if err != nil {
@@ -296,11 +299,15 @@ func (a *App) startTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) err
 	if prompt == "" {
 		return errors.New("terminal announcement has no text")
 	}
+	language := "fr-FR"
+	if len(plans) > 0 && plans[0] != nil && plans[0].TerminalLanguage != "" {
+		language = plans[0].TerminalLanguage
+	}
 	// Store speaking only after command acceptance. If the process dies between
 	// acceptance and persistence, replay uses the same carrier idempotency key.
 	_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "speak_text", map[string]any{
 		"call_control_id": row.CarrierSID, "payload": prompt, "payload_type": "text",
-		"voice": "Telnyx.NaturalHD.Astra", "language": "fr-FR",
+		"voice": "Telnyx.NaturalHD.Astra", "language": language,
 		"client_state": terminalAnnouncementClientState(row.ID),
 		"command_id":   telnyxCommandID(row.ID, "terminal-announcement"),
 	})
@@ -330,6 +337,9 @@ func (a *App) finishTelnyxTerminalAnnouncement(ctx *sdk.AppCtx, row *callRow) er
 		return err
 	}
 	_, err = a.db().db.Exec(`UPDATE calls SET announcement_state='finished' WHERE id=? AND announcement_state='finishing'`, row.ID)
+	if err == nil && isSuppressedHandlingReason(row.HandlingReason) {
+		_, err = a.db().updateStatusWithFacts(row.ID, "canceled", row.ErrorMessage, lifecycleFacts{Source: "telephony", TerminationInitiator: "telephony"})
+	}
 	return err
 }
 

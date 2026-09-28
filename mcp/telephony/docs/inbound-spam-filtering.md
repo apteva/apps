@@ -42,3 +42,49 @@ an upstream dialer reacts or prevent new carrier sessions from arriving.
 Use `telephony_call_get` to inspect separate carrier leg/session IDs, allowlisted
 routing SIP headers and recent command outcomes. These records help correlate
 repeated sessions with carrier traces; displayed caller ID alone is insufficient.
+
+## Optional completion of suspected retry bursts (local follow-up)
+
+A burst is evidence of repeated attempts, not proof of malicious callers. An
+upstream forwarding service may retry unanswered calls. For controlled testing,
+`inbound_burst_action=answer_announcement` can answer a suppressed call, wait for
+carrier answer confirmation, play a short configured message, then hang up only
+after matching speech completion. The policy is generic; this mode currently
+supports programmable Telnyx. Other transports retain rejection and report
+`announcement_unsupported` in call diagnostics.
+
+The default remains `reject`. Answering may incur carrier charges and may change
+Google/tracking-provider call reporting. Explicit caller block rules always
+reject. Destination-wide bursts remain alert-only. This mode does not offer the
+call to an adviser, start an AI thread, record it, or add it to the missed-call
+pool. It preserves `burst_suppressed` classification.
+
+Settings:
+
+| Setting | Default | Bounds / purpose |
+| --- | --- | --- |
+| `inbound_burst_action` | `reject` | `reject` or `answer_announcement` |
+| `inbound_burst_message` | We cannot take your call right now. Goodbye. | At most 240 characters |
+| `inbound_burst_language` | `en-US` | Telnyx speech language, e.g. `fr-FR` |
+| `inbound_burst_max_seconds` | `20` | 5–60 seconds from admission to deadline cleanup |
+| `inbound_burst_max_concurrent` | `3` | 1–50 active suppressed announcements per project |
+
+Disposition, message and language are pinned at admission. Capacity is reserved
+transactionally through active call records and survives restart. Excess
+suppressed calls use explicit rejection with reason `announcement_capacity`;
+this limit never excludes unrelated callers. Migration 034 indexes active burst
+announcements so capacity checks do not scan completed call history.
+
+Duplicate initiated webhooks do not reissue an accepted answer while waiting for
+its confirmation. Failed commands use the existing bounded retry queue. Missing
+answer/speech callbacks trigger hangup at the configured deadline; carrier
+outages can still delay physical disconnection. Call diagnostics expose the
+selected action, reason and execution stage under `suppression`.
+
+This removes pre-answer rejection from the selected bounded burst path. It does
+not promise to stop an independent upstream retry loop, and it cannot establish
+whether Google, Telnyx or another provider originates repeats. Verify using one
+originating direct call and one through the actual forwarding path, with carrier
+SIP traces and a count of new sessions after completion. Local tests cannot
+substitute for that network verification. No automatic deployment or live call
+is part of this change.

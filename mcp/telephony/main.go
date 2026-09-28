@@ -282,6 +282,11 @@ config_schema:
   - { name: inbound_burst_per_caller, type: text, default: "12", label: "New calls per caller and number in window", description: "0 disables this limit. Counts distinct carrier call IDs." }
   - { name: inbound_burst_per_number, type: text, default: "60", label: "New calls per number in window", description: "0 disables this alert. Detects rotating caller IDs without blocking the destination." }
   - { name: inbound_burst_cooldown_seconds, type: text, default: "300", label: "Burst suppression cooldown (seconds)" }
+  - { name: inbound_burst_action, type: text, default: "reject", label: "Suspected burst handling", description: "reject or answer_announcement. Optional announcement mode currently supports programmable Telnyx only; answering may incur charges and affect call reporting. Explicit blocks always reject." }
+  - { name: inbound_burst_message, type: text, default: "We cannot take your call right now. Goodbye.", label: "Burst announcement", description: "Up to 240 characters; used only in answer_announcement mode." }
+  - { name: inbound_burst_language, type: text, default: "en-US", label: "Burst announcement language" }
+  - { name: inbound_burst_max_seconds, type: text, default: "20", label: "Burst announcement maximum seconds", description: "5–60 seconds including answer and speech callbacks." }
+  - { name: inbound_burst_max_concurrent, type: text, default: "3", label: "Concurrent burst announcements per project", description: "1–50. Excess suppressed calls use rejection; unrelated calls remain eligible." }
   - { name: inbound_burst_trusted_numbers, type: text, label: "Trusted caller numbers", description: "Comma-separated E.164 caller numbers exempt from the per-caller limit; destination-wide protection still applies." }
   - { name: inbound_spam_blocked_callers, type: text, label: "Blocked displayed caller numbers", description: "Comma-separated E.164 caller numbers, optionally scoped as caller@destination. Rejects matching calls before adviser delivery; never disables the destination number. Displayed caller ID can be spoofed." }
   - { name: human_audio_send_ahead_ms, type: select, default: "40", label: "Human audio send-ahead (ms)", options: ["20", "40", "60", "80"], description: "Carrier pacing cushion for new human/external bridges. Keep 40 unless measurements justify a change. Stale-audio limits remain enabled." }
@@ -2739,7 +2744,11 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 			callID, from, to,
 		)
 	}
-	stored, created, err := a.db().insertInboundCallWithEvent(call, msg, plan)
+	handlingPolicy := loadBurstHandlingPolicy(nil)
+	if globalCtx != nil {
+		handlingPolicy = loadBurstHandlingPolicy(globalCtx.WithProject(route.ProjectID).Config())
+	}
+	stored, created, err := a.db().insertInboundCallWithPolicy(call, msg, handlingPolicy, plan)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2889,10 +2898,17 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if row != nil && !isTerminalStatus(row.Status) && row.RoutingFlowVersionID != "" && globalCtx != nil {
+		if row != nil && !isTerminalStatus(row.Status) && (row.RoutingFlowVersionID != "" || row.AnnouncementState != "") && globalCtx != nil {
 			ctx := globalCtx.WithProject(row.ProjectID)
 			switch event.Data.EventType {
 			case "call.answered":
+				if isSuppressedHandlingReason(row.HandlingReason) {
+					if err := a.driveRoutingEffect(ctx, row.ID, "suppression"); err != nil {
+						http.Error(w, "suppression pending; retry", 503)
+						return
+					}
+					break
+				}
 				_, plan, planErr := a.routingPlanForCall(row, nil)
 				if planErr == nil && plan != nil && (plan.TerminalType == "dtmf_menu" || plan.TerminalType == "hangup" || plan.TerminalType == "reject") {
 					if err := a.ensureRoutingEffect(row, plan); err != nil {

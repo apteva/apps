@@ -19,6 +19,10 @@ type outboxRow struct {
 }
 
 func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans ...*inboundRoutingPlan) (*callRow, bool, error) {
+	return c.insertInboundCallWithPolicy(call, message, loadBurstHandlingPolicy(nil), plans...)
+}
+
+func (c *callsDB) insertInboundCallWithPolicy(call callRow, message string, policy burstHandlingPolicy, plans ...*inboundRoutingPlan) (*callRow, bool, error) {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return nil, false, err
@@ -35,6 +39,14 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return nil, false, err
+	}
+
+	var suppressionPlan *inboundRoutingPlan
+	if isSuppressedHandlingReason(call.HandlingReason) {
+		suppressionPlan, err = burstHandlingPlanTx(tx, &call, policy)
+		if err != nil {
+			return nil, false, err
+		}
 	}
 
 	_, err = tx.Exec(`INSERT INTO calls
@@ -75,7 +87,7 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 		}
 	}
 	if isSuppressedHandlingReason(call.HandlingReason) {
-		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, &inboundRoutingPlan{NodeID: "suppression", TerminalType: "reject"}); err != nil {
+		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, suppressionPlan); err != nil {
 			return nil, false, err
 		}
 	}

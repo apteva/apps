@@ -46,7 +46,7 @@ func reliabilityEvent(t *testing.T, a *App, route *routeRow, row *callRow, key e
 			payload[key] = value
 		}
 	}
-	raw, e := json.Marshal(map[string]any{"data": map[string]any{"id": event, "event_type": event, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": payload}})
+	raw, e := json.Marshal(map[string]any{"data": map[string]any{"id": event + ":" + row.CarrierSID, "event_type": event, "occurred_at": time.Now().UTC().Format(time.RFC3339Nano), "payload": payload}})
 	if e != nil {
 		t.Fatal(e)
 	}
