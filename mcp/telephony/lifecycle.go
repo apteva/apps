@@ -67,7 +67,7 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	}); err != nil {
 		return nil, false, err
 	}
-	if call.HandlingReason != handlingBurstSuppressed && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
+	if !isSuppressedHandlingReason(call.HandlingReason) && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {
@@ -147,6 +147,9 @@ func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID strin
 	if row.Status != "pending" {
 		return nil
 	}
+	if isSuppressedHandlingReason(row.HandlingReason) {
+		return nil
+	}
 	_, err = a.answerCall(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, true)
 	return err
 }
@@ -159,6 +162,7 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
         FROM calls c JOIN inbound_routes r ON r.id = c.route_id
         WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
+	          AND COALESCE(c.handling_reason,'')=''
           AND r.enabled = 1
           AND (c.state_expires_at = '' OR c.state_expires_at > ?)
         ORDER BY c.placed_at LIMIT 20`, project, time.Now().UTC().Format(time.RFC3339))

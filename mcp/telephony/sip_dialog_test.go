@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +35,10 @@ type sipDialogFixture struct {
 }
 
 func newSIPDialogFixture(t *testing.T, secure bool, ackTimeout time.Duration) *sipDialogFixture {
+	return newSIPDialogFixtureWithRoute(t, secure, ackTimeout, nil)
+}
+
+func newSIPDialogFixtureWithRoute(t *testing.T, secure bool, ackTimeout time.Duration, configure func(*App, *routeRow)) *sipDialogFixture {
 	t.Helper()
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -65,6 +70,9 @@ func newSIPDialogFixture(t *testing.T, secure bool, ackTimeout time.Duration) *s
 	t.Cleanup(gateway.Stop)
 	app.sip.gateway = gateway
 	route := routeRow{ID: "dialog-route", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 10, PhoneNumber: "+12025550100", AgentID: 7, Enabled: true, Secret: "test", AnswerMode: answerModeAgent, TimeoutSec: 60, InboundTransport: inboundTransportSIPDirect, TransportConfig: `{"provider":"twilio","trunk_id":"TK1"}`}
+	if configure != nil {
+		configure(app, &route)
+	}
 	if err = app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +183,58 @@ func (f *sipDialogFixture) waitRefreshIdle(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("SIP refresh handler did not finish")
+}
+
+func TestDIDWWDirectSIPDecisionOfferKeepsCallerRingingUntilAnswer(t *testing.T) {
+	f := newSIPDialogFixtureWithRoute(t, false, 2*time.Second, func(app *App, route *routeRow) {
+		route.CarrierSlug = "didww"
+		route.TransportConfig = `{"provider":"didww","trunk_id":"trunk-test"}`
+		route.AnswerMode = answerModeHumanBrowser
+		identity := phoneTestIdentity("sip-adviser")
+		_, err := app.saveRoutingDestination(route.ProjectID, "sip-adviser", "SIP adviser", "browser", map[string]any{
+			"capacity": destinationCapacity{Identity: identity, Limit: 1},
+		}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, _ := json.Marshal(phonePolicy{Users: []phoneUser{{Identity: identity, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{"sip-adviser"}}}}})
+		if _, err := app.db().db.Exec(`INSERT INTO telephony_access_policies(project_id,revision,policy_json) VALUES(?,?,?)`, route.ProjectID, 1, string(policy)); err != nil {
+			t.Fatal(err)
+		}
+		definition := routingDefinition{Entry: "choose", Nodes: []routingNode{
+			{ID: "choose", Type: "decision", Config: map[string]any{"function_id": 42, "timeout_ms": 5000, "destination_ids": []string{"sip-adviser"}}, Branches: map[string]string{"fallback": "end"}},
+			{ID: "end", Type: "hangup"},
+		}}
+		draft, _ := json.Marshal(definition)
+		flow, err := app.saveRoutingFlow(route.ProjectID, "", "SIP decision", "", string(draft))
+		if err != nil {
+			t.Fatal(err)
+		}
+		version, problems, err := app.publishRoutingFlow(route.ProjectID, flow.ID)
+		if err != nil || len(problems) != 0 {
+			t.Fatalf("publish decision flow: %v %v", err, problems)
+		}
+		route.FlowID, route.PublishedFlowVersionID = flow.ID, version.ID
+	})
+	if f.call.Status != "pending" || f.session.media != nil {
+		t.Fatalf("decision answered SIP before adviser selection: %+v", f.call)
+	}
+	decisions, err := f.app.listDecisions("project-a", f.call.ID)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("SIP decision missing: %v %v", decisions, err)
+	}
+	decision := decisions[0]
+	if err := f.app.completeDecision(decision, decisionResponse{DecisionID: decision.ID, Action: "offer", DestinationID: "sip-adviser"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	offers, err := f.app.db().activeRingOffers(f.call.ID, "project-a")
+	if err != nil || len(offers) != 1 || offers[0].DestinationID != "sip-adviser" || f.session.media != nil {
+		t.Fatalf("SIP offer did not preserve unanswered leg: %+v %v", offers, err)
+	}
+	f.answer(t)
+	if f.session.media == nil {
+		t.Fatal("selected SIP call did not answer")
+	}
 }
 func TestSIPAnsweredDialogRefreshAndBidirectionalMedia(t *testing.T) {
 	for _, secure := range []bool{false, true} {

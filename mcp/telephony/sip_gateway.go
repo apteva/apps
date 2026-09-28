@@ -374,6 +374,11 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		respond(sip.StatusNotFound, "No Route")
 		return
 	}
+	if err := g.app.validatePublishedFlowForInboundRoute(route); err != nil {
+		g.appCtx.Logger().Error("direct SIP published flow is not executable", "route", route.ID, "err", err)
+		respond(sip.StatusServiceUnavailable, "Routing Unavailable")
+		return
+	}
 	dialog, err := g.dialogs.ReadInvite(request, transaction)
 	if err != nil {
 		respond(sip.StatusBadRequest, "Invalid Dialog")
@@ -397,7 +402,7 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 		_ = dialog.Close()
 		return
 	}
-	if call.HandlingReason == handlingBurstSuppressed {
+	if isSuppressedHandlingReason(call.HandlingReason) {
 		_ = g.app.db().updateStatus(call.ID, "canceled", call.ErrorMessage)
 		_ = dialog.Respond(sip.StatusBusyHere, "Burst Suppressed", nil)
 		_ = dialog.Close()
@@ -433,7 +438,13 @@ func (g *sipGateway) handleInvite(request *sip.Request, transaction sip.ServerTr
 	if err := g.app.deliverOutboxCall(projectCtx, call.ID); err != nil {
 		projectCtx.Logger().Warn("deliver direct SIP incoming call event", "call", call.ID, "err", err)
 	}
-	g.app.enqueueImmediateAnswer(route, call.ID)
+	if routeForCall.RoutingTerminalType == "hangup" || routeForCall.RoutingTerminalType == "reject" {
+		if err := g.app.expireCall(projectCtx, call); err != nil {
+			projectCtx.Logger().Warn("finish direct SIP terminal route", "call", call.ID, "err", err)
+		}
+	} else {
+		g.app.enqueueImmediateAnswer(&routeForCall, call.ID)
+	}
 
 	// sipgo terminates the INVITE server transaction when this handler
 	// returns. Keep it alive so carrier CANCEL requests can match while the

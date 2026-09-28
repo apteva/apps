@@ -61,8 +61,22 @@ Example flow draft, with a saved static overflow group:
 }
 ```
 
-Publish and assign the flow to a Twilio or Telnyx webhook number. Direct SIP does
-not support decisions. The published version pins the function ID, configuration
+Publish and assign the flow to a Twilio, Telnyx, or manually configured
+Bandwidth webhook number, or a direct SIP number from Twilio, Telnyx, or DIDWW.
+Direct SIP supports browser and AI decisions while the carrier INVITE rings.
+It does not yet support announcement,
+DTMF menu, voicemail, or external destination nodes. Bandwidth inbound routing
+supports decisions and terminal announcements, but not Telephony-managed DTMF,
+voicemail, or external destinations. Its Voice Application is assigned to a
+Location, so Telephony returns callback URLs and credentials for manual setup
+and never changes a shared Location. Configure a dedicated Bandwidth Voice
+Application with the returned initiate and disconnect URLs and Basic credentials,
+then assign only the intended Location to that Application. Telephony validates
+the account, Application, destination number, and credentials on every callback.
+The route is not live until this carrier setup is complete. Disabling the route
+locally requires restoring the provider Location assignment manually.
+
+The published version pins the function ID, configuration
 and permitted destination snapshots. **Functions executes the active function
 version**; it does not pin function source. Deploy business-rule changes with that
 policy in mind.

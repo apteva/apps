@@ -708,15 +708,19 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 		return []string{"route is unavailable"}
 	}
 	errs := []string{}
+	capabilities := inboundCapabilities(route)
 	for _, node := range def.Nodes {
-		if node.Type == "decision" && (route.InboundTransport == inboundTransportSIPDirect || (route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx")) {
-			errs = append(errs, "routing decisions require a Twilio or Telnyx webhook route")
+		if node.Type == "decision" && !capabilities.Decisions {
+			errs = append(errs, fmt.Sprintf("%s %s routes do not support routing decisions", route.CarrierSlug, route.InboundTransport))
 		}
-		if node.Type == "dtmf_menu" && (route.InboundTransport == inboundTransportSIPDirect || (route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx")) {
+		if node.Type == "dtmf_menu" && !capabilities.DTMFMenu {
 			errs = append(errs, fmt.Sprintf("%s does not support Telephony-managed DTMF menus on this route", route.CarrierSlug))
 		}
-		if node.Type == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
+		if node.Type == "voicemail" && !capabilities.Voicemail {
 			errs = append(errs, fmt.Sprintf("voicemail is not enabled for %s routes yet", route.CarrierSlug))
+		}
+		if node.Type == "announcement" && !capabilities.TerminalAnnouncements {
+			errs = append(errs, fmt.Sprintf("%s %s routes cannot play routing announcements", route.CarrierSlug, route.InboundTransport))
 		}
 		ids := []string{}
 		if node.Type == "destination" {
@@ -750,14 +754,11 @@ func (a *App) validateFlowForRoute(project string, def routingDefinition, route 
 				continue
 			}
 			if destination.Kind == "pstn" || destination.Kind == "sip" {
-				if route.InboundTransport == inboundTransportSIPDirect {
-					errs = append(errs, "external ring destinations require a provider webhook route")
-				}
-				if route.CarrierSlug != "twilio" && route.CarrierSlug != "telnyx" && route.CarrierSlug != "plivo" {
-					errs = append(errs, "external ring destinations require Twilio, Telnyx, or Plivo")
+				if !capabilities.ExternalDestinations {
+					errs = append(errs, "external ring destinations are not supported on this carrier route")
 				}
 			}
-			if destination.Kind == "voicemail" && (route.CarrierSlug != "twilio" || route.InboundTransport == inboundTransportSIPDirect) {
+			if destination.Kind == "voicemail" && !capabilities.Voicemail {
 				errs = append(errs, "voicemail requires a Twilio webhook route")
 			}
 		}
@@ -1982,12 +1983,24 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 // announcement before ending the call instead of expiring it at plan commit.
 func (a *App) finishTerminalRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *routeRow, plan *inboundRoutingPlan) error {
 	if terminalAnnouncementText(plan) != "" {
+		if a.callUsesDirectSIP(row) {
+			return errors.New("direct SIP cannot play a terminal routing announcement")
+		}
 		if row.CarrierSlug == "telnyx" {
 			applyRoutingPlanToRoute(route, plan)
 			return a.executeTelnyxRoutingPlan(ctx, row, route, plan)
 		}
 		if row.CarrierSlug == "twilio" {
 			return nil // Its next wait callback renders Say, then Hangup.
+		}
+		if row.CarrierSlug == "bandwidth" {
+			if _, err := a.db().db.Exec(`UPDATE calls SET announcement_state='awaiting_redirect',announcement_text=?,handling_reason=? WHERE id=?`, terminalAnnouncementText(plan), routeHandlingReason(plan), row.ID); err != nil {
+				return err
+			}
+			_, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+				"callId": row.CarrierSID, "state": "active", "redirectUrl": a.bandwidthWaitURL(*route, row.ID), "redirectMethod": "POST",
+			})
+			return err
 		}
 	}
 	return a.expireCall(ctx, row)

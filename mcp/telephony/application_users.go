@@ -299,7 +299,7 @@ func (a *App) phoneCallAllowed(p *phonePrincipal, row *callRow, shared bool) boo
 	return false
 }
 func (a *App) phoneOfferDestination(p *phonePrincipal, row *callRow, requested string) string {
-	if row.Status != "pending" || row.Direction != "inbound" {
+	if row.Status != "pending" || row.Direction != "inbound" || isSuppressedHandlingReason(row.HandlingReason) {
 		return ""
 	}
 	offers, err := a.db().activeRingOffers(row.ID, row.ProjectID)

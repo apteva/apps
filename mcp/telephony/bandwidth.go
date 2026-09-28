@@ -32,8 +32,9 @@ func (a *App) handleBandwidthXML(w http.ResponseWriter, r *http.Request) {
 		EventType string `json:"eventType"`
 		CallID    string `json:"callId"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&event); err != nil || event.EventType != "answer" || event.CallID == "" {
-		http.Error(w, "invalid Bandwidth answer event", http.StatusBadRequest)
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&event); err != nil || event.CallID == "" ||
+		(event.EventType != "answer" && event.EventType != "redirect") || (row.Direction == "inbound" && row.RouteID != "" && event.EventType != "redirect") {
+		http.Error(w, "invalid Bandwidth media event", http.StatusBadRequest)
 		return
 	}
 	if row.CarrierSID != "" && event.CallID != row.CarrierSID {

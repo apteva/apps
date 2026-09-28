@@ -181,7 +181,7 @@ func (a *App) handlePlivoInbound(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if stored.HandlingReason == handlingBurstSuppressed {
+	if isSuppressedHandlingReason(stored.HandlingReason) {
 		_ = a.db().updateStatus(stored.ID, "canceled", stored.ErrorMessage)
 		writePlivoHangup(w)
 		return
