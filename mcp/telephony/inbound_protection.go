@@ -64,8 +64,16 @@ func loadInboundBurstPolicy(config sdk.Config) inboundBurstPolicy {
 // makes carrier webhook retries free: only genuinely new call IDs count.
 func (a *App) registerInboundAttempt(route *routeRow, carrierSID, from, to string, now time.Time, policy inboundBurstPolicy) (string, error) {
 	a.burstMu.Lock()
-	reason, err := a.registerInboundAttemptLocked(route, carrierSID, from, to, now, policy)
+	reason, destinationAlert, err := a.registerInboundAttemptLocked(route, carrierSID, from, to, now, policy)
 	a.burstMu.Unlock()
+	if destinationAlert && err == nil && globalCtx != nil {
+		ctx := globalCtx.WithProject(route.ProjectID)
+		ctx.Logger().Warn("inbound destination burst detected", "provider_call_id", carrierSID, "to", to)
+		ctx.Emit("telephony.burst.detected", map[string]any{
+			"provider_call_id": carrierSID, "to_number": to,
+			"reason": burstPerNumber, "occurred_at": now.UTC().Format(time.RFC3339Nano),
+		})
+	}
 	if reason != "" && err == nil && globalCtx != nil {
 		ctx := globalCtx.WithProject(route.ProjectID)
 		ctx.Logger().Warn("inbound burst suppressed", "provider_call_id", carrierSID, "to", to, "from", from, "reason", reason)
@@ -77,71 +85,76 @@ func (a *App) registerInboundAttempt(route *routeRow, carrierSID, from, to strin
 	return reason, err
 }
 
-func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to string, now time.Time, policy inboundBurstPolicy) (string, error) {
+func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to string, now time.Time, policy inboundBurstPolicy) (string, bool, error) {
 	if route == nil || carrierSID == "" {
-		return "", errors.New("inbound burst identity is unavailable")
+		return "", false, errors.New("inbound burst identity is unavailable")
 	}
 	if policy.PerCaller == 0 && policy.PerNumber == 0 {
-		return "", nil
+		return "", false, nil
 	}
 	to = compactPhoneNumber(to)
 	from = compactPhoneNumber(from)
 	if to == "" {
-		return "", errors.New("inbound destination is unavailable")
+		return "", false, errors.New("inbound destination is unavailable")
 	}
 	tx, err := a.db().db.Begin()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`INSERT OR IGNORE INTO inbound_burst_attempts
 		(project_id,carrier_slug,carrier_connection_id,carrier_sid,to_number,from_number,received_at)
 		VALUES(?,?,?,?,?,?,?)`, route.ProjectID, route.CarrierSlug, route.CarrierConnectionID, carrierSID, to, from, now.Unix())
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	inserted, err := result.RowsAffected()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if inserted == 0 {
 		var existing string
 		err = tx.QueryRow(`SELECT suppression_reason FROM inbound_burst_attempts WHERE project_id=? AND carrier_slug=? AND carrier_connection_id=? AND carrier_sid=?`,
 			route.ProjectID, route.CarrierSlug, route.CarrierConnectionID, carrierSID).Scan(&existing)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
-		return existing, tx.Commit()
+		return existing, false, tx.Commit()
 	}
 	trusted := policy.TrustedNumbers[from]
 	reason := ""
-	for _, candidate := range []struct {
-		key    string
-		reason string
-	}{{"*", burstPerNumber}, {from, burstPerCaller}} {
-		if candidate.key == "" || (candidate.reason == burstPerCaller && trusted) {
-			continue
-		}
+	if from != "" && !trusted && policy.PerCaller > 0 {
 		var active string
 		err = tx.QueryRow(`SELECT reason FROM inbound_burst_cooldowns WHERE project_id=? AND to_number=? AND from_number=? AND expires_at>?`,
-			route.ProjectID, to, candidate.key, now.Unix()).Scan(&active)
+			route.ProjectID, to, from, now.Unix()).Scan(&active)
 		if err == nil {
 			reason = active
-			break
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", err
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return "", false, err
 		}
 	}
-	if reason == "" && policy.PerNumber > 0 {
+	destinationAlert := false
+	if policy.PerNumber > 0 {
 		var count int64
 		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND received_at>=?`,
 			route.ProjectID, to, now.Unix()-policy.WindowSeconds+1).Scan(&count)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if count > policy.PerNumber {
-			reason = burstPerNumber
+			var active string
+			err = tx.QueryRow(`SELECT reason FROM inbound_burst_cooldowns WHERE project_id=? AND to_number=? AND from_number='*' AND expires_at>?`,
+				route.ProjectID, to, now.Unix()).Scan(&active)
+			if errors.Is(err, sql.ErrNoRows) {
+				destinationAlert = true
+				_, err = tx.Exec(`INSERT INTO inbound_burst_cooldowns(project_id,to_number,from_number,reason,expires_at)
+					VALUES(?,?,'*',?,?) ON CONFLICT(project_id,to_number,from_number)
+					DO UPDATE SET reason=excluded.reason,expires_at=excluded.expires_at`,
+					route.ProjectID, to, burstPerNumber, now.Unix()+policy.CooldownSeconds)
+			}
+			if err != nil {
+				return "", false, err
+			}
 		}
 	}
 	if reason == "" && policy.PerCaller > 0 && from != "" && !trusted {
@@ -149,32 +162,28 @@ func (a *App) registerInboundAttemptLocked(route *routeRow, carrierSID, from, to
 		err = tx.QueryRow(`SELECT COUNT(*) FROM inbound_burst_attempts WHERE project_id=? AND to_number=? AND from_number=? AND received_at>=?`,
 			route.ProjectID, to, from, now.Unix()-policy.WindowSeconds+1).Scan(&count)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if count > policy.PerCaller {
 			reason = burstPerCaller
 		}
 	}
 	if reason != "" {
-		key := from
-		if reason == burstPerNumber {
-			key = "*"
-		}
 		if _, err = tx.Exec(`INSERT INTO inbound_burst_cooldowns(project_id,to_number,from_number,reason,expires_at)
 			VALUES(?,?,?,?,?) ON CONFLICT(project_id,to_number,from_number)
 			DO UPDATE SET reason=excluded.reason,expires_at=MAX(expires_at,excluded.expires_at)`,
-			route.ProjectID, to, key, reason, now.Unix()+policy.CooldownSeconds); err != nil {
-			return "", err
+			route.ProjectID, to, from, reason, now.Unix()+policy.CooldownSeconds); err != nil {
+			return "", false, err
 		}
 		if _, err = tx.Exec(`UPDATE inbound_burst_attempts SET suppression_reason=? WHERE project_id=? AND carrier_slug=? AND carrier_connection_id=? AND carrier_sid=?`,
 			reason, route.ProjectID, route.CarrierSlug, route.CarrierConnectionID, carrierSID); err != nil {
-			return "", err
+			return "", false, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("commit inbound burst decision: %w", err)
+		return "", false, fmt.Errorf("commit inbound burst decision: %w", err)
 	}
-	return reason, nil
+	return reason, destinationAlert, nil
 }
 
 func routeHandlingReason(plan *inboundRoutingPlan) string {
