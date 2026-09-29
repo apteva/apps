@@ -1,0 +1,703 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+type service struct {
+	ctx *sdk.AppCtx
+	db  store
+}
+
+var errSealed = errors.New("sealed packs are immutable: fork it into a draft, or seal a new version")
+
+// ---- pack authoring ----
+
+func (s *service) savePack(input *Pack, creating bool) (*Pack, error) {
+	if strings.TrimSpace(input.Name) == "" {
+		return nil, errors.New("name is required")
+	}
+	now := time.Now().UTC()
+	if creating {
+		pack := &Pack{
+			ID: newID("pack"), Name: input.Name, Description: input.Description,
+			State: PackStateDraft, Scenarios: input.Scenarios, Revision: 1,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if pack.Scenarios == nil {
+			pack.Scenarios = []Scenario{}
+		}
+		if err := s.db.savePack(pack); err != nil {
+			return nil, err
+		}
+		return pack, nil
+	}
+
+	existing, err := s.requireDraft(input.ID)
+	if err != nil {
+		return nil, err
+	}
+	existing.Name, existing.Description, existing.UpdatedAt = input.Name, input.Description, now
+	if input.Scenarios != nil {
+		existing.Scenarios = input.Scenarios
+	}
+	if err := s.db.savePack(existing); err != nil {
+		return nil, err
+	}
+	return s.db.getPack(existing.ID)
+}
+
+func (s *service) requireDraft(id string) (*Pack, error) {
+	pack, err := s.db.getPack(id)
+	if err != nil {
+		return nil, err
+	}
+	if pack == nil {
+		return nil, errors.New("pack not found")
+	}
+	if pack.State != PackStateDraft {
+		return nil, errSealed
+	}
+	return pack, nil
+}
+
+func (s *service) putScenario(packID string, scenario Scenario) (*Pack, error) {
+	pack, err := s.requireDraft(packID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(scenario.Name) == "" {
+		return nil, errors.New("scenario name is required")
+	}
+	if strings.TrimSpace(scenario.Prompt) == "" {
+		return nil, errors.New("scenario prompt is required")
+	}
+	if scenario.ID == "" {
+		scenario.ID = slugify(scenario.Name)
+	}
+	if scenario.Weight <= 0 {
+		scenario.Weight = 1
+	}
+	if scenario.Checks == nil {
+		scenario.Checks = []Check{}
+	}
+	replaced := false
+	for i := range pack.Scenarios {
+		if pack.Scenarios[i].ID == scenario.ID {
+			pack.Scenarios[i], replaced = scenario, true
+			break
+		}
+	}
+	if !replaced {
+		pack.Scenarios = append(pack.Scenarios, scenario)
+	}
+	pack.UpdatedAt = time.Now().UTC()
+	if err := s.db.savePack(pack); err != nil {
+		return nil, err
+	}
+	return s.db.getPack(pack.ID)
+}
+
+func (s *service) deleteScenario(packID, scenarioID string) (*Pack, error) {
+	pack, err := s.requireDraft(packID)
+	if err != nil {
+		return nil, err
+	}
+	kept := make([]Scenario, 0, len(pack.Scenarios))
+	for _, scenario := range pack.Scenarios {
+		if scenario.ID != scenarioID {
+			kept = append(kept, scenario)
+		}
+	}
+	if len(kept) == len(pack.Scenarios) {
+		return nil, errors.New("scenario not found")
+	}
+	pack.Scenarios, pack.UpdatedAt = kept, time.Now().UTC()
+	if err := s.db.savePack(pack); err != nil {
+		return nil, err
+	}
+	return s.db.getPack(pack.ID)
+}
+
+func (s *service) deletePack(id string) error {
+	pack, err := s.db.getPack(id)
+	if err != nil {
+		return err
+	}
+	if pack == nil {
+		return errors.New("pack not found")
+	}
+	count, err := s.db.countRunsForPack(id)
+	if err != nil {
+		return err
+	}
+	// A sealed pack with runs is the definition those scores refer to.
+	// Deleting it would orphan every number ever published against it.
+	if count > 0 {
+		return fmt.Errorf("pack has %d run(s); its definition must outlive them", count)
+	}
+	return s.db.deletePack(id)
+}
+
+// seal copies a draft into a new immutable pack row. The draft stays editable:
+// the next seal mints another version rather than moving this one.
+func (s *service) seal(draftID, version string) (*Pack, error) {
+	draft, err := s.requireDraft(draftID)
+	if err != nil {
+		return nil, err
+	}
+	if len(draft.Scenarios) == 0 {
+		return nil, errors.New("cannot seal a pack with no scenarios")
+	}
+	for _, scenario := range draft.Scenarios {
+		if err := validateScenario(scenario); err != nil {
+			return nil, err
+		}
+	}
+
+	if strings.TrimSpace(version) == "" {
+		sealed, err := s.db.sealedVersions(draft.ID)
+		if err != nil {
+			return nil, err
+		}
+		version = fmt.Sprintf("%d.0.0", sealed+1)
+	}
+
+	now := time.Now().UTC()
+	pack := &Pack{
+		ID: newID("pack"), Name: draft.Name, Description: draft.Description,
+		State: PackStateSealed, Version: version, ScoringVersion: ScoringVersion,
+		SourcePackID: draft.ID, Scenarios: normalizeScenarios(draft.Scenarios),
+		Revision: 1, CreatedAt: now, UpdatedAt: now,
+	}
+	digest, err := packDigest(pack)
+	if err != nil {
+		return nil, err
+	}
+	pack.Digest = digest
+
+	// An identical definition is the same benchmark. Returning the existing
+	// sealed row keeps one digest to one pack, so results stay joinable.
+	if existing, err := s.db.getPackByDigest(digest); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
+
+	if err := s.db.savePack(pack); err != nil {
+		return nil, err
+	}
+	s.ctx.Emit("bench.pack.sealed", map[string]any{
+		"pack_id": pack.ID, "name": pack.Name, "version": pack.Version,
+		"digest": pack.Digest, "scoring_version": pack.ScoringVersion,
+		"scenarios": len(pack.Scenarios),
+	})
+	return pack, nil
+}
+
+func (s *service) fork(sourceID, name string) (*Pack, error) {
+	source, err := s.db.getPack(sourceID)
+	if err != nil {
+		return nil, err
+	}
+	if source == nil {
+		return nil, errors.New("pack not found")
+	}
+	if strings.TrimSpace(name) == "" {
+		name = source.Name + " (draft)"
+	}
+	now := time.Now().UTC()
+	draft := &Pack{
+		ID: newID("pack"), Name: name, Description: source.Description,
+		State: PackStateDraft, Scenarios: source.Scenarios, Revision: 1,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := s.db.savePack(draft); err != nil {
+		return nil, err
+	}
+	return draft, nil
+}
+
+func validateScenario(scenario Scenario) error {
+	if scenario.ID == "" || scenario.Name == "" {
+		return errors.New("every scenario needs an id and a name")
+	}
+	if strings.TrimSpace(scenario.Prompt) == "" {
+		return fmt.Errorf("scenario %q has no prompt", scenario.ID)
+	}
+	if scenario.EnvironmentID == "" && scenario.SnapshotID == "" {
+		return fmt.Errorf("scenario %q pins no environment or snapshot, so its world is not reproducible", scenario.ID)
+	}
+	budget := scenario.Budget
+	if budget.DurationMS <= 0 || budget.Turns <= 0 || (budget.TokensTotal <= 0 && budget.CostUSD <= 0) {
+		return fmt.Errorf("scenario %q needs duration, turn, and token or cost budgets to be scoreable", scenario.ID)
+	}
+	return nil
+}
+
+// normalizeScenarios sorts scenarios and fills defaults so that two packs with
+// the same content always hash the same regardless of authoring order.
+func normalizeScenarios(scenarios []Scenario) []Scenario {
+	out := make([]Scenario, len(scenarios))
+	copy(out, scenarios)
+	for i := range out {
+		if out[i].Weight <= 0 {
+			out[i].Weight = 1
+		}
+		if out[i].Checks == nil {
+			out[i].Checks = []Check{}
+		}
+		if out[i].Goals == nil {
+			out[i].Goals = []string{}
+		}
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
+	return out
+}
+
+// packDigest hashes only the definition — never ids, timestamps or revisions —
+// so the digest identifies the benchmark rather than the row holding it.
+func packDigest(pack *Pack) (string, error) {
+	return canonicalDigest(struct {
+		Name           string     `json:"name"`
+		Description    string     `json:"description"`
+		ScoringVersion string     `json:"scoring_version"`
+		Scenarios      []Scenario `json:"scenarios"`
+	}{pack.Name, pack.Description, pack.ScoringVersion, normalizeScenarios(pack.Scenarios)})
+}
+
+func scenarioDigests(scenarios []Scenario) map[string]string {
+	digests := map[string]string{}
+	for _, scenario := range scenarios {
+		if digest, err := canonicalDigest(scenario); err == nil {
+			digests[scenario.ID] = digest
+		}
+	}
+	return digests
+}
+
+func slugify(value string) string {
+	var b strings.Builder
+	previousDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(value)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			previousDash = false
+		default:
+			if !previousDash && b.Len() > 0 {
+				b.WriteByte('-')
+				previousDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// ---- catalog ----
+
+func (s *service) catalog() (map[string]any, error) {
+	// Evals already aggregates agents, models, and Environments for its own
+	// target picker. Reusing it keeps one catalog shape across both apps and
+	// spares bench a dependency on llm just to list models.
+	catalog := map[string]any{}
+	if err := s.ctx.PlatformAPI().CallAppResult("evals", "eval_catalog", map[string]any{}, &catalog); err != nil {
+		return nil, fmt.Errorf("evals catalog: %w", err)
+	}
+	if catalog == nil {
+		catalog = map[string]any{}
+	}
+	// Snapshots are a bench-specific way to pin a scenario's world, so they are
+	// fetched directly rather than relying on what Evals happens to surface.
+	var snapshots []map[string]any
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_snapshot_list", map[string]any{}, &snapshots); err == nil {
+		catalog["snapshots"] = snapshots
+	}
+	catalog["scoring_version"] = ScoringVersion
+	catalog["scoring_formula"] = ScoringFormula
+	catalog["scoring_weights"] = ScoreWeights
+	return catalog, nil
+}
+
+// ---- baselines ----
+
+func (s *service) setBaseline(benchRunID, scenarioID string, targetIndex int, label string) (*Baseline, error) {
+	run, err := s.db.getRun(benchRunID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, errors.New("run not found")
+	}
+	if run.Status != RunStatusCompleted {
+		return nil, errors.New("only a completed run can be pinned as a baseline")
+	}
+
+	matching := []Result{}
+	for _, result := range run.Results {
+		if result.ScenarioID == scenarioID && result.TargetIndex == targetIndex && result.Admission != AdmissionInvalid {
+			matching = append(matching, result)
+		}
+	}
+	if len(matching) == 0 {
+		return nil, errors.New("no admitted results for that scenario and target")
+	}
+
+	baseline := &Baseline{
+		ID: newID("baseline"), PackDigest: run.PackDigest, ScenarioID: scenarioID,
+		Target: matching[0].Target, SourceRunID: run.ID, CreatedAt: time.Now().UTC(),
+	}
+	if label == "" {
+		label = matching[0].Target.label()
+	}
+	baseline.Label = label
+
+	passed, score := 0, 0.0
+	for _, result := range matching {
+		if result.Passed {
+			passed++
+		}
+		score += result.Score.Score
+		baseline.Metrics = result.Metrics
+	}
+	baseline.PassRate = round3(float64(passed) / float64(len(matching)))
+	baseline.Score = round1(score / float64(len(matching)))
+	if err := s.db.saveBaseline(baseline); err != nil {
+		return nil, err
+	}
+	return baseline, nil
+}
+
+type baselineDelta struct {
+	ScenarioID    string  `json:"scenario_id"`
+	TargetIndex   int     `json:"target_index"`
+	Label         string  `json:"label"`
+	BaselineFrom  string  `json:"baseline_label"`
+	Score         float64 `json:"score"`
+	BaselineScore float64 `json:"baseline_score"`
+	ScoreDelta    float64 `json:"score_delta"`
+	PassRate      float64 `json:"pass_rate"`
+	BaselinePass  float64 `json:"baseline_pass_rate"`
+	PassDelta     float64 `json:"pass_rate_delta"`
+	Verdict       string  `json:"verdict"`
+}
+
+func (s *service) compareToBaselines(benchRunID string) (map[string]any, error) {
+	run, err := s.db.getRun(benchRunID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, errors.New("run not found")
+	}
+	baselines, err := s.db.listBaselines(run.PackDigest)
+	if err != nil {
+		return nil, err
+	}
+	index := map[string]Baseline{}
+	for _, baseline := range baselines {
+		index[baseline.ScenarioID] = baseline
+	}
+
+	type bucket struct {
+		scores []float64
+		passed int
+		total  int
+		target Target
+	}
+	buckets := map[string]*bucket{}
+	for _, result := range run.Results {
+		if result.Admission == AdmissionInvalid {
+			continue
+		}
+		key := fmt.Sprintf("%s|%d", result.ScenarioID, result.TargetIndex)
+		if buckets[key] == nil {
+			buckets[key] = &bucket{target: result.Target}
+		}
+		b := buckets[key]
+		b.scores = append(b.scores, result.Score.Score)
+		b.total++
+		if result.Passed {
+			b.passed++
+		}
+	}
+
+	deltas := []baselineDelta{}
+	for key, b := range buckets {
+		parts := strings.SplitN(key, "|", 2)
+		scenarioID := parts[0]
+		baseline, ok := index[scenarioID]
+		if !ok {
+			continue
+		}
+		total := 0.0
+		for _, score := range b.scores {
+			total += score
+		}
+		delta := baselineDelta{
+			ScenarioID: scenarioID, Label: b.target.label(), BaselineFrom: baseline.Label,
+			Score: round1(total / float64(b.total)), BaselineScore: baseline.Score,
+			PassRate: round3(float64(b.passed) / float64(b.total)), BaselinePass: baseline.PassRate,
+		}
+		delta.ScoreDelta = round1(delta.Score - delta.BaselineScore)
+		delta.PassDelta = round3(delta.PassRate - delta.BaselinePass)
+		switch {
+		case delta.PassDelta > 0 || (delta.PassDelta == 0 && delta.ScoreDelta > 0):
+			delta.Verdict = "ahead"
+		case delta.PassDelta < 0 || delta.ScoreDelta < 0:
+			delta.Verdict = "behind"
+		default:
+			delta.Verdict = "even"
+		}
+		deltas = append(deltas, delta)
+	}
+	sort.Slice(deltas, func(a, b int) bool { return deltas[a].ScenarioID < deltas[b].ScenarioID })
+	return map[string]any{"run_id": run.ID, "pack_digest": run.PackDigest, "deltas": deltas}, nil
+}
+
+// ---- leaderboard ----
+
+// ScoreComponents averages each part of the scoring contract, so a reader can
+// see *why* a target scores what it does rather than only the total.
+type ScoreComponents struct {
+	Success    float64 `json:"success"`
+	Duration   float64 `json:"duration"`
+	Cost       float64 `json:"cost"`
+	Turns      float64 `json:"turns"`
+	ToolErrors float64 `json:"tool_errors"`
+}
+
+type leaderboardRow struct {
+	Label             string          `json:"label"`
+	Provider          string          `json:"provider,omitempty"`
+	Model             string          `json:"model,omitempty"`
+	Runs              int             `json:"runs"`
+	Passed            int             `json:"passed"`
+	PassRate          float64         `json:"pass_rate"`
+	AverageScore      float64         `json:"average_score"`
+	AverageDurationMS float64         `json:"average_duration_ms"`
+	AverageTokens     float64         `json:"average_tokens"`
+	AverageCostUSD    float64         `json:"average_cost_usd"`
+	Scenarios         int             `json:"scenarios"`
+	Packs             int             `json:"packs"`
+	MixedCostBasis    bool            `json:"mixed_cost_basis"`
+	Components        ScoreComponents `json:"components"`
+}
+
+// scenarioRow is one target's record on one scenario, for the per-scenario
+// breakdown under a pack's leaderboard.
+type scenarioRow struct {
+	ScenarioID   string  `json:"scenario_id"`
+	ScenarioName string  `json:"scenario_name"`
+	Label        string  `json:"label"`
+	Runs         int     `json:"runs"`
+	Passed       int     `json:"passed"`
+	PassRate     float64 `json:"pass_rate"`
+	AverageScore float64 `json:"average_score"`
+}
+
+// aggregate folds admitted results into ranked rows keyed by provider/model, so
+// the same model benchmarked from different agents lands in one row.
+func aggregate(results []resultWithPack) []leaderboardRow {
+	type group struct {
+		row       leaderboardRow
+		scenarios map[string]struct{}
+		packs     map[string]struct{}
+		bases     map[string]struct{}
+	}
+	groups := map[string]*group{}
+	order := []string{}
+
+	for _, result := range results {
+		key := result.Target.label()
+		g := groups[key]
+		if g == nil {
+			g = &group{
+				row:       leaderboardRow{Label: key, Provider: result.Target.Provider, Model: result.Target.Model},
+				scenarios: map[string]struct{}{}, packs: map[string]struct{}{}, bases: map[string]struct{}{},
+			}
+			groups[key] = g
+			order = append(order, key)
+		}
+		g.row.Runs++
+		if result.Passed {
+			g.row.Passed++
+		}
+		g.row.AverageScore += result.Score.Score
+		g.row.AverageDurationMS += float64(result.Metrics.DurationMS)
+		g.row.AverageTokens += float64(result.Metrics.TokensTotal)
+		g.row.AverageCostUSD += result.Metrics.CostUSD
+		g.row.Components.Success += result.Score.SuccessPoints
+		g.row.Components.Duration += result.Score.DurationPoints
+		g.row.Components.Cost += result.Score.CostPoints
+		g.row.Components.Turns += result.Score.TurnPoints
+		g.row.Components.ToolErrors += result.Score.ToolErrorPoints
+		g.scenarios[result.ScenarioID] = struct{}{}
+		if result.PackDigest != "" {
+			g.packs[result.PackDigest] = struct{}{}
+		}
+		if result.Score.CostBasis != "" {
+			g.bases[result.Score.CostBasis] = struct{}{}
+		}
+	}
+
+	rows := make([]leaderboardRow, 0, len(groups))
+	for _, key := range order {
+		g := groups[key]
+		n := float64(g.row.Runs)
+		if n == 0 {
+			continue
+		}
+		g.row.PassRate = round3(float64(g.row.Passed) / n)
+		g.row.AverageScore = round1(g.row.AverageScore / n)
+		g.row.AverageDurationMS = round1(g.row.AverageDurationMS / n)
+		g.row.AverageTokens = round1(g.row.AverageTokens / n)
+		g.row.AverageCostUSD = round3(g.row.AverageCostUSD / n)
+		g.row.Components = ScoreComponents{
+			Success:    round1(g.row.Components.Success / n),
+			Duration:   round1(g.row.Components.Duration / n),
+			Cost:       round1(g.row.Components.Cost / n),
+			Turns:      round1(g.row.Components.Turns / n),
+			ToolErrors: round1(g.row.Components.ToolErrors / n),
+		}
+		g.row.Scenarios = len(g.scenarios)
+		g.row.Packs = len(g.packs)
+		g.row.MixedCostBasis = len(g.bases) > 1
+		rows = append(rows, g.row)
+	}
+	// Pass rate is the benchmark's headline; score only breaks ties.
+	sort.Slice(rows, func(a, b int) bool {
+		if rows[a].PassRate != rows[b].PassRate {
+			return rows[a].PassRate > rows[b].PassRate
+		}
+		return rows[a].AverageScore > rows[b].AverageScore
+	})
+	return rows
+}
+
+// byScenario breaks each target's record down per scenario, which is where an
+// aggregate score hides a target that is strong on one task and weak on another.
+func byScenario(results []resultWithPack) []scenarioRow {
+	type key struct{ scenario, label string }
+	acc := map[key]*scenarioRow{}
+	order := []key{}
+	for _, result := range results {
+		k := key{result.ScenarioID, result.Target.label()}
+		if acc[k] == nil {
+			acc[k] = &scenarioRow{ScenarioID: result.ScenarioID, ScenarioName: result.ScenarioName, Label: k.label}
+			order = append(order, k)
+		}
+		row := acc[k]
+		row.Runs++
+		if result.Passed {
+			row.Passed++
+		}
+		row.AverageScore += result.Score.Score
+	}
+	rows := make([]scenarioRow, 0, len(acc))
+	for _, k := range order {
+		row := acc[k]
+		row.PassRate = round3(float64(row.Passed) / float64(row.Runs))
+		row.AverageScore = round1(row.AverageScore / float64(row.Runs))
+		rows = append(rows, *row)
+	}
+	sort.Slice(rows, func(a, b int) bool {
+		if rows[a].ScenarioID != rows[b].ScenarioID {
+			return rows[a].ScenarioID < rows[b].ScenarioID
+		}
+		return rows[a].AverageScore > rows[b].AverageScore
+	})
+	return rows
+}
+
+// leaderboard ranks every admitted result for one sealed digest under that
+// pack's scoring version. Comparability is enforced by the join, not convention.
+func (s *service) leaderboard(packDigest string) (map[string]any, error) {
+	pack, err := s.db.getPackByDigest(packDigest)
+	if err != nil {
+		return nil, err
+	}
+	if pack == nil {
+		return nil, errors.New("no sealed pack with that digest")
+	}
+	all, err := s.db.listAdmittedResults(pack.ScoringVersion)
+	if err != nil {
+		return nil, err
+	}
+	scoped := make([]resultWithPack, 0, len(all))
+	for _, result := range all {
+		if result.PackDigest == packDigest {
+			scoped = append(scoped, result)
+		}
+	}
+	return map[string]any{
+		"pack":            map[string]any{"id": pack.ID, "name": pack.Name, "version": pack.Version, "digest": pack.Digest},
+		"scoring_version": pack.ScoringVersion,
+		"rows":            aggregate(scoped),
+		"by_scenario":     byScenario(scoped),
+		"scenarios":       len(pack.Scenarios),
+	}, nil
+}
+
+// globalLeaderboard ranks targets across every sealed pack under one scoring
+// version. Targets that ran different packs are still listed, with their
+// coverage reported and comparable=false, rather than being averaged together
+// as though they had faced the same work.
+func (s *service) globalLeaderboard(scoringVersion string) (map[string]any, error) {
+	versions, err := s.db.scoringVersions()
+	if err != nil {
+		return nil, err
+	}
+	if scoringVersion == "" {
+		scoringVersion = ScoringVersion
+		if len(versions) > 0 {
+			scoringVersion = versions[0]
+		}
+	}
+	results, err := s.db.listAdmittedResults(scoringVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	packs := map[string]map[string]any{}
+	for _, result := range results {
+		if packs[result.PackDigest] == nil {
+			packs[result.PackDigest] = map[string]any{
+				"digest": result.PackDigest, "name": result.PackName, "version": result.PackVersion,
+			}
+		}
+	}
+	packList := make([]map[string]any, 0, len(packs))
+	for _, p := range packs {
+		packList = append(packList, p)
+	}
+	sort.Slice(packList, func(a, b int) bool {
+		return packList[a]["digest"].(string) < packList[b]["digest"].(string)
+	})
+
+	rows := aggregate(results)
+	// Every target must have faced the same packs for the ranking to be a fair
+	// comparison; say so plainly instead of letting the reader assume it.
+	comparable := true
+	for _, row := range rows {
+		if row.Packs != len(packList) {
+			comparable = false
+			break
+		}
+	}
+
+	return map[string]any{
+		"scoring_version":  scoringVersion,
+		"scoring_versions": versions,
+		"packs":            packList,
+		"rows":             rows,
+		"by_scenario":      byScenario(results),
+		"comparable":       comparable,
+	}, nil
+}
