@@ -1752,6 +1752,10 @@ interface NumberOffer {
   matching_compliance_profiles?: number;
   purchase_ready: boolean;
   purchase_blocker?: string;
+  provider_resource_id?: string;
+  provider_group_id?: string;
+  provider_sku_id?: string;
+  inventory_mode?: string;
 }
 
 interface NumberSearchResponse {
@@ -1852,6 +1856,7 @@ interface RegulatoryBundle {
   sid: string;
   friendly_name?: string;
   status?: string;
+  resource_kind?: "identity" | "verification";
   regulation_sid?: string;
   email?: string;
   valid_until?: string;
@@ -2063,7 +2068,7 @@ function NumbersView({ projectId }: NativePanelProps) {
         ...(addressSid.trim() ? { address_id: addressSid.trim() } : {}),
         ...(bundleSid.trim() ? { compliance_id: bundleSid.trim() } : {}),
       });
-      setPurchaseResult(`${data.phone_number || selected.phone_number} purchased through ${data.provider || selected.provider}`);
+      setPurchaseResult(`${data.phone_number || selected.phone_number || selected.friendly_name || "DIDWW number"} purchased through ${data.provider || selected.provider}`);
       setSelected(null);
       setStatus("Purchase completed");
       await loadConnected();
@@ -2459,11 +2464,11 @@ function NumbersView({ projectId }: NativePanelProps) {
                 </div>
                 {offers.map((offer) => (
                   <div
-                    key={`${offer.provider}-${offer.phone_number}`}
+                    key={`${offer.provider}-${offer.provider_resource_id || offer.provider_group_id || offer.phone_number}`}
                     className="grid gap-3 items-center px-4 py-3 border-b border-border/70 text-sm"
                     style={{ gridTemplateColumns: NUMBER_COLUMNS }}
                   >
-                    <div className="font-medium truncate">{offer.phone_number}</div>
+                    <div className="font-medium truncate">{offer.phone_number || offer.friendly_name || "Number selected after order"}</div>
                     <div>
                       <div>{offer.country}</div>
                       <div className="text-xs text-text-dim">{offer.number_type.replace("_", " ")}</div>
@@ -2498,7 +2503,7 @@ function NumbersView({ projectId }: NativePanelProps) {
       {selected ? (
         <section className="shrink-0 border-t border-border bg-bg-muted/40 px-4 py-3 flex flex-wrap items-center gap-4">
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold">Confirm purchase of {selected.phone_number}</div>
+            <div className="text-sm font-semibold">Confirm purchase of {selected.phone_number || selected.friendly_name || "DIDWW number"}</div>
             <div className="mt-1 text-xs text-text-muted">
               {money(selected.monthly_price, selected.currency, "/month")}
               {selected.upfront_price ? ` + ${money(selected.upfront_price, selected.currency)} setup` : ""}
@@ -2506,6 +2511,11 @@ function NumbersView({ projectId }: NativePanelProps) {
               {selected.address_requirement ? `; address requirement: ${selected.address_requirement}` : ""}
               {selected.recommended_compliance_name ? `; approved profile: ${selected.recommended_compliance_name}` : ""}
             </div>
+            {selected.provider === "didww" && selected.compliance_required ? (
+              <div className="mt-3 max-w-3xl rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+                DIDWW completes registration after the order allocates a DID. Confirm the order first; then create or select the identity and address and submit an approved verification for the allocated number.
+              </div>
+            ) : null}
             {selected.provider === "twilio" || selected.provider === "telnyx" ? (
               <div className="mt-3 grid max-w-3xl gap-3 md:grid-cols-2">
                 {selected.provider === "twilio" ? <label>
@@ -2530,7 +2540,7 @@ function NumbersView({ projectId }: NativePanelProps) {
                     onChange={(event) => setBundleSid(event.target.value)}
                     className="h-9 w-full rounded border border-border bg-bg px-2 text-sm outline-none focus:border-text-dim"
                   >
-                    <option value="">{resourcesLoading ? "Loading profiles..." : "No profile selected"}</option>
+                      <option value="">{resourcesLoading ? "Loading profiles..." : "No profile selected"}</option>
                     {bundles.map((bundle) => (
                       <option key={bundle.sid} value={bundle.sid}>{bundle.friendly_name || bundle.sid}</option>
                     ))}
@@ -2554,7 +2564,7 @@ function NumbersView({ projectId }: NativePanelProps) {
               selected.provider === "twilio" &&
               ((selected.address_requirement && selected.address_requirement !== "none" && !/^AD[0-9a-fA-F]{32}$/.test(addressSid.trim())) ||
               (bundleSid.trim() && !/^BU[0-9a-fA-F]{32}$/.test(bundleSid.trim()))) ||
-              (selected.compliance_required && !bundleSid.trim())
+              ((selected.provider === "twilio" || selected.provider === "telnyx") && selected.compliance_required && !bundleSid.trim())
             )}
             className="h-9 px-4 rounded bg-error text-bg text-sm font-medium disabled:opacity-50"
           >
@@ -2573,7 +2583,7 @@ function AddressesView({ projectId }: NativePanelProps) {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     customer_name: "", friendly_name: "", street: "", street_secondary: "",
-    city: "", region: "", postal_code: "", country: "",
+    city: "", region: "", postal_code: "", country: "", identity_id: "",
   });
   const endpoint = useCallback((path: string) => {
     const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
@@ -2595,7 +2605,7 @@ function AddressesView({ projectId }: NativePanelProps) {
     setSaving(true);
     try {
       await postJSON(endpoint("/numbers/addresses/create"), { ...form, auto_correct: true });
-      setForm({ ...form, customer_name: "", friendly_name: "", street: "", street_secondary: "", city: "", region: "", postal_code: "" });
+      setForm({ ...form, customer_name: "", friendly_name: "", street: "", street_secondary: "", city: "", region: "", postal_code: "", identity_id: "" });
       setStatus("Address created");
       await load();
     } catch (e) {
@@ -2649,6 +2659,7 @@ function AddressesView({ projectId }: NativePanelProps) {
           <Field label="Postal code" value={form.postal_code} onChange={(value) => setForm({ ...form, postal_code: value })} required />
           <Field label="Country" value={form.country} onChange={(value) => setForm({ ...form, country: value.toUpperCase().slice(0, 2) })} required />
         </div>
+        <Field label="DIDWW identity ID (when required)" value={form.identity_id} onChange={(value) => setForm({ ...form, identity_id: value })} />
         <button type="submit" disabled={saving} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">
           {saving ? "Creating..." : "Create address"}
         </button>
@@ -2673,8 +2684,11 @@ function BundlesView({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [bundleForm, setBundleForm] = useState({
-    country: "EE", number_type: "national", end_user_type: "individual", friendly_name: "Estonia national", email: "",
+    country: "FR", number_type: "local", end_user_type: "business", friendly_name: "", email: "",
   });
+  const [identityForm, setIdentityForm] = useState({ first_name: "", last_name: "", company_reg_number: "", vat_id: "", phone_number: "" });
+  const [proofForm, setProofForm] = useState({ entity: "identity", entity_id: "", proof_type_id: "", file_ids: "" });
+  const [verificationForm, setVerificationForm] = useState({ address_id: "", did_id: "", service_description: "French voice number" });
   const [itemForm, setItemForm] = useState({ kind: "end_user", friendly_name: "", type: "individual", attributes: "{}", requirement_id: "", field_value: "" });
   const [itemFile, setItemFile] = useState<File | null>(null);
   const endpoint = useCallback((path: string) => {
@@ -2694,10 +2708,10 @@ function BundlesView({ projectId }: NativePanelProps) {
   }, [endpoint]);
   useEffect(() => { void load(); }, [load]);
 
-  const inspect = async (bundleSid: string, preserveResult = false) => {
+  const inspect = async (bundleSid: string, resourceKind: RegulatoryBundle["resource_kind"] = "verification", preserveResult = false) => {
     setBusy(true);
     try {
-      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { compliance_id: bundleSid });
+      const data = await postJSON<BundleDetails>(endpoint("/numbers/regulatory/bundles/get"), { compliance_id: bundleSid, ...(resourceKind ? { resource_kind: resourceKind } : {}) });
       setSelected(data);
       if (!preserveResult) setResult(null);
     } catch (e) {
@@ -2722,10 +2736,24 @@ function BundlesView({ projectId }: NativePanelProps) {
     event.preventDefault();
     setBusy(true);
     try {
-      const data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
-      setStatus("Compliance profile created");
+      const didww = provider === "didww";
+      let data: { bundle?: RegulatoryBundle };
+      if (didww) {
+        await postJSON<{ profile?: RegulatoryBundle; identity?: Record<string, unknown> }>(endpoint("/numbers/identities/create"), {
+          identity_type: bundleForm.end_user_type === "business" ? "business" : "personal",
+          country: bundleForm.country,
+          company_name: bundleForm.friendly_name,
+          contact_email: bundleForm.email,
+          description: bundleForm.friendly_name,
+          ...identityForm,
+        });
+        data = {};
+      } else {
+        data = await postJSON<{ bundle?: RegulatoryBundle }>(endpoint("/numbers/regulatory/bundles/create"), bundleForm);
+      }
+      setStatus(didww ? "DIDWW identity created; add the required proofs and regulatory address" : "Compliance profile created");
       await load();
-      if (data.bundle?.sid) await inspect(data.bundle.sid);
+      if (!didww && data.bundle?.sid) await inspect(data.bundle.sid);
     } catch (e) {
       setStatus((e as Error).message || "Bundle creation failed");
     } finally {
@@ -2735,6 +2763,10 @@ function BundlesView({ projectId }: NativePanelProps) {
   const addItem = async (event: React.FormEvent) => {
     event.preventDefault();
     const bundleSid = selected?.bundle?.sid;
+    if (selected?.bundle?.resource_kind === "identity") {
+      setStatus("Select an address verification to add the allocated DID and supporting documents");
+      return;
+    }
     if (!bundleSid) return;
     let attributes: Record<string, unknown>;
     try {
@@ -2754,22 +2786,67 @@ function BundlesView({ projectId }: NativePanelProps) {
       setResult(data);
       setStatus("Compliance requirement assigned");
       setItemFile(null);
-      await inspect(bundleSid, true);
+      await inspect(bundleSid, selected?.bundle?.resource_kind, true);
     } catch (e) {
       setStatus((e as Error).message || "Item creation failed");
     } finally {
       setBusy(false);
     }
   };
+  const uploadDIDWWProof = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const entityID = proofForm.entity_id.trim() || (proofForm.entity === "identity" && selected?.bundle?.resource_kind === "identity" ? selected.bundle.sid : "");
+    if (!entityID || !proofForm.proof_type_id.trim() || (!itemFile && !proofForm.file_ids.trim())) {
+      setStatus("Select an identity or address, proof type, and document");
+      return;
+    }
+    if (itemFile && itemFile.size > 5 * 1024 * 1024) { setStatus("Document must be at most 5 MB"); return; }
+    setBusy(true);
+    try {
+      const data = await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), {
+        kind: "document", [proofForm.entity === "identity" ? "identity_id" : "address_id"]: entityID,
+        proof_type_id: proofForm.proof_type_id.trim(),
+        ...(itemFile ? { file: await readAsDataURL(itemFile), file_name: itemFile.name } : { file_ids: proofForm.file_ids.split(/[\s,]+/).filter(Boolean) }),
+      });
+      setResult(data);
+      setStatus("Document encrypted and proof attached");
+      setItemFile(null);
+      if (selected?.bundle) await inspect(selected.bundle.sid, selected.bundle.resource_kind, true);
+    } catch (e) { setStatus((e as Error).message || "Proof attachment failed"); }
+    finally { setBusy(false); }
+  };
+  const createDIDWWVerification = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const didIDs = verificationForm.did_id.split(/[\s,]+/).map((value) => value.trim()).filter(Boolean);
+    if (!verificationForm.address_id.trim() || didIDs.length === 0) {
+      setStatus("Address ID and allocated DID ID are required");
+      return;
+    }
+    setBusy(true);
+    try {
+      await postJSON(endpoint("/numbers/regulatory/bundles/items/create"), {
+        address_id: verificationForm.address_id.trim(),
+        did_ids: didIDs,
+        service_description: verificationForm.service_description.trim() || "French voice number",
+      });
+      setStatus("DIDWW address verification created; wait for provider approval");
+      setVerificationForm({ ...verificationForm, address_id: "", did_id: "" });
+      await load();
+    } catch (e) {
+      setStatus((e as Error).message || "DIDWW verification creation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
   const bundleAction = async (action: "evaluate" | "submit") => {
     const bundleSid = selected?.bundle?.sid;
-    if (!bundleSid) return;
+    if (!bundleSid || selected?.bundle?.resource_kind === "identity") return;
     setBusy(true);
     try {
       const data = await postJSON(endpoint(`/numbers/regulatory/bundles/${action}`), { compliance_id: bundleSid });
       setResult(data);
       setStatus(action === "submit" ? "Submission processed" : "Evaluation complete");
-      await inspect(bundleSid, true);
+      await inspect(bundleSid, selected?.bundle?.resource_kind, true);
     } catch (e) {
       setStatus((e as Error).message || `${action} failed`);
     } finally {
@@ -2789,7 +2866,7 @@ function BundlesView({ projectId }: NativePanelProps) {
           <span className="truncate text-xs text-text-muted">{status}</span>
         </header>
         {bundles.map((bundle) => (
-          <button key={bundle.sid} type="button" onClick={() => inspect(bundle.sid)} className={`w-full px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/60 ${selected?.bundle?.sid === bundle.sid ? "bg-bg-muted" : ""}`}>
+          <button key={`${bundle.resource_kind ?? "verification"}:${bundle.sid}`} type="button" onClick={() => inspect(bundle.sid, bundle.resource_kind)} className={`w-full px-4 py-3 text-left border-b border-border/70 hover:bg-bg-muted/60 ${selected?.bundle?.sid === bundle.sid ? "bg-bg-muted" : ""}`}>
             <div className="flex items-center justify-between gap-2">
               <span className="truncate text-sm font-medium">{bundle.friendly_name || bundle.sid}</span>
               <span className="shrink-0 text-xs text-text-muted">{bundle.status || "unknown"}</span>
@@ -2808,8 +2885,8 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <div className="mt-1 truncate font-mono text-xs text-text-dim">{selected.bundle.sid}</div>
               </div>
               <span className="rounded border border-border px-2 py-1 text-xs">{selected.bundle.status || "unknown"}</span>
-              <button type="button" disabled={busy} onClick={() => bundleAction("evaluate")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Evaluate</button>
-              <button type="button" disabled={busy || selected.bundle.status !== "draft"} onClick={() => bundleAction("submit")} className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-50">Submit</button>
+              <button type="button" disabled={busy || selected.bundle.resource_kind === "identity"} onClick={() => bundleAction("evaluate")} className="h-8 px-3 rounded border border-border text-xs disabled:opacity-50">Evaluate</button>
+              <button type="button" disabled={busy || selected.bundle.resource_kind === "identity" || selected.bundle.status !== "draft"} onClick={() => bundleAction("submit")} className="h-8 px-3 rounded bg-accent text-bg text-xs font-medium disabled:opacity-50">Submit</button>
             </header>
             <div className="grid lg:grid-cols-2">
               <section className="p-4 border-b lg:border-r border-border">
@@ -2827,7 +2904,11 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <pre className="max-h-80 overflow-auto whitespace-pre-wrap text-xs leading-5 text-text-muted">{JSON.stringify(result, null, 2)}</pre>
               </section>
             ) : null}
-            <form onSubmit={addItem} className="p-4 space-y-3">
+            {provider === "didww" ? (
+              <div className="m-4 rounded border border-warn/30 bg-warn/10 p-3 text-xs text-warn">
+                Attach the required proofs to the identity and address below. Once the DID is allocated, submit its address verification and wait for provider approval.
+              </div>
+            ) : <form onSubmit={addItem} className="p-4 space-y-3">
               <h3 className="text-sm font-semibold">Set requirement</h3>
               {provider === "telnyx" ? (
                 <div className="grid md:grid-cols-2 gap-3">
@@ -2855,7 +2936,7 @@ function BundlesView({ projectId }: NativePanelProps) {
                 <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => setItemFile(event.target.files?.[0] ?? null)} className="block w-full text-xs text-text-muted file:mr-3 file:h-8 file:rounded file:border file:border-border file:bg-bg file:px-3 file:text-xs file:text-text" />
               ) : null}
               <button type="submit" disabled={busy} className="h-9 px-4 rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Create and assign</button>
-            </form>
+            </form>}
           </div>
         ) : <div className="h-full flex items-center justify-center text-sm text-text-muted" style={{ minHeight: "18rem" }}>Select a compliance profile</div>}
       </section>
@@ -2878,6 +2959,15 @@ function BundlesView({ projectId }: NativePanelProps) {
           </select>
         </label>
         <Field label="Name" value={bundleForm.friendly_name} onChange={(value) => setBundleForm({ ...bundleForm, friendly_name: value })} required />
+        {provider === "didww" ? <>
+          {bundleForm.end_user_type === "business" ? <>
+            <Field label="Business registration number" value={identityForm.company_reg_number} onChange={(value) => setIdentityForm({ ...identityForm, company_reg_number: value })} />
+            <Field label="VAT ID" value={identityForm.vat_id} onChange={(value) => setIdentityForm({ ...identityForm, vat_id: value })} />
+          </> : null}
+          <Field label="First name / contact" value={identityForm.first_name} onChange={(value) => setIdentityForm({ ...identityForm, first_name: value })} required={bundleForm.end_user_type === "individual"} />
+          <Field label="Last name / contact" value={identityForm.last_name} onChange={(value) => setIdentityForm({ ...identityForm, last_name: value })} required={bundleForm.end_user_type === "individual"} />
+          <Field label="Contact phone" value={identityForm.phone_number} onChange={(value) => setIdentityForm({ ...identityForm, phone_number: value })} />
+        </> : null}
         {provider !== "telnyx" ? <Field label="Status email" value={bundleForm.email} onChange={(value) => setBundleForm({ ...bundleForm, email: value })} type="email" required /> : null}
         <div className="grid grid-cols-2 gap-2">
           <button type="button" onClick={discover} disabled={busy} className="h-9 rounded border border-border text-sm disabled:opacity-50">Requirements</button>
@@ -2885,6 +2975,30 @@ function BundlesView({ projectId }: NativePanelProps) {
         </div>
         {requirements ? <pre className="overflow-auto whitespace-pre-wrap border-t border-border pt-3 text-xs leading-5 text-text-muted" style={{ maxHeight: "30rem" }}>{JSON.stringify(requirements, null, 2)}</pre> : null}
       </form>
+      {provider === "didww" ? <form onSubmit={uploadDIDWWProof} className="border-t border-border p-4 space-y-3">
+        <h2 className="text-sm font-semibold">Attach regulatory document</h2>
+        <p className="text-xs text-text-muted">Use a proof type from Requirements. Documents are encrypted with DIDWW's public keys before upload. PDF, JPEG or PNG, up to 5 MB.</p>
+        <label className="block"><span className="mb-1 block text-xs text-text-muted">Attach to</span>
+          <select value={proofForm.entity} onChange={(event) => setProofForm({ ...proofForm, entity: event.target.value, entity_id: "" })} className="h-9 w-full rounded border border-border bg-bg px-2 text-sm">
+            <option value="identity">Identity</option><option value="address">Address</option>
+          </select>
+        </label>
+        <Field label="Identity or address ID" value={proofForm.entity_id || (proofForm.entity === "identity" && selected?.bundle?.resource_kind === "identity" ? selected.bundle.sid : "")} onChange={(value) => setProofForm({ ...proofForm, entity_id: value })} required />
+        <Field label="Proof type ID from Requirements" value={proofForm.proof_type_id} onChange={(value) => setProofForm({ ...proofForm, proof_type_id: value })} required />
+        <input type="file" accept="image/jpeg,image/png,application/pdf" onChange={(event) => { setItemFile(event.target.files?.[0] ?? null); setProofForm({ ...proofForm, file_ids: "" }); }} className="block w-full text-xs" />
+        <Field label="Or reuse encrypted file ID(s)" value={proofForm.file_ids} onChange={(value) => { setProofForm({ ...proofForm, file_ids: value }); setItemFile(null); }} />
+        <button type="submit" disabled={busy} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">Attach proof</button>
+      </form> : null}
+      {provider === "didww" ? (
+        <form onSubmit={createDIDWWVerification} className="min-h-0 overflow-auto border-t border-border p-4 space-y-3">
+          <h2 className="text-sm font-semibold">New DIDWW address verification</h2>
+          <p className="text-xs text-text-muted">Create this after the order allocates a DID and the French address is linked to the business identity.</p>
+          <Field label="Address ID" value={verificationForm.address_id} onChange={(value) => setVerificationForm({ ...verificationForm, address_id: value })} required />
+          <Field label="Allocated DID ID(s)" value={verificationForm.did_id} onChange={(value) => setVerificationForm({ ...verificationForm, did_id: value })} required />
+          <Field label="Service description" value={verificationForm.service_description} onChange={(value) => setVerificationForm({ ...verificationForm, service_description: value })} required />
+          <button type="submit" disabled={busy} className="h-9 w-full rounded bg-accent text-bg text-sm font-medium disabled:opacity-50">{busy ? "Creating..." : "Create verification"}</button>
+        </form>
+      ) : null}
     </div>
   );
 }

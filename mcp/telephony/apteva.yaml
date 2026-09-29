@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.7.5
+version: 0.8.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -117,6 +117,9 @@ provides:
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
     - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
     - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities. Args: identity_type?, limit?." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity. DIDWW supports personal and business identities." }
+    - { name: telephony_identity_get, description: "Get one provider regulatory identity. Args: identity_id." }
     - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
     - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
     - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }

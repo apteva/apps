@@ -26,6 +26,18 @@ func (a *App) toolAddressCreate(_ context.Context, ctx *sdk.AppCtx, args map[str
 	return resourceToolResult(a.addressCreate(ctx, args))
 }
 
+func (a *App) toolIdentitiesList(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return resourceToolResult(a.didwwIdentitiesList(ctx, args))
+}
+
+func (a *App) toolIdentityCreate(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return resourceToolResult(a.didwwIdentityCreate(ctx, args))
+}
+
+func (a *App) toolIdentityGet(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return resourceToolResult(a.didwwIdentityGet(ctx, args))
+}
+
 func (a *App) toolRegulatoryRequirements(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return resourceToolResult(a.regulatoryRequirements(ctx, args))
 }
@@ -73,7 +85,7 @@ func (a *App) resourceProvider(ctx *sdk.AppCtx) (*numberProvider, error) {
 	if err != nil {
 		return nil, err
 	}
-	if provider.Slug != "twilio" && provider.Slug != "telnyx" {
+	if provider.Slug != "twilio" && provider.Slug != "telnyx" && provider.Slug != "didww" {
 		return nil, fmt.Errorf("address and compliance resources are not supported for provider %s", provider.Slug)
 	}
 	return provider, nil
@@ -87,6 +99,9 @@ func (a *App) addressesList(ctx *sdk.AppCtx, args map[string]any) (map[string]an
 	if provider.Slug == "telnyx" {
 		return a.telnyxAddressesList(ctx, args)
 	}
+	if provider.Slug == "didww" {
+		return a.didwwAddressesList(ctx, args)
+	}
 	return a.twilioAddressesList(ctx, args)
 }
 
@@ -97,6 +112,9 @@ func (a *App) addressCreate(ctx *sdk.AppCtx, args map[string]any) (map[string]an
 	}
 	if provider.Slug == "telnyx" {
 		return a.telnyxAddressCreate(ctx, args)
+	}
+	if provider.Slug == "didww" {
+		return a.didwwAddressCreate(ctx, args)
 	}
 	return a.twilioAddressCreate(ctx, args)
 }
@@ -109,6 +127,9 @@ func (a *App) regulatoryRequirements(ctx *sdk.AppCtx, args map[string]any) (map[
 	if provider.Slug == "telnyx" {
 		return a.telnyxRegulatoryRequirements(ctx, args)
 	}
+	if provider.Slug == "didww" {
+		return a.didwwRequirements(ctx, args)
+	}
 	return a.twilioRegulatoryRequirements(ctx, args)
 }
 
@@ -120,6 +141,30 @@ func (a *App) complianceProfilesList(ctx *sdk.AppCtx, args map[string]any) (map[
 	if provider.Slug == "telnyx" {
 		return a.telnyxProfilesList(ctx, args)
 	}
+	if provider.Slug == "didww" {
+		// DIDWW calls the business/person record an identity and the number
+		// approval request an address verification. Present both resource types
+		// through the same provider-neutral profile list.
+		verifications, verificationErr := a.didwwAddressVerificationsList(ctx, args)
+		identities, identityErr := a.didwwIdentitiesList(ctx, args)
+		if verificationErr != nil && identityErr != nil {
+			return nil, fmt.Errorf("DIDWW profiles unavailable: %v; identities unavailable: %v", verificationErr, identityErr)
+		}
+		profiles := make([]map[string]any, 0)
+		if verificationErr == nil {
+			if values, ok := verifications["profiles"].([]map[string]any); ok {
+				profiles = append(profiles, values...)
+			}
+		}
+		if identityErr == nil {
+			if values, ok := identities["identities"].([]map[string]any); ok {
+				for _, identity := range values {
+					profiles = append(profiles, didwwIdentityProfile(identity))
+				}
+			}
+		}
+		return map[string]any{"provider": "didww", "profiles": profiles, "bundles": profiles}, nil
+	}
 	return a.twilioBundlesList(ctx, args)
 }
 
@@ -130,6 +175,35 @@ func (a *App) complianceProfileCreate(ctx *sdk.AppCtx, args map[string]any) (map
 	}
 	if provider.Slug == "telnyx" {
 		return a.telnyxProfileCreate(ctx, args)
+	}
+	if provider.Slug == "didww" {
+		identityType := strings.TrimSpace(strArg(args, "identity_type", ""))
+		if identityType == "" {
+			if strings.EqualFold(strArg(args, "end_user_type", ""), "business") {
+				identityType = "business"
+			} else {
+				identityType = "personal"
+			}
+		}
+		identityArgs := make(map[string]any, len(args)+2)
+		for key, value := range args {
+			identityArgs[key] = value
+		}
+		identityArgs["identity_type"] = identityType
+		if strings.TrimSpace(strArg(identityArgs, "company_name", "")) == "" && identityType == "business" {
+			identityArgs["company_name"] = firstNonEmpty(strArg(args, "friendly_name", ""), strArg(args, "name", ""))
+		}
+		if strings.TrimSpace(strArg(identityArgs, "contact_email", "")) == "" {
+			identityArgs["contact_email"] = strArg(args, "email", "")
+		}
+		result, err := a.didwwIdentityCreate(ctx, identityArgs)
+		if err != nil {
+			return nil, err
+		}
+		identity, _ := result["identity"].(map[string]any)
+		profile := didwwIdentityProfile(identity)
+		result["profile"], result["bundle"] = profile, profile
+		return result, nil
 	}
 	return a.twilioBundleCreate(ctx, args)
 }
@@ -143,6 +217,12 @@ func (a *App) complianceProfileGet(ctx *sdk.AppCtx, args map[string]any) (map[st
 	if provider.Slug == "telnyx" {
 		return a.telnyxProfileGet(ctx, args)
 	}
+	if provider.Slug == "didww" {
+		if strings.EqualFold(strArg(args, "resource_kind", ""), "identity") {
+			return a.didwwIdentityGet(ctx, map[string]any{"identity_id": firstNonEmpty(strArg(args, "identity_id", ""), strArg(args, "compliance_id", ""))})
+		}
+		return a.didwwAddressVerificationGet(ctx, args)
+	}
 	return a.twilioBundleGet(ctx, args)
 }
 
@@ -154,6 +234,12 @@ func (a *App) complianceRequirementSet(ctx *sdk.AppCtx, args map[string]any) (ma
 	args = resourceArgs(args)
 	if provider.Slug == "telnyx" {
 		return a.telnyxRequirementSet(ctx, args)
+	}
+	if provider.Slug == "didww" {
+		if strArg(args, "kind", "") == "document" {
+			return a.didwwProofCreate(ctx, args)
+		}
+		return a.didwwAddressVerificationCreate(ctx, args)
 	}
 	return a.twilioBundleItemCreate(ctx, args)
 }
@@ -167,6 +253,12 @@ func (a *App) complianceProfileEvaluate(ctx *sdk.AppCtx, args map[string]any) (m
 	if provider.Slug == "telnyx" {
 		return a.telnyxProfileEvaluate(ctx, args)
 	}
+	if provider.Slug == "didww" {
+		if strings.EqualFold(strArg(args, "resource_kind", ""), "identity") {
+			return a.didwwIdentityGet(ctx, map[string]any{"identity_id": firstNonEmpty(strArg(args, "identity_id", ""), strArg(args, "compliance_id", ""))})
+		}
+		return a.didwwAddressVerificationGet(ctx, args)
+	}
 	return a.twilioBundleEvaluate(ctx, args)
 }
 
@@ -178,6 +270,9 @@ func (a *App) complianceProfileSubmit(ctx *sdk.AppCtx, args map[string]any) (map
 	args = resourceArgs(args)
 	if provider.Slug == "telnyx" {
 		return a.telnyxProfileSubmit(ctx, args)
+	}
+	if provider.Slug == "didww" {
+		return nil, errors.New("DIDWW registration is submitted by create_address_verification after the allocated DID and address are supplied")
 	}
 	return a.twilioBundleSubmit(ctx, args)
 }

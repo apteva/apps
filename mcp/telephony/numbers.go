@@ -49,6 +49,10 @@ type numberOffer struct {
 	MatchingComplianceProfiles int      `json:"matching_compliance_profiles,omitempty"`
 	PurchaseReady              bool     `json:"purchase_ready"`
 	PurchaseBlocker            string   `json:"purchase_blocker,omitempty"`
+	ProviderResourceID         string   `json:"provider_resource_id,omitempty"`
+	ProviderGroupID            string   `json:"provider_group_id,omitempty"`
+	ProviderSKUID              string   `json:"provider_sku_id,omitempty"`
+	InventoryMode              string   `json:"inventory_mode,omitempty"`
 }
 
 type numberCountryResult struct {
@@ -79,6 +83,10 @@ type numberPurchaseIntent struct {
 	ResponseJSON        string
 	ErrorMessage        string
 	ExpiresAt           time.Time
+	ProviderResourceID  string
+	ProviderGroupID     string
+	ProviderSKUID       string
+	InventoryMode       string
 }
 
 type numberProvider struct {
@@ -122,6 +130,9 @@ func (a *App) numberProviderFor(ctx *sdk.AppCtx) (*numberProvider, error) {
 		p.Search = true
 		p.Types = []string{"local", "toll_free"}
 		p.Reason = "SignalWire inventory is searchable, but purchase is disabled because its inventory API does not return a verifiable price quote"
+	case "didww":
+		p.Search, p.Purchase = true, true
+		p.Types = []string{"local", "mobile", "national", "toll_free"}
 	default:
 		p.Reason = "phone-number inventory is not implemented for this carrier"
 	}
@@ -253,7 +264,7 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 				// Provider-specific enrichment already found a safety or
 				// compliance blocker. Preserve it and do not mint a purchase
 				// token that could bypass the UI warning.
-			} else if !validE164(offers[i].PhoneNumber) {
+			} else if !validE164(offers[i].PhoneNumber) && !(provider.Slug == "didww" && offers[i].ProviderGroupID != "") {
 				offers[i].PurchaseBlocker = "provider returned an invalid phone number"
 			} else if offers[i].MonthlyPrice == "" {
 				offers[i].PurchaseBlocker = "provider did not return a monthly price"
@@ -272,6 +283,10 @@ func (a *App) searchNumberInventory(ctx *sdk.AppCtx, args map[string]any) (map[s
 					InboundPrice: offers[i].InboundPrice, Currency: offers[i].Currency,
 					AddressRequirement: offers[i].AddressRequirement,
 					ComplianceRequired: offers[i].ComplianceRequired,
+					ProviderResourceID: offers[i].ProviderResourceID,
+					ProviderGroupID:    offers[i].ProviderGroupID,
+					ProviderSKUID:      offers[i].ProviderSKUID,
+					InventoryMode:      offers[i].InventoryMode,
 					Status:             "quoted", ExpiresAt: expiresAt,
 				}
 				if err := dbNumberPurchaseIntentInsert(ctx.AppDB(), intent); err != nil {
@@ -319,6 +334,8 @@ func (a *App) searchProviderCountry(ctx *sdk.AppCtx, provider *numberProvider, r
 		return searchPlivoNumbers(ctx, provider.ConnID, request, country)
 	case "signalwire":
 		return searchSignalWireNumbers(ctx, provider.ConnID, request, country)
+	case "didww":
+		return searchDIDWWNumbers(ctx, provider, request, country)
 	default:
 		return nil, nil, fmt.Errorf("number search is unsupported for provider %s", provider.Slug)
 	}
@@ -826,6 +843,9 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 	if intent.Status == "succeeded" {
 		return numberPurchaseResult(intent, true), nil
 	}
+	if intent.Status == "pending" && intent.Provider == "didww" {
+		return a.reconcileDIDWWOrder(ctx, intent)
+	}
 	if intent.Status == "purchasing" || intent.Status == "unknown" {
 		provider, err := a.numberProviderFor(ctx)
 		if err != nil {
@@ -903,6 +923,10 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		if err := validateTelnyxPurchaseProfile(ctx, intent, complianceID); err != nil {
 			return nil, err
 		}
+	} else if intent.Provider == "didww" {
+		if err := validateDIDWWPurchaseResources(ctx, intent, addressID, complianceID); err != nil {
+			return nil, err
+		}
 	} else if complianceID != "" {
 		return nil, fmt.Errorf("compliance_id is not supported for provider %s", intent.Provider)
 	}
@@ -942,6 +966,8 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "buy_phone_number", map[string]any{
 			"number": compactPhoneNumber(intent.PhoneNumber),
 		})
+	case "didww":
+		raw, err = executeCarrierTool(ctx, intent.CarrierConnectionID, "create_order", didwwNumberOrderInput(intent))
 	default:
 		err = fmt.Errorf("number purchase is unsupported for provider %s", intent.Provider)
 	}
@@ -960,12 +986,45 @@ func (a *App) purchaseNumber(ctx *sdk.AppCtx, token, addressID, complianceID str
 			}
 		}
 	}
+	if intent.Provider == "didww" {
+		orderID, orderStatus := didwwOrderState(raw)
+		if orderID == "" {
+			_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "unknown", raw, "DIDWW returned no order ID")
+			return nil, errors.New("DIDWW order was accepted without an order ID; reconcile it in the DIDWW portal before retrying")
+		}
+		if orderStatus == "pending" {
+			if err := dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "pending", raw, ""); err != nil {
+				return nil, err
+			}
+			intent.Status, intent.ResponseJSON = "pending", string(raw)
+			return didwwPendingPurchaseResult(intent, orderID, orderStatus), nil
+		}
+		if orderStatus == "canceled" {
+			_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "failed", raw, "DIDWW canceled the order")
+			return nil, errors.New("DIDWW canceled the order")
+		}
+		if number := didwwNumberFromOrder(raw); number != "" {
+			intent.PhoneNumber = number
+		}
+	}
 	if err := dbNumberPurchaseIntentStatus(ctx.AppDB(), token, "succeeded", raw, ""); err != nil {
 		return nil, fmt.Errorf("number purchased but local confirmation persistence failed; do not retry: %w", err)
 	}
 	intent.Status = "succeeded"
 	intent.ResponseJSON = string(raw)
 	return numberPurchaseResult(intent, false), nil
+}
+
+func validateDIDWWPurchaseResources(_ *sdk.AppCtx, intent *numberPurchaseIntent, addressID, verificationID string) error {
+	if intent == nil {
+		return nil
+	}
+	// DIDWW creates the order first. Registration is completed after the
+	// allocated DID is returned, so its order API has no compliance fields.
+	if addressID != "" || verificationID != "" {
+		return errors.New("DIDWW registration is completed after the order allocates a DID; omit address_id and compliance_id when ordering")
+	}
+	return nil
 }
 
 func telnyxNumberOrderInput(intent *numberPurchaseIntent, provider *numberProvider, complianceID string) map[string]any {
@@ -980,6 +1039,82 @@ func telnyxNumberOrderInput(intent *numberPurchaseIntent, provider *numberProvid
 	return input
 }
 
+func didwwNumberOrderInput(intent *numberPurchaseIntent) map[string]any {
+	attributes := map[string]any{"sku_id": intent.ProviderSKUID}
+	if intent.InventoryMode == "available_did" && intent.ProviderResourceID != "" {
+		attributes["available_did_id"] = intent.ProviderResourceID
+	} else {
+		// DIDWW selects the group represented by the SKU. Group orders use qty;
+		// did_group_id is returned by DIDWW after allocation, not an order input.
+		attributes["qty"] = 1
+	}
+	return map[string]any{
+		"items":                 []map[string]any{{"type": "did_order_items", "attributes": attributes}},
+		"allow_back_ordering":   false,
+		"external_reference_id": "telephony-" + intent.Token,
+	}
+}
+
+func didwwOrderState(raw json.RawMessage) (string, string) {
+	var root struct {
+		Data struct {
+			ID         string `json:"id"`
+			Attributes struct {
+				Status string `json:"status"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &root) != nil {
+		return "", ""
+	}
+	return root.Data.ID, strings.ToLower(strings.TrimSpace(root.Data.Attributes.Status))
+}
+
+func didwwPendingPurchaseResult(intent *numberPurchaseIntent, orderID, status string) map[string]any {
+	result := map[string]any{
+		"purchased": false, "order_pending": true, "order_id": orderID, "order_status": status,
+		"idempotent_replay": true, "provider": intent.Provider, "phone_number": intent.PhoneNumber,
+		"country": intent.Country, "number_type": intent.NumberType, "provider_group_id": intent.ProviderGroupID,
+		"provider_sku_id": intent.ProviderSKUID,
+		"message":         "DIDWW accepted the order; wait for completion and retry the same confirmation token to reconcile it.",
+	}
+	if intent.ComplianceRequired {
+		result["registration_required"] = true
+		result["registration_message"] = "After DIDWW allocates the DID, create or select an identity and address, then submit the approved address verification for that DID before activation."
+	}
+	return result
+}
+
+func (a *App) reconcileDIDWWOrder(ctx *sdk.AppCtx, intent *numberPurchaseIntent) (map[string]any, error) {
+	orderID, _ := didwwOrderState(json.RawMessage(intent.ResponseJSON))
+	if orderID == "" {
+		return nil, errors.New("DIDWW pending order has no order ID; reconcile it in the DIDWW portal")
+	}
+	raw, err := executeCarrierTool(ctx, intent.CarrierConnectionID, "get_order", map[string]any{"id": orderID})
+	if err != nil {
+		return nil, fmt.Errorf("check DIDWW order %s: %w", orderID, err)
+	}
+	currentID, status := didwwOrderState(raw)
+	if currentID == "" {
+		currentID = orderID
+	}
+	if status == "pending" || status == "" {
+		return didwwPendingPurchaseResult(intent, currentID, firstNonEmpty(status, "pending")), nil
+	}
+	if status == "canceled" {
+		_ = dbNumberPurchaseIntentStatus(ctx.AppDB(), intent.Token, "failed", raw, "DIDWW canceled the order")
+		return nil, errors.New("DIDWW canceled the order")
+	}
+	if number := didwwNumberFromOrder(raw); number != "" {
+		intent.PhoneNumber = number
+	}
+	if err := dbNumberPurchaseIntentStatus(ctx.AppDB(), intent.Token, "succeeded", raw, ""); err != nil {
+		return nil, err
+	}
+	intent.Status, intent.ResponseJSON = "succeeded", string(raw)
+	return numberPurchaseResult(intent, true), nil
+}
+
 func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]any {
 	var response any
 	if intent.ResponseJSON != "" {
@@ -987,7 +1122,7 @@ func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]
 			response = intent.ResponseJSON
 		}
 	}
-	return map[string]any{
+	result := map[string]any{
 		"purchased": true, "idempotent_replay": replay,
 		"provider": intent.Provider, "phone_number": intent.PhoneNumber,
 		"country": intent.Country, "number_type": intent.NumberType,
@@ -995,9 +1130,47 @@ func numberPurchaseResult(intent *numberPurchaseIntent, replay bool) map[string]
 		"inbound_price": intent.InboundPrice, "currency": intent.Currency,
 		"address_sid": intent.SelectedAddressSID, "bundle_sid": intent.SelectedBundleSID,
 		"address_id": intent.SelectedAddressSID, "compliance_id": intent.SelectedBundleSID,
+		"provider_resource_id": intent.ProviderResourceID, "provider_group_id": intent.ProviderGroupID,
+		"provider_sku_id": intent.ProviderSKUID, "inventory_mode": intent.InventoryMode,
 		"provider_response": response,
 		"next":              "Create an inbound route for this number, then configure the carrier webhook where that provider is supported.",
 	}
+	if intent.ComplianceRequired {
+		result["registration_required"] = true
+		result["registration_message"] = "This DIDWW number requires registration after allocation. Create or select an identity and address, then submit an approved address verification for the allocated DID before activation."
+	}
+	return result
+}
+
+func didwwNumberFromOrder(raw json.RawMessage) string {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return ""
+	}
+	var walk func(any) string
+	walk = func(node any) string {
+		switch item := node.(type) {
+		case map[string]any:
+			for _, key := range []string{"number", "phone_number", "did_number"} {
+				if candidate := normalizedOwnedPhone(stringValue(item[key])); validE164(candidate) {
+					return candidate
+				}
+			}
+			for _, child := range item {
+				if found := walk(child); found != "" {
+					return found
+				}
+			}
+		case []any:
+			for _, child := range item {
+				if found := walk(child); found != "" {
+					return found
+				}
+			}
+		}
+		return ""
+	}
+	return walk(value)
 }
 
 func (a *App) toolNumbersSearch(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1089,6 +1262,12 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 		result, err = a.addressesList(ctx, body)
 	case "/numbers/addresses/create":
 		result, err = a.addressCreate(ctx, body)
+	case "/numbers/identities/list":
+		result, err = a.didwwIdentitiesList(ctx, body)
+	case "/numbers/identities/create":
+		result, err = a.didwwIdentityCreate(ctx, body)
+	case "/numbers/identities/get":
+		result, err = a.didwwIdentityGet(ctx, body)
 	case "/numbers/regulatory/requirements":
 		result, err = a.regulatoryRequirements(ctx, body)
 	case "/numbers/regulatory/bundles/list":
@@ -1117,12 +1296,14 @@ func (a *App) handleNumbers(w http.ResponseWriter, r *http.Request) {
 
 func dbNumberPurchaseIntentInsert(db *sql.DB, intent numberPurchaseIntent) error {
 	_, err := db.Exec(`INSERT INTO number_purchase_intents
-        (token, project_id, provider_slug, carrier_connection_id, country, phone_number,
-	         number_type, monthly_price, upfront_price, inbound_price, currency, address_requirement, compliance_required, status, expires_at)
-	        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
+		(token, project_id, provider_slug, carrier_connection_id, country, phone_number,
+		         number_type, monthly_price, upfront_price, inbound_price, currency, address_requirement, compliance_required,
+		         provider_resource_id, provider_group_id, provider_sku_id, inventory_mode, status, expires_at)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'quoted', ?)`,
 		intent.Token, intent.ProjectID, intent.Provider, intent.CarrierConnectionID,
 		intent.Country, intent.PhoneNumber, intent.NumberType, intent.MonthlyPrice,
 		intent.UpfrontPrice, intent.InboundPrice, intent.Currency, intent.AddressRequirement, intent.ComplianceRequired,
+		intent.ProviderResourceID, intent.ProviderGroupID, intent.ProviderSKUID, intent.InventoryMode,
 		intent.ExpiresAt.Format(time.RFC3339))
 	return err
 }
@@ -1132,11 +1313,13 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	var expires string
 	err := db.QueryRow(`SELECT token, project_id, provider_slug, carrier_connection_id, country,
         phone_number, number_type, monthly_price, upfront_price, inbound_price, currency,
-	        address_requirement, compliance_required, selected_address_sid, selected_bundle_sid, status, response_json, error_message, expires_at
+        address_requirement, compliance_required, provider_resource_id, provider_group_id, provider_sku_id, inventory_mode,
+        selected_address_sid, selected_bundle_sid, status, response_json, error_message, expires_at
         FROM number_purchase_intents WHERE project_id = ? AND token = ?`, projectID, token).Scan(
 		&intent.Token, &intent.ProjectID, &intent.Provider, &intent.CarrierConnectionID,
 		&intent.Country, &intent.PhoneNumber, &intent.NumberType, &intent.MonthlyPrice,
 		&intent.UpfrontPrice, &intent.InboundPrice, &intent.Currency, &intent.AddressRequirement, &intent.ComplianceRequired,
+		&intent.ProviderResourceID, &intent.ProviderGroupID, &intent.ProviderSKUID, &intent.InventoryMode,
 		&intent.SelectedAddressSID, &intent.SelectedBundleSID, &intent.Status,
 		&intent.ResponseJSON, &intent.ErrorMessage, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1149,13 +1332,16 @@ func dbNumberPurchaseIntentGet(db *sql.DB, projectID, token string) (*numberPurc
 	if err != nil {
 		return nil, fmt.Errorf("invalid number purchase expiry: %w", err)
 	}
+	if intent.Provider == "didww" && intent.PhoneNumber == "" && intent.ResponseJSON != "" {
+		intent.PhoneNumber = didwwNumberFromOrder(json.RawMessage(intent.ResponseJSON))
+	}
 	return &intent, nil
 }
 
 func dbNumberPurchaseIntentClaim(db *sql.DB, projectID, token, addressSID, bundleSID string) (bool, error) {
 	result, err := db.Exec(`UPDATE number_purchase_intents
         SET status = 'purchasing', selected_address_sid = ?, selected_bundle_sid = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND other.phone_number=number_purchase_intents.phone_number AND other.token<>number_purchase_intents.token AND other.status IN ('purchasing','unknown','succeeded'))`, addressSID, bundleSID, projectID, token)
+        WHERE project_id = ? AND token = ? AND status = 'quoted' AND NOT EXISTS (SELECT 1 FROM number_purchase_intents other WHERE other.carrier_connection_id=number_purchase_intents.carrier_connection_id AND ((number_purchase_intents.phone_number<>'' AND other.phone_number=number_purchase_intents.phone_number) OR (number_purchase_intents.provider_resource_id<>'' AND other.provider_resource_id=number_purchase_intents.provider_resource_id)) AND other.token<>number_purchase_intents.token AND other.status IN ('purchasing','pending','unknown','succeeded'))`, addressSID, bundleSID, projectID, token)
 	if err != nil {
 		return false, err
 	}

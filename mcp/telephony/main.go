@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.7.5
+version: 0.8.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -147,6 +147,9 @@ provides:
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
     - { name: telephony_addresses_list, description: "List provider addresses." }
     - { name: telephony_address_create, description: "Create and validate a provider address." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity." }
+    - { name: telephony_identity_get, description: "Get a provider regulatory identity." }
     - { name: telephony_regulatory_requirements, description: "Discover current provider regulatory requirements." }
     - { name: telephony_regulatory_bundles_list, description: "List provider regulatory bundles." }
     - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle." }
@@ -777,6 +780,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List addresses in the bound carrier account. Args: country?, customer_name?, limit?. Address data comes directly from the provider and is not stored by Telephony.",
 			InputSchema: schemaObject(map[string]any{
 				"country":       map[string]any{"type": "string", "description": "Optional ISO alpha-2 address country."},
+				"identity_id":   map[string]any{"type": "string", "description": "Optional DIDWW identity filter."},
 				"customer_name": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
 			}, nil),
@@ -797,10 +801,39 @@ func (a *App) MCPTools() []sdk.Tool {
 				"region":           map[string]any{"type": "string"},
 				"postal_code":      map[string]any{"type": "string"},
 				"country":          map[string]any{"type": "string", "description": "ISO alpha-2 address country."},
+				"identity_id":      map[string]any{"type": "string", "description": "DIDWW identity ID for a regulatory address."},
 				"friendly_name":    map[string]any{"type": "string"},
 				"auto_correct":     map[string]any{"type": "boolean", "default": true},
 			}, []string{"street", "city", "country"}),
 			HandlerCtx: a.toolAddressCreate,
+		},
+		{
+			Name:        "telephony_identities_list",
+			Description: "List provider regulatory identities. This is currently implemented for DIDWW and returns identity IDs used when creating address verification.",
+			InputSchema: schemaObject(map[string]any{
+				"identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+			}, nil),
+			HandlerCtx: a.toolIdentitiesList,
+		},
+		{
+			Name:        "telephony_identity_create",
+			Description: "Create a DIDWW personal or business regulatory identity. This sends identity data to the bound carrier and does not purchase a number.",
+			InputSchema: schemaObject(map[string]any{
+				"identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}},
+				"country":       map[string]any{"type": "string", "description": "ISO alpha-2 country code."}, "country_id": map[string]any{"type": "string"},
+				"first_name": map[string]any{"type": "string"}, "last_name": map[string]any{"type": "string"}, "phone_number": map[string]any{"type": "string"},
+				"id_number": map[string]any{"type": "string"}, "birth_date": map[string]any{"type": "string"}, "company_name": map[string]any{"type": "string"},
+				"company_reg_number": map[string]any{"type": "string"}, "vat_id": map[string]any{"type": "string"}, "personal_tax_id": map[string]any{"type": "string"},
+				"contact_email": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "external_reference_id": map[string]any{"type": "string"},
+			}, []string{"identity_type"}),
+			HandlerCtx: a.toolIdentityCreate,
+		},
+		{
+			Name:        "telephony_identity_get",
+			Description: "Get one DIDWW regulatory identity by identity_id.",
+			InputSchema: schemaObject(map[string]any{"identity_id": map[string]any{"type": "string"}}, []string{"identity_id"}),
+			HandlerCtx:  a.toolIdentityGet,
 		},
 		{
 			Name:        "telephony_regulatory_requirements",
@@ -849,16 +882,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "telephony_regulatory_bundle_item_create",
 			Description: "Legacy alias for setting a compliance requirement. Twilio accepts end-user/document objects; Telnyx accepts requirement_id plus field_value or file.",
 			InputSchema: schemaObject(map[string]any{
-				"bundle_sid":     map[string]any{"type": "string"},
-				"compliance_id":  map[string]any{"type": "string"},
-				"requirement_id": map[string]any{"type": "string"},
-				"field_value":    map[string]any{"type": "string"},
-				"kind":           map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
-				"friendly_name":  map[string]any{"type": "string"},
-				"type":           map[string]any{"type": "string"},
-				"attributes":     map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
-				"file":           map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
-				"file_name":      map[string]any{"type": "string"},
+				"bundle_sid":          map[string]any{"type": "string"},
+				"compliance_id":       map[string]any{"type": "string"},
+				"requirement_id":      map[string]any{"type": "string"},
+				"address_id":          map[string]any{"type": "string", "description": "DIDWW regulatory address ID."},
+				"did_id":              map[string]any{"type": "string", "description": "Allocated DIDWW DID ID."},
+				"did_ids":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Allocated DIDWW DID IDs."},
+				"identity_id":         map[string]any{"type": "string"},
+				"proof_type_id":       map[string]any{"type": "string"},
+				"file_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"onetime_file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"service_description": map[string]any{"type": "string"},
+				"field_value":         map[string]any{"type": "string"},
+				"kind":                map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
+				"friendly_name":       map[string]any{"type": "string"},
+				"type":                map[string]any{"type": "string"},
+				"attributes":          map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
+				"file":                map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
+				"file_name":           map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolRegulatoryBundleItemCreate,
 		},
@@ -880,23 +921,36 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "telephony_compliance_profile_create", Description: "Create a provider compliance profile after discovering current requirements.",
-			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "end_user_type": map[string]any{"type": "string"}, "email": map[string]any{"type": "string"}, "regulation_sid": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolRegulatoryBundleCreate,
+			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "country_id": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "end_user_type": map[string]any{"type": "string"}, "identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}}, "company_name": map[string]any{"type": "string"}, "email": map[string]any{"type": "string"}, "contact_email": map[string]any{"type": "string"}, "regulation_sid": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolRegulatoryBundleCreate,
 		},
 		{
 			Name: "telephony_compliance_profile_get", Description: "Get a provider compliance profile and its current requirements.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleGet,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleGet,
 		},
 		{
 			Name: "telephony_compliance_requirement_set", Description: "Set one compliance requirement value or upload and assign its document.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "requirement_id": map[string]any{"type": "string"}, "field_value": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"}, "attributes": map[string]any{"type": "object"}, "file": map[string]any{"type": "string"}, "file_name": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleItemCreate,
+			InputSchema: schemaObject(map[string]any{
+				"compliance_id": map[string]any{"type": "string"}, "requirement_id": map[string]any{"type": "string"},
+				"address_id":          map[string]any{"type": "string", "description": "DIDWW regulatory address ID."},
+				"did_id":              map[string]any{"type": "string", "description": "Allocated DIDWW DID ID."},
+				"did_ids":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Allocated DIDWW DID IDs."},
+				"identity_id":         map[string]any{"type": "string"},
+				"proof_type_id":       map[string]any{"type": "string"},
+				"file_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"onetime_file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"service_description": map[string]any{"type": "string"}, "field_value": map[string]any{"type": "string"},
+				"kind": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"},
+				"type": map[string]any{"type": "string"}, "attributes": map[string]any{"type": "object"},
+				"file": map[string]any{"type": "string"}, "file_name": map[string]any{"type": "string"},
+			}, nil), HandlerCtx: a.toolRegulatoryBundleItemCreate,
 		},
 		{
 			Name: "telephony_compliance_profile_evaluate", Description: "Evaluate whether a provider compliance profile is complete and usable for ordering.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleEvaluate,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleEvaluate,
 		},
 		{
 			Name: "telephony_compliance_profile_submit", Description: "Submit a complete provider compliance profile for optional provider review or pre-approval.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
 		},
 	}
 	for i := range tools {
