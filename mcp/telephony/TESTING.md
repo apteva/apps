@@ -103,3 +103,32 @@ first), a number nobody answers, and a number that goes to voicemail with
 `machine_detection: detect`. Expect `termination.reason` of `busy`,
 `no_answer`, and `completed` with `answered_by: machine`, plus one
 `call.machine_detected` event for the voicemail call.
+
+
+## Telnyx AI carrier activation
+
+`TestCarrierActivation*` covers carrier-confirmed answer state, answered IVR
+handoff, rejected commands, lost callbacks, durable deadlines across restart,
+late preparation, caller cancellation, migration evidence, and media-based talk
+time. A prepared Core session alone must never mark a handoff delivered.
+
+The activation journal allows three command attempts per phase, waits up to ten
+seconds for each accepted command's confirmation, and has a thirty-second total
+budget capped by the call deadline. Failure ends the call with
+`ai_activation_failed` and one callback opportunity. Carrier termination errors
+remain visible and are retried; Telephony cannot guarantee remote termination
+when the carrier API is unavailable.
+
+`TestTier2AIHandoffCarrierActivation` runs a compiled sidecar with loopback
+Functions, Core and Telnyx substitutes. It lets a human offer expire, selects AI,
+checks answer-before-streaming through signed callbacks, verifies two-way audio,
+and checks that the routing decision is applied only after media connects.
+
+```sh
+GOWORK=off go test -short ./...
+GOWORK=off go test -race -short -run 'TestCarrierActivation|TestAIHandoff|TestRealtimePreparation|TestReliability|TestTerminalAnnouncement' .
+GOWORK=off go test -tags integration -run TestTier2AIHandoffCarrierActivation .
+```
+
+These tests make no staging, production or live-carrier requests. They validate
+Telephony's protocol sequence, not an actual PSTN call.

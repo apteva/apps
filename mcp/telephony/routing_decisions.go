@@ -818,11 +818,6 @@ func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	if e != nil {
 		return e
 	}
-	if row != nil && row.Status == "answering" {
-		// A bounded HTTP wait may finish before the background startup. Do not
-		// mark delivery applied until preparation has actually resolved.
-		return errAnswerPreparationInProgress
-	}
 	var p inboundRoutingPlan
 	if e = json.Unmarshal([]byte(d.PlanJSON), &p); e != nil {
 		return e
@@ -831,7 +826,13 @@ func (a *App) deliverDecision(ctx *sdk.AppCtx, d decisionRecord) error {
 	if e = ctx.AppDB().QueryRow(`SELECT current_node_id FROM call_route_executions WHERE call_id=?`, d.CallID).Scan(&node); e != nil {
 		return e
 	}
-	if row != nil && row.Status == "pending" && node == p.NodeID {
+	if row != nil && !isTerminalStatus(row.Status) && row.CarrierSlug == "telnyx" && node == p.NodeID && p.AnswerMode == answerModeRealtimeImmediate && (p.TerminalType == "destination" || p.TerminalType == "ring_group") {
+		if _, e = a.prepareAndActivateTelnyxAI(ctx, row, p.Directive, p.Voice, p.Greeting); e != nil {
+			return e
+		}
+	} else if row != nil && row.Status == "answering" {
+		return errAnswerPreparationInProgress
+	} else if row != nil && row.Status == "pending" && node == p.NodeID {
 		if p.TerminalType == "hangup" || p.TerminalType == "reject" {
 			var ex routingExecutionContext
 			if e = json.Unmarshal([]byte(p.ContextJSON), &ex); e == nil {

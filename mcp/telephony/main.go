@@ -397,6 +397,7 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{Name: "carrier-activations", Schedule: "@every 1s", Run: a.runCarrierActivations},
 		{Name: "ai-handoffs", Schedule: "@every 1s", Run: a.runAIHandoffs},
 		{Name: "routing-decisions", Schedule: "@every 1s", Run: a.runDecisionTick},
 		{Name: "ring-groups", Schedule: "@every 1s", Run: a.runRingGroupTick},
@@ -1755,6 +1756,9 @@ func (a *App) answerCall(ctx *sdk.AppCtx, row *callRow, directive, voice, greeti
 }
 
 func (a *App) answerCallOwned(ctx *sdk.AppCtx, row *callRow, directive, voice, greeting string, terminalOnCarrierError bool) (string, error) {
+	if row.CarrierSlug == "telnyx" && row.Direction == "inbound" && !a.callUsesDirectSIP(row) {
+		return a.prepareAndActivateTelnyxAI(ctx, row, directive, voice, greeting)
+	}
 	if row.RoutingFlowVersionID != "" {
 		_, plan, err := a.routingPlanForCall(row, nil)
 		if err != nil {
@@ -2120,7 +2124,7 @@ func (a *App) answerInboundCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 		// browser destination. Once the operator claims that call, start media on
 		// the already-answered leg; issuing answer_call twice is rejected by the
 		// carrier and leaves the browser stuck in "answering".
-		if row.AnsweredAt != "" && row.RoutingFlowVersionID != "" {
+		if carrierAnswerObserved(row) {
 			return a.startTelnyxStream(ctx, row)
 		}
 		input := map[string]any{
@@ -2366,6 +2370,9 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		if created && globalCtx != nil {
 			_ = a.publishLifecycleEvents(globalCtx.WithProject(row.ProjectID), callID)
 		}
+	}
+	if row.CarrierSlug == "telnyx" && globalCtx != nil {
+		a.advanceCarrierActivation(globalCtx.WithProject(row.ProjectID), callID)
 	}
 	if err := a.applyProgressUpdate(row, update); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2872,6 +2879,14 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if row != nil {
+			if media := telnyxMediaStatusFromEvent(event.Data.EventType); media != "" {
+				if err := a.db().updateMediaStatusWithLeg(row.ID, media, "", 0, "", string(mediaCloseLegCarrier)); err != nil {
+					http.Error(w, "persist carrier media", 500)
+					return
+				}
+			}
+		}
 		status := telnyxStatusFromEvent(event.Data.EventType, event.Data.Payload.HangupCause)
 		if row != nil && status != "" {
 			created, err := a.db().updateStatusWithFacts(row.ID, status,
@@ -2898,6 +2913,9 @@ func (a *App) handleTelnyxInbound(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "reload call", 500)
 				return
 			}
+		}
+		if row != nil && globalCtx != nil {
+			a.advanceCarrierActivation(globalCtx.WithProject(row.ProjectID), row.ID)
 		}
 		if row != nil && !isTerminalStatus(row.Status) && row.RoutingFlowVersionID != "" && globalCtx != nil {
 			ctx := globalCtx.WithProject(row.ProjectID)
@@ -3839,6 +3857,7 @@ type callRow struct {
 	AudioBridgeURL           string
 	Status                   string
 	PlacedAt                 string
+	CarrierAnsweredAt        string
 	AnsweredAt               string
 	EndedAt                  string
 	ProjectID                string
@@ -3974,7 +3993,7 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(hold_control_revision,0), COALESCE(hold_control_action,''), COALESCE(hold_requested_at,''),
 	COALESCE(recording_control_revision,0), COALESCE(recording_control_action,''), COALESCE(recording_requested_at,''),
 	COALESCE((SELECT hold_music_url FROM call_control_settings WHERE project_id=calls.project_id),''),
-	COALESCE((SELECT hold_music_storage_file_id FROM call_control_settings WHERE project_id=calls.project_id),0)`
+	COALESCE((SELECT hold_music_storage_file_id FROM call_control_settings WHERE project_id=calls.project_id),0), COALESCE(carrier_answered_at,'')`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -4001,7 +4020,7 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.HoldState, &r.RecordingControlState, &r.ControlRevision, &r.ControlAction, &r.ControlError, &r.ControlRequestedAt, &r.HoldClientState,
 		&r.HoldControlRevision, &r.HoldControlAction, &r.HoldRequestedAt,
 		&r.RecordingControlRevision, &r.RecordingControlAction, &r.RecordingRequestedAt,
-		&r.HoldMusicURL, &r.HoldMusicStorageFileID); err != nil {
+		&r.HoldMusicURL, &r.HoldMusicStorageFileID, &r.CarrierAnsweredAt); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -4380,10 +4399,10 @@ func (c *callsDB) updateMediaStatusWithLeg(id, status, errMsg string, closeCode 
 		    WHEN ? <> '' THEN ? ELSE media_close_leg
 		END,
         updated_at = ?
-        WHERE id = ?`,
+        WHERE id = ? AND (? <> 'connected' OR status NOT IN ('completed','failed','busy','no-answer','canceled'))`,
 		status, status, errMsg, errMsg, status,
 		status, now, status, terminalMedia, now, status, closeCode, closeCode,
-		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id)
+		status, closeReason, closeReason, status, closeLeg, closeLeg, now, id, status)
 	return err
 }
 

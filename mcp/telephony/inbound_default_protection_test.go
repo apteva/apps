@@ -13,12 +13,12 @@ func TestDefaultTerminationDistinguishesUnansweredAndAnswered(t *testing.T) {
 		{"first inbound", "inbound", "", "", "pending", "reject_call"},
 		{"carrier answered", "inbound", "2026-09-28T10:00:00Z", "", "pending", "hangup_call"},
 		{"media connected", "inbound", "", "2026-09-28T10:00:00Z", "answering", "hangup_call"},
-		{"answered status", "inbound", "", "", "answered", "hangup_call"},
+		{"unconfirmed answered status", "inbound", "", "", "answered", "reject_call"},
 		{"outbound ringing", "outbound", "", "", "ringing", "hangup_call"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, ctx, platform, _, row, _ := reliabilityFixture(t)
-			row.Direction, row.AnsweredAt, row.MediaConnectedAt, row.Status = tc.direction, tc.answered, tc.media, tc.status
+			row.Direction, row.CarrierAnsweredAt, row.MediaConnectedAt, row.Status = tc.direction, tc.answered, tc.media, tc.status
 			if err := a.terminateCarrierCall(ctx, row); err != nil {
 				t.Fatal(err)
 			}

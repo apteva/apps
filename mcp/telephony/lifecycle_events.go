@@ -95,6 +95,12 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	if allowLateFacts && (status == "answered" || status == "in-progress") {
 		answeredAt = earliestRFC3339(answeredAt, occurredAt)
 	}
+	if allowLateFacts && facts.Source == "provider" && (status == "answered" || status == "in-progress") {
+		confirmed := earliestRFC3339(current.CarrierAnsweredAt, occurredAt)
+		if _, err := tx.Exec(`UPDATE calls SET carrier_answered_at=? WHERE id=?`, confirmed, id); err != nil {
+			return false, err
+		}
+	}
 	endedAt := current.EndedAt
 	if isTerminalStatus(status) {
 		endedAt = earliestRFC3339(endedAt, occurredAt)
@@ -113,6 +119,14 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 	talkDurationSeconds := current.TalkDurationSeconds
 	if answeredAt != "" && endedAt != "" {
 		talkDurationSeconds = elapsedSeconds(answeredAt, endedAt)
+	}
+	// AI conversation time requires a connected media bridge. Carrier answer
+	// time includes IVR/waiting and is retained separately in answered_at.
+	if current.Direction == "inbound" && current.PeerKind == peerKindRealtime {
+		talkDurationSeconds = 0
+		if current.MediaConnectedAt != "" && endedAt != "" {
+			talkDurationSeconds = elapsedSeconds(current.MediaConnectedAt, endedAt)
+		}
 	}
 	providerSequence := current.ProviderSequence
 	if facts.ProviderSequence > providerSequence {
@@ -305,7 +319,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 	if call.DurationSeconds > 0 {
 		payload["duration_seconds"] = call.DurationSeconds
 	}
-	if call.TalkDurationSeconds > 0 {
+	if call.TalkDurationSeconds > 0 || (call.Direction == "inbound" && call.PeerKind == peerKindRealtime && isTerminalStatus(call.Status)) {
 		payload["talk_duration_seconds"] = call.TalkDurationSeconds
 	}
 	if call.ErrorMessage != "" {

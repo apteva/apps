@@ -561,7 +561,7 @@ func TestReliabilityUpgradePreservesCallHistory(t *testing.T) {
 
 func TestReliabilityLegacyAnnouncementRecovery(t *testing.T) {
 	a, ctx, platform, route, row, key := reliabilityFixture(t)
-	_, err := a.db().db.Exec(`UPDATE calls SET routing_flow_version_id='legacy',announcement_state='awaiting_answer',announcement_text='Stored announcement',answered_at=? WHERE id=?`, ringTime(time.Now()), row.ID)
+	_, err := a.db().db.Exec(`UPDATE calls SET routing_flow_version_id='legacy',announcement_state='awaiting_answer',announcement_text='Stored announcement',answered_at=?,carrier_answered_at=? WHERE id=?`, ringTime(time.Now()), ringTime(time.Now()), row.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
