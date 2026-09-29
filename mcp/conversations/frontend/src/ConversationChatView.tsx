@@ -113,7 +113,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           <p className="text-xs text-text-muted truncate">{props.subtitle}</p>
         </div>
         {props.headerActions && (
-          <div className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
+          <div data-chat-header-actions className="ml-auto flex shrink-0 items-center gap-1">{props.headerActions}</div>
         )}
         {!props.archived && props.onOpenDetails && (
           <button

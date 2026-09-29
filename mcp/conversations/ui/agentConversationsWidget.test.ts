@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { isValidElement, type ReactNode } from "react";
+import AgentConversationsWidget from "./AgentConversationsWidget";
 import {
   agentConversationWidgetLayout,
   conversationDisplayMode,
@@ -91,6 +93,32 @@ describe("AgentConversationsWidget scope", () => {
     expect(widget).toContain('useWideWidgetLayout(widgetSize !== "half")');
     const entry = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(entry).toContain('props.slot === "dashboard.agent_detail"');
+  });
+
+  test("frames dashboard-grid chat without changing other embeds or adding a second header", () => {
+    const classes = (node: ReactNode): string[] => {
+      if (Array.isArray(node)) return node.flatMap(classes);
+      if (!isValidElement<{ className?: string; children?: ReactNode }>(node)) return [];
+      return [node.props.className ?? "", ...classes(node.props.children)];
+    };
+    const props = { appName: "conversations", installId: 1, projectId: "project-a", instanceId: 42 };
+    const classNames = classes(AgentConversationsWidget({ ...props, slot: "dashboard.agent_detail" }));
+    expect(classNames).toContain("agent-conversations-widget-frame h-full min-h-0 min-w-0 overflow-hidden rounded-lg border border-border bg-bg");
+    expect(classNames.join(" ")).not.toContain("bg-bg-card");
+    for (const slot of ["dashboard.build", "other.embed"]) {
+      expect(classes(AgentConversationsWidget({ ...props, slot }))).not.toContainEqual(expect.stringContaining("agent-conversations-widget-frame"));
+    }
+
+    const entry = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    expect(entry).not.toContain("<header");
+    expect(entry).not.toContain("<h2");
+    const chat = readFileSync(new URL("../frontend/src/ConversationChatView.tsx", import.meta.url), "utf8");
+    expect(chat).toContain('className="flex-1 min-h-0 overflow-auto p-4 flex flex-col gap-4"');
+    expect(chat).toContain('className="chat-composer-safe shrink-0');
+    expect(chat).toContain("data-chat-header-actions");
+    const styles = readFileSync(new URL("../frontend/styles.css", import.meta.url), "utf8");
+    expect(styles).toContain(".apteva-conversations .agent-conversations-widget-frame {container-type:inline-size;container-name:agent-chat-widget;}");
+    expect(styles).toContain("@container agent-chat-widget (width <= 420px)");
   });
 
   test("both surfaces use the same transport/controller and shared chat view", () => {

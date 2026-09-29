@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.11 — 2026-09-29
+
+- Frame the agent Overview chat widget like its neighboring dashboard cards, using the page background and the existing chat header. Keep the Build surface and exported chat embeds unchanged.
+- Let header actions wrap in narrow widget widths while messages retain internal scrolling and the composer stays visible. Add widget-scope regression coverage and rebuild the packaged UI assets.
+- Pin App SDK v0.89.1, the latest tagged SDK release by commit ancestry.
+
 ## 0.24.10 — 2026-09-29
 
 - Offer the existing agent-conversations widget on agent detail pages as well as Build, with half- and full-width options. Agent details default to the focused single-agent chat; Build retains its browser default.

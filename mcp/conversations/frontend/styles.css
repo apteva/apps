@@ -56,6 +56,15 @@
 .apteva-conversations :where(button,input,textarea) {background-color:transparent;}
 .apteva-conversations .chat-composer-safe {padding-bottom:max(.5rem,env(safe-area-inset-bottom));}
 
+/* The agent Overview mounts chat in a widget grid. Keep its frame and
+ * small-width header behavior local to that surface, not the shared panel. */
+.apteva-conversations .agent-conversations-widget-frame {container-type:inline-size;container-name:agent-chat-widget;}
+.apteva-conversations .agent-conversations-widget-frame [data-chat-header-actions] {min-width:0;max-width:100%;flex-wrap:wrap;justify-content:flex-end;}
+.apteva-conversations .agent-conversations-widget-frame [data-chat-header-actions] > button {min-width:0;max-width:100%;white-space:normal;text-align:center;}
+@container agent-chat-widget (width <= 420px) {
+ .apteva-conversations .agent-conversations-widget-frame [data-chat-header-actions] {flex:1 1 100%;margin-left:0;justify-content:flex-start;}
+}
+
 }
 
 .apteva-conversations {
