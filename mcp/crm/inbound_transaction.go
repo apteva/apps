@@ -180,15 +180,31 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	} else {
 		refs := append([]string{body.InReplyTo}, body.References...)
 		for _, ref := range refs {
-			if ref == "" {
-				continue
-			}
-			err = tx.QueryRow(`SELECT id FROM contact_conversations WHERE project_id=? AND contact_id=? AND channel='email' AND (root_message_id=? OR id IN (SELECT conversation_id FROM contact_activities WHERE project_id=? AND contact_id=? AND message_id_header=?)) ORDER BY id LIMIT 1`, pid, cid, ref, pid, cid, ref).Scan(&convoID)
-			if err == nil {
-				break
-			}
-			if err != sql.ErrNoRows {
+			var sesFallback bool
+			convoID, sesFallback, err = emailConversationByReferenceTx(tx, pid, cid, ref)
+			if err != nil {
 				return nil, err
+			}
+			if convoID != 0 {
+				// Repair the root of a legacy SES conversation as its first
+				// matching reply arrives. Also correct an SES header whose
+				// delivered domain differs from the sending region's usual form.
+				if sesFallback {
+					var root string
+					if err = tx.QueryRow(`SELECT COALESCE(root_message_id,'') FROM contact_conversations WHERE project_id=? AND contact_id=? AND id=?`, pid, cid, convoID).Scan(&root); err != nil {
+						return nil, err
+					}
+					providerID := sesProviderIDFromReference(ref)
+					if root == "" || root == providerID || sesProviderIDFromReference(root) == providerID {
+						_, err = tx.Exec(`UPDATE contact_conversations SET root_message_id=?
+							WHERE project_id=? AND contact_id=? AND id=? AND COALESCE(root_message_id,'')=?`,
+							strings.TrimSpace(ref), pid, cid, convoID, root)
+						if err != nil {
+							return nil, err
+						}
+					}
+				}
+				break
 			}
 		}
 	}
