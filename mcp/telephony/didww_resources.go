@@ -83,7 +83,7 @@ func (a *App) didwwRequirements(ctx *sdk.AppCtx, args map[string]any) (map[strin
 	if err != nil {
 		return nil, err
 	}
-	input := map[string]any{"page_size": boundedIntArg(args, "limit", 100, 1, 1000), "include": "country,did_group_type,personal_proof_types,business_proof_types,address_proof_types"}
+	input := map[string]any{"page_size": boundedIntArg(args, "limit", 100, 1, 1000), "include": "country,did_group_type,personal_proof_types,business_proof_types,address_proof_types,business_permanent_document,business_onetime_document,personal_permanent_document,personal_onetime_document"}
 	if country := strings.TrimSpace(strArg(args, "country", "")); country != "" {
 		id, e := didwwAddressCountryID(ctx, provider.ConnID, country)
 		if e != nil {

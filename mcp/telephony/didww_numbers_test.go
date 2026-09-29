@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -245,5 +246,30 @@ func TestDIDWWRequirementLookupUsesSingleResourceEndpoint(t *testing.T) {
 	}
 	if len(platform.integrationCalls) != 1 || platform.integrationCalls[0].Tool != "get_requirement" {
 		t.Fatalf("requirement lookup did not use get_requirement: %#v", platform.integrationCalls)
+	}
+}
+
+func TestDIDWWRequirementsIncludeAgreementTemplates(t *testing.T) {
+	platform := &answerPlatform{
+		bindings:    map[string]any{"carrier": int64(19)},
+		credentials: &sdk.ConnectionCredentials{Slug: "didww", Fields: map[string]string{}},
+		integrationResponse: map[string]json.RawMessage{
+			"list_requirements": json.RawMessage(`{"data":[],"included":[{"type":"supporting_document_templates","id":"agreement-fr","attributes":{"name":"France Tripartite Agreement"}}]}`),
+		},
+	}
+	app, ctx := withTelephonyTestContext(t, platform)
+	result, err := app.didwwRequirements(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	included := result["included"].([]map[string]any)
+	if len(included) != 1 || included[0]["id"] != "agreement-fr" {
+		t.Fatalf("agreement metadata lost: %#v", result)
+	}
+	include := platform.integrationCalls[0].Input["include"].(string)
+	for _, relationship := range []string{"business_permanent_document", "business_onetime_document", "personal_permanent_document", "personal_onetime_document"} {
+		if !strings.Contains(include, relationship) {
+			t.Fatalf("missing agreement relationship %s", relationship)
+		}
 	}
 }
