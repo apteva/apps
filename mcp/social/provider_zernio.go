@@ -321,37 +321,33 @@ func (a *App) startZernioAccountConnect(ctx *sdk.AppCtx, args map[string]any) (a
 	if err != nil {
 		return mcpError(err.Error()), nil
 	}
-	returnTo := strings.TrimSpace(toString(args["return_to"]))
-	if returnTo == "" {
-		returnTo = "/api/apps/social/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
-	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		return mcpError("return_to must be a same-origin absolute path"), nil
-	}
-	now := time.Now().UTC()
-	res, err := ctx.AppDB().Exec(
-		`INSERT INTO pending_accounts
-		   (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id,
-		    provider_slug, provider_profile_id)
-		 VALUES (?, ?, ?, ?, 'pending_oauth', ?, ?, ?, ?)`,
-		pid, platform, zernioProviderSlug, connID, pendingExpiry(now.Add(30*time.Minute)), profileID,
-		zernioProviderSlug, zProfileID,
-	)
+	returnTo, err := socialOAuthReturnURL(pid, toString(args["return_to"]))
 	if err != nil {
-		return nil, fmt.Errorf("create pending Zernio account: %w", err)
+		return mcpError(err.Error()), nil
 	}
-	pendingID, _ := res.LastInsertId()
-	sep := "?"
-	if strings.Contains(returnTo, "?") {
-		sep = "&"
+	callbackToken, callbackHash, err := newOAuthCallbackToken()
+	if err != nil {
+		return nil, fmt.Errorf("create OAuth callback token: %w", err)
 	}
 	nonce, err := callbackNonce()
 	if err != nil {
 		return nil, err
 	}
-	if _, err = ctx.AppDB().Exec(`UPDATE pending_accounts SET callback_nonce=? WHERE id=?`, nonce, pendingID); err != nil {
-		return nil, err
+	now := time.Now().UTC()
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts
+		   (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id,
+		    provider_slug, provider_profile_id, callback_nonce, callback_token_hash)
+		 VALUES (?, ?, ?, ?, 'pending_oauth', ?, ?, ?, ?, ?, ?)`,
+		pid, platform, zernioProviderSlug, connID, pendingExpiry(now.Add(30*time.Minute)), profileID,
+		zernioProviderSlug, zProfileID, nonce, callbackHash,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create pending Zernio account: %w", err)
 	}
-	returnURL := fmt.Sprintf("%s%spending=%d&provider=%s", returnTo, sep, pendingID, zernioProviderSlug) + "&callback_nonce=" + url.QueryEscape(nonce)
+	pendingID, _ := res.LastInsertId()
+	returnURL := fmt.Sprintf("%s&pending=%d&provider=%s", returnTo, pendingID, zernioProviderSlug) +
+		"&callback_nonce=" + url.QueryEscape(nonce) + "&callback_token=" + url.QueryEscape(callbackToken)
 	connectInput := map[string]any{
 		"platform":     platform,
 		"profileId":    zProfileID,
@@ -420,6 +416,9 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 	}
 	ctx = ctx.WithProject(row.projectID)
 	q := r.URL.Query()
+	if !oauthCallbackTokenMatches(row.callbackTokenHash, q.Get("callback_token")) {
+		return row.connectionID, false
+	}
 	var nonce string
 	if err := ctx.AppDB().QueryRow(`SELECT callback_nonce FROM pending_accounts WHERE id=? AND project_id=? AND status='pending_oauth'`, row.id, row.projectID).Scan(&nonce); err != nil {
 		return row.connectionID, false
@@ -462,9 +461,10 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 			state = firstDeepStringRaw(raw, "state")
 		}
 		updateRes, err := ctx.AppDB().Exec(
-			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?
-			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
-			state, string(raw), row.id, row.projectID,
+			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?, callback_token_hash=''
+			  WHERE id=? AND project_id=? AND status='pending_oauth' AND callback_token_hash=?
+			    AND julianday(expires_at)>julianday(?)`,
+			state, string(raw), row.id, row.projectID, row.callbackTokenHash, pendingExpiry(time.Now().UTC()),
 		)
 		if err != nil {
 			return row.connectionID, false
@@ -480,9 +480,10 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 			return row.connectionID, false
 		}
 		updateRes, err := ctx.AppDB().Exec(
-			`UPDATE pending_accounts SET status='ready', provider_state=?
-			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
-			state, row.id, row.projectID,
+			`UPDATE pending_accounts SET status='ready', provider_state=?, callback_token_hash=''
+			  WHERE id=? AND project_id=? AND status='pending_oauth' AND callback_token_hash=?
+			    AND julianday(expires_at)>julianday(?)`,
+			state, row.id, row.projectID, row.callbackTokenHash, pendingExpiry(time.Now().UTC()),
 		)
 		if err != nil {
 			return row.connectionID, false
