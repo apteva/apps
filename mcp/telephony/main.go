@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.7.4
+version: 0.7.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -278,6 +278,9 @@ db:
   path: /data/telephony.db
   migrations: migrations/
 config_schema:
+  - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
+  - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
+  - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
   - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
   - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }
@@ -372,7 +375,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
         state_expires_at = CASE
             WHEN status NOT IN ('completed','failed','no-answer','busy','canceled')
              AND (media_active <> 0 OR media_status IN ('connecting','connected'))
-            THEN ? ELSE state_expires_at END
+            THEN CASE WHEN duration_started_at<>'' THEN '' ELSE ? END ELSE state_expires_at END
         WHERE media_active <> 0 OR media_status IN ('connecting','connected')`,
 		time.Now().UTC().Format(time.RFC3339),
 		time.Now().UTC().Add(20*time.Second).Format(time.RFC3339)); err != nil {
@@ -495,7 +498,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"greeting":                 map[string]any{"type": "string", "description": "Opening instruction spoken after the callee connects."},
 				"recording":                map[string]any{"type": "boolean", "description": "Override the project recording default for this call. Supported by Twilio, Telnyx, and Plivo."},
 				"timeout_sec":              map[string]any{"type": "integer", "description": "Ring timeout before giving up. Omit to use the project default from telephony_outbound_settings_set, or 30 seconds.", "minimum": 5, "maximum": 120},
-				"max_duration_sec":         map[string]any{"type": "integer", "description": "Hard maximum connected-call duration.", "default": 3600, "minimum": 60, "maximum": 14400},
+				"max_duration_sec":         map[string]any{"type": "integer", "description": "Connected-call duration limit in seconds. Omit for the configured default (four hours).", "minimum": 60, "maximum": maximumConnectedDurationSec},
 				"idempotency_key":          map[string]any{"type": "string", "description": "Stable unique key for safely retrying this call request."},
 				"machine_detection":        map[string]any{"type": "string", "enum": []string{"off", "detect", "premium"}, "description": "Answering machine detection for this call. Omit to use the project default from telephony_outbound_settings_set. Supported by Twilio, SignalWire, Telnyx, and Plivo."},
 				"machine_detection_action": map[string]any{"type": "string", "enum": []string{"notify", "hangup"}, "description": "notify records answered_by and emits call.machine_detected; hangup also ends the call when a machine or fax answers."},
@@ -925,7 +928,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	voice := strings.TrimSpace(strArg(args, "voice", ""))
 	greeting := strings.TrimSpace(strArg(args, "greeting", "Greet the person who just joined the call, introduce yourself naturally, and begin the conversation."))
 	timeout := intArg(args, "timeout_sec", 0)
-	maxDuration := intArg(args, "max_duration_sec", 3600)
+	maxDuration := intArg(args, "max_duration_sec", 0)
 	idempotencyKey := strings.TrimSpace(strArg(args, "idempotency_key", ""))
 	recordingOverride, hasRecordingOverride := args["recording"].(bool)
 
@@ -941,11 +944,11 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	if greeting == "" || len(greeting) > 500 {
 		return mcpError("greeting must be between 1 and 500 characters"), nil
 	}
-	if maxDuration < 60 {
+	if maxDuration != 0 && maxDuration < 60 {
 		maxDuration = 60
 	}
-	if maxDuration > 14400 {
-		maxDuration = 14400
+	if maxDuration > maximumConnectedDurationSec {
+		maxDuration = maximumConnectedDurationSec
 	}
 	if len(idempotencyKey) > 128 {
 		return mcpError("idempotency_key must be at most 128 characters"), nil
@@ -1055,25 +1058,25 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	// the call, so the bridge route must already be able to resolve
 	// callID -> audio_bridge_url.
 	row := callRow{
-		ID:                     callID,
-		ThreadID:               threadID,
-		Direction:              "outbound",
-		AgentID:                agentID,
-		CarrierSlug:            carrier.Slug(),
-		CarrierConnectionID:    bound.ConnectionID,
-		CallbackSecret:         callbackSecret,
-		ToNumber:               to,
-		FromNumber:             from,
-		IngressPath:            "outbound",
-		Directive:              effectiveDirective,
-		Voice:                  voice,
-		AudioBridgeURL:         rt.AudioBridgeURL,
-		Status:                 "initiated",
-		PlacedAt:               now.Format(time.RFC3339),
-		ProjectID:              projectID,
-		IdempotencyKey:         idempotencyKey,
-		StateExpiresAt:         now.Add(time.Duration(timeout+30) * time.Second).Format(time.RFC3339),
-		DeadlineAt:             now.Add(time.Duration(maxDuration) * time.Second).Format(time.RFC3339),
+		ID:                  callID,
+		ThreadID:            threadID,
+		Direction:           "outbound",
+		AgentID:             agentID,
+		CarrierSlug:         carrier.Slug(),
+		CarrierConnectionID: bound.ConnectionID,
+		CallbackSecret:      callbackSecret,
+		ToNumber:            to,
+		FromNumber:          from,
+		IngressPath:         "outbound",
+		Directive:           effectiveDirective,
+		Voice:               voice,
+		AudioBridgeURL:      rt.AudioBridgeURL,
+		Status:              "initiated",
+		PlacedAt:            now.Format(time.RFC3339),
+		ProjectID:           projectID,
+		IdempotencyKey:      idempotencyKey,
+		StateExpiresAt:      now.Add(time.Duration(timeout+30) * time.Second).Format(time.RFC3339),
+
 		RecordingMode:          recordingMode,
 		RecordingChannels:      recordingPolicy.Channels,
 		RecordingStorageMode:   recordingPolicy.StorageMode,
@@ -1101,6 +1104,10 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 // caller passes a KillThread closure; the softphone caller passes nil, because
 // a human call has no thread.
 func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *callRow, timeout, maxDuration int, onUnwind func()) error {
+	if row.MaxDurationSec == 0 {
+		configureCallDuration(ctx, row, maxDuration)
+	}
+	maxDuration = callDurationOrDefault(row.MaxDurationSec)
 	unwind := func() {
 		if onUnwind != nil {
 			onUnwind()
@@ -2341,10 +2348,6 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		if update.MediaStatus == "connected" {
 			_ = a.db().clearStateExpiry(callID)
-		} else if update.MediaStatus == "disconnected" {
-			_ = a.db().clearStateExpiry(callID)
-		} else if update.MediaStatus == "error" {
-			_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
 		}
 	}
 	if update.Status != "" {
@@ -2709,15 +2712,15 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		ForwardedFrom:       meta.ForwardedFrom,
 		CarrierLegID:        meta.CarrierLegID, CarrierSessionID: meta.CarrierSessionID, CarrierSignalingJSON: meta.CarrierSignalingJSON,
 		ProviderEventID: meta.ProviderEventID, ProviderOccurredAt: meta.ProviderOccurredAt,
-		IngressPath:            meta.IngressPath,
-		Directive:              "inbound pending",
-		Voice:                  "",
-		AudioBridgeURL:         "pending",
-		Status:                 "pending",
-		PlacedAt:               now.Format(time.RFC3339),
-		ProjectID:              route.ProjectID,
-		StateExpiresAt:         now.Add(time.Duration(route.TimeoutSec) * time.Second).Format(time.RFC3339),
-		DeadlineAt:             now.Add(time.Hour).Format(time.RFC3339),
+		IngressPath:    meta.IngressPath,
+		Directive:      "inbound pending",
+		Voice:          "",
+		AudioBridgeURL: "pending",
+		Status:         "pending",
+		PlacedAt:       now.Format(time.RFC3339),
+		ProjectID:      route.ProjectID,
+		StateExpiresAt: now.Add(time.Duration(route.TimeoutSec) * time.Second).Format(time.RFC3339),
+
 		RecordingMode:          recordingMode,
 		RecordingChannels:      recordingPolicy.Channels,
 		RecordingStorageMode:   recordingPolicy.StorageMode,
@@ -2725,6 +2728,7 @@ func (a *App) recordInboundCall(route *routeRow, carrierSID, from, to string, me
 		PeerKind:               inboundPeerKind(route.AnswerMode),
 		HandlingReason:         routeHandlingReason(plan),
 	}
+	configureCallDuration(globalCtx, &call, 0)
 	if suppression != "" {
 		call.HandlingReason = handlingBurstSuppressed
 		if suppression == blockedCaller {
@@ -3490,15 +3494,16 @@ func callsPublic(rows []callRow) []map[string]any {
 	out := make([]map[string]any, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, map[string]any{
-			"call_id":                   r.ID,
-			"thread_id":                 r.ThreadID,
-			"direction":                 r.Direction,
-			"agent_id":                  r.AgentID,
-			"route_id":                  r.RouteID,
-			"carrier":                   r.CarrierSlug,
-			"to":                        r.ToNumber,
-			"from":                      r.FromNumber,
-			"status":                    r.Status,
+			"call_id":          r.ID,
+			"thread_id":        r.ThreadID,
+			"direction":        r.Direction,
+			"agent_id":         r.AgentID,
+			"route_id":         r.RouteID,
+			"carrier":          r.CarrierSlug,
+			"to":               r.ToNumber,
+			"from":             r.FromNumber,
+			"status":           r.Status,
+			"max_duration_sec": r.MaxDurationSec, "duration_started_at": r.DurationStartedAt, "connected_deadline_at": r.ConnectedDeadlineAt,
 			"carrier_status":            r.Status,
 			"media_status":              r.MediaStatus,
 			"media_error":               r.MediaErrorMessage,
@@ -3537,6 +3542,7 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 			"carrier_leg_id": r.CarrierLegID, "carrier_session_id": r.CarrierSessionID,
 			"direction": r.Direction, "to_number": r.ToNumber, "from_number": r.FromNumber,
 			"directive": r.Directive, "voice": r.Voice, "status": r.Status,
+			"max_duration_sec": r.MaxDurationSec, "duration_started_at": r.DurationStartedAt, "connected_deadline_at": r.ConnectedDeadlineAt,
 			"carrier_status": r.Status, "media_status": r.MediaStatus,
 			"media_error_message": r.MediaErrorMessage,
 			"media_connected_at":  r.MediaConnectedAt, "media_disconnected_at": r.MediaDisconnectedAt,
@@ -3865,6 +3871,11 @@ type callRow struct {
 	IdempotencyKey           string
 	StateExpiresAt           string
 	DeadlineAt               string
+	MaxDurationSec           int
+	DurationStartedAt        string
+	ConnectedDeadlineAt      string
+	MediaRecoveryTimeoutSec  int
+	MediaDeadlineAt          string
 	RecordingMode            string
 	RecordingChannels        string
 	RecordingStorageMode     string
@@ -3993,7 +4004,7 @@ const callSelectColumns = `id, thread_id,
 	COALESCE(hold_control_revision,0), COALESCE(hold_control_action,''), COALESCE(hold_requested_at,''),
 	COALESCE(recording_control_revision,0), COALESCE(recording_control_action,''), COALESCE(recording_requested_at,''),
 	COALESCE((SELECT hold_music_url FROM call_control_settings WHERE project_id=calls.project_id),''),
-	COALESCE((SELECT hold_music_storage_file_id FROM call_control_settings WHERE project_id=calls.project_id),0), COALESCE(carrier_answered_at,'')`
+	COALESCE((SELECT hold_music_storage_file_id FROM call_control_settings WHERE project_id=calls.project_id),0), COALESCE(carrier_answered_at,''), max_duration_sec,duration_started_at,connected_deadline_at,media_recovery_timeout_sec,media_deadline_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -4020,7 +4031,7 @@ func scanCall(row rowScanner) (*callRow, error) {
 		&r.HoldState, &r.RecordingControlState, &r.ControlRevision, &r.ControlAction, &r.ControlError, &r.ControlRequestedAt, &r.HoldClientState,
 		&r.HoldControlRevision, &r.HoldControlAction, &r.HoldRequestedAt,
 		&r.RecordingControlRevision, &r.RecordingControlAction, &r.RecordingRequestedAt,
-		&r.HoldMusicURL, &r.HoldMusicStorageFileID, &r.CarrierAnsweredAt); err != nil {
+		&r.HoldMusicURL, &r.HoldMusicStorageFileID, &r.CarrierAnsweredAt, &r.MaxDurationSec, &r.DurationStartedAt, &r.ConnectedDeadlineAt, &r.MediaRecoveryTimeoutSec, &r.MediaDeadlineAt); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -4038,8 +4049,8 @@ func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
 		         peer_kind, peer_token, routing_flow_id, routing_flow_version_id, routing_destination_id,
-		         machine_detection, machine_detection_action)
-		        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? <= 0 OR (SELECT COUNT(*) FROM calls WHERE project_id=? AND direction='outbound' AND placed_at>=?) < ?`,
+		         machine_detection, machine_detection_action, max_duration_sec,media_recovery_timeout_sec,duration_started_at,connected_deadline_at)
+		        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ? <= 0 OR (SELECT COUNT(*) FROM calls WHERE project_id=? AND direction='outbound' AND placed_at>=?) < ?`,
 		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierRequestID,
 		r.CarrierSlug, r.CarrierConnectionID, r.CallbackSecret,
 		r.ToNumber, r.FromNumber, r.ForwardedFrom, r.IngressPath, r.Directive, r.Voice, r.AudioBridgeURL,
@@ -4049,6 +4060,7 @@ func (c *callsDB) insertCall(r callRow, enforceLimit ...bool) error {
 		firstNonEmpty(r.PeerKind, peerKindRealtime), r.PeerToken,
 		r.RoutingFlowID, r.RoutingFlowVersionID, r.RoutingDestinationID,
 		firstNonEmpty(r.MachineDetection, machineDetectionOff), firstNonEmpty(r.MachineDetectionAction, machineDetectionNotify),
+		callDurationOrDefault(r.MaxDurationSec), mediaRecoveryOrDefault(r.MediaRecoveryTimeoutSec), r.DurationStartedAt, r.ConnectedDeadlineAt,
 		limit, r.ProjectID, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339), limit,
 	)
 	if err != nil {

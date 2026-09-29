@@ -43,15 +43,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message,carrier_leg_id,carrier_session_id,carrier_signaling_json,provider_event_id,provider_occurred_at)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message,carrier_leg_id,carrier_session_id,carrier_signaling_json,provider_event_id,provider_occurred_at,max_duration_sec,media_recovery_timeout_sec)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
 		call.ForwardedFrom, call.IngressPath, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
 		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
 		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
 		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays,
-		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage, call.CarrierLegID, call.CarrierSessionID, firstNonEmpty(call.CarrierSignalingJSON, "{}"), call.ProviderEventID, call.ProviderOccurredAt)
+		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage, call.CarrierLegID, call.CarrierSessionID, firstNonEmpty(call.CarrierSignalingJSON, "{}"), call.ProviderEventID, call.ProviderOccurredAt, callDurationOrDefault(call.MaxDurationSec), mediaRecoveryOrDefault(call.MediaRecoveryTimeoutSec))
 	if err != nil {
 		return nil, false, err
 	}
@@ -254,8 +254,10 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 	expired, err := a.db().listWhere(`project_id = ?
         AND status NOT IN ('completed','failed','no-answer','busy','canceled')
         AND ((state_expires_at <> '' AND state_expires_at <= ?)
-          OR (deadline_at <> '' AND deadline_at <= ?))
-        ORDER BY placed_at LIMIT 50`, project, now.Format(time.RFC3339), now.Format(time.RFC3339))
+          OR (duration_started_at='' AND deadline_at <> '' AND deadline_at <= ?)
+ OR (connected_deadline_at<>'' AND connected_deadline_at<=?)
+ OR (media_deadline_at<>'' AND media_deadline_at<=?))
+        ORDER BY placed_at LIMIT 50`, project, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
@@ -283,6 +285,11 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 }
 
 func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
+	return a.expireCallAt(ctx, row, time.Now().UTC())
+}
+
+// Explicit clock makes multi-hour and boundary tests immediate and deterministic.
+func (a *App) expireCallAt(ctx *sdk.AppCtx, row *callRow, now time.Time) error {
 	if row == nil {
 		return nil
 	}
@@ -310,23 +317,30 @@ func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
 	}
 	// The worker's snapshot may predate a successful adviser claim or a routing
 	// transition that extended the deadline. Recheck while holding the claim lock.
-	now := time.Now()
-	expired := false
-	for _, raw := range []string{fresh.StateExpiresAt, fresh.DeadlineAt} {
-		if deadline, parseErr := time.Parse(time.RFC3339Nano, raw); parseErr == nil && !now.Before(deadline) {
-			expired = true
-		}
-	}
-	if !expired {
+	reasonCode := callExpiryReason(fresh, now)
+	if reasonCode == "" {
 		return nil
 	}
+
 	row = fresh
+	if reasonCode == terminationTimeLimit {
+		// Persist the intentional reason before the carrier can call us back.
+		// A failed command stays retryable without losing its classification.
+		_, err := a.db().db.Exec(`UPDATE calls SET termination_reason='time_limit',termination_cause='max_duration',termination_initiator='telephony' WHERE id=? AND status NOT IN ('completed','failed','busy','no-answer','canceled')`, row.ID)
+		if err != nil {
+			return err
+		}
+	}
 	if err := a.terminateCarrierCall(ctx, row); err != nil {
 		return fmt.Errorf("carrier termination: %w", err)
 	}
 
 	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill expired call thread", "call", row.ID, "err", err)
+	}
+	if reasonCode == terminationTimeLimit {
+		_, err := a.db().updateStatusWithFacts(row.ID, "completed", "", lifecycleFacts{Source: "telephony", OccurredAt: now.Format(time.RFC3339Nano), TerminationCause: "max_duration", TerminationInitiator: "telephony"})
+		return err
 	}
 	status := "failed"
 	reason := "call lifecycle deadline exceeded"
@@ -338,5 +352,9 @@ func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
 		status = "failed"
 		reason = row.ErrorMessage
 	}
-	return a.db().updateStatus(row.ID, status, reason)
+	if reasonCode == "media_timeout" {
+		reason = "media transport did not recover before its deadline"
+	}
+	_, err = a.db().updateStatusWithFacts(row.ID, status, reason, lifecycleFacts{Source: "telephony", OccurredAt: now.Format(time.RFC3339Nano), TerminationCause: reasonCode, TerminationInitiator: "telephony"})
+	return err
 }

@@ -291,6 +291,7 @@ func (c *twilioCarrier) Place(ctx *sdk.AppCtx, req carrierPlaceRequest) (*carrie
 		"StatusCallbackMethod": "POST",
 		"StatusCallbackEvent":  []string{"initiated", "ringing", "answered", "completed"},
 		"Timeout":              req.TimeoutSec,
+		"TimeLimit":            callDurationOrDefault(req.MaxDurationSec),
 	}
 	applyTwilioMachineDetection(input, req, c.app.statusCallbackURL(req.CallID, req.CallbackSecret, req.ProjectID))
 	data, err := executeCarrierTool(ctx, c.connID, "make_call", input)

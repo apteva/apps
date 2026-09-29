@@ -233,7 +233,7 @@ func (g *sipGateway) startDIDWWOutbound(row *callRow, settings didwwSIPSettings,
 	s := &outboundSIPSession{gateway: g, callID: row.ID, providerCallID: providerCallID,
 		dialog: dialog, media: media, localKey: localKey, settings: settings, ctx: ctx, cancel: cancel,
 		dialTimeout: time.Duration(max(5, min(timeoutSec, 120))) * time.Second,
-		maxDuration: time.Duration(max(60, min(maxDurationSec, 14400))) * time.Second,
+		maxDuration: time.Duration(max(60, min(maxDurationSec, maximumConnectedDurationSec))) * time.Second,
 		inviteDone:  make(chan struct{})}
 	g.mu.Lock()
 	if g.outboundByCall[row.ID] != nil {
@@ -330,7 +330,7 @@ func (s *outboundSIPSession) waitAnswer() {
 	if s.ended.Load() {
 		return
 	}
-	_ = s.gateway.app.db().updateStatus(s.callID, "in-progress", "")
+	_, _ = s.gateway.app.db().updateStatusWithFacts(s.callID, "in-progress", "", lifecycleFacts{Source: "provider", OccurredAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	if !s.gateway.runTask(func() {
 		s.gateway.app.bridgeSIPMedia(sipBridgeSession{
 			callID: s.callID, ctx: s.ctx, media: s.media, finish: s.finish, hangup: s.hangup,
@@ -343,6 +343,7 @@ func (s *outboundSIPSession) waitAnswer() {
 	defer timer.Stop()
 	select {
 	case <-timer.C:
+		_, _ = s.gateway.app.db().db.Exec(`UPDATE calls SET termination_reason='time_limit',termination_cause='max_duration',termination_initiator='telephony' WHERE id=? AND status NOT IN ('completed','failed','busy','no-answer','canceled')`, s.callID)
 		s.finish("local", nil)
 	case <-s.ctx.Done():
 	}

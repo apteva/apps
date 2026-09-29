@@ -12,7 +12,7 @@ import {
 } from "./audio-settings";
 
 import { usePanelSoftphone } from "./use-panel-softphone";
-import { isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
+import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
 const API = "/api/apps/telephony";
 
@@ -1444,7 +1444,7 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                         <span className="truncate">{call.status || "unknown"}</span>
                       </span>
                       {call.terminationReason && call.terminationReason !== call.status.replaceAll("-", "_") ? (
-                        <div className="mt-1 truncate text-xs text-text-dim">{call.terminationReason.replaceAll("_", " ")}</div>
+                        <div className="mt-1 truncate text-xs text-text-dim">{callTerminationLabel({reason:call.terminationReason},typeof navigator!=="undefined" ? navigator.language : "en")}</div>
                       ) : null}
                       {call.answeredBy && call.answeredBy !== "human" ? (
                         <div className="mt-1 truncate text-xs text-text-dim">Answered by {call.answeredBy}</div>

@@ -71,9 +71,9 @@ func (a *App) startRingLeg(ctx *sdk.AppCtx, parent *callRow, offer ringOffer) er
 	if err != nil || n == 0 {
 		return err
 	}
-	child := callRow{ID: childID, ThreadID: "external-" + childID, Direction: "outbound", AgentID: 0, CarrierSlug: parent.CarrierSlug, CarrierConnectionID: parent.CarrierConnectionID, CallbackSecret: newSecret(), ToNumber: to, FromNumber: parent.ToNumber, IngressPath: "ring_group", Status: "initiated", PlacedAt: now.Format(time.RFC3339), ProjectID: parent.ProjectID, StateExpiresAt: expires.Format(time.RFC3339), DeadlineAt: parent.DeadlineAt, PeerKind: peerKindExternal, RecordingMode: recordingModeOff, RecordingChannels: "dual", RecordingStorageMode: recordingStorageCopy, IdempotencyKey: "ring:" + offer.ID}
+	child := callRow{ID: childID, ThreadID: "external-" + childID, Direction: "outbound", AgentID: 0, CarrierSlug: parent.CarrierSlug, CarrierConnectionID: parent.CarrierConnectionID, CallbackSecret: newSecret(), ToNumber: to, FromNumber: parent.ToNumber, IngressPath: "ring_group", Status: "initiated", PlacedAt: now.Format(time.RFC3339), ProjectID: parent.ProjectID, StateExpiresAt: expires.Format(time.RFC3339), DeadlineAt: parent.DeadlineAt, MaxDurationSec: parent.MaxDurationSec, MediaRecoveryTimeoutSec: parent.MediaRecoveryTimeoutSec, DurationStartedAt: parent.DurationStartedAt, ConnectedDeadlineAt: parent.ConnectedDeadlineAt, PeerKind: peerKindExternal, RecordingMode: recordingModeOff, RecordingChannels: "dual", RecordingStorageMode: recordingStorageCopy, IdempotencyKey: "ring:" + offer.ID}
 	child.AudioBridgeURL = a.peerLoopbackURL(&child)
-	if err = a.placeOutboundLeg(ctx, carrier, &child, timeout, 3600, nil); err != nil {
+	if err = a.placeOutboundLeg(ctx, carrier, &child, timeout, parent.MaxDurationSec, nil); err != nil {
 		_, _ = ctx.AppDB().Exec(`UPDATE call_legs SET status='failed',error_message=? WHERE id=?`, err.Error(), childID)
 		_, _ = ctx.AppDB().Exec(`UPDATE call_offers SET status='failed',last_error=? WHERE id=? AND status='offered'`, err.Error(), offer.ID)
 		return err
