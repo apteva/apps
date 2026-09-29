@@ -93,7 +93,10 @@ func TestTier2AIHandoffFailureRecovery(t *testing.T) {
 			deadline := time.Now().Add(15 * time.Second)
 			for time.Now().Before(deadline) {
 				call := request("GET", "/calls/"+id, nil)["call"].(map[string]any)
-				if call["call_classification"] == "ai_startup_failed" {
+				// Classification and fallback delivery are separate durable writes.
+				// Wait for the complete outcome, not its first visible phase.
+				startup, _ := call["ai_startup"].(map[string]any)
+				if call["call_classification"] == "ai_startup_failed" && startup["fallback_applied"] == true {
 					finished = call
 					break
 				}

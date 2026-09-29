@@ -372,6 +372,8 @@ export class SoftphoneSession {
   private cancelWorkerStart?: () => void;
   private microphoneTransportReady = false;
   private ringback: (() => void) | null = null;
+  private transportTiming: Record<string, unknown> = {};
+  private playbackTiming: Record<string, unknown> = {};
   private diagnostics: SoftphoneDiagnostics = {
     rttMs: null, queueMs: 0, targetMs: JITTER_TARGET_MS, underruns: 0,
     droppedMs: 0, maxQueueMs: 0, audioContextRate: SAMPLE_RATE,
@@ -486,6 +488,7 @@ export class SoftphoneSession {
     this.playback.port.onmessage = (event: MessageEvent) => {
       const stats = event.data;
       if (stats?.type !== "stats") return;
+      this.playbackTiming = {played_ms:stats.played_ms,max_residence_ms:stats.max_residence_ms,drop_totals_ms:stats.drop_totals_ms};
       this.speakerLevel = Math.max(this.speakerLevel, stats.speaker_level ?? 0);
       this.diagnostics = {
         ...this.diagnostics, queueMs: stats.queue_ms ?? 0, targetMs: stats.target_ms ?? JITTER_TARGET_MS,
@@ -539,11 +542,12 @@ export class SoftphoneSession {
           this.diagnostics.dropEvents = [...this.diagnostics.dropEvents, message.event].slice(-100);
         } else if (message?.type === "transport.stats") {
           this.diagnostics.websocketBufferedBytes = message.buffered_bytes ?? 0;
+          this.transportTiming = message.timing ?? {};
         }
       };
       worker.onerror = () => { finish(new Error("audio worker failed")); if (!this.closed) this.fail("Audio worker failed. Reconnect audio."); };
       worker.postMessage({
-        type: "init", mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE, muted: this.muted,
+        type: "init", audioClockMS:(this.ctx?.currentTime ?? 0)*1000, monotonicEpochMS:performance.timeOrigin+performance.now(), mediaURL, contextRate: this.ctx?.sampleRate ?? SAMPLE_RATE, muted: this.muted,
         capturePort: captureChannel.port2, playbackPort: playbackChannel.port2,
       }, [captureChannel.port2, playbackChannel.port2]);
     });
@@ -597,6 +601,7 @@ export class SoftphoneSession {
   private sendDiagnostics(): void {
     const value = this.diagnostics;
     this.sendText(JSON.stringify({ type: "diagnostics", diagnostics: {
+      timing: {transport:this.transportTiming, playback:this.playbackTiming},
       rtt_ms: value.rttMs, playback_queue_ms: value.queueMs, playback_target_ms: value.targetMs,
       playback_max_queue_ms: value.maxQueueMs, playback_underruns: value.underruns,
       playback_dropped_ms: value.droppedMs, websocket_buffered_bytes: value.websocketBufferedBytes,

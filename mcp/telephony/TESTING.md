@@ -132,3 +132,18 @@ GOWORK=off go test -tags integration -run TestTier2AIHandoffCarrierActivation .
 
 These tests make no staging, production or live-carrier requests. They validate
 Telephony's protocol sequence, not an actual PSTN call.
+
+## Live human audio quality
+
+See [AUDIO-QUALITY.md](AUDIO-QUALITY.md) for the local regression matrix, measured
+jitter results, protocol compatibility, queue limits, directional diagnostics,
+and the limits of what local tests can prove. These tests do not use staging or
+production and must not be confused with the opt-in live-carrier profile.
+
+## Repeatable softphone network benchmark
+
+Run `bun run benchmark:softphone` for actual Chromium and local sidecar audio
+measurements under bandwidth, latency, jitter, retransmission stalls and outage
+profiles. See [benchmark instructions](benchmarks/softphone/README.md) for gates,
+artifacts, reproducibility and the distinction between a local network model
+and real carrier/physical audio quality. This does not contact staging or prod.

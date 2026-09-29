@@ -94,8 +94,10 @@ func (a *App) aiHandoffAdmission(call string) error {
 		if h.Status == "failed" && h.FallbackApplied != 0 {
 			// A permitted fallback can later reach a different AI node through
 			// a decision/menu. Retire that node too, without resetting the budget
-			// or recursively following another AI failure branch.
-			_, err = a.db().db.Exec(`UPDATE ai_handoffs SET fallback_applied=0,error_code='ai_budget_already_failed',owner='',agent_id=(SELECT agent_id FROM calls WHERE id=?),node_id=COALESCE((SELECT current_node_id FROM call_route_executions WHERE call_id=?),'') WHERE call_id=? AND status='failed' AND fallback_applied=1 AND node_id<>COALESCE((SELECT current_node_id FROM call_route_executions WHERE call_id=?),'') AND EXISTS(SELECT 1 FROM calls WHERE id=? AND status='pending' AND peer_kind='realtime')`, call, call, call, call, call)
+			// or recursively following another AI failure branch. A committed
+			// terminal/menu effect is already handling the current node; late
+			// admission must not reset its fallback journal before delivery.
+			_, err = a.db().db.Exec(`UPDATE ai_handoffs SET fallback_applied=0,error_code='ai_budget_already_failed',owner='',agent_id=(SELECT agent_id FROM calls WHERE id=?),node_id=COALESCE((SELECT current_node_id FROM call_route_executions WHERE call_id=?),'') WHERE call_id=? AND status='failed' AND fallback_applied=1 AND node_id<>COALESCE((SELECT current_node_id FROM call_route_executions WHERE call_id=?),'') AND EXISTS(SELECT 1 FROM calls WHERE id=? AND status='pending' AND peer_kind='realtime') AND NOT EXISTS(SELECT 1 FROM routing_effects e JOIN call_route_executions x ON x.call_id=e.call_id AND x.current_node_id=e.node_id WHERE e.call_id=ai_handoffs.call_id)`, call, call, call, call, call)
 			if err != nil {
 				return err
 			}

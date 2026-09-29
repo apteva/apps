@@ -82,6 +82,15 @@ func TestAIHandoffPermanentFailureStopsDecisionReplay(t *testing.T) {
 	if h := aiJournal(t, a, row.ID); h.FallbackApplied != 1 {
 		t.Fatalf("fallback not committed: %+v", h)
 	}
+	// A stale immediate-answer worker may enter admission after fallback
+	// commits but before the carrier effect finishes. It must not reopen the
+	// journal for the synthetic terminal node.
+	for range 3 {
+		_ = a.aiHandoffAdmission(row.ID)
+		if h := aiJournal(t, a, row.ID); h.FallbackApplied != 1 || h.Code != "configuration_or_access" {
+			t.Fatalf("late admission reopened committed fallback: %+v", h)
+		}
+	}
 	for range 3 {
 		_ = a.deliverDecision(ctx, d)
 		if err = a.runRoutingEffects(context.Background(), ctx); err != nil {

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -33,12 +35,17 @@ type websocketWriteRequest struct {
 	payload  []byte
 	timeout  time.Duration
 	complete chan error
+	enqueued time.Time
+	pcmBytes int
 }
 
 // websocketWriterPump is the sole writer for a WebSocket connection. Data,
 // control, and close frames all pass through the same queue.
 type websocketWriterPump struct {
 	audioDropped atomic.Int64
+	audioMu      sync.Mutex
+	audioBytes   int
+	audioStats   liveAudioQueueSnapshot
 	conn         net.Conn
 	state        ws.State
 	requests     chan websocketWriteRequest
@@ -115,7 +122,7 @@ func newWebSocketWriterPump(conn net.Conn, state ws.State) *websocketWriterPump 
 		conn:     conn,
 		state:    state,
 		requests: make(chan websocketWriteRequest, websocketWriteQueueSize),
-		audio:    make(chan websocketWriteRequest, 6),
+		audio:    make(chan websocketWriteRequest, 128),
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
 	}
@@ -140,6 +147,24 @@ func (p *websocketWriterPump) run() {
 			case request = <-p.audio:
 			}
 		}
+		if request.pcmBytes > 0 {
+			p.audioMu.Lock()
+			p.audioBytes -= request.pcmBytes
+			age := time.Since(request.enqueued)
+			p.audioStats.MaxResidenceMS = max(p.audioStats.MaxResidenceMS, age.Milliseconds())
+			if age >= liveAudioMaxAge {
+				p.audioStats.StaleBytes += int64(request.pcmBytes)
+				p.audioMu.Unlock()
+				continue
+			}
+			p.audioMu.Unlock()
+			request.timeout = min(request.timeout, liveAudioMaxAge-age)
+		}
+		if request.pcmBytes > 0 && len(request.payload)-request.pcmBytes == 32 && binary.LittleEndian.Uint32(request.payload) == softphoneAudioFrameV2 {
+			binary.LittleEndian.PutUint64(request.payload[16:], math.Float64bits(mediaClockMS()))
+			binary.LittleEndian.PutUint64(request.payload[24:], math.Float64bits(float64(time.Since(request.enqueued))/float64(time.Millisecond)))
+		}
+		started := time.Now()
 		timeout := request.timeout
 		if timeout <= 0 {
 			timeout = websocketWriteTimeout
@@ -147,6 +172,18 @@ func (p *websocketWriterPump) run() {
 		err := p.conn.SetWriteDeadline(time.Now().Add(timeout))
 		if err == nil {
 			err = wsutil.WriteMessage(p.conn, p.state, request.op, request.payload)
+		}
+		if request.pcmBytes > 0 {
+			p.audioMu.Lock()
+			p.audioStats.MaxWriteMS = max(p.audioStats.MaxWriteMS, time.Since(started).Milliseconds())
+			if err == nil {
+				p.audioStats.SentBytes += int64(request.pcmBytes)
+			} else {
+				p.audioStats.WriteErrors++
+				p.audioStats.FailedBytes += int64(request.pcmBytes)
+			}
+			p.audioStats.LastWriteAt = time.Now().UTC().Format(time.RFC3339Nano)
+			p.audioMu.Unlock()
 		}
 		if request.complete != nil {
 			request.complete <- err
@@ -159,36 +196,95 @@ func (p *websocketWriterPump) run() {
 	}
 }
 
-// QueueAudio never blocks a carrier read loop. Keep at most 120ms of speech;
-// discard the oldest frame on overload and close stalled sockets after 250ms.
-func (p *websocketWriterPump) QueueAudio(data []byte) {
-	request := websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: 250 * time.Millisecond}
+// Live PCM queues are bounded by duration AND residence time. These limits do
+// not apply to buffered model speech or control messages.
+const liveAudioMaxBytes = 24000 * 2 * 120 / 1000
+const liveAudioMaxAge = 250 * time.Millisecond
+
+type liveAudioQueueSnapshot struct {
+	QueuedMS       int    `json:"queued_ms"`
+	MaxQueuedMS    int    `json:"max_queued_ms"`
+	MaxResidenceMS int64  `json:"max_residence_ms"`
+	MaxWriteMS     int64  `json:"max_write_ms"`
+	EnqueuedBytes  int64  `json:"enqueued_bytes"`
+	SentBytes      int64  `json:"sent_bytes"`
+	OverflowBytes  int64  `json:"overflow_bytes"`
+	StaleBytes     int64  `json:"stale_bytes"`
+	FlushedBytes   int64  `json:"flushed_bytes"`
+	FailedBytes    int64  `json:"failed_bytes"`
+	WriteErrors    int64  `json:"write_errors"`
+	LastWriteAt    string `json:"last_write_at,omitempty"`
+}
+
+func (p *websocketWriterPump) audioSnapshot() liveAudioQueueSnapshot {
+	if p == nil {
+		return liveAudioQueueSnapshot{}
+	}
+	p.audioMu.Lock()
+	defer p.audioMu.Unlock()
+	s := p.audioStats
+	s.QueuedMS = p.audioBytes * 1000 / 48000
+	return s
+}
+
+// QueueAudio never waits for the socket. Framing metadata, when present, is
+// excluded from the PCM budget and is preserved when trimming oversized audio.
+func (p *websocketWriterPump) QueueAudio(data []byte) { p.queueAudio(data, 0) }
+
+func (p *websocketWriterPump) queueAudio(data []byte, headerBytes int) {
+	pcmBytes := (len(data) - headerBytes) &^ 1
+	if pcmBytes <= 0 {
+		return
+	}
+	p.audioMu.Lock()
+	defer p.audioMu.Unlock()
 	select {
 	case <-p.done:
 		return
-	default:
-	}
-	select {
-	case p.audio <- request:
+	case <-p.stop:
 		return
 	default:
 	}
-	select {
-	case <-p.audio:
-		p.audioDropped.Add(1)
-	default:
+	p.stateMu.Lock()
+	closed := p.closeSent
+	p.stateMu.Unlock()
+	if closed {
+		return
 	}
-	select {
-	case p.audio <- request:
-	default:
+	p.audioStats.EnqueuedBytes += int64(pcmBytes)
+	if pcmBytes > liveAudioMaxBytes {
+		p.audioStats.OverflowBytes += int64(pcmBytes - liveAudioMaxBytes)
+		trimmed := make([]byte, headerBytes+liveAudioMaxBytes)
+		copy(trimmed, data[:headerBytes])
+		copy(trimmed[headerBytes:], data[headerBytes+pcmBytes-liveAudioMaxBytes:headerBytes+pcmBytes])
+		data, pcmBytes = trimmed, liveAudioMaxBytes
 	}
+	for p.audioBytes+pcmBytes > liveAudioMaxBytes || len(p.audio) == cap(p.audio) {
+		select {
+		case old := <-p.audio:
+			p.audioBytes -= old.pcmBytes
+			p.audioStats.OverflowBytes += int64(old.pcmBytes)
+			p.audioDropped.Add(1)
+		default:
+			// The writer has dequeued a frame and will account for it once
+			// this lock is released. Drop the new frame rather than block.
+			p.audioStats.OverflowBytes += int64(pcmBytes)
+			return
+		}
+	}
+	p.audio <- websocketWriteRequest{op: ws.OpBinary, payload: append([]byte(nil), data...), timeout: liveAudioMaxAge, enqueued: time.Now(), pcmBytes: pcmBytes}
+	p.audioBytes += pcmBytes
+	p.audioStats.MaxQueuedMS = max(p.audioStats.MaxQueuedMS, p.audioBytes*1000/48000)
 }
 
-// FlushAudio discards browser-bound frames queued before a hold transition.
 func (p *websocketWriterPump) FlushAudio() {
+	p.audioMu.Lock()
+	defer p.audioMu.Unlock()
 	for {
 		select {
-		case <-p.audio:
+		case old := <-p.audio:
+			p.audioBytes -= old.pcmBytes
+			p.audioStats.FlushedBytes += int64(old.pcmBytes)
 		default:
 			return
 		}
