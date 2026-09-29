@@ -21,7 +21,7 @@ test("mobile panel shows a list or a conversation, never both", async ({ page, r
   await expect(page.getByRole("button", { name: "More options" })).toBeVisible();
   expect(await page.locator("main aside ul").evaluate(element => ({ style: getComputedStyle(element).listStyleType, padding: getComputedStyle(element).paddingLeft }))).toEqual({ style: "none", padding: "0px" });
   const before = await (await request.get("/requests")).json();
-  expect(before.some((call: any) => ["/messages", "/changes", "/stream", "/seen"].some(path => call.path.endsWith(path)))).toBe(false);
+  expect(before.some((call: any) => ["/messages", "/changes", "/seen"].some(path => call.path.endsWith(path)) || (call.path.endsWith("/stream") && call.query.scope !== "user"))).toBe(false);
 
   await first.click();
   await expect(page.getByRole("button", { name: "Back to conversations" })).toBeVisible();
@@ -42,6 +42,9 @@ for (const surface of ["panel", "widget-browser"] as const) {
     await page.goto(`/?host=dashboard&surface=${surface}`);
     const working = page.getByRole("img", { name: "Working" });
     await expect(working).toHaveCount(1);
+    const calls = await (await request.get("/requests")).json();
+    expect(calls.some((call: any) => call.path.endsWith("/stream") && call.query.scope === "user")).toBe(true);
+    expect(calls.some((call: any) => call.path.endsWith("/activity-summary"))).toBe(false);
     await expect(working.locator("xpath=..")).toContainText("Weather via Pushover");
     expect(await working.evaluate(element => getComputedStyle(element).animationName)).toBe("chat-thread-working");
     await page.emulateMedia({ reducedMotion: "reduce" });

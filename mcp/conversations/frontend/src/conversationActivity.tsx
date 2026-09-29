@@ -1,53 +1,64 @@
 import { useEffect, useState } from "react";
 import { useConversationAPI } from "./context";
 import { useConversationLocalization } from "./i18n";
+import type { StreamFrame } from "./types";
 
-interface ActivitySummary {
-  active_conversation_ids: string[];
+export function applyConversationActivityFrame(current: ReadonlySet<string>, frame: StreamFrame): ReadonlySet<string> {
+  if (!frame.snapshot) return current;
+  const active = new Set(current);
+  const frames = Array.isArray(frame.frames) ? frame.frames : [];
+  if (!frame.chat_id) {
+    return new Set(frames.filter(item => item.response_progress?.phase !== "idle" && item.response_progress).map(item => item.chat_id));
+  }
+  if (frames.some(item => item.response_progress && item.response_progress.phase !== "idle")) active.add(frame.chat_id);
+  else active.delete(frame.chat_id);
+  return active;
 }
 
-// One small request serves the whole list, including conversations whose
-// transcript is not open. Pausing while hidden avoids unnecessary polling.
+// The existing user-scoped Conversations SSE stream serves the entire list.
+// Its progress snapshots are authoritative on reconnect and on completion.
 export function useConversationActivity(projectId: string, agentId?: number, enabled = true): ReadonlySet<string> {
-  const { apiGet } = useConversationAPI();
+  const { conversationsClient } = useConversationAPI();
   const [active, setActive] = useState<ReadonlySet<string>>(() => new Set());
 
   useEffect(() => {
     setActive(new Set());
     if (!projectId || !enabled) return;
-    let cancelled = false;
-    let pending = false;
-    let lastSuccess = 0;
-    const path = agentId ? `/activity-summary?agent_id=${encodeURIComponent(agentId)}` : "/activity-summary";
-    const refresh = async () => {
-      if (cancelled || pending || document.hidden) return;
-      pending = true;
-      try {
-        const summary = await apiGet<ActivitySummary>(path, projectId);
-        if (!cancelled) {
-          lastSuccess = Date.now();
-          setActive(new Set(Array.isArray(summary.active_conversation_ids) ? summary.active_conversation_ids : []));
-        }
-      } catch {
-        // A transient request must not leave a thread glowing indefinitely.
-        if (!cancelled && Date.now() - lastSuccess > 10_000) setActive(new Set());
-      } finally {
-        pending = false;
-      }
+    let closed = false;
+    let subscription: ReturnType<typeof conversationsClient.subscribeActivity> | undefined;
+    let staleTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearStaleTimer = () => {
+      if (staleTimer !== undefined) clearTimeout(staleTimer);
+      staleTimer = undefined;
+    };
+    const open = () => {
+      if (closed || document.hidden || subscription) return;
+      subscription = conversationsClient.subscribeActivity(agentId, {
+        onFrame: frame => setActive(current => applyConversationActivityFrame(current, frame)),
+        onOpen: clearStaleTimer,
+        onError: () => {
+          clearStaleTimer();
+          staleTimer = setTimeout(() => setActive(new Set()), 10_000);
+        },
+      });
     };
     const onVisibility = () => {
-      if (document.hidden) setActive(new Set());
-      else void refresh();
+      if (document.hidden) {
+        subscription?.close();
+        subscription = undefined;
+        clearStaleTimer();
+        setActive(new Set());
+      } else open();
     };
-    void refresh();
-    const timer = window.setInterval(refresh, 2_500);
+    open();
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      cancelled = true;
-      window.clearInterval(timer);
+      closed = true;
+      subscription?.close();
+      clearStaleTimer();
       document.removeEventListener("visibilitychange", onVisibility);
     };
-  }, [apiGet, projectId, agentId, enabled]);
+  }, [conversationsClient, projectId, agentId, enabled]);
 
   return active;
 }

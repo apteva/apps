@@ -34,6 +34,12 @@ export interface ConversationSubscription {
   onError?: (error: unknown) => void;
   signal?: AbortSignal;
 }
+export interface ConversationActivitySubscription {
+  onFrame: (frame: StreamFrame) => void;
+  onOpen?: () => void;
+  onError?: (error: unknown) => void;
+  signal?: AbortSignal;
+}
 export interface VoiceSession {
   id?: string;
   conversation_id?: string;
@@ -124,6 +130,18 @@ export class ConversationsClient {
       } else if ((event as Message).conversation_id === id) handlers.onMessage?.(event as Message);
     }, options);
   };
+
+  // The existing user-scoped stream also carries progress-only snapshots for
+  // thread lists. One SSE connection covers every visible conversation.
+  subscribeActivity = (agentId: number | undefined, handlers: ConversationActivitySubscription) =>
+    this.app.subscribe<StreamFrame>(query("/stream", { scope: "user", agent_id: agentId }), (frame, meta) => {
+      if (meta.event === "stream") handlers.onFrame(frame);
+    }, {
+      eventTypes: ["stream"],
+      signal: handlers.signal,
+      onOpen: handlers.onOpen,
+      onError: handlers.onError,
+    });
 
   // Shared adapter for administrative UI routes; scope comes exclusively from the handle.
   private checkProject(projectId: string) {

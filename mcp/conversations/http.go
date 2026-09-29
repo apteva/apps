@@ -949,14 +949,23 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conversationID := r.URL.Query().Get("chat_id")
+	userScope := conversationID == "" && r.URL.Query().Get("scope") == "user"
+	var activityAgentID int64
 	if conversationID != "" {
 		if _, err := a.authorizeConversation(r, conversationID); err != nil {
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
-	} else if r.URL.Query().Get("scope") != "user" {
+	} else if !userScope {
 		http.Error(w, "chat_id or scope=user required", http.StatusBadRequest)
 		return
+	} else {
+		var err error
+		activityAgentID, err = requestAgentScope(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -998,9 +1007,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	case r.URL.Query().Get("scope") == "user":
 		ch, cancel = a.hub.subscribeUser(projectID + ":" + fmt.Sprint(userID))
-	}
-	if cancelFrames == nil {
+		frames, cancelFrames = a.hub.subscribeProjectFrames(projectID)
 		defer cancel()
+		defer cancelFrames()
+		writeStreamSSE(w, a.userActivitySnapshot(r, activityAgentID))
 	}
 	flusher.Flush()
 
@@ -1019,15 +1029,15 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				writeStreamSSE(w, a.streamer.snapshot(conversationID))
+			} else if userScope {
+				writeStreamSSE(w, a.userActivitySnapshot(r, activityAgentID))
 			}
 			fmt.Fprint(w, ": heartbeat\n\n")
 			flusher.Flush()
 		case <-r.Context().Done():
 			return
 		case f := <-frames:
-			_, err := a.authorizeConversation(r, f.ConversationID)
-			allowed := err == nil
-			if err != nil || !allowed {
+			if !a.visibleActivityConversation(r, f.ConversationID, activityAgentID) {
 				continue
 			}
 			// Named event: the client's `stream` listener gets ephemeral
@@ -1314,22 +1324,75 @@ func (a *App) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	writeJSON(w, map[string]any{"active_conversation_ids": a.visibleActivityIDs(r, agentID)})
+}
+
+func (a *App) visibleActivityConversation(r *http.Request, id string, agentID int64) bool {
+	if id == "" {
+		return false
+	}
+	if _, err := a.authorizeConversation(r, id); err != nil {
+		return false
+	}
+	if agentID != 0 {
+		member, err := a.store.IsParticipantAgent(id, agentID)
+		return err == nil && member
+	}
+	return true
+}
+
+func (a *App) visibleActivityIDs(r *http.Request, agentID int64) []string {
 	ids := []string{}
 	if a.streamer != nil {
 		for _, id := range a.streamer.activeConversationIDs() {
-			if _, err := a.authorizeConversation(r, id); err != nil {
-				continue
+			if a.visibleActivityConversation(r, id, agentID) {
+				ids = append(ids, id)
 			}
-			if agentID != 0 {
-				member, err := a.store.IsParticipantAgent(id, agentID)
-				if err != nil || !member {
-					continue
-				}
-			}
-			ids = append(ids, id)
 		}
 	}
-	writeJSON(w, map[string]any{"active_conversation_ids": ids})
+	return ids
+}
+
+// Reuse the ordinary `stream` SSE frame/snapshot contract for list activity.
+// Its project feed carries progress only; text and tool arguments remain on
+// the authorized per-conversation stream.
+func (a *App) listProgressSnapshot(id string) StreamFrame {
+	snapshot := a.streamer.snapshot(id)
+	progress := make([]StreamFrame, 0, len(snapshot.Frames))
+	for _, frame := range snapshot.Frames {
+		if frame.Progress != nil && frame.Progress.Phase != "idle" {
+			phase := &ResponseProgress{
+				Phase: frame.Progress.Phase, RunID: frame.Progress.RunID,
+				Revision: frame.Progress.Revision, AfterMessageID: frame.Progress.AfterMessageID,
+				StartedAt: frame.Progress.StartedAt,
+			}
+			progress = append(progress, StreamFrame{
+				Type: "stream", ConversationID: id, AgentID: frame.AgentID,
+				Progress: phase,
+			})
+		}
+	}
+	snapshot.Frames = progress
+	return snapshot
+}
+
+func (a *App) userActivitySnapshot(r *http.Request, agentID int64) StreamFrame {
+	snapshot := StreamFrame{Type: "stream", Snapshot: true, Done: true, CallID: "snapshot", CreatedAt: time.Now()}
+	for _, id := range a.visibleActivityIDs(r, agentID) {
+		snapshot.Frames = append(snapshot.Frames, a.listProgressSnapshot(id).Frames...)
+	}
+	return snapshot
+}
+
+func (a *App) publishListProgress(id string) {
+	if a.store == nil || a.hub == nil || a.streamer == nil || id == "" {
+		return
+	}
+	conversation, err := a.store.GetConversation(id)
+	if err != nil {
+		return
+	}
+	a.hub.publishProjectFrame(conversation.ProjectID, a.listProgressSnapshot(id))
 }
 
 func (a *App) handleDeliveryFailures(w http.ResponseWriter, r *http.Request) {

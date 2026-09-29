@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.12 — 2026-09-29
+
+- Drive conversation-list activity through the existing user-scoped SSE stream instead of polling. The indicator starts when a response is acknowledged and clears only after all responding agents settle.
+- Send authorized, progress-only snapshots on connect, reconnect, and heartbeat; preserve the existing cursor-free `stream` event and leave exported chat unchanged.
+- Add scoped SSE, multi-agent settlement, and packaged panel/widget browser regressions.
+
 ## 0.24.11 — 2026-09-29
 
 - Frame the agent Overview chat widget like its neighboring dashboard cards, using the page background and the existing chat header. Keep the Build surface and exported chat embeds unchanged.

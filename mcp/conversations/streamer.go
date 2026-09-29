@@ -84,9 +84,10 @@ type streamer struct {
 	// Gemini reuse call ids across responses, and the panel tombstones
 	// settled ids — a constant id would suppress every bubble after
 	// the first reply.
-	pendingAcks map[string]string
-	ackSeq      uint64
-	onFrame     func(StreamFrame)
+	pendingAcks      map[string]string
+	ackSeq           uint64
+	onFrame          func(StreamFrame)
+	onActivityChange func(string)
 }
 
 func (s *streamer) publish(frame StreamFrame) {
@@ -365,6 +366,9 @@ func (s *streamer) emitAck(conversationID, threadID string, agentID int64, after
 		Progress:  progress.Progress,
 		CreatedAt: time.Now(),
 	})
+	if s.onActivityChange != nil {
+		s.onActivityChange(conversationID)
+	}
 }
 
 // Called with mu held. The first source timestamp anchors text in the same

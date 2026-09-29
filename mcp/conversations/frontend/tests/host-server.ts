@@ -10,6 +10,9 @@ const activityRows=new Map<string,any[]>();
 const resolved=new Set<string>();
 let room=false;let deliveryStatus="delivered";
 const streams = new Set<ReadableStreamDefaultController>();
+const activityStreams = new Set<ReadableStreamDefaultController>();
+const activitySnapshot = () => `event: stream\ndata: ${JSON.stringify({type:"stream",snapshot:true,chat_id:"",frames:activeConversations.map(chat_id=>({type:"stream",chat_id,response_progress:{phase:"thinking"}}))})}\n\n`;
+const publishActivity = () => {for(const stream of activityStreams){try{stream.enqueue(new TextEncoder().encode(activitySnapshot()));}catch{activityStreams.delete(stream);}}};
 const reply = "## Here’s the update\n\nThe conversation is **working well**. Here are the next steps:\n\n- Review the summary\n- Confirm the schedule\n\nYou can use `status` to check progress.\n\n```js\nconst result = await conversations.history(\"support\");\nconsole.log(result);\n```\n\n| Task | Status |\n| --- | --- |\n| Review | Complete |\n\n[Read the details](https://example.com/" + "long-path-".repeat(30) + ")";
 
 const report=(user:string)=>({id:91,conversation_id:`chat-${user}`,role:"agent",agent_id:41,content:"Report summary",component_kind:"report",components:[{app:"conversations",name:"report-card",props:{title:"Daily report",summary:"Report summary",sections:[{title:"Results",body:"All systems healthy"}]}}],created_at:new Date().toISOString()});
@@ -19,7 +22,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
  if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];activityRows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
- if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();return Response.json({ok:true});}
+ if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();publishActivity();return Response.json({ok:true});}
  if(url.pathname==="/seed" && req.method==="POST") {
   const options=await req.json();room=Boolean(options.room);deliveryStatus=options.deliveryStatus || "delivered";
   for(const user of ["operator","visitor-a"]) rows.set(user,[
@@ -74,6 +77,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/chats"&&url.searchParams.has("id"))return Response.json(panelRows.find(item=>item.id===url.searchParams.get("id"))??conversation(user));
  if(path==="/chats"&&url.searchParams.has("page"))return Response.json(url.searchParams.get("archived")==="1"?{conversations:[],next_cursor:""}:url.searchParams.get("cursor")==="older"?{conversations:panelOlderRows,next_cursor:""}:{conversations:panelRows,next_cursor:panelOlderRows.length?"older":""});
  if(path==="/chats")return Response.json([conversation(user)]);
+ if(path==="/stream"&&url.searchParams.get("scope")==="user")return new Response(new ReadableStream({start(c){activityStreams.add(c);c.enqueue(new TextEncoder().encode(activitySnapshot()));},cancel(){/* Closed controllers are pruned on the next publish. */}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/messages"&&req.method==="POST"){
   const body=await req.json();const existing=rows.get(user)??[];const row={id:existing.length+1,conversation_id:conversation(user).id,role:"user",content:body.content,attachments:(body.attachments??[]).map((a:any)=>uploaded.get(`${conversation(user).id}:${a.id}`)?.attachment??a),components:[],created_at:new Date().toISOString(),client_message_id:body.client_message_id};existing.push(row);rows.set(user,existing);return Response.json(row);

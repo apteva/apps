@@ -82,6 +82,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.telegramFeedback = newTelegramFeedbackManager(a)
 	a.streamer.onFrame = a.telegramFeedback.OnFrame
+	a.streamer.onActivityChange = a.publishListProgress
 	mountedCtx = ctx
 	// Token-level streaming when the platform grants it; Stage-1 phase
 	// frames otherwise. The panel renders either without knowing which.

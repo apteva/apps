@@ -53,6 +53,9 @@ func (s *streamer) finishResponse(chat string, agent int64) {
 	frame := s.progressFrame(p)
 	s.mu.Unlock()
 	s.publish(frame)
+	if s.onActivityChange != nil {
+		s.onActivityChange(chat)
+	}
 }
 func (s *streamer) intermediateReply(chat string, agent int64) {
 	s.mu.Lock()
