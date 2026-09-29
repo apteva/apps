@@ -403,7 +403,19 @@ func hasNpmScript(dir, name string) bool {
 // land in the artifact dir alongside the source. Plain copyTree would
 // drop them via shouldSkipForBuild.
 func copyTreeAll(src, dst string) error {
-	src = filepath.Clean(src)
+	var err error
+	src, err = filepath.EvalSymlinks(src)
+	if err != nil {
+		return err
+	}
+	src, err = filepath.Abs(src)
+	if err != nil {
+		return err
+	}
+	dst, err = filepath.Abs(dst)
+	if err != nil {
+		return err
+	}
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -420,6 +432,22 @@ func copyTreeAll(src, dst string) error {
 			target, err := os.Readlink(path)
 			if err != nil {
 				return err
+			}
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return fmt.Errorf("resolve artifact symlink %q: %w", rel, err)
+			}
+			within, err := filepath.Rel(src, resolved)
+			if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("artifact symlink %q escapes source tree", rel)
+			}
+			if filepath.IsAbs(target) {
+				// Bun can link node_modules back to this build's temporary src.
+				// Point the staged link at the copied target before src is removed.
+				target, err = filepath.Rel(filepath.Dir(out), filepath.Join(dst, within))
+				if err != nil {
+					return err
+				}
 			}
 			return os.Symlink(target, out)
 		}

@@ -488,6 +488,9 @@ requested releases and recovery artifacts; newly discovered orphan directories
 receive a grace period. ZIP extraction is limited to 100,000 entries and 2 GiB
 expanded data (1 GiB for runner source capsules), rejects duplicate/special files
 and escaping links, and preserves confined relative runtime symlinks.
+Node, Bun, and blank artifact staging remaps absolute links into the temporary
+source tree to relative links within the staged artifact. Links outside the
+source tree fail with their path; artifact attestation still checks every link.
 
 Log tails read at most the last 1 MiB. Build logs rotate at 16 MiB with one backup;
 runtime logs use periodic copy/truncate rotation so services can survive sidecar
