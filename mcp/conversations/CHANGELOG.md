@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.10 — 2026-09-29
+
+- Offer the existing agent-conversations widget on agent detail pages as well as Build, with half- and full-width options. Agent details default to the focused single-agent chat; Build retains its browser default.
+- Keep conversation lists, creation, and history scoped to the host-provided agent. Give the detail widget a usable chat height and stack its browser layout when placed at half width. Add manifest and widget regressions.
+
 ## 0.24.9 — 2026-09-29
 
 - Add live voice to existing direct operator conversations through a temporary realtime thread, while keeping typed chat and exported widgets unchanged. Show speech turns in the same conversation and carry recent voice context into the next typed turn.

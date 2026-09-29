@@ -31,6 +31,8 @@ export interface AgentConversationsWidgetProps extends ConversationLocalization 
   installId: number;
   projectId: string;
   instanceId: number;
+  slot?: string;
+  widgetSize?: "half" | "full";
   eventRevision?: number;
   widgetSettings?: AgentConversationWidgetSettings;
 }
@@ -43,18 +45,19 @@ interface UnreadEntry {
 
 const EMPTY_CONVERSATION_REFRESH_MS = 8_000;
 
-function useWideWidgetLayout(): boolean {
+function useWideWidgetLayout(allowWide: boolean): boolean {
   const query = "(min-width: 768px)";
   const [wide, setWide] = useState(() =>
-    typeof window !== "undefined" && window.matchMedia(query).matches,
+    allowWide && typeof window !== "undefined" && window.matchMedia(query).matches,
   );
   useEffect(() => {
+    if (!allowWide) { setWide(false); return; }
     const media = window.matchMedia(query);
     const update = () => setWide(media.matches);
     media.addEventListener("change", update);
     update();
     return () => media.removeEventListener("change", update);
-  }, []);
+  }, [allowWide]);
   return wide;
 }
 
@@ -63,6 +66,7 @@ function ConversationBrowser({
   instanceId,
   eventRevision,
   widgetSettings,
+  widgetSize,
 }: AgentConversationsWidgetProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -77,7 +81,7 @@ function ConversationBrowser({
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const wideLayout = useWideWidgetLayout();
+  const wideLayout = useWideWidgetLayout(widgetSize !== "half");
   const layout = agentConversationWidgetLayout(wideLayout);
 
   useEffect(()=>{setConversations([]);setSelectedId("");},[projectId,instanceId,archived]);
@@ -558,7 +562,7 @@ function SingleConversation({
 }
 
 export default function AgentConversationsWidget(props: AgentConversationsWidgetProps) {
-  return conversationDisplayMode(props.widgetSettings) === "single"
+  return conversationDisplayMode(props.widgetSettings, props.slot) === "single"
     ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...props} />
     : <ConversationBrowser {...props} />;
 }

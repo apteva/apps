@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.9
+version: 0.24.10
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -99,10 +99,10 @@ provides:
       label: Agent conversations
       description: Chat with one agent through its durable conversations.
       entry: /ui/AgentConversationsWidget.mjs
-      slots: [dashboard.build]
+      slots: [dashboard.build, dashboard.agent_detail]
       suggested: true
       visibility: attached
-      supported_sizes: [full]
+      supported_sizes: [half, full]
       default_size: full
       settings_schema:
         type: object
@@ -111,7 +111,6 @@ provides:
             type: string
             title: Conversation layout
             enum: [browser, single]
-            default: browser
           composer_layout:
             type: string
             title: Composer layout
@@ -166,7 +165,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.9, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.10, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

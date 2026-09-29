@@ -61,6 +61,9 @@ describe("AgentConversationsWidget scope", () => {
 
   test("browser remains the default and creation visibility is configurable", () => {
     expect(conversationDisplayMode()).toBe("browser");
+    expect(conversationDisplayMode(undefined, "dashboard.build")).toBe("browser");
+    expect(conversationDisplayMode(undefined, "dashboard.agent_detail")).toBe("single");
+    expect(conversationDisplayMode({ display_mode: "browser" }, "dashboard.agent_detail")).toBe("browser");
     expect(conversationDisplayMode({ display_mode: "browser" })).toBe("browser");
     expect(conversationDisplayMode({ display_mode: "single" })).toBe("single");
     expect(showNewConversation()).toBe(true);
@@ -85,6 +88,9 @@ describe("AgentConversationsWidget scope", () => {
     const widget = readFileSync(new URL("../frontend/src/AgentConversationsWidget.tsx", import.meta.url), "utf8");
     expect(widget).not.toContain("md:grid-cols-[");
     expect(widget).toContain("window.matchMedia");
+    expect(widget).toContain('useWideWidgetLayout(widgetSize !== "half")');
+    const entry = readFileSync(new URL("./AgentConversationsWidget.tsx", import.meta.url), "utf8");
+    expect(entry).toContain('props.slot === "dashboard.agent_detail"');
   });
 
   test("both surfaces use the same transport/controller and shared chat view", () => {

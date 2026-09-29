@@ -47,8 +47,10 @@ export function selectedConversationSeenInput(
 
 export function conversationDisplayMode(
   settings?: AgentConversationWidgetSettings,
+  slot?: string,
 ): ConversationDisplayMode {
-  return settings?.display_mode === "single" ? "single" : "browser";
+  if (settings?.display_mode === "single" || settings?.display_mode === "browser") return settings.display_mode;
+  return slot === "dashboard.agent_detail" ? "single" : "browser";
 }
 
 export function showNewConversation(

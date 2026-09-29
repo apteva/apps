@@ -73,9 +73,9 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 			continue
 		}
 		if component.Entry != "/ui/AgentConversationsWidget.mjs" ||
-			len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardBuild ||
+			len(component.Slots) != 2 || component.Slots[0] != sdk.UIComponentSlotDashboardBuild || component.Slots[1] != sdk.UIComponentSlotDashboardAgentDetail ||
 			component.Visibility != sdk.UIComponentVisibilityAttached ||
-			component.DefaultSize != "full" {
+			component.DefaultSize != "full" || len(component.SupportedSizes) != 2 || component.SupportedSizes[0] != "half" || component.SupportedSizes[1] != "full" {
 			t.Fatalf("agent-conversations component=%+v", component)
 		}
 		schema, err := json.Marshal(component.SettingsSchema)
@@ -86,6 +86,9 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 			if !strings.Contains(string(schema), required) {
 				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
 			}
+		}
+		if strings.Contains(string(schema), `"default":"browser"`) {
+			t.Fatal("agent-detail must default to focused single mode without changing Build's browser fallback")
 		}
 		bundle, err := os.ReadFile("ui/AgentConversationsWidget.mjs")
 		if err != nil {
@@ -195,7 +198,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.9"
+	const releaseVersion = "0.24.10"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
