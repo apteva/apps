@@ -156,6 +156,28 @@ func TestOAuthCallbackRejectsExpiredToken(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedOAuthStatusIsProjectScoped(t *testing.T) {
+	app, _, _, pendingID, q := startNativeOAuthForTest(t)
+	status := func(project string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		app.handleAccountsItem(rec, httptest.NewRequest(http.MethodGet,
+			fmt.Sprintf("/accounts/%d/oauth_status?project_id=%s", pendingID, url.QueryEscape(project)), nil))
+		return rec
+	}
+	if rec := status("other"); rec.Code != http.StatusNotFound {
+		t.Fatalf("other project status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if rec := status("test-proj"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"pending_oauth"`) || strings.Contains(rec.Body.String(), "callback_token") {
+		t.Fatalf("pending status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	q.Set("conn_id", "7")
+	q.Set("status", "ok")
+	app.handleOAuthDone(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/accounts/oauth_done?"+q.Encode(), nil))
+	if rec := status("test-proj"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ready"`) {
+		t.Fatalf("ready status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestOAuthReturnURLCannotLeaveHandoffRoute(t *testing.T) {
 	for _, raw := range []string{
 		"/", "/api/apps/social/accounts/start", "//example.com/steal",

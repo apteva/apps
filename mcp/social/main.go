@@ -10139,6 +10139,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid id", http.StatusBadRequest)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "oauth_status" && r.Method == http.MethodGet {
+		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		row, err := a.getPending(id)
+		if err != nil || requestProject == "" || row.projectID != requestProject {
+			http.Error(w, "pending account not found", http.StatusNotFound)
+			return
+		}
+		status := row.status
+		if row.expired && status == "pending_oauth" {
+			status = "expired"
+		}
+		writeJSON(w, map[string]any{"status": status})
+		return
+	}
 	if len(parts) == 2 && parts[1] == "creator-info" && r.Method == http.MethodGet {
 		a.handleTikTokCreatorInfo(w, r, id)
 		return

@@ -545,7 +545,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
 
   // A callback on the Apteva origin cannot postMessage to a popup opener
   // running on localhost. After the popup closes, use the authenticated
-  // account endpoint to discover completion instead of trusting its origin.
+  // pending-account status endpoint to discover completion instead of trusting its origin.
   useEffect(() => {
     if (!pendingOAuthPopup) return;
     let cancelled = false;
@@ -561,10 +561,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
       }
       checking = true;
       try {
-        const res = await fetch(appURL(`/accounts/${pendingOAuthPopup.pendingId}/pages`, pendingOAuthPopup.projectId), {
+        const res = await fetch(appURL(`/accounts/${pendingOAuthPopup.pendingId}/oauth_status`, pendingOAuthPopup.projectId), {
           credentials: "same-origin",
         });
-        if (res.ok && !mcpEnvelopeError(await res.json()) && !cancelled) {
+        const result = res.ok ? await res.json() : null;
+        if (result?.status === "expired" && !cancelled) {
+          setPendingOAuthPopup(null);
+          setStatus("Authorization expired. Start the account connection again.");
+        } else if (result?.status === "ready" && !cancelled) {
           setPendingOAuthPopup(null);
           setOauthLanding((current) => current?.pendingId === pendingOAuthPopup.pendingId ? current : ({
             pendingId: pendingOAuthPopup.pendingId,
