@@ -286,6 +286,19 @@ func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row == nil {
 		return nil
 	}
+	// The activation journal owns its deadline and failure classification. Do
+	// this before taking the claim lock because its driver takes the same lock.
+	var activating bool
+	if err := a.db().db.QueryRow(`SELECT EXISTS(SELECT 1 FROM carrier_activations WHERE call_id=? AND status IN ('pending','waiting','failed'))`, row.ID).Scan(&activating); err != nil {
+		return err
+	}
+	if activating {
+		err := a.driveCarrierActivation(ctx, row.ID)
+		if errors.Is(err, errAnswerPreparationInProgress) || errors.Is(err, errAnswerCallEnded) {
+			return nil
+		}
+		return err
+	}
 	unlock := a.softphones.lockClaim(row.ID)
 	defer unlock()
 	fresh, err := a.db().findCall(row.ID)

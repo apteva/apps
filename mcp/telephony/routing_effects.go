@@ -188,7 +188,7 @@ func (a *App) driveRoutingEffect(ctx *sdk.AppCtx, callID, nodeID string) error {
 				row.AnnouncementText = prompt
 			}
 		}
-		if stage != "hangup" && row.AnsweredAt == "" && row.Status != "answered" {
+		if stage != "hangup" && !carrierAnswerObserved(row) {
 			stage = "answer"
 		}
 	}

@@ -531,6 +531,10 @@ func TestTerminalAnnouncementPlaysBeforeTelnyxHangup(t *testing.T) {
 	if _, _, err := db.insertInboundCallWithEvent(ivr, "pending"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.updateStatusWithFacts(ivr.ID, "answered", "", lifecycleFacts{Source: "provider"}); err != nil {
+		t.Fatal(err)
+	}
+	ivr.CarrierAnsweredAt = ivr.AnsweredAt
 	if err := app.executeTelnyxRoutingPlan(ctx, &ivr, &route, plan); err != nil {
 		t.Fatal(err)
 	}

@@ -476,10 +476,20 @@ func (a *App) handleCallRead(w http.ResponseWriter, r *http.Request, callID stri
 	}
 	call := callsPanelPublic(detail, phoneUserFrom(r) == nil)[0]
 	if phoneUserFrom(r) == nil {
+		call["carrier_answered_at"] = row.CarrierAnsweredAt
+		call["talk_duration_seconds"] = row.TalkDurationSeconds
 		startup, err := a.aiHandoffPublic(callID)
 		if err != nil {
 			http.Error(w, "load AI startup diagnostics", http.StatusInternalServerError)
 			return
+		}
+		activation, err := a.carrierActivationPublic(callID)
+		if err != nil {
+			http.Error(w, "load carrier activation", 500)
+			return
+		}
+		if activation != nil {
+			call["carrier_activation"] = activation
 		}
 		if startup != nil {
 			call["ai_startup"] = startup

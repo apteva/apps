@@ -6,6 +6,9 @@ import (
 )
 
 func carrierAnswerObserved(row *callRow) bool {
+	if row.CarrierSlug == "telnyx" {
+		return row.CarrierAnsweredAt != "" || row.MediaConnectedAt != ""
+	}
 	return row.AnsweredAt != "" || row.MediaConnectedAt != "" || row.Status == "answered" || row.Status == "in-progress"
 }
 
@@ -19,7 +22,11 @@ func (a *App) terminateCarrierCall(ctx *sdk.AppCtx, row *callRow) error {
 	if row.CarrierSID == "" && !a.callUsesDirectSIP(row) {
 		return nil
 	}
-	if row.Direction == "inbound" && !carrierAnswerObserved(row) {
+	answered := carrierAnswerObserved(row)
+	if a.callUsesDirectSIP(row) {
+		answered = row.AnsweredAt != "" || row.MediaConnectedAt != "" || row.Status == "answered" || row.Status == "in-progress"
+	}
+	if row.Direction == "inbound" && !answered {
 		return a.rejectInboundCarrierCall(ctx, row)
 	}
 	if a.callUsesDirectSIP(row) {

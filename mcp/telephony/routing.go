@@ -1952,6 +1952,20 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 		}
 		return a.driveRoutingEffect(ctx.WithProject(row.ProjectID), row.ID, plan.NodeID)
 	}
+	if (plan.TerminalType == "destination" || plan.TerminalType == "ring_group") && plan.AnswerMode == answerModeRealtimeImmediate {
+		if err := a.updateCallRoutingPlan(row, plan); err != nil {
+			return err
+		}
+		current, err := a.db().findCall(row.ID)
+		if err != nil {
+			return err
+		}
+		if current == nil || isTerminalStatus(current.Status) {
+			return errAnswerCallEnded
+		}
+		_, err = a.prepareAndActivateTelnyxAI(ctx, current, plan.Directive, plan.Voice, plan.Greeting)
+		return err
+	}
 	unlock := a.softphones.lockClaim(row.ID)
 	defer unlock()
 	if err := a.updateCallRoutingPlan(row, plan); err != nil {
@@ -1966,26 +1980,6 @@ func (a *App) executeTelnyxRoutingPlan(ctx *sdk.AppCtx, row *callRow, route *rou
 		return nil
 	case "destination", "ring_group":
 		switch plan.AnswerMode {
-		case answerModeRealtimeImmediate:
-			_, err := a.sharedRealtimeWork(row, "ivr-stream", true, func(owned *callRow) error {
-				if _, err := a.sharedRealtimeWork(owned, "prepare", false, func(preparing *callRow) error {
-					return a.runInboundPreparation(ctx, preparing, plan.Directive, plan.Voice, plan.Greeting)
-				}); err != nil {
-					return err
-				}
-				if err := a.db().updateStatus(owned.ID, "answered", ""); err != nil {
-					return err
-				}
-				current, err := a.db().findCall(owned.ID)
-				if err != nil {
-					return err
-				}
-				if current == nil || isTerminalStatus(current.Status) {
-					return errAnswerCallEnded
-				}
-				return a.startTelnyxStream(ctx, current)
-			})
-			return err
 		case answerModeHumanBrowser:
 			// The carrier leg is already answered by the IVR. Return it to the
 			// project's browser-offer state; softphoneAnswer starts streaming
