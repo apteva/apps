@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.8 — 2026-09-29
+
+- Show a small live activity indicator beside responding conversations in the full panel and agent-conversations widget thread lists, including the single-conversation history list. Keep unread and inbox-attention markers distinct, and respect reduced-motion preferences.
+- Use one authorized, lightweight activity summary for visible lists rather than a stream per thread. Clear the indicator when a response settles or its activity becomes unavailable; exported chat remains unchanged.
+- Add authorization, lifecycle, scoped polling, and packaged mobile panel/widget browser regressions. Pin App SDK v0.89.0.
+
 ## 0.24.7 — 2026-09-28
 
 - Give the full Conversations panel a mobile list-to-detail flow instead of stacking the list above an automatically selected chat. Keep the composer in a full-height chat view and restore list position and focus on Back.
