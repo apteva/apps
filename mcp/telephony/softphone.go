@@ -47,7 +47,21 @@ import (
 // unattached side is dropped rather than buffered, because late audio on a
 // phone call is worse than no audio.
 type softphoneHub struct {
-	callID string
+	pacerStats              *livePacerStats
+	captureStaleBytes       int64
+	carrierForward          *websocketWriterPump
+	completedCarrierForward liveAudioQueueSnapshot
+	captureTransitBase      float64
+	captureTransitSet       bool
+	captureTransitExcessMS  float64
+	callID                  string
+	timeline                liveAudioTimeline
+	playbackSequence        uint32
+	framedBrowser           *websocketWriterPump
+	captureTimestampMS      float64
+	captureWorkerAgeMS      float64
+	completedBrowser        liveAudioQueueSnapshot
+	completedPeer           liveAudioQueueSnapshot
 
 	mu      sync.Mutex
 	peer    *websocketWriterPump
@@ -69,6 +83,9 @@ type softphoneHub struct {
 const softphoneAudioFrameMagic uint32 = 0x31545041
 
 func decodeSoftphoneAudioFrame(data []byte) (payload []byte, sequence uint32, framed bool) {
+	if len(data) >= 32 && binary.LittleEndian.Uint32(data[:4]) == softphoneAudioFrameV2 {
+		return data[32:], binary.LittleEndian.Uint32(data[4:8]), true
+	}
 	if len(data) < 16 || binary.LittleEndian.Uint32(data[:4]) != softphoneAudioFrameMagic {
 		return data, 0, false
 	}
@@ -114,6 +131,9 @@ func (h *softphoneHub) setHeld(held bool) {
 	if held && h.browser != nil {
 		h.browser.FlushAudio()
 	}
+	if held && h.peer != nil {
+		h.peer.FlushAudio()
+	}
 	h.mu.Unlock()
 }
 
@@ -149,6 +169,8 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	replaced, h.browser = h.browser, w
+	h.captureSequenceSet = false
+	h.captureTransitSet = false
 	return replaced
 }
 
@@ -158,6 +180,7 @@ func (h *softphoneHub) setBrowser(w *websocketWriterPump) (replaced *websocketWr
 func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.completedPeer = mergeLiveAudioSnapshots(h.completedPeer, w.audioSnapshot())
 	if h.peer == w {
 		h.peer = nil
 		return true
@@ -168,6 +191,7 @@ func (h *softphoneHub) clearPeer(w *websocketWriterPump) bool {
 func (h *softphoneHub) clearBrowser(w *websocketWriterPump) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.completedBrowser = mergeLiveAudioSnapshots(h.completedBrowser, w.audioSnapshot())
 	if h.browser == w {
 		h.browser = nil
 	}
@@ -209,7 +233,13 @@ func (h *softphoneHub) toBrowser(op ws.OpCode, data []byte) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.held && h.browser != nil {
-			h.browser.QueueAudio(data)
+			sequence := h.playbackSequence
+			h.playbackSequence++
+			if h.framedBrowser == h.browser {
+				h.browser.queueAudio(encodePlaybackFrame(data, sequence), 32)
+			} else {
+				h.browser.QueueAudio(data)
+			}
 		}
 		return
 	}
@@ -224,12 +254,29 @@ func (h *softphoneHub) toPeer(op ws.OpCode, data []byte) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if !h.held && h.peer != nil {
-			_ = h.peer.Write(op, data)
+			h.peer.QueueAudio(data)
 		}
 		return
 	}
 	if w := h.peerWriter(); w != nil {
 		_ = w.Write(op, data)
+	}
+}
+
+// Source ownership, hold and answer state are checked atomically with enqueue.
+// An old browser completing a read after reconnect cannot inject microphone audio.
+func (h *softphoneHub) forwardMicrophone(source *websocketWriterPump, data []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.closed || h.browser != source || h.held {
+		return
+	}
+	if h.status != "answered" && h.status != "in-progress" {
+		h.preAnswerMicSamples += int64(len(data) / 2)
+		return
+	}
+	if h.peer != nil {
+		h.peer.QueueAudio(data)
 	}
 }
 
@@ -423,6 +470,7 @@ func (a *App) handlePeerSocket(w http.ResponseWriter, r *http.Request) {
 		switch op {
 		case ws.OpBinary:
 			// Caller audio, PCM16LE @ 24 kHz — straight through.
+			hub.timeline.observe("caller_hub_receipt", len(data), time.Time{}, "", "")
 			hub.toBrowser(ws.OpBinary, data)
 		case ws.OpText:
 			// input.speech_started / playback.progress / playback.overflow all
@@ -476,6 +524,7 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 	hub := a.softphones.hubFor(callID)
 	defer func() {
 		hub.clearBrowser(writer)
+		_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
 		closer.Close(ws.StatusNormalClosure, "softphone browser closed")
 		a.softphones.dropIfEmpty(callID, hub)
 		logSoftphone("softphone browser detached", "call", callID)
@@ -548,11 +597,16 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		defer close(watcherDone)
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		ticks := 0
 		for {
 			select {
 			case <-done:
 				return
 			case <-ticker.C:
+				ticks++
+				if ticks%5 == 0 {
+					_ = a.db().updateServerAudioDiagnostics(callID, hub.serverAudioSnapshot())
+				}
 				if reason := a.phoneMediaDenialReason(row, token); reason != "" {
 					logSoftphone("softphone browser media session closed", "call", callID, "reason", reason)
 					_ = conn.Close()
@@ -570,21 +624,26 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 		case ws.OpBinary:
 			// Operator microphone audio, PCM16LE @ 24 kHz.
 			payload, sequence, framed := decodeSoftphoneAudioFrame(data)
+			sourceSequence := ""
 			if framed {
 				hub.observeCaptureFrame(sequence)
+				sourceSequence = strconv.FormatUint(uint64(sequence), 10)
+			}
+			hub.timeline.observe("microphone_server_receipt", len(data), time.Time{}, "", sourceSequence)
+			// Received sequence gaps and our intentional stale-frame drops
+			// are separate measurements, so observe arrival before filtering.
+			if hub.observeCaptureTiming(data) {
+				continue
 			}
 			if len(payload) == 0 {
 				continue
 			}
-			if hub.microphoneReady() {
-				hub.toPeer(ws.OpBinary, payload)
-			} else {
-				hub.dropPreAnswerMicrophone(payload)
-			}
+			hub.forwardMicrophone(writer, payload)
 		case ws.OpText:
 			var control struct {
 				Type        string                   `json:"type"`
 				Nonce       float64                  `json:"nonce,omitempty"`
+				Version     int                      `json:"version,omitempty"`
 				Digits      string                   `json:"digits,omitempty"`
 				Diagnostics *browserAudioDiagnostics `json:"diagnostics,omitempty"`
 			}
@@ -592,6 +651,20 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			switch control.Type {
+			case "media.capabilities":
+				if control.Version == 2 {
+					// Ack precedes enabling framed playback on the sole writer.
+					_ = writer.Write(ws.OpText, []byte(`{"type":"media.capabilities","version":2}`))
+					hub.mu.Lock()
+					if hub.browser == writer {
+						hub.framedBrowser = writer
+					}
+					hub.mu.Unlock()
+				}
+			case "media.clock":
+				received := mediaClockMS()
+				reply, _ := json.Marshal(map[string]any{"type": "media.clock", "nonce": control.Nonce, "received_ms": received, "sent_ms": mediaClockMS()})
+				_ = writer.Write(ws.OpText, reply)
 			case "ping":
 				gaps, _ := hub.captureDiagnostics()
 				pong, _ := json.Marshal(map[string]any{"type": "pong", "nonce": control.Nonce, "capture_sequence_gaps": gaps})
@@ -617,6 +690,8 @@ func (a *App) handleSoftphoneMedia(w http.ResponseWriter, r *http.Request) {
 				_ = writer.Write(ws.OpText, softphoneEvent("dtmf.sent", callID))
 			case "diagnostics":
 				if control.Diagnostics != nil {
+					snapshot := hub.serverAudioSnapshot()
+					control.Diagnostics.Server = &snapshot
 					if err := a.db().updateBrowserAudioDiagnostics(callID, *control.Diagnostics); err != nil {
 						logSoftphone("persist browser audio diagnostics failed", "call", callID, "err", err)
 					}

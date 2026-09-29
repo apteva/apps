@@ -23,7 +23,7 @@ func (t *audioSequenceTracker) observe(sequence uint64, direction string) {
 		t.gaps += gap
 		t.events = append(t.events, audioDropEvent{
 			Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: direction,
-			Reason: "carrier_sequence_gap", DurationMS: gap * 20, Sequence: t.expected,
+			Reason: "carrier_sequence_gap", DurationMS: 0, Sequence: t.expected,
 		})
 		if len(t.events) > 100 {
 			t.events = t.events[len(t.events)-100:]
@@ -39,29 +39,54 @@ func (t *audioSequenceTracker) snapshot() (int, []audioDropEvent) {
 	return t.gaps, append([]audioDropEvent(nil), t.events...)
 }
 
+type browserAudioTiming struct {
+	Transport struct {
+		CaptureFrames              float64            `json:"capture_frames"`
+		CaptureSentMS              float64            `json:"capture_sent_ms"`
+		CaptureDroppedMS           float64            `json:"capture_dropped_ms"`
+		CaptureMaxAgeMS            float64            `json:"capture_max_age_ms"`
+		PlaybackTransportDroppedMS float64            `json:"playback_transport_dropped_ms"`
+		PlaybackReceivedMS         float64            `json:"playback_received_ms"`
+		PlaybackSequenceGaps       float64            `json:"playback_sequence_gaps"`
+		PlaybackMaxTransitMS       float64            `json:"playback_max_transit_ms"`
+		PlaybackMaxServerQueueMS   float64            `json:"playback_max_server_queue_ms"`
+		WorkerMaxTickGapMS         float64            `json:"worker_max_tick_gap_ms"`
+		ClockUncertaintyMS         *float64           `json:"clock_uncertainty_ms"`
+		ClockSampleAgeMS           *float64           `json:"clock_sample_age_ms"`
+		DropTotalsMS               map[string]float64 `json:"drop_totals_ms,omitempty"`
+	} `json:"transport"`
+	Playback struct {
+		PlayedMS       float64            `json:"played_ms"`
+		MaxResidenceMS float64            `json:"max_residence_ms"`
+		DropTotalsMS   map[string]float64 `json:"drop_totals_ms,omitempty"`
+	} `json:"playback"`
+}
+
 type browserAudioDiagnostics struct {
-	ReceivedAt             string           `json:"received_at,omitempty"`
-	RTTMS                  *int             `json:"rtt_ms,omitempty"`
-	PlaybackQueueMS        int              `json:"playback_queue_ms"`
-	PlaybackTargetMS       int              `json:"playback_target_ms"`
-	PlaybackMaxQueueMS     int              `json:"playback_max_queue_ms"`
-	PlaybackUnderruns      int              `json:"playback_underruns"`
-	PlaybackDroppedMS      int              `json:"playback_dropped_ms"`
-	WebSocketBufferedBytes int              `json:"websocket_buffered_bytes"`
-	AudioContextRate       int              `json:"audio_context_rate"`
-	MicrophoneSampleRate   int              `json:"microphone_sample_rate,omitempty"`
-	MicrophoneChannelCount int              `json:"microphone_channel_count,omitempty"`
-	EchoCancellation       *bool            `json:"echo_cancellation,omitempty"`
-	NoiseSuppression       *bool            `json:"noise_suppression,omitempty"`
-	AutoGainControl        *bool            `json:"auto_gain_control,omitempty"`
-	MicActiveRMSDBFS       *float64         `json:"mic_active_rms_dbfs,omitempty"`
-	MicPeakDBFS            *float64         `json:"mic_peak_dbfs,omitempty"`
-	MicPostPeakDBFS        *float64         `json:"mic_post_peak_dbfs,omitempty"`
-	MicInputGainDB         *float64         `json:"mic_input_gain_db,omitempty"`
-	MicLimiterReductionDB  *float64         `json:"mic_limiter_reduction_db,omitempty"`
-	CaptureSequenceGaps    int              `json:"capture_sequence_gaps"`
-	PlaybackSequenceGaps   int              `json:"playback_sequence_gaps"`
-	DropEvents             []audioDropEvent `json:"drop_events,omitempty"`
+	Timing                 *browserAudioTiming     `json:"timing,omitempty"`
+	Server                 *serverAudioDiagnostics `json:"server,omitempty"`
+	ReceivedAt             string                  `json:"received_at,omitempty"`
+	RTTMS                  *int                    `json:"rtt_ms,omitempty"`
+	PlaybackQueueMS        int                     `json:"playback_queue_ms"`
+	PlaybackTargetMS       int                     `json:"playback_target_ms"`
+	PlaybackMaxQueueMS     int                     `json:"playback_max_queue_ms"`
+	PlaybackUnderruns      int                     `json:"playback_underruns"`
+	PlaybackDroppedMS      int                     `json:"playback_dropped_ms"`
+	WebSocketBufferedBytes int                     `json:"websocket_buffered_bytes"`
+	AudioContextRate       int                     `json:"audio_context_rate"`
+	MicrophoneSampleRate   int                     `json:"microphone_sample_rate,omitempty"`
+	MicrophoneChannelCount int                     `json:"microphone_channel_count,omitempty"`
+	EchoCancellation       *bool                   `json:"echo_cancellation,omitempty"`
+	NoiseSuppression       *bool                   `json:"noise_suppression,omitempty"`
+	AutoGainControl        *bool                   `json:"auto_gain_control,omitempty"`
+	MicActiveRMSDBFS       *float64                `json:"mic_active_rms_dbfs,omitempty"`
+	MicPeakDBFS            *float64                `json:"mic_peak_dbfs,omitempty"`
+	MicPostPeakDBFS        *float64                `json:"mic_post_peak_dbfs,omitempty"`
+	MicInputGainDB         *float64                `json:"mic_input_gain_db,omitempty"`
+	MicLimiterReductionDB  *float64                `json:"mic_limiter_reduction_db,omitempty"`
+	CaptureSequenceGaps    int                     `json:"capture_sequence_gaps"`
+	PlaybackSequenceGaps   int                     `json:"playback_sequence_gaps"`
+	DropEvents             []audioDropEvent        `json:"drop_events,omitempty"`
 }
 
 type audioDropEvent struct {
@@ -72,6 +97,31 @@ type audioDropEvent struct {
 	QueueBeforeMS int    `json:"queue_before_ms,omitempty"`
 	QueueAfterMS  int    `json:"queue_after_ms,omitempty"`
 	Sequence      uint64 `json:"sequence,omitempty"`
+}
+
+// Browser clocks report fractional milliseconds. Accept them at the wire
+// boundary while keeping the existing integer diagnostics API. Otherwise one
+// fractional event causes json.Unmarshal to discard the entire snapshot.
+func (event *audioDropEvent) UnmarshalJSON(data []byte) error {
+	type fields audioDropEvent
+	var decoded fields
+	wire := struct {
+		*fields
+		DurationMS    float64 `json:"duration_ms"`
+		QueueBeforeMS float64 `json:"queue_before_ms"`
+		QueueAfterMS  float64 `json:"queue_after_ms"`
+	}{fields: &decoded}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	milliseconds := func(value float64) int {
+		return int(math.Round(math.Max(0, math.Min(value, 60000))))
+	}
+	decoded.DurationMS = milliseconds(wire.DurationMS)
+	decoded.QueueBeforeMS = milliseconds(wire.QueueBeforeMS)
+	decoded.QueueAfterMS = milliseconds(wire.QueueAfterMS)
+	*event = audioDropEvent(decoded)
+	return nil
 }
 
 type carrierAudioDiagnostics struct {
@@ -88,6 +138,8 @@ type carrierAudioDiagnostics struct {
 	MaxQueuedMS                  int                    `json:"max_queued_ms"`
 	DroppedStaleMS               int                    `json:"dropped_stale_ms"`
 	PreAnswerMicrophoneDroppedMS int64                  `json:"pre_answer_microphone_dropped_ms"`
+	CarrierSequenceGaps          int                    `json:"carrier_sequence_gaps"`
+	CaptureSequenceGaps          int                    `json:"capture_sequence_gaps"`
 	SequenceGaps                 int                    `json:"sequence_gaps"`
 	DropEvents                   []audioDropEvent       `json:"drop_events,omitempty"`
 }
@@ -111,6 +163,19 @@ func clampDiagnosticDBFS(value *float64) *float64 {
 }
 
 func normalizeBrowserAudioDiagnostics(value browserAudioDiagnostics) browserAudioDiagnostics {
+	if value.Timing != nil {
+		sanitize := func(values map[string]float64) map[string]float64 {
+			out := map[string]float64{}
+			for _, key := range []string{"playback_flush", "playback_hard_limit", "playback_age_limit", "capture_age_limit", "websocket_backpressure", "playback_transport_age"} {
+				if n, ok := values[key]; ok && !math.IsNaN(n) && !math.IsInf(n, 0) {
+					out[key] = math.Max(0, math.Min(n, 24*60*60*1000))
+				}
+			}
+			return out
+		}
+		value.Timing.Transport.DropTotalsMS = sanitize(value.Timing.Transport.DropTotalsMS)
+		value.Timing.Playback.DropTotalsMS = sanitize(value.Timing.Playback.DropTotalsMS)
+	}
 	value.ReceivedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	if value.RTTMS != nil {
 		rtt := clampDiagnosticInt(*value.RTTMS, 60000)

@@ -65,7 +65,9 @@ type carrierMediaFrame struct {
 		} `json:"media_format,omitempty"`
 	} `json:"start,omitempty"`
 	Media *struct {
-		Payload string `json:"payload"`
+		Payload   string `json:"payload"`
+		Timestamp any    `json:"timestamp,omitempty"`
+		Chunk     any    `json:"chunk,omitempty"`
 	} `json:"media,omitempty"`
 	Mark *struct {
 		Name string `json:"name"`
@@ -215,6 +217,12 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	playback := newTwilioPlaybackTracker()
 	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
 	inputSequences := &audioSequenceTracker{}
+	var humanHub *softphoneHub
+	if row.PeerKind == peerKindHuman {
+		humanHub = a.softphones.hubFor(callID)
+		humanHub.setCarrierForward(coreWriter)
+		defer humanHub.finishCarrierForward(coreWriter)
+	}
 
 	go func() {
 		defer cancel()
@@ -244,9 +252,14 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 						continue
 					}
 					f.Media = &struct {
-						Payload string `json:"payload"`
+						Payload   string `json:"payload"`
+						Timestamp any    `json:"timestamp,omitempty"`
+						Chunk     any    `json:"chunk,omitempty"`
 					}{Payload: f.Payload}
 				}
+			}
+			if sequence, ok := frameSequenceNumber(f); ok {
+				inputSequences.observe(sequence, "carrier_to_operator")
 			}
 			switch f.Event {
 			case "start":
@@ -273,12 +286,13 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 					}
 				}
 			case "media":
+				decodeStarted := time.Now()
+				if humanHub != nil {
+					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", "")
+				}
 				if cfg.Provider == "bandwidth" && !bandwidthStarted {
 					closeState.SetLeg(mediaCloseLegCarrier, ws.StatusPolicyViolation, "Bandwidth media arrived before a verified start frame")
 					return
-				}
-				if sequence, ok := frameSequenceNumber(f); ok {
-					inputSequences.observe(sequence, "carrier_to_operator")
 				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
@@ -299,7 +313,12 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if len(pcm24) == 0 {
 					continue
 				}
-				err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+				if humanHub != nil {
+					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, fmt.Sprint(f.Media.Timestamp), fmt.Sprint(f.Media.Chunk))
+					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+				} else {
+					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+				}
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					err = coreWriter.Write(ws.OpText, control)
@@ -360,7 +379,16 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
 		playback, pacerPolicy,
 		func(payload []byte) error {
-			return carrierWriter.Write(ws.OpText, payload)
+			started := time.Now()
+			err := carrierWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
+			if humanHub != nil {
+				stage := "carrier_send"
+				if err != nil {
+					stage = "carrier_send_error"
+				}
+				humanHub.timeline.observe(stage, len(payload), started, "", "")
+			}
+			return err
 		},
 		func(progress twilioPlaybackProgress) error {
 			control, _ := json.Marshal(realtimeBridgeControl{Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS})
@@ -372,23 +400,30 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 			cancel()
 		},
 	)
+	if humanHub != nil {
+		humanHub.setPacerStats(&pacer.diagnostics)
+	}
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, cfg.Provider, cfg.InputCodec, maxQueuedMS, droppedStaleMS)
 		var preAnswerDroppedMS int64
 		sequenceGaps, dropEvents := inputSequences.snapshot()
+		carrierGaps := sequenceGaps
+		captureGapCount := 0
 		dropEvents = append(dropEvents, pacer.dropEvents()...)
 		if hub := a.softphones.lookup(callID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 			captureGaps, captureDrops := hub.captureDiagnostics()
 			sequenceGaps += captureGaps
+			captureGapCount = captureGaps
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		if err := a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   cfg.Provider, Codec: cfg.OutputCodec, SampleRate: sampleRate,
-			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
-			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
+			CarrierSequenceGaps:          carrierGaps, CaptureSequenceGaps: captureGapCount,
+			SequenceGaps: sequenceGaps, DropEvents: dropEvents,
 		}); err != nil {
 			globalCtx.Logger().Warn("persist carrier audio diagnostics", "provider", cfg.Provider, "call", callID, "err", err)
 		}
