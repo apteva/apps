@@ -2076,7 +2076,8 @@ export default function ConversationsPanel({ projectId, instanceId, workspaceRai
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const wasMobileDetailRef = useRef(false);
   const [showArchived, setShowArchived] = useState(false);
-  const activeConversations = useConversationActivity(projectId, instanceId, tab === "chats" && !showArchived);
+  const [listEventRevision, setListEventRevision] = useState(0);
+  const activeConversations = useConversationActivity(projectId, instanceId, !showArchived, () => setListEventRevision(value => value + 1));
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -2139,6 +2140,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
     const interval = window.setInterval(loadConversations, 8000);
     return () => window.clearInterval(interval);
   }, [loadConversations]);
+  useEffect(() => { if (listEventRevision) void loadConversations(); }, [listEventRevision, loadConversations]);
 
   // Agent directory, fetched lazily the first time a dialog needs it.
   const ensureAgents = useCallback(() => {
@@ -2367,7 +2369,7 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                           )}
                           <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
                           <ConversationActivityIndicator active={activeConversations.has(c.id)} />
-                          {unreadCount > 0 && c.id !== selectedId && (
+                          {unreadCount > 0 && !(c.id === selectedId && (!isMobile || mobileDetail) && tab === "chats") && (
                             <span className="ml-auto shrink-0 text-xs px-1.5 py-0.5 rounded-full bg-accent text-bg">
                               {unreadCount}
                             </span>

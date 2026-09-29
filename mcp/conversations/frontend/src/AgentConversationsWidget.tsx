@@ -76,7 +76,8 @@ function ConversationBrowser({
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
   const [archived, setArchived] = useState(false);
-  const activeConversations = useConversationActivity(projectId, instanceId, !archived && validAgent);
+  const [listEventRevision, setListEventRevision] = useState(0);
+  const activeConversations = useConversationActivity(projectId, instanceId, !archived && validAgent, () => setListEventRevision(value => value + 1));
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
@@ -116,6 +117,7 @@ function ConversationBrowser({
     const timer = window.setInterval(load, 8_000);
     return () => window.clearInterval(timer);
   }, [load, eventRevision]);
+  useEffect(() => { if (listEventRevision) void load(); }, [listEventRevision, load]);
 
   const selected = useMemo(
     () => conversations.find((conversation) => conversation.id === selectedId) ?? null,

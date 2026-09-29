@@ -36,6 +36,8 @@ export interface ConversationSubscription {
 }
 export interface ConversationActivitySubscription {
   onFrame: (frame: StreamFrame) => void;
+  onMessage?: (message: Message) => void;
+  onResync?: () => void;
   onOpen?: () => void;
   onError?: (error: unknown) => void;
   signal?: AbortSignal;
@@ -134,10 +136,12 @@ export class ConversationsClient {
   // The existing user-scoped stream also carries progress-only snapshots for
   // thread lists. One SSE connection covers every visible conversation.
   subscribeActivity = (agentId: number | undefined, handlers: ConversationActivitySubscription) =>
-    this.app.subscribe<StreamFrame>(query("/stream", { scope: "user", agent_id: agentId }), (frame, meta) => {
-      if (meta.event === "stream") handlers.onFrame(frame);
+    this.app.subscribe<StreamFrame | Message>(query("/stream", { scope: "user", agent_id: agentId }), (event, meta) => {
+      if (meta.event === "stream") handlers.onFrame(event as StreamFrame);
+      else if (meta.event === "message") handlers.onMessage?.(event as Message);
+      else if (meta.event === "resync") handlers.onResync?.();
     }, {
-      eventTypes: ["stream"],
+      eventTypes: ["stream", "message", "resync"],
       signal: handlers.signal,
       onOpen: handlers.onOpen,
       onError: handlers.onError,

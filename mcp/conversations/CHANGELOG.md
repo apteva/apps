@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.13 — 2026-09-29
+
+- Refresh conversation-list unread counts immediately from durable messages on the existing user-scoped SSE connection, including after reconnect; keep the eight-second refresh as a fallback.
+- Show the unread badge on a mobile list after leaving a conversation, even while that conversation remains selected internally. Preserve read-on-view behavior and exported chat.
+- Add panel and agent-widget browser regressions for live unread updates.
+
 ## 0.24.12 — 2026-09-29
 
 - Drive conversation-list activity through the existing user-scoped SSE stream instead of polling. The indicator starts when a response is acknowledged and clears only after all responding agents settle.

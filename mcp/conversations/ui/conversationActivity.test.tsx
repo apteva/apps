@@ -9,6 +9,7 @@ import { applyConversationActivityFrame, ConversationActivityIndicator, useConve
 
 test("thread activity follows the existing scoped SSE stream and settles without polling", async () => {
   const requests: URL[] = [];
+  let listInvalidations = 0;
   let stream!: ReadableStreamDefaultController<Uint8Array>;
   let streamOpened!: () => void;
   const opened = new Promise<void>(resolve => { streamOpened = resolve; });
@@ -28,7 +29,7 @@ test("thread activity follows the existing scoped SSE stream and settles without
   Object.defineProperty(document, "hidden", { configurable: true, value: false });
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   function Probe() {
-    const active = useConversationActivity("project", 41);
+    const active = useConversationActivity("project", 41, true, () => { listInvalidations++; });
     return <>
       <ConversationActivityIndicator active={active.has("first")} />
       <ConversationActivityIndicator active={active.has("second")} />
@@ -41,6 +42,7 @@ test("thread activity follows the existing scoped SSE stream and settles without
     expect(requests[0].pathname).toEndWith("/stream");
     expect(requests[0].searchParams.get("scope")).toBe("user");
     expect(requests[0].searchParams.get("agent_id")).toBe("41");
+    expect(listInvalidations).toBeGreaterThan(0);
     await act(async () => {
       stream.enqueue(new TextEncoder().encode('event: stream\ndata: {"snapshot":true,"chat_id":"","frames":[{"chat_id":"first","response_progress":{"phase":"thinking"}}]}\n\n'));
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -52,6 +54,12 @@ test("thread activity follows the existing scoped SSE stream and settles without
       await new Promise(resolve => setTimeout(resolve, 10));
     });
     expect(node.querySelectorAll(".chat-thread-working-dot")).toHaveLength(0);
+    const beforeMessage = listInvalidations;
+    await act(async () => {
+      stream.enqueue(new TextEncoder().encode('event: message\ndata: {"id":5,"conversation_id":"second","role":"agent"}\n\n'));
+      await new Promise(resolve => setTimeout(resolve, 10));
+    });
+    expect(listInvalidations).toBe(beforeMessage + 1);
     expect(requests).toHaveLength(1);
   } finally {
     await act(async () => root.unmount());

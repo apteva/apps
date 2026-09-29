@@ -36,6 +36,24 @@ test("mobile panel shows a list or a conversation, never both", async ({ page, r
   await expect(page.getByRole("heading", { name: "Client onboarding" })).toHaveCount(0);
 });
 
+test("a reply to a chat left on mobile becomes unread immediately from the list SSE", async ({ page, request }) => {
+  await page.goto("/?host=dashboard&surface=panel");
+  const row = page.locator('button[data-conversation-id="mobile-one"]');
+  await row.click();
+  await page.getByRole("button", { name: "Back to conversations" }).click();
+  await expect(row).toBeVisible();
+  await request.post("/seed-unread", { data: { chat_id: "mobile-one", count: 1 } });
+  await expect(row.getByText("1", { exact: true })).toBeVisible({ timeout: 3_000 });
+});
+
+test("the agent widget marks an unselected chat unread from the same SSE", async ({ page, request }) => {
+  await page.goto("/?host=dashboard&surface=widget-browser");
+  const row = page.getByRole("button", { name: /Weather via Pushover/ });
+  await expect(row).toBeVisible();
+  await request.post("/seed-unread", { data: { chat_id: "mobile-two", count: 1 } });
+  await expect(row.getByText("1", { exact: true })).toBeVisible({ timeout: 3_000 });
+});
+
 for (const surface of ["panel", "widget-browser"] as const) {
   test(`${surface} thread list pulses only while that conversation is active`, async ({ page, request }) => {
     await request.post("/seed-activity", { data: ["mobile-two"] });

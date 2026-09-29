@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useConversationAPI } from "./context";
 import { useConversationLocalization } from "./i18n";
 import type { StreamFrame } from "./types";
@@ -17,9 +17,11 @@ export function applyConversationActivityFrame(current: ReadonlySet<string>, fra
 
 // The existing user-scoped Conversations SSE stream serves the entire list.
 // Its progress snapshots are authoritative on reconnect and on completion.
-export function useConversationActivity(projectId: string, agentId?: number, enabled = true): ReadonlySet<string> {
+export function useConversationActivity(projectId: string, agentId?: number, enabled = true, onListChanged?: () => void): ReadonlySet<string> {
   const { conversationsClient } = useConversationAPI();
   const [active, setActive] = useState<ReadonlySet<string>>(() => new Set());
+  const onListChangedRef = useRef(onListChanged);
+  onListChangedRef.current = onListChanged;
 
   useEffect(() => {
     setActive(new Set());
@@ -35,7 +37,9 @@ export function useConversationActivity(projectId: string, agentId?: number, ena
       if (closed || document.hidden || subscription) return;
       subscription = conversationsClient.subscribeActivity(agentId, {
         onFrame: frame => setActive(current => applyConversationActivityFrame(current, frame)),
-        onOpen: clearStaleTimer,
+        onMessage: () => onListChangedRef.current?.(),
+        onResync: () => onListChangedRef.current?.(),
+        onOpen: () => { clearStaleTimer(); onListChangedRef.current?.(); },
         onError: () => {
           clearStaleTimer();
           staleTimer = setTimeout(() => setActive(new Set()), 10_000);
