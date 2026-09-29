@@ -90,7 +90,7 @@ func pipelinePath(root, relative string) (string, error) {
 	}
 	rr, e := filepath.Rel(root, resolved)
 	if e != nil || rr == ".." || strings.HasPrefix(rr, ".."+string(filepath.Separator)) {
-		return "", errors.New("pipeline symlink escapes root")
+		return "", fmt.Errorf("pipeline symlink escapes root: %q", relative)
 	}
 	return resolved, nil
 }
