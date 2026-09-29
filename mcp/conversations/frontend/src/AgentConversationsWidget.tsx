@@ -2,6 +2,7 @@ import type { ComposerOptions } from "./composer";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
 import {
   ConversationChat,
   MoreConversations,
@@ -71,6 +72,7 @@ function ConversationBrowser({
   const [unread, setUnread] = useState<Map<string, UnreadEntry>>(new Map());
   const [selectedId, setSelectedId] = useState("");
   const [archived, setArchived] = useState(false);
+  const activeConversations = useConversationActivity(projectId, instanceId, !archived && validAgent);
   const [creating, setCreating] = useState(false);
   const [title, setTitle] = useState("");
   const [saving, setSaving] = useState(false);
@@ -224,6 +226,7 @@ function ConversationBrowser({
                     >
                       <div className="flex items-center gap-2">
                         <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{conversation.title}</span>
+                        <ConversationActivityIndicator active={activeConversations.has(conversation.id)} />
                         {unreadCount > 0 && conversation.id !== selectedId && (
                           <span className="rounded-full bg-accent px-1.5 py-0.5 text-xs text-bg">{unreadCount}</span>
                         )}
@@ -289,6 +292,7 @@ function SingleConversation({
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const activeHistory = useConversationActivity(projectId, instanceId, historyOpen && validAgent);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [history, setHistory] = useState<Conversation[]>([]);
   const [error, setError] = useState("");
@@ -535,7 +539,10 @@ function SingleConversation({
                         }}
                         className={`w-full px-4 py-3 text-left hover:bg-bg-hover ${conversation.id === selected?.id ? "bg-bg-hover" : ""}`}
                       >
-                        <span className="block truncate text-sm font-medium text-text">{conversation.title}</span>
+                        <span className="flex items-center gap-2 text-sm font-medium text-text">
+                          <span className="min-w-0 flex-1 truncate">{conversation.title}</span>
+                          <ConversationActivityIndicator active={activeHistory.has(conversation.id)} />
+                        </span>
                         <span className="mt-1 block text-xs text-text-dim">{relativeTime(conversation.updated_at)}</span>
                       </button>
                     </li>

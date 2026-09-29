@@ -28,6 +28,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/changes", Handler: a.handleChanges},
 		{Method: "GET", Pattern: "/activity", Handler: a.handleToolActivity},
+		{Method: "GET", Pattern: "/activity-summary", Handler: a.handleActivitySummary},
 		{Pattern: "/deliveries", Handler: a.handleDeliveryStatus},
 		{Method: "GET", Pattern: "/stream", Handler: a.handleStream},
 		{Method: "GET", Pattern: "/inbox", Handler: a.handleInbox},
@@ -1288,6 +1289,36 @@ func (a *App) handleUnreadSummary(w http.ResponseWriter, r *http.Request) {
 		entries = []UnreadEntry{}
 	}
 	writeJSON(w, entries)
+}
+
+// handleActivitySummary projects only currently responding conversations the
+// caller could see in the thread list. It contains no message or tool text.
+func (a *App) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
+	if _, _, err := requestIdentity(r); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	agentID, err := requestAgentScope(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ids := []string{}
+	if a.streamer != nil {
+		for _, id := range a.streamer.activeConversationIDs() {
+			if _, err := a.authorizeConversation(r, id); err != nil {
+				continue
+			}
+			if agentID != 0 {
+				member, err := a.store.IsParticipantAgent(id, agentID)
+				if err != nil || !member {
+					continue
+				}
+			}
+			ids = append(ids, id)
+		}
+	}
+	writeJSON(w, map[string]any{"active_conversation_ids": ids})
 }
 
 func (a *App) handleDeliveryFailures(w http.ResponseWriter, r *http.Request) {

@@ -96,6 +96,7 @@ export const catalog = {
   "approval.note": ["Note:", "Note :", "Nota:"],
   "chat.thinkingLabel": ["Thinking", "Réflexion en cours", "Pensando"],
   "chat.thinking": ["Thinking…", "Réflexion en cours…", "Pensando…"],
+  "chat.working": ["Working", "En cours", "Trabajando"],
   "common.title": ["Title", "Titre", "Título"],
   "common.optional": ["Optional", "Facultatif", "Opcional"],
   "chat.audience": ["Audience", "Public cible", "Audiencia"],

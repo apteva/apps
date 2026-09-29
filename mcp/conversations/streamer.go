@@ -25,6 +25,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -399,6 +400,27 @@ func (s *streamer) snapshot(chat string) StreamFrame {
 		}
 	}
 	return frame
+}
+
+// activeConversationIDs is a compact, ephemeral projection for conversation
+// lists. The HTTP handler applies the requesting user's visibility and agent
+// filters before returning any IDs; this method never exposes stream content.
+func (s *streamer) activeConversationIDs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked()
+	active := make(map[string]bool)
+	for _, progress := range s.responses {
+		if progress.Phase != "idle" && progress.chatID != "" {
+			active[progress.chatID] = true
+		}
+	}
+	ids := make([]string, 0, len(active))
+	for id := range active {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // settleAck settles the conversation's outstanding ack, if any. A

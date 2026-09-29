@@ -99,6 +99,7 @@ export interface WorkspaceRailProps {
 }
 
 import type { Conversation, Message, StreamFrame, InboxPage, InboxItem, UnreadEntry, AgentInfo, ChangePage, MessageDelivery, ToolActivity } from "./types";
+import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
 export type { Conversation, Message } from "./types";
 
 // Pickers only offer agents that hold this app's MCP — an unattached
@@ -2068,6 +2069,7 @@ export default function ConversationsPanel({ projectId, instanceId, workspaceRai
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const wasMobileDetailRef = useRef(false);
   const [showArchived, setShowArchived] = useState(false);
+  const activeConversations = useConversationActivity(projectId, instanceId, tab === "chats" && !showArchived);
   const [newOpen, setNewOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
@@ -2356,7 +2358,8 @@ const [inboxAttention,setInboxAttention]=useState<Record<string,number>>({});
                               title={t("inbox.pendingItem")}
                             />
                           )}
-                          <span className="text-sm font-medium text-text truncate">{c.title}</span>
+                          <span className="min-w-0 flex-1 truncate text-sm font-medium text-text">{c.title}</span>
+                          <ConversationActivityIndicator active={activeConversations.has(c.id)} />
                           {unreadCount > 0 && c.id !== selectedId && (
                             <span className="ml-auto shrink-0 text-xs px-1.5 py-0.5 rounded-full bg-accent text-bg">
                               {unreadCount}

@@ -36,6 +36,21 @@ test("mobile panel shows a list or a conversation, never both", async ({ page, r
   await expect(page.getByRole("heading", { name: "Client onboarding" })).toHaveCount(0);
 });
 
+for (const surface of ["panel", "widget-browser"] as const) {
+  test(`${surface} thread list pulses only while that conversation is active`, async ({ page, request }) => {
+    await request.post("/seed-activity", { data: ["mobile-two"] });
+    await page.goto(`/?host=dashboard&surface=${surface}`);
+    const working = page.getByRole("img", { name: "Working" });
+    await expect(working).toHaveCount(1);
+    await expect(working.locator("xpath=..")).toContainText("Weather via Pushover");
+    expect(await working.evaluate(element => getComputedStyle(element).animationName)).toBe("chat-thread-working");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    expect(await working.evaluate(element => getComputedStyle(element).animationName)).toBe("none");
+    await request.post("/seed-activity", { data: [] });
+    await expect(working).toHaveCount(0, { timeout: 6_000 });
+  });
+}
+
 test("mobile back preserves the list position and narrow screens do not overflow", async ({ page, request }) => {
   await request.post("/seed-panel", { data: Array.from({ length: 30 }, (_, index) => ({ ...panelRows[0], id: `mobile-${index}`, title: `Conversation ${index + 1}` })) });
   await page.setViewportSize({ width: 320, height: 650 });
