@@ -1255,24 +1255,24 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 	// realtime thread. A stable synthetic id prevents a legacy empty-id row
 	// (or any earlier browser call) from blocking every later outbound call.
 	row := callRow{
-		ID:                     callID,
-		ThreadID:               "human-" + callID,
-		Direction:              "outbound",
-		AgentID:                0,
-		CarrierSlug:            carrier.Slug(),
-		CarrierConnectionID:    bound.ConnectionID,
-		CallbackSecret:         newSecret(),
-		ToNumber:               to,
-		FromNumber:             from,
-		IngressPath:            "outbound",
-		Directive:              "",
-		Voice:                  "",
-		Status:                 "initiated",
-		PlacedAt:               now.Format(time.RFC3339),
-		ProjectID:              projectID,
-		StateExpiresAt:         now.Add(time.Duration(timeoutSec) * time.Second).Format(time.RFC3339),
-		IdempotencyKey:         key,
-		DeadlineAt:             now.Add(time.Hour).Format(time.RFC3339),
+		ID:                  callID,
+		ThreadID:            "human-" + callID,
+		Direction:           "outbound",
+		AgentID:             0,
+		CarrierSlug:         carrier.Slug(),
+		CarrierConnectionID: bound.ConnectionID,
+		CallbackSecret:      newSecret(),
+		ToNumber:            to,
+		FromNumber:          from,
+		IngressPath:         "outbound",
+		Directive:           "",
+		Voice:               "",
+		Status:              "initiated",
+		PlacedAt:            now.Format(time.RFC3339),
+		ProjectID:           projectID,
+		StateExpiresAt:      now.Add(time.Duration(timeoutSec) * time.Second).Format(time.RFC3339),
+		IdempotencyKey:      key,
+
 		RecordingMode:          recordingMode,
 		RecordingChannels:      recordingPolicy.Channels,
 		RecordingStorageMode:   recordingPolicy.StorageMode,
@@ -1285,7 +1285,7 @@ func (a *App) placeHumanCallForUserWithOptions(ctx *sdk.AppCtx, principal *phone
 	row.ApplicationUser = principal
 	row.AudioBridgeURL = a.peerLoopbackURL(&row)
 
-	if err := a.placeOutboundLeg(ctx, carrier, &row, timeoutSec, 3600, nil); err != nil {
+	if err := a.placeOutboundLeg(ctx, carrier, &row, timeoutSec, 0, nil); err != nil {
 		return nil, err
 	}
 	return &softphoneSession{

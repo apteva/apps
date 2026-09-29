@@ -983,11 +983,7 @@ func (a *App) finishMediaBridge(callID string, leg mediaCloseLeg, code ws.Status
 		errMsg = reason
 	}
 	_ = a.db().updateMediaStatusWithLeg(callID, status, errMsg, int(code), reason, string(leg))
-	if status == "error" {
-		_ = a.db().setStateExpiry(callID, time.Now().UTC().Add(2*time.Minute))
-	} else {
-		_ = a.db().clearStateExpiry(callID)
-	}
+
 	globalCtx.Logger().Info("media bridge down", "call", callID, "leg", leg, "code", code, "reason", reason)
 }
 

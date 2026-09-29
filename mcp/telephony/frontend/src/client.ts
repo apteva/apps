@@ -2,12 +2,21 @@ import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
 import { HeadlessSoftphone, type SoftphoneOptions } from "./softphone";
 
+/** Translate stable termination reasons without presenting duration expiry as a fault. */
+export function callTerminationLabel(termination: CallTermination | undefined, locale = "en"): string {
+  if (termination?.reason === "time_limit") return locale.toLowerCase().startsWith("fr") ? "Durée maximale atteinte" : "Maximum call duration reached";
+  return termination?.reason?.replaceAll("_", " ") ?? "";
+}
+
 export interface CallTermination { reason?: string; cause?: string; code?: string; initiator?: string }
 export interface Call {
   id: string;
   status: string;
   answered_at?: string;
   ended_at?: string;
+  max_duration_sec?: number;
+  duration_started_at?: string;
+  connected_deadline_at?: string;
   /** human, machine, fax, silence, or unknown once answering machine detection reports. */
   answered_by?: string;
   termination?: CallTermination;

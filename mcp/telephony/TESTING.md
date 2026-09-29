@@ -147,3 +147,10 @@ measurements under bandwidth, latency, jitter, retransmission stalls and outage
 profiles. See [benchmark instructions](benchmarks/softphone/README.md) for gates,
 artifacts, reproducibility and the distinction between a local network model
 and real carrier/physical audio quality. This does not contact staging or prod.
+
+## Connected-call duration
+
+See [CALL-DURATION.md](CALL-DURATION.md) for snapshotted limits, setup/media
+watchdogs, migration behavior and carrier limits. `TestCallDuration*` advances an
+explicit clock across hour boundaries and exercises the actual database and
+termination paths; it places no real calls.

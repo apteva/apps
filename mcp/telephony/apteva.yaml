@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.7.4
+version: 0.7.5
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -253,6 +253,9 @@ db:
   migrations: migrations/
 
 config_schema:
+  - { name: connected_call_max_duration_seconds, type: text, default: "14400", label: "Connected call duration limit (seconds)", description: "60–14400 seconds, measured from first confirmed carrier answer or connected media. Snapshotted for each new call." }
+  - { name: call_setup_timeout_seconds, type: text, default: "3600", label: "Call setup safety timeout (seconds)", description: "60–3600 seconds. Separate from shorter ringing, routing and AI preparation deadlines." }
+  - { name: call_media_recovery_timeout_seconds, type: text, default: "120", label: "Media recovery timeout (seconds)", description: "30–600 seconds after a media transport failure/disconnection. Silence, mute and hold do not trigger this timer." }
   - { name: ai_startup_max_attempts, type: text, default: "3", label: "AI startup maximum attempts", description: "Call-wide budget, 1–5. Only explicit temporary failures are retried." }
   - { name: ai_startup_timeout_seconds, type: text, default: "15", label: "AI startup total timeout (seconds)", description: "1–120 seconds, capped by the remaining call deadline." }
   - { name: inbound_burst_window_seconds, type: text, default: "60", label: "Inbound burst window (seconds)" }

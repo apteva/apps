@@ -76,6 +76,15 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 		return false, nil
 	}
 
+	// Carrier completion can race our intentional duration-limit hangup.
+	// Keep its durable reason and completed classification through late callbacks.
+	durationEnded := current.TerminationReason == terminationTimeLimit && current.TerminationInitiator == "telephony"
+	if durationEnded && isTerminalStatus(status) {
+		status = "completed"
+		facts.TerminationCause = "max_duration"
+		facts.TerminationInitiator = "telephony"
+		errMsg = ""
+	}
 	now := time.Now().UTC()
 	occurredAt := normalizedEventTime(facts.OccurredAt, now)
 	lateNonTerminal := isTerminalStatus(current.Status) && !isTerminalStatus(status)
@@ -148,7 +157,7 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
 
 	_, err = tx.Exec(`UPDATE calls SET
         status = ?,
-        error_message = CASE WHEN ? <> '' THEN ? ELSE error_message END,
+        error_message = CASE WHEN ? THEN '' WHEN ? <> '' THEN ? ELSE error_message END,
         answered_at = NULLIF(?, ''),
         ended_at = NULLIF(?, ''),
         updated_at = ?,
@@ -166,7 +175,7 @@ func (c *callsDB) updateStatusWithFacts(id, status, errMsg string, facts lifecyc
         recording_control_state = CASE WHEN ? THEN 'ended' ELSE recording_control_state END,
         control_action = CASE WHEN ? THEN '' ELSE control_action END
         WHERE id = ?`,
-		nextStatus, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
+		nextStatus, durationEnded, errorToStore, errorToStore, answeredAt, endedAt, now.Format(time.RFC3339Nano),
 		providerOccurredAt, durationSeconds, talkDurationSeconds, terminationCause,
 		terminationCode, terminationInitiator, terminationReason, providerSequence, providerEventID,
 		isTerminalStatus(nextStatus), isTerminalStatus(nextStatus), isTerminalStatus(nextStatus),
@@ -302,6 +311,7 @@ func lifecycleEventPublic(call callRow, eventID, topic, occurredAt string, facts
 		"call_classification":     callClassification(call),
 		"callback_opportunity_id": callbackOpportunityID(call),
 		"routing_resolution":      call.RoutingResolution,
+		"max_duration_sec":        call.MaxDurationSec, "duration_started_at": call.DurationStartedAt, "connected_deadline_at": call.ConnectedDeadlineAt,
 	}
 	addOptionalString(payload, "provider_leg_id", call.CarrierLegID)
 	addOptionalString(payload, "provider_session_id", call.CarrierSessionID)
