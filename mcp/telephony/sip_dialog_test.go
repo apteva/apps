@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -417,6 +418,55 @@ func TestSIPTLSCertificateReloadKeepsLastGood(t *testing.T) {
 		t.Fatalf("lost last good certificate: %v", err)
 	}
 }
+
+func TestSIPTLSCertificateReloadDetectsSameMetadataReplacement(t *testing.T) {
+	dir := t.TempDir()
+	writeSIPTestCertificate(t, dir, "sip.example.test")
+	cfg := directSIPTestConfig()
+	cfg.TLSCertFile = filepath.Join(dir, "fullchain.pem")
+	cfg.TLSKeyFile = filepath.Join(dir, "privkey.pem")
+	config, err := cfg.tlsConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := config.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificateInfo, err := os.Stat(cfg.TLSCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(cfg.TLSCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(original)
+	if block == nil || len(block.Bytes) == 0 {
+		t.Fatal("test certificate was not PEM encoded")
+	}
+	// Change only a signature byte. The certificate remains parseable and has
+	// the same length, inode, and mtime as the previous file.
+	block.Bytes[len(block.Bytes)-1] ^= 1
+	replacement := pem.EncodeToMemory(block)
+	if len(replacement) != len(original) {
+		t.Fatal("replacement unexpectedly changed certificate length")
+	}
+	if err := os.WriteFile(cfg.TLSCertFile, replacement, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cfg.TLSCertFile, certificateInfo.ModTime(), certificateInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := config.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first.Certificate[0], second.Certificate[0]) {
+		t.Fatal("same-metadata certificate replacement was not reloaded")
+	}
+}
+
 func TestSIPAdmissionCapacityIsAtomic(t *testing.T) {
 	g := &sipGateway{cfg: sipGatewayConfig{MaxSessions: 3}, byProviderCall: map[string]*sipSession{}, byCall: map[string]*sipSession{}}
 	var wg sync.WaitGroup
