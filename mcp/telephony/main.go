@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.8.2
+version: 0.8.3
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -74,6 +74,7 @@ requires:
   integrations:
     - role: carrier
       kind: integration
+      mode: multiple
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
       required: true
@@ -1233,19 +1234,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	return nil
 }
 
-// resolveCarrierBinding returns the bound carrier integration, its credentials,
-// and the validated From= number. Extracted from toolPlaceCall so the softphone
-// path resolves its carrier identically.
+// resolveCarrierBinding returns the carrier integration selected by the caller
+// ID, its credentials, and the validated From= number. When no caller ID is
+// supplied, the default carrier keeps the legacy selection behavior. Explicit
+// caller IDs are searched across every authorized carrier binding so inbound
+// routes and outbound numbers can coexist across providers.
 func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom string) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
-	bound := ctx.IntegrationFor("carrier")
-	if bound == nil {
-		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
-	}
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
-	if err != nil {
-		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
-	}
-	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requestedFrom)
+	bound, creds, from, err := a.selectCarrierBinding(ctx, projectID, requestedFrom)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -1254,6 +1249,99 @@ func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom st
 		return nil, nil, "", err
 	}
 	return bound, creds, from, nil
+}
+
+// selectCarrierBinding performs selection and caller-ID validation without
+// provider readiness checks. Configuration tools use this lower-level helper
+// so they can repair an unready carrier profile before placing calls.
+func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom string) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
+	requestedFrom = strings.TrimSpace(requestedFrom)
+	bindings := ctx.IntegrationsFor("carrier")
+	if len(bindings) == 0 {
+		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
+	}
+
+	// An explicit From= is an identity selector, not merely a validation
+	// hint. Search all bindings and stop at the first authorized connection
+	// that owns a voice-capable copy of it.
+	if requestedFrom != "" {
+		if !validE164(requestedFrom) {
+			return nil, nil, "", errors.New("from must be a valid E.164 number (+ followed by 8-15 digits)")
+		}
+		for _, candidate := range bindings {
+			if candidate == nil {
+				continue
+			}
+			creds, err := ctx.PlatformAPI().GetConnectionCredentials(candidate.ConnectionID)
+			if err != nil {
+				continue // An inaccessible binding cannot authorize this caller ID.
+			}
+			if !a.outboundNumberBelongsToBinding(ctx, projectID, candidate, creds, requestedFrom) {
+				continue
+			}
+			from, err := a.resolveOutboundFrom(ctx, projectID, candidate, creds, requestedFrom)
+			if err != nil {
+				continue
+			}
+			return candidate, creds, from, nil
+		}
+		return nil, nil, "", errors.New("selected from number is not owned by any authorized carrier")
+	}
+
+	bound := ctx.IntegrationFor("carrier")
+	if bound == nil {
+		bound = bindings[0]
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
+	}
+	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, "")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return bound, creds, from, nil
+}
+
+// outboundNumberBelongsToBinding performs the cross-carrier ownership check
+// used before selecting an explicit caller ID. Routes and the legacy
+// phone_number credential are accepted as local durable evidence; when the
+// provider inventory is available it is authoritative and must report voice.
+func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string) bool {
+	if bound == nil || creds == nil || !validE164(requested) {
+		return false
+	}
+	requestedKey := compactPhoneNumber(requested)
+	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	owned, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields})
+	if err == nil {
+		for _, number := range owned {
+			if compactPhoneNumber(number.PhoneNumber) == requestedKey {
+				return len(number.Capabilities) == 0 || containsString(number.Capabilities, "voice")
+			}
+		}
+		// Older connections expose only their configured default number in
+		// credentials. Keep that durable provider assertion usable when the
+		// inventory endpoint omits legacy metadata.
+		if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
+			return true
+		}
+		// A successful inventory response that omits a number is authoritative.
+		return false
+	}
+	// Preserve legacy connections that cannot enumerate inventory while still
+	// requiring durable project or credential evidence for the selected number.
+	if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
+		return true
+	}
+	if routes, routeErr := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID); routeErr == nil {
+		for _, route := range currentRoutesByNumber(routes) {
+			if route.Enabled && compactPhoneNumber(route.PhoneNumber) == requestedKey {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func callToolResult(callID, threadID, to string) map[string]any {

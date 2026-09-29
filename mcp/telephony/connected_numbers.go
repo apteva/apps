@@ -220,13 +220,71 @@ func (a *App) resolveTelnyxApplicationID(
 }
 
 func (a *App) connectedNumbers(ctx *sdk.AppCtx) (map[string]any, error) {
+	bindings := ctx.IntegrationsFor("carrier")
+	if len(bindings) == 0 {
+		return nil, errors.New("no carrier bound")
+	}
+	if len(bindings) == 1 {
+		provider, err := a.numberProviderForBinding(ctx, bindings[0])
+		if err != nil {
+			return nil, err
+		}
+		return a.connectedNumbersForProvider(ctx, provider)
+	}
+
 	projectID := currentProject(ctx)
 	if projectID == "" {
 		return nil, errors.New("project context required for connected numbers")
 	}
-	provider, err := a.numberProviderFor(ctx)
-	if err != nil {
-		return nil, err
+	allNumbers := make([]connectedNumberView, 0)
+	providerNames := make([]string, 0, len(bindings))
+	var directSIP map[string]any
+	for _, bound := range bindings {
+		provider, err := a.numberProviderForBinding(ctx, bound)
+		if err != nil {
+			return nil, err
+		}
+		result, err := a.connectedNumbersForProvider(ctx, provider)
+		if err != nil {
+			return nil, fmt.Errorf("list %s connected numbers: %w", provider.Slug, err)
+		}
+		if numbers, ok := result["numbers"].([]connectedNumberView); ok {
+			allNumbers = append(allNumbers, numbers...)
+		}
+		providerNames = append(providerNames, provider.Slug)
+		if directSIP == nil {
+			if value, ok := result["direct_sip"].(map[string]any); ok {
+				directSIP = value
+			}
+		}
+	}
+	sort.SliceStable(allNumbers, func(i, j int) bool {
+		leftRouted := allNumbers[i].Route != nil && allNumbers[i].Route.Enabled
+		rightRouted := allNumbers[j].Route != nil && allNumbers[j].Route.Enabled
+		if leftRouted != rightRouted {
+			return leftRouted
+		}
+		if allNumbers[i].PhoneNumber != allNumbers[j].PhoneNumber {
+			return allNumbers[i].PhoneNumber < allNumbers[j].PhoneNumber
+		}
+		return allNumbers[i].Provider < allNumbers[j].Provider
+	})
+	if directSIP == nil {
+		directSIP = map[string]any{"supported": false, "enabled": false, "ready": false, "managed": true}
+	}
+	return map[string]any{
+		"provider":   "multiple",
+		"providers":  providerNames,
+		"count":      len(allNumbers),
+		"numbers":    allNumbers,
+		"direct_sip": directSIP,
+	}, nil
+}
+
+func (a *App) connectedNumbersForProvider(ctx *sdk.AppCtx, provider *numberProvider) (map[string]any, error) {
+	projectID := currentProject(ctx)
+	if projectID == "" {
+		return nil, errors.New("project context required for connected numbers")
 	}
 	owned, err := listOwnedCarrierNumbers(ctx, provider)
 	if err != nil {
@@ -391,15 +449,7 @@ func (a *App) configureNumberOutboundProfile(ctx *sdk.AppCtx, phoneNumber, profi
 	if projectID == "" {
 		return nil, errors.New("project context required for outbound configuration")
 	}
-	bound := ctx.IntegrationFor("carrier")
-	if bound == nil {
-		return nil, errors.New("no carrier bound")
-	}
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
-	if err != nil {
-		return nil, fmt.Errorf("read carrier credentials: %w", err)
-	}
-	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, strings.TrimSpace(phoneNumber))
+	bound, creds, from, err := a.selectCarrierBinding(ctx, projectID, strings.TrimSpace(phoneNumber))
 	if err != nil {
 		return nil, err
 	}

@@ -28,19 +28,22 @@ import (
 
 type answerPlatform struct {
 	tk.BasePlatformClient
-	failCarrier          bool
-	failTool             string
-	spawned              []sdk.RealtimeSpawnRequest
-	killed               []string
-	integrationCalls     []integrationCall
-	integrationResponse  map[string]json.RawMessage
-	integrationResponses map[string][]json.RawMessage
-	credentials          *sdk.ConnectionCredentials
-	bindings             map[string]any
-	connection           *sdk.PlatformConnection
-	agents               map[int64]*sdk.PlatformAgent
-	appResponses         map[string]any
-	appCalls             []integrationCall
+	failCarrier                bool
+	failTool                   string
+	spawned                    []sdk.RealtimeSpawnRequest
+	killed                     []string
+	integrationCalls           []integrationCall
+	integrationResponse        map[string]json.RawMessage
+	integrationResponses       map[string][]json.RawMessage
+	integrationResponsesByConn map[int64]map[string]json.RawMessage
+	credentials                *sdk.ConnectionCredentials
+	credentialsByID            map[int64]*sdk.ConnectionCredentials
+	bindings                   map[string]any
+	connection                 *sdk.PlatformConnection
+	connectionsByID            map[int64]*sdk.PlatformConnection
+	agents                     map[int64]*sdk.PlatformAgent
+	appResponses               map[string]any
+	appCalls                   []integrationCall
 }
 
 func (p *answerPlatform) CallAppResult(app, tool string, args map[string]any, out any) error {
@@ -66,6 +69,11 @@ func (p *answerPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
 }
 
 func (p *answerPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if configured := p.connectionsByID[id]; configured != nil {
+		copy := *configured
+		copy.ID = id
+		return &copy, nil
+	}
 	if p.connection != nil {
 		copy := *p.connection
 		copy.ID = id
@@ -110,6 +118,11 @@ func TestKillCallThreadSkipsHumanSoftphone(t *testing.T) {
 }
 
 func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	if configured := p.credentialsByID[id]; configured != nil {
+		copy := *configured
+		copy.ConnectionID = id
+		return &copy, nil
+	}
 	if p.credentials != nil {
 		copy := *p.credentials
 		copy.ConnectionID = id
@@ -118,12 +131,16 @@ func (p *answerPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCred
 	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "twilio", Fields: map[string]string{"auth_token": "test-auth-token"}}, nil
 }
 
-func (p *answerPlatform) ExecuteIntegrationTool(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+func (p *answerPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.integrationCalls = append(p.integrationCalls, integrationCall{Tool: tool, Input: input})
 	if p.failCarrier || p.failTool == tool {
 		return &sdk.ExecuteResult{Success: false, Status: 409, Data: json.RawMessage(`{"message":"call ended"}`)}, nil
 	}
 	data := json.RawMessage(`{}`)
+	if responses := p.integrationResponsesByConn[connID]; responses != nil && responses[tool] != nil {
+		data = responses[tool]
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: data}, nil
+	}
 	if responses := p.integrationResponses[tool]; len(responses) > 0 {
 		data = responses[0]
 		p.integrationResponses[tool] = responses[1:]

@@ -104,6 +104,13 @@ func (a *App) numberProviderFor(ctx *sdk.AppCtx) (*numberProvider, error) {
 	if bound == nil {
 		return nil, errors.New("no carrier bound")
 	}
+	return a.numberProviderForBinding(ctx, bound)
+}
+
+func (a *App) numberProviderForBinding(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) (*numberProvider, error) {
+	if bound == nil {
+		return nil, errors.New("no carrier bound")
+	}
 	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
 	if err != nil {
 		return nil, fmt.Errorf("read carrier credentials: %w", err)
