@@ -514,15 +514,27 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     pendingId: number;
     connectionId: number;
   } | null>(null);
+  const [pendingOAuthPopup, setPendingOAuthPopup] = useState<{
+    pendingId: number;
+    popup: Window;
+    projectId?: string | null;
+  } | null>(null);
+  const pendingOAuthPopupRef = useRef(pendingOAuthPopup);
+  pendingOAuthPopupRef.current = pendingOAuthPopup;
   useEffect(() => {
     const onMsg = (ev: MessageEvent) => {
+      const pending = pendingOAuthPopupRef.current;
+      if (!pending || ev.source !== pending.popup) return;
       if (isTrustedOAuthMessage(ev.origin, window.location.origin, ev.data)) {
-        setOauthLanding({
+        if (ev.data.pending_account_id !== pending.pendingId) return;
+        setPendingOAuthPopup((current) => current?.pendingId === ev.data.pending_account_id ? null : current);
+        setOauthLanding((current) => current?.pendingId === ev.data.pending_account_id ? current : ({
           pendingId: ev.data.pending_account_id,
           connectionId: ev.data.connection_id,
-        });
+        }));
         setTab("accounts");
       } else if (ev.origin === window.location.origin && ev.data?.type === "social.oauth_error") {
+        setPendingOAuthPopup(null);
         setStatus("Authorization failed or expired. Start the account connection again.");
         setTab("accounts");
       }
@@ -531,10 +543,51 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
+  // A callback on the Apteva origin cannot postMessage to a popup opener
+  // running on localhost. After the popup closes, use the authenticated
+  // pending-account status endpoint to discover completion instead of trusting its origin.
+  useEffect(() => {
+    if (!pendingOAuthPopup) return;
+    let cancelled = false;
+    let checking = false;
+    let closedAt = 0;
+    const poll = async () => {
+      if (cancelled || checking || !pendingOAuthPopup.popup.closed) return;
+      if (!closedAt) closedAt = Date.now();
+      if (Date.now() - closedAt > 30_000) {
+        setPendingOAuthPopup(null);
+        setStatus("Authorization was not completed. Start the account connection again.");
+        return;
+      }
+      checking = true;
+      try {
+        const res = await fetch(appURL(`/accounts/${pendingOAuthPopup.pendingId}/oauth_status`, pendingOAuthPopup.projectId), {
+          credentials: "same-origin",
+        });
+        const result = res.ok ? await res.json() : null;
+        if (result?.status === "expired" && !cancelled) {
+          setPendingOAuthPopup(null);
+          setStatus("Authorization expired. Start the account connection again.");
+        } else if (result?.status === "ready" && !cancelled) {
+          setPendingOAuthPopup(null);
+          setOauthLanding((current) => current?.pendingId === pendingOAuthPopup.pendingId ? current : ({
+            pendingId: pendingOAuthPopup.pendingId,
+            connectionId: 0,
+          }));
+          setTab("accounts");
+        }
+      } catch {}
+      checking = false;
+    };
+    const timer = window.setInterval(() => { void poll(); }, 1000);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [pendingOAuthPopup]);
+
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
   const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
-    setOauthLanding({ pendingId, connectionId });
+    setOauthLanding((current) => current?.pendingId === pendingId ? current : ({ pendingId, connectionId }));
   }, []);
 
   return (
@@ -572,6 +625,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             oauthLanding={oauthLanding}
             onClearLanding={clearOauthLanding}
             onSetLanding={setOauthLandingFromReuse}
+            onOAuthStarted={(pendingId, popup) => setPendingOAuthPopup({ pendingId, popup, projectId })}
             onChange={loadAccounts}
             onImported={loadPosts}
             setStatus={setStatus}
@@ -1001,7 +1055,7 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onChange, onImported, setStatus,
+  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onOAuthStarted, onChange, onImported, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   activeProfile: Profile | null;
@@ -1009,6 +1063,7 @@ function AccountsView({
   oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
   onSetLanding: (pendingId: number, connectionId: number) => void;
+  onOAuthStarted: (pendingId: number, popup: Window) => void;
   onChange: () => void;
   onImported: () => void;
   setStatus: (s: string) => void;
@@ -1113,6 +1168,7 @@ function AccountsView({
             onSetLanding(pendingId, connId);
             setAdding(false);
           }}
+          onOAuthStarted={onOAuthStarted}
         />
       )}
 
@@ -2550,7 +2606,7 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 function AddAccountDialog({
-  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting,
+  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
   activeProfile: Profile | null;
@@ -2558,6 +2614,7 @@ function AddAccountDialog({
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
+  onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
@@ -2646,6 +2703,9 @@ function AddAccountDialog({
         }
         // Navigate the already-open popup to the upstream authorize URL.
         popup.location.href = data.authorize_url;
+        if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0) {
+          onOAuthStarted(data.pending_account_id, popup);
+        }
         onClose();
       } catch (e) {
         fail("Start failed: " + (e as Error).message);

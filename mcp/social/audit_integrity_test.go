@@ -143,14 +143,18 @@ func TestExternalAvatarPolicy(t *testing.T) {
 
 func TestZernioOAuthNonceStateAndReplay(t *testing.T) {
 	ctx, pf, _, _ := auditSeed(t, "linkedin", "zernio", "draft")
-	result, err := ctx.AppDB().Exec(`INSERT INTO pending_accounts(project_id,platform,integration_slug,connection_id,status,expires_at,provider_slug,provider_profile_id,provider_state,callback_nonce) VALUES ('test-proj','linkedin','zernio',7,'pending_oauth',datetime('now','+1 hour'),'zernio','profile','expected','nonce')`)
+	token, hash, err := newOAuthCallbackToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ctx.AppDB().Exec(`INSERT INTO pending_accounts(project_id,platform,integration_slug,connection_id,status,expires_at,provider_slug,provider_profile_id,provider_state,callback_nonce,callback_token_hash) VALUES ('test-proj','linkedin','zernio',7,'pending_oauth',datetime('now','+1 hour'),'zernio','profile','expected','nonce',?)`, hash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	id, _ := result.LastInsertId()
-	row := &pendingRow{id: id, projectID: "test-proj", platform: "linkedin", connectionID: 7, providerProfileID: "profile", providerState: "expected"}
+	row := &pendingRow{id: id, projectID: "test-proj", platform: "linkedin", connectionID: 7, providerProfileID: "profile", providerState: "expected", callbackTokenHash: hash}
 	a := &App{}
-	for _, query := range []string{"callback_nonce=wrong&state=expected&code=code", "callback_nonce=nonce&state=wrong&code=code"} {
+	for _, query := range []string{"callback_nonce=wrong&state=expected&code=code&callback_token=" + token, "callback_nonce=nonce&state=wrong&code=code&callback_token=" + token} {
 		if _, ok := a.completeZernioOAuth(ctx, httptest.NewRequest("GET", "/callback?"+query, nil), row); ok {
 			t.Fatalf("accepted %s", query)
 		}
@@ -158,7 +162,7 @@ func TestZernioOAuthNonceStateAndReplay(t *testing.T) {
 	if len(pf.executeCalls) != 0 {
 		t.Fatal("invalid callback reached provider")
 	}
-	req := httptest.NewRequest("GET", "/callback?callback_nonce=nonce&state=expected&code=code", nil)
+	req := httptest.NewRequest("GET", "/callback?callback_nonce=nonce&state=expected&code=code&callback_token="+token, nil)
 	if _, ok := a.completeZernioOAuth(ctx, req, row); !ok {
 		t.Fatal("valid callback rejected")
 	}
