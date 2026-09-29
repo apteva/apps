@@ -25,6 +25,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "GET", Pattern: "/agents", Handler: a.handleAgents},
 		{Method: "GET", Pattern: "/tool-visuals", Handler: a.handleToolVisuals},
 		{Pattern: "/messages", Handler: a.handleMessages},
+		{Pattern: "/voice", Handler: a.handleVoice},
 		{Pattern: "/attachments", Handler: a.handleAttachments},
 		{Pattern: "/changes", Handler: a.handleChanges},
 		{Method: "GET", Pattern: "/activity", Handler: a.handleToolActivity},
@@ -298,6 +299,10 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "conversation not found", http.StatusNotFound)
 			return
 		}
+		if err := a.stopVoiceForChat(a.appCtx(r).WithProject(requestProject(r)).PlatformAPI(), id); err != nil {
+			http.Error(w, "could not stop active voice session", http.StatusBadGateway)
+			return
+		}
 		if err := a.store.DeleteConversation(id); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -482,6 +487,12 @@ func (a *App) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if body.Archived != nil {
+		if *body.Archived {
+			if err := a.stopVoiceForChat(a.appCtx(r).WithProject(requestProject(r)).PlatformAPI(), id); err != nil {
+				http.Error(w, "could not stop active voice session", http.StatusBadGateway)
+				return
+			}
+		}
 		if conv, err = a.store.SetConversationArchived(id, *body.Archived); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -892,7 +903,7 @@ func isRouteWordByte(b byte) bool {
 }
 
 func (a *App) agentEventPayload(conv *Conversation, msg *Message, agentID int64, targets []int64) any {
-	text := "[chat] " + msg.Content + pageContextText(msg)
+	text := "[chat] " + msg.Content + pageContextText(msg) + a.voiceContextBefore(conv.ID, msg.ID)
 	if messageIntent(msg) == messageIntentSoftBreak {
 		text = "[chat soft break] The user requested a conversational break while work may still be in progress. " +
 			"This is a new advisory event: no model call, tool, or thread was canceled. " +

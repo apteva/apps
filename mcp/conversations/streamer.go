@@ -459,27 +459,52 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	ch, err := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
+	ch, chatErr := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
 		Events:       []string{"llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
 		ThreadPrefix: "chat-",
 	})
-	if err != nil {
+	voice, voiceErr := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
+		Events:       []string{"realtime.user", "realtime.assistant", "tool.call", "tool.result", "thread.done"},
+		ThreadPrefix: "voice-",
+	})
+	if chatErr != nil && voiceErr != nil {
 		cancel()
 		a.telemetryStop = nil
-		ctx.Logger().Info("telemetry bridge unavailable — streaming falls back to phase frames", "err", err)
+		ctx.Logger().Info("telemetry bridge unavailable — streaming falls back to phase frames", "err", chatErr)
 		return false
 	}
-	go func() {
-		for ev := range ch {
-			if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
-				ctx.Logger().Error("tool activity persistence failed", "err", err)
+	if chatErr != nil {
+		ctx.Logger().Info("chat telemetry unavailable — streaming falls back to phase frames", "err", chatErr)
+	}
+	if voiceErr != nil {
+		ctx.Logger().Warn("voice telemetry unavailable; voice transcript is not captured", "err", voiceErr)
+	} else {
+		go func() {
+			for ev := range voice {
+				if err := a.ingestVoiceEvent(ev); err != nil {
+					ctx.Logger().Error("voice transcript persistence failed", "err", err)
+				}
+				if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+					ctx.Logger().Error("voice tool activity persistence failed", "err", err)
+				}
+				a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 			}
-			a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
-		}
-		_ = a.store.interruptToolActivities()
-		ctx.Logger().Info("telemetry feed ended")
-	}()
-	return true
+			ctx.Logger().Warn("voice telemetry ended; future voice transcript may be incomplete")
+		}()
+	}
+	if chatErr == nil {
+		go func() {
+			for ev := range ch {
+				if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+					ctx.Logger().Error("tool activity persistence failed", "err", err)
+				}
+				a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
+			}
+			_ = a.store.interruptToolActivities()
+			ctx.Logger().Info("telemetry feed ended")
+		}()
+	}
+	return chatErr == nil
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────

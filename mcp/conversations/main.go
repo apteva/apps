@@ -62,6 +62,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("conversations requires a db block")
 	}
 	a.store = newStore(ctx.AppDB())
+	if err := a.recoverVoiceSessions(ctx); err != nil {
+		ctx.Logger().Warn("voice session recovery incomplete", "err", err)
+	}
 	if err := a.store.interruptToolActivities(); err != nil {
 		return err
 	}
@@ -73,7 +76,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		var id string
 		err := a.store.db.QueryRow(`SELECT c.id FROM conversations c JOIN conversation_agent_threads t ON t.conversation_id=c.id JOIN participants p ON p.conversation_id=c.id AND p.agent_id=t.agent_id WHERE t.agent_id=? AND t.thread_id=? AND c.archived_at IS NULL`, agentID, threadID).Scan(&id)
 		if err != nil {
-			return ""
+			_ = a.store.db.QueryRow(`SELECT conversation_id FROM conversation_voice_sessions WHERE agent_id=? AND thread_id=? AND status IN ('starting','active')`, agentID, threadID).Scan(&id)
 		}
 		return id
 	}
@@ -99,7 +102,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	if a.store != nil && ctx != nil {
+		if err := a.recoverVoiceSessions(ctx); err != nil {
+			ctx.Logger().Warn("voice shutdown incomplete", "err", err)
+		}
+	}
 	if a.deliveryWorker != nil {
 		close(a.deliveryWorker.stop)
 		a.deliveryWorker.done.Wait()

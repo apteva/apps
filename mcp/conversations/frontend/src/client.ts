@@ -34,6 +34,15 @@ export interface ConversationSubscription {
   onError?: (error: unknown) => void;
   signal?: AbortSignal;
 }
+export interface VoiceSession {
+  id?: string;
+  conversation_id?: string;
+  agent_id?: number;
+  thread_id?: string;
+  status: "starting" | "active" | "closed";
+  mode?: "live" | "dictation";
+  audio_bridge_url?: string;
+}
 const query = (path: string, values: Record<string, string | number | boolean | undefined>) => {
   const params = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -74,6 +83,15 @@ export class ConversationsClient {
     this.app.get<ChangePage>(query("/changes", { chat_id: id, cursor }), init);
   send = (id: string, input: SendMessage, init?: RequestInit) =>
     this.app.post<Message>(query("/messages", { chat_id: id }), input, init);
+  voiceStatus = (id: string) => this.app.get<VoiceSession>(query("/voice", { chat_id: id }));
+  startVoice = (id: string) => this.app.post<VoiceSession>(query("/voice", { chat_id: id }));
+  renewVoice = (id: string) => this.app.patch<VoiceSession>(query("/voice", { chat_id: id }));
+  endVoice = (id: string) => this.app.del<VoiceSession>(query("/voice", { chat_id: id }));
+  voiceWorkletURL = () => {
+    const url = new URL(this.app.mcpURL(), window.location.href);
+    url.pathname = url.pathname.replace(/\/mcp$/, "/ui/realtime-capture-worklet.js");
+    return url.toString();
+  };
   upload = (chat:string,id:string,name:string,content_base64:string) => this.app.post<Attachment>(query("/attachments",{chat_id:chat}),{id,name,content_base64});
   attachment = (chat:string,id:string) => this.app.get<{attachment:Attachment;content_base64:string}>(query("/attachments",{chat_id:chat,id}));
   markSeen = (id: string, lastSeenId: number, init?: RequestInit) =>

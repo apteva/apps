@@ -415,6 +415,16 @@ func (s *store) ConversationForAgentThread(projectID string, agentID int64, thre
 	if err != sql.ErrNoRows {
 		return nil, err
 	}
+	conv, err = scanConversation(s.db.QueryRow(`SELECT `+prefixCols("c.", conversationCols)+`
+		FROM conversation_voice_sessions v JOIN conversations c ON c.id=v.conversation_id
+		WHERE c.project_id=? AND v.agent_id=? AND v.thread_id=? AND v.status IN ('starting','active')
+		LIMIT 1`, projectID, agentID, threadID))
+	if err == nil {
+		return conv, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
 	conv, err = scanConversation(s.db.QueryRow(`
 		SELECT `+conversationCols+`
 		FROM conversations
@@ -611,6 +621,7 @@ func (s *store) DeleteConversation(id string) error {
 		return err
 	}
 	for _, q := range []string{
+		`DELETE FROM conversation_voice_sessions WHERE conversation_id = ?`,
 		`DELETE FROM messages WHERE conversation_id = ?`,
 		`DELETE FROM participants WHERE conversation_id = ?`,
 		`DELETE FROM read_marks WHERE conversation_id = ?`,

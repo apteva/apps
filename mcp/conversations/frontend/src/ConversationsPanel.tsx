@@ -31,6 +31,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
+import { VoiceControls } from "./voiceControls";
 import { useHostPageContext } from "./context";
 import { PageContextChip, useMessagePageContext } from "./pageContext";
 import { isSoftBreakMetadata, softBreakMessageInput } from "./softBreak";
@@ -1072,9 +1073,12 @@ function ContextColumn({
 //   system — centered status line
 function MessageRow(props: {message:Message;agentName?:string;onAction:(id:number,action:string,note:string)=>Promise<void>}) {
  const user=props.message.role==="user";
+ const voice=props.message.metadata?.source==="voice";
+ const { t } = useConversationLocalization();
  const attachments=<AttachmentContent attachments={props.message.attachments} chatID={props.message.conversation_id}/>;
  return <div className={`min-w-0 shrink-0 flex flex-col gap-2 ${user?"chat-message-user":""}`}>
  {props.agentName ? <p className="text-[10px] font-semibold uppercase text-text-muted">{props.agentName}</p> : null}
+ {voice ? <span className={`inline-flex items-center gap-1 text-[10px] text-text-muted ${user?"self-end":"self-start"}`} title={t("voice.transcriptWarning")}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3ZM5 10v2a7 7 0 0 0 14 0v-2M12 19v3"/></svg>{t("voice.turn")}</span> : null}
  {user&&attachments}
  {(props.message.content?.trim() || props.message.component_kind) ? <MessageBody {...props}/> : null}
  {!user&&attachments}<GenericComponents components={props.message.components}/>
@@ -1473,6 +1477,7 @@ export function ConversationChat({
   useEffect(() => { mountedRef.current=true; return () => {mountedRef.current=false;}; }, []);
   useEffect(() => {try {sessionStorage.setItem(storageKey,draft);} catch {}},[storageKey,draft]);
   const [sending, setSending] = useState(false);
+  const [voiceActive, setVoiceActive] = useState(false);
   const [deliveries,setDeliveries]=useState<MessageDelivery[]>([]);
   const refreshDeliveries=useCallback(async()=>{try{setDeliveries(await conversationsClient.deliveries(conversation.id));}catch{}},[conversation.id,conversation.project_id]);
   useEffect(()=>{void refreshDeliveries();const timer=window.setInterval(refreshDeliveries,5000);return ()=>window.clearInterval(timer);},[refreshDeliveries]);
@@ -1550,7 +1555,7 @@ export function ConversationChat({
   },[messages, conversation.id, conversation.project_id, archived]);
 
   const send = async () => {
-    const content=draft.trim(); if ((!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
+    const content=draft.trim(); if (voiceActive || (!content && !attachments.items.length) || sending || attachments.items.some(i=>!i.attachment || i.busy || i.error)) return;
     let request=pendingSendRef.current;
     if (!request) { try { request=JSON.parse(sessionStorage.getItem(storageKey+":pending") ?? "null"); } catch {} }
     if (!request) request={content,client_message_id:newClientMessageId(),page_context:sharedPage.context,...(attachments.items.length?{attachments:attachments.items.map(i=>({id:i.attachment!.id,type:i.attachment!.type}))}:{})};
@@ -1608,6 +1613,8 @@ export function ConversationChat({
 
   return (
     <ConversationChatView
+      voiceControl={!archived && conversation.audience !== "public" && conversation.kind === "direct" ? <VoiceControls client={conversationsClient} chatId={conversation.id} disabled={Boolean(activeResponse) || sending} onActiveChange={setVoiceActive} onTranscript={text => setDraft(current => [current.trimEnd(), text].filter(Boolean).join(" "))}/> : undefined}
+      voiceActive={voiceActive}
       contextChip={showPageContext ? <PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} /> : undefined}
       attachments={attachments}
       title={conversation.title}

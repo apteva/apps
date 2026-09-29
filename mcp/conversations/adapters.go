@@ -8,6 +8,7 @@ package main
 // transport through a platform-managed integration connection.
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -111,6 +112,25 @@ func (d *agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversatio
 			return fmt.Errorf("malformed agent thread target: %w", err)
 		}
 		threadID = string(raw)
+	}
+	if strings.HasPrefix(threadID, "voice-") && d.app != nil && conv != nil {
+		var status string
+		err := d.app.store.db.QueryRow(`SELECT status FROM conversation_voice_sessions WHERE conversation_id=? AND agent_id=? AND thread_id=?`, conv.ID, agentID, threadID).Scan(&status)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == sql.ErrNoRows || status != "active" {
+			chatThread, _, ensureErr := d.app.ensureConversationThreadForAgent(app, conv, agentID, nil)
+			if ensureErr != nil {
+				return ensureErr
+			}
+			if chatThread != "" {
+				threadID = chatThread
+			} else {
+				threadID = "main"
+			}
+			event.Message = fmt.Sprint(event.Message) + "\nThis approval originated during a voice session that has ended. Continue any approved work in this durable conversation; do not resume the ended voice thread."
+		}
 	}
 	if conv != nil && threadID == "main" {
 		event.Message = fmt.Sprint(event.Message) + fmt.Sprintf("\nUse conversations_send with conversation_id=%s, phase=acknowledgement, approval_message_id=%d to acknowledge this decision from main. This exception only permits the receipt; ordinary replies remain in their conversation thread.", conv.ID, msg.ID)

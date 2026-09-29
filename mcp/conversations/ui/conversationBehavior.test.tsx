@@ -53,6 +53,51 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await act(async()=>root.unmount());await win.happyDOM.abort();});
 
+test("voice mic appears only in active direct operator chats",async()=>{
+ await render();
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).not.toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={{...conv("a"),audience:"public"}} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={{...conv("a"),kind:"room"}} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={true} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+});
+
+test("saved spoken turns are marked as voice in the existing transcript",async()=>{
+ const spoken={...message(1,"a","Spoken question"),metadata:{source:"voice"}};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[spoken],cursor:1,before:1,has_more:false});
+ await render();
+ expect(element.textContent).toContain("Spoken question");
+ expect([...element.querySelectorAll("span")].some(span=>span.textContent==="Voice" && span.title.includes("Voice turns"))).toBe(true);
+});
+
+test("dictation updates the existing draft and waits for an explicit send",async()=>{
+ const posted:string[]=[];
+ class Recognition {
+  static current:Recognition;
+  lang="";continuous=false;interimResults=false;
+  onresult:((event:any)=>void)|null=null;onerror:null=null;onend:(()=>void)|null=null;
+  constructor(){Recognition.current=this;}
+  start(){} stop(){this.onend?.();} abort(){this.onend?.();}
+ }
+ Object.assign(win,{SpeechRecognition:Recognition});
+ fetcher=(url,init)=>{
+  if(url.includes("/voice"))return json({status:"closed",mode:"dictation"});
+  if(init?.method==="POST"&&url.includes("/messages")){posted.push(JSON.parse(String(init.body)).content);return json(message(1,"a",posted[0]));}
+  return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ await render();await settle();
+ await act(async()=>element.querySelector('[aria-label="Dictate a message"]')!.dispatchEvent(new win.MouseEvent("click",{bubbles:true}) as unknown as Event));
+ await settle();
+ await act(async()=>Recognition.current.onresult?.({resultIndex:0,results:[{isFinal:true,0:{transcript:"Find the onboarding process"}}]}));
+ expect(element.querySelector("textarea")!.value).toBe("Find the onboarding process");
+ expect(posted).toEqual([]);
+ await act(async()=>[...element.querySelectorAll("button")].find(button=>button.textContent==="Stop dictation")!.click());
+ await send();await settle();
+ expect(posted).toEqual(["Find the onboarding process"]);
+});
+
 test("a live row arriving before snapshot never advances durable replay cursor",async()=>{
  let resolveSnapshot!:(value:Response)=>void;const paths:string[]=[];
  fetcher=(url)=>{paths.push(url);if(url.includes("/deliveries")||url.includes("/activity"))return json([]);if(url.includes("page=1"))return new Promise(resolve=>{resolveSnapshot=resolve});return json({messages:[message(201)],cursor:201,has_more:false});};

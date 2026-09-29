@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.9 — 2026-09-29
+
+- Add live voice to existing direct operator conversations through a temporary realtime thread, while keeping typed chat and exported widgets unchanged. Show speech turns in the same conversation and carry recent voice context into the next typed turn.
+- Make the mic capability-aware: use a configured project realtime provider independently of the agent's text provider, or dictate into a reviewable text draft when realtime is unavailable. Never auto-send browser speech recognition output.
+- Keep voice child lifecycle, authorization, cleanup, and tool activity bounded to its owning conversation. Add Go and browser regressions for lifecycle, capability fallback, transcript handling, and packaging.
+
 ## 0.24.8 — 2026-09-29
 
 - Show a small live activity indicator beside responding conversations in the full panel and agent-conversations widget thread lists, including the single-conversation history list. Keep unread and inbox-attention markers distinct, and respect reduced-motion preferences.

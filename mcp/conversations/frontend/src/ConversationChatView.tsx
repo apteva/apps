@@ -4,6 +4,8 @@ import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } f
 
 export interface ConversationChatViewProps {
   contextChip?: ReactNode;
+  voiceControl?: ReactNode;
+  voiceActive?: boolean;
   attachments:ComposerController;
   title: string;
   subtitle: string;
@@ -198,7 +200,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             onPaste={event=>{if(props.attachments.options.files!==false&&event.clipboardData.files.length){event.preventDefault();void props.attachments.add(Array.from(event.clipboardData.files));}}}
             onSubmit={(event) => {
               event.preventDefault();
-              if (hasDraft && !props.sending) props.onSend();
+              if (hasDraft && !props.sending && !props.voiceActive) props.onSend();
             }}
             className="chat-composer-box"
             data-layout={layout}
@@ -207,21 +209,22 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <textarea
               ref={props.inputRef}
               value={props.draft}
+              disabled={props.voiceActive}
               onChange={(event) => props.onDraftChange(event.target.value, event.target)}
               onKeyDown={props.onComposerKeyDown}
               rows={1}
-              placeholder={props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
+              placeholder={props.voiceActive ? t("voice.endToType") : props.connected ? t("chat.placeholder") : t("chat.reconnectingPlaceholder")}
               className="chat-composer-input"
               autoFocus={
                 typeof window !== "undefined" &&
                 window.matchMedia("(hover: hover) and (pointer: fine)").matches
               }
             />
-            <div className="chat-composer-toolbar"><ComposerMenu controller={props.attachments}/>
+            <div className="chat-composer-toolbar">{!props.voiceActive && <ComposerMenu controller={props.attachments}/>}{props.voiceControl}
             <button
               type={showBreak ? "button" : "submit"}
               onClick={showBreak ? props.onSoftBreak : undefined}
-              disabled={showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error)}
+              disabled={props.voiceActive || (showBreak ? props.breakBusy || props.breakRequested : props.sending || !hasDraft || props.attachments.items.some(i=>!i.attachment || i.busy || i.error))}
               className="chat-composer-send"
               aria-label={showBreak ? breakLabel : t("chat.send")}
               aria-busy={showBreak && props.breakBusy ? true : undefined}

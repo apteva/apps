@@ -15,6 +15,10 @@ import (
 // declared Conversations entry self-contained until the platform exposes a
 // path-scoped asset contract.
 func TestUIModuleEntriesAreSelfContained(t *testing.T) {
+	worklet, err := os.ReadFile(filepath.Join("ui", "realtime-capture-worklet.js"))
+	if err != nil || !strings.Contains(string(worklet), `registerProcessor("conversations-pcm-capture"`) {
+		t.Fatalf("packaged voice capture worklet missing or invalid: %v", err)
+	}
 	relativeImport := regexp.MustCompile(`(?m)\b(?:from|import)\s*["']\./`)
 	for _, name := range []string{
 		"ConversationsPanel.mjs",

@@ -27,6 +27,9 @@ type recordingPlatform struct {
 	trackedEvents          []sdk.AgentEventRequest
 	appCalls               []capturedAppCall
 	spawns                 []sdk.ThreadSpawnRequest
+	realtimeSpawns         []sdk.RealtimeSpawnRequest
+	realtimeRenewals       []sdk.ThreadRef
+	realtimeSpawnHook      func(sdk.RealtimeSpawnRequest)
 	ensures                []sdk.ThreadEnsureRequest
 	identity               *sdk.InstallIdentity
 	connections            map[int64]*sdk.PlatformConnection
@@ -163,6 +166,22 @@ func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.Thre
 func (p *recordingPlatform) KillThread(agentID int64, threadID string) error {
 	p.killed = append(p.killed, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
 	return nil
+}
+
+func (p *recordingPlatform) SpawnRealtimeThread(req sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
+	p.realtimeSpawns = append(p.realtimeSpawns, req)
+	if p.realtimeSpawnHook != nil {
+		p.realtimeSpawnHook(req)
+	}
+	if p.failSpawn {
+		return nil, fmt.Errorf("realtime unavailable")
+	}
+	return &sdk.RealtimeSpawnResult{Status: "created", ThreadID: req.ThreadID, AudioBridgeURL: "wss://example.test/audio?token=secret"}, nil
+}
+
+func (p *recordingPlatform) RenewRealtimeAudioBridge(agentID int64, threadID string) (*sdk.RealtimeSpawnResult, error) {
+	p.realtimeRenewals = append(p.realtimeRenewals, sdk.ThreadRef{AgentID: agentID, ThreadID: threadID})
+	return &sdk.RealtimeSpawnResult{Status: "exists", ThreadID: threadID, AudioBridgeURL: "wss://example.test/audio?token=renewed"}, nil
 }
 
 func (p *recordingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
