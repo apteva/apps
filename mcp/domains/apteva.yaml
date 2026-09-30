@@ -39,7 +39,7 @@ requires:
     - role: dns_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [porkbun, namecheap, ionos, spaceship]
+      compatible_slugs: [porkbun, namecheap, ionos, spaceship, dynadot]
       capabilities:
         - dns.list_records
         - dns.create_record
@@ -51,12 +51,12 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship)"
+      label: "DNS providers (Porkbun, Namecheap, IONOS, Spaceship, Dynadot)"
       hint: "Connect every DNS account used by this project and choose a default. Each domain is pinned to its selected connection."
     - role: registrar_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [porkbun]
+      compatible_slugs: [porkbun, dynadot]
       capabilities:
         - domains.check_availability
         - domains.register
@@ -66,7 +66,7 @@ requires:
         domains.register:            register_domain
         domains.pricing:             get_pricing
       required: false
-      label: "Registrar providers (Porkbun)"
+      label: "Registrar providers (Porkbun, Dynadot)"
       hint: "Connect every Porkbun registrar account used by this project and choose a default. If unset, registrar tools fall back to the default DNS provider when it is Porkbun, or to Spaceship for availability checks only."
 
 provides:

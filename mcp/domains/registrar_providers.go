@@ -45,8 +45,10 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64, projectID string) (reg
 			return &porkbunRegistrar{bound: bound}, bound, nil
 		case "spaceship":
 			return &spaceshipRegistrar{bound: bound}, bound, nil
+		case "dynadot":
+			return &dynadotRegistrar{bound: bound}, bound, nil
 		}
-		return nil, bound, fmt.Errorf("unsupported registrar provider %q on connection %d (compatible: porkbun, spaceship for availability)", conn.AppSlug, connID)
+		return nil, bound, fmt.Errorf("unsupported registrar provider %q on connection %d (compatible: porkbun, spaceship, dynadot)", conn.AppSlug, connID)
 	}
 	id, err := selectedConnectionID(ctx, "registrar_provider", "dns_provider")
 	if err != nil {
