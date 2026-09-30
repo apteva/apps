@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.15 — 2026-09-30
+
+- Show Conversations work-tool activity, including attachment reads, while keeping reply sends represented by the resulting chat message.
+- Replace the generic attachment glyph with recognizable archive, code, document, and file icons; ZIP attachments now use an archive icon.
+- Preserve the read-only attachment flow: binary files remain bounded bytes and are never extracted or executed by Conversations.
+
 ## 0.24.14 — 2026-09-30
 
 - Give the shared chat composer a larger bottom inset across the panel and agent widget, matching the Codex-style floating composer spacing.
