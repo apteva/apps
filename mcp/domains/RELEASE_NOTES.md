@@ -61,3 +61,7 @@ The browser tests use an installed Chrome by default. `CHROME_CHANNEL`, `PLAYWRI
 Deploy the app and corrected Porkbun integration catalog together. Migration 004 marks legacy null pins unmanaged and expires old unvalidated quotes; operators must explicitly select an account for those inventory rows. Back up the app database before a release migration.
 
 Namecheap does not expose conditional whole-zone writes, so another installation or external operator can still change a zone between the final read and write. Spaceship value replacement also remains non-atomic at the provider. These API limits are mitigated by fresh snapshot checks, serialization, durable recovery, verification, and explicit conflict reporting; they cannot be made globally atomic by this sidecar alone.
+# Domains v0.7.0 release notes
+
+- Added provider-neutral marketplace listing tools for Dynadot and Spaceship: publish, remove, and inspect listings.
+- Added provider binding and catalog compatibility for Dynadot DNS and registrar workflows.

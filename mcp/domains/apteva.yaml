@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.6.0
+version: 0.7.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -73,6 +73,9 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship." }
+    - { name: domain_sale_remove, description: "Remove a domain marketplace listing through Dynadot or Spaceship." }
+    - { name: domain_sale_get, description: "Read marketplace listing status through Dynadot or Spaceship." }
     - { name: domain_update, description: "Update metadata or explicitly change/unbind a DNS connection." }
     - { name: domain_sync, description: "Refresh domain registration expiry from Porkbun." }
     - { name: domain_registration_status, description: "Inspect, cancel unsubmitted purchases, and read ownership for recovery." }
