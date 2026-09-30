@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.8.4
+version: 0.9.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -100,6 +100,7 @@ provides:
     - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
@@ -305,6 +306,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent passive listeners, limited to 1–16. Requires explicit listening access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 upgrade_policy: auto-patch
@@ -323,6 +325,7 @@ type App struct {
 	installID        int64
 	sip              sipRuntimeHolder
 	softphones       softphoneRegistry
+	listeners        callListenerRegistry
 	preparations     realtimePreparations
 	eventDispatcher  *routingDispatcher
 }
@@ -474,6 +477,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// and /peer/ is the loopback endpoint the carrier bridge dials.
 		{Pattern: "/softphone/", Handler: a.handleSoftphoneAction},
 		{Pattern: "/softphone/media/", Handler: a.handleSoftphoneMedia, NoAuth: true},
+		{Pattern: "/softphone/listen-media/", Handler: a.handleListenMedia, NoAuth: true},
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 	for i := range routes {
@@ -3725,6 +3729,13 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 
 func (a *App) callsPanelForRequest(r *http.Request, rows []callRow, diagnostics bool) []map[string]any {
 	out := callsPanelPublic(rows, diagnostics)
+	for i := range rows {
+		supported, reason := a.listenerCapability(&rows[i])
+		out[i]["listen_supported"] = supported
+		out[i]["listen_unavailable_reason"] = reason
+		p := phoneUserFrom(r)
+		out[i]["listenable"] = supported && a.phoneCanListen(p, &rows[i]) && (p == nil || p.ListenScope)
+	}
 	if principal := phoneUserFrom(r); principal != nil {
 		for i := range rows {
 			out[i]["answerable"] = a.phoneOfferDestination(principal, &rows[i], "") != ""

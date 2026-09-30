@@ -291,6 +291,8 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	inputResampler := newPCMResampler(8000, 24000)
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := newTwilioPlaybackTracker()
+	tap := a.listeners.openBridge(callID)
+	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(8000)
 	inputSequences := &audioSequenceTracker{}
 	var humanHub *softphoneHub
@@ -378,6 +380,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if len(pcm24) == 0 {
 					continue
 				}
+				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, "", "")
 					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
@@ -434,9 +437,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		pacerMode = "live_human"
 	}
 	droppedStaleMS := 0
+	observeSent := tap.jsonOutputObserver(carrierCodecPCMU8)
 	pacer := newTwilioAudioPacerWithPolicy(ctx, streamSID, playback, pacerPolicy, func(payload []byte) error {
 		started := time.Now()
 		err := twWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
+		if err == nil {
+			observeSent(payload)
+		}
 		if humanHub != nil {
 			stage := "carrier_send"
 			if err != nil {

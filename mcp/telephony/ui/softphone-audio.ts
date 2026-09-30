@@ -40,7 +40,7 @@ function pcm16ToFloat(buffer: ArrayBuffer): Float32Array {
 
 // The local microphone preview uses the same streaming anti-alias filter as
 // the worker fallback, with independent history for each recording session.
-class PreviewResampler {
+export class PreviewResampler {
   private history = new Float32Array(64);
   private phase = 0;
   process(frame:Float32Array,from:number,to:number):Float32Array {

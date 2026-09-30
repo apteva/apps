@@ -14,6 +14,8 @@ import {
 import { usePanelSoftphone } from "./use-panel-softphone";
 import { callTerminationLabel, isIncomingBrowserCall, type Call as TelephonyCall } from "../frontend/src/client";
 
+import type { HeadlessCallListener, ListenerSnapshot } from "../frontend/src/listener";
+
 const API = "/api/apps/telephony";
 
 interface NativePanelProps {
@@ -24,6 +26,8 @@ interface NativePanelProps {
 }
 
 interface RawCall {
+  listenable?: boolean;
+  listen_supported?: boolean;
   ID?: string;
   id?: string;
   ThreadID?: string;
@@ -141,6 +145,7 @@ interface CarrierAudioDiagnostics {
 interface RingOffer {id:string;destination_id:string;name:string;kind:string;agent_id?:number;expires_at:string}
 
 interface Call {
+  listenable: boolean;
   ringOffers: RingOffer[];
   id: string;
   threadId: string;
@@ -246,6 +251,7 @@ function usePanelWidth() {
 
 function normalizeCall(row: RawCall): Call {
   return {
+    listenable: row.listenable === true,
     id: row.id ?? row.ID ?? "",
     threadId: row.thread_id ?? row.ThreadID ?? "",
     carrierSid: row.carrier_sid ?? row.CarrierSID ?? "",
@@ -998,6 +1004,14 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
     onDiagnostics: setDiagnostics,
     onNotice: setStatus,
   });
+  const [callListener, setCallListener] = useState<HeadlessCallListener>();
+  const [listenerState, setListenerState] = useState<ListenerSnapshot>({ state: "idle" });
+  useEffect(() => {
+    const listener = telephony.createCallListener();
+    setCallListener(listener);
+    const unsubscribe = listener.subscribe(setListenerState);
+    return () => { unsubscribe(); void listener.dispose(); };
+  }, [telephony]);
   const softphoneCallId = phoneState.callId ?? "";
   const softphoneState = phoneState.audioState;
   const softphoneDetail = phoneState.detail ?? "";
@@ -1515,6 +1529,12 @@ function CallsView({ projectId, installId, visible = true, showCalls }: NativePa
                   <div className="mt-1 text-lg font-semibold truncate">{(selected.direction === "inbound" ? selected.fromNumber : selected.toNumber) || selected.id}</div>
                   <div className="mt-1 text-xs text-text-muted truncate">{selected.threadId}</div>
                 </div>
+                {selected.listenable && listenerState.callId !== selected.id ? (
+                  <button type="button" disabled={!callListener || Boolean(softphoneCallId)} onClick={() => void callListener?.listen(selected.id).catch(error => setStatus(String(error)))} className="h-8 px-3 rounded border border-border text-xs">Listen</button>
+                ) : null}
+                {listenerState.callId ? (
+                  <div className="text-xs"><span>{listenerState.state.replaceAll("_", " ")}</span><button type="button" onClick={() => void callListener?.stop()} className="ml-2 h-8 px-3 rounded border border-border">Stop listening</button><label className="ml-2">Volume <input aria-label="Listener volume" type="range" min="0" max="1" step="0.05" defaultValue="1" onChange={e => callListener?.setOutputVolume(Number(e.target.value))} /></label></div>
+                ) : null}
                 {selected.peerKind === "human"
                   && !selected.routingWaiting
                   && ((selected.direction === "inbound" && selected.status === "pending") || LIVE_STATUSES.has(selected.status))

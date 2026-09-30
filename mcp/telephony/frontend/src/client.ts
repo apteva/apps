@@ -1,5 +1,6 @@
 import { defineAppExtension, type AppHandle } from "@apteva/web-sdk";
 import { createMicrophonePreview, listMicrophones } from "./audio";
+import { HeadlessCallListener, type CallListenerOptions } from "./listener";
 import { HeadlessSoftphone, type SoftphoneOptions } from "./softphone";
 
 /** Translate stable termination reasons without presenting duration expiry as a fault. */
@@ -24,6 +25,9 @@ export interface Call {
   peer_kind: string;
   /** Advisory at list time; Answer checks the current offer again. */
   answerable?: boolean;
+  listen_supported?: boolean;
+  listenable?: boolean;
+  listen_unavailable_reason?: string;
   from_number: string;
   to_number: string;
   routing_waiting?: boolean;
@@ -239,6 +243,13 @@ export class TelephonyClient {
     return this.session(await this.app.post(this.path(`/softphone/takeover/${callID(id)}`), {}), id);
   }
 
+  createCallListener(options: CallListenerOptions = {}): HeadlessCallListener { return new HeadlessCallListener(this, options); }
+
+  async listenSession(id: string): Promise<CallSession> { return this.session(await this.app.post(this.path(`/softphone/listen/${callID(id)}`), {}), id, "listen-media"); }
+  async renewListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/listen-renew/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async stopListening(session: CallSession): Promise<void> { await this.app.post(this.path(`/softphone/listen-stop/${callID(session.call_id)}`), { session_token: session.session_token }); }
+  async listenerAudit(id: string): Promise<{ listeners: Array<{ id: string; principal: unknown; joined_at: string; left_at: string; reason: string; diagnostics: unknown }> }> { return this.app.get(this.path(`/softphone/listen-audit/${callID(id)}`)); }
+
   async renew(session: CallSession): Promise<void> {
     await this.app.post(this.path(`/softphone/renew/${callID(session.call_id)}`), { session_token: session.session_token });
   }
@@ -275,20 +286,23 @@ export class TelephonyClient {
   }
 
   /** Resolve only the selected installation's media path on the SDK gateway. */
-  mediaURL(session: CallSession): string {
+  mediaURL(session: CallSession): string { return this.resolveMediaURL(session, "media"); }
+  listenerMediaURL(session: CallSession): string { return this.resolveMediaURL(session, "listen-media"); }
+  private resolveMediaURL(session: CallSession, kind: "media" | "listen-media"): string {
     const gateway = new URL(this.app.mcpURL(), typeof location === "undefined" ? undefined : location.href);
     const url = new URL(session.media_url, gateway);
-    const prefix = `/api/apps/telephony/_install/${this.app.installId}/softphone/media/${callID(session.call_id)}/`;
+    const prefix = `/api/apps/telephony/_install/${this.app.installId}/softphone/${kind}/${callID(session.call_id)}/`;
     if (url.origin !== gateway.origin || !["http:", "https:"].includes(url.protocol) ||
         url.username || url.password || url.search || url.hash || !url.pathname.startsWith(prefix) ||
         !/^[A-Za-z0-9_-]+$/.test(url.pathname.slice(prefix.length))) {
       throw new Error("Invalid Telephony media endpoint");
     }
+    if (kind === "listen-media" && url.pathname.slice(prefix.length) !== session.session_token) throw new Error("Listener credential mismatch");
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     return url.href;
   }
 
-  private session(value: unknown, expectedID?: string): CallSession {
+  private session(value: unknown, expectedID?: string, kind: "media" | "listen-media" = "media"): CallSession {
     const session = value as CallSession;
     if (!session || typeof session.call_id !== "string" || typeof session.media_url !== "string" ||
         (expectedID && session.call_id !== expectedID) ||
@@ -296,8 +310,9 @@ export class TelephonyClient {
       throw new Error("Invalid Telephony session response");
     }
     if (session.lease_seconds !== undefined && (!Number.isFinite(session.lease_seconds) || session.lease_seconds < 10 || session.lease_seconds > 3600 || !session.session_token)) throw new Error("Invalid media lease");
+    if (kind === "listen-media" && (!session.session_token || session.lease_seconds === undefined)) throw new Error("Invalid listener lease");
     callID(session.call_id);
-    this.mediaURL(session);
+    this.resolveMediaURL(session, kind);
     return session;
   }
 }

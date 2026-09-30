@@ -169,7 +169,11 @@ func (a *App) authenticateApplicationSession(r *http.Request) (*http.Request, in
 	if e != nil {
 		return nil, 403, errors.New("Telephony access denied")
 	}
-	if action == "call.takeover" && !p.Supervisor {
+	p.AuthProvider = provider
+	for _, v := range provider.Actions {
+		p.ListenScope = p.ListenScope || v == "call.listen"
+	}
+	if (action == "call.takeover" || action == "call.listen") && !p.Supervisor {
 		return nil, 403, errors.New("supervisor permission required")
 	}
 	clone = clone.WithContext(context.WithValue(clone.Context(), phonePrincipalKey{}, p))
