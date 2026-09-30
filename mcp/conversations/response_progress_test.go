@@ -144,6 +144,9 @@ func TestResponseProgressLifecycle(t *testing.T) {
 	}
 	ingest("tool.call", `{"name":"code_repos_list","id":"c1"}`)
 	phase("running")
+	if got := frames[len(frames)-1].Progress; got == nil || got.ToolName != "code_repos_list" || got.CallID != "c1" {
+		t.Fatalf("running progress lost tool identity: %+v", got)
+	}
 	ingest("tool.result", `{"name":"code_repos_list","id":"c1"}`)
 	phase("continuing")
 	ingest("llm.start", `{}`)

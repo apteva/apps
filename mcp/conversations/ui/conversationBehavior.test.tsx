@@ -427,6 +427,23 @@ test("completed tool hands progress back to thinking without continuing to glow"
  expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
 });
 
+test("tool preparation stays visible while the running frame waits for activity", async () => {
+ const user={...message(827,"a","Create the seed lists"),created_at:"2026-09-23T12:12:34.761Z"};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:url.includes("/messages")?[user]:[],cursor:827,before:827,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const progress=(phase:string,revision:number,call_id="",tool_name="")=>({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,response_progress:{phase,run_id:"run-seed",revision,after_message_id:827,started_at:"2026-09-23T12:12:34.761Z",tool_started_at:"2026-09-23T12:12:35.000Z",call_id,tool_name}});
+ await act(async()=>stream({data:JSON.stringify(progress("preparing_tool",1,"call-seed","todo_lists_create"))}));
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ // The server's running progress can cross the stream before the durable
+ // tool_activity frame. The tool identity must survive that handoff.
+ await act(async()=>stream({data:JSON.stringify(progress("running",2))}));
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});
+
 test("Processes trace: acknowledgement precedes grouped tools, every model gap thinks, final text survives done-before-message", async () => {
  await render();
  const events=FakeEvents.instances[0];

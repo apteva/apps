@@ -1286,7 +1286,20 @@ function useConversationTransport(conversationID: string, projectId: string) {
         setProgresses(current => {
           const existing = current.find(p=>p.agent_id===progress.agent_id && p.thread_id===progress.thread_id);
           if (existing && existing.revision >= progress.revision) return current;
-          return [...current.filter(p=>p!==existing),progress];
+          // The server clears tool_name/call_id when a prepared call enters
+          // execution. Keep the preparation identity through that tiny
+          // handoff so the UI can keep rendering the pulsing tool row until
+          // the durable tool_activity frame arrives. Without this, the
+          // transient `running` progress frame falls through to generic
+          // Thinking and fast calls can appear to skip their tool entirely.
+          const carriedTool = progress.phase === "running" && existing?.phase === "preparing_tool"
+            ? {
+                tool_name: progress.tool_name || existing.tool_name,
+                call_id: progress.call_id || existing.call_id,
+                tool_started_at: progress.tool_started_at || existing.tool_started_at,
+              }
+            : {};
+          return [...current.filter(p=>p!==existing), {...progress, ...carriedTool}];
         });
         if (progress.phase === "idle") {
           for (const [key,value] of streamRef.current) if (value.agentId===frame.agent_id && !value.text) {
@@ -1463,7 +1476,7 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
   const runningActivity = activities.find(item => item.status === "running");
   const responseProgress = progresses.find(p=>p.phase!=="idle");
   const activeResponse = bubble ?? (runningActivity ? {callId:runningActivity.call_id,agentId:runningActivity.agent_id} : responseProgress ? {callId:responseProgress.call_id || responseProgress.run_id,agentId:responseProgress.agent_id} : null);
-  const preparingTools: TimelineTool[] = progresses.flatMap(p => p.phase === "preparing_tool" && p.tool_name && isVisibleChatTool(p.tool_name)
+  const preparingTools: TimelineTool[] = progresses.flatMap(p => (p.phase === "preparing_tool" || p.phase === "running") && p.tool_name && isVisibleChatTool(p.tool_name)
     && !activities.some(tool=>tool.agent_id===p.agent_id && tool.thread_id===p.thread_id && tool.call_id===p.call_id)
     ? [{id:`preparing-${p.run_id}-${p.call_id}`,callId:p.call_id,agentId:p.agent_id ?? 0,threadId:p.thread_id ?? "",name:p.tool_name,reason:"",state:"preparing" as const,startedAt:Date.parse(p.tool_started_at ?? "") || p.sourceAt}]
     : []);

@@ -161,8 +161,16 @@ func (s *streamer) ingestProgress(event string, agent int64, thread, chat, raw s
 		}
 		phase = "running"
 		p.hadTools = true
-		p.ToolName = ""
-		p.CallID = ""
+		// Keep the identity announced by llm.tool_chunk on the running
+		// frame.  The durable tool_activity frame normally follows almost
+		// immediately, but it can arrive on a separate queue (or after a
+		// reconnect).  Without the identity, clients briefly fall back to a
+		// generic Thinking row and can miss the pulsing tool row entirely.
+		p.ToolName = name
+		p.CallID = firstNonEmptyString(d.ID, d.CallID, d.ToolCallID, p.CallID)
+		if p.ToolStartedAt.IsZero() {
+			p.ToolStartedAt = ts
+		}
 	default:
 		s.mu.Unlock()
 		return

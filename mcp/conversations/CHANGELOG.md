@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.20 — 2026-09-30
+
+- Keep the named work-tool row pulsing across the preparation-to-execution handoff, including fast calls and reconnects where the durable activity frame arrives separately.
+- Preserve tool identity on running progress frames and add regression coverage for the shared panel and widget rendering.
+
 ## 0.24.19 — 2026-09-30
 
 - Add one shared embedded-chat contract for host-provided welcome text, draft suggestions, scoped context labels, and idempotent composer insertion without automatic sending.
