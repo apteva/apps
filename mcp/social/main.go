@@ -53,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.4
+version: 0.16.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -138,6 +138,45 @@ provides:
       icon: megaphone
       entry: /ui/SocialPanel.mjs
   ui_components:
+    - name: publishing-calendar
+      label: Social · Publishing calendar
+      description: Upcoming scheduled posts, a week calendar, and items needing attention.
+      entry: /ui/SocialPublishingCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          view: { type: string, title: View, enum: [auto, upcoming, calendar], default: auto }
+          horizon_days: { type: integer, title: Upcoming days, minimum: 1, maximum: 42, default: 7 }
+          max_posts: { type: integer, title: Upcoming post limit, minimum: 1, maximum: 20, default: 5 }
+          show_attention: { type: boolean, title: Show items needing attention, default: true }
+      preview_props: { preview: true }
+    - name: performance
+      label: Social · Performance
+      description: Cached audience totals, daily performance trends, and account coverage.
+      entry: /ui/SocialPerformanceWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          days: { type: integer, title: Complete days, enum: [7, 28, 90], default: 28 }
+          visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
+          show_trends: { type: boolean, title: Show trends, default: true }
+      preview_props: { preview: true }
     - name: calendar-card
       entry: /ui/SocialCalendarCard.mjs
       slots: [chat.message_attachment]
@@ -735,6 +774,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Post management
 		{Pattern: "/posts", Handler: a.handlePostsAPI},
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
+		// Read-only summaries for project Home widgets.
+		{Pattern: "/widgets/publishing-calendar", Handler: a.handlePublishingWidget},
+		{Pattern: "/widgets/performance", Handler: a.handlePerformanceWidget},
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
 		// Profiles (brand/client/site containers — see profiles.go)
