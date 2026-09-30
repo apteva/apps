@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 type WorkletCtor = new (options?: { processorOptions?: Record<string, unknown> }) => {
   port: MockPort;
@@ -20,7 +22,11 @@ beforeAll(async () => {
   globals.currentTime = 0;
   globals.AudioWorkletProcessor = class { port = new MockPort(); };
   globals.registerProcessor = (name: string, ctor: WorkletCtor) => processors.set(name, ctor);
-  await import("./softphone-worklet.js");
+  // Execute the worklet as a browser AudioWorklet script. Importing the
+  // .js file as an ES module here collides with the frontend tests' text
+  // asset import in Bun's module cache when the whole suite runs together.
+  // Reading the source also matches how the browser loads the worklet URL.
+  vm.runInThisContext(readFileSync(new URL("./softphone-worklet.js", import.meta.url), "utf8"));
 });
 
 describe("softphone realtime worklet", () => {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -12,51 +13,79 @@ import (
 // The listener consults this on each handshake. Certificate bytes are immutable
 // once published; a partial/invalid renewal never replaces a valid certificate.
 type sipTLSCertificate struct {
-	mu                sync.Mutex
-	cfg               sipGatewayConfig
-	current           *tls.Certificate
-	certInfo, keyInfo os.FileInfo
-	lastError         string
+	mu  sync.Mutex
+	cfg sipGatewayConfig
+
+	current        *tls.Certificate
+	certHash       [sha256.Size]byte
+	keyHash        [sha256.Size]byte
+	hasFingerprint bool
+	lastError      string
 }
 
+// Renewal writers do not all use atomic renames. Some replace the contents of
+// the existing files quickly enough that inode, size, and filesystem mtime can
+// all remain unchanged. Keep content fingerprints so those renewals are still
+// observed. The certificate and key are small, and handshakes are infrequent
+// compared with media packets, so reading them on a handshake is deliberate.
 func (s *sipTLSCertificate) getCertificate(_ *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	certInfo, certErr := os.Stat(s.cfg.TLSCertFile)
-	keyInfo, keyErr := os.Stat(s.cfg.TLSKeyFile)
-	changed := s.current == nil || certErr != nil || keyErr != nil || !sameSIPCertificateFile(s.certInfo, certInfo) || !sameSIPCertificateFile(s.keyInfo, keyInfo)
-	if changed {
-		cert, err := tls.LoadX509KeyPair(s.cfg.TLSCertFile, s.cfg.TLSKeyFile)
-		if err == nil {
-			cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
-			if err == nil {
-				if e := cert.Leaf.VerifyHostname(s.cfg.PublicHost); e != nil {
-					err = fmt.Errorf("SIP certificate does not cover %s: %w", s.cfg.PublicHost, e)
-				}
-			}
-			if err == nil && (time.Now().Before(cert.Leaf.NotBefore) || !time.Now().Before(cert.Leaf.NotAfter)) {
-				err = fmt.Errorf("certificate is outside its validity period")
-			}
-		}
-		if err == nil {
-			s.current = &cert
-			s.certInfo = certInfo
-			s.keyInfo = keyInfo
-			s.lastError = ""
-		} else {
-			s.lastError = fmt.Sprintf("load renewed SIP certificate: %v", err)
+
+	certPEM, err := os.ReadFile(s.cfg.TLSCertFile)
+	if err != nil {
+		return s.keepCurrentOrError(fmt.Errorf("read SIP certificate: %w", err))
+	}
+	keyPEM, err := os.ReadFile(s.cfg.TLSKeyFile)
+	if err != nil {
+		return s.keepCurrentOrError(fmt.Errorf("read SIP private key: %w", err))
+	}
+	certHash := sha256.Sum256(certPEM)
+	keyHash := sha256.Sum256(keyPEM)
+	if s.current != nil && s.hasFingerprint && s.certHash == certHash && s.keyHash == keyHash {
+		return s.checkedCurrent()
+	}
+
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err == nil {
+		cert.Leaf, err = x509.ParseCertificate(cert.Certificate[0])
+	}
+	if err == nil {
+		if hostnameErr := cert.Leaf.VerifyHostname(s.cfg.PublicHost); hostnameErr != nil {
+			err = fmt.Errorf("SIP certificate does not cover %s: %w", s.cfg.PublicHost, hostnameErr)
 		}
 	}
+	if err == nil && (time.Now().Before(cert.Leaf.NotBefore) || !time.Now().Before(cert.Leaf.NotAfter)) {
+		err = fmt.Errorf("certificate is outside its validity period")
+	}
+	if err != nil {
+		return s.keepCurrentOrError(fmt.Errorf("load renewed SIP certificate: %w", err))
+	}
+
+	s.current = &cert
+	s.certHash = certHash
+	s.keyHash = keyHash
+	s.hasFingerprint = true
+	s.lastError = ""
+	return s.checkedCurrent()
+}
+
+func (s *sipTLSCertificate) keepCurrentOrError(err error) (*tls.Certificate, error) {
+	s.lastError = err.Error()
 	if s.current == nil {
-		return nil, fmt.Errorf("%s", s.lastError)
+		return nil, err
+	}
+	return s.checkedCurrent()
+}
+
+func (s *sipTLSCertificate) checkedCurrent() (*tls.Certificate, error) {
+	if s.current == nil {
+		return nil, fmt.Errorf("SIP certificate is not loaded")
 	}
 	if !time.Now().Before(s.current.Leaf.NotAfter) {
 		return nil, fmt.Errorf("SIP certificate for %s has expired", s.cfg.PublicHost)
 	}
 	return s.current, nil
-}
-func sameSIPCertificateFile(a, b os.FileInfo) bool {
-	return a != nil && b != nil && os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
 }
 func (s *sipTLSCertificate) status() map[string]any {
 	_, err := s.getCertificate(nil)

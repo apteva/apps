@@ -47,7 +47,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.7.5
+version: 0.9.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads in core; carrier audio is bridged through this sidecar.
@@ -74,6 +74,7 @@ requires:
   integrations:
     - role: carrier
       kind: integration
+      mode: multiple
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
       required: true
@@ -99,6 +100,7 @@ provides:
     - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
@@ -147,6 +149,9 @@ provides:
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit confirmation, with address and bundle when required." }
     - { name: telephony_addresses_list, description: "List provider addresses." }
     - { name: telephony_address_create, description: "Create and validate a provider address." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity." }
+    - { name: telephony_identity_get, description: "Get a provider regulatory identity." }
     - { name: telephony_regulatory_requirements, description: "Discover current provider regulatory requirements." }
     - { name: telephony_regulatory_bundles_list, description: "List provider regulatory bundles." }
     - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle." }
@@ -301,6 +306,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent passive listeners, limited to 1–16. Requires explicit listening access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 upgrade_policy: auto-patch
@@ -319,6 +325,7 @@ type App struct {
 	installID        int64
 	sip              sipRuntimeHolder
 	softphones       softphoneRegistry
+	listeners        callListenerRegistry
 	preparations     realtimePreparations
 	eventDispatcher  *routingDispatcher
 }
@@ -470,6 +477,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// and /peer/ is the loopback endpoint the carrier bridge dials.
 		{Pattern: "/softphone/", Handler: a.handleSoftphoneAction},
 		{Pattern: "/softphone/media/", Handler: a.handleSoftphoneMedia, NoAuth: true},
+		{Pattern: "/softphone/listen-media/", Handler: a.handleListenMedia, NoAuth: true},
 		{Pattern: "/peer/", Handler: a.handlePeerSocket, NoAuth: true},
 	}
 	for i := range routes {
@@ -777,6 +785,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "List addresses in the bound carrier account. Args: country?, customer_name?, limit?. Address data comes directly from the provider and is not stored by Telephony.",
 			InputSchema: schemaObject(map[string]any{
 				"country":       map[string]any{"type": "string", "description": "Optional ISO alpha-2 address country."},
+				"identity_id":   map[string]any{"type": "string", "description": "Optional DIDWW identity filter."},
 				"customer_name": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
 			}, nil),
@@ -797,10 +806,39 @@ func (a *App) MCPTools() []sdk.Tool {
 				"region":           map[string]any{"type": "string"},
 				"postal_code":      map[string]any{"type": "string"},
 				"country":          map[string]any{"type": "string", "description": "ISO alpha-2 address country."},
+				"identity_id":      map[string]any{"type": "string", "description": "DIDWW identity ID for a regulatory address."},
 				"friendly_name":    map[string]any{"type": "string"},
 				"auto_correct":     map[string]any{"type": "boolean", "default": true},
 			}, []string{"street", "city", "country"}),
 			HandlerCtx: a.toolAddressCreate,
+		},
+		{
+			Name:        "telephony_identities_list",
+			Description: "List provider regulatory identities. This is currently implemented for DIDWW and returns identity IDs used when creating address verification.",
+			InputSchema: schemaObject(map[string]any{
+				"identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}},
+				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": 1000, "default": 50},
+			}, nil),
+			HandlerCtx: a.toolIdentitiesList,
+		},
+		{
+			Name:        "telephony_identity_create",
+			Description: "Create a DIDWW personal or business regulatory identity. This sends identity data to the bound carrier and does not purchase a number.",
+			InputSchema: schemaObject(map[string]any{
+				"identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}},
+				"country":       map[string]any{"type": "string", "description": "ISO alpha-2 country code."}, "country_id": map[string]any{"type": "string"},
+				"first_name": map[string]any{"type": "string"}, "last_name": map[string]any{"type": "string"}, "phone_number": map[string]any{"type": "string"},
+				"id_number": map[string]any{"type": "string"}, "birth_date": map[string]any{"type": "string"}, "company_name": map[string]any{"type": "string"},
+				"company_reg_number": map[string]any{"type": "string"}, "vat_id": map[string]any{"type": "string"}, "personal_tax_id": map[string]any{"type": "string"},
+				"contact_email": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}, "external_reference_id": map[string]any{"type": "string"},
+			}, []string{"identity_type"}),
+			HandlerCtx: a.toolIdentityCreate,
+		},
+		{
+			Name:        "telephony_identity_get",
+			Description: "Get one DIDWW regulatory identity by identity_id.",
+			InputSchema: schemaObject(map[string]any{"identity_id": map[string]any{"type": "string"}}, []string{"identity_id"}),
+			HandlerCtx:  a.toolIdentityGet,
 		},
 		{
 			Name:        "telephony_regulatory_requirements",
@@ -849,16 +887,24 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "telephony_regulatory_bundle_item_create",
 			Description: "Legacy alias for setting a compliance requirement. Twilio accepts end-user/document objects; Telnyx accepts requirement_id plus field_value or file.",
 			InputSchema: schemaObject(map[string]any{
-				"bundle_sid":     map[string]any{"type": "string"},
-				"compliance_id":  map[string]any{"type": "string"},
-				"requirement_id": map[string]any{"type": "string"},
-				"field_value":    map[string]any{"type": "string"},
-				"kind":           map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
-				"friendly_name":  map[string]any{"type": "string"},
-				"type":           map[string]any{"type": "string"},
-				"attributes":     map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
-				"file":           map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
-				"file_name":      map[string]any{"type": "string"},
+				"bundle_sid":          map[string]any{"type": "string"},
+				"compliance_id":       map[string]any{"type": "string"},
+				"requirement_id":      map[string]any{"type": "string"},
+				"address_id":          map[string]any{"type": "string", "description": "DIDWW regulatory address ID."},
+				"did_id":              map[string]any{"type": "string", "description": "Allocated DIDWW DID ID."},
+				"did_ids":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Allocated DIDWW DID IDs."},
+				"identity_id":         map[string]any{"type": "string"},
+				"proof_type_id":       map[string]any{"type": "string"},
+				"file_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"onetime_file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"service_description": map[string]any{"type": "string"},
+				"field_value":         map[string]any{"type": "string"},
+				"kind":                map[string]any{"type": "string", "enum": []string{"end_user", "document"}},
+				"friendly_name":       map[string]any{"type": "string"},
+				"type":                map[string]any{"type": "string"},
+				"attributes":          map[string]any{"type": "object", "description": "Dynamic fields from the selected Twilio Regulation."},
+				"file":                map[string]any{"type": "string", "description": "Optional JPEG, PNG, or PDF as base64, data URL, blob reference, or binary envelope."},
+				"file_name":           map[string]any{"type": "string"},
 			}, nil),
 			HandlerCtx: a.toolRegulatoryBundleItemCreate,
 		},
@@ -880,23 +926,36 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "telephony_compliance_profile_create", Description: "Create a provider compliance profile after discovering current requirements.",
-			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "end_user_type": map[string]any{"type": "string"}, "email": map[string]any{"type": "string"}, "regulation_sid": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolRegulatoryBundleCreate,
+			InputSchema: schemaObject(map[string]any{"country": map[string]any{"type": "string"}, "country_id": map[string]any{"type": "string"}, "number_type": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "end_user_type": map[string]any{"type": "string"}, "identity_type": map[string]any{"type": "string", "enum": []string{"personal", "business"}}, "company_name": map[string]any{"type": "string"}, "email": map[string]any{"type": "string"}, "contact_email": map[string]any{"type": "string"}, "regulation_sid": map[string]any{"type": "string"}}, nil), HandlerCtx: a.toolRegulatoryBundleCreate,
 		},
 		{
 			Name: "telephony_compliance_profile_get", Description: "Get a provider compliance profile and its current requirements.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleGet,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleGet,
 		},
 		{
 			Name: "telephony_compliance_requirement_set", Description: "Set one compliance requirement value or upload and assign its document.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "requirement_id": map[string]any{"type": "string"}, "field_value": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"}, "type": map[string]any{"type": "string"}, "attributes": map[string]any{"type": "object"}, "file": map[string]any{"type": "string"}, "file_name": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleItemCreate,
+			InputSchema: schemaObject(map[string]any{
+				"compliance_id": map[string]any{"type": "string"}, "requirement_id": map[string]any{"type": "string"},
+				"address_id":          map[string]any{"type": "string", "description": "DIDWW regulatory address ID."},
+				"did_id":              map[string]any{"type": "string", "description": "Allocated DIDWW DID ID."},
+				"did_ids":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Allocated DIDWW DID IDs."},
+				"identity_id":         map[string]any{"type": "string"},
+				"proof_type_id":       map[string]any{"type": "string"},
+				"file_ids":            map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"onetime_file_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"service_description": map[string]any{"type": "string"}, "field_value": map[string]any{"type": "string"},
+				"kind": map[string]any{"type": "string"}, "friendly_name": map[string]any{"type": "string"},
+				"type": map[string]any{"type": "string"}, "attributes": map[string]any{"type": "object"},
+				"file": map[string]any{"type": "string"}, "file_name": map[string]any{"type": "string"},
+			}, nil), HandlerCtx: a.toolRegulatoryBundleItemCreate,
 		},
 		{
 			Name: "telephony_compliance_profile_evaluate", Description: "Evaluate whether a provider compliance profile is complete and usable for ordering.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleEvaluate,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleEvaluate,
 		},
 		{
 			Name: "telephony_compliance_profile_submit", Description: "Submit a complete provider compliance profile for optional provider review or pre-approval.",
-			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
+			InputSchema: schemaObject(map[string]any{"compliance_id": map[string]any{"type": "string"}, "resource_kind": map[string]any{"type": "string", "enum": []string{"identity", "verification"}}}, []string{"compliance_id"}), HandlerCtx: a.toolRegulatoryBundleSubmit,
 		},
 	}
 	for i := range tools {
@@ -1179,19 +1238,13 @@ func (a *App) placeOutboundLeg(ctx *sdk.AppCtx, carrier carrierAdapter, row *cal
 	return nil
 }
 
-// resolveCarrierBinding returns the bound carrier integration, its credentials,
-// and the validated From= number. Extracted from toolPlaceCall so the softphone
-// path resolves its carrier identically.
+// resolveCarrierBinding returns the carrier integration selected by the caller
+// ID, its credentials, and the validated From= number. When no caller ID is
+// supplied, the default carrier keeps the legacy selection behavior. Explicit
+// caller IDs are searched across every authorized carrier binding so inbound
+// routes and outbound numbers can coexist across providers.
 func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom string) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
-	bound := ctx.IntegrationFor("carrier")
-	if bound == nil {
-		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
-	}
-	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
-	if err != nil {
-		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
-	}
-	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, requestedFrom)
+	bound, creds, from, err := a.selectCarrierBinding(ctx, projectID, requestedFrom)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -1200,6 +1253,99 @@ func (a *App) resolveCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom st
 		return nil, nil, "", err
 	}
 	return bound, creds, from, nil
+}
+
+// selectCarrierBinding performs selection and caller-ID validation without
+// provider readiness checks. Configuration tools use this lower-level helper
+// so they can repair an unready carrier profile before placing calls.
+func (a *App) selectCarrierBinding(ctx *sdk.AppCtx, projectID, requestedFrom string) (*sdk.BoundIntegration, *sdk.ConnectionCredentials, string, error) {
+	requestedFrom = strings.TrimSpace(requestedFrom)
+	bindings := ctx.IntegrationsFor("carrier")
+	if len(bindings) == 0 {
+		return nil, nil, "", errors.New("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings")
+	}
+
+	// An explicit From= is an identity selector, not merely a validation
+	// hint. Search all bindings and stop at the first authorized connection
+	// that owns a voice-capable copy of it.
+	if requestedFrom != "" {
+		if !validE164(requestedFrom) {
+			return nil, nil, "", errors.New("from must be a valid E.164 number (+ followed by 8-15 digits)")
+		}
+		for _, candidate := range bindings {
+			if candidate == nil {
+				continue
+			}
+			creds, err := ctx.PlatformAPI().GetConnectionCredentials(candidate.ConnectionID)
+			if err != nil {
+				continue // An inaccessible binding cannot authorize this caller ID.
+			}
+			if !a.outboundNumberBelongsToBinding(ctx, projectID, candidate, creds, requestedFrom) {
+				continue
+			}
+			from, err := a.resolveOutboundFrom(ctx, projectID, candidate, creds, requestedFrom)
+			if err != nil {
+				continue
+			}
+			return candidate, creds, from, nil
+		}
+		return nil, nil, "", errors.New("selected from number is not owned by any authorized carrier")
+	}
+
+	bound := ctx.IntegrationFor("carrier")
+	if bound == nil {
+		bound = bindings[0]
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return nil, nil, "", errors.New("read carrier credentials: " + err.Error())
+	}
+	from, err := a.resolveOutboundFrom(ctx, projectID, bound, creds, "")
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return bound, creds, from, nil
+}
+
+// outboundNumberBelongsToBinding performs the cross-carrier ownership check
+// used before selecting an explicit caller ID. Routes and the legacy
+// phone_number credential are accepted as local durable evidence; when the
+// provider inventory is available it is authoritative and must report voice.
+func (a *App) outboundNumberBelongsToBinding(ctx *sdk.AppCtx, projectID string, bound *sdk.BoundIntegration, creds *sdk.ConnectionCredentials, requested string) bool {
+	if bound == nil || creds == nil || !validE164(requested) {
+		return false
+	}
+	requestedKey := compactPhoneNumber(requested)
+	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	owned, err := listOwnedCarrierNumbers(ctx, &numberProvider{Slug: slug, ConnID: bound.ConnectionID, Fields: creds.Fields})
+	if err == nil {
+		for _, number := range owned {
+			if compactPhoneNumber(number.PhoneNumber) == requestedKey {
+				return len(number.Capabilities) == 0 || containsString(number.Capabilities, "voice")
+			}
+		}
+		// Older connections expose only their configured default number in
+		// credentials. Keep that durable provider assertion usable when the
+		// inventory endpoint omits legacy metadata.
+		if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
+			return true
+		}
+		// A successful inventory response that omits a number is authoritative.
+		return false
+	}
+	// Preserve legacy connections that cannot enumerate inventory while still
+	// requiring durable project or credential evidence for the selected number.
+	if legacy := strings.TrimSpace(creds.Fields["phone_number"]); validE164(legacy) && compactPhoneNumber(legacy) == requestedKey {
+		return true
+	}
+	if routes, routeErr := a.db().listRoutesForProjectConnection(projectID, bound.ConnectionID); routeErr == nil {
+		for _, route := range currentRoutesByNumber(routes) {
+			if route.Enabled && compactPhoneNumber(route.PhoneNumber) == requestedKey {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func callToolResult(callID, threadID, to string) map[string]any {
@@ -3583,6 +3729,13 @@ func callsPanelPublic(rows []callRow, includeDiagnostics ...bool) []map[string]a
 
 func (a *App) callsPanelForRequest(r *http.Request, rows []callRow, diagnostics bool) []map[string]any {
 	out := callsPanelPublic(rows, diagnostics)
+	for i := range rows {
+		supported, reason := a.listenerCapability(&rows[i])
+		out[i]["listen_supported"] = supported
+		out[i]["listen_unavailable_reason"] = reason
+		p := phoneUserFrom(r)
+		out[i]["listenable"] = supported && a.phoneCanListen(p, &rows[i]) && (p == nil || p.ListenScope)
+	}
 	if principal := phoneUserFrom(r); principal != nil {
 		for i := range rows {
 			out[i]["answerable"] = a.phoneOfferDestination(principal, &rows[i], "") != ""

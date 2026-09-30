@@ -774,7 +774,7 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && r.URL.Path == "/softphone/access") {
+	if r.Method != http.MethodPost && !(r.Method == http.MethodGet && (r.URL.Path == "/softphone/access" || strings.HasPrefix(r.URL.Path, "/softphone/listen-audit/"))) {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -798,6 +798,12 @@ func (a *App) handleSoftphoneAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	action := strings.Trim(strings.TrimPrefix(r.URL.Path, "/softphone/"), "/")
+	for _, name := range []string{"listen", "listen-renew", "listen-stop", "listen-audit"} {
+		if strings.HasPrefix(action, name+"/") {
+			a.handleListenAction(w, r, project, name, strings.TrimPrefix(action, name+"/"))
+			return
+		}
+	}
 	for _, name := range []string{"attach", "takeover", "renew"} {
 		if strings.HasPrefix(action, name+"/") {
 			a.handlePhoneSession(w, r, project, name, strings.TrimPrefix(action, name+"/"))

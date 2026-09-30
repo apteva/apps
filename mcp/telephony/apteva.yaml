@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.7.5
+version: 0.9.0
 description: |
   Place and receive voice calls via programmable carriers. Calls run as realtime
   sub-threads that the agent controls via send/done — the same
@@ -39,6 +39,7 @@ requires:
   integrations:
     - role: carrier
       kind: integration
+      mode: multiple
       compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage, bandwidth, sinch, didww]
       capabilities: [voice.place, voice.update]
       # Carrier tool names are provider-specific (for example, Twilio uses
@@ -69,6 +70,7 @@ provides:
     - { prefix: /ui/frontend/, no_auth: true }
     - { prefix: /softphone/ }
     - { prefix: /softphone/media/, no_auth: true }
+    - { prefix: /softphone/listen-media/, no_auth: true }
     - { prefix: /peer/, no_auth: true }
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call. Args: to (E.164), directive, voice?, recording?, timeout_sec?, max_duration_sec?, idempotency_key?, machine_detection? (off|detect|premium), machine_detection_action? (notify|hangup). Telephony spawns the realtime thread and bridges carrier audio into it." }
@@ -117,6 +119,9 @@ provides:
     - { name: telephony_numbers_purchase, description: "Purchase a quoted phone number after explicit user confirmation. This spends real money. Args: confirmation_token, address_id?, compliance_id?." }
     - { name: telephony_addresses_list, description: "List provider addresses. Args: country?, customer_name?, limit?." }
     - { name: telephony_address_create, description: "Create and validate a provider address. Args: customer_name, street, city, region, postal_code, country, street_secondary?, friendly_name?, auto_correct?." }
+    - { name: telephony_identities_list, description: "List provider regulatory identities. Args: identity_type?, limit?." }
+    - { name: telephony_identity_create, description: "Create a provider regulatory identity. DIDWW supports personal and business identities." }
+    - { name: telephony_identity_get, description: "Get one provider regulatory identity. Args: identity_id." }
     - { name: telephony_regulatory_requirements, description: "Discover current provider requirements. Args: country, number_type, end_user_type." }
     - { name: telephony_regulatory_bundles_list, description: "List regulatory bundles. Args: country?, number_type?, end_user_type?, status?, friendly_name?, limit?." }
     - { name: telephony_regulatory_bundle_create, description: "Create a draft regulatory bundle. Args: friendly_name, email, regulation_sid? or country+number_type+end_user_type." }
@@ -276,6 +281,7 @@ config_schema:
   - { name: sip_rtp_port_min, type: text, default: "20000", label: "First RTP UDP port" }
   - { name: sip_rtp_port_max, type: text, default: "20199", label: "Last RTP UDP port" }
   - { name: sip_srtp, type: select, default: "preferred", label: "Media encryption", options: [required, preferred, disabled] }
+  - { name: max_call_listeners, type: text, default: "4", label: "Maximum listeners per call", description: "Independent passive listeners, limited to 1–16. Requires explicit listening access." }
   - { name: sip_max_sessions, type: text, default: "100", label: "Maximum SIP sessions" }
   - { name: sip_allow_insecure_signaling, type: toggle, default: "false", label: "Allow UDP or TCP signaling" }
 

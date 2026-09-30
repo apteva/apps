@@ -32,7 +32,8 @@ func (p phoneIdentity) valid() bool {
 }
 
 type phoneGrant struct {
-	Role            string   `json:"role"` // user or supervisor; supervisors still have resource bounds
+	Listen          bool     `json:"listen,omitempty"` // explicit passive listening grant; visibility alone is insufficient
+	Role            string   `json:"role"`             // user or supervisor; supervisors still have resource bounds
 	Destinations    []string `json:"destinations"`
 	OutboundNumbers []string `json:"outbound_numbers"`
 }
@@ -56,6 +57,9 @@ type phonePrincipal struct {
 	Identity     phoneIdentity
 	Project      string
 	Revision     int64
+	Listen       bool
+	ListenScope  bool
+	AuthProvider *phoneAuthProvider
 	Supervisor   bool
 	Destinations map[string]bool
 	Numbers      map[string]bool
@@ -95,6 +99,7 @@ func phonePrincipalFromPolicy(project string, identity phoneIdentity, policy pho
 	p := &phonePrincipal{Identity: identity, Project: project, Revision: policy.Revision, Destinations: map[string]bool{}, Numbers: map[string]bool{}}
 	add := func(g phoneGrant) {
 		p.Supervisor = p.Supervisor || g.Role == "supervisor"
+		p.Listen = p.Listen || g.Listen
 		for _, v := range g.Destinations {
 			p.Destinations[v] = true
 		}
@@ -126,6 +131,9 @@ func phoneAction(r *http.Request) string {
 	if r.Method == "GET" && (path == "/calls" || path == "/calls/events") {
 		return "call.read"
 	}
+	if r.Method == "GET" && strings.HasPrefix(path, "/softphone/listen-audit/") {
+		return "call.listen"
+	}
 	if r.Method == "GET" && path == "/softphone/access" {
 		return "call.read"
 	}
@@ -136,6 +144,8 @@ func phoneAction(r *http.Request) string {
 		return ""
 	}
 	switch {
+	case strings.HasPrefix(path, "/softphone/listen/"), strings.HasPrefix(path, "/softphone/listen-renew/"), strings.HasPrefix(path, "/softphone/listen-stop/"):
+		return "call.listen"
 	case path == "/softphone/place":
 		return "call.dial"
 	case strings.HasPrefix(path, "/softphone/answer/"):
@@ -202,7 +212,14 @@ func (a *App) applicationUserHTTP(next http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "Telephony access denied", 403)
 			return
 		}
-		if action == "call.takeover" && !p.Supervisor {
+		for _, scope := range scopes {
+			if scope.Type == "app_user" && scope.App == "telephony" {
+				for _, v := range scope.Actions {
+					p.ListenScope = p.ListenScope || v == "call.listen"
+				}
+			}
+		}
+		if (action == "call.takeover" || action == "call.listen") && !p.Supervisor {
 			http.Error(w, "supervisor permission required", 403)
 			return
 		}
@@ -582,8 +599,8 @@ func (a *App) validatePhonePolicy(project string, p phonePolicy) error {
 		}
 		for _, id := range g.Destinations {
 			d, e := a.findRoutingDestination(project, id)
-			if e != nil || d == nil || d.Kind != "browser" || !d.Enabled {
-				return errors.New("grant requires an enabled browser destination in this project")
+			if e != nil || d == nil || (d.Kind != "browser" && g.Role != "supervisor") || !d.Enabled {
+				return errors.New("grant requires an enabled destination in this project; users require browser destinations")
 			}
 		}
 		for _, n := range g.OutboundNumbers {
@@ -686,6 +703,7 @@ func (a *App) handlePhoneAccess(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.routingCommitted(project)
+		a.revokeCallListeners(project)
 		p.Revision++
 		writeJSON(w, p)
 		return

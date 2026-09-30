@@ -215,6 +215,8 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 	inputResampler := carrierInputResampler(cfg.InputCodec)
 	outputResampler := carrierOutputResampler(cfg.OutputCodec)
 	playback := newTwilioPlaybackTracker()
+	tap := a.listeners.openBridge(callID)
+	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(carrierCodecSampleRate(cfg.InputCodec))
 	inputSequences := &audioSequenceTracker{}
 	var humanHub *softphoneHub
@@ -313,6 +315,7 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 				if len(pcm24) == 0 {
 					continue
 				}
+				tap.publishPCM(0, pcm24)
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, fmt.Sprint(f.Media.Timestamp), fmt.Sprint(f.Media.Chunk))
 					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
@@ -376,11 +379,15 @@ func (a *App) handleJSONMediaStream(w http.ResponseWriter, r *http.Request, cfg 
 		pacerPolicy = liveHumanCarrierPacerPolicy()
 		pacerMode = "live_human"
 	}
+	observeSent := tap.jsonOutputObserver(cfg.OutputCodec)
 	pacer := newJSONCarrierAudioPacer(ctx, sampleRate, cfg.OutputCodec, cfg.OutboundShape, streamSID, cfg.PlaybackMarks,
 		playback, pacerPolicy,
 		func(payload []byte) error {
 			started := time.Now()
 			err := carrierWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
+			if err == nil {
+				observeSent(payload)
+			}
 			if humanHub != nil {
 				stage := "carrier_send"
 				if err != nil {
@@ -716,6 +723,8 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 		}()
 	}
 
+	tap := a.listeners.openBridge(callID)
+	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(16000)
 	audioFrontend.mode = localBargeInOff
 	defer func() {
@@ -753,6 +762,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			if len(pcm24) == 0 {
 				continue
 			}
+			tap.publishPCM(0, pcm24)
 			err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
 			if err != nil {
 				closeState.SetLeg(mediaCloseLegCore, ws.StatusInternalServerError, "write caller audio to realtime bridge")
@@ -762,6 +772,7 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 	}()
 
 	outputResampler := newPCMResampler(24000, 16000)
+	listenResampler := newPCMResampler(16000, 24000)
 	for {
 		select {
 		case <-ctx.Done():
@@ -791,7 +802,11 @@ func (a *App) handleBinaryMediaStream(w http.ResponseWriter, r *http.Request, pr
 			continue
 		}
 		pcm16 := outputResampler.Process(bytesToPCM16(data))
-		err = writeVonageFrames(vonageWriter, pcm16ToBytes(pcm16))
+		err = writeVonageFramesObserved(vonageWriter, pcm16ToBytes(pcm16), func(frame []byte) {
+			if tap.hasListeners() {
+				tap.publish(1, pcm16ToBytes(listenResampler.Process(bytesToPCM16(frame))))
+			}
+		})
 		if err != nil {
 			closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "write realtime audio to Vonage")
 			return
@@ -996,6 +1011,9 @@ func downsample24to16(pcm24 []int16) []int16 {
 }
 
 func writeVonageFrames(writer *websocketWriterPump, data []byte) error {
+	return writeVonageFramesObserved(writer, data, nil)
+}
+func writeVonageFramesObserved(writer *websocketWriterPump, data []byte, observe func([]byte)) error {
 	const frameBytes = 640 // 20ms of PCM16 mono at 16kHz.
 	for len(data) > 0 {
 		n := frameBytes
@@ -1004,6 +1022,9 @@ func writeVonageFrames(writer *websocketWriterPump, data []byte) error {
 		}
 		if err := writer.Write(ws.OpBinary, data[:n]); err != nil {
 			return err
+		}
+		if observe != nil {
+			observe(data[:n])
 		}
 		data = data[n:]
 	}

@@ -326,6 +326,7 @@ type sipRTPOutboundPacket struct {
 }
 
 type sipRTPPacer struct {
+	observeSent    func([]byte)
 	diagnostics    livePacerStats
 	ctx            context.Context
 	media          *sipRTPMedia
@@ -362,6 +363,7 @@ func newSIPRTPPacerWithPolicy(
 	playback *sipPlaybackState,
 	policy carrierPacerPolicy,
 	onProgress func(twilioPlaybackProgress) error,
+	observers ...func([]byte),
 ) *sipRTPPacer {
 	queuePackets := sipRTPQueuePackets
 	if policy.dropStale {
@@ -379,6 +381,9 @@ func newSIPRTPPacerWithPolicy(
 		ssrc:          binary.BigEndian.Uint32(seed[6:]),
 		dropStale:     policy.dropStale,
 		trimToPackets: max(1, policy.trimToMS/int(sipRTPPacketTime/time.Millisecond)),
+	}
+	if len(observers) > 0 {
+		pacer.observeSent = observers[0]
 	}
 	go pacer.run()
 	return pacer
@@ -441,6 +446,9 @@ func (p *sipRTPPacer) run() {
 					default:
 					}
 					return
+				}
+				if p.observeSent != nil {
+					p.observeSent(packet.payload)
 				}
 				p.diagnostics.sent(20, writeStarted)
 				if p.onProgress != nil && packet.itemID != "" && packet.audioEndMS > 0 {
@@ -619,6 +627,9 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 	ctx, cancel := context.WithCancel(session.ctx)
 	defer cancel()
 	closeState := &websocketCloseState{}
+	tap := a.listeners.openBridge(row.ID)
+	defer a.listeners.closeBridge(row.ID, tap)
+	listenResampler := newPCMResampler(8000, 24000)
 	audioFrontend := newCarrierAudioFrontend(8000)
 	var humanHub *softphoneHub
 	if row.PeerKind == peerKindHuman {
@@ -641,6 +652,10 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 			Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
 		})
 		return coreWriter.Write(ws.OpText, control)
+	}, func(payload []byte) {
+		if tap.hasListeners() {
+			tap.publish(1, pcm16ToBytes(listenResampler.Process(decodeSIPG711(payload, media.offer.Codec))))
+		}
 	})
 	if humanHub != nil {
 		humanHub.setPacerStats(&pacer.diagnostics)
@@ -738,6 +753,7 @@ func (a *App) bridgeSIPMedia(session sipBridgeSession) {
 				if humanHub != nil {
 					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, time.Time{}, "", "")
 				}
+				tap.publishPCM(0, pcm24)
 				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
