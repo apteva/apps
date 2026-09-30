@@ -185,6 +185,23 @@ for(const host of ["dashboard","external"]){
  });
 }
 
+for (const surface of ["dashboard", "external", "panel"] as const) {
+ test(`${surface}: composer has breathing room below its rounded box`, async ({page}) => {
+  for (const width of [390, 1280]) {
+   await page.setViewportSize({width, height:800});
+   await page.goto(surface==="external"?"/?host=external":surface==="panel"?"/?host=dashboard&surface=panel":"/?host=dashboard");
+   if (surface==="panel" && width===390) await page.getByRole("button", {name:/Support chat/}).click();
+   const geometry = await page.locator(".chat-composer-safe:visible").first().evaluate(footer => {
+    const box = footer.querySelector(".chat-composer-box")!.getBoundingClientRect();
+    const edge = footer.getBoundingClientRect();
+    return {gap:edge.bottom-box.bottom, footerBottom:edge.bottom};
+   });
+   expect(geometry.gap).toBeGreaterThanOrEqual(23);
+   expect(geometry.footerBottom).toBeLessThanOrEqual(800);
+  }
+ });
+}
+
 for(const host of ["dashboard","external"]){
  test(`${host}: inbox displays report sections and resolves approvals`,async({page})=>{
   await page.goto(`/?host=${host}&surface=inbox`);

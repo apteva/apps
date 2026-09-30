@@ -54,7 +54,7 @@
 .apteva-conversations :where(button) {cursor:pointer;}
 .apteva-conversations :where(h1,h2,h3,h4,p,fieldset) {margin:0;padding:0;}
 .apteva-conversations :where(button,input,textarea) {background-color:transparent;}
-.apteva-conversations .chat-composer-safe {padding-bottom:max(.5rem,env(safe-area-inset-bottom));}
+.apteva-conversations .chat-composer-safe {padding-bottom:max(1.5rem,calc(env(safe-area-inset-bottom) + .5rem));}
 
 /* The agent Overview mounts chat in a widget grid. Keep its frame and
  * small-width header behavior local to that surface, not the shared panel. */

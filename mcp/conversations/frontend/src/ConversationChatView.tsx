@@ -191,7 +191,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
           </span>
         </footer>
       ) : (
-        <footer className="chat-composer-safe shrink-0 px-2 pt-2 pb-2 sm:px-5">
+        <footer className="chat-composer-safe shrink-0 px-2 pt-2 sm:px-5">
           {props.sendError && <p className="mx-1 mb-1 text-xs text-error">{props.sendError}</p>}
           {props.contextChip}
           <form

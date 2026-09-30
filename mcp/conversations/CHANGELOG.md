@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.14 — 2026-09-30
+
+- Give the shared chat composer a larger bottom inset across the panel and agent widget, matching the Codex-style floating composer spacing.
+- Add browser coverage for the composer’s bottom breathing room on dashboard, external, and panel surfaces.
+
 ## 0.24.13 — 2026-09-29
 
 - Refresh conversation-list unread counts immediately from durable messages on the existing user-scoped SSE connection, including after reconnect; keep the eight-second refresh as a fallback.
