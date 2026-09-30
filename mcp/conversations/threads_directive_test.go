@@ -10,6 +10,8 @@ func TestConversationThreadDirectiveAcknowledgesEveryToolBackedRequest(t *testin
 	for _, want := range []string{
 		"Before calling any work tool for a user request, including a single quick lookup",
 		"phase=acknowledgement alone and briefly say what you are about to do",
+		"For long multi-step work, send concise phase=progress updates after meaningful milestones",
+		"do not narrate individual tool calls or routine retries",
 		"The only exception is a response you can give without a tool, or a simple image question",
 	} {
 		if !strings.Contains(text, want) {

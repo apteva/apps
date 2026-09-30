@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.22 — 2026-09-30
+
+- Add concise progress guidance for long multi-step work at meaningful milestones, plan changes, blockers, and input requests, while suppressing per-tool narration.
+- Include the progress contract in the Conversations tool description and thread directive.
+
 ## 0.24.21 — 2026-09-30
 
 - Require a short visible acknowledgement before every tool-backed user request, including one-call lookups, so the user sees what the agent is about to do before work starts.

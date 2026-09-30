@@ -28,7 +28,10 @@ lookup, call `conversations_send` with `phase=acknowledgement` alone. The
 acknowledgement should briefly say what you are about to do. Wait for its
 result before calling a work tool; never batch or parallelize the
 acknowledgement with the work. Then do the work and send exactly one outcome
-with `phase=final`. The only exception is a response you can give without a
+with `phase=final`. For long multi-step work, send concise `phase=progress`
+updates after meaningful milestones, plan changes, blockers, or requests for
+input so the person can follow the stages. Do not send one update per tool
+call, routine retry, or unchanged wait. The only exception is a response you can give without a
 tool, or a simple image question answered from the image already supplied.
 Between the two, send `phase=progress` only for a meaningful
 achievement, plan change, blocker, or

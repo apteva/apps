@@ -198,7 +198,7 @@ func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
 }
 
 func TestReleaseVersionArtifactsAgree(t *testing.T) {
-	const releaseVersion = "0.24.21"
+	const releaseVersion = "0.24.22"
 	manifest := (&App{}).Manifest()
 	if manifest.Version != releaseVersion {
 		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
@@ -238,7 +238,7 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 	wants := map[string][]string{
-		"send":             {"originating conversation thread", "generic workers report to their parent"},
+		"send":             {"originating conversation thread", "generic workers report to their parent", "For long multi-step work", "meaningful milestones", "do not narrate individual tool calls"},
 		"request_approval": {"owned by main or by the originating conversation", "Generic workers report"},
 		"report":           {"Main-thread global output only", "generic workers report results"},
 		"alert":            {"global alert from main", "conversation-local urgent alert", "Generic workers report"},
@@ -264,6 +264,8 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		"do not grant the Conversations MCP",
 		"worker needs approval, it reports the exact",
 		"same capability-ownership pattern used by Tasks",
+		"For long multi-step work, send concise",
+		"Do not send one update per tool",
 	} {
 		if !strings.Contains(string(skill), fragment) {
 			t.Errorf("using-conversations skill missing %q", fragment)
