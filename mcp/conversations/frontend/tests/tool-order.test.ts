@@ -62,3 +62,8 @@ test("only the exact internal search_tools lookup is hidden",()=>{
  for(const name of ["search_tools"," SEARCH_TOOLS "]) expect(isVisibleChatTool(name)).toBe(false);
  for(const name of ["tickets_search","agent_query","search_tools_extra","custom_search_tools"]) expect(isVisibleChatTool(name)).toBe(true);
 });
+
+test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
+ for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_request_approval", "conversations_report", " CODE_REPOS_LIST "]) expect(isVisibleChatTool(name)).toBe(true);
+ for(const name of ["", "pace", "done", "wait", "think", "conversations_send", "conversations_conversations_send", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
+});

@@ -453,9 +453,10 @@ func (s *streamer) settleAck(conversationID string, agents ...int64) {
 // ─── telemetry feed ──────────────────────────────────────────────────
 
 // runTelemetryFeed subscribes to the platform's telemetry bridge and
-// pipes events into the streamer. Returns false when the bridge is
-// unavailable — the app then runs on Stage-1 phase frames alone, and
-// the panel cannot tell the difference structurally (only textually).
+// pipes events into the streamer. The platform can briefly return 401 while
+// an app install is being registered after a sidecar restart. Keep retrying
+// those transient startup failures instead of permanently falling back to
+// phase frames for the lifetime of the process.
 func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	tc, ok := ctx.PlatformAPI().(sdk.TelemetryClient)
 	if !ok {
@@ -463,52 +464,104 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	}
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
-	ch, chatErr := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
+	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events:       []string{"llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
 		ThreadPrefix: "chat-",
-	})
-	voice, voiceErr := tc.SubscribeTelemetry(feedCtx, sdk.TelemetrySubscription{
+	}, false)
+	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
 		Events:       []string{"realtime.user", "realtime.assistant", "tool.call", "tool.result", "thread.done"},
 		ThreadPrefix: "voice-",
-	})
-	if chatErr != nil && voiceErr != nil {
-		cancel()
-		a.telemetryStop = nil
-		ctx.Logger().Info("telemetry bridge unavailable — streaming falls back to phase frames", "err", chatErr)
+	}, true)
+	return true
+}
+
+const (
+	telemetryRetryInitial = 250 * time.Millisecond
+	telemetryRetryMax     = 30 * time.Second
+)
+
+// connectTelemetryFeed owns one filtered subscription. 403/404/405 mean the
+// permission or bridge is genuinely unavailable; other startup failures,
+// including 401 while registration settles, are retried with backoff.
+func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc sdk.TelemetryClient, feedCtx context.Context, sub sdk.TelemetrySubscription, voice bool) {
+	backoff := telemetryRetryInitial
+	for {
+		if feedCtx.Err() != nil {
+			return
+		}
+		ch, err := tc.SubscribeTelemetry(feedCtx, sub)
+		if err == nil {
+			ctx.Logger().Info("telemetry bridge connected", "thread_prefix", sub.ThreadPrefix)
+			if voice {
+				a.consumeVoiceTelemetry(ctx, ch)
+			} else {
+				a.consumeChatTelemetry(ctx, ch)
+			}
+			return
+		}
+		if feedCtx.Err() != nil {
+			return
+		}
+		if !retryTelemetrySubscription(err) {
+			if voice {
+				ctx.Logger().Warn("voice telemetry unavailable; voice transcript is not captured", "err", err)
+			} else {
+				ctx.Logger().Info("chat telemetry unavailable — streaming falls back to phase frames", "err", err)
+			}
+			return
+		}
+		ctx.Logger().Info("telemetry bridge not ready — retrying", "err", err, "backoff", backoff.String())
+		timer := time.NewTimer(backoff)
+		select {
+		case <-feedCtx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if backoff < telemetryRetryMax {
+			backoff *= 2
+			if backoff > telemetryRetryMax {
+				backoff = telemetryRetryMax
+			}
+		}
+	}
+}
+
+func retryTelemetrySubscription(err error) bool {
+	if err == nil {
 		return false
 	}
-	if chatErr != nil {
-		ctx.Logger().Info("chat telemetry unavailable — streaming falls back to phase frames", "err", chatErr)
+	text := err.Error()
+	for _, code := range []string{"HTTP 403", "HTTP 404", "HTTP 405"} {
+		if strings.Contains(text, code) {
+			return false
+		}
 	}
-	if voiceErr != nil {
-		ctx.Logger().Warn("voice telemetry unavailable; voice transcript is not captured", "err", voiceErr)
-	} else {
-		go func() {
-			for ev := range voice {
-				if err := a.ingestVoiceEvent(ev); err != nil {
-					ctx.Logger().Error("voice transcript persistence failed", "err", err)
-				}
-				if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
-					ctx.Logger().Error("voice tool activity persistence failed", "err", err)
-				}
-				a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
-			}
-			ctx.Logger().Warn("voice telemetry ended; future voice transcript may be incomplete")
-		}()
+	return true
+}
+
+func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {
+	for ev := range ch {
+		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+			ctx.Logger().Error("tool activity persistence failed", "err", err)
+		}
+		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 	}
-	if chatErr == nil {
-		go func() {
-			for ev := range ch {
-				if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
-					ctx.Logger().Error("tool activity persistence failed", "err", err)
-				}
-				a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
-			}
-			_ = a.store.interruptToolActivities()
-			ctx.Logger().Info("telemetry feed ended")
-		}()
+	_ = a.store.interruptToolActivities()
+	ctx.Logger().Info("telemetry feed ended")
+}
+
+func (a *App) consumeVoiceTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStreamEvent) {
+	for ev := range ch {
+		if err := a.ingestVoiceEvent(ev); err != nil {
+			ctx.Logger().Error("voice transcript persistence failed", "err", err)
+		}
+		if err := a.ingestToolActivity(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time); err != nil {
+			ctx.Logger().Error("voice tool activity persistence failed", "err", err)
+		}
+		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 	}
-	return chatErr == nil
+	ctx.Logger().Warn("voice telemetry ended; future voice transcript may be incomplete")
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────

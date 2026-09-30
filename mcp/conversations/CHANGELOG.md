@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.16 — 2026-09-30
+
+- Retry transient telemetry subscription failures during startup, including HTTP 401 while a local install is being enabled, so tool activity and voice capture recover automatically.
+- Show attachment reads and other Conversations work tools consistently in the shared frontend, native panel, and agent widget.
+- Add regression coverage for startup authentication recovery, live activity persistence, cancellation, and frontend tool visibility.
+
 ## 0.24.15 — 2026-09-30
 
 - Show Conversations work-tool activity, including attachment reads, while keeping reply sends represented by the resulting chat message.

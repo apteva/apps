@@ -85,9 +85,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.streamer.onActivityChange = a.publishListProgress
 	mountedCtx = ctx
 	// Token-level streaming when the platform grants it; Stage-1 phase
-	// frames otherwise. The panel renders either without knowing which.
+	// frames otherwise. The bridge connects asynchronously because the
+	// platform may still be registering this install during startup.
 	if a.runTelemetryFeed(ctx) {
-		ctx.Logger().Info("telemetry bridge active — token-level streaming on")
+		ctx.Logger().Info("telemetry bridge enabled — connecting")
 	}
 	// Crash recovery: anything the ledger recorded but never confirmed
 	// goes out again according to its persisted retry schedule.
