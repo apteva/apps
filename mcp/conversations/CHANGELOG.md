@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.23 — 2026-09-30
+
+- Require at least one concise progress message between distinct stages or batches of a multi-step request, including when the first batch completes quickly.
+- Add a real Codex scenario and durable transcript assertion covering acknowledgement → work → progress → next work stage → final outcome.
+
 ## 0.24.22 — 2026-09-30
 
 - Add concise progress guidance for long multi-step work at meaningful milestones, plan changes, blockers, and input requests, while suppressing per-tool narration.
