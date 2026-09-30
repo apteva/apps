@@ -8,6 +8,7 @@ package main
 // transport through a platform-managed integration connection.
 
 import (
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -112,6 +113,25 @@ func (d *agentAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conversatio
 		}
 		threadID = string(raw)
 	}
+	if strings.HasPrefix(threadID, "voice-") && d.app != nil && conv != nil {
+		var status string
+		err := d.app.store.db.QueryRow(`SELECT status FROM conversation_voice_sessions WHERE conversation_id=? AND agent_id=? AND thread_id=?`, conv.ID, agentID, threadID).Scan(&status)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		if err == sql.ErrNoRows || status != "active" {
+			chatThread, _, ensureErr := d.app.ensureConversationThreadForAgent(app, conv, agentID, nil)
+			if ensureErr != nil {
+				return ensureErr
+			}
+			if chatThread != "" {
+				threadID = chatThread
+			} else {
+				threadID = "main"
+			}
+			event.Message = fmt.Sprint(event.Message) + "\nThis approval originated during a voice session that has ended. Continue any approved work in this durable conversation; do not resume the ended voice thread."
+		}
+	}
 	if conv != nil && threadID == "main" {
 		event.Message = fmt.Sprint(event.Message) + fmt.Sprintf("\nUse conversations_send with conversation_id=%s, phase=acknowledgement, approval_message_id=%d to acknowledge this decision from main. This exception only permits the receipt; ordinary replies remain in their conversation thread.", conv.ID, msg.ID)
 	}
@@ -167,20 +187,29 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 		ID:      conversationThreadEventID(conv.ID, msg.ID, agentID),
 		Message: d.app.agentEventPayload(conv, msg, agentID, targets),
 	}
-	threadID, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
-	if err != nil {
-		return err
+	// Register before EnsureThread: Core can start before its receipt returns.
+	threadID := conversationThreadID(conv.ID)
+	if state, _ := d.app.store.AgentThread(conv.ID, agentID); state != nil && state.ThreadID != "" {
+		threadID = state.ThreadID
 	}
-	if !delivered {
+	ack := messageIntent(msg) != messageIntentSoftBreak
+	if ack {
+		d.app.streamer.emitInboundAck(conv.ID, threadID, agentID, msg)
+	}
+	_, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
+	if err != nil || !delivered {
+		if ack {
+			d.app.streamer.finishResponse(conv.ID, agentID, msg.ID)
+		}
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("platform did not confirm inbound event %q", event.ID)
 	}
 	// A soft break is sent only while an existing response is active. Keep that
 	// response's acknowledgement/stream bubble authoritative instead of
 	// replacing it with a second synthetic ack that could settle out of order.
 	// The durable "Break requested" transcript row is the immediate feedback.
-	if messageIntent(msg) != messageIntentSoftBreak {
-		d.app.streamer.emitAck(conv.ID, threadID, agentID, msg.ID)
-	}
 	return nil
 }
 

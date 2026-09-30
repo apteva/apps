@@ -45,7 +45,7 @@ Do not invoke the `scenario` Go build tag directly.
 | Chat round trip | Real reply persisted in the originating chat |
 | Single conversation | Latest lead-agent lookup and focused chat reply |
 | Soft break | Live SSE call ID; targeted break consumed; retry is idempotent |
-| Image → Storage → Tickets | Actual colour recognition; unique ticket; exact Storage ID in message, tool args and ticket; retry deduplication |
+| Image → Storage → Tickets | Acknowledgement before visible tool work; actual colour recognition; unique ticket; exact Storage ID in message, tool args and ticket; retry deduplication |
 | Two conversations | Neither chat receives the other's response |
 | Alert | Agent-created, titled operator conversation and warning/error inbox card |
 | Approval round trip | Advertised action accepted, card updated in place, verdict acknowledged |

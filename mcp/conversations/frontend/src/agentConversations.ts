@@ -1,3 +1,4 @@
+import type { ComposerSuggestion } from "./composerHost";
 export type ConversationDisplayMode = "browser" | "single";
 
 export interface AgentConversationWidgetSettings {
@@ -5,8 +6,16 @@ export interface AgentConversationWidgetSettings {
   display_mode?: ConversationDisplayMode;
   show_page_context?: boolean;
   show_new_conversation?: boolean;
+  show_tool_completion?: boolean;
+  show_tool_duration?: boolean;
   /** Presentation-only empty transcript text; never persisted as a message. */
   empty_message?: string;
+  /** Presentation-only welcome text; never persisted as a message. */
+  welcome_text?: string;
+  /** Presentation-only draft starters. */
+  suggestions?: ComposerSuggestion[];
+  /** Optional prefix for the visible context chip. */
+  context_label?: string;
 }
 
 export function appendAgentScope(path: string, instanceId: number): string {
@@ -45,8 +54,10 @@ export function selectedConversationSeenInput(
 
 export function conversationDisplayMode(
   settings?: AgentConversationWidgetSettings,
+  slot?: string,
 ): ConversationDisplayMode {
-  return settings?.display_mode === "single" ? "single" : "browser";
+  if (settings?.display_mode === "single" || settings?.display_mode === "browser") return settings.display_mode;
+  return slot === "dashboard.agent_detail" ? "single" : "browser";
 }
 
 export function showNewConversation(
@@ -59,6 +70,14 @@ export function showPageContext(
   settings?: AgentConversationWidgetSettings,
 ): boolean {
   return settings?.show_page_context !== false;
+}
+
+export function showToolCompletion(settings?: AgentConversationWidgetSettings): boolean {
+  return settings?.show_tool_completion === true;
+}
+
+export function showToolDuration(settings?: AgentConversationWidgetSettings): boolean {
+  return settings?.show_tool_duration === true;
 }
 
 export function fixedAgentConversationInput(instanceId: number, projectId: string, title: string) {

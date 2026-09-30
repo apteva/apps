@@ -4,7 +4,7 @@ import "./testDom";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act, createRef } from "react";
 import { ConversationChat as ChatSource, refreshConversationList, type Conversation } from "../frontend/src/ConversationsPanel";
 import { reportSectionsText } from "./messageContent";
 
@@ -13,6 +13,7 @@ import { conversationsExtension, type ConversationsClient } from "../frontend/sr
 import { ConversationsProvider, PageContextProvider } from "../frontend/src/context";
 import type { PageContext } from "../frontend/src/pageContext";
 import { showPageContext, type AgentConversationWidgetSettings } from "../frontend/src/agentConversations";
+import type { ConversationComposerHandle } from "../frontend/src/composerHost";
 import type { ComponentProps } from "react";
 let conversations: ConversationsClient;
 function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization & { pageContext?: PageContext; widgetSettings?: AgentConversationWidgetSettings }) {
@@ -53,6 +54,51 @@ beforeEach(()=>{
 });
 afterEach(async()=>{await act(async()=>root.unmount());await win.happyDOM.abort();});
 
+test("voice mic appears only in active direct operator chats",async()=>{
+ await render();
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).not.toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={{...conv("a"),audience:"public"}} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={{...conv("a"),kind:"room"}} archived={false} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={true} onActed={()=>{}} onRemoved={()=>{}}/>));
+ expect(element.querySelector('[aria-label="Start voice in this chat"]')).toBeNull();
+});
+
+test("saved spoken turns are marked as voice in the existing transcript",async()=>{
+ const spoken={...message(1,"a","Spoken question"),metadata:{source:"voice"}};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[spoken],cursor:1,before:1,has_more:false});
+ await render();
+ expect(element.textContent).toContain("Spoken question");
+ expect([...element.querySelectorAll("span")].some(span=>span.textContent==="Voice" && span.title.includes("Voice turns"))).toBe(true);
+});
+
+test("dictation updates the existing draft and waits for an explicit send",async()=>{
+ const posted:string[]=[];
+ class Recognition {
+  static current:Recognition;
+  lang="";continuous=false;interimResults=false;
+  onresult:((event:any)=>void)|null=null;onerror:null=null;onend:(()=>void)|null=null;
+  constructor(){Recognition.current=this;}
+  start(){} stop(){this.onend?.();} abort(){this.onend?.();}
+ }
+ Object.assign(win,{SpeechRecognition:Recognition});
+ fetcher=(url,init)=>{
+  if(url.includes("/voice"))return json({status:"closed",mode:"dictation"});
+  if(init?.method==="POST"&&url.includes("/messages")){posted.push(JSON.parse(String(init.body)).content);return json(message(1,"a",posted[0]));}
+  return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ await render();await settle();
+ await act(async()=>element.querySelector('[aria-label="Dictate a message"]')!.dispatchEvent(new win.MouseEvent("click",{bubbles:true}) as unknown as Event));
+ await settle();
+ await act(async()=>Recognition.current.onresult?.({resultIndex:0,results:[{isFinal:true,0:{transcript:"Find the onboarding process"}}]}));
+ expect(element.querySelector("textarea")!.value).toBe("Find the onboarding process");
+ expect(posted).toEqual([]);
+ await act(async()=>[...element.querySelectorAll("button")].find(button=>button.textContent==="Stop dictation")!.click());
+ await send();await settle();
+ expect(posted).toEqual(["Find the onboarding process"]);
+});
+
 test("a live row arriving before snapshot never advances durable replay cursor",async()=>{
  let resolveSnapshot!:(value:Response)=>void;const paths:string[]=[];
  fetcher=(url)=>{paths.push(url);if(url.includes("/deliveries")||url.includes("/activity"))return json([]);if(url.includes("page=1"))return new Promise(resolve=>{resolveSnapshot=resolve});return json({messages:[message(201)],cursor:201,has_more:false});};
@@ -84,6 +130,32 @@ test("page context is included in the posted message snapshot",async()=>{
  await type("inspect this page");await send();await settle();
  expect(bodies).toHaveLength(1);expect(bodies[0].page_context).toEqual(pageContext);
 });
+test("welcome suggestions append to the draft without sending",async()=>{
+ const posted:string[]=[];
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){posted.push(String(init.body));return json(message(1,"a","should not send"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={false} welcomeText="What would you like to build?" suggestions={[{id:"build",label:"Build something",text:"Help me build a dashboard"}]} onActed={()=>{}} onRemoved={()=>{}}/>));await settle();
+ expect(element.textContent).toContain("What would you like to build?");
+ await act(async()=>[...element.querySelectorAll("button")].find(button=>button.textContent==="Build something")?.dispatchEvent(new win.MouseEvent("click",{bubbles:true}) as unknown as Event));
+ expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Help me build a dashboard");
+ expect(posted).toHaveLength(0);
+});
+test("host composer requests are scoped, idempotent, and never send",async()=>{
+ const posted:string[]=[];
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){posted.push(String(init.body));return json(message(1,"a","unexpected"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ const bridge=createRef<ConversationComposerHandle>();
+ await act(async()=>root.render(<PageContextProvider.Provider value={undefined}><ConversationsProvider conversations={conversations}><ChatSource ref={bridge} conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/></ConversationsProvider></PageContextProvider.Provider>));await settle();
+ let first:any;
+ await act(async()=>{first=await bridge.current!.insertText("Add a report",{requestId:"req-1",projectId:"project",agentId:41,conversationId:"a"});});
+ expect(first.status).toBe("applied");expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Add a report");
+ let duplicate:any;
+ await act(async()=>{duplicate=await bridge.current!.insertText("Do not duplicate",{requestId:"req-1"});});
+ expect(duplicate.status).toBe("already_applied");expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Add a report");expect(posted).toHaveLength(0);
+ let wrong:any;
+ await act(async()=>{wrong=await bridge.current!.insertText("Wrong scope",{projectId:"other"});});
+ expect(wrong.status).toBe("wrong_project");
+});
 test("hidden page context stays attached to the posted message",async()=>{
  const bodies:any[]=[];
  const pageContext:PageContext={version:1,page:"app",project_id:"project",app:"workspace-setup",panel:"stage=workspace_setup; goal=Launch a shop"};
@@ -105,7 +177,10 @@ test("two agents sharing a provider call id keep independent streaming bubbles",
  await act(async()=>{emit(41,"Alpha progress");emit(42,"Beta progress");});
  expect(element.textContent).toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
  await act(async()=>emit(41,"",true));
- expect(element.textContent).not.toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
+ expect(element.textContent).toContain("Alpha progress");expect(element.textContent).toContain("Beta progress");
+ await act(async()=>events.emit({...message(1,"a","Alpha progress"),role:"agent",agent_id:41}));
+ expect(element.textContent!.match(/Alpha progress/g)).toHaveLength(1);
+ expect(element.textContent).toContain("Beta progress");
  await act(async()=>emit(41,"New response",false,"2"));
  expect(element.textContent).toContain("New response");
 });
@@ -251,12 +326,12 @@ test("soft break copy describes an advisory request and existing send failures f
  expect(element.querySelector("textarea")!.value).toBe("Request");
 });
 
-test("old stored Conversations tools stay hidden and approval actions use host theme",async()=>{
+test("stored Conversations work tools remain visible and approval actions use host theme",async()=>{
  const approval={...message(2),role:"agent",component_kind:"approval",components:[{app:"conversations",name:"approval-card",props:{title:"Approve deletion",body:"Delete repository?",status:"pending",actions:[{id:"approve",label:"Approve",style:"primary"},{id:"deny",label:"Deny",style:"secondary"}]}}]};
  fetcher=url=> url.includes("/activity") ? json([{id:1,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"legacy",name:"conversations_request_approval",reason:"Requesting deletion approval",status:"running",started_at:message(1).created_at,ended_at:"",revision:1}]) : url.includes("/deliveries") ? json([]) : json({messages:[approval],cursor:2,before:2,has_more:false});
  await render();
  expect(element.textContent).toContain("Approve deletion");
- expect(element.textContent).not.toContain("Requesting deletion approval");
+ expect(element.textContent).toContain("Requesting deletion approval");
  const approve=[...element.querySelectorAll("button")].find(b=>b.textContent==="Approve")!;
  const deny=[...element.querySelectorAll("button")].find(b=>b.textContent==="Deny")!;
  expect(approve.className).toContain("bg-accent");
@@ -326,4 +401,116 @@ test("optimistic response survives send completion and hands off once to the ser
  expect(element.querySelectorAll('[role="status"]')).toHaveLength(1);
  await act(async()=>FakeEvents.instances[0].emit({...message(2,"a","Hello back"),role:"agent",agent_id:41}));
  expect(element.querySelectorAll('[role="status"]')).toHaveLength(0);
+});
+
+test("completed tool hands progress back to thinking without continuing to glow", async () => {
+ const user={...message(826,"a","Locate the client onboarding process"),created_at:"2026-09-23T12:12:34.761Z"};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:url.includes("/messages")?[user]:[],cursor:826,before:826,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const tool={id:64,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",name:"apteva-server_app_tool_call",reason:"Finding onboarding procedure",status:"running",started_at:"2026-09-23T12:12:49.260018Z",ended_at:"",revision:1};
+ const progress=(phase:string,revision:number)=>({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,response_progress:{phase,run_id:"run-1",revision,after_message_id:826,started_at:"2026-09-23T12:12:34.761Z"}});
+ await act(async()=>{
+   stream({data:JSON.stringify(progress("running",1))});
+   stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",text:"",done:false,tool_activity:tool})});
+ });
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await act(async()=>{
+   stream({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"call-lookup",text:"",done:false,tool_activity:{...tool,status:"completed",ended_at:"2026-09-23T12:12:49.306451Z",revision:2,duration_ms:46}})});
+   stream({data:JSON.stringify(progress("continuing",2))});
+ });
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+ expect(element.querySelector(".chat-tool-activity-continuing")).toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+});
+
+test("tool preparation stays visible while the running frame waits for activity", async () => {
+ const user={...message(827,"a","Create the seed lists"),created_at:"2026-09-23T12:12:34.761Z"};
+ fetcher=(url)=>(url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:url.includes("/messages")?[user]:[],cursor:827,before:827,has_more:false});
+ await render();
+ const stream=FakeEvents.instances[0].listeners.get("stream")!;
+ const progress=(phase:string,revision:number,call_id="",tool_name="")=>({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,response_progress:{phase,run_id:"run-seed",revision,after_message_id:827,started_at:"2026-09-23T12:12:34.761Z",tool_started_at:"2026-09-23T12:12:35.000Z",call_id,tool_name}});
+ await act(async()=>stream({data:JSON.stringify(progress("preparing_tool",1,"call-seed","todo_lists_create"))}));
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ // The server's running progress can cross the stream before the durable
+ // tool_activity frame. The tool identity must survive that handoff.
+ await act(async()=>stream({data:JSON.stringify(progress("running",2))}));
+ await settle();
+ expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+});
+
+test("Processes trace: acknowledgement precedes grouped tools, every model gap thinks, final text survives done-before-message", async () => {
+ await render();
+ const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const at=(seconds:number)=>new Date(Date.parse("2026-09-23T14:36:42.661Z")+seconds*1000).toISOString();
+ let revision=0;
+ const progress=async(phase:string,seconds:number,call_id="",tool_name="")=>frame({created_at:at(seconds),response_progress:{phase,run_id:"run-list",revision:++revision,after_message_id:863,started_at:at(0),tool_started_at:at(seconds),call_id,tool_name}});
+ await act(async()=>events.emit({...message(863,"a","List processes"),created_at:at(0)}));
+ await progress("thinking",0);
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ await frame({call_id:"ack-text",run_id:"1",text:"I will check the processes.",created_at:at(6),after_message_id:863});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ // SSE stream completion can beat its durable replacement on the other queue.
+ await frame({call_id:"ack-text",run_id:"1",done:true});
+ await progress("thinking",6.28);
+ expect(element.textContent).toContain("I will check the processes.");
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ const toolTimes=[17.05,21.7,30.62];
+ for (let i=0;i<3;i++) {
+   const call_id=`tool-${i}`, seconds=toolTimes[i]!;
+   await progress("preparing_tool",seconds-0.2,call_id,"apteva-server_app_tool_call");
+   expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+   // Preparation stays in the same group as the preceding completed calls.
+   expect(element.querySelectorAll(".chat-tool-activity")).toHaveLength(1);
+   const tool={id:100+i,chat_id:"a",agent_id:41,thread_id:"chat-a",call_id,name:"apteva-server_app_tool_call",reason:`Lookup ${i+1}`,status:"running",started_at:at(seconds),ended_at:"",revision:1};
+   await frame({tool_activity:tool}); await settle();
+   expect(element.querySelector(".chat-tool-copy-running")).not.toBeNull();
+   expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+   expect(element.textContent!.indexOf("I will check")).toBeLessThan(element.textContent!.indexOf(`Lookup ${i+1}`));
+   await frame({tool_activity:{...tool,status:"completed",ended_at:at(seconds+.018),revision:2}});
+   await progress("continuing",seconds+.02); await settle();
+   expect(element.querySelector(".chat-tool-copy-running")).toBeNull();
+   expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+   // A delayed preparing frame must not revive a completed call or go blank.
+   await progress("preparing_tool",seconds-.1,call_id,tool.name);
+   expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ }
+ await act(async()=>events.emit({...message(864,"a","I will check the processes."),role:"agent",agent_id:41,phase:"acknowledgement",created_at:at(6.27)}));
+ expect(element.textContent!.match(/I will check/g)).toHaveLength(1);
+ await progress("continuing",30.66);
+ await frame({call_id:"final-text",run_id:"2",text:"There is one",created_at:at(32.58),after_message_id:863});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await frame({call_id:"final-text",run_id:"2",text:"There is one process.",created_at:at(32.58),after_message_id:863});
+ await frame({call_id:"final-text",run_id:"2",done:true});
+ await progress("idle",35.59);
+ expect(element.textContent).toContain("There is one process.");
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ await act(async()=>events.emit({...message(865,"a","There is one process."),role:"agent",agent_id:41,phase:"final",created_at:at(35.59)}));
+ expect(element.textContent!.match(/There is one process/g)).toHaveLength(1);
+ expect(element.textContent!.indexOf("Lookup 3")).toBeLessThan(element.textContent!.indexOf("There is one process"));
+});
+
+test("reconnect restores authoritative progress/text and ignores snapshot overlap and durable-first text", async () => {
+ await render();const events=FakeEvents.instances[0];
+ const frame=async(value:any)=>act(async()=>events.listeners.get("stream")!({data:JSON.stringify({chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"",text:"",done:false,...value})}));
+ const progress={chat_id:"a",agent_id:41,thread_id:"chat-a",response_progress:{phase:"thinking",run_id:"run",revision:4,after_message_id:10,started_at:"2026-09-23T14:36:42Z"}};
+ await frame(progress);
+ await act(async()=>events.listeners.get("error")?.({data:""}));
+ expect(element.querySelector('[aria-label="Thinking"]')).not.toBeNull();
+ const text={chat_id:"a",agent_id:41,thread_id:"chat-a",call_id:"text",run_id:"1",text:"A complete reply",after_message_id:10,created_at:"2026-09-23T14:36:48Z"};
+ await frame({snapshot:true,frames:[progress,text]});
+ await frame({...text,text:"A complete"});
+ expect(element.textContent).toContain("A complete reply");
+ await act(async()=>events.emit({...message(11,"a","A complete reply"),role:"agent",agent_id:41}));
+ await frame({...text,call_id:"late-text"});
+ expect(element.textContent!.match(/A complete reply/g)).toHaveLength(1);
+ await frame({snapshot:true,frames:[]});
+ expect(element.querySelector('[aria-label="Thinking"]')).toBeNull();
+ expect(element.textContent).toContain("A complete reply");
 });

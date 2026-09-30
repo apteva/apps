@@ -19,6 +19,31 @@ test("headless contract uses one explicit scope and current bearer credential fo
   expect(()=>c.apiGet("/chats","other-project")).toThrow("scope");
 });
 
+test("global inbox reuses the inbox route and scopes item actions to their project", async () => {
+  const requests: Array<{url: URL; init: RequestInit}> = [];
+  const client = new AptevaClient({
+    baseURL: "https://platform.example",
+    accessToken: "operator-a",
+    fetch: async (url, init) => {
+      requests.push({ url: new URL(String(url)), init: init! });
+      return Response.json({ items: [], projects: [] });
+    },
+  });
+  const c = client.use(conversationsExtension({ global: true }), { installId: 31 });
+
+  await c.inbox({ project_id: "project-a", limit: 25 });
+  await c.apiPost("/message-action", { message_id: 7, action_id: "approve" }, "project-a");
+  await c.apiPost("/message-dismiss", { message_id: 8 }, "project-b");
+
+  expect(requests[0].url.pathname).toEndWith("/inbox");
+  expect(requests[0].url.searchParams.get("scope")).toBe("global");
+  expect(requests[0].url.searchParams.get("project_id")).toBe("project-a");
+  expect(requests[0].url.searchParams.get("limit")).toBe("25");
+  expect(requests[1].url.searchParams.get("project_id")).toBe("project-a");
+  expect(requests[2].url.searchParams.get("project_id")).toBe("project-b");
+  expect(() => c.apiPost("/message-action", {}, "")).toThrow("item's project scope");
+});
+
 test("bearer SSE distinguishes stream frames, edits and resync without deduplicating message IDs", async()=>{
   let controller!: ReadableStreamDefaultController<Uint8Array>;let resolveOpen!:()=>void;
   const opened=new Promise<void>(r=>resolveOpen=r);let initSeen:RequestInit|undefined;

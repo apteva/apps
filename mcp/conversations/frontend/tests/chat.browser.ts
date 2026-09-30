@@ -49,6 +49,33 @@ for (const host of ["dashboard", "external"]) {
  });
 }
 
+for (const host of ["dashboard", "external", "package"]) {
+ test(`${host}: many tool sources keep the latest icon in front and expand to every source`, async ({page,request}) => {
+  await request.post("/reset");await page.goto(`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
+  const names=["tasks_list","storage_files_list","apteva-server_apps_list","processes_start"];
+  for (const [index,name] of names.entries()) {
+   const activity={id:810+index,chat_id:chat,agent_id:41,thread_id:chat,call_id:`source-${index}`,name,reason:`Step ${index+1}`,status:index===3?"running":"completed",started_at:new Date(Date.now()+index*100).toISOString(),ended_at:index===3?"":new Date(Date.now()+index*100+20).toISOString(),revision:1};
+   await request.post("/emit",{data:{chat_id:chat,agent_id:41,tool_activity:activity}});
+  }
+  const row=page.locator(".chat-tool-activity");
+  await expect(row).toHaveCount(1);
+  await expect(row.locator(".chat-tool-copy").first()).toHaveText("Step 4");
+  const icons=row.getByRole("button").first().locator(".chat-tool-icon");
+  await expect(icons).toHaveCount(2);
+  await expect(icons.first()).toHaveAttribute("title","Apteva");
+  await expect(icons.last()).toHaveAttribute("title","Processes");
+  await page.setViewportSize({width:390,height:800});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+  await page.screenshot({path:test.info().outputPath("tool-sources-stacked-mobile.png")});
+  await row.getByRole("button").first().click();
+  await expect(row.locator("[id^=tools-] > div")).toHaveCount(4);
+  await expect(row.locator("[id^=tools-] .chat-tool-icon")).toHaveCount(4);
+  expect(await row.locator("[id^=tools-] .chat-tool-icon").evaluateAll(icons=>icons.map(icon=>icon.getAttribute("title")))).toEqual(["Tasks","Storage","Apteva","Processes"]);
+ });
+}
+
 for (const host of ["dashboard", "external"]) {
  test(`${host}: composer switches between pause and sending during a response`, async ({page,request}) => {
   await request.post("/reset");
@@ -155,6 +182,25 @@ for(const host of ["dashboard","external"]){
   const calls=await (await request.get("/requests")).json();const own=calls.filter((c:any)=>c.bearer===(host==="external"));expect(own.some((c:any)=>c.path.endsWith("/messages")&&c.method==="POST")).toBe(true);
   expect(own.every((c:any)=>c.query.install_id==="7"&&c.query.project_id==="project")).toBe(true);
   if(host==="external")expect(own.every((c:any)=>!c.cookie)).toBe(true);
+ });
+}
+
+for (const surface of ["dashboard", "external", "panel"] as const) {
+ test(`${surface}: composer has breathing room below its rounded box`, async ({page,request}) => {
+  await request.post("/reset");
+  if(surface==="panel") await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",audience:"operator",origin:"web",created_at:"",updated_at:""}]});
+  for (const width of [390, 1280]) {
+   await page.setViewportSize({width, height:800});
+   await page.goto(surface==="external"?"/?host=external":surface==="panel"?"/?host=dashboard&surface=panel":"/?host=dashboard");
+   if (surface==="panel" && width===390) await page.getByRole("button", {name:/Support chat/}).click();
+   const geometry = await page.locator(".chat-composer-safe:visible").first().evaluate(footer => {
+    const box = footer.querySelector(".chat-composer-box")!.getBoundingClientRect();
+    const edge = footer.getBoundingClientRect();
+    return {gap:edge.bottom-box.bottom, footerBottom:edge.bottom};
+   });
+   expect(geometry.gap).toBeGreaterThanOrEqual(23);
+   expect(geometry.footerBottom).toBeLessThanOrEqual(800);
+  }
  });
 }
 
@@ -367,17 +413,18 @@ for (const host of ["dashboard","external","package"]) {
   expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),duration_ms:42,revision:2}}});
   await expect(row).toHaveAttribute("aria-label",/Done/);
-  // No blank/static gap while waiting for the next model event.
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
+  // A completed call settles; the next model step owns the indicator.
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
   await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(row.getByText("42ms",{exact:true})).toBeVisible();
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row.getByText("42ms",{exact:true})).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
   await phase("idle",5);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await expect(page.getByRole("button",{name:"Send",exact:true})).toBeDisabled();
   // An approval verdict begins a new turn. Existing tool history stays done.
   await phase("thinking",6,{run_id:"response-2",started_at:new Date().toISOString()});
@@ -404,7 +451,7 @@ for (const host of ["dashboard","external","package"]) {
   release();
   await expect(page.getByRole("status",{name:"Preparing response…",exact:true})).toHaveCount(0);
  });
- test(`${host}: result groups keep pulsing through intermediate replies and parallel calls`,async({page,request})=>{
+ test(`${host}: running parallel calls pulse; completed groups yield to thinking`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
   await expect(page.getByTitle("Live")).toBeVisible();
   const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
@@ -419,15 +466,14 @@ for (const host of ["dashboard","external","package"]) {
   const row=page.locator(".chat-tool-activity");
   await expect(row).toHaveCount(1);await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:602,call_id:"parallel-2",reason:"Checking repository",status:"completed",ended_at:new Date().toISOString(),duration_ms:64,revision:2}}});
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   // A durable intermediate reply moves the tail away from the tool group.
   await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
   await expect(page.getByText("I am checking the next step.")).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
-  await expect(page.getByRole("status",{name:/Thinking|Preparing response/})).toHaveCount(0);
-  expect(await row.locator(".chat-tool-copy").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await request.post("/emit",{data:{...frame,response_progress:{phase:"idle",run_id:"ack-1",revision:2,started_at:start,after_message_id:0}}});
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
  });
@@ -449,7 +495,7 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row).toHaveCount(1);
   await expect(row.getByText("Verifying React project files",{exact:true})).toBeVisible();
   await expect(row.getByText("+1",{exact:true})).toBeVisible();
-  await expect(row.getByText("300ms",{exact:true})).toBeVisible();
+  await expect(row.getByText("300ms",{exact:true})).toHaveCount(0);
   await row.getByRole("button").first().click();
   await expect(row.locator("[id^=tools-] > div")).toHaveCount(2);
   await page.reload();await expect(row).toHaveCount(1);
@@ -464,7 +510,7 @@ for (const host of ["dashboard","external","package"]) {
 
 
 for (const host of ["dashboard","external","package"]) {
- test(`${host}: internal tool lookup stays hidden live and after reload without hiding other searches`,async({page,request})=>{
+ test(`${host}: internal lookup and parent-thread send stay hidden live and after reload`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
   await expect(page.getByTitle("Live")).toBeVisible();
   const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
@@ -474,14 +520,19 @@ for (const host of ["dashboard","external","package"]) {
   await request.post("/emit",{data:{...frame,tool_activity:activity}});
   await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"preparing_tool",tool_name:"send",call_id:"parent-report",run_id:"turn",revision:2,after_message_id:0,started_at:activity.started_at}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:803,call_id:"parent-report",name:"send",reason:"Reporting repository results",status:"completed",revision:2}}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:802,call_id:"search",name:"tickets_search",reason:"Searching tickets"}}});
   await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
   await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
   await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
   await expect(page.locator(".chat-tool-activity").getByText("+1",{exact:true})).toHaveCount(0);
   await page.reload();
   await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
   await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
   await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
  });
 }

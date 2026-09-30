@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // TestStreamerAccumulatesPartialText is the core token-streaming
@@ -243,5 +248,108 @@ func TestAckIDsUniquePerEmission(t *testing.T) {
 	case f := <-ch:
 		t.Fatalf("unexpected frame after empty settle: %+v", f)
 	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+type telemetrySubscriberFunc func(context.Context, sdk.TelemetrySubscription) (<-chan sdk.TelemetryStreamEvent, error)
+
+func (f telemetrySubscriberFunc) SubscribeTelemetry(ctx context.Context, sub sdk.TelemetrySubscription) (<-chan sdk.TelemetryStreamEvent, error) {
+	return f(ctx, sub)
+}
+
+func TestTelemetryStartupAuthRaceRecoversActivityAndLiveFrames(t *testing.T) {
+	a, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, a, 41)
+	boundConversationCaller(t, a, conv, 41)
+	thread := conversationThreadID(conv.ID)
+	frames, cancel := a.hub.subscribeFrames(conv.ID)
+	defer cancel()
+	now := time.Now().UTC()
+	ch := make(chan sdk.TelemetryStreamEvent, 2)
+	ch <- sdk.TelemetryStreamEvent{AgentID: 41, ThreadID: thread, Type: "tool.call", Time: now, Data: json.RawMessage(`{"id":"recovered","name":"code_repos_list","reason":"Listing available repositories"}`)}
+	ch <- sdk.TelemetryStreamEvent{AgentID: 41, ThreadID: thread, Type: "tool.result", Time: now.Add(time.Millisecond), Data: json.RawMessage(`{"id":"recovered","name":"code_repos_list","success":true,"duration_ms":1}`)}
+	close(ch)
+	var attempts atomic.Int32
+	tc := telemetrySubscriberFunc(func(_ context.Context, sub sdk.TelemetrySubscription) (<-chan sdk.TelemetryStreamEvent, error) {
+		if sub.ThreadPrefix != "chat-" {
+			return nil, fmt.Errorf("unexpected subscription: %+v", sub)
+		}
+		if attempts.Add(1) == 1 {
+			return nil, fmt.Errorf("telemetry subscribe: HTTP 401")
+		}
+		return ch, nil
+	})
+	feedCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	done := make(chan struct{})
+	go func() {
+		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{ThreadPrefix: "chat-"}, false)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup auth failure did not recover")
+	}
+	rows, err := a.store.toolActivities(conv.ID)
+	if err != nil || attempts.Load() != 2 || len(rows) != 1 || rows[0].Status != "completed" || rows[0].Name != "code_repos_list" {
+		t.Fatalf("recovery: attempts=%d rows=%+v err=%v", attempts.Load(), rows, err)
+	}
+	for _, status := range []string{"running", "completed"} {
+		select {
+		case frame := <-frames:
+			if frame.Activity == nil || frame.Activity.Status != status {
+				t.Fatalf("live frame: %+v, want %s activity", frame, status)
+			}
+		default:
+			t.Fatalf("missing %s live frame", status)
+		}
+	}
+}
+
+func TestTelemetryStartupRetryStopsOnUnmount(t *testing.T) {
+	a, ctx, _ := newTestEnv(t)
+	feedCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	attempted := make(chan struct{}, 1)
+	var attempts atomic.Int32
+	tc := telemetrySubscriberFunc(func(context.Context, sdk.TelemetrySubscription) (<-chan sdk.TelemetryStreamEvent, error) {
+		attempts.Add(1)
+		attempted <- struct{}{}
+		return nil, fmt.Errorf("telemetry subscribe: HTTP 401")
+	})
+	done := make(chan struct{})
+	go func() {
+		a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{}, false)
+		close(done)
+	}()
+	<-attempted
+	stop()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled subscription kept retrying")
+	}
+	if attempts.Load() != 1 {
+		t.Fatalf("subscription retried after cancellation: %d", attempts.Load())
+	}
+}
+
+func TestRetryTelemetrySubscriptionOnlyStopsForPermanentRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "startup unauthorized", err: fmt.Errorf("telemetry subscribe: HTTP 401"), want: true},
+		{name: "temporary unavailable", err: fmt.Errorf("telemetry subscribe: HTTP 503"), want: true},
+		{name: "permission denied", err: fmt.Errorf("telemetry subscription unsupported: HTTP 403"), want: false},
+		{name: "bridge missing", err: fmt.Errorf("telemetry subscription unsupported: HTTP 404"), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := retryTelemetrySubscription(tc.err); got != tc.want {
+				t.Fatalf("retryTelemetrySubscription(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }

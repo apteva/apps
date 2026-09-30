@@ -55,8 +55,11 @@ func alertCard(text, severity string) Component {
 // ─── the inbox view ──────────────────────────────────────────────────
 
 type InboxItem struct {
-	Message  Message `json:"message"`
-	Priority int     `json:"priority"`
+	Message     Message `json:"message"`
+	Priority    int     `json:"priority"`
+	ProjectID   string  `json:"project_id,omitempty"`
+	ProjectName string  `json:"project_name,omitempty"`
+	AgentName   string  `json:"agent_name,omitempty"`
 }
 
 // inboxPriority mirrors the dashboard's ordering: pending approvals
@@ -95,18 +98,54 @@ func (s *store) InboxForAgent(projectID string, userID, agentID int64, limit int
 }
 
 type InboxPage struct {
-	Items      []InboxItem    `json:"items"`
-	Total      int            `json:"total"`
-	NextCursor string         `json:"next_cursor"`
-	Attention  map[string]int `json:"attention"`
+	Items             []InboxItem    `json:"items"`
+	Total             int            `json:"total"`
+	NextCursor        string         `json:"next_cursor"`
+	Attention         map[string]int `json:"attention"`
+	Projects          []InboxProject `json:"projects,omitempty"`
+	SelectedProjectID string         `json:"selected_project_id,omitempty"`
+}
+
+type InboxProject struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 const inboxPrioritySQL = `CASE m.component_kind WHEN 'approval' THEN 0 WHEN 'alert' THEN CASE m.severity WHEN 'error' THEN 1 WHEN 'warn' THEN 2 ELSE 3 END WHEN 'report' THEN 4 ELSE 9 END`
 
 func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cursor string, allowedAgents ...int64) (InboxPage, error) {
+	page, err := s.InboxPageAcrossProjects([]string{projectID}, userID, agentID, limit, cursor, allowedAgents...)
+	if err != nil {
+		return page, err
+	}
+	// Preserve the established project-scoped response shape. Project metadata
+	// is only needed by the global Home widget.
+	for i := range page.Items {
+		page.Items[i].ProjectID = ""
+	}
+	return page, nil
+}
+
+// InboxPageAcrossProjects applies the ordinary inbox ownership and participant
+// checks to one server-authorized project allowlist. The caller must derive the
+// allowlist from the platform; browser-supplied project lists are never trusted.
+func (s *store) InboxPageAcrossProjects(projectIDs []string, userID, agentID int64, limit int, cursor string, allowedAgents ...int64) (InboxPage, error) {
 	out := InboxPage{Items: []InboxItem{}}
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	seenProjects := map[string]bool{}
+	projects := make([]string, 0, len(projectIDs))
+	for _, projectID := range projectIDs {
+		projectID = strings.TrimSpace(projectID)
+		if projectID != "" && !seenProjects[projectID] {
+			seenProjects[projectID] = true
+			projects = append(projects, projectID)
+		}
+	}
+	if len(projects) == 0 {
+		out.Attention = map[string]int{}
+		return out, nil
 	}
 	priority, lastID := -1, int64(0)
 	if cursor != "" {
@@ -114,12 +153,18 @@ func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cu
 			return out, errors.New("invalid inbox cursor")
 		}
 	}
+	projectMarks := make([]string, len(projects))
+	args := make([]any, 0, len(projects)+5)
+	for i, projectID := range projects {
+		projectMarks[i] = "?"
+		args = append(args, projectID)
+	}
 	base := ` FROM messages m JOIN conversations c ON c.id=m.conversation_id
- WHERE c.project_id=? AND c.archived_at IS NULL
+ WHERE c.project_id IN (` + strings.Join(projectMarks, ",") + `) AND c.archived_at IS NULL
  AND ((c.owner_user_id=0 AND ?>0) OR c.owner_user_id=? OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.user_id=?))
  AND (?=0 OR EXISTS(SELECT 1 FROM participants p WHERE p.conversation_id=c.id AND p.agent_id=?))
  AND m.component_kind IN('approval','alert','report') AND (m.component_kind!='approval' OR m.action_status='pending') AND m.dismissed=0` + allowedConversationSQL(allowedAgents)
-	args := []any{projectID, userID, userID, userID, agentID, agentID}
+	args = append(args, userID, userID, userID, agentID, agentID)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return out, err
@@ -150,17 +195,18 @@ func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cu
 		return out, err
 	}
 	paged := base + ` AND (?=-1 OR ` + inboxPrioritySQL + `>? OR (` + inboxPrioritySQL + `=? AND m.id<?)) ORDER BY ` + inboxPrioritySQL + `,m.id DESC LIMIT ?`
-	rows, err := tx.Query(`SELECT `+prefixCols("m.", messageCols)+paged, append(args, priority, priority, priority, lastID, limit+1)...)
+	rows, err := tx.Query(`SELECT `+prefixCols("m.", messageCols)+`,c.project_id`+paged, append(args, priority, priority, priority, lastID, limit+1)...)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
-		m, err := scanMessage(rows)
+		var projectID string
+		m, err := scanMessage(inboxMessageScanner{scanner: rows, projectID: &projectID})
 		if err != nil {
 			rows.Close()
 			return out, err
 		}
-		out.Items = append(out.Items, InboxItem{Message: *m, Priority: inboxPriority(m)})
+		out.Items = append(out.Items, InboxItem{Message: *m, Priority: inboxPriority(m), ProjectID: projectID})
 	}
 	err = rows.Err()
 	rows.Close()
@@ -173,6 +219,15 @@ func (s *store) InboxPage(projectID string, userID, agentID int64, limit int, cu
 		out.NextCursor = fmt.Sprintf("%d:%d", last.Priority, last.Message.ID)
 	}
 	return out, tx.Commit()
+}
+
+type inboxMessageScanner struct {
+	scanner   interface{ Scan(...any) error }
+	projectID *string
+}
+
+func (s inboxMessageScanner) Scan(dest ...any) error {
+	return s.scanner.Scan(append(dest, s.projectID)...)
 }
 
 // sortInbox: priority ascending, then newest first. Insertion sort —

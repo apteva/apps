@@ -64,7 +64,18 @@ func (a *App) handleToolActivity(w http.ResponseWriter, r *http.Request) {
 }
 func visibleActivityTool(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
-	return name != "" && name != "search_tools" && !strings.HasPrefix(name, "conversations_") && !strings.Contains(name, "_conversations_") && !visibleConversationTool(name) && name != "pace" && name != "done" && name != "wait" && name != "think"
+	if name == "" || name == "search_tools" || name == "send" || name == "pace" || name == "done" || name == "wait" || name == "think" {
+		return false
+	}
+	// Core send reports between threads and is internal conversation plumbing.
+	// conversations_send is represented by the resulting chat message and
+	// response bubble, so showing a second activity row would duplicate it.
+	// Other Conversations tools are meaningful work (for example reading an
+	// attachment) and should be visible in the shared activity timeline.
+	if visibleConversationTool(name) {
+		return false
+	}
+	return true
 }
 func activityTime(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
 func (a *App) ingestToolActivity(event string, agent int64, thread, data string, ts time.Time) error {

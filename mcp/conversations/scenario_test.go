@@ -160,6 +160,75 @@ func TestScenario_ChatRoundTrip(t *testing.T) {
 	t.Fatal("no agent reply within 120s")
 }
 
+// TestScenario_LongMultiStepProgress proves that a real agent makes the
+// stage boundary visible: acknowledgement, first work stage, progress, next
+// work stage, then one final outcome. The YAML trajectory assertions verify
+// the tool ordering; this driver also waits for the durable final message so
+// a missing progress update cannot be hidden by an otherwise correct answer.
+func TestScenario_LongMultiStepProgress(t *testing.T) {
+	c := newScenarioClient(t)
+	agentID, cleanupAgent := c.ensureAgent()
+	defer cleanupAgent()
+
+	var list struct {
+		ID int64 `json:"id"`
+	}
+	if status := c.do("POST", "/api/apps/todo/lists", map[string]any{
+		"name": "Progress fixture",
+	}, &list); status != http.StatusOK || list.ID == 0 {
+		t.Fatalf("seed todo list: status=%d list=%+v", status, list)
+	}
+	for _, title := range []string{"First fixture todo", "Second fixture todo"} {
+		if status := c.do("POST", "/api/apps/todo/todos", map[string]any{
+			"title": title, "list_id": list.ID, "source": "human",
+		}, nil); status != http.StatusOK {
+			t.Fatalf("seed todo %q: status=%d", title, status)
+		}
+	}
+
+	var conv struct {
+		ID string `json:"id"`
+	}
+	status := c.do("POST", "/api/apps/conversations/chats", map[string]any{
+		"agent_id": agentID, "title": "Live long multi-step progress (codex)",
+	}, &conv)
+	if status != http.StatusOK || conv.ID == "" {
+		t.Fatalf("create conversation: status=%d conv=%+v", status, conv)
+	}
+	defer c.do("DELETE", "/api/apps/conversations/chats?id="+conv.ID, nil, nil)
+
+	content := "Complete this two-stage read-only task. First call the todo lists tool and tell me how many lists you found. That is stage one. Send a concise conversations_send phase=progress update before starting stage two, even if stage one was quick. Then call the todo todos tool for the Progress fixture list and summarize it. Send exactly one final phase=final message containing the token LONG_PROGRESS_DONE. Start with a phase=acknowledgement message before any work tool, and keep that acknowledgement as the only tool call in its turn."
+	if status := c.do("POST", "/api/apps/conversations/messages?chat_id="+conv.ID, map[string]any{
+		"content": content, "client_message_id": "live-long-progress-1",
+	}, nil); status != http.StatusOK {
+		t.Fatalf("post long multi-step message: status=%d", status)
+	}
+
+	deadline := time.Now().Add(180 * time.Second)
+	for time.Now().Before(deadline) {
+		var transcript []Message
+		c.do("GET", "/api/apps/conversations/messages?chat_id="+conv.ID, nil, &transcript)
+		hasProgress := false
+		hasFinal := false
+		for _, message := range transcript {
+			if message.Role != "agent" {
+				continue
+			}
+			hasProgress = hasProgress || message.Phase == "progress"
+			hasFinal = hasFinal || message.Phase == "final" && strings.Contains(message.Content, "LONG_PROGRESS_DONE")
+		}
+		if hasFinal {
+			if !hasProgress {
+				t.Fatalf("agent reached final outcome without an intermediate progress message: %+v", transcript)
+			}
+			t.Log("real Codex emitted an intermediate progress message between multi-step stages")
+			return
+		}
+		time.Sleep(3 * time.Second)
+	}
+	t.Fatal("no final long multi-step Codex reply within 180s")
+}
+
 // TestScenario_SingleConversationRoundTrip proves the focused widget's
 // server-selected conversation is the same durable chat used for a real Codex
 // turn. It covers the lead-agent projection without introducing a second chat
@@ -358,7 +427,7 @@ func TestScenario_ImageStorageTicket(t *testing.T) {
 		value color.RGBA
 	}{{"red", color.RGBA{255, 0, 0, 255}}, {"blue", color.RGBA{0, 0, 255, 255}}, {"green", color.RGBA{0, 180, 0, 255}}}
 	selected := colours[time.Now().UnixNano()%int64(len(colours))]
-	canvas := image.NewRGBA(image.Rect(0, 0, 128, 128))
+	canvas := image.NewRGBA(image.Rect(0, 0, 512, 512))
 	draw.Draw(canvas, canvas.Bounds(), &image.Uniform{C: selected.value}, image.Point{}, draw.Src)
 	var encoded bytes.Buffer
 	if err := png.Encode(&encoded, canvas); err != nil {

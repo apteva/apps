@@ -36,13 +36,18 @@ func (a *App) delegatedHTTP(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		subject := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-ID"))
 		issuer := strings.TrimSpace(r.Header.Get("X-Apteva-Issuer-App"))
-		if subject == "" && issuer == "" && r.Header.Get("X-Apteva-Subject-Type") == "" && r.Header.Get("X-Apteva-Issuer-Install-ID") == "" {
+		install := strings.TrimSpace(r.Header.Get("X-Apteva-Issuer-Install-ID"))
+		// Signed first-party principals also carry subject_type=user and a
+		// subject id. Only delegated application users carry issuer markers.
+		// The platform strips client-supplied identity headers before signing
+		// this request, so subject-only identity is safe to leave on the normal
+		// operator path.
+		if issuer == "" && install == "" {
 			next(w, r)
 			return
 		}
 		project := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
 		kind := strings.TrimSpace(r.Header.Get("X-Apteva-Subject-Type"))
-		install := strings.TrimSpace(r.Header.Get("X-Apteva-Issuer-Install-ID"))
 		if subject == "" || issuer == "" || project == "" || kind == "" || install == "" {
 			http.Error(w, "incomplete application-user identity", 401)
 			return

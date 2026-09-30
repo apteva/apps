@@ -1,4 +1,4 @@
-// Port of dashboard/src/components/chat/ToolActivity.tsx; keep presentation in parity.
+// Conversations tool activity presentation, adapted from the dashboard chat.
 import { useEffect, useMemo, useState } from "react";
 import { useToolTranslation as useTranslation } from "./toolActivityAdapter";
 import { AppIcon } from "./toolAppIcon";
@@ -13,11 +13,12 @@ import {
 interface ToolActivityProps {
   tools: ToolActivity[];
   parallel?: boolean;
-  continuing?: boolean;
   expanded?: boolean;
   onToggle?: () => void;
   registry: ToolVisualRegistry;
   detailsId?: string;
+  showCompletion?: boolean;
+  showDuration?: boolean;
 }
 
 type VisualState = "preparing" | "running" | "done" | "failed" | "interrupted";
@@ -91,14 +92,15 @@ function summaryFocusTool(tools: ToolActivity[]): ToolActivity {
 export function ChatToolActivity({
   tools,
   parallel = false,
-  continuing = false,
   expanded = false,
   onToggle,
   registry,
   detailsId,
+  showCompletion = false,
+  showDuration = false,
 }: ToolActivityProps) {
   const { t } = useTranslation();
-  const running = tools.some(tool => tool.state === "running");
+  const running = showDuration && tools.some(tool => tool.state === "running");
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!running) return;
@@ -107,7 +109,7 @@ export function ChatToolActivity({
     return () => window.clearInterval(timer);
   }, [running]);
   if (tools.length === 0) return null;
-  const duration = durationLabel(toolGroupDurationMs(tools, now));
+  const duration = showDuration ? durationLabel(toolGroupDurationMs(tools, now)) : "";
 
   const grouped = tools.length > 1;
   const status = grouped
@@ -120,22 +122,21 @@ export function ChatToolActivity({
     : reasonLabel(tools[0]!, t);
   const focusTool = summaryFocusTool(tools);
   const focusReason = reasonLabel(focusTool, t);
-  const copyIsActive =
-    continuing || status.state === "preparing" || status.state === "running";
+  const copyIsActive = status.state === "preparing" || status.state === "running";
   const failedCount = tools.filter((tool) => visualState(tool) === "failed").length;
   const visibleFailure = failedCount > 0
     ? grouped
       ? t("chat.panel.toolsFailedCount", { count: failedCount })
       : stateLabel(tools[0]!, t)
     : "";
-  const allSucceeded = !continuing && tools.every((tool) => visualState(tool) === "done");
+  const allSucceeded = tools.every((tool) => visualState(tool) === "done");
   const remainingCount = tools.length - 1;
   const resolvedDetailsId = detailsId || `chat-tool-details-${tools[0]!.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  const accessibleSummary = `${title}, ${focusReason}, ${status.text}${continuing ? `, ${t("chat.panel.startingResponse")}` : ""}`;
+  const accessibleSummary = `${title}, ${focusReason}, ${status.text}`;
 
   return (
     <section
-      className={`chat-tool-activity min-w-0 py-0.5 ${continuing ? "chat-tool-activity-continuing" : ""}`}
+      className="chat-tool-activity min-w-0 py-0.5"
       aria-label={accessibleSummary}
     >
       <button
@@ -153,7 +154,7 @@ export function ChatToolActivity({
         onClick={grouped ? onToggle : undefined}
         title={grouped ? `${title} · ${expanded ? t("chat.panel.hideToolCalls") : t("chat.panel.showToolCalls")}` : focusReason}
       >
-        <ToolIconStack tools={tools} registry={registry} continuing={continuing} />
+        <ToolIconStack tools={tools} focusTool={focusTool} registry={registry} />
         <span className="flex min-w-0 flex-col gap-0.5 sm:flex-row sm:items-center sm:gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
@@ -171,7 +172,7 @@ export function ChatToolActivity({
               <FailureIcon />
               <span>{visibleFailure}</span>
             </span>
-          ) : allSucceeded ? (
+          ) : showCompletion && allSucceeded ? (
             <span
               className="inline-flex shrink-0 items-center text-green"
               title={status.text}
@@ -189,7 +190,7 @@ export function ChatToolActivity({
       {grouped && expanded && (
         <div id={resolvedDetailsId} className="mt-1 grid min-w-0 sm:pl-9">
           {tools.map((tool) => (
-            <ToolCallRow key={tool.id} tool={tool} registry={registry} now={now} />
+            <ToolCallRow key={tool.id} tool={tool} registry={registry} now={now} showCompletion={showCompletion} showDuration={showDuration} />
           ))}
         </div>
       )}
@@ -199,42 +200,30 @@ export function ChatToolActivity({
 
 function ToolIconStack({
   tools,
+  focusTool,
   registry,
-  continuing = false,
 }: {
   tools: ToolActivity[];
+  focusTool: ToolActivity;
   registry: ToolVisualRegistry;
-  continuing?: boolean;
 }) {
-  const sources: Array<{ tool: ToolActivity; visual: ToolVisual }> = [];
-  for (const tool of tools) {
-    const visual = resolveToolVisual(tool.name, registry);
-    const existing = sources.find((source) => source.visual.key === visual.key);
-    if (existing) {
-      // Preserve first-seen source ordering, but let any active call for that
-      // source drive the single representative icon's running state.
-      if (existing.tool.state === "done" && tool.state !== "done") existing.tool = tool;
-      continue;
-    }
-    sources.push({ tool, visual });
-  }
-  const visible = sources.slice(0, 4);
-  const extra = Math.max(0, sources.length - visible.length);
+  const primary = resolveToolVisual(focusTool.name, registry);
+  const otherTools = tools.filter((tool) => resolveToolVisual(tool.name, registry).key !== primary.key);
+  const secondaryTool = otherTools.length ? summaryFocusTool(otherTools) : null;
+  const secondary = secondaryTool ? resolveToolVisual(secondaryTool.name, registry) : null;
   return (
     <span
-      className={`flex min-w-[1.9rem] items-center py-0.5 pl-0.5 ${continuing ? "chat-tool-icon-stack-running" : ""}`}
+      className="relative inline-flex h-8 shrink-0 items-center pl-0.5"
       aria-hidden="true"
     >
-      {visible.map(({ tool, visual }, index) => (
-        <span key={visual.key} className={index === 0 ? "relative" : "relative -ml-1.5"} style={{ zIndex: visible.length - index }}>
-          <ToolSourceIcon tool={tool} visual={visual} />
-        </span>
-      ))}
-      {extra > 0 && (
-        <span className="relative -ml-1.5 inline-flex h-7 min-w-7 items-center justify-center rounded-md bg-bg-hover px-1 text-[10px] font-semibold text-text-muted">
-          +{extra}
+      {secondaryTool && secondary && (
+        <span className="relative z-0 rounded-md opacity-65">
+          <ToolSourceIcon tool={secondaryTool} visual={secondary} />
         </span>
       )}
+      <span className={`relative z-10 rounded-md ring-2 ring-bg ${secondary ? "-ml-3" : ""}`}>
+        <ToolSourceIcon tool={focusTool} visual={primary} />
+      </span>
     </span>
   );
 }
@@ -244,16 +233,20 @@ function ToolCallRow({
   registry,
   standalone = false,
   now,
+  showCompletion,
+  showDuration,
 }: {
   tool: ToolActivity;
   registry: ToolVisualRegistry;
   standalone?: boolean;
   now: number;
+  showCompletion: boolean;
+  showDuration: boolean;
 }) {
   const { t } = useTranslation();
   const visual = useMemo(() => resolveToolVisual(tool.name, registry), [tool.name, registry]);
   const state = visualState(tool);
-  const duration = durationLabel(toolDurationMs(tool, now));
+  const duration = showDuration ? durationLabel(toolDurationMs(tool, now)) : "";
   const stateText = stateLabel(tool, t);
   const reason = reasonLabel(tool, t);
   return (
@@ -270,7 +263,7 @@ function ToolCallRow({
         {reason}
       </span>
       <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[10px] font-medium uppercase tracking-wide sm:text-[11px]">
-        {state === "done" && (
+        {showCompletion && state === "done" && (
           <span className="inline-flex text-green" title={stateText} aria-hidden="true">
             <CheckIcon />
           </span>

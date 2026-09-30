@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -72,19 +73,22 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 			continue
 		}
 		if component.Entry != "/ui/AgentConversationsWidget.mjs" ||
-			len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardBuild ||
+			len(component.Slots) != 2 || component.Slots[0] != sdk.UIComponentSlotDashboardBuild || component.Slots[1] != sdk.UIComponentSlotDashboardAgentDetail ||
 			component.Visibility != sdk.UIComponentVisibilityAttached ||
-			component.DefaultSize != "full" {
+			component.DefaultSize != "full" || len(component.SupportedSizes) != 2 || component.SupportedSizes[0] != "half" || component.SupportedSizes[1] != "full" {
 			t.Fatalf("agent-conversations component=%+v", component)
 		}
 		schema, err := json.Marshal(component.SettingsSchema)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`, `"show_page_context"`} {
+		for _, required := range []string{`"display_mode"`, `"browser"`, `"single"`, `"show_new_conversation"`, `"show_page_context"`, `"show_tool_completion"`, `"show_tool_duration"`} {
 			if !strings.Contains(string(schema), required) {
 				t.Fatalf("agent-conversations settings schema missing %s: %s", required, schema)
 			}
+		}
+		if strings.Contains(string(schema), `"default":"browser"`) {
+			t.Fatal("agent-detail must default to focused single mode without changing Build's browser fallback")
 		}
 		bundle, err := os.ReadFile("ui/AgentConversationsWidget.mjs")
 		if err != nil {
@@ -94,12 +98,137 @@ func TestManifestDeclaresScopedAgentConversationWidget(t *testing.T) {
 		// Keep release packaging from silently shipping an older bundle that
 		// ignores a setting already declared by the manifest and covered by
 		// source-level tests.
-		if !strings.Contains(string(bundle), "show_page_context") {
+		if !strings.Contains(string(bundle), "show_page_context") || !strings.Contains(string(bundle), "show_tool_completion") || !strings.Contains(string(bundle), "show_tool_duration") {
 			t.Fatal("agent-conversations bundle is stale: rebuild panels after changing widget settings")
 		}
 		return
 	}
 	t.Fatal("agent-conversations component missing")
+}
+
+func TestManifestDeclaresInboxOnProjectAndGlobalHome(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	for _, component := range manifest.Provides.UIComponents {
+		if component.Name != "inbox-overview" {
+			continue
+		}
+		if len(component.Slots) != 1 || component.Slots[0] != sdk.UIComponentSlotDashboardHome {
+			t.Fatalf("inbox-overview slots=%v", component.Slots)
+		}
+		wantScopes := []string{sdk.UIComponentDashboardScopeProject, sdk.UIComponentDashboardScopeGlobal}
+		if len(component.DashboardScopes) != len(wantScopes) {
+			t.Fatalf("inbox-overview dashboard scopes=%v want=%v", component.DashboardScopes, wantScopes)
+		}
+		for i := range wantScopes {
+			if component.DashboardScopes[i] != wantScopes[i] {
+				t.Fatalf("inbox-overview dashboard scopes=%v want=%v", component.DashboardScopes, wantScopes)
+			}
+		}
+		return
+	}
+	t.Fatal("inbox-overview component missing")
+}
+
+func TestManifestDeclaresConversationsMobileSurface(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if len(manifest.Provides.UISurfaces) != 1 {
+		t.Fatalf("ui surfaces=%+v, want one", manifest.Provides.UISurfaces)
+	}
+	descriptor := manifest.Provides.UISurfaces[0]
+	if descriptor.ID != "conversations" || descriptor.Label != "Conversations" ||
+		descriptor.Icon != "message-circle" || descriptor.Schema != sdk.NativeSurfaceSchemaCurrent ||
+		descriptor.Entry != "/ui/surfaces/conversations.json" ||
+		len(descriptor.Slots) != 1 || descriptor.Slots[0] != sdk.UISurfaceSlotMobileProjectApp {
+		t.Fatalf("surface descriptor=%+v", descriptor)
+	}
+
+	document, err := os.ReadFile("ui/surfaces/conversations.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	surface, err := sdk.ParseNativeSurface(document)
+	if err != nil {
+		t.Fatalf("parse conversations surface: %v", err)
+	}
+	if err := sdk.ValidateNativeSurfaceForDescriptor(surface, descriptor); err != nil {
+		t.Fatalf("validate conversations surface: %v", err)
+	}
+	if len(surface.Sections) != 1 || surface.Sections[0].Component != "chat/v1" || surface.Sections[0].Chat == nil {
+		t.Fatalf("chat surface=%+v", surface.Sections)
+	}
+	chat := surface.Sections[0].Chat
+	if chat.ConversationsSource != "conversations" || chat.MessagesSource != "messages" ||
+		chat.CreateAction != "create-conversation" || chat.SendAction != "send-message" ||
+		chat.MarkSeenAction != "mark-seen" || chat.Subscription == nil {
+		t.Fatalf("chat contract=%+v", chat)
+	}
+	messageEvent := chat.Subscription.Events["message"]
+	streamEvent := chat.Subscription.Events["stream"]
+	if chat.Subscription.CursorQuery != "since" ||
+		messageEvent.Operation != "upsert" || messageEvent.Source != "messages" || messageEvent.Value != "$" || messageEvent.ID != "$.id" ||
+		streamEvent.Operation != "set_activity" || streamEvent.Source != "messages" || streamEvent.Value != "$.text" {
+		t.Fatalf("subscription contract=%+v", chat.Subscription)
+	}
+
+	conversations := surface.DataSources["conversations"]
+	messages := surface.DataSources["messages"]
+	agents := surface.DataSources["agents"]
+	if conversations.Request.Path != "/chats" || conversations.Request.Query["page"] != float64(1) ||
+		conversations.Response.Items != "$.conversations" || conversations.Pagination == nil || conversations.Pagination.RequestKey != "cursor" {
+		t.Fatalf("conversations source=%+v", conversations)
+	}
+	if messages.Request.Path != "/messages" || messages.Request.Query["page"] != float64(1) ||
+		messages.Request.Query["chat_id"] != "$state.conversation_id" || messages.Response.Items != "$.messages" ||
+		messages.Pagination == nil || messages.Pagination.RequestKey != "before" {
+		t.Fatalf("messages source=%+v", messages)
+	}
+	if agents.Request.Path != "/agents" || agents.Request.Method != http.MethodGet {
+		t.Fatalf("agents source=%+v", agents)
+	}
+	for name, expected := range map[string]struct{ method, path string }{
+		"create-conversation": {http.MethodPost, "/chats"},
+		"send-message":        {http.MethodPost, "/messages"},
+		"mark-seen":           {http.MethodPost, "/seen"},
+	} {
+		action := surface.Actions[name]
+		if action.Request == nil || action.Request.Method != expected.method || action.Request.Path != expected.path {
+			t.Fatalf("action %s=%+v", name, action)
+		}
+	}
+}
+
+func TestReleaseVersionArtifactsAgree(t *testing.T) {
+	const releaseVersion = "0.24.23"
+	manifest := (&App{}).Manifest()
+	if manifest.Version != releaseVersion {
+		t.Fatalf("manifest version=%q want=%q", manifest.Version, releaseVersion)
+	}
+	if manifest.Runtime.Source == nil || manifest.Runtime.Source.Ref != "conversations/v"+releaseVersion {
+		t.Fatalf("runtime source=%+v; release installs must use their immutable tag", manifest.Runtime.Source)
+	}
+
+	for _, path := range []string{"frontend/package.json", "ui/frontend.json"} {
+		document, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var artifact struct {
+			Version string `json:"version"`
+		}
+		if err := json.Unmarshal(document, &artifact); err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		if artifact.Version != releaseVersion {
+			t.Fatalf("%s version=%q want=%q", path, artifact.Version, releaseVersion)
+		}
+	}
+	module, err := os.ReadFile("go.mod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(module), "github.com/apteva/app-sdk v0.89.1") {
+		t.Fatal("go.mod must pin app-sdk v0.89.1, the latest SDK release by commit ancestry")
+	}
 }
 
 func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
@@ -109,7 +238,7 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		descriptions[tool.Name] = tool.Description
 	}
 	wants := map[string][]string{
-		"send":             {"originating conversation thread", "generic workers report to their parent"},
+		"send":             {"originating conversation thread", "generic workers report to their parent", "For long multi-step work", "meaningful milestones", "do not narrate individual tool calls"},
 		"request_approval": {"owned by main or by the originating conversation", "Generic workers report"},
 		"report":           {"Main-thread global output only", "generic workers report results"},
 		"alert":            {"global alert from main", "conversation-local urgent alert", "Generic workers report"},
@@ -135,6 +264,8 @@ func TestConversationOwnershipIsTaughtAtEveryModelSurface(t *testing.T) {
 		"do not grant the Conversations MCP",
 		"worker needs approval, it reports the exact",
 		"same capability-ownership pattern used by Tasks",
+		"For long multi-step work, send concise",
+		"Do not send one update per tool",
 	} {
 		if !strings.Contains(string(skill), fragment) {
 			t.Errorf("using-conversations skill missing %q", fragment)

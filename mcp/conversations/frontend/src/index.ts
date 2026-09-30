@@ -4,3 +4,4 @@ export type { CreateConversation, SendMessage, ListConversations, ConversationSu
 export type * from "./types";
 
 export type { ConversationLocalization, ConversationMessages, ConversationMessage, ConversationMessageKey } from "./i18n";
+export type { ComposerInsertOptions, ComposerInsertResult, ComposerInsertStatus, ComposerSuggestion, ConversationComposerHandle } from "./composerHost";

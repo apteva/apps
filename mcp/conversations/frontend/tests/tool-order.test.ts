@@ -25,11 +25,12 @@ test("fast call/result bursts paint running first without blocking parallel star
  expect(splitActivityPaint(first.deferred).paint).toEqual([result]);
 });
 
-test("tool progress belongs to the response, not the last transcript item",()=>{
+test("only an executing tool owns the response indicator",()=>{
  const user={id:7,role:"user",created_at:new Date(900).toISOString()} as any;
- const timeline=[{kind:"toolGroup",key:"group",tools:[base]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
+ const timeline=[{kind:"toolGroup",key:"group",tools:[{...base,state:"running"}]}, {kind:"message",key:"reply",message:{id:8,role:"agent"}}] as any;
  const response={agentId:41,threadId:"chat-1",afterMessageId:7,createdAt:1200};
  expect(responseToolGroup(response,timeline,[user])).toBe("group");
+ expect(responseToolGroup(response,[{kind:"toolGroup",key:"group",tools:[base]}] as any,[user])).toBeUndefined();
  expect(responseToolGroup({...response,agentId:42},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,threadId:"other"},timeline,[user])).toBeUndefined();
  expect(responseToolGroup({...response,afterMessageId:8,createdAt:3000},timeline,[user])).toBeUndefined();
@@ -49,7 +50,20 @@ test("consecutive tools keep one stable group across long gaps until a message",
  expect(separated.map(item=>item.kind)).toEqual(["toolGroup","message","toolGroup"]);
 });
 
+test("subsecond message timestamps retain the order around a completed tool",()=>{
+ const user={id:826,role:"user",content:"Locate the client onboarding process",created_at:"2026-09-23T12:12:34.761Z"} as any;
+ const tool={...base,startedAt:Date.parse("2026-09-23T12:12:39.537Z"),finishedAt:Date.parse("2026-09-23T12:12:39.554Z")};
+ const acknowledgement={id:828,role:"agent",content:"I'll search",created_at:"2026-09-23T12:12:39.630Z"} as any;
+ const timeline=buildChatTimeline([user,acknowledgement],[tool]).filter(item=>item.kind!=="day" && item.kind!=="time");
+ expect(timeline.map(item=>item.kind)).toEqual(["message","toolGroup","message"]);
+});
+
 test("only the exact internal search_tools lookup is hidden",()=>{
  for(const name of ["search_tools"," SEARCH_TOOLS "]) expect(isVisibleChatTool(name)).toBe(false);
  for(const name of ["tickets_search","agent_query","search_tools_extra","custom_search_tools"]) expect(isVisibleChatTool(name)).toBe(true);
+});
+
+test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
+ for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_request_approval", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send"]) expect(isVisibleChatTool(name)).toBe(true);
+ for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
 });
