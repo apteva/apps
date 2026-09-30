@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.21 — 2026-09-30
+
+- Require a short visible acknowledgement before every tool-backed user request, including one-call lookups, so the user sees what the agent is about to do before work starts.
+- Keep direct no-tool answers and simple image answers immediate.
+
 ## 0.24.20 — 2026-09-30
 
 - Keep the named work-tool row pulsing across the preparation-to-execution handoff, including fast calls and reconnects where the durable activity frame arrives separately.

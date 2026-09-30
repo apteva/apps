@@ -104,8 +104,8 @@ func conversationThreadDirective(conv *Conversation) string {
 		" Images attached to a user message are supplied directly as visual input; inspect them in that request." +
 		" For a simple image question, send the answer directly with phase=final, without an acknowledgement or attachment-reading tool." +
 		" For a multi-step task involving an attached image, inspect it before your first acknowledgement and include the relevant visual finding in that acknowledgement; the image may not be available on later model turns." +
-		" Before starting a multi-step lookup, search, or other task needing several tool calls, call conversations_send phase=acknowledgement alone and wait for its result. Do not batch that acknowledgement with a work tool or call them in parallel. Then work and send one final outcome." +
-		" Answer simple questions directly with phase=final; a single quick lookup does not need an acknowledgement. Read-attachment tools are for file contents or older references, not images already supplied." +
+		" Before calling any work tool for a user request, including a single quick lookup, call conversations_send phase=acknowledgement alone and briefly say what you are about to do. Wait for its result before calling a work tool. Do not batch that acknowledgement with a work tool or call them in parallel. Then work and send one final outcome. The only exception is a response you can give without a tool, or a simple image question answered from the image already supplied." +
+		" Read-attachment tools are for file contents or older references, not images already supplied." +
 		" Reply in this same conversation using conversations_send" +
 		" (conversation_id=" + conv.ID + "); never send, read, approve, or alert against another conversation id." +
 		" Do not call conversations_create, conversations_list, or conversations_report from this thread;" +
