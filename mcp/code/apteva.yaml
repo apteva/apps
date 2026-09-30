@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.14.4
+version: 0.14.5
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.14.5 pins installation builds to the matching Code release, including
+  the reviewed repos_import_zip MCP tool.
   v0.14.4 imports an exact Git branch, tag, or reachable commit SHA while
   preserving branch tracking and pinning tags and commits to detached HEAD.
   v0.14.3 accepts both unified diffs and Codex-style patches, safely
@@ -344,7 +346,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: code/v0.14.3
+    ref: code/v0.14.5
     entry: mcp/code
   port: 8080
   health_check: /health

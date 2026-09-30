@@ -20,6 +20,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
+	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "code/v"+m.Version {
+		t.Fatalf("runtime source must point to code/v%s; installing another ref builds a different release", m.Version)
+	}
 	if len(m.Provides.MCPTools) != 72 {
 		t.Errorf("expected 72 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}

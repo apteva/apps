@@ -1,5 +1,11 @@
 # Apteva Code
 
+## v0.14.5
+
+Corrects the release source pin so installations build `code/v0.14.5`, including
+the reviewed `repos_import_zip` MCP tool. A manifest regression now requires the
+runtime source ref to match the advertised version.
+
 ## v0.14.4
 
 `repos_git_import` accepts branches, tags, and reachable commit SHAs. Branch

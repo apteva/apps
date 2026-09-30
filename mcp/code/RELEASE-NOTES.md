@@ -1,3 +1,14 @@
+# Apteva Code 0.14.5
+
+Corrects the runtime source ref that made 0.14.4 installations build 0.14.3
+source. The published manifest and compiled MCP tool surface now come from the
+same release, including `repos_import_zip` and reachable Git commit imports.
+
+A regression test requires the manifest's source ref to match its version.
+The ZIP preview/apply integration tests exercise the live compiled tool.
+
+---
+
 # Apteva Code 0.14.4
 
 This patch release lets `repos_git_import` pin an import to any reachable Git
