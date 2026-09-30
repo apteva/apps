@@ -22,12 +22,32 @@ export function AttachmentContent({attachments=[],chatID}: {attachments?:Attachm
  return <div className={`chat-message-attachment ${visual?"chat-message-photo":""}`} key={item.id||index}>
  {visual
  ? <button type="button" className="chat-image-preview" aria-label={t("composer.enlarge",{name:item.name||t("attachment.image")})} title={item.name} onClick={()=>setZoom(item)}><img src={item.data_url} alt={item.name||t("attachment.image")} loading="lazy"/></button>
- : <><span className="chat-file-icon" aria-hidden="true">▤</span><div className="chat-file-info"><span>{item.name||t("attachment.image")}</span>{item.size!=null&&<small>{item.mime_type} · {(item.size/1024).toFixed(1)} KB</small>}</div>
+ : <><AttachmentIcon item={item}/><div className="chat-file-info"><span>{item.name||t("attachment.image")}</span>{item.size!=null&&<small>{item.mime_type} · {(item.size/1024).toFixed(1)} KB</small>}</div>
  {item.id&&chatID&&<button type="button" disabled={busy===item.id} onClick={()=>download(item)}>{t("composer.download")}</button>}</>}
  </div>;
  })}</div>}{error&&<p role="alert">{error}</p>}
  {zoom&&<ImageDialog item={zoom} close={()=>setZoom(null)} download={()=>download(zoom)} label={t("composer.close")} downloadLabel={t("composer.download")}/>}
  </>;
+}
+function attachmentKind(item: Attachment): "archive"|"code"|"document"|"generic" {
+ const mime=(item.mime_type??"").toLowerCase();
+ const name=(item.name??"").toLowerCase();
+ const extension=name.includes(".")?name.slice(name.lastIndexOf(".")+1):"";
+ if (mime.includes("zip")||mime.includes("compressed")||["7z","bz2","gz","rar","tar","tgz","xz"].includes(extension)) return "archive";
+ if (["c","cc","cpp","css","go","h","hpp","html","java","js","json","jsx","md","py","rb","rs","sh","sql","ts","tsx","xml","yaml","yml"].includes(extension)) return "code";
+ if (mime.includes("pdf")||mime.includes("document")||mime.includes("spreadsheet")||mime.includes("presentation")||["doc","docx","ods","odt","pdf","ppt","pptx","rtf","xls","xlsx"].includes(extension)) return "document";
+ return "generic";
+}
+function AttachmentIcon({item}:{item:Attachment}) {
+ const kind=attachmentKind(item);
+ return <span className={`chat-file-icon chat-file-icon-${kind}`} aria-hidden="true">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+   {kind==="archive" ? <><path d="m6 3-2 4v13h16V7l-2-4z"/><path d="M4 7h16M8 3v4m4-4v4m4-4v4M10 11h4m-4 3h4m-4 3h4"/></>
+    : kind==="code" ? <><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="m10 13-2 2 2 2m4-4 2 2-2 2"/></>
+    : kind==="document" ? <><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5M9 13h6M9 17h6"/></>
+    : <><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5M9 13h6M9 17h4"/></>}
+  </svg>
+ </span>;
 }
 function ImageDialog({item,close,download,label,downloadLabel}:{item:Attachment;close:()=>void;download:()=>void;label:string;downloadLabel:string}){
  const ref=useRef<HTMLDialogElement>(null);useEffect(()=>{ref.current?.showModal();return()=>ref.current?.close()},[]);
