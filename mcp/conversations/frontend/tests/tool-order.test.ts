@@ -64,6 +64,6 @@ test("only the exact internal search_tools lookup is hidden",()=>{
 });
 
 test("conversation work tools appear in panels and widgets while reply sends stay in bubbles",()=>{
- for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_request_approval", "conversations_report", " CODE_REPOS_LIST "]) expect(isVisibleChatTool(name)).toBe(true);
- for(const name of ["", "pace", "done", "wait", "think", "conversations_send", "conversations_conversations_send", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
+ for(const name of ["conversations_read_attachment", "conversations_conversations_read_attachment", "conversations_history", "conversations_request_approval", "conversations_report", " CODE_REPOS_LIST ", "sms_send", "slack_send"]) expect(isVisibleChatTool(name)).toBe(true);
+ for(const name of ["", "pace", "done", "wait", "think", "send", " SEND ", "conversations_send", "conversations_conversations_send", "channels_send", "channels_channels_respond"]) expect(isVisibleChatTool(name)).toBe(false);
 });

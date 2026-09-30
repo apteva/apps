@@ -510,7 +510,7 @@ for (const host of ["dashboard","external","package"]) {
 
 
 for (const host of ["dashboard","external","package"]) {
- test(`${host}: internal tool lookup stays hidden live and after reload without hiding other searches`,async({page,request})=>{
+ test(`${host}: internal lookup and parent-thread send stay hidden live and after reload`,async({page,request})=>{
   await request.post("/reset");await page.goto(`/?host=${host}`);
   await expect(page.getByTitle("Live")).toBeVisible();
   const chat=host==="dashboard"?"chat-operator":"chat-visitor-a";
@@ -520,14 +520,19 @@ for (const host of ["dashboard","external","package"]) {
   await request.post("/emit",{data:{...frame,tool_activity:activity}});
   await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
+  await request.post("/emit",{data:{...frame,response_progress:{phase:"preparing_tool",tool_name:"send",call_id:"parent-report",run_id:"turn",revision:2,after_message_id:0,started_at:activity.started_at}}});
+  await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:803,call_id:"parent-report",name:"send",reason:"Reporting repository results",status:"completed",revision:2}}});
+  await expect(page.locator(".chat-tool-activity")).toHaveCount(0);
   await request.post("/emit",{data:{...frame,tool_activity:{...activity,id:802,call_id:"search",name:"tickets_search",reason:"Searching tickets"}}});
   await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
   await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
   await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
   await expect(page.locator(".chat-tool-activity").getByText("+1",{exact:true})).toHaveCount(0);
   await page.reload();
   await expect(page.locator(".chat-tool-activity")).toHaveCount(1);
   await expect(page.getByText("Searching tickets",{exact:true})).toBeVisible();
   await expect(page.getByText("Internal capability lookup",{exact:true})).toHaveCount(0);
+  await expect(page.getByText("Reporting repository results",{exact:true})).toHaveCount(0);
  });
 }

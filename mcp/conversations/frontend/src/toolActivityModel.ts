@@ -171,8 +171,9 @@ export function toolGroupDurationMs(tools: ToolActivity[], now: number): number 
 // Also filter stored rows from older app versions that recorded internal tools.
 export function isVisibleChatTool(name: string): boolean {
   const normalized = name.trim().toLowerCase();
-  if (["", "search_tools", "pace", "done", "wait", "think"].includes(normalized)) return false;
-  // Sending a reply already produces a message; other Conversations tools
+  if (["", "search_tools", "send", "pace", "done", "wait", "think"].includes(normalized)) return false;
+  // Core send reports between threads; reply sends already produce a message.
+  // Other Conversations tools
   // (including attachment reads) belong in the shared activity timeline.
   return !["conversations_send", "channels_send", "channels_respond"].some(base =>
     normalized === base || normalized.endsWith(`_${base}`));

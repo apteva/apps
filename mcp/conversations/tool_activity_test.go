@@ -126,8 +126,23 @@ func TestConversationSendStaysInReplyBubbleButOtherConversationToolsAreVisible(t
 	if err != nil || len(rows) != 6 {
 		t.Fatalf("live rows: %+v, %v", rows, err)
 	}
-	if visibleActivityTool("conversations_send") {
-		t.Fatal("send should remain represented by the reply bubble")
+	for _, name := range []string{"send", " SEND ", "conversations_send"} {
+		if visibleActivityTool(name) {
+			t.Fatalf("internal/reply send should be hidden: %s", name)
+		}
+		data, _ := json.Marshal(map[string]string{"id": "hidden-" + name, "name": name})
+		if err := a.ingestToolActivity("tool.call", 41, thread, string(data), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Retained send records from older versions are hidden without deletion.
+	_, err = a.store.db.Exec(`INSERT INTO conversation_tool_activity(conversation_id,agent_id,thread_id,call_id,name,started_at) VALUES(?,?,?,?,?,?)`, conv.ID, 41, thread, "legacy-send", "send", activityTime(time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err = a.store.toolActivities(conv.ID)
+	if err != nil || len(rows) != 6 {
+		t.Fatalf("internal sends leaked in live/history rows: %+v, %v", rows, err)
 	}
 	// Simulate an approval call persisted by a previous version; it is now
 	// visible after the activity policy change.
@@ -139,7 +154,7 @@ func TestConversationSendStaysInReplyBubbleButOtherConversationToolsAreVisible(t
 	if err != nil || len(rows) != 7 {
 		t.Fatalf("history rows: %+v, %v", rows, err)
 	}
-	if !visibleActivityTool("tickets_create") || !visibleActivityTool("code_delete_repository") {
+	if !visibleActivityTool("tickets_create") || !visibleActivityTool("code_delete_repository") || !visibleActivityTool("sms_send") || !visibleActivityTool("slack_send") {
 		t.Fatal("unrelated tools hidden")
 	}
 }

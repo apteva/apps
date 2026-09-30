@@ -64,9 +64,10 @@ func (a *App) handleToolActivity(w http.ResponseWriter, r *http.Request) {
 }
 func visibleActivityTool(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" || name == "search_tools" || name == "pace" || name == "done" || name == "wait" || name == "think" {
+	if name == "" || name == "search_tools" || name == "send" || name == "pace" || name == "done" || name == "wait" || name == "think" {
 		return false
 	}
+	// Core send reports between threads and is internal conversation plumbing.
 	// conversations_send is represented by the resulting chat message and
 	// response bubble, so showing a second activity row would duplicate it.
 	// Other Conversations tools are meaningful work (for example reading an

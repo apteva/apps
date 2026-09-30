@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.18 — 2026-09-30
+
+- Hide Core’s internal parent-thread `send` activity by default across all chat surfaces, including preparation and historical rows after refresh.
+- Preserve real work tools such as repository calls, attachment reads, and app-specific send tools.
+
 ## 0.24.17 — 2026-09-30
 
 - Keep Thinking and tool preparation active for queued follow-up requests; previous-response housekeeping and final sends cannot settle the new response.
