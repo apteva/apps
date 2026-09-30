@@ -30,6 +30,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -69,16 +70,17 @@ type streamState struct {
 }
 
 type streamer struct {
-	responses   map[string]*responseProgressState
-	progressSeq uint64
-	hub         *hub
-	resolve     func(int64, string) string
-	throttle    time.Duration
-	mu          sync.Mutex
-	buffers     map[string]*streamState
-	lastEmit    map[string]string
-	touched     map[string]time.Time
-	ackTimes    map[string]time.Time
+	responses          map[string]*responseProgressState
+	progressSeq        uint64
+	telemetryConnected bool
+	hub                *hub
+	resolve            func(int64, string) string
+	throttle           time.Duration
+	mu                 sync.Mutex
+	buffers            map[string]*streamState
+	lastEmit           map[string]string
+	touched            map[string]time.Time
+	ackTimes           map[string]time.Time
 	// pendingAcks maps conversation → the outstanding ack frame's call
 	// id. Ack ids are unique per emission (ackSeq): providers like
 	// Gemini reuse call ids across responses, and the panel tombstones
@@ -186,6 +188,13 @@ func (s *streamer) Ingest(eventType string, agentID int64, threadID, dataJSON st
 		conversationID = s.resolve(agentID, threadID)
 	}
 	if conversationID == "" {
+		return
+	}
+	s.mu.Lock()
+	p := s.responses[responseProgressKey(conversationID, agentID)]
+	queued := p != nil && p.inboundPreview != "" && !p.inboundReceived
+	s.mu.Unlock()
+	if queued && eventType != "event.received" {
 		return
 	}
 	s.ingestProgress(eventType, agentID, threadID, conversationID, dataJSON, ts)
@@ -345,15 +354,38 @@ func (s *streamer) onToolEnd(agentID int64, threadID, conversationID, dataJSON s
 // message forwarded" and "agent reply landed". Each emission mints a
 // fresh call id and records it as the conversation's pending ack.
 func (s *streamer) emitAck(conversationID, threadID string, agentID int64, afterMessageIDs ...int64) {
-	s.mu.Lock()
-	s.pruneLocked()
-	s.ackSeq++
-	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
 	afterID := int64(0)
 	if len(afterMessageIDs) > 0 {
 		afterID = afterMessageIDs[0]
 	}
-	s.responses[responseProgressKey(conversationID, agentID)] = &responseProgressState{ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, AfterMessageID: afterID, StartedAt: time.Now()}, agentID: agentID, threadID: threadID, chatID: conversationID, touched: time.Now()}
+	s.emitResponseAck(conversationID, threadID, agentID, afterID, "")
+}
+
+func (s *streamer) emitInboundAck(chat, thread string, agent int64, msg *Message) {
+	// Core's event.received preview contains at most the first 100 bytes.
+	preview := "[chat] " + msg.Content
+	if len(preview) > 100 {
+		preview = preview[:100]
+		for !utf8.ValidString(preview) {
+			preview = preview[:len(preview)-1]
+		}
+	}
+	s.mu.Lock()
+	connected := s.telemetryConnected
+	s.mu.Unlock()
+	if !connected {
+		preview = "" // Keep durable-reply settlement on servers without telemetry.
+	}
+	s.emitResponseAck(chat, thread, agent, msg.ID, preview)
+}
+
+func (s *streamer) emitResponseAck(conversationID, threadID string, agentID, afterID int64, preview string) {
+	s.mu.Lock()
+	s.pruneLocked()
+	s.ackSeq++
+	id := "ack-" + conversationID + "-" + strconv.FormatUint(s.ackSeq, 10)
+	now := time.Now()
+	s.responses[responseProgressKey(conversationID, agentID)] = &responseProgressState{ResponseProgress: ResponseProgress{Phase: "thinking", RunID: id, AfterMessageID: afterID, StartedAt: now}, agentID: agentID, threadID: threadID, chatID: conversationID, touched: now, lastEvent: now, inboundPreview: preview}
 	s.progressSeq++
 	s.responses[responseProgressKey(conversationID, agentID)].Revision = s.progressSeq
 	progress := s.progressFrame(s.responses[responseProgressKey(conversationID, agentID)])
@@ -465,7 +497,7 @@ func (a *App) runTelemetryFeed(ctx *sdk.AppCtx) bool {
 	feedCtx, cancel := context.WithCancel(context.Background())
 	a.telemetryStop = cancel
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
-		Events:       []string{"llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
+		Events:       []string{"event.received", "llm.start", "llm.tool_chunk", "tool.call", "tool.result", "llm.error", "llm.err", "thread.done"},
 		ThreadPrefix: "chat-",
 	}, false)
 	go a.connectTelemetryFeed(ctx, tc, feedCtx, sdk.TelemetrySubscription{
@@ -491,6 +523,11 @@ func (a *App) connectTelemetryFeed(ctx *sdk.AppCtx, tc sdk.TelemetryClient, feed
 		}
 		ch, err := tc.SubscribeTelemetry(feedCtx, sub)
 		if err == nil {
+			if !voice {
+				a.streamer.mu.Lock()
+				a.streamer.telemetryConnected = true
+				a.streamer.mu.Unlock()
+			}
 			ctx.Logger().Info("telemetry bridge connected", "thread_prefix", sub.ThreadPrefix)
 			if voice {
 				a.consumeVoiceTelemetry(ctx, ch)
@@ -547,6 +584,9 @@ func (a *App) consumeChatTelemetry(ctx *sdk.AppCtx, ch <-chan sdk.TelemetryStrea
 		}
 		a.streamer.Ingest(ev.Type, ev.AgentID, ev.ThreadID, string(ev.Data), ev.Time)
 	}
+	a.streamer.mu.Lock()
+	a.streamer.telemetryConnected = false
+	a.streamer.mu.Unlock()
 	_ = a.store.interruptToolActivities()
 	ctx.Logger().Info("telemetry feed ended")
 }

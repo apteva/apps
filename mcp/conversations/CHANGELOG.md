@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.17 — 2026-09-30
+
+- Keep Thinking and tool preparation active for queued follow-up requests; previous-response housekeeping and final sends cannot settle the new response.
+- Register progress before event delivery and transfer ownership when the agent consumes the inbound message, including fast first responses.
+- Verify three consecutive replies and reconnects during Thinking, preparation, execution, and continuation, with real animation assertions across panel/widget, external, and package hosts.
+
 ## 0.24.16 — 2026-09-30
 
 - Retry transient telemetry subscription failures during startup, including HTTP 401 while a local install is being enabled, so tool activity and voice capture recover automatically.

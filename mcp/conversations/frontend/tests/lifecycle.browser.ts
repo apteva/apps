@@ -52,3 +52,42 @@ for (const host of ["dashboard", "external", "package"]) {
   await page.screenshot({path:test.info().outputPath("ordered-lifecycle.png")});
  });
 }
+
+for (const host of ["dashboard", "panel", "external", "package"]) {
+ test(`${host}: second and third responses keep animated progress through refresh`, async ({page,request}) => {
+  await request.post("/reset");
+  if(host==="panel") await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",audience:"operator",origin:"web",created_at:"",updated_at:""}]});
+  await page.goto(host==="panel"?"/?host=dashboard&surface=panel":`/?host=${host}`);
+  await expect(page.getByTitle("Live")).toBeVisible();
+  const chat=(host==="dashboard"||host==="panel")?"chat-operator":"chat-visitor-a";
+  const base={chat_id:chat,agent_id:41,thread_id:chat}; let revision=0;
+  const thinking=page.getByRole("status",{name:"Thinking",exact:true});
+  const animatedThinking=async()=>{
+   await expect(thinking).toBeVisible();
+   expect(await thinking.locator(".chat-thinking-dots > span").first().evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-thinking-dot");
+  };
+  const animatedTool=async()=>{
+   await expect(page.locator(".chat-tool-copy-running")).toHaveCount(1);
+   expect(await page.locator(".chat-tool-copy-running").evaluate(el=>getComputedStyle(el).animationName)).toContain("chat-tool-copy-breathe");
+  };
+  for(let response=0;response<3;response++) {
+   const id=response*2+1, start=new Date().toISOString(), call=`request-${response}`;
+   await request.post("/append-message",{data:{id,conversation_id:chat,role:"user",content:`Request ${response+1}`,created_at:start}});
+   const progress=(phase:string,extra={})=>request.post("/emit",{data:{...base,response_progress:{phase,run_id:call,revision:++revision,after_message_id:id,started_at:start,...extra}}});
+   await progress("thinking"); await animatedThinking();
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedThinking();
+   await progress("preparing_tool",{tool_name:"code_repos_list",call_id:call,tool_started_at:new Date().toISOString()});
+   await animatedTool(); await expect(thinking).toHaveCount(0);
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool();
+   const tool={id:900+response,chat_id:chat,agent_id:41,thread_id:chat,call_id:call,name:"code_repos_list",reason:"Listing repositories",status:"running",started_at:new Date().toISOString(),revision:1};
+   await request.post("/emit",{data:{...base,tool_activity:tool}}); await progress("running"); await animatedTool();
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedTool();
+   await request.post("/emit",{data:{...base,tool_activity:{...tool,status:"completed",ended_at:new Date().toISOString(),revision:2}}});
+   await progress("continuing"); await animatedThinking();
+   await page.reload(); await expect(page.getByTitle("Live")).toBeVisible(); await animatedThinking();
+   await request.post("/append-message",{data:{id:id+1,conversation_id:chat,role:"agent",agent_id:41,content:`Reply ${response+1}`,created_at:new Date().toISOString()}});
+   await progress("idle"); await expect(thinking).toHaveCount(0);
+   await expect(page.locator(".chat-tool-copy-running")).toHaveCount(0);
+  }
+ });
+}

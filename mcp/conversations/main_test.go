@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -31,6 +32,7 @@ type recordingPlatform struct {
 	realtimeRenewals       []sdk.ThreadRef
 	realtimeSpawnHook      func(sdk.RealtimeSpawnRequest)
 	ensures                []sdk.ThreadEnsureRequest
+	ensureHook             func(sdk.ThreadEnsureRequest)
 	identity               *sdk.InstallIdentity
 	connections            map[int64]*sdk.PlatformConnection
 	integrationMu          sync.Mutex
@@ -146,6 +148,9 @@ func (p *recordingPlatform) SpawnThread(req sdk.ThreadSpawnRequest) (*sdk.Thread
 
 func (p *recordingPlatform) EnsureThread(req sdk.ThreadEnsureRequest) (*sdk.ThreadEnsureResult, error) {
 	p.ensures = append(p.ensures, req)
+	if p.ensureHook != nil {
+		p.ensureHook(req)
+	}
 	if p.ensureErr != nil {
 		return nil, p.ensureErr
 	}
@@ -1994,5 +1999,34 @@ func TestCreateChatWithKeyIsPublicFindOrCreate(t *testing.T) {
 	conv, _ := app.store.GetConversation(created.(map[string]any)["conversation_id"].(string))
 	if conv.Audience != "operator" {
 		t.Fatalf("agent-created audience = %q, want operator", conv.Audience)
+	}
+}
+
+func TestInboundResponseCanCompleteBeforeEnsureReceipt(t *testing.T) {
+	app, ctx, platform := newTestEnv(t)
+	mountedCtx = ctx
+	conv := mkConversation(t, app, 41)
+	app.streamer.telemetryConnected = true
+	called := false
+	platform.ensureHook = func(req sdk.ThreadEnsureRequest) {
+		if len(req.Events) == 0 {
+			return
+		}
+		called = true
+		snapshot := app.streamer.snapshot(conv.ID)
+		if len(snapshot.Frames) != 1 || snapshot.Frames[0].Progress == nil {
+			t.Fatal("progress not registered before Core started")
+		}
+		raw, _ := json.Marshal(map[string]string{"message": req.Events[0].Message.(string)})
+		app.streamer.Ingest("event.received", 41, req.ThreadID, string(raw), time.Now())
+		app.streamer.Ingest("llm.start", 41, req.ThreadID, `{}`, time.Now())
+		app.streamer.finishResponse(conv.ID, 41)
+	}
+	postUserMessage(t, app, conv, "Fast reply")
+	if !called {
+		t.Fatal("event not delivered")
+	}
+	if snapshot := app.streamer.snapshot(conv.ID); len(snapshot.Frames) != 0 {
+		t.Fatal("late receipt restarted finished Thinking")
 	}
 }

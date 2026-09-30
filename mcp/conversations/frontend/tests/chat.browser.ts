@@ -186,7 +186,9 @@ for(const host of ["dashboard","external"]){
 }
 
 for (const surface of ["dashboard", "external", "panel"] as const) {
- test(`${surface}: composer has breathing room below its rounded box`, async ({page}) => {
+ test(`${surface}: composer has breathing room below its rounded box`, async ({page,request}) => {
+  await request.post("/reset");
+  if(surface==="panel") await request.post("/seed-panel",{data:[{id:"chat-operator",project_id:"project",lead_agent_id:41,title:"Support chat",kind:"direct",audience:"operator",origin:"web",created_at:"",updated_at:""}]});
   for (const width of [390, 1280]) {
    await page.setViewportSize({width, height:800});
    await page.goto(surface==="external"?"/?host=external":surface==="panel"?"/?host=dashboard&surface=panel":"/?host=dashboard");

@@ -8,6 +8,7 @@ let panelRows:any[]=[],panelOlderRows:any[]=[];
 let activeConversations:string[]=[];
 const unreadConversations=new Map<string,number>();
 const activityRows=new Map<string,any[]>();
+const responseFrames=new Map<string,any>();
 const resolved=new Set<string>();
 let room=false;let deliveryStatus="delivered";
 const streams = new Set<ReadableStreamDefaultController>();
@@ -22,7 +23,7 @@ const approval=(user:string)=>({id:92,conversation_id:`chat-${user}`,role:"agent
 const conversation=(user:string)=>({id:`chat-${user}`,project_id:"project",lead_agent_id:41,lead_agent_name:"Assistant",title:"Support chat",kind:room?"room":"direct",origin:"web",audience:"public",created_at:"",updated_at:""});
 Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  const url=new URL(req.url);
- if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
+ if(url.pathname==="/reset" && req.method==="POST"){rows.clear();panelRows=[];panelOlderRows=[];activeConversations=[];unreadConversations.clear();activityRows.clear();responseFrames.clear();resolved.clear();calls.length=0;room=false;deliveryStatus="delivered";return Response.json({ok:true});}
  if(url.pathname==="/seed-panel" && req.method==="POST"){const seed=await req.json();panelRows=Array.isArray(seed)?seed:seed.current;panelOlderRows=Array.isArray(seed)?[]:seed.older;return Response.json({ok:true});}
  if(url.pathname==="/seed-activity" && req.method==="POST"){activeConversations=await req.json();publishActivity();return Response.json({ok:true});}
  if(url.pathname==="/seed-unread" && req.method==="POST"){const {chat_id,count}=await req.json();unreadConversations.set(chat_id,count);publishListMessage(chat_id);return Response.json({ok:true});}
@@ -43,6 +44,11 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  }
  if(url.pathname==="/emit" && req.method==="POST") {
   const frame=await req.json();
+  if(frame.response_progress) {
+   const key=`${frame.chat_id}:${frame.agent_id}`;
+   if(frame.response_progress.phase==="idle")responseFrames.delete(key);
+   else responseFrames.set(key,frame);
+  }
   if(frame.tool_activity) {
    const current=activityRows.get(frame.chat_id)??[];
    activityRows.set(frame.chat_id,[...current.filter(a=>a.id!==frame.tool_activity.id),frame.tool_activity]);
@@ -81,7 +87,7 @@ Bun.serve({port:5292,hostname:"127.0.0.1",async fetch(req){
  if(path==="/chats"&&url.searchParams.has("page"))return Response.json(url.searchParams.get("archived")==="1"?{conversations:[],next_cursor:""}:url.searchParams.get("cursor")==="older"?{conversations:panelOlderRows,next_cursor:""}:{conversations:panelRows,next_cursor:panelOlderRows.length?"older":""});
  if(path==="/chats")return Response.json([conversation(user)]);
  if(path==="/stream"&&url.searchParams.get("scope")==="user")return new Response(new ReadableStream({start(c){activityStreams.add(c);c.enqueue(new TextEncoder().encode(activitySnapshot()));},cancel(){/* Closed controllers are pruned on the next publish. */}}),{headers:{"Content-Type":"text/event-stream"}});
- if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(': connected\n\n'));}}),{headers:{"Content-Type":"text/event-stream"}});
+ if(path==="/stream")return new Response(new ReadableStream({start(c){streams.add(c);c.enqueue(new TextEncoder().encode(`event: stream\ndata: ${JSON.stringify({type:"stream",snapshot:true,done:true,chat_id:url.searchParams.get("chat_id"),frames:[...responseFrames.values()].filter(f=>f.chat_id===url.searchParams.get("chat_id"))})}\n\n`));}}),{headers:{"Content-Type":"text/event-stream"}});
  if(path==="/messages"&&req.method==="POST"){
   const body=await req.json();const existing=rows.get(user)??[];const row={id:existing.length+1,conversation_id:conversation(user).id,role:"user",content:body.content,attachments:(body.attachments??[]).map((a:any)=>uploaded.get(`${conversation(user).id}:${a.id}`)?.attachment??a),components:[],created_at:new Date().toISOString(),client_message_id:body.client_message_id};existing.push(row);rows.set(user,existing);return Response.json(row);
  }

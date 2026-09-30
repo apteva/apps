@@ -187,20 +187,29 @@ func (d *agentInboundAdapter) Deliver(app *sdk.AppCtx, target string, conv *Conv
 		ID:      conversationThreadEventID(conv.ID, msg.ID, agentID),
 		Message: d.app.agentEventPayload(conv, msg, agentID, targets),
 	}
-	threadID, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
-	if err != nil {
-		return err
+	// Register before EnsureThread: Core can start before its receipt returns.
+	threadID := conversationThreadID(conv.ID)
+	if state, _ := d.app.store.AgentThread(conv.ID, agentID); state != nil && state.ThreadID != "" {
+		threadID = state.ThreadID
 	}
-	if !delivered {
+	ack := messageIntent(msg) != messageIntentSoftBreak
+	if ack {
+		d.app.streamer.emitInboundAck(conv.ID, threadID, agentID, msg)
+	}
+	_, delivered, err := d.app.ensureConversationThreadForAgent(app, conv, agentID, &event)
+	if err != nil || !delivered {
+		if ack {
+			d.app.streamer.finishResponse(conv.ID, agentID, msg.ID)
+		}
+		if err != nil {
+			return err
+		}
 		return fmt.Errorf("platform did not confirm inbound event %q", event.ID)
 	}
 	// A soft break is sent only while an existing response is active. Keep that
 	// response's acknowledgement/stream bubble authoritative instead of
 	// replacing it with a second synthetic ack that could settle out of order.
 	// The durable "Break requested" transcript row is the immediate feedback.
-	if messageIntent(msg) != messageIntentSoftBreak {
-		d.app.streamer.emitAck(conv.ID, threadID, agentID, msg.ID)
-	}
 	return nil
 }
 
