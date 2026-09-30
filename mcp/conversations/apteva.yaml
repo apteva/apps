@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: conversations
 display_name: Conversations
-version: 0.24.18
+version: 0.24.19
 description: |
   One conversation system for dashboard chat and the inbox
   (approvals, reports, alerts). Inbox items are messages — an
@@ -132,6 +132,30 @@ provides:
             type: boolean
             title: Show tool execution time
             default: false
+          empty_message:
+            type: string
+            title: Empty conversation text
+            required: false
+          welcome_text:
+            type: string
+            title: Welcome text
+            required: false
+          context_label:
+            type: string
+            title: Context label
+            description: Prefix for the optional context indicator, for example Discussing
+            required: false
+          suggestions:
+            type: array
+            title: Composer suggestions
+            required: false
+            items:
+              type: object
+              properties:
+                id: { type: string }
+                label: { type: string }
+                text: { type: string }
+              required: [id, label, text]
     - name: inbox-overview
       label: Inbox
       description: Pending approvals, alerts, and reports from agents.
@@ -165,7 +189,7 @@ provides:
 
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.18, entry: mcp/conversations }
+  source: { repo: github.com/apteva/apps, ref: conversations/v0.24.19, entry: mcp/conversations }
   port: 8080
   health_check: /health
 

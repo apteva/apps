@@ -4,7 +4,7 @@ import "./testDom";
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { Window } from "happy-dom";
 import { createRoot, type Root } from "react-dom/client";
-import { act } from "react";
+import { act, createRef } from "react";
 import { ConversationChat as ChatSource, refreshConversationList, type Conversation } from "../frontend/src/ConversationsPanel";
 import { reportSectionsText } from "./messageContent";
 
@@ -13,6 +13,7 @@ import { conversationsExtension, type ConversationsClient } from "../frontend/sr
 import { ConversationsProvider, PageContextProvider } from "../frontend/src/context";
 import type { PageContext } from "../frontend/src/pageContext";
 import { showPageContext, type AgentConversationWidgetSettings } from "../frontend/src/agentConversations";
+import type { ConversationComposerHandle } from "../frontend/src/composerHost";
 import type { ComponentProps } from "react";
 let conversations: ConversationsClient;
 function ConversationChat(props: ComponentProps<typeof ChatSource> & ConversationLocalization & { pageContext?: PageContext; widgetSettings?: AgentConversationWidgetSettings }) {
@@ -128,6 +129,32 @@ test("page context is included in the posted message snapshot",async()=>{
  expect(element.textContent).toContain("Using context: tickets app");
  await type("inspect this page");await send();await settle();
  expect(bodies).toHaveLength(1);expect(bodies[0].page_context).toEqual(pageContext);
+});
+test("welcome suggestions append to the draft without sending",async()=>{
+ const posted:string[]=[];
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){posted.push(String(init.body));return json(message(1,"a","should not send"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ await act(async()=>root.render(<ConversationChat conversation={conv("a")} archived={false} welcomeText="What would you like to build?" suggestions={[{id:"build",label:"Build something",text:"Help me build a dashboard"}]} onActed={()=>{}} onRemoved={()=>{}}/>));await settle();
+ expect(element.textContent).toContain("What would you like to build?");
+ await act(async()=>[...element.querySelectorAll("button")].find(button=>button.textContent==="Build something")?.dispatchEvent(new win.MouseEvent("click",{bubbles:true}) as unknown as Event));
+ expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Help me build a dashboard");
+ expect(posted).toHaveLength(0);
+});
+test("host composer requests are scoped, idempotent, and never send",async()=>{
+ const posted:string[]=[];
+ fetcher=(url,init)=>{if(init?.method==="POST"&&url.includes("/messages")){posted.push(String(init.body));return json(message(1,"a","unexpected"));}return (url.includes("/deliveries")||url.includes("/activity"))?json([]):json({messages:[],cursor:0,has_more:false,before:0});
+ };
+ const bridge=createRef<ConversationComposerHandle>();
+ await act(async()=>root.render(<PageContextProvider.Provider value={undefined}><ConversationsProvider conversations={conversations}><ChatSource ref={bridge} conversation={conv("a")} archived={false} onActed={()=>{}} onRemoved={()=>{}}/></ConversationsProvider></PageContextProvider.Provider>));await settle();
+ let first:any;
+ await act(async()=>{first=await bridge.current!.insertText("Add a report",{requestId:"req-1",projectId:"project",agentId:41,conversationId:"a"});});
+ expect(first.status).toBe("applied");expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Add a report");
+ let duplicate:any;
+ await act(async()=>{duplicate=await bridge.current!.insertText("Do not duplicate",{requestId:"req-1"});});
+ expect(duplicate.status).toBe("already_applied");expect((element.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Add a report");expect(posted).toHaveLength(0);
+ let wrong:any;
+ await act(async()=>{wrong=await bridge.current!.insertText("Wrong scope",{projectId:"other"});});
+ expect(wrong.status).toBe("wrong_project");
 });
 test("hidden page context stays attached to the posted message",async()=>{
  const bodies:any[]=[];

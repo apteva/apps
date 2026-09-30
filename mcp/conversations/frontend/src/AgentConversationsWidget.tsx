@@ -1,7 +1,8 @@
 import type { ComposerOptions } from "./composer";
+import type { ConversationComposerHandle } from "./composerHost";
 import { useConversationLocalization, type ConversationLocalization } from "./i18n";
 import { useConversationAPI } from "./context";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { ConversationActivityIndicator, useConversationActivity } from "./conversationActivity";
 import {
   ConversationChat,
@@ -35,6 +36,9 @@ export interface AgentConversationsWidgetProps extends ConversationLocalization 
   widgetSize?: "half" | "full";
   eventRevision?: number;
   widgetSettings?: AgentConversationWidgetSettings;
+  /** Internal/public typed host bridge; never sends automatically. */
+  composerRef?: Ref<ConversationComposerHandle>;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
 }
 
 interface UnreadEntry {
@@ -67,6 +71,8 @@ function ConversationBrowser({
   eventRevision,
   widgetSettings,
   widgetSize,
+  composerRef,
+  onContextCleared,
 }: AgentConversationsWidgetProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -251,7 +257,7 @@ function ConversationBrowser({
       </aside>
 
       {selected ? (
-        <ConversationChat key={`${selected.project_id}:${selected.id}`}
+        <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={archived}
           onActed={load}
@@ -261,6 +267,10 @@ function ConversationBrowser({
             void load();
           }}
           emptyMessage={widgetSettings?.empty_message}
+          welcomeText={widgetSettings?.welcome_text}
+          suggestions={widgetSettings?.suggestions}
+          contextLabel={widgetSettings?.context_label}
+          onContextCleared={onContextCleared}
           showPageContext={showPageContext(widgetSettings)}
           showToolCompletion={showToolCompletion(widgetSettings)}
           showToolDuration={showToolDuration(widgetSettings)}
@@ -284,6 +294,8 @@ function SingleConversation({
   instanceId,
   eventRevision,
   widgetSettings,
+  composerRef,
+  onContextCleared,
 }: AgentConversationsWidgetProps) {
   const { t, relativeTime } = useConversationLocalization();
   const { conversationsClient, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
@@ -441,10 +453,14 @@ function SingleConversation({
           {t("chat.loading")}
         </section>
       ) : selected ? (
-        <ConversationChat key={`${selected.project_id}:${selected.id}`}
+        <ConversationChat ref={composerRef} key={`${selected.project_id}:${selected.id}`}
           conversation={selected}
           archived={false}
           emptyMessage={widgetSettings?.empty_message}
+          welcomeText={widgetSettings?.welcome_text}
+          suggestions={widgetSettings?.suggestions}
+          contextLabel={widgetSettings?.context_label}
+          onContextCleared={onContextCleared}
           showPageContext={showPageContext(widgetSettings)}
           showToolCompletion={showToolCompletion(widgetSettings)}
           showToolDuration={showToolDuration(widgetSettings)}
@@ -564,7 +580,8 @@ function SingleConversation({
 }
 
 export default function AgentConversationsWidget(props: AgentConversationsWidgetProps) {
+  const scopedProps = props;
   return conversationDisplayMode(props.widgetSettings, props.slot) === "single"
-    ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...props} />
-    : <ConversationBrowser {...props} />;
+    ? <SingleConversation key={`${props.projectId}:${props.instanceId}`} {...scopedProps} />
+    : <ConversationBrowser {...scopedProps} />;
 }

@@ -27,7 +27,7 @@ import { AttachmentContent, GenericComponents, reportSectionsText } from "./mess
 // no arbitrary Tailwind values. Built by
 // `bun run scripts/build-panels.ts --app conversations`.
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type ReactNode } from "react";
 import createDOMPurify from "dompurify";
 import { marked } from "marked";
 import ConversationChatView from "./ConversationChatView";
@@ -35,6 +35,7 @@ import { VoiceControls } from "./voiceControls";
 import { useHostPageContext } from "./context";
 import { PageContextChip, useMessagePageContext } from "./pageContext";
 import { isSoftBreakMetadata, softBreakMessageInput } from "./softBreak";
+import { composerRequestId, type ComposerInsertOptions, type ComposerInsertResult, type ComposerSuggestion, type ConversationComposerHandle } from "./composerHost";
 
 import { useConversationAPI } from "./context";
 import type { ConversationsClient } from "./client";
@@ -85,6 +86,10 @@ export interface NativePanelProps extends ConversationLocalization {
   projectId: string;
   instanceId?: number;
   workspaceRail?: ComponentType<WorkspaceRailProps>;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
+  contextLabel?: string;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
 }
 
 export interface WorkspaceRailProps {
@@ -1399,23 +1404,15 @@ export function MoreConversations({path,projectId,rows,cursor,onRows,onCursor}: 
  return <div className="p-2 text-center text-xs"><button type="button" disabled={busy||!rows.length} className="text-accent" onClick={more}>{busy?t("common.loading"):t("chat.loadEarlier")}</button>{(error||exhausted)&&<p role="status">{error || t("chat.noEarlierStatus")}</p>}</div>;
 }
 
-export function ConversationChat({
-  conversation,
-  archived,
-  emptyMessage,
-  showPageContext = true,
-  showToolCompletion = false,
-  showToolDuration = false,
-  onOpenDetails,
-  leadingAction,
-  headerActions,
-  onActed,
-  onRemoved,
-}: {
+export const ConversationChat = forwardRef<ConversationComposerHandle, {
   conversation: Conversation;
   archived: boolean;
   emptyMessage?: string;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
   showPageContext?: boolean;
+  contextLabel?: string;
+  onContextCleared?: (context: import("./pageContext").PageContext) => void;
   showToolCompletion?: boolean;
   showToolDuration?: boolean;
   onOpenDetails?: () => void;
@@ -1423,13 +1420,29 @@ export function ConversationChat({
   headerActions?: ReactNode;
   onActed: () => void;
   onRemoved: () => void;
-}) {
+}>(({
+  conversation,
+  archived,
+  emptyMessage,
+  welcomeText,
+  suggestions,
+  showPageContext = true,
+  contextLabel,
+  onContextCleared,
+  showToolCompletion = false,
+  showToolDuration = false,
+  onOpenDetails,
+  leadingAction,
+  headerActions,
+  onActed,
+  onRemoved,
+}, ref) => {
   const { t } = useConversationLocalization();
   const toolVisualRegistry = useToolVisualRegistry();
   const { conversationsClient, legacyDrafts, apiGet, apiPost, apiPatch, apiDelete } = useConversationAPI();
   const { messages, activities: storedActivities, progresses, beginResponse, bubble, bubbles, connected, mergeMessages, hasOlder, loadOlder, historyError } = useConversationTransport(conversation.id, conversation.project_id);
   const hostPage = useHostPageContext();
-  const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined);
+  const sharedPage = useMessagePageContext(hostPage?.project_id === conversation.project_id && conversation.audience !== "public" ? hostPage : undefined, onContextCleared);
   // Resolve display names only for a room or a transcript with multiple speakers.
   const activities = useMemo(() => storedActivities.filter(activity => isVisibleChatTool(activity.name)), [storedActivities]);
   const speakerIds = new Set([conversation.lead_agent_id, ...messages.filter(m => m.role === "agent").map(m => m.agent_id), ...bubbles.map(b => b.agentId), ...activities.map(a => a.agent_id)].filter((id): id is number => Boolean(id)));
@@ -1492,6 +1505,29 @@ export function ConversationChat({
   const [archiveBusy, setArchiveBusy] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const appliedComposerRequests = useRef<Set<string>>(new Set());
+
+  const insertText = useCallback(async (text: string, options: ComposerInsertOptions = {}): Promise<ComposerInsertResult> => {
+    const requestId = options.requestId || composerRequestId();
+    const result = (status: ComposerInsertResult["status"]): ComposerInsertResult => ({ requestId, status, conversationId: conversation.id });
+    const clean = text.trim();
+    if (!clean) return result("empty_text");
+    if (options.projectId && options.projectId !== conversation.project_id) return result("wrong_project");
+    if (options.agentId && options.agentId !== conversation.lead_agent_id) return result("wrong_agent");
+    if (options.conversationId && options.conversationId !== conversation.id) return result("conversation_not_open");
+    if (appliedComposerRequests.current.has(requestId)) return result("already_applied");
+    if (archived) return result("archived");
+    if (voiceActive) return result("voice_active");
+    appliedComposerRequests.current.add(requestId);
+    setDraft(current => current.trim() ? `${current.trimEnd()} ${clean}` : clean);
+    if (options.focus !== false) {
+      const focus = () => inputRef.current?.focus();
+      if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(focus);
+      else focus();
+    }
+    return result("applied");
+  }, [archived, conversation.id, conversation.lead_agent_id, conversation.project_id, voiceActive]);
+  useImperativeHandle(ref, () => ({ insertText }), [insertText]);
 
   useEffect(() => {
     setConfirmDelete(false);
@@ -1615,7 +1651,7 @@ export function ConversationChat({
     <ConversationChatView
       voiceControl={!archived && conversation.audience !== "public" && conversation.kind === "direct" ? <VoiceControls client={conversationsClient} chatId={conversation.id} disabled={Boolean(activeResponse) || sending} onActiveChange={setVoiceActive} onTranscript={text => setDraft(current => [current.trimEnd(), text].filter(Boolean).join(" "))}/> : undefined}
       voiceActive={voiceActive}
-      contextChip={showPageContext ? <PageContextChip context={sharedPage.context} onRemove={sharedPage.dismiss} /> : undefined}
+      contextChip={showPageContext ? <PageContextChip context={sharedPage.context} prefix={contextLabel || "Using context"} onRemove={sharedPage.dismiss} /> : undefined}
       attachments={attachments}
       title={conversation.title}
       subtitle={`${conversation.lead_agent_name || t("chat.agentName", { id: String(conversation.lead_agent_id) })}${conversation.origin !== "web" ? t("chat.via", { origin: conversation.origin }) : ""}`}
@@ -1645,6 +1681,9 @@ export function ConversationChat({
         })}
       </> : null}
       emptyMessage={emptyMessage}
+      welcomeText={welcomeText}
+      suggestions={suggestions}
+      onSuggestion={(suggestion) => { void insertText(suggestion.text); }}
       leadingAction={leadingAction}
       headerActions={headerActions}
       bottomRef={bottomRef}
@@ -1673,7 +1712,7 @@ export function ConversationChat({
       onDelete={deleteConversation}
     />
   );
-}
+});
 
 // ─── inbox tab ───────────────────────────────────────────────────────
 

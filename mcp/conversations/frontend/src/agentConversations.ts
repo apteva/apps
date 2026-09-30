@@ -1,3 +1,4 @@
+import type { ComposerSuggestion } from "./composerHost";
 export type ConversationDisplayMode = "browser" | "single";
 
 export interface AgentConversationWidgetSettings {
@@ -9,6 +10,12 @@ export interface AgentConversationWidgetSettings {
   show_tool_duration?: boolean;
   /** Presentation-only empty transcript text; never persisted as a message. */
   empty_message?: string;
+  /** Presentation-only welcome text; never persisted as a message. */
+  welcome_text?: string;
+  /** Presentation-only draft starters. */
+  suggestions?: ComposerSuggestion[];
+  /** Optional prefix for the visible context chip. */
+  context_label?: string;
 }
 
 export function appendAgentScope(path: string, instanceId: number): string {

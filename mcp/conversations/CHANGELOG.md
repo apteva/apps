@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.24.19 — 2026-09-30
+
+- Add one shared embedded-chat contract for host-provided welcome text, draft suggestions, scoped context labels, and idempotent composer insertion without automatic sending.
+- Expose explicit acknowledgement statuses for wrong project/agent, closed conversation, archived chat, voice mode, and repeated requests.
+- Preserve existing panel/widget defaults, per-conversation drafts and attachments, responsive layout, tool activity, and context-sharing behavior.
+
 ## 0.24.18 — 2026-09-30
 
 - Hide Core’s internal parent-thread `send` activity by default across all chat surfaces, including preparation and historical rows after refresh.

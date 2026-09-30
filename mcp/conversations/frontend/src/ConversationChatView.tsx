@@ -1,4 +1,5 @@
 import { ComposerAttachments, ComposerMenu, type ComposerController } from "./composer";
+import type { ComposerSuggestion } from "./composerHost";
 import { useConversationLocalization } from "./i18n";
 import { useLayoutEffect, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 
@@ -16,6 +17,9 @@ export interface ConversationChatViewProps {
   hasMessages: boolean;
   streamNode: ReactNode;
   emptyMessage?: string;
+  welcomeText?: string;
+  suggestions?: ComposerSuggestion[];
+  onSuggestion?: (suggestion: ComposerSuggestion) => void;
   leadingAction?: ReactNode;
   headerActions?: ReactNode;
   bottomRef: RefObject<HTMLDivElement | null>;
@@ -91,6 +95,7 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
     return () => observer.disconnect();
   }, [props.draft, layout, props.archived]);
   const hasDraft = Boolean(props.draft.trim()) || props.attachments.items.length>0;
+  const showSuggestions = !props.hasMessages && !props.streamNode && !hasDraft && !props.archived && Boolean(props.suggestions?.length);
   const showBreak = props.responseActive && !hasDraft;
   const breakLabel = t(props.breakRequested ? "chat.breakRequested" : props.breakBusy ? "chat.breakRequesting" : "chat.breakLabel");
   return (
@@ -134,7 +139,22 @@ export default function ConversationChatView(props: ConversationChatViewProps) {
             <span className="text-text-dim">
               <Glyph d={GLYPH_CHAT} size={32} />
             </span>
-            <p className="text-sm text-center">{props.emptyMessage || t("chat.empty")}</p>
+            {(props.welcomeText || props.emptyMessage) && <p className="text-sm text-center">{props.welcomeText || props.emptyMessage}</p>}
+            {!props.welcomeText && !props.emptyMessage && !showSuggestions && <p className="text-sm text-center">{t("chat.empty")}</p>}
+            {showSuggestions && (
+              <div className="flex max-w-xl flex-wrap justify-center gap-2">
+                {props.suggestions!.map((suggestion) => (
+                  <button
+                    key={suggestion.id}
+                    type="button"
+                    className="rounded-full border border-border px-3 py-1.5 text-xs text-text-muted hover:border-accent hover:text-text"
+                    onClick={() => props.onSuggestion?.(suggestion)}
+                  >
+                    {suggestion.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <>
