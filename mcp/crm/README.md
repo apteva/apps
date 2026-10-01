@@ -1,9 +1,15 @@
-# CRM v0.9.9
+# CRM v0.9.10
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
+
+Release `crm/v0.9.10` marks `conversations_inbox` with standard MCP
+`readOnlyHint: true` and `destructiveHint: false` annotations, so it is eligible
+for Core's strict `access: "read_only"` tool discovery. The SDK dependency emits
+these hints in `tools/list`; no Core heuristics, schema changes, or record
+updates are needed.
 
 Release `crm/v0.9.9` restores missing inbound email bodies safely, including
 on installations with legacy numeric Messaging bindings. HTML-only
