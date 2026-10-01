@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.9.7
+version: 0.9.8
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -107,6 +107,8 @@ provides:
       description: List templates from the bound Messaging app, especially approved WhatsApp templates.
     - name: messaging_whatsapp_session_check
       description: Check whether a WhatsApp contact is inside the 24-hour free-form reply window.
+    - name: contacts_refresh_message_body
+      description: Preview or recover missing inbound email content from the original Messaging record while preserving the existing activity and conversation.
     - name: messaging_inbound_receive
       description: Receive an inbound message and normalized attachment metadata dispatched by Messaging and attach it to CRM contact activity.
     - name: contacts_list_messageable

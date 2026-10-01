@@ -1,9 +1,25 @@
 package main
 
 import (
-	"golang.org/x/net/html"
 	"strings"
+
+	"golang.org/x/net/html"
 )
+
+func inboundMessageText(body inboundPayload) string {
+	if strings.TrimSpace(body.BodyText) != "" {
+		return body.BodyText
+	}
+	return plainTextFromHTML(body.BodyHTML)
+}
+
+func inboundActivityBody(body inboundPayload) string {
+	text := inboundMessageText(body)
+	if body.Channel == channelEmail && body.Subject != "" {
+		return body.Subject + "\n\n" + text
+	}
+	return text
+}
 
 // Never render inbound HTML. Extract human-readable text while excluding
 // executable, hidden metadata and stylesheet content.

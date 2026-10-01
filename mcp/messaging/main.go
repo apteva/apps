@@ -3890,6 +3890,18 @@ func dispatchInbound(ctx *sdk.AppCtx, pid string, m *Message) error {
 	if m == nil {
 		return errors.New("nil message")
 	}
+	if m.Channel == channelEmail && strings.TrimSpace(m.BodyText) == "" {
+		if text := inboundEmailText(m.BodyText, m.BodyHTML); text != "" {
+			// Also covers old HTML-only records when an operator retries them.
+			// Never overwrite text another process has filled in meanwhile.
+			if _, err := ctx.AppDB().Exec(`UPDATE messages SET body_text=? WHERE id=? AND project_id=? AND direction='in' AND COALESCE(body_text,'')=?`, text, m.ID, pid, m.BodyText); err != nil {
+				return err
+			}
+			if err := ctx.AppDB().QueryRow(`SELECT COALESCE(body_text,'') FROM messages WHERE id=? AND project_id=? AND direction='in'`, m.ID, pid).Scan(&m.BodyText); err != nil {
+				return err
+			}
+		}
+	}
 	sender := canonicalAddrForChannel(m.Channel, m.From)
 	if sender != "" {
 		match, err := dbSuppressionMatch(ctx.AppDB(), pid, m.Channel, sender)
@@ -5005,7 +5017,7 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 		To:          splitAddrList(hdrs["To"]),
 		Cc:          splitAddrList(hdrs["Cc"]),
 		Subject:     decodeMIMEHeader(hdrs["Subject"]),
-		BodyText:    bodyText,
+		BodyText:    inboundEmailText(bodyText, bodyHTML),
 		BodyHTML:    bodyHTML,
 		MessageID:   hdrs["Message-Id"],
 		InReplyTo:   hdrs["In-Reply-To"],
