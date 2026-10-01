@@ -113,6 +113,106 @@ func TestListTodosHydratesTagsInBatches(t *testing.T) {
 	}
 }
 
+func TestCompactSearchPaginatesTodosAndIncludesHierarchy(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search"
+	g, err := insertListGroup(db, pid, "Personal", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := insertList(db, pid, "Admin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET group_id = ? WHERE id = ?`, g.ID, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	listID := l.ID
+	for _, title := range []string{"Pay taxes", "Tax documents", "Book dentist"} {
+		if _, err := insertTodo(db, pid, &Todo{Title: title, ListID: &listID, Tags: []string{"admin"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := insertTodo(db, pid, &Todo{Title: "Old tax receipt", ListID: &listID, Status: "done"}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := searchTodosCompact(db, pid, "", "any", "tax", nil, nil, "", "", 1, 0, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Items) != 1 || !first.HasMore || first.NextCursor == "" {
+		t.Fatalf("first page = %#v", first)
+	}
+	if first.Items[0].List == nil || first.Items[0].List.Name != "Admin" || first.Items[0].Group == nil || first.Items[0].Group.Name != "Personal" {
+		t.Fatalf("hierarchy = %#v", first.Items[0])
+	}
+	second, err := searchTodosCompact(db, pid, "", "any", "tax", nil, nil, "", first.NextCursor, 10, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Items) != 2 || second.HasMore || second.Total == nil || *second.Total != 3 {
+		t.Fatalf("second page = %#v", second)
+	}
+}
+
+func TestCompactSearchFindsListsAndGroupsWithoutListingEverything(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search-lists"
+	g, err := insertListGroup(db, pid, "Personal Admin", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := insertList(db, pid, "Tax Work", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE lists SET group_id = ? WHERE id = ?`, g.ID, l.ID); err != nil {
+		t.Fatal(err)
+	}
+	lists, err := searchListsCompact(db, pid, "tax", nil, nil, false, "", 20, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists.Items) != 1 || lists.Items[0].Name != "Tax Work" || lists.Total == nil || *lists.Total != 1 {
+		t.Fatalf("lists = %#v", lists)
+	}
+	groups, err := searchListGroupsCompact(db, pid, "admin", nil, false, "", 20, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups.Items) != 1 || groups.Items[0].Name != "Personal Admin" {
+		t.Fatalf("groups = %#v", groups)
+	}
+}
+
+func TestCompactSearchIndexesFollowTodoUpdatesAndDeletes(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-search-index"
+	todo, err := insertTodo(db, pid, &Todo{Title: "Original title"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := searchTodosCompact(db, pid, "", "open", "original", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("initial search = %#v, err=%v", page, err)
+	}
+	if err := updateTodoFields(db, pid, todo.ID, map[string]any{"title": "Renamed item"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err = searchTodosCompact(db, pid, "", "open", "renamed", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("updated search = %#v, err=%v", page, err)
+	}
+	if _, err := db.Exec(`DELETE FROM todos WHERE id = ? AND project_id = ?`, todo.ID, pid); err != nil {
+		t.Fatal(err)
+	}
+	page, err = searchTodosCompact(db, pid, "", "any", "renamed", nil, nil, "", "", 20, 0, false)
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("deleted search = %#v, err=%v", page, err)
+	}
+}
+
 func TestTodayViewKeepsTodosSnoozedToLaterToday(t *testing.T) {
 	db := openTestDB(t)
 	const pid = "project-snooze"
@@ -281,6 +381,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		"migrations/001_init.sql",
 		"migrations/002_rename_projects_to_lists.sql",
 		"migrations/003_list_groups.sql",
+		"migrations/004_search_indexes.sql",
 	} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
