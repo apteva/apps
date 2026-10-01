@@ -1,8 +1,6 @@
 package main
 
 import (
-	"sync"
-
 	sdk "github.com/apteva/app-sdk"
 )
 
@@ -50,42 +48,21 @@ func (a *App) sessionDurations(ctx *sdk.AppCtx, sessionID string) (sessionDurati
 		return out, nil
 	}
 
-	// Keep a large session from sending an unbounded burst to Media.
-	workers := 4
-	if len(files) < workers {
-		workers = len(files)
+	assets := make([]Asset, len(files))
+	refs := make([]*Asset, len(files))
+	for i, f := range files {
+		assets[i] = Asset{ID: f.assetID, StorageFileID: f.storageFileID}
+		refs[i] = &assets[i]
 	}
-	queue := make(chan file)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for f := range queue {
-				var result struct {
-					Found bool `json:"found"`
-					Media struct {
-						DurationMS int64 `json:"duration_ms"`
-					} `json:"media"`
-				}
-				err := ctx.PlatformAPI().CallAppResult("media", "media_get", map[string]any{"_project_id": pid, "file_id": f.storageFileID}, &result)
-				mu.Lock()
-				if err != nil {
-					out.Failed++
-				} else if result.Found && result.Media.DurationMS > 0 {
-					out.Durations[f.assetID] = result.Media.DurationMS
-				} else {
-					out.Unavailable++
-				}
-				mu.Unlock()
-			}
-		}()
+	a.loadAssetMedia(ctx, refs)
+	for _, asset := range assets {
+		if asset.MediaError != "" {
+			out.Failed++
+		} else if asset.DurationMS > 0 {
+			out.Durations[asset.ID] = asset.DurationMS
+		} else {
+			out.Unavailable++
+		}
 	}
-	for _, f := range files {
-		queue <- f
-	}
-	close(queue)
-	wg.Wait()
 	return out, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -12,20 +13,25 @@ import (
 )
 
 type Asset struct {
-	ID               string           `json:"id"`
-	SessionID        string           `json:"session_id"`
-	StorageInstallID int64            `json:"storage_install_id"`
-	StorageFileID    string           `json:"storage_file_id"`
-	Name             string           `json:"name"`
-	Kind             string           `json:"kind"`
-	ContentType      string           `json:"content_type"`
-	SHA256           string           `json:"sha256"`
-	SizeBytes        int64            `json:"size_bytes"`
-	ReviewStatus     string           `json:"review_status"`
-	MediaStatus      string           `json:"media_status"`
-	MediaRating      string           `json:"media_rating"`
-	Publications     []Publication    `json:"publications"`
-	Hostings         []HostingSummary `json:"hostings"`
+	ID                   string           `json:"id"`
+	SessionID            string           `json:"session_id"`
+	StorageInstallID     int64            `json:"storage_install_id"`
+	StorageFileID        string           `json:"storage_file_id"`
+	Name                 string           `json:"name"`
+	Kind                 string           `json:"kind"`
+	ContentType          string           `json:"content_type"`
+	SHA256               string           `json:"sha256"`
+	SizeBytes            int64            `json:"size_bytes"`
+	ReviewStatus         string           `json:"review_status"`
+	MediaStatus          string           `json:"media_status"`
+	MediaRating          string           `json:"media_rating"`
+	Description          string           `json:"description"`
+	DescriptionSource    string           `json:"description_source"`
+	DescriptionUpdatedAt string           `json:"description_updated_at"`
+	DurationMS           int64            `json:"duration_ms"`
+	MediaError           string           `json:"media_error,omitempty"`
+	Publications         []Publication    `json:"publications"`
+	Hostings             []HostingSummary `json:"hostings"`
 }
 
 func assetByID(db *sql.DB, pid, id string) (*Asset, error) {
@@ -202,6 +208,7 @@ func (a *App) assetsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err = loadAssetHostings(ctx.AppDB(), pid, assetRefs); err != nil {
 		return nil, err
 	}
+	a.loadAssetMedia(ctx, assetRefs)
 	return map[string]any{"assets": out}, nil
 }
 func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -244,6 +251,7 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	out := map[string]any{"asset": asset, "sources": sources, "hostings": hostingsAny.(map[string]any)["hostings"], "publications": asset.Publications}
+	asset.MediaStatus, asset.MediaRating = "unavailable", ""
 	if ctx.IntegrationFor("media") != nil {
 		var media struct {
 			Found bool           `json:"found"`
@@ -251,8 +259,16 @@ func (a *App) assetGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		if err := ctx.PlatformAPI().CallAppResult("media", "media_get", map[string]any{"_project_id": pid, "file_id": asset.StorageFileID}, &media); err != nil {
 			out["media_error"] = err.Error()
+			asset.MediaError = err.Error()
 		} else if media.Found {
 			out["media"] = media.Media
+			b, _ := json.Marshal(media.Media)
+			var metadata assetMediaMetadata
+			if err := json.Unmarshal(b, &metadata); err == nil {
+				applyAssetMedia(asset, metadata)
+			}
+		} else {
+			asset.MediaStatus = "missing"
 		}
 	}
 	return out, nil

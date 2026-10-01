@@ -15,6 +15,9 @@ import (
 
 type catalogPlatform struct {
 	tk.BasePlatformClient
+	mediaBatchCalls int
+	mediaRows       map[string]map[string]any
+	mediaBatchError error
 	starts          int
 	files           []map[string]any
 	folder          string
@@ -47,7 +50,31 @@ func (p *catalogPlatform) CallAppResult(app, tool string, input map[string]any, 
 		data = map[string]any{"files": p.files}
 	case "gigs/gigs_status":
 		data = map[string]any{"gig": map[string]any{"id": input["id"]}}
+	case "media/media_get_batch":
+		p.mediaBatchCalls++
+		if p.mediaBatchError != nil {
+			return p.mediaBatchError
+		}
+		items := []map[string]any{}
+		missing := []string{}
+		for _, id := range input["file_ids"].([]string) {
+			if p.mediaRows != nil {
+				if m, ok := p.mediaRows[id]; ok {
+					items = append(items, m)
+				} else {
+					missing = append(missing, id)
+				}
+			} else {
+				items = append(items, map[string]any{"file_id": id, "duration_ms": 94000, "probe_status": "ok", "audience_rating": "general"})
+			}
+		}
+		data = map[string]any{"items": items, "missing_file_ids": missing}
 	case "media/media_get":
+		if p.mediaRows != nil {
+			m, found := p.mediaRows[input["file_id"].(string)]
+			data = map[string]any{"found": found, "media": m}
+			break
+		}
 		data = map[string]any{"found": true, "media": map[string]any{"file_id": input["file_id"], "duration_ms": 94000, "source_sha256": "sha-1", "probe_status": "ok", "audience_rating": "general", "derivations": []map[string]any{{"kind": "thumbnail", "status": "ok", "storage_file_id": "901"}}}}
 	default:
 		return fmt.Errorf("unexpected app call %s/%s", app, tool)
