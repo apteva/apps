@@ -659,16 +659,20 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" && in.TargetKind != "artifact" {
-		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, ios, or artifact")
+	if _, err := sourceBuildSubdir(&Deployment{SourceKind: in.SourceKind, SourceExtraJSON: in.SourceExtraJSON}); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if in.TargetKind == "android" || in.TargetKind == "ios" {
+	if in.TargetKind != "service" && !isAppPlatform(in.TargetKind) && in.TargetKind != "artifact" {
+		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, ios, macos, or artifact")
+		return
+	}
+	if isAppPlatform(in.TargetKind) {
 		if in.Framework == "" {
 			in.Framework = in.TargetKind
 		}
 		if in.Framework != in.TargetKind {
-			httpErr(w, http.StatusBadRequest, "mobile target_kind must match framework")
+			httpErr(w, http.StatusBadRequest, "app target_kind must match framework")
 			return
 		}
 		if domainArg != "" {

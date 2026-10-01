@@ -36,10 +36,15 @@ func detectMobileRequirements(root string, d *Deployment) (mobileRequirementSnap
 		platform = strings.ToLower(strings.TrimSpace(d.Framework))
 	}
 	features := append([]string(nil), target.RequiredFeatures...)
-	if platform == "ios" {
+	if isApplePlatform(platform) {
 		detected, err := detectIOSRequiredFeatures(root)
 		if err != nil {
 			return mobileRequirementSnapshot{}, err
+		}
+		if platform == "macos" {
+			for i, feature := range detected {
+				detected[i] = strings.Replace(feature, "ios.", "macos.", 1)
+			}
 		}
 		features = append(features, detected...)
 	}

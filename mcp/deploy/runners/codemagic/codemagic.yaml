@@ -27,6 +27,11 @@ workflows:
             test "$(shasum -a 256 "$capsule" | awk '{print $1}')" = "$APTEVA_SOURCE_SHA256"
             unzip -q "$capsule" -d "$APTEVA_SOURCE_DIR"
           fi
+          if [[ -n "${APTEVA_SOURCE_BUILD_SUBDIR:-}" ]]; then
+            test "$APTEVA_SOURCE_BUILD_SUBDIR" = "app" || { echo "unsupported source build subdirectory" >&2; exit 1; }
+            export APTEVA_SOURCE_DIR="$APTEVA_SOURCE_DIR/$APTEVA_SOURCE_BUILD_SUBDIR"
+            test -d "$APTEVA_SOURCE_DIR"
+          fi
           echo "APTEVA_SOURCE_DIR=$APTEVA_SOURCE_DIR" >> "$CM_ENV"
 
       - name: Decode mobile target
@@ -67,8 +72,16 @@ workflows:
 
           if [[ -n "${APTEVA_BUILD_CMD:-}" ]]; then
             sh -c "$APTEVA_BUILD_CMD"
-          elif [[ "$APTEVA_TARGET_KIND" = "ios" ]]; then
+          elif [[ "$APTEVA_TARGET_KIND" = "ios" || "$APTEVA_TARGET_KIND" = "macos" ]]; then
             test -n "${APTEVA_BUNDLE_ID:-}"
+            apple_platform="iOS"
+            profile_type="IOS_APP_STORE"
+            extension="ipa"
+            if [[ "$APTEVA_TARGET_KIND" = "macos" ]]; then
+              apple_platform="macOS"
+              profile_type="MAC_APP_STORE"
+              extension="pkg"
+            fi
             if [[ -f project.yml ]] && \
               ! find . -maxdepth 1 \( -name '*.xcodeproj' -o -name '*.xcworkspace' \) -print -quit | grep -q .; then
               xcodegen generate
@@ -89,7 +102,7 @@ workflows:
             fi
 
             keychain initialize
-            app-store-connect fetch-signing-files "$APTEVA_BUNDLE_ID" --type IOS_APP_STORE --create
+            app-store-connect fetch-signing-files "$APTEVA_BUNDLE_ID" --type "$profile_type" --create
             keychain add-certificates
             xcode-project use-profiles
             archive="$CM_BUILD_DIR/apteva.xcarchive"
@@ -97,6 +110,7 @@ workflows:
             xcodebuild "${input[@]}" \
               -scheme "$APTEVA_XCODE_SCHEME" \
               -configuration "$APTEVA_CONFIGURATION" \
+              -destination "generic/platform=$apple_platform" \
               -archivePath "$archive" \
               MARKETING_VERSION="$APTEVA_VERSION_NAME" \
               CURRENT_PROJECT_VERSION="$APTEVA_BUILD_NUMBER" \
@@ -105,7 +119,9 @@ workflows:
               -archivePath "$archive" \
               -exportPath "$ipa_dir" \
               -exportOptionsPlist "$HOME/export_options.plist"
-            cp "$(find "$ipa_dir" -name '*.ipa' -print -quit)" "$output/app.ipa"
+            artifact="$(find "$ipa_dir" -name "*.$extension" -print -quit)"
+            test -n "$artifact" || { echo "Xcode export produced no .$extension" >&2; exit 1; }
+            cp "$artifact" "$output/app.$extension"
           elif [[ "$APTEVA_TARGET_KIND" = "android" ]]; then
             test -n "${APTEVA_PACKAGE_NAME:-}"
             chmod +x ./gradlew
@@ -186,14 +202,16 @@ workflows:
           mode="${APTEVA_ARTIFACT_MODE:-file}"
           channel="${APTEVA_STORE_CHANNEL:-internal}"
 
-          if [[ "$mode" = "store_upload" && "$APTEVA_TARGET_KIND" = "ios" ]]; then
+          if [[ "$mode" = "store_upload" && ( "$APTEVA_TARGET_KIND" = "ios" || "$APTEVA_TARGET_KIND" = "macos" ) ]]; then
             required=(APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_IDENTIFIER APP_STORE_CONNECT_PRIVATE_KEY)
             for name in "${required[@]}"; do
               test -n "${!name:-}" || { echo "missing required variable: $name" >&2; exit 1; }
             done
             key="$CM_BUILD_DIR/AuthKey_${APP_STORE_CONNECT_KEY_IDENTIFIER}.p8"
             printf '%s\n' "$APP_STORE_CONNECT_PRIVATE_KEY" > "$key"
-            xcrun altool --upload-package "$output/app.ipa" \
+            apple_extension="ipa"
+            if [[ "$APTEVA_TARGET_KIND" = "macos" ]]; then apple_extension="pkg"; fi
+            xcrun altool --upload-package "$output/app.$apple_extension" \
               --api-key "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
               --api-issuer "$APP_STORE_CONNECT_ISSUER_ID" \
               --p8-file-path "$key" \
@@ -215,7 +233,7 @@ workflows:
 
           platform = os.environ["APTEVA_TARGET_KIND"]
           mode = os.environ.get("APTEVA_ARTIFACT_MODE", "file")
-          primary = "app.ipa" if platform == "ios" else "app.aab"
+          primary = {"ios": "app.ipa", "macos": "app.pkg", "android": "app.aab"}[platform]
           manifest = {
               "platform": platform,
               "primary": primary,
@@ -232,8 +250,8 @@ workflows:
           if mode == "store_upload":
               manifest.update({
                   "channel": os.environ.get("APTEVA_STORE_CHANNEL", ""),
-                  "external_provider": "app_store_connect" if platform == "ios" else "google_play",
-                  "external_status": "uploaded_processing" if platform == "ios" else "completed",
+                  "external_provider": "app_store_connect" if platform in ("ios", "macos") else "google_play",
+                  "external_status": "uploaded_processing" if platform in ("ios", "macos") else "completed",
               })
           with open(os.path.join(os.environ["CM_BUILD_DIR"], "apteva-output", ".apteva-artifact.json"), "w") as f:
               json.dump(manifest, f, separators=(",", ":"))

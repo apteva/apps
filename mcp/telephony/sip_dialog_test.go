@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net"
 	"net/http"
@@ -34,6 +36,10 @@ type sipDialogFixture struct {
 }
 
 func newSIPDialogFixture(t *testing.T, secure bool, ackTimeout time.Duration) *sipDialogFixture {
+	return newSIPDialogFixtureWithRoute(t, secure, ackTimeout, nil)
+}
+
+func newSIPDialogFixtureWithRoute(t *testing.T, secure bool, ackTimeout time.Duration, configure func(*App, *routeRow)) *sipDialogFixture {
 	t.Helper()
 	app, ctx := withTelephonyTestContext(t, &answerPlatform{})
 	probe, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
@@ -65,6 +71,9 @@ func newSIPDialogFixture(t *testing.T, secure bool, ackTimeout time.Duration) *s
 	t.Cleanup(gateway.Stop)
 	app.sip.gateway = gateway
 	route := routeRow{ID: "dialog-route", ProjectID: "project-a", CarrierSlug: "twilio", CarrierConnectionID: 10, PhoneNumber: "+12025550100", AgentID: 7, Enabled: true, Secret: "test", AnswerMode: answerModeAgent, TimeoutSec: 60, InboundTransport: inboundTransportSIPDirect, TransportConfig: `{"provider":"twilio","trunk_id":"TK1"}`}
+	if configure != nil {
+		configure(app, &route)
+	}
 	if err = app.db().insertRoute(route); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +184,58 @@ func (f *sipDialogFixture) waitRefreshIdle(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatal("SIP refresh handler did not finish")
+}
+
+func TestDIDWWDirectSIPDecisionOfferKeepsCallerRingingUntilAnswer(t *testing.T) {
+	f := newSIPDialogFixtureWithRoute(t, false, 2*time.Second, func(app *App, route *routeRow) {
+		route.CarrierSlug = "didww"
+		route.TransportConfig = `{"provider":"didww","trunk_id":"trunk-test"}`
+		route.AnswerMode = answerModeHumanBrowser
+		identity := phoneTestIdentity("sip-adviser")
+		_, err := app.saveRoutingDestination(route.ProjectID, "sip-adviser", "SIP adviser", "browser", map[string]any{
+			"capacity": destinationCapacity{Identity: identity, Limit: 1},
+		}, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, _ := json.Marshal(phonePolicy{Users: []phoneUser{{Identity: identity, Enabled: true, phoneGrant: phoneGrant{Role: "user", Destinations: []string{"sip-adviser"}}}}})
+		if _, err := app.db().db.Exec(`INSERT INTO telephony_access_policies(project_id,revision,policy_json) VALUES(?,?,?)`, route.ProjectID, 1, string(policy)); err != nil {
+			t.Fatal(err)
+		}
+		definition := routingDefinition{Entry: "choose", Nodes: []routingNode{
+			{ID: "choose", Type: "decision", Config: map[string]any{"function_id": 42, "timeout_ms": 5000, "destination_ids": []string{"sip-adviser"}}, Branches: map[string]string{"fallback": "end"}},
+			{ID: "end", Type: "hangup"},
+		}}
+		draft, _ := json.Marshal(definition)
+		flow, err := app.saveRoutingFlow(route.ProjectID, "", "SIP decision", "", string(draft))
+		if err != nil {
+			t.Fatal(err)
+		}
+		version, problems, err := app.publishRoutingFlow(route.ProjectID, flow.ID)
+		if err != nil || len(problems) != 0 {
+			t.Fatalf("publish decision flow: %v %v", err, problems)
+		}
+		route.FlowID, route.PublishedFlowVersionID = flow.ID, version.ID
+	})
+	if f.call.Status != "pending" || f.session.media != nil {
+		t.Fatalf("decision answered SIP before adviser selection: %+v", f.call)
+	}
+	decisions, err := f.app.listDecisions("project-a", f.call.ID)
+	if err != nil || len(decisions) != 1 {
+		t.Fatalf("SIP decision missing: %v %v", decisions, err)
+	}
+	decision := decisions[0]
+	if err := f.app.completeDecision(decision, decisionResponse{DecisionID: decision.ID, Action: "offer", DestinationID: "sip-adviser"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	offers, err := f.app.db().activeRingOffers(f.call.ID, "project-a")
+	if err != nil || len(offers) != 1 || offers[0].DestinationID != "sip-adviser" || f.session.media != nil {
+		t.Fatalf("SIP offer did not preserve unanswered leg: %+v %v", offers, err)
+	}
+	f.answer(t)
+	if f.session.media == nil {
+		t.Fatal("selected SIP call did not answer")
+	}
 }
 func TestSIPAnsweredDialogRefreshAndBidirectionalMedia(t *testing.T) {
 	for _, secure := range []bool{false, true} {
@@ -357,6 +418,55 @@ func TestSIPTLSCertificateReloadKeepsLastGood(t *testing.T) {
 		t.Fatalf("lost last good certificate: %v", err)
 	}
 }
+
+func TestSIPTLSCertificateReloadDetectsSameMetadataReplacement(t *testing.T) {
+	dir := t.TempDir()
+	writeSIPTestCertificate(t, dir, "sip.example.test")
+	cfg := directSIPTestConfig()
+	cfg.TLSCertFile = filepath.Join(dir, "fullchain.pem")
+	cfg.TLSKeyFile = filepath.Join(dir, "privkey.pem")
+	config, err := cfg.tlsConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := config.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certificateInfo, err := os.Stat(cfg.TLSCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := os.ReadFile(cfg.TLSCertFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(original)
+	if block == nil || len(block.Bytes) == 0 {
+		t.Fatal("test certificate was not PEM encoded")
+	}
+	// Change only a signature byte. The certificate remains parseable and has
+	// the same length, inode, and mtime as the previous file.
+	block.Bytes[len(block.Bytes)-1] ^= 1
+	replacement := pem.EncodeToMemory(block)
+	if len(replacement) != len(original) {
+		t.Fatal("replacement unexpectedly changed certificate length")
+	}
+	if err := os.WriteFile(cfg.TLSCertFile, replacement, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(cfg.TLSCertFile, certificateInfo.ModTime(), certificateInfo.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	second, err := config.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(first.Certificate[0], second.Certificate[0]) {
+		t.Fatal("same-metadata certificate replacement was not reloaded")
+	}
+}
+
 func TestSIPAdmissionCapacityIsAtomic(t *testing.T) {
 	g := &sipGateway{cfg: sipGatewayConfig{MaxSessions: 3}, byProviderCall: map[string]*sipSession{}, byCall: map[string]*sipSession{}}
 	var wg sync.WaitGroup
@@ -379,6 +489,24 @@ func TestSIPAdmissionCapacityIsAtomic(t *testing.T) {
 	}
 	if g.reserveSession("replacement") != 0 {
 		t.Fatal("reservation leaked")
+	}
+}
+func TestSIPAdmissionCapacitySharedWithOutbound(t *testing.T) {
+	g := &sipGateway{cfg: sipGatewayConfig{MaxSessions: 2},
+		byCall:         map[string]*sipSession{"inbound": {}},
+		outboundByCall: map[string]*outboundSIPSession{"outbound": {}},
+	}
+	if status := g.reserveSession("another-inbound"); status != 503 {
+		t.Fatalf("inbound exceeded shared capacity: %d", status)
+	}
+	delete(g.outboundByCall, "outbound")
+	g.outboundReserved = map[string]bool{"placing-outbound": true}
+	if status := g.reserveSession("another-inbound"); status != 503 {
+		t.Fatalf("outbound reservation did not consume capacity: %d", status)
+	}
+	delete(g.outboundReserved, "placing-outbound")
+	if status := g.reserveSession("another-inbound"); status != 0 {
+		t.Fatalf("capacity was not released: %d", status)
 	}
 }
 func TestSIPSessionTimerValidation(t *testing.T) {

@@ -400,10 +400,12 @@ func TestSIPRTPPacerSendsTwentyMillisecondPacketAndProgress(t *testing.T) {
 		offer: sipMediaOffer{PayloadType: 0, Codec: "PCMU"},
 	}
 	playback := &sipPlaybackState{}
-	pacer := newSIPRTPPacer(ctx, media, playback, func(value twilioPlaybackProgress) error {
+	tap := &callAudioTap{}
+	listener, _ := tap.add("sip-listener", 4)
+	pacer := newSIPRTPPacerWithPolicy(ctx, media, playback, bufferedCarrierPacerPolicy(), func(value twilioPlaybackProgress) error {
 		progress <- value
 		return nil
-	})
+	}, func(payload []byte) { tap.publish(1, pcm16ToBytes(upsample8to24(decodeSIPG711(payload, "PCMU")))) })
 	if _, err := pacer.enqueue([]sipRTPOutboundPacket{{
 		payload: make([]byte, sipRTPPacketSamples), itemID: "item-1", audioEndMS: 20,
 	}}); err != nil {
@@ -418,6 +420,14 @@ func TestSIPRTPPacerSendsTwentyMillisecondPacketAndProgress(t *testing.T) {
 	var packet rtp.Packet
 	if err := packet.Unmarshal(raw[:n]); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case audio := <-listener.audio:
+		if len(audio.data) != 24+960 {
+			t.Fatal("SIP listener did not receive normalized audio")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIP sent packet did not reach listener")
 	}
 	if len(packet.Payload) != sipRTPPacketSamples || packet.Timestamp == 0 {
 		t.Fatalf("unexpected paced RTP packet: %#v", packet)
@@ -551,7 +561,7 @@ func testSIPGatewayPendingDialog(t *testing.T, reject bool) {
 		}
 		done := make(chan error, 1)
 		go func() { done <- gateway.Reject(call) }()
-		response := readSIPResponseContaining(t, conn, "486 Busy Here")
+		response := readSIPResponseContaining(t, conn, "603 Decline")
 		ack := strings.ReplaceAll(strings.Split(invite, "Content-Type:")[0], "INVITE", "ACK")
 		for _, line := range strings.Split(response, "\r\n") {
 			if strings.HasPrefix(line, "To:") {

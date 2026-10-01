@@ -1,3 +1,43 @@
+# Composer v0.9.0
+
+Composer now supports procedural clips as an additive source alongside image,
+video, audio, text, and AI-generated clips. A procedure is project-scoped,
+revisioned source code with named asset inputs and parameters. Composer runs the
+trusted local procedure, validates and stores its result, then passes the
+materialized `storage:N` asset through the existing timeline renderer.
+
+- Add immutable procedure resources, revisions, materialization history, MCP
+  tools, HTTP endpoints, composition bindings, and database migration 006.
+- Run Python, Bun/TypeScript, and Go through one language-neutral
+  `job.json`/`result.json` contract. Web Canvas remains reserved but is not yet
+  locally executable.
+- Materialize Storage, Media Studio, and new AI inputs before execution. Reuse
+  generated AI assets and cached procedure artifacts across retries and saved
+  output variants.
+- Apply runtime timeouts, process-tree cancellation, bounded/redacted logs,
+  minimal non-secret environment variables, source/input/output size limits,
+  path and symlink checks, and FFprobe media/duration validation.
+- Preserve existing V1/V2 render behavior. Procedural documents open in the
+  JSON editor so bindings remain intact, while render cards expose a dedicated
+  procedural-materialization phase.
+
+## Compatibility
+
+Migration 006 only adds procedure tables; existing compositions, renders, and
+Storage artifacts are unchanged. Trusted local execution is enabled by default
+and can be disabled with `procedural_execution_enabled`. Runtime paths, timeout,
+and maximum artifact size are installation settings. This release does not add
+Containers, Compute, or another app dependency.
+
+## Validation
+
+The full Composer Go suite and `go vet` pass. New tests cover immutable revision
+conflicts, reference validation, cache invalidation/reuse, traversal and output
+safety, local Python/Bun/Go execution, process timeout, and artifact probing.
+Composer panel bundles and host-import verification also pass.
+
+---
+
 # Composer v0.8.0
 
 One composition now manages Song, Image video, and Full clip exports. Each output keeps independent settings, excerpts, attempts, history, and its last successful preview. Shared audio and completed shots are reused across exports; only dependencies needed by the selected output are generated.

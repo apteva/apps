@@ -90,3 +90,40 @@ From the apps repository root, rebuild the shipped panel:
 ```sh
 bun run scripts/build-panels.ts --app environments
 ```
+
+## Manual clock
+
+Environment runs use wall time by default. To test date-dependent behavior,
+create a run with a manual clock:
+
+```json
+{
+  "spec": {
+    "version": 1,
+    "clock": {"mode": "manual", "initial_time": "2030-01-01T00:00:00Z"},
+    "http_mocks": [
+      {"host": "example.test", "path": "/status", "body": {"phase": "before"}, "expires_at": "2030-01-02T00:00:00Z"},
+      {"host": "example.test", "path": "/status", "body": {"phase": "after"}, "available_at": "2030-01-02T00:00:00Z"}
+    ]
+  }
+}
+```
+
+Pass this to `environment_run_create`, then call
+`environment_clock_advance` with the returned `run_id` and
+`to: "2030-01-02T00:00:00Z"`. `environment_clock_get` returns the current
+time and advancement history. Advancing to the current time or earlier fails.
+An agent in a manual-clock run has a read-only `environment_clock_get` tool.
+
+Integration fixtures accept the same `available_at` and `expires_at` fields.
+The start is inclusive and the expiry is exclusive. Dated responses take
+precedence over undated fallback responses. Overlapping dated responses for
+the same request are rejected. Without a matching response, the runtime uses
+its existing network or integration mode behavior.
+
+Cloned apps using the updated SDK can call `ctx.Now()` or
+`ctx.EnvironmentTime()` to read the server-owned clock. Apps calling Go's
+`time.Now()` directly still see wall time. LLM calls, network deadlines, and
+runtime expiry also continue to use wall time. Snapshots retain the clock,
+its advancement history, and the fixture rules; restoring one starts a new
+run at the captured logical time.

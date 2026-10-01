@@ -8,6 +8,9 @@ for (const kind of ["worklet", "worker"]) {
   const hash = new Bun.CryptoHasher("sha256").update(audio).digest("hex");
   await Bun.write(join(out, `${kind}-${hash}.js`), audio);
 }
+const listenerSource = await Bun.file(join(root, "../ui/listener-worklet.js")).text();
+const listenerHash = new Bun.CryptoHasher("sha256").update(listenerSource).digest("hex");
+await Bun.write(join(out, `listener-${listenerHash}.js`), listenerSource);
 const result = await Bun.build({ entrypoints: [join(root, "client-entry.ts")], target: "browser", format: "esm", minify: true });
 if (!result.success) throw new AggregateError(result.logs, "Telephony client build failed");
 const source = await result.outputs[0].text();

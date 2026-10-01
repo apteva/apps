@@ -43,15 +43,15 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	         forwarded_from, ingress_path, directive, voice, audio_bridge_url, status, placed_at, project_id,
 		         idempotency_key, state_expires_at, deadline_at, recording_mode,
 		         recording_channels, recording_storage_mode, recording_retention_days,
-		         peer_kind, peer_token)
-		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		         peer_kind, peer_token, handling_reason, announcement_state, announcement_text, error_message,carrier_leg_id,carrier_session_id,carrier_signaling_json,provider_event_id,provider_occurred_at,max_duration_sec,media_recovery_timeout_sec)
+		        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		call.ID, call.ThreadID, call.Direction, call.AgentID, call.RouteID, call.CarrierSID, call.CarrierRequestID,
 		call.CarrierSlug, call.CarrierConnectionID, call.CallbackSecret, call.ToNumber, call.FromNumber,
 		call.ForwardedFrom, call.IngressPath, call.Directive, call.Voice, call.AudioBridgeURL, call.Status, call.PlacedAt, call.ProjectID,
 		call.IdempotencyKey, call.StateExpiresAt, call.DeadlineAt,
 		firstNonEmpty(call.RecordingMode, recordingModeOff), firstNonEmpty(call.RecordingChannels, "dual"),
 		firstNonEmpty(call.RecordingStorageMode, recordingStorageCopy), call.RecordingRetentionDays,
-		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken)
+		firstNonEmpty(call.PeerKind, peerKindRealtime), call.PeerToken, call.HandlingReason, call.AnnouncementState, call.AnnouncementText, call.ErrorMessage, call.CarrierLegID, call.CarrierSessionID, firstNonEmpty(call.CarrierSignalingJSON, "{}"), call.ProviderEventID, call.ProviderOccurredAt, callDurationOrDefault(call.MaxDurationSec), mediaRecoveryOrDefault(call.MediaRecoveryTimeoutSec))
 	if err != nil {
 		return nil, false, err
 	}
@@ -60,17 +60,22 @@ func (c *callsDB) insertInboundCallWithEvent(call callRow, message string, plans
 	if _, err := tx.Exec(`UPDATE calls SET updated_at = ? WHERE id = ?`, now, call.ID); err != nil {
 		return nil, false, err
 	}
-	if _, err := enqueueLifecycleEventTx(tx, &call, "call.incoming", call.PlacedAt, lifecycleFacts{
-		OccurredAt:      call.PlacedAt,
+	if _, err := enqueueLifecycleEventTx(tx, &call, "call.incoming", firstNonEmpty(call.ProviderOccurredAt, call.PlacedAt), lifecycleFacts{
+		OccurredAt:      firstNonEmpty(call.ProviderOccurredAt, call.PlacedAt),
 		Source:          "provider",
-		ProviderEventID: firstNonEmpty(call.CarrierSID, call.ID) + ":incoming",
+		ProviderEventID: firstNonEmpty(call.ProviderEventID, firstNonEmpty(call.CarrierSID, call.ID)+":incoming"),
 	}); err != nil {
 		return nil, false, err
 	}
-	if len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil) {
+	if !isSuppressedHandlingReason(call.HandlingReason) && (len(plans) == 0 || plans[0] == nil || (plans[0].TerminalType == "destination" && plans[0].Group == nil)) {
 		if _, err := tx.Exec(`INSERT INTO inbound_event_outbox
         (call_id, project_id, agent_id, message, next_attempt_at)
         VALUES (?, ?, ?, ?, ?)`, call.ID, call.ProjectID, call.AgentID, message, now); err != nil {
+			return nil, false, err
+		}
+	}
+	if isSuppressedHandlingReason(call.HandlingReason) {
+		if err := enqueueRoutingEffectTx(tx, call.ID, call.ProjectID, &inboundRoutingPlan{NodeID: "suppression", TerminalType: "reject"}); err != nil {
 			return nil, false, err
 		}
 	}
@@ -147,6 +152,9 @@ func (a *App) answerImmediateCall(ctx *sdk.AppCtx, route *routeRow, callID strin
 	if row.Status != "pending" {
 		return nil
 	}
+	if isSuppressedHandlingReason(row.HandlingReason) {
+		return nil
+	}
 	_, err = a.answerCall(ctx, row, route.AutoDirective, route.AutoVoice, route.AutoGreeting, true)
 	return err
 }
@@ -159,6 +167,7 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 	rows, err := ctx.AppDB().Query(`SELECT c.id, r.id
         FROM calls c JOIN inbound_routes r ON r.id = c.route_id
         WHERE c.project_id = ? AND c.direction = 'inbound' AND c.status = 'pending'
+	          AND COALESCE(c.handling_reason,'')=''
           AND r.enabled = 1
           AND (c.state_expires_at = '' OR c.state_expires_at > ?)
         ORDER BY c.placed_at LIMIT 20`, project, time.Now().UTC().Format(time.RFC3339))
@@ -204,6 +213,9 @@ func (a *App) runAutoAnswerTick(_ context.Context, ctx *sdk.AppCtx) error {
 }
 
 func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
+	if err := a.runRoutingEffects(context.Background(), ctx); err != nil {
+		return err
+	}
 	project := ctx.CurrentProject()
 	if project == "" {
 		return nil
@@ -242,8 +254,10 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 	expired, err := a.db().listWhere(`project_id = ?
         AND status NOT IN ('completed','failed','no-answer','busy','canceled')
         AND ((state_expires_at <> '' AND state_expires_at <= ?)
-          OR (deadline_at <> '' AND deadline_at <= ?))
-        ORDER BY placed_at LIMIT 50`, project, now.Format(time.RFC3339), now.Format(time.RFC3339))
+          OR (duration_started_at='' AND deadline_at <> '' AND deadline_at <= ?)
+ OR (connected_deadline_at<>'' AND connected_deadline_at<=?)
+ OR (media_deadline_at<>'' AND media_deadline_at<=?))
+        ORDER BY placed_at LIMIT 50`, project, now.Format(time.RFC3339), now.Format(time.RFC3339), now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
@@ -265,27 +279,68 @@ func (a *App) runLifecycleTick(_ context.Context, ctx *sdk.AppCtx) error {
 		WHERE project_id = ? AND ended_at <> '' AND ended_at < ?
 		  AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.call_id = calls.id AND r.deleted_at = '')`,
 		project, now.Add(-30*24*time.Hour).Format(time.RFC3339))
+	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_attempts WHERE project_id=? AND received_at<?`, project, now.Add(-24*time.Hour).Unix())
+	_, _ = ctx.AppDB().Exec(`DELETE FROM inbound_burst_cooldowns WHERE project_id=? AND expires_at<?`, project, now.Unix())
 	return nil
 }
 
 func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
-	if a.callUsesDirectSIP(row) {
-		if gateway := a.directSIPGateway(); gateway != nil {
-			if err := gateway.Hangup(row); err != nil {
-				return err
-			}
+	return a.expireCallAt(ctx, row, time.Now().UTC())
+}
+
+// Explicit clock makes multi-hour and boundary tests immediate and deterministic.
+func (a *App) expireCallAt(ctx *sdk.AppCtx, row *callRow, now time.Time) error {
+	if row == nil {
+		return nil
+	}
+	// The activation journal owns its deadline and failure classification. Do
+	// this before taking the claim lock because its driver takes the same lock.
+	var activating bool
+	if err := a.db().db.QueryRow(`SELECT EXISTS(SELECT 1 FROM carrier_activations WHERE call_id=? AND status IN ('pending','waiting','failed'))`, row.ID).Scan(&activating); err != nil {
+		return err
+	}
+	if activating {
+		err := a.driveCarrierActivation(ctx, row.ID)
+		if errors.Is(err, errAnswerPreparationInProgress) || errors.Is(err, errAnswerCallEnded) {
+			return nil
 		}
-	} else if row.CarrierSID != "" {
-		carrier, err := a.carrierForRow(ctx, nil, row)
+		return err
+	}
+	unlock := a.softphones.lockClaim(row.ID)
+	defer unlock()
+	fresh, err := a.db().findCall(row.ID)
+	if err != nil {
+		return err
+	}
+	if fresh == nil || isTerminalStatus(fresh.Status) {
+		return nil
+	}
+	// The worker's snapshot may predate a successful adviser claim or a routing
+	// transition that extended the deadline. Recheck while holding the claim lock.
+	reasonCode := callExpiryReason(fresh, now)
+	if reasonCode == "" {
+		return nil
+	}
+
+	row = fresh
+	if reasonCode == terminationTimeLimit {
+		// Persist the intentional reason before the carrier can call us back.
+		// A failed command stays retryable without losing its classification.
+		_, err := a.db().db.Exec(`UPDATE calls SET termination_reason='time_limit',termination_cause='max_duration',termination_initiator='telephony' WHERE id=? AND status NOT IN ('completed','failed','busy','no-answer','canceled')`, row.ID)
 		if err != nil {
 			return err
 		}
-		if err := carrier.Hangup(ctx, row); err != nil {
-			return fmt.Errorf("carrier hangup: %w", err)
-		}
 	}
+	if err := a.terminateCarrierCall(ctx, row); err != nil {
+		return fmt.Errorf("carrier termination: %w", err)
+	}
+
 	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill expired call thread", "call", row.ID, "err", err)
+	}
+	if reasonCode == terminationTimeLimit {
+		_, err := a.db().updateStatusWithFacts(row.ID, "completed", "", lifecycleFacts{Source: "telephony", OccurredAt: now.Format(time.RFC3339Nano), TerminationCause: "max_duration", TerminationInitiator: "telephony"})
+		return err
 	}
 	status := "failed"
 	reason := "call lifecycle deadline exceeded"
@@ -293,5 +348,13 @@ func (a *App) expireCall(ctx *sdk.AppCtx, row *callRow) error {
 		status = "no-answer"
 		reason = "call was not connected before its deadline"
 	}
-	return a.db().updateStatus(row.ID, status, reason)
+	if row.RoutingResolution == "routing_error" && row.ErrorMessage == "carrier action retry limit exceeded" {
+		status = "failed"
+		reason = row.ErrorMessage
+	}
+	if reasonCode == "media_timeout" {
+		reason = "media transport did not recover before its deadline"
+	}
+	_, err = a.db().updateStatusWithFacts(row.ID, status, reason, lifecycleFacts{Source: "telephony", OccurredAt: now.Format(time.RFC3339Nano), TerminationCause: reasonCode, TerminationInitiator: "telephony"})
+	return err
 }

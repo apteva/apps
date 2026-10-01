@@ -467,6 +467,7 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 				t.Fatal(err)
 			}
 			core := waitTestConnection(t, coreBridge.conn)
+			assertListeners := startListenerProbe(t, a, call.ID)
 
 			caller := sinePCM(tc.sampleRate, 440, tc.sampleRate/50)
 			var raw []byte
@@ -554,6 +555,7 @@ func TestJSONCarrierMediaBridgesArePacedAndInterruptible(t *testing.T) {
 				t.Fatal("carrier playback progress did not reach Core")
 			}
 
+			assertListeners()
 			callerSpeech := telephoneSpeech(tc.sampleRate, 500, 3500)
 			frameSamples := tc.sampleRate / 50
 			for offset := 0; offset < len(callerSpeech); offset += frameSamples {

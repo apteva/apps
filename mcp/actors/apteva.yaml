@@ -1,0 +1,94 @@
+schema: apteva-app/v1
+name: actors
+display_name: Actors
+version: 0.1.0
+description: |
+  Reusable browser actors with named operations, saved tasks, revisioned
+  definitions, durable run history, datasets, and Jobs schedules.
+  Uses Computer directly for browser sessions and saved contexts.
+  Web is independent and is not required. Site workflows are user definitions.
+icon: /ui/icon.svg
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/actors
+tags: [automation, actors, extraction, browser]
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+requires:
+  permissions: [db.write.app, net.egress, platform.apps.call]
+  apps:
+    - name: computer
+      version: ">=0.7.72"
+      reason: Browser control, saved contexts, rendered extraction and screenshots.
+    - name: storage
+      reason: Private dataset exports, screenshots and run traces.
+    - name: jobs
+      version: ">=0.1.13"
+      reason: Actor schedules and trigger delivery.
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: actors_save
+      description: Create or update a reusable actor definition and immutable revision.
+    - name: actors_get
+      description: Get an actor by ID or name.
+    - name: actors_list
+      description: List actor definitions in the current project.
+    - name: actors_delete
+      description: Delete an actor after removing its saved tasks and schedules; preserve run history.
+    - name: actors_run
+      description: Queue a named operation with optional revision, preset, input and idempotency key.
+    - name: actors_run_get
+      description: Get run status, bounded output, immutable snapshot and export references.
+    - name: actors_run_cancel
+      description: Cancel queued work or request cancellation of an active run.
+    - name: actors_run_retry
+      description: Explicitly repeat a run using its original definition and input snapshot.
+    - name: actors_schedule
+      description: Create a Jobs-owned schedule pinned to an actor revision and operation.
+    - name: actors_schedules
+      description: List Actors schedules or one schedule's delivery history.
+    - name: actors_unschedule
+      description: Cancel an Actors-owned schedule.
+    - name: actors_task_save
+      description: Save a task pinned to an actor revision and operation.
+    - name: actors_task_list
+      description: List saved tasks.
+    - name: actors_task_run
+      description: Execute a saved task.
+    - name: actors_task_delete
+      description: Delete a saved task.
+    - name: actors_dataset_read
+      description: Read a run dataset with cursor pagination, including partial results.
+  ui_panels:
+    - slot: project.page
+      label: Actors
+      icon: workflow
+      entry: /ui/ActorsPanel.mjs
+  skills:
+    - name: how-to-use-actors
+      command: /actors
+      body_file: skills/how-to-use-actors.md
+      description: Create and execute reusable browser actors through Computer.
+  workers:
+    - name: actor-runner
+      schedule: "@every 2s"
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: actors/v0.1.0
+    entry: mcp/actors
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/actors.db
+  migrations: migrations/
+config_schema:
+  - name: allow_private_networks
+    type: bool
+    default: false
+    label: Allow private network URLs
+    description: Permit private destinations for trusted local workflows.
+upgrade_policy: auto-patch

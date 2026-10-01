@@ -22,6 +22,16 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
+	if len(m.Provides.UIComponents) != 1 {
+		t.Fatalf("ui components=%d, want 1", len(m.Provides.UIComponents))
+	}
+	widget := m.Provides.UIComponents[0]
+	if widget.Name != "messages" || widget.Entry != "/ui/MessagingWidget.mjs" {
+		t.Fatalf("unexpected messaging widget: %+v", widget)
+	}
+	if widget.Native == nil || widget.Native.Schema != sdk.NativeSurfaceSchemaCurrent || widget.Native.Entry != "/ui/surfaces/messages.json" {
+		t.Fatalf("messaging native widget is not advertised: %+v", widget.Native)
+	}
 }
 
 func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
@@ -76,6 +86,9 @@ func TestManifestAndYAMLAgree(t *testing.T) {
 	}
 	if !reflect.DeepEqual(routeContracts(disk), routeContracts(embedded)) {
 		t.Fatalf("HTTP route drift: disk=%v embedded=%v", routeContracts(disk), routeContracts(embedded))
+	}
+	if !reflect.DeepEqual(disk.Provides.UIComponents, embedded.Provides.UIComponents) {
+		t.Fatalf("UI component drift: disk=%+v embedded=%+v", disk.Provides.UIComponents, embedded.Provides.UIComponents)
 	}
 }
 

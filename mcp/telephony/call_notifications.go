@@ -72,12 +72,12 @@ func (a *App) callNotificationSnapshot(r *http.Request, project string) ([32]byt
 	}
 	type offer struct{ ID, Destination, Kind, Expires string }
 	type entry struct {
-		ID, Status, Peer, Destination, Media string
-		Offers                               []offer
+		ID, Status, Peer, Destination, Media, Hold, Recording string
+		Offers                                                []offer
 	}
 	entries := make([]entry, 0, len(rows))
 	for _, row := range rows {
-		e := entry{ID: row.ID, Status: row.Status, Peer: row.PeerKind, Destination: row.RoutingDestinationID, Media: row.MediaStatus}
+		e := entry{ID: row.ID, Status: row.Status, Peer: row.PeerKind, Destination: row.RoutingDestinationID, Media: row.MediaStatus, Hold: row.HoldState, Recording: effectiveRecordingControlState(row)}
 		offers, err := a.db().activeRingOffers(row.ID, project)
 		if err != nil {
 			return [32]byte{}, err

@@ -575,7 +575,7 @@ func studioAction(ctx *sdk.AppCtx, action string, args map[string]any) (any, err
 	case "metric_sources":
 		return metricSources(ctx, s)
 	case "metrics_sync":
-		return syncMetricSource(ctx, s, txt(args["source_id"]), boundedArg(args, "days", 7, 1, 31))
+		return syncMetricSourceMonth(ctx, s, txt(args["source_id"]), boundedArg(args, "days", 7, 1, 31), txt(args["month"]))
 	case "metrics_query":
 		return gameMetricsQuery(ctx, s, args)
 	case "discovery":

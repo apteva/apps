@@ -60,11 +60,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.90
+version: 0.7.91
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.90 adds persistent
-  operator-owned scheduling constraints that reject immediate publication and
-  incorrect schedule times, with live Patreon LLM recovery coverage.
+  Watch, steer, and replay hosted browser sessions. v0.7.91 shows live sessions
+  first, loads past sessions on demand in pages, and folds browser settings
+  away from the session list.
 icon: /ui/icon.svg
 icon_style: monochrome
 scopes: [project, global]
@@ -6062,6 +6062,11 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	view := r.URL.Query().Get("view")
+	if view != "" && view != "all" && view != "active" && view != "history" {
+		httpErr(w, 400, "view must be all, active, or history")
+		return
+	}
 	limit, offset := 100, 0
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		n, err := strconv.Atoi(raw)
@@ -6079,7 +6084,33 @@ func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
-	rows, err := a.listUISessionsPage(appCtxForRequest(r, nil), limit, offset)
+	if view == "active" {
+		writeJSON(w, map[string]any{"sessions": a.listSessions()})
+		return
+	}
+	ctx := appCtxForRequest(r, nil)
+	if view == "history" {
+		if ctx == nil || ctx.AppDB() == nil {
+			writeJSON(w, map[string]any{"sessions": []sessionInfo{}, "has_more": false})
+			return
+		}
+		history, err := dbListEndedSessionsPage(ctx.AppDB(), limit+1, offset)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		hasMore := len(history) > limit
+		if hasMore {
+			history = history[:limit]
+		}
+		rows := make([]sessionInfo, 0, len(history))
+		for _, row := range history {
+			rows = append(rows, historicalSessionInfo(row))
+		}
+		writeJSON(w, map[string]any{"sessions": rows, "limit": limit, "offset": offset, "next_offset": offset + len(rows), "has_more": hasMore})
+		return
+	}
+	rows, err := a.listUISessionsPage(ctx, limit, offset)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

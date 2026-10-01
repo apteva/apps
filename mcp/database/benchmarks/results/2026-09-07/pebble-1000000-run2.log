@@ -1,0 +1,4 @@
+2026/09/07 10:17:05 Found 0 WALs
+10:17:05 pebble run 2: loading 1000000 rows with 3 secondary indexes
+10:17:21 loaded 22000/1000000 rows
+load batch 23: context deadline exceeded

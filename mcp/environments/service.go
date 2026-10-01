@@ -159,7 +159,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 	if err = s.createProtocolFixtures(run, spec); err != nil {
 		return run, fmt.Errorf("create protocol fixtures: %w", err)
 	}
-	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
+	req := sdk.RuntimeCreateRequest{ID: runtimeID, ProjectID: s.ctx.CurrentProject(), TTLSeconds: spec.TTLSeconds, Clock: spec.Clock, AppInstallIDs: spec.AppInstallIDs, ConnectionIDs: spec.ConnectionIDs, MCPServerIDs: spec.MCPServerIDs, NetworkMode: spec.NetworkMode, IntegrationMode: spec.IntegrationMode, AllowHostSuffixes: spec.AllowHostSuffixes, HTTPMocks: spec.HTTPMocks, IntegrationFixtures: spec.IntegrationFixtures, IntegrationBindings: protocolFixtureBindings(spec), ConnectionBindings: spec.ConnectionBindings, Subscriptions: spec.Subscriptions, SnapshotID: spec.SnapshotID}
 	created = true
 	if _, err = s.runtime().CreateRuntime(req); err != nil {
 		return run, fmt.Errorf("create runtime: %w", err)
@@ -561,6 +561,14 @@ func (s *service) liveMap() (map[string]*sdk.RuntimeSummary, error) {
 	return out, nil
 }
 func validateSpec(spec EnvironmentSpec) error {
+	if spec.Clock != nil {
+		if spec.Clock.Mode != "real" && spec.Clock.Mode != "manual" {
+			return errors.New("clock mode must be real or manual")
+		}
+		if spec.Clock.Mode == "real" && spec.Clock.InitialTime != nil {
+			return errors.New("initial_time requires manual clock mode")
+		}
+	}
 	if spec.TTLSeconds != 0 && (spec.TTLSeconds < 60 || spec.TTLSeconds > 86400) {
 		return errors.New("ttl_seconds must be between 60 and 86400")
 	}

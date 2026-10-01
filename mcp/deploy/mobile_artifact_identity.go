@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"howett.net/plist"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -30,6 +34,9 @@ func zipMemberBytes(file *zip.File) ([]byte, error) {
 	return b, err
 }
 func readMobileBinaryIdentity(path, platform string) (mobileBinaryIdentity, error) {
+	if platform == "macos" {
+		return readMacPackageIdentity(path)
+	}
 	zr, err := zip.OpenReader(path)
 	if err != nil {
 		return mobileBinaryIdentity{}, err
@@ -115,6 +122,62 @@ func readMobileBinaryIdentity(path, platform string) (mobileBinaryIdentity, erro
 		return result, errors.New("mobile manifest is missing identifier or version")
 	}
 	return result, nil
+}
+
+func readMacPackageIdentity(path string) (mobileBinaryIdentity, error) {
+	if runtime.GOOS != "darwin" {
+		return mobileBinaryIdentity{}, errors.New("macOS package verification requires a macOS runner")
+	}
+	if !strings.EqualFold(filepath.Ext(path), ".pkg") {
+		return mobileBinaryIdentity{}, errors.New("macOS artifact must be an App Store .pkg")
+	}
+	signature, err := exec.Command("pkgutil", "--check-signature", path).CombinedOutput()
+	if err != nil || !strings.Contains(strings.ToLower(string(signature)), "signed by") {
+		return mobileBinaryIdentity{}, fmt.Errorf("macOS package signature is invalid: %s", strings.TrimSpace(string(signature)))
+	}
+	tmp, err := os.MkdirTemp("", "apteva-mac-package-*")
+	if err != nil {
+		return mobileBinaryIdentity{}, err
+	}
+	defer os.RemoveAll(tmp)
+	if output, err := exec.Command("pkgutil", "--expand-full", path, tmp).CombinedOutput(); err != nil {
+		return mobileBinaryIdentity{}, fmt.Errorf("expand macOS package: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	var infoPath string
+	err = filepath.WalkDir(tmp, func(candidate string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && strings.HasSuffix(filepath.ToSlash(candidate), ".app/Contents/Info.plist") {
+			if infoPath != "" {
+				return errors.New("macOS package contains multiple apps")
+			}
+			infoPath = candidate
+		}
+		return nil
+	})
+	if err != nil {
+		return mobileBinaryIdentity{}, err
+	}
+	if infoPath == "" {
+		return mobileBinaryIdentity{}, errors.New("macOS package contains no app Info.plist")
+	}
+	body, err := os.ReadFile(infoPath)
+	if err != nil {
+		return mobileBinaryIdentity{}, err
+	}
+	var info struct {
+		ID      string `plist:"CFBundleIdentifier"`
+		Version string `plist:"CFBundleShortVersionString"`
+		Build   string `plist:"CFBundleVersion"`
+	}
+	if _, err := plist.Unmarshal(body, &info); err != nil {
+		return mobileBinaryIdentity{}, err
+	}
+	if info.ID == "" || info.Version == "" || info.Build == "" {
+		return mobileBinaryIdentity{}, errors.New("macOS package is missing bundle identity or version")
+	}
+	return mobileBinaryIdentity{Identifier: info.ID, Version: info.Version, Build: info.Build}, nil
 }
 func verifyMobileBinaryIdentity(path, platform string, cfg mobileTargetConfig) (mobileBinaryIdentity, error) {
 	actual, err := readMobileBinaryIdentity(path, platform)

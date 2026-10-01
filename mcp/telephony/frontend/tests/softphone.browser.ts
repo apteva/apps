@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-test("installed headless client talks through real Telephony with host-owned UI", async ({ page }) => {
+test("installed headless client talks through real Telephony with host-owned UI", async ({ page, context }) => {
   const gateway = process.env.TELEPHONY_TEST_GATEWAY;
   if (!gateway) throw new Error("Run via TestTier2HeadlessBrowser; a compiled sidecar gateway is required");
   const errors: string[] = [];
@@ -63,6 +63,28 @@ test("installed headless client talks through real Telephony with host-owned UI"
   await expect.poll(() => page.evaluate(() => (window as any).maxSpeaker), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(() => page.evaluate(() => (window as any).maxMic), { timeout: 15000 }).toBeGreaterThan(0.01);
   await expect.poll(async () => (await page.request.get(gateway + "/fixture/audio-ready")).json()).toEqual({ ready: true });
+  if (process.env.TELEPHONY_TEST_SURFACE === "headless") {
+    const observer = await context.newPage();
+    const observerErrors: string[] = [];
+    observer.on("pageerror", error => observerErrors.push(error.message));
+    await observer.goto("/listener");
+    await observer.waitForFunction(() => typeof (window as any).loadListener === "function");
+    await observer.evaluate(async () => {
+      const w = window as any;
+      navigator.mediaDevices.getUserMedia = async () => { throw new Error("Passive listener requested microphone access"); };
+      await w.loadListener();
+    });
+    await observer.click("#listen");
+    await observer.evaluate(() => (window as any).listenPromise);
+    await expect.poll(() => observer.evaluate(() => (window as any).callListener.getSnapshot().state)).toBe("listening");
+    await expect.poll(() => observer.evaluate(() => (window as any).listenerDiagnostics?.played_ms?.every((value: number) => value > 100))).toBe(true);
+    expect(await observer.evaluate(() => (window as any).listenerDiagnostics.max_queue_ms)).toBeLessThanOrEqual(160);
+    await observer.evaluate(() => (window as any).callListener.stop());
+    expect(await observer.evaluate(() => (window as any).callListener.getSnapshot().state)).toBe("idle");
+    expect(observerErrors).toEqual([]);
+    await observer.close();
+    expect(await page.evaluate(() => (window as any).phone.getSnapshot().audioState)).toBe("live");
+  }
   await page.evaluate(() => { const w = window as any; w.phone.setMuted(true); w.phone.sendDTMF("12#"); });
   await expect.poll(() => page.evaluate(() => (window as any).notices)).toContain("Keypad tone sent");
   await expect.poll(() => page.evaluate(() => (window as any).diagnostics?.micInputGainDb)).toBe(0);

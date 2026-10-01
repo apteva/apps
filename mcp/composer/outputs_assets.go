@@ -34,6 +34,23 @@ func validateOutputAssets(ctx *sdk.AppCtx, edit *Edit) error {
 					}
 				}
 			}
+			if c.Asset.Procedure != nil {
+				for _, input := range c.Asset.Procedure.Inputs {
+					if input == nil {
+						continue
+					}
+					if err := check(input.Src); err != nil {
+						return err
+					}
+					if input.AI != nil {
+						for _, src := range aiSourceImages(input.AI) {
+							if err := check(src); err != nil {
+								return err
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -45,6 +62,25 @@ func prepareOutputAssets(ctx *sdk.AppCtx, edit *Edit, cid int64, renderID int64)
 		t := &edit.Timeline.Tracks[ti]
 		for ci := range t.Clips {
 			c := &t.Clips[ci]
+			if c.Asset.Procedure != nil {
+				for name, input := range c.Asset.Procedure.Inputs {
+					if input == nil || input.AI == nil || input.Src != "" {
+						continue
+					}
+					p, err := prepareOutputAsset(ctx, input.AI, cid, ttsContinuityPlan{}, renderID)
+					if err != nil {
+						return pending, fmt.Errorf("%s procedure input %s: %w", c.UID, name, err)
+					}
+					if p != "" {
+						pending = append(pending, p)
+						continue
+					}
+					input.Src = fmt.Sprintf("storage:%d", input.AI.StorageID)
+					if input.Kind == "" {
+						input.Kind = assetTypeForAI(input.AI.MediaKind)
+					}
+				}
+			}
 			if c.AI == nil || c.Asset.Src != "" {
 				continue
 			}

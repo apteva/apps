@@ -1,0 +1,569 @@
+package main
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/gobwas/ws"
+)
+
+const listenerFrameMagic uint32 = 0x314c5441 // ATL1, PCM16LE@24k, direction + sequence + server time
+const listenerMaxAge = 200 * time.Millisecond
+const listenerMaxFrameBytes = 960 // 20 ms
+const listenerQueueFrames = 12    // combined directions; at most 240 ms aggregate, further bounded by age
+
+type listenerAudioFrame struct {
+	data []byte
+	at   time.Time
+}
+type callListener struct {
+	hash       string
+	audio      chan listenerAudioFrame
+	done       chan struct{}
+	once       sync.Once
+	dropped    [2]atomic.Int64
+	sent       [2]atomic.Int64
+	stale      [2]atomic.Int64
+	trimmed    [2]atomic.Int64
+	maxWriteMS atomic.Int64
+	mu         sync.Mutex
+	reason     string
+}
+
+func (l *callListener) close(reason string) {
+	l.once.Do(func() { l.mu.Lock(); l.reason = reason; l.mu.Unlock(); close(l.done) })
+}
+func (l *callListener) closeReason() string { l.mu.Lock(); defer l.mu.Unlock(); return l.reason }
+func (l *callListener) diagnostics() map[string]any {
+	return map[string]any{"sent_frames": []int64{l.sent[0].Load(), l.sent[1].Load()}, "overflow_frames": []int64{l.dropped[0].Load(), l.dropped[1].Load()}, "stale_frames": []int64{l.stale[0].Load(), l.stale[1].Load()}, "source_trimmed_frames": []int64{l.trimmed[0].Load(), l.trimmed[1].Load()}, "max_write_ms": l.maxWriteMS.Load()}
+}
+
+type callAudioTap struct {
+	mu        sync.Mutex
+	listeners map[string]*callListener
+	closed    bool
+	sequence  [2]uint64
+}
+
+func (t *callAudioTap) hasListeners() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return !t.closed && len(t.listeners) > 0
+}
+func (t *callAudioTap) add(hash string, maximum int) (*callListener, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed {
+		return nil, errors.New("media disconnected")
+	}
+	if _, ok := t.listeners[hash]; ok {
+		return nil, errors.New("listener already connected")
+	}
+	if len(t.listeners) >= maximum {
+		return nil, errors.New("listener limit reached")
+	}
+	l := &callListener{hash: hash, audio: make(chan listenerAudioFrame, listenerQueueFrames), done: make(chan struct{})}
+	if t.listeners == nil {
+		t.listeners = map[string]*callListener{}
+	}
+	t.listeners[hash] = l
+	return l, nil
+}
+func (t *callAudioTap) remove(l *callListener) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.listeners[l.hash] == l {
+		delete(t.listeners, l.hash)
+	}
+	l.close("listener_stopped")
+}
+func (t *callAudioTap) close(reason string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	for _, l := range t.listeners {
+		l.close(reason)
+	}
+}
+
+// No socket I/O, database work or waiting on listeners occurs in the call path.
+// The frame is copied once and shared immutably across independent bounded queues.
+func (t *callAudioTap) publish(direction uint32, pcm []byte) {
+	if direction > 1 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.closed || len(t.listeners) == 0 {
+		return
+	}
+	now := time.Now()
+	clockMS := int64(mediaClockMS())
+	// Never replay seconds of a catch-up burst to a supervisor.
+	if len(pcm) > listenerMaxFrameBytes*6 {
+		skipped := uint64((len(pcm) - listenerMaxFrameBytes*6 + listenerMaxFrameBytes - 1) / listenerMaxFrameBytes)
+		t.sequence[direction] += skipped
+		for _, l := range t.listeners {
+			l.trimmed[direction].Add(int64(skipped))
+		}
+		pcm = pcm[len(pcm)-listenerMaxFrameBytes*6:]
+	}
+	offset := int64(0)
+	for len(pcm) >= 2 {
+		n := min(len(pcm)&^1, listenerMaxFrameBytes)
+		data := make([]byte, 24+n)
+		binary.LittleEndian.PutUint32(data, listenerFrameMagic)
+		binary.LittleEndian.PutUint32(data[4:], direction)
+		binary.LittleEndian.PutUint64(data[8:], t.sequence[direction])
+		t.sequence[direction]++
+		binary.LittleEndian.PutUint64(data[16:], uint64(clockMS+offset))
+		copy(data[24:], pcm[:n])
+		pcm = pcm[n:]
+		offset += int64(n) * 1000 / 48000
+		frame := listenerAudioFrame{data, now}
+		for _, l := range t.listeners {
+			select {
+			case <-l.done:
+				continue
+			default:
+			}
+			select {
+			case l.audio <- frame:
+			default:
+				select {
+				case old := <-l.audio:
+					d := binary.LittleEndian.Uint32(old.data[4:])
+					l.dropped[d].Add(1)
+				default:
+				}
+				select {
+				case l.audio <- frame:
+				default:
+					l.dropped[direction].Add(1)
+				}
+			}
+		}
+	}
+}
+
+type callListenerRegistry struct {
+	mu   sync.Mutex
+	taps map[string]*callAudioTap
+}
+
+func (r *callListenerRegistry) openBridge(id string) *callAudioTap {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.taps == nil {
+		r.taps = map[string]*callAudioTap{}
+	}
+	if old := r.taps[id]; old != nil {
+		old.close("media_replaced")
+	}
+	t := &callAudioTap{}
+	r.taps[id] = t
+	return t
+}
+func (r *callListenerRegistry) lookup(id string) *callAudioTap {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.taps[id]
+}
+func (r *callListenerRegistry) closeBridge(id string, t *callAudioTap) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t.close("media_disconnected")
+	if r.taps[id] == t {
+		delete(r.taps, id)
+	}
+}
+func (r *callListenerRegistry) disconnect(id, hash string) {
+	if t := r.lookup(id); t != nil {
+		t.mu.Lock()
+		if l := t.listeners[hash]; l != nil {
+			l.close("listener_stopped")
+		}
+		t.mu.Unlock()
+	}
+}
+func (a *App) maxCallListeners() int {
+	if globalCtx == nil {
+		return 4
+	}
+	return int(max(1, boundedBurstSetting(globalCtx.Config(), "max_call_listeners", 4, 16)))
+}
+func (a *App) phoneCanListen(p *phonePrincipal, row *callRow) bool {
+	return p == nil || (p.Supervisor && p.Listen && a.phoneCallAllowed(p, row, true))
+}
+func (a *App) listenerCapability(row *callRow) (bool, string) {
+	if isTerminalStatus(row.Status) {
+		return false, "call_ended"
+	}
+	if row.MediaStatus != "connected" || a.listeners.lookup(row.ID) == nil {
+		return false, "media_not_bridged"
+	}
+	return true, ""
+}
+func (a *App) listenerMediaURL(id, token string) string {
+	path := "/softphone/listen-media/" + id + "/" + token
+	if a.installID > 0 {
+		return fmt.Sprintf("/api/apps/telephony/_install/%d%s", a.installID, path)
+	}
+	return path
+}
+func (a *App) listenerSessionValid(row *callRow, token string) bool {
+	if isTerminalStatus(row.Status) {
+		return false
+	}
+	var principal, providerJSON string
+	var expires int64
+	err := a.db().db.QueryRow(`SELECT principal,provider_json,expires_at FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=?`, phoneHash(token), row.ID, row.ProjectID).Scan(&principal, &providerJSON, &expires)
+	if err != nil || expires <= time.Now().Unix() {
+		return false
+	}
+	if principal == "" {
+		return true
+	}
+	var identity phoneIdentity
+	if json.Unmarshal([]byte(principal), &identity) != nil || !identity.valid() {
+		return false
+	}
+	policy, err := a.phonePolicy(row.ProjectID)
+	if err != nil {
+		return false
+	}
+	p, err := phonePrincipalFromPolicy(row.ProjectID, identity, policy)
+	if err != nil || !a.phoneCanListen(p, row) {
+		return false
+	}
+	if providerJSON != "" {
+		var provider phoneAuthProvider
+		if json.Unmarshal([]byte(providerJSON), &provider) != nil || !phoneProviderStillAllows(policy, provider, "call.listen") {
+			return false
+		}
+	}
+	return true
+}
+func (a *App) handleListenAction(w http.ResponseWriter, r *http.Request, project, action, id string) {
+	row, err := a.db().findCall(id)
+	p := phoneUserFrom(r)
+	if err != nil || row == nil || row.ProjectID != project || !a.phoneCanListen(p, row) {
+		http.Error(w, "call not found", 404)
+		return
+	}
+	if action == "listen-audit" {
+		rows, err := a.db().db.Query(`SELECT id,principal,joined_at,left_at,reason,diagnostics_json FROM telephony_listener_audit WHERE call_id=? AND project_id=? ORDER BY joined_at DESC LIMIT 100`, id, project)
+		if err != nil {
+			http.Error(w, "audit unavailable", 503)
+			return
+		}
+		defer rows.Close()
+		out := make([]map[string]any, 0)
+		for rows.Next() {
+			var auditID, principal, joined, left, reason, diagnostics string
+			if rows.Scan(&auditID, &principal, &joined, &left, &reason, &diagnostics) != nil {
+				http.Error(w, "audit unavailable", 503)
+				return
+			}
+			out = append(out, map[string]any{"id": auditID, "principal": json.RawMessage(firstNonEmpty(principal, "null")), "joined_at": joined, "left_at": left, "reason": reason, "diagnostics": json.RawMessage(diagnostics)})
+		}
+		if rows.Err() != nil {
+			http.Error(w, "audit unavailable", 503)
+			return
+		}
+		writeJSON(w, map[string]any{"listeners": out})
+		return
+	}
+	if action != "listen" {
+		var body struct {
+			SessionToken string `json:"session_token"`
+		}
+		if decodeJSONBody(r, &body) != nil || body.SessionToken == "" {
+			http.Error(w, "listener credential required", 400)
+			return
+		}
+		principal := ""
+		if p != nil {
+			principal = p.Identity.key()
+		}
+		if action == "listen-stop" {
+			res, err := a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=? AND call_id=? AND project_id=? AND principal=?`, phoneHash(body.SessionToken), id, project, principal)
+			if err != nil {
+				http.Error(w, "session unavailable", 503)
+				return
+			}
+			n, _ := res.RowsAffected()
+			if n == 1 {
+				a.listeners.disconnect(id, phoneHash(body.SessionToken))
+			}
+			writeJSON(w, map[string]any{"ok": true})
+			return
+		}
+		if !a.listenerSessionValid(row, body.SessionToken) {
+			http.Error(w, "listener access expired or revoked", 403)
+			return
+		}
+		res, err := a.db().db.Exec(`UPDATE telephony_listener_sessions SET expires_at=? WHERE token_hash=? AND call_id=? AND project_id=? AND principal=?`, time.Now().Unix()+phoneLeaseSeconds, phoneHash(body.SessionToken), id, project, principal)
+		if err != nil {
+			http.Error(w, "session unavailable", 503)
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n != 1 {
+			http.Error(w, "session not owned", 403)
+			return
+		}
+		writeJSON(w, map[string]any{"lease_seconds": phoneLeaseSeconds})
+		return
+	}
+	if supported, reason := a.listenerCapability(row); !supported {
+		writeJSONStatus(w, 409, map[string]any{"code": reason})
+		return
+	}
+	principal, providerJSON := "", ""
+	if p != nil {
+		principal = p.Identity.key()
+		if p.AuthProvider != nil {
+			b, _ := json.Marshal(p.AuthProvider)
+			providerJSON = string(b)
+		}
+	}
+	token := newSecret()
+	tx, err := a.db().db.Begin()
+	if err != nil {
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`DELETE FROM telephony_listener_sessions WHERE expires_at<=?`, time.Now().Unix())
+	if err != nil {
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	var count int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM telephony_listener_sessions WHERE call_id=? AND project_id=?`, id, project).Scan(&count); err != nil {
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	if count >= a.maxCallListeners() {
+		writeJSONStatus(w, 409, map[string]any{"code": "listener_limit"})
+		return
+	}
+	_, err = tx.Exec(`INSERT INTO telephony_listener_sessions(token_hash,call_id,project_id,principal,provider_json,expires_at) VALUES(?,?,?,?,?,?)`, phoneHash(token), id, project, principal, providerJSON, time.Now().Unix()+phoneLeaseSeconds)
+	if err != nil || tx.Commit() != nil {
+		http.Error(w, "session unavailable", 503)
+		return
+	}
+	writeJSON(w, map[string]any{"call_id": id, "media_url": a.listenerMediaURL(id, token), "session_token": token, "lease_seconds": phoneLeaseSeconds})
+}
+
+func (a *App) handleListenMedia(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	id, token := softphonePathParts(r.URL.Path, "/softphone/listen-media/")
+	row, err := a.db().findCall(id)
+	if id == "" || token == "" || err != nil || row == nil || !a.listenerSessionValid(row, token) {
+		http.Error(w, "listener access denied", 403)
+		return
+	}
+	tap := a.listeners.lookup(id)
+	if tap == nil {
+		http.Error(w, "media disconnected", 409)
+		return
+	}
+	l, err := tap.add(phoneHash(token), a.maxCallListeners())
+	if err != nil {
+		http.Error(w, "listener unavailable", 409)
+		return
+	}
+	defer tap.remove(l)
+	conn, readConn, err := upgradeBuffered(w, r)
+	if err != nil {
+		return
+	}
+	writer := newWebSocketWriterPump(conn, ws.StateServerSide)
+	closer := newGracefulWebSocket(conn, writer)
+	auditID := newSecret()
+	var principal string
+	_ = a.db().db.QueryRow(`SELECT principal FROM telephony_listener_sessions WHERE token_hash=?`, l.hash).Scan(&principal)
+	_, err = a.db().db.Exec(`INSERT INTO telephony_listener_audit(id,call_id,project_id,principal,joined_at) VALUES(?,?,?,?,?)`, auditID, id, row.ProjectID, principal, ringTime(time.Now()))
+	if err != nil {
+		closer.Close(ws.StatusInternalServerError, "audit_unavailable")
+		return
+	}
+	defer func() {
+		closer.Close(ws.StatusNormalClosure, l.closeReason())
+		b, _ := json.Marshal(l.diagnostics())
+		_, _ = a.db().db.Exec(`UPDATE telephony_listener_audit SET left_at=?,reason=?,diagnostics_json=? WHERE id=?`, ringTime(time.Now()), l.closeReason(), string(b), auditID)
+		_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, l.hash)
+	}()
+	_ = writer.Write(ws.OpText, []byte(`{"type":"listener.ready","sample_rate":24000,"channels":2}`))
+	done := make(chan struct{})
+	watcherDone := make(chan struct{})
+	defer func() { close(done); <-watcherDone }()
+	go func() {
+		defer close(watcherDone)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-l.done:
+				code := ws.StatusGoingAway
+				if l.closeReason() == "call_ended" {
+					code = ws.StatusNormalClosure
+				}
+				if l.closeReason() == "access_revoked" {
+					code = ws.StatusPolicyViolation
+				}
+				closer.Close(code, l.closeReason())
+				return
+			case <-ticker.C:
+				current, e := a.db().findCall(id)
+				if e != nil || current == nil {
+					l.close("access_revoked")
+					continue
+				}
+				if isTerminalStatus(current.Status) {
+					l.close("call_ended")
+					continue
+				}
+				if !a.listenerSessionValid(current, token) {
+					l.close("access_revoked")
+					continue
+				}
+			case frame := <-l.audio:
+				select {
+				case <-l.done:
+					continue
+				default:
+				}
+				direction := binary.LittleEndian.Uint32(frame.data[4:])
+				if time.Since(frame.at) > listenerMaxAge {
+					l.stale[direction].Add(1)
+					continue
+				}
+				// Recheck termination/revocation on the periodic path, never on the primary media path.
+				started := time.Now()
+				if err := writer.write(ws.OpBinary, frame.data, listenerMaxAge); err != nil {
+					l.close("listener_network_error")
+					closer.Close(ws.StatusGoingAway, l.closeReason())
+					return
+				}
+				elapsed := time.Since(started).Milliseconds()
+				for previous := l.maxWriteMS.Load(); elapsed > previous && !l.maxWriteMS.CompareAndSwap(previous, elapsed); previous = l.maxWriteMS.Load() {
+				}
+				l.sent[direction].Add(1)
+			}
+		}
+	}()
+	for {
+		data, op, err := readWebSocketData(readConn, ws.StateServerSide, writer)
+		if err != nil {
+			l.close("listener_disconnected")
+			return
+		}
+		// Listen sockets are strictly receive-only. No microphone, DTMF, ownership or carrier controls.
+		if op == ws.OpBinary || (op == ws.OpText && strings.TrimSpace(string(data)) != "") {
+			l.close("listener_protocol_violation")
+			closer.Close(ws.StatusPolicyViolation, l.closeReason())
+			return
+		}
+	}
+}
+
+// Observe only successfully transmitted carrier audio, after pacing, stale-frame
+// dropping and codec conversion. Generated but canceled AI speech is never copied.
+func (t *callAudioTap) jsonOutputObserver(codec string) func([]byte) {
+	resampler := carrierInputResampler(codec)
+	return func(payload []byte) {
+		if !t.hasListeners() {
+			return
+		}
+		var frame struct {
+			Media *struct {
+				Payload string `json:"payload"`
+			} `json:"media"`
+		}
+		if json.Unmarshal(payload, &frame) != nil || frame.Media == nil || frame.Media.Payload == "" {
+			return
+		}
+		pcm, err := decodeCarrierPCM(frame.Media.Payload, codec)
+		if err != nil {
+			return
+		}
+		if resampler != nil {
+			pcm = resampler.Process(pcm)
+		}
+		t.publish(1, pcm16ToBytes(pcm))
+	}
+}
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+// Policy writes revoke only affected listeners. No main-call sockets are touched.
+func (a *App) revokeCallListeners(project string) {
+	rows, err := a.db().db.Query(`SELECT s.call_id,s.token_hash,s.principal,s.provider_json FROM telephony_listener_sessions s WHERE s.project_id=?`, project)
+	if err != nil {
+		return
+	}
+	type grant struct{ id, hash, principal, provider string }
+	var grants []grant
+	for rows.Next() {
+		var g grant
+		if rows.Scan(&g.id, &g.hash, &g.principal, &g.provider) == nil {
+			grants = append(grants, g)
+		}
+	}
+	_ = rows.Close()
+	policy, err := a.phonePolicy(project)
+	if err != nil {
+		return
+	}
+	for _, g := range grants {
+		if g.principal == "" {
+			continue
+		}
+		row, e := a.db().findCall(g.id)
+		if e != nil || row == nil {
+			continue
+		}
+		var identity phoneIdentity
+		_ = json.Unmarshal([]byte(g.principal), &identity)
+		p, e := phonePrincipalFromPolicy(project, identity, policy)
+		allowed := e == nil && a.phoneCanListen(p, row)
+		if allowed && g.provider != "" {
+			var provider phoneAuthProvider
+			allowed = json.Unmarshal([]byte(g.provider), &provider) == nil && phoneProviderStillAllows(policy, provider, "call.listen")
+		}
+		if !allowed {
+			_, _ = a.db().db.Exec(`DELETE FROM telephony_listener_sessions WHERE token_hash=?`, g.hash)
+			if tap := a.listeners.lookup(g.id); tap != nil {
+				tap.mu.Lock()
+				if l := tap.listeners[g.hash]; l != nil {
+					l.close("access_revoked")
+				}
+				tap.mu.Unlock()
+			}
+		}
+	}
+}
+
+func (t *callAudioTap) publishPCM(direction uint32, pcm []int16) {
+	if t.hasListeners() {
+		t.publish(direction, pcm16ToBytes(pcm))
+	}
+}

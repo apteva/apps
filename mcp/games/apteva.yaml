@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: games
 display_name: Games
-version: 0.5.0
+version: 0.6.0
 description: |
   Per-game logos reference retained sprite asset versions and ship in content builds.
   Versioned game assets and content for thirteen asset kinds, with Media Studio
@@ -10,7 +10,7 @@ description: |
   Multi-game backend for Apteva: independent games, players, cloud saves,
   transactional statistics, leaderboards and achievements within each project.
   Links Code source and Deploy releases to each game, imports reporting from
-  AdMob, GA4 and Apple sales, and provides bounded gameplay telemetry.
+  AdMob, GA4, Apple sales and Google Play sales/earnings, and provides bounded gameplay telemetry.
   Game-specific Auth clients and login tickets protect player APIs. Legacy
   clients remain bound to their migrated game. Agents use scoped MCP tools.
 author: Apteva
@@ -79,7 +79,7 @@ requires:
       kind: integration
       mode: multiple
       required: false
-      compatible_slugs: [admob, google-analytics, app-store-connect]
+      compatible_slugs: [admob, google-analytics, app-store-connect, google-play-developer]
       label: Reporting providers
 
 provides:
@@ -159,7 +159,7 @@ provides:
     - name: games_metric_sources
       description: Read reporting sources and refresh status.
     - name: games_metrics_sync
-      description: Import up to 31 days with deduplication.
+      description: Import up to 31 days of daily reports, or available monthly Google Play reports; month YYYYMM selects an exact Play report.
     - name: games_metrics_query
       description: Query Analytics with enforced game scope.
     - name: games_studio_discover
@@ -328,7 +328,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: games/v0.5.0
+    ref: games/v0.6.0
     entry: mcp/games
   port: 8080
   health_check: /health

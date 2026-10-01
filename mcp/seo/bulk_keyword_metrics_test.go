@@ -3,10 +3,13 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func TestClassifyProviderError(t *testing.T) {
@@ -28,6 +31,9 @@ func TestClassifyProviderError(t *testing.T) {
 		if providerErr.HTTPStatus != test.want {
 			t.Fatalf("code %d HTTP status = %d, want %d", test.code, providerErr.HTTPStatus, test.want)
 		}
+		if test.want == http.StatusTooManyRequests && providerErr.RetryAfter != 60 {
+			t.Fatalf("code %d RetryAfter = %d, want 60", test.code, providerErr.RetryAfter)
+		}
 	}
 }
 
@@ -38,6 +44,11 @@ func TestWriteJSONOrErrMapsProviderStatus(t *testing.T) {
 		if recorder.Code != status {
 			t.Fatalf("provider status %d mapped to %d", status, recorder.Code)
 		}
+	}
+	recorder := httptest.NewRecorder()
+	writeJSONOrErr(recorder, nil, &providerRequestError{HTTPStatus: http.StatusTooManyRequests, RetryAfter: 60, Message: "slow down"})
+	if got := recorder.Header().Get("Retry-After"); got != "60" {
+		t.Fatalf("Retry-After = %q, want 60", got)
 	}
 }
 
@@ -73,6 +84,7 @@ func TestKeywordMetricJobResumesOnlyMissingFields(t *testing.T) {
 		"migrations/005_search_engine_keyword_backfill.sql",
 		"migrations/006_serp_consistency_and_retention.sql",
 		"migrations/007_keyword_metric_jobs.sql",
+		"migrations/011_keyword_metric_availability.sql",
 	)
 	locID := insertTestLocation(t, db, "google", 2840)
 	firstID, err := insertKeywordRecord(db, "project-a", "google", "mcp gateway", locID, "US", "en")
@@ -129,12 +141,27 @@ func TestKeywordMetricJobResumesOnlyMissingFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if partial.Status != "partial" || partial.VolumeCompleted != 2 || partial.DifficultyCompleted != 1 || partial.IncompleteKeywords != 1 {
+	if partial.Status != "partial" || partial.VolumeCompleted != 2 || partial.DifficultyCompleted != 1 ||
+		partial.DifficultyUnavailable != 1 || partial.IncompleteKeywords != 1 || partial.CompletedAt == nil {
 		t.Fatalf("partial job = %#v", partial)
 	}
 	remainingVolume, _ := pendingKeywordMetricItems(db, jobID, "volume")
 	remainingDifficulty, _ := pendingKeywordMetricItems(db, jobID, "difficulty")
-	if len(remainingVolume) != 0 || len(remainingDifficulty) != 1 || remainingDifficulty[0].KeywordID != secondID {
+	if len(remainingVolume) != 0 || len(remainingDifficulty) != 0 {
+		t.Fatalf("provider-confirmed missing fields should not retry automatically: volume=%#v difficulty=%#v", remainingVolume, remainingDifficulty)
+	}
+	items, err := listKeywordMetricJobItems(db, jobID, partial.Status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[1].DifficultyStatus != "unavailable" {
+		t.Fatalf("partial item statuses = %#v", items)
+	}
+	if err := resetUnavailableKeywordMetricFields(db, jobID); err != nil {
+		t.Fatal(err)
+	}
+	remainingDifficulty, _ = pendingKeywordMetricItems(db, jobID, "difficulty")
+	if len(remainingDifficulty) != 1 || remainingDifficulty[0].KeywordID != secondID {
 		t.Fatalf("remaining volume=%#v difficulty=%#v", remainingVolume, remainingDifficulty)
 	}
 
@@ -169,6 +196,111 @@ func TestKeywordMetricJobResumesOnlyMissingFields(t *testing.T) {
 		if keywordID == firstID && strings.Contains(raw, "hosted mcp server") {
 			t.Fatalf("keyword snapshot duplicated another batch row: %s", raw)
 		}
+	}
+}
+
+func TestKeywordMetricJobCreationReusesActiveWork(t *testing.T) {
+	db := newSEOTestDB(t,
+		"migrations/001_init.sql",
+		"migrations/004_search_entities.sql",
+		"migrations/005_search_engine_keyword_backfill.sql",
+		"migrations/007_keyword_metric_jobs.sql",
+		"migrations/011_keyword_metric_availability.sql",
+	)
+	locID := insertTestLocation(t, db, "google", 2840)
+	keywordID, err := insertKeywordRecord(db, "project-a", "google", "mcp gateway", locID, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := createKeywordMetricJobs(db, "project-a", []int64{keywordID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := createKeywordMetricJobs(db, "project-a", []int64{keywordID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || len(second) != 1 || first[0].ID != second[0].ID {
+		t.Fatalf("active job was not reused: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestBulkKeywordMetricJobQueuesMoreThanOneHundredKeywords(t *testing.T) {
+	db := newSEOTestDB(t,
+		"migrations/001_init.sql",
+		"migrations/004_search_entities.sql",
+		"migrations/005_search_engine_keyword_backfill.sql",
+		"migrations/007_keyword_metric_jobs.sql",
+		"migrations/011_keyword_metric_availability.sql",
+	)
+	locID := insertTestLocation(t, db, "google", 2840)
+	ids := make([]int64, 0, 150)
+	for i := 0; i < 150; i++ {
+		id, err := insertKeywordRecord(db, "project-a", "google", fmt.Sprintf("keyword %03d", i), locID, "US", "en")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	jobs, err := createKeywordMetricJobs(db, "project-a", ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].TotalKeywords != 150 {
+		t.Fatalf("jobs = %#v, want one 150-keyword job", jobs)
+	}
+	items, err := listKeywordMetricJobItems(db, jobs[0].ID, jobs[0].Status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 150 || items[0].VolumeStatus != "pending" || items[149].DifficultyStatus != "pending" {
+		t.Fatalf("item status summary: count=%d first=%#v last=%#v", len(items), items[0], items[len(items)-1])
+	}
+}
+
+func TestSingleKeywordRefreshReturnsSuccessfulPartialResult(t *testing.T) {
+	db := newSEOTestDB(t,
+		"migrations/001_init.sql",
+		"migrations/004_search_entities.sql",
+		"migrations/005_search_engine_keyword_backfill.sql",
+		"migrations/007_keyword_metric_jobs.sql",
+		"migrations/011_keyword_metric_availability.sql",
+	)
+	locID := insertTestLocation(t, db, "google", 2840)
+	keywordID, err := insertKeywordRecord(db, "project-a", "google", "mcp gateway", locID, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyword, err := getKeyword(db, "project-a", keywordID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	location, err := getLocation(db, locID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := &yepPlatformStub{
+		responses: map[string]json.RawMessage{
+			"account_info":          json.RawMessage(`{"status_code":20000,"tasks":[{"status_code":20000,"result":[{"money":{"balance":10}}]}]}`),
+			"keyword_search_volume": json.RawMessage(`{"status_code":20000,"tasks":[{"status_code":20000,"result":[{"keyword":"mcp gateway","search_volume":1900,"cpc":47.03}]}]}`),
+			"keyword_difficulty":    json.RawMessage(`{"status_code":20000,"tasks":[{"status_code":20000,"result":[{"items":[]}]}]}`),
+		},
+		identity:    &sdk.InstallIdentity{Bindings: map[string]any{providerRole: map[string]any{"ids": []int64{42}, "default_id": int64(42)}}},
+		connections: map[int64]*sdk.PlatformConnection{42: {ID: 42, AppSlug: "dataforseo"}},
+	}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, nil, stub, nil)
+	result, err := refreshKeywordViaDataForSEO(ctx, 42, keyword, location)
+	if err != nil {
+		t.Fatalf("partial refresh returned an error: %v", err)
+	}
+	payload := result.(map[string]any)
+	if payload["status"] != "partial" || payload["volume"] != int64(1900) || payload["difficulty"] != nil {
+		t.Fatalf("partial payload = %#v", payload)
+	}
+	unavailable := payload["unavailable"].([]string)
+	if len(unavailable) != 1 || unavailable[0] != "difficulty" {
+		t.Fatalf("unavailable = %#v", unavailable)
 	}
 }
 

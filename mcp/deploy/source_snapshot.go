@@ -28,10 +28,11 @@ type sourceReceipt struct {
 	Subdir         string `json:"subdir,omitempty"`
 }
 type sourceSelection struct {
-	SnapshotID       string `json:"snapshot_id"`
-	Subdir           string `json:"subdir"`
-	MaxBytes         int64  `json:"max_bytes"`
-	MaxExpandedBytes int64  `json:"max_expanded_bytes"`
+	SnapshotID       string             `json:"snapshot_id"`
+	Subdir           string             `json:"subdir"`
+	MaxBytes         int64              `json:"max_bytes"`
+	MaxExpandedBytes int64              `json:"max_expanded_bytes"`
+	Dependencies     []sourceDependency `json:"dependencies,omitempty"`
 }
 
 func (f *codeFetcher) fetchSnapshot(d *Deployment, dest string) error {

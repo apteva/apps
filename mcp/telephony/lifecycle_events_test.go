@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,69 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+func TestCallGetIncludesProjectScopedCurrentSoftphoneOwner(t *testing.T) {
+	ctx := softphoneTestCtx(t)
+	app := &App{installID: 42}
+	call := insertSoftphoneCall(t, app, "ringing")
+	identity := phoneTestIdentity("alice")
+	if _, err := app.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?)`,
+		call.ID, "project-a", identity.key(), ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := result.(map[string]any)["call"].(map[string]any)
+	if got := public["owner_identity"]; got != identity {
+		t.Fatalf("owner_identity = %#v, want %#v", got, identity)
+	}
+	if got := public["peer_kind"]; got != peerKindHuman {
+		t.Fatalf("peer_kind = %#v", got)
+	}
+	bob := phoneTestIdentity("bob")
+	if _, err := app.db().db.Exec(`UPDATE telephony_call_owners SET principal=? WHERE call_id=? AND project_id=?`,
+		bob.key(), call.ID, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	result, err = app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public = result.(map[string]any)["call"].(map[string]any)
+	if got := public["owner_identity"]; got != bob {
+		t.Fatalf("owner_identity after takeover = %#v, want %#v", got, bob)
+	}
+	other, err := app.toolCallGet(context.Background(), ctx.WithProject("project-b"), map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := other.(map[string]any)["call"]; ok {
+		t.Fatal("call or owner leaked into another project")
+	}
+}
+
+func TestCallGetIgnoresMalformedOptionalOwner(t *testing.T) {
+	ctx := softphoneTestCtx(t)
+	app := &App{installID: 42}
+	call := insertSoftphoneCall(t, app, "ringing")
+	if _, err := app.db().db.Exec(`INSERT INTO telephony_call_owners(call_id,project_id,principal,destination_id) VALUES(?,?,?,?)`,
+		call.ID, "project-a", `{not-json`, ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.toolCallGet(context.Background(), ctx, map[string]any{"call_id": call.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := result.(map[string]any)["call"].(map[string]any)
+	if public["call_id"] != call.ID {
+		t.Fatalf("call_id = %#v, want %q", public["call_id"], call.ID)
+	}
+	if _, ok := public["owner_identity"]; ok {
+		t.Fatal("malformed owner identity was returned")
+	}
+}
 
 func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 	diskBytes, err := os.ReadFile("apteva.yaml")
@@ -44,6 +108,15 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		t.Fatalf("carrier dependency declares a provider-specific tool as generic: disk=%#v embedded=%#v",
 			disk.Requires.Integrations[0].Tools, embedded.Requires.Integrations[0].Tools)
 	}
+	if !reflect.DeepEqual(disk.Requires.Integrations[0].CompatibleSlugs, embedded.Requires.Integrations[0].CompatibleSlugs) {
+		t.Fatalf("carrier compatibility drift: disk=%#v embedded=%#v",
+			disk.Requires.Integrations[0].CompatibleSlugs, embedded.Requires.Integrations[0].CompatibleSlugs)
+	}
+	for _, slug := range []string{"telnyx", "bandwidth", "sinch", "didww"} {
+		if !containsString(embedded.Requires.Integrations[0].CompatibleSlugs, slug) {
+			t.Fatalf("carrier %s is unavailable in the install picker", slug)
+		}
+	}
 	if !containsString(embeddedTools, "telephony_routes_set_transport") {
 		t.Fatal("direct SIP transport tool is not declared in the manifest")
 	}
@@ -53,8 +126,12 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		"telephony.routing.rejected",
 		"telephony.routing.timed_out",
 		"telephony.routing.fallback",
+		"telephony.routing.exhausted",
+		"telephony.routing.waiting",
 		"telephony.routing.canceled",
 		"telephony.routing.offer.offered",
+		"telephony.routing.offer.declined",
+		"telephony.routing.offer.acknowledged",
 		"telephony.routing.offer.claimed",
 		"telephony.routing.offer.answerer",
 		"telephony.routing.offer.failed",
@@ -67,7 +144,7 @@ func TestLifecycleManifestDeclarationsMatchDisk(t *testing.T) {
 		"telephony.routing.call.busy",
 		"telephony.routing.call.no-answer",
 		"telephony.routing.call.canceled",
-		"call.routing.started", "call.routing.node_entered", "call.offered",
+		"call.routing.started", "call.routing.node_entered", "call.offered", "telephony.burst.suppressed", "telephony.burst.detected", "telephony.spam.suppressed",
 		"call.incoming", "call.initiated", "call.ringing", "call.answered",
 		"call.completed", "call.failed", "call.busy", "call.no_answer",
 		"call.canceled", "call.machine_detected", "recording.ready", "recording.stored", "recording.deleted",

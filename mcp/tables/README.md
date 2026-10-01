@@ -8,11 +8,15 @@ table and row is resolved against the calling project_id.
 
 ## Surfaces
 
-- **17 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **18 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `indexes_create`, `indexes_list`,
   `indexes_drop`, `rows_insert`, `rows_get`,
   `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
-  `rows_count`, `rows_aggregate`, `tables_query`
+  `rows_count`, `rows_aggregate`, `tables_query`, `tables_batch`
+- **Generic batch execution** — `tables_batch` combines validated reads or
+  writes with explicit `read_snapshot`, `write_transaction`, and
+  `best_effort` modes. Operations can reference earlier results with
+  `{"$ref":"operation.path"}` and receive independent status/error entries.
 - **Strict typed columns** — `text`, `number`, `bool`, `datetime`,
   `json`, `file_id` (FK into the `storage` app)
 - **Read-only SQL escape hatch** — `tables_query` runs on a SQLite

@@ -17,12 +17,12 @@ test("audit: 48kHz fallback resampling must reject content above 12kHz",()=>{
 });
 
 test("muted worker startup cannot send capture audio before an explicit unmute", () => {
-  const context = vm.createContext({ self: {}, postMessage() {}, performance: { now: () => 0 }, setTimeout, clearTimeout });
+  const context = vm.createContext({ self: {}, postMessage() {}, performance: { timeOrigin: 0, now: () => 0 }, setTimeout, clearTimeout });
   vm.runInContext(readFileSync(new URL("./softphone-worker.js", import.meta.url), "utf8"), context);
   const sent = vm.runInContext(`(() => {
     let sent = 0;
     connect = () => {};
-    self.onmessage({data:{type:"init",muted:true,mediaURL:"ws://unused",capturePort:{},playbackPort:{}}});
+    self.onmessage({data:{type:"init",muted:true,mediaURL:"ws://unused",capturePort:{postMessage(){}},playbackPort:{}}});
     socket = { readyState: 1, bufferedAmount: 0, send() { sent++; } };
     WebSocket = { OPEN: 1 };
     microphoneReady = true;
@@ -38,11 +38,12 @@ test("muted worker startup cannot send capture audio before an explicit unmute",
 });
 
 function transportFixture() {
-  const context = vm.createContext({ self: {}, postMessage() {}, performance: { now: () => 0 } });
+  const context = vm.createContext({ self: {}, postMessage() {}, performance: { timeOrigin: 0, now: () => 0 } });
   vm.runInContext(`
     let now = 1000, nextTimer = 0;
     const timers = new Map(), sockets = [], events = [];
     Date.now = () => now;
+    performance.now = () => now;
     postMessage = event => events.push(event);
     setTimeout = (fn, ms) => { const id = ++nextTimer; timers.set(id, {fn, at: now + ms, ms: 0}); return id; };
     setInterval = (fn, ms) => { const id = ++nextTimer; timers.set(id, {fn, at: now + ms, ms}); return id; };
@@ -69,7 +70,7 @@ function transportFixture() {
     }
   `, context);
   vm.runInContext(readFileSync(new URL("./softphone-worker.js", import.meta.url), "utf8"), context);
-  vm.runInContext(`self.onmessage({data:{type:'init',mediaURL:'ws://fixture',capturePort:{},playbackPort:{postMessage(){}}}});`, context);
+  vm.runInContext(`self.onmessage({data:{type:'init',mediaURL:'ws://fixture',capturePort:{postMessage(){}},playbackPort:{postMessage(){}}}});`, context);
   return (script: string) => vm.runInContext(script, context);
 }
 

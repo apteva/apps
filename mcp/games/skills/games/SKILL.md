@@ -86,11 +86,14 @@ Approval remains with the authorized Deploy caller. Do not invent or forward an
 approver identity in Games arguments. Publication is not proof of availability;
 report Deploy's observation state without promoting an unknown result to live.
 
-Use `games_metric_source_set` for authorized AdMob, GA4 or Apple sales sources.
-`games_metrics_sync` is bounded to 31 completed provider-local dates and upserts
-reports; `games_metrics_query` always enforces game scope. Show missing/delayed
+Use `games_metric_source_set` for authorized AdMob, GA4, Apple sales or Google Play
+sales/earnings sources. Google Play needs the game's exact Android package ID and
+separate `sales` and `earnings` source families. `games_metrics_sync` is bounded to
+31 completed provider-local dates for daily reports; Play reports are monthly and
+can select an exact `month` in YYYYMM form. `games_metrics_query` always enforces
+game scope; choose `provider_monthly` for Play reports. Show missing/delayed
 reports as unavailable, not zero. Preserve report currencies and estimated versus
-sales-proceeds bases. Network and mediation totals overlap; daily active users
+sales-proceeds versus merchant-earnings bases. Network and mediation totals overlap; daily active users
 cannot be summed into monthly unique users. Connecting AdMob does not authorize
 adding an advertising SDK or changing a paid game's monetization.
 

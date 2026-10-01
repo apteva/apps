@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.47
+version: 0.13.52
 description: |
-  Send and receive email through AWS SES and SMS/WhatsApp through
+  Send and receive email through AWS SES or Gmail and SMS/WhatsApp through
   Twilio. Tracks
   delivery state, maintains a per-channel suppression list from
   bounces and complaints, and routes inbound mail/SMS/WhatsApp to
@@ -19,7 +19,7 @@ author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/messaging
 icon: /ui/icon.svg
 icon_style: monochrome
-tags: [messaging, email, ses, sms, whatsapp, twilio, inbox]
+tags: [messaging, email, ses, gmail, sms, whatsapp, twilio, inbox]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -41,13 +41,14 @@ requires:
   integrations:
     - role: email_provider
       kind: integration
-      compatible_slugs: [aws-ses]
-      capabilities: [email.send]
+      mode: multiple
+      compatible_slugs: [aws-ses, gmail]
+      capabilities: [email.send, email.read]
       tools:
         email.send: send_email
       required: false
-      label: "Email provider (AWS SES)"
-      hint: "Verifies the sender domain and delivers outbound mail. Bounce/complaint webhook target lives in app config."
+      label: "Email providers (AWS SES or Gmail)"
+      hint: "Select one or more email accounts and a default. Sender addresses determine the connection used for each message."
     - role: phone_provider
       kind: integration
       compatible_slugs: [twilio]
@@ -104,7 +105,7 @@ provides:
     - { prefix: /webhooks/twilio-status, method: POST, no_auth: true }
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Args: channel (email|sms|whatsapp), to (address or address[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns normalized attachment metadata and never returns base64. Channel is explicit. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
+    - { name: send_message,           description: "Send a message. Email routes through its registered sender's SES or Gmail connection; optional connection_id must match. Args: channel (email|sms|whatsapp), to (address or address[]), body?, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{exactly one of storage_id|url|content_base64, filename?, content_type?, size_bytes?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. Attachment-only messages are supported. WhatsApp accepts one media attachment; provider ContentSid templates cannot be combined with body or direct media. Returns provider_message_id (opaque provider ID) separately from message_id_header (RFC email Message-ID when known; use this for threading), plus normalized attachment metadata and never base64. Channel is explicit. Email addresses and E.164 numbers may be bare or use mailto:/tel:/whatsapp: prefixes; from defaults to the configured channel sender. Suppressed recipients return code=recipient_suppressed with address, matched address/domain, reason, source, and kind." }
     - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events, and normalized attachment metadata without raw bytes." }
     - { name: message_list,           description: "List messages with normalized attachment metadata. Filters: q? (sender, recipients, subject, and body), direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?, offset?. Returns total for pagination." }
@@ -129,7 +130,7 @@ provides:
     - { name: senders_get,            description: "Get a single identity's status — verification, DKIM, feedback forwarding. Args: address (URI or bare)." }
     - { name: senders_delete,         description: "Remove a sending identity from the provider. Args: address." }
     - { name: senders_get_quota,      description: "Provider account stats — sandbox flag, 24h send quota, current usage. Powers the sandbox banner." }
-    - { name: senders_create,         description: "Unified sender registration across email (SES) + SMS/WhatsApp (Twilio). Address shape dispatches: \"foo@x.com\" → SES verify_email; \"x.com\" → verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap (S3 bucket + SNS topic + receipt rule + MX + webhook subscribe); \"+15551234567\" → adopt Twilio phone for sms or an approved Twilio WhatsApp sender for whatsapp; SMS auto-wires SmsUrl, WhatsApp auto-wires sender callback_url. Writes a row to the local senders table. Args: address (req), channel?, inbound? (auto|true|false), publish_dns?, spf?, region?, bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default?. Idempotent." }
+    - { name: senders_create,         description: "Register a sender using a bound SES or Gmail connection (optional connection_id). SES supports mailbox/domain verification and inbound bootstrap; Gmail adopts only verified send-as aliases and syncs inbound mailbox history. Phone addresses adopt Twilio SMS/WhatsApp senders. Args: address (required), channel?, connection_id?, inbound?, display_name?, set_default?." }
     - { name: senders_refresh,        description: "Refresh verification/DKIM + sending status for locally-tracked senders by re-listing each bound provider. Does NOT import unknown upstream identities — use senders_create to add. Soft-deletes locals missing upstream. Returns {refreshed, count}." }
     - { name: senders_set_default,    description: "Flip the per-(project, channel) default sender. send_message uses the default when 'from' is omitted. Args: address, channel? (auto-detected if blank)." }
     - { name: senders_update,         description: "Patch local-mutable fields on a sender — display_name (used as friendly From: \"Name\" <addr>) and notes. No provider round-trip. For verification / DKIM / inbound state use senders_create or senders_refresh; for the default flag use senders_set_default. Args: address (req), channel?, display_name?, notes?. Empty values preserve existing." }
@@ -139,6 +140,35 @@ provides:
       label: Messaging
       icon: mail
       entry: /ui/MessagingPanel.mjs
+  ui_components:
+    - name: messages
+      label: Messages
+      description: SMS and WhatsApp conversations in a compact phone-style inbox.
+      entry: /ui/MessagingWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [message.sent, message.received, message.event]
+      native:
+        schema: apteva-native-surface/v1
+        entry: /ui/surfaces/messages.json
+      settings_schema:
+        type: object
+        properties:
+          default_channel:
+            type: string
+            title: Default channel
+            enum: [all, sms, whatsapp]
+            enum_names: [All messages, SMS, WhatsApp]
+            default: all
+          max_conversations:
+            type: integer
+            title: Maximum conversations
+            default: 10
+            minimum: 4
+            maximum: 20
   workers:
     - name: messaging-recovery
       schedule: "@every 30s"

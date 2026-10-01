@@ -17,6 +17,7 @@ var (
 )
 
 type carrierPacedPacket struct {
+	EnqueuedAt time.Time
 	PCM        []int16
 	ItemID     string
 	AudioEndMS int
@@ -143,6 +144,7 @@ func (p *carrierAudioPacketizer) clear() {
 }
 
 type jsonCarrierAudioPacer struct {
+	diagnostics   livePacerStats
 	ctx           context.Context
 	commands      chan carrierPacerCommand
 	clearCommands chan carrierPacerCommand
@@ -171,6 +173,7 @@ func (p *jsonCarrierAudioPacer) dropEvents() []audioDropEvent {
 }
 
 func (p *jsonCarrierAudioPacer) recordDrop(event audioDropEvent) {
+	p.diagnostics.dropped(event.Reason, event.DurationMS)
 	p.dropMu.Lock()
 	defer p.dropMu.Unlock()
 	p.drops = append(p.drops, event)
@@ -198,6 +201,12 @@ func newJSONCarrierAudioPacer(ctx context.Context, sampleRate int, codec, shape,
 func (p *jsonCarrierAudioPacer) enqueue(ctx context.Context, packets []carrierPacedPacket) (int, int, error) {
 	if len(packets) == 0 {
 		return 0, 0, nil
+	}
+	now := time.Now()
+	for i := range packets {
+		if packets[i].EnqueuedAt.IsZero() {
+			packets[i].EnqueuedAt = now
+		}
 	}
 	result := p.command(ctx, carrierPacerCommand{packets: packets})
 	return result.queuedMS, result.droppedMS, result.err
@@ -340,6 +349,12 @@ func (p *jsonCarrierAudioPacer) run() {
 		packet := queue[0]
 		queue = queue[1:]
 		queuedSamples -= len(packet.PCM)
+		if p.policy.dropStale && !packet.EnqueuedAt.IsZero() && time.Since(packet.EnqueuedAt) >= liveAudioMaxAge {
+			droppedSamples += len(packet.PCM)
+			needsCrossfade = true
+			p.recordDrop(audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: carrierSamplesToMS(len(packet.PCM), p.sampleRate)})
+			return nil
+		}
 		pcm := packet.PCM
 		if needsCrossfade && len(lastSentTail) > 0 {
 			pcm = append([]int16(nil), pcm...)
@@ -348,9 +363,11 @@ func (p *jsonCarrierAudioPacer) run() {
 		}
 		payload := encodeCarrierPacket(pcm, p.codec)
 		frame, _ := json.Marshal(buildCarrierOutbound(p.shape, p.streamID, payload))
+		writeStarted := time.Now()
 		if err := p.write(frame); err != nil {
 			return err
 		}
+		p.diagnostics.sent(carrierSamplesToMS(len(packet.PCM), p.sampleRate), writeStarted)
 		duration := time.Duration(len(packet.PCM)) * time.Second / time.Duration(p.sampleRate)
 		if duration <= 0 {
 			duration = time.Millisecond
@@ -442,6 +459,7 @@ func (p *jsonCarrierAudioPacer) run() {
 			activeMaxQueuedSamples = adaptiveMaxQueuedSamples
 			adaptiveUntil = time.Now().Add(5 * time.Second)
 		}
+		p.diagnostics.queued(carrierSamplesToMS(queuedSamples, p.sampleRate))
 		queuedAtEnqueue := queuedSamples
 		err := fillLead()
 		command.response <- carrierPacerResult{

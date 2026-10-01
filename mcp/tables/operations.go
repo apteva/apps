@@ -226,16 +226,37 @@ func exactInteger(v any) (int64, error) {
 
 type writeTx struct {
 	*sql.Tx
-	ctx    context.Context
-	counts map[int64]int64
+	ctx     context.Context
+	counts  map[int64]int64
+	managed bool
 }
 
 func beginWrite(ctx *sdk.AppCtx) (*writeTx, error) {
+	if shared, ok := requestContext(ctx).Value(batchWriteTxKey{}).(*writeTx); ok && shared != nil {
+		return &writeTx{Tx: shared.Tx, ctx: requestContext(ctx), counts: shared.counts, managed: true}, nil
+	}
 	tx, err := ctx.AppDB().BeginTx(requestContext(ctx), nil)
 	if err != nil {
 		return nil, queryStageErr("writer_queue", "", err)
 	}
 	return &writeTx{Tx: tx, ctx: requestContext(ctx), counts: map[int64]int64{}}, nil
+}
+
+// Batch-managed transactions are committed and rolled back by the batch
+// executor. Individual operation handlers still call Commit/Rollback, so
+// these methods deliberately become no-ops for their lightweight wrappers.
+func (t *writeTx) Commit() error {
+	if t.managed {
+		return nil
+	}
+	return t.Tx.Commit()
+}
+
+func (t *writeTx) Rollback() error {
+	if t.managed {
+		return nil
+	}
+	return t.Tx.Rollback()
 }
 func (t *writeTx) Exec(q string, args ...any) (sql.Result, error) {
 	return t.Tx.ExecContext(t.ctx, q, args...)

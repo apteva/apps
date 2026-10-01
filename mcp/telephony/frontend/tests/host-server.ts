@@ -5,11 +5,15 @@ const source = await bundle.outputs[0].text();
 const panel = await Bun.build({ entrypoints: [import.meta.dir + "/panel-host.tsx"], target: "browser", format: "esm" });
 if (!panel.success) throw new AggregateError(panel.logs);
 const panelSource = await panel.outputs[0].text();
+const listener = await Bun.build({ entrypoints: [import.meta.dir + "/listener-host.ts"], target: "browser", format: "esm" });
+if (!listener.success) throw new AggregateError(listener.logs);
+const listenerSource = await listener.outputs[0].text();
 Bun.serve({
   hostname: "127.0.0.1", port: Number(process.env.TELEPHONY_HOST_PORT || 5295),
   async fetch(request, server) {
     const url = new URL(request.url), path = url.pathname;
     if (path === "/host.js") return new Response(source, { headers: { "Content-Type": "text/javascript" } });
+    if (path === "/listener-host.js") return new Response(listenerSource, { headers: { "Content-Type": "text/javascript" } });
     if (path === "/panel.js") return new Response(panelSource, { headers: { "Content-Type": "text/javascript" } });
     // Match the dashboard's execution policy. In particular blob AudioWorklets
     // are blocked by script-src even though worker-src permits blob workers.
@@ -34,6 +38,7 @@ Bun.serve({
       const headers = new Headers(request.headers); headers.set("Authorization", "Bearer headless-browser-fixture"); headers.delete("host");
       return fetch(target, { method: request.method, headers, body: request.method === "GET" ? undefined : await request.arrayBuffer() });
     }
+    if (path === "/listener") return new Response('<html><button id="listen">Listen</button><script type="module" src="/listener-host.js"></script></html>', { headers: { "Content-Type": "text/html", "Content-Security-Policy": "default-src 'self'; script-src 'self'; connect-src 'self' ws:; object-src 'none'" } });
     if (path === "/health") return new Response("ok");
     return new Response('<!doctype html><title>Headless Telephony test host</title><button id="answer">Answer</button><script type="module" src="/host.js"></script>', { headers: { "Content-Type": "text/html" } });
   },

@@ -16,6 +16,8 @@ The widget opens on **All brands**. When the project has brands, a picker in the
 
 Per-instance settings cover default view, `planned_at` or `deadline` dates, the starting brand, whether channel releases appear, and the list horizon. The widget reads `GET /calendar` and `GET /settings` only; it never writes, and every entry links back into the panel. Releases with a saved URL link to that record instead.
 
+The same `editorial-calendar` contribution has a declarative native renderer for iOS and Android. Native clients show a full-width agenda rather than reproducing the web month/week interaction. They carry the shared `date_field`, `brand_id`, `show_releases` and `horizon_days` settings into `GET /mobile/calendar-summary`; `default_view` remains web-only. The native summary resolves the project from the trusted app context/header, bounds the horizon and result count, joins brand names, and always returns an `events` array.
+
 The widget refreshes on the app bus topics under `publishes`, so a content or release write anywhere — panel, HTTP or MCP — updates an open dashboard without a reload.
 
 ## Brands
@@ -62,10 +64,13 @@ All tools use the `editorial_` prefix. See `apteva.yaml` and the tool schemas in
 - `PATCH /releases/:id`: `{revision, patch}`.
 - `POST /releases/:id/refresh`: read the saved link's results.
 - `GET /calendar`: the flat, pre-merged planning stream a calendar surface needs. Filters `from`, `to` (`YYYY-MM-DD` or RFC3339, defaulting to today and 30 days out, 400 days maximum), `date_field` (`planned_at` or `deadline`), `brand_id`, `include_releases`, `limit` (default 500, max 2000). Returns `events` sorted by date with `truncated`. Each event carries `kind` (`item` or `release`), `date` (the server-side bucket), `at` (the value as stored), the item's identity and, for releases, `release_id`, `channel` and `url`. Releases are matched on their own planned date and joined back to their parent, so a release inside the window appears even when its item's date sits outside it — which is why this is not a filter on `/items`. Archived content and archived releases are always excluded, and releases appear on `planned_at` views only, as in the panel.
-- `GET /settings`, `PATCH /settings`: settings with revision, including `timezone` (IANA name; empty means UTC) and `due_time` (`HH:MM`, default `09:00`) which decide when a bare date falls due, and optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers.
+- `GET /mobile/calendar-summary`: native-ready upcoming agenda rows. Filters `date_field`, `brand_id`, `include_releases`, `horizon_days` (1–365, default 30) and `limit` (1–20, default 12). The date window begins today in the project's configured Editorial timezone. Project scope comes only from the pinned install or trusted gateway header; a `project_id` query cannot switch it.
+- `GET /settings`, `PATCH /settings`: settings with revision, including `timezone` (IANA name; empty means UTC) and `due_time` (`HH:MM`, default `09:00`) which decide when a bare date falls due, and optional `brands: [{id, name, color, logo_url, social_account_ids, campaign_ids}]`. IDs are stable strings; mappings are arrays of positive integers. `statuses` are content workflow states, not release states; the first status and format are the defaults used when item creation omits them.
 - `GET /integrations`: optional connection states. `?app=social|campaigns` browses existing records. Add `brand_id` to apply the saved brand mappings.
 
 Dates accept `YYYY-MM-DD` or RFC3339 with timezone; the panel uses date pickers and displays calendar timestamps in the viewer's local timezone. You can also type a precise timestamp into the date field. Clear fields with empty strings/arrays/objects, not null. Item and release edits require the latest revision; stale writes return HTTP 409. Release `results` are snapshots or manually entered JSON, not normalized cross-platform metrics.
+
+Item approval accepts `not_required`, `pending`, `approved` and `changes_requested`. `approved` requires a non-empty reviewer. Complete the brief and other reviewable fields before approving: later changes to reviewed content intentionally reset an existing approval to `pending`. Release status is a separate fixed vocabulary: `planned`, `scheduled`, `published`, `failed` and `cancelled`.
 
 Project-scoped installs stay pinned to their project. Global HTTP calls use the gateway project header first, then the authenticated dashboard's `project_id` query. MCP tools require the SDK's current project and ignore argument attempts to override it. The sidecar belongs behind Apteva's authenticated gateway.
 
@@ -73,7 +78,7 @@ Project-scoped installs stay pinned to their project. Global HTTP calls use the 
 
 A `due_scanner` worker turns planning dates into app-bus events. It emits `content.due` when an item reaches its planned publication date, `content.deadline` when it reaches its editorial deadline, and `release.due` when a channel release reaches its planned date. Editorial still publishes nothing itself — the event is the product, and a Workflow, agent or person decides what to do with it.
 
-Every due payload carries the brand: `brand_id` and the human `brand` name, both empty strings for unassigned content so the shape never varies. Items also carry title, format, status, approval, owner, which `date_field` fired and the resolved `due_at` instant; releases add `item_id`, `channel`, `url` and their parent's title, brand and approval.
+Every due payload carries the brand: `brand_id` and the human `brand` name, both empty strings for unassigned content so the shape never varies. Items also carry title, format, status, approval, owner, which `date_field` fired and the resolved `due_at` instant; releases add `item_id`, `channel`, `url` and their parent's title, format, brand and approval. Processes can route `release.due` directly using `channel`, `format`, `brand_id` and `approval`.
 
 A bare `YYYY-MM-DD` names a day, not an instant, so **Settings** carries a `timezone` (IANA name, default UTC) and a `due_time` (`HH:MM`, default `09:00`) that decide when that day falls due. A stored RFC3339 timestamp already carries its own offset and is used as written, ignoring both.
 
@@ -97,4 +102,4 @@ bun run scripts/build-panels.ts --app editorial
 bun run test:editorial-ui
 ```
 
-Go 1.25.1+, app-sdk v0.81.0 (latest tag by ancestry when implemented). The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.
+Go 1.25.1+, app-sdk v0.85.0 (latest tag by ancestry when implemented). The repository-wide workspace may request a different Go toolchain; `GOWORK=off` validates the standalone installation against its actual published dependencies.

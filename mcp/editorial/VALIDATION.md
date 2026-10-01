@@ -1,5 +1,22 @@
 # Validation
 
+## v0.4.3 native calendar widget
+
+The existing `editorial-calendar` Home contribution now advertises an `apteva-native-surface/v1` renderer. Its native presentation is a project-scoped agenda, not a month grid, and binds the shared date, brand, release and horizon settings to a dedicated `GET /mobile/calendar-summary` source. The endpoint returns stable native row IDs, normalized timestamps, display-ready detail and brand text, and a non-nil `events` array. It derives project scope from the pinned app context or trusted gateway header and ignores caller-controlled `project_id` query parameters.
+
+Regression coverage parses and validates the strict JSON surface, matches it to the manifest descriptor, checks every settings binding and the empty state, and exercises project/brand/date/release/horizon/result filters, cross-project isolation, empty arrays, timestamp normalization, truncation and invalid booleans. The app-sdk pin advances from v0.82.0 to v0.85.0, verified as the newest published tag by ancestry on 2026-09-21.
+
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...`, `go vet ./...`, and a standalone build passed.
+- All 14 browser-widget tests and the host React import-surface verifier passed unchanged.
+
+## v0.4.2 agent guidance
+
+The live MCP schemas now distinguish project-configured content workflow statuses from fixed release statuses, publish the fixed approval and release-status enums, explain create defaults, and state that approved items require a reviewer. Validation errors include the project's allowed values and default, with a specific release-status hint when a release value such as `planned` is mistakenly supplied as an item status. The settings response and stored data are unchanged, and approval invalidation remains intact.
+
+Focused regression tests cover a one-call approved item with a reviewer, rejection without a reviewer, customized first-status and first-format defaults, the actionable `planned` diagnostic, the default release status, schema descriptions, and both fixed enums.
+
+Validated on 2026-09-20 with the standalone race suite, `go vet`, and a standalone binary build.
+
 Validated locally on 2026-09-14 against the published app-sdk v0.81.0 with no workspace overlay.
 
 - `GOWORK=off GOTOOLCHAIN=local go test -race ./...` — passed.
@@ -95,6 +112,13 @@ The check now lives in `dispatch`, the one place both doors pass through, so an 
 
 Behaviour change: an MCP caller — including an agent — that passed an argument no tool declares now gets a tool error instead of a silently unfiltered result. That is the intent, and it is the same break v0.3.2 made for HTTP callers.
 
+
+## v0.4.1 release routing
+
+Validated on 2026-09-19. `release.due` now includes the parent content's `format`, so Processes can filter by channel, content type, brand and approval directly. Publishing remains in Processes. The SDK pin advances to v0.82.0, verified as a descendant of v0.81.0.
+
+- The existing due-event regression test now verifies a custom `preview` format and approved parent alongside channel, brand and content identity.
+- `GOWORK=off GOTOOLCHAIN=local go test -race -count=1 ./...` and `GOWORK=off GOTOOLCHAIN=local go vet ./...` passed.
 
 ## v0.4.0 due events
 

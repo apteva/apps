@@ -37,7 +37,7 @@ func orderColumn(args map[string]any) (string, string) {
 func makeCursor(pid string, t *Table, args map[string]any, row map[string]any) string {
 	col, dir := orderColumn(args)
 	id, _ := exactInteger(row["id"])
-	c := rowCursor{pid, t.ID, digest(t.Columns), col + " " + dir, digest(args["where"]), id, row[col]}
+	c := rowCursor{pid, t.ID, digest(t.Columns), col + " " + dir, filterDigest(args), id, row[col]}
 	b, _ := json.Marshal(c)
 	return base64.RawURLEncoding.EncodeToString(b)
 }
@@ -64,7 +64,7 @@ func cursorWhere(pid string, t *Table, args map[string]any) (string, []any, erro
 		return "", nil, errf("invalid cursor")
 	}
 	col, dir := orderColumn(args)
-	if c.Project != pid || c.Table != t.ID || c.Shape != digest(t.Columns) || c.Order != col+" "+dir || c.Filter != digest(args["where"]) || c.ID <= 0 {
+	if c.Project != pid || c.Table != t.ID || c.Shape != digest(t.Columns) || c.Order != col+" "+dir || c.Filter != filterDigest(args) || c.ID <= 0 {
 		return "", nil, errf("cursor does not match project, table, schema, filter or ordering")
 	}
 	if intArg(args, "offset", 0) != 0 {
@@ -98,4 +98,8 @@ func cursorWhere(pid string, t *Table, args map[string]any) (string, []any, erro
 	}
 	clause += ")"
 	return clause, []any{value, value, c.ID}, nil
+}
+
+func filterDigest(args map[string]any) string {
+	return digest(map[string]any{"where": args["where"], "filter_ast": args["filter_ast"]})
 }

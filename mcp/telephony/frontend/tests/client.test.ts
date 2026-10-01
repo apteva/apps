@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { AptevaClient } from "@apteva/web-sdk";
-import { TelephonyClient, telephonyExtension, type CallSession } from "../src/client";
+import { TelephonyClient, telephonyExtension, type CallControlResult, type CallSession } from "../src/client";
 import type { AudioRuntime } from "../src/audio";
 import type { SoftphoneCallbacks } from "../../ui/softphone-audio";
 
@@ -16,7 +16,8 @@ function fixture() {
     const parsed = new URL(String(url));
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ url: parsed, headers: new Headers(init?.headers), body });
-    return Response.json(await response(parsed, body));
+    const value = await response(parsed, body);
+    return value instanceof Response ? value : Response.json(value);
   }) as typeof fetch });
   const client = sdk.use(telephonyExtension, { projectId: "p1", installId: 42 });
   let callbacks: SoftphoneCallbacks = {};
@@ -53,6 +54,18 @@ function deferred() {
 }
 
 describe("Telephony extension", () => {
+  test("call controls use the same authenticated project-scoped client", async () => {
+    const f = fixture();
+    const state: CallControlResult = { call_id: "call-1", hold_state: "held", recording_state: "pause_requested", control_error: "",
+      capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async () => state);
+    expect(await f.client.hold("call-1")).toEqual(state);
+    await f.client.resume("call-1");
+    await f.client.pauseRecording("call-1");
+    await f.client.resumeRecording("call-1");
+    expect(f.requests.map(r => r.url.pathname.split("/").at(-1))).toEqual(["hold", "resume", "pause-recording", "resume-recording"]);
+    expect(f.requests.every(r => r.url.searchParams.get("project_id") === "p1" && r.url.searchParams.get("install_id") === "42")).toBe(true);
+  });
   test("script-only client reuses live SDK auth and scopes every operation", async () => {
     const f = fixture();
     await f.client.listCalls();
@@ -106,6 +119,17 @@ describe("Telephony extension", () => {
     expect(f.muted).toBe(true);
     stale.onState?.("error", "old session");
     expect(f.phone.getSnapshot().audioState).toBe("live");
+    f.phone.dispose();
+  });
+  test("headless softphone controls its attached call and updates the snapshot", async () => {
+    const f = fixture();
+    const result: CallControlResult = { call_id: "call-1", hold_state: "starting", recording_state: "active",
+      control_error: "", capabilities: { hold_music: true, recording_pause: true } };
+    f.setResponse(async url => url.pathname.endsWith("/hold") ? result : f.session);
+    await f.phone.dial({ to: "+12025550100" });
+    expect(await f.phone.hold()).toEqual(result);
+    expect(f.phone.getSnapshot().holdState).toBe("starting");
+    expect(f.requests.at(-1)?.url.pathname).toEndWith("/calls/call-1/hold");
     f.phone.dispose();
   });
   test("audio setup failure hangs up an outbound leg", async () => {
@@ -177,17 +201,24 @@ describe("Telephony extension", () => {
     expect(f.stopped).toBe(1);
     expect(f.requests).toHaveLength(1); // dispose does not hang up an established call
   });
-  test("incoming list includes browser ring offers but excludes AI and completed calls", () => {
+  test("incoming list includes answerable browser offers but excludes stale and supervisor-visible calls", () => {
     const f = fixture();
     const base = { direction: "inbound", status: "pending", from_number: "", to_number: "", peer_kind: "human" };
     const result = f.client.incomingCalls([
       { ...base, id: "human" },
-      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "group", peer_kind: "agent", ring_offers: [{ id: "offer-desk", kind: "browser", destination_id: "desk" }] },
+      { ...base, id: "moved", answerable: false, ring_offers: [{ id: "offer-other", kind: "browser", destination_id: "other" }] },
+      { ...base, id: "supervisor", answerable: false },
       { ...base, id: "ai", peer_kind: "agent" },
       { ...base, id: "waiting", routing_waiting: true },
       { ...base, id: "finished", status: "completed" },
     ]);
     expect(result.map(c => c.id)).toEqual(["human", "group"]);
+  });
+  test("Answer exposes offer_expired as a stable error code", async () => {
+    const f = fixture();
+    f.setResponse(async () => Response.json({ code: "offer_expired", error: "call offer expired" }, { status: 409 }));
+    await expect(f.client.answer("call-1")).rejects.toMatchObject({ code: "offer_expired", status: 409 });
   });
   test("watch cancellation suppresses late responses and overlapping requests", async () => {
     const f = fixture(), gate = deferred();

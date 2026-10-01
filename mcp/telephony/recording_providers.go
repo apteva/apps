@@ -88,6 +88,29 @@ func (a *App) handleTelnyxRecordingEvent(call *callRow, body []byte) (bool, erro
 	if err := json.Unmarshal(body, &event); err != nil {
 		return false, err
 	}
+	if event.Data.EventType == "call.playback.started" || event.Data.EventType == "call.playback.ended" {
+		payload := event.Data.Payload
+		callControlID := stringValue(payload["call_control_id"])
+		if callControlID == "" || (call.CarrierSID != "" && callControlID != call.CarrierSID) {
+			return true, errors.New("Telnyx playback does not match call")
+		}
+		if call.PeerKind != peerKindHuman {
+			return false, nil
+		}
+		state, updated, err := a.db().confirmHoldPlayback(call.ID, event.Data.EventType, stringValue(payload["client_state"]))
+		if err != nil {
+			return true, err
+		}
+		if updated {
+			a.softphones.hubFor(call.ID).setHeld(state != "active")
+			fresh, err := a.db().findCall(call.ID)
+			if err != nil {
+				return true, err
+			}
+			a.notifyCallControl(fresh)
+		}
+		return true, nil
+	}
 	if event.Data.EventType != "call.recording.saved" {
 		return false, nil
 	}
@@ -121,10 +144,16 @@ func (a *App) reconcileCallRecordings(ctx *sdk.AppCtx, call *callRow) error {
 		input = map[string]any{"filter[call_control_id]": call.CarrierSID, "page[size]": 20}
 	case "plivo":
 		input = map[string]any{"call_uuid": call.CarrierSID, "limit": 20}
+	case "bandwidth":
+		input = map[string]any{"callId": call.CarrierSID}
 	default:
 		return nil
 	}
-	raw, err := executeCarrierTool(ctx, call.CarrierConnectionID, "list_recordings", input)
+	tool := "list_recordings"
+	if call.CarrierSlug == "bandwidth" {
+		tool = "list_call_recordings"
+	}
+	raw, err := executeCarrierTool(ctx, call.CarrierConnectionID, tool, input)
 	if err != nil {
 		return err
 	}
@@ -146,6 +175,13 @@ func (a *App) reconcileCallRecordings(ctx *sdk.AppCtx, call *callRow) error {
 }
 
 func recordingListItems(provider string, raw json.RawMessage) ([]map[string]any, error) {
+	if provider == "bandwidth" {
+		var items []map[string]any
+		if err := json.Unmarshal(raw, &items); err != nil {
+			return nil, err
+		}
+		return items, nil
+	}
 	var response map[string]any
 	if err := json.Unmarshal(raw, &response); err != nil {
 		return nil, err
@@ -184,6 +220,10 @@ func parseProviderRecordingMetadata(provider string, item map[string]any, call *
 		metadata.ID = stringValue(item["recording_id"])
 		metadata.Format = strings.ToLower(firstNonEmpty(stringValue(item["recording_format"]), "wav"))
 		metadata.DurationMS = firstPositiveInt64(item["recording_duration_ms"])
+	case "bandwidth":
+		metadata.ID = stringValue(item["recordingId"])
+		metadata.Format = strings.ToLower(firstNonEmpty(stringValue(item["fileFormat"]), "wav"))
+		metadata.DurationMS = bandwidthDurationMS(stringValue(item["duration"]))
 	}
 	metadata.Channels = providerChannelCount(item["channels"], call.RecordingChannels)
 	return metadata
@@ -193,7 +233,17 @@ func (a *App) downloadProviderRecording(downloadCtx context.Context, ctx *sdk.Ap
 	if recording.Provider == "twilio" {
 		return downloadTwilioRecordingChannels(downloadCtx, creds, recording.ProviderRecordingID, recording.Format, recording.Channels)
 	}
-	raw, err := executeCarrierTool(ctx, recording.CarrierConnectionID, "get_recording", map[string]any{"recording_id": recording.ProviderRecordingID})
+	tool := "get_recording"
+	input := map[string]any{"recording_id": recording.ProviderRecordingID}
+	if recording.Provider == "bandwidth" {
+		call, err := a.db().findCall(recording.CallID)
+		if err != nil || call == nil || call.CarrierSID == "" || call.ProjectID != recording.ProjectID {
+			return "", 0, errors.New("Bandwidth recording has no project-scoped carrier call")
+		}
+		tool = "get_call_recording"
+		input = map[string]any{"callId": call.CarrierSID, "recordingId": recording.ProviderRecordingID}
+	}
+	raw, err := executeCarrierTool(ctx, recording.CarrierConnectionID, tool, input)
 	if err != nil {
 		return "", 0, err
 	}
@@ -202,7 +252,7 @@ func (a *App) downloadProviderRecording(downloadCtx context.Context, ctx *sdk.Ap
 		return "", 0, err
 	}
 	username, password := "", ""
-	if recording.Provider == "plivo" {
+	if recording.Provider == "plivo" || recording.Provider == "bandwidth" {
 		username = firstNonEmpty(creds["auth_id"], creds["username"])
 		password = firstNonEmpty(creds["password"], creds["auth_token"])
 	}
@@ -231,6 +281,10 @@ func providerRecordingURL(provider string, raw json.RawMessage, format string) (
 		}
 	} else if provider == "plivo" {
 		if candidate := stringValue(data["recording_url"]); candidate != "" {
+			return candidate, nil
+		}
+	} else if provider == "bandwidth" {
+		if candidate := stringValue(data["mediaUrl"]); strings.HasPrefix(candidate, "https://") {
 			return candidate, nil
 		}
 	}

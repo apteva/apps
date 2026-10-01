@@ -1,0 +1,27 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "cpu_count": 10,
+  "source_sha256": "ea4364fd68f4cc456ce70fc1e371aa36a558e8e9b9ec8131c1662e3c9d508e15",
+  "binary_sha256": "efce54710bfb5665351bb6e14e639b288623b4b538def787aba59719ac94e29f",
+  "cgo_enabled": false,
+  "argv": {
+    "rows": [
+      1000000
+    ],
+    "repeats": 3,
+    "samples": 200,
+    "slow_samples": 7,
+    "output": "benchmarks/results/2026-09-07-post-restart",
+    "binary": "/private/tmp/apteva-database-benchmark",
+    "resume": false,
+    "trials": [
+      "sqlite-1000000-run2",
+      "sqlite-1000000-run3",
+      "pebble-1000000-run3"
+    ]
+  },
+  "started_utc": "2026-09-07T08:23:02.655660+00:00",
+  "machdep.cpu.brand_string": "Apple M1 Pro",
+  "hw.memsize": "17179869184",
+  "hw.logicalcpu": "10"
+}

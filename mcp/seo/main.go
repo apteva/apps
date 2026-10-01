@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.7.1
+version: 0.7.2
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -73,7 +73,7 @@ provides:
     - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
     - { name: rank_trackers_list, description: "List automatic rank trackers, refresh frequency, and status. Args: keyword_id?." }
     - { name: rank_history, description: "Read durable scheduled rank/not-found observations. Args: tracker_id, limit?." }
-    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
+    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into provider- and locale-specific content opportunities. Missing metrics return an explicit status and no score. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
@@ -278,7 +278,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"keyword_ids"}),
 			Handler: a.toolRankingsForKeywords},
 		{Name: "content_opportunities",
-			Description: "Summarize latest cached SERP snapshots into content opportunities. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only.",
+			Description: "Summarize latest cached SERP snapshots into provider- and locale-specific content opportunities. Missing metrics return an explicit status and no score. Args: provider? (default binding; all for every provider), search_engine? (google default), limit?. YouTube uses video results only.",
 			InputSchema: schemaObject(map[string]any{
 				"provider":      map[string]any{"type": "string", "enum": []string{"dataforseo", "yepapi", "all"}},
 				"search_engine": map[string]any{"type": "string"},
@@ -2651,11 +2651,9 @@ func contentOpportunitiesProvider(db *sql.DB, pid, searchEngine string, limit in
 	where := `s.snapshot_rank = 1`
 	qargs := []any{pid, searchEngine}
 	snapshotProviderFilter := ""
-	metricProviderFilter := ""
 	if provider = strings.ToLower(strings.TrimSpace(provider)); provider != "" {
 		snapshotProviderFilter = ` AND s.provider = ?`
-		metricProviderFilter = ` WHERE provider = ?`
-		qargs = append(qargs, provider, provider)
+		qargs = append(qargs, provider)
 	}
 	if searchEngine == "youtube" {
 		where += ` AND r.result_type = 'video'`
@@ -2670,25 +2668,47 @@ func contentOpportunitiesProvider(db *sql.DB, pid, searchEngine string, limit in
 		           ) AS snapshot_rank
 		      FROM search_serp_snapshots s
 		     WHERE s.project_id = ? AND s.search_engine = ?`+snapshotProviderFilter+`
+		), resolved_snapshots AS (
+		    SELECT s.*, COALESCE(s.keyword_id, k.id) AS resolved_keyword_id
+		      FROM ranked_snapshots s
+		      LEFT JOIN keywords k
+		        ON k.project_id = s.project_id
+		       AND k.search_engine = s.search_engine
+		       AND k.text = s.keyword_text
+		       AND k.location_id = s.location_id
 		), latest_keyword_metrics AS (
-		    SELECT keyword_id, volume, difficulty,
-		           ROW_NUMBER() OVER (PARTITION BY keyword_id ORDER BY ts DESC, id DESC) AS metric_rank
+		    SELECT keyword_id, provider, ts, volume, difficulty,
+		           ROW_NUMBER() OVER (
+		             PARTITION BY keyword_id, provider ORDER BY ts DESC, id DESC
+		           ) AS metric_rank
 		      FROM keyword_metrics
-		     `+metricProviderFilter+`
 		)
-		 SELECT s.keyword_text,
+		 SELECT s.id,
+		        s.resolved_keyword_id,
+		        s.keyword_text,
+		        s.location_id,
+		        l.location_name,
+		        l.country_iso,
+		        l.language_code,
+		        s.provider,
 		        COUNT(*) AS result_count,
 		        SUM(CASE WHEN r.rank <= 10 THEN 1 ELSE 0 END) AS top10_count,
-		        MAX(s.ts) AS latest_ts,
+		        s.ts AS latest_ts,
 		        GROUP_CONCAT(CASE WHEN r.rank <= 5 THEN r.title ELSE NULL END, ' || ') AS titles,
 		        MAX(km.volume) AS volume,
-		        MAX(km.difficulty) AS difficulty
-		   FROM ranked_snapshots s
+		        MAX(km.difficulty) AS difficulty,
+		        MAX(km.ts) AS metrics_ts
+		   FROM resolved_snapshots s
 		   JOIN search_serp_results r ON r.snapshot_id = s.id
-		   LEFT JOIN latest_keyword_metrics km ON km.keyword_id = s.keyword_id AND km.metric_rank = 1
+		   JOIN seo_locations l ON l.id = s.location_id
+		   LEFT JOIN latest_keyword_metrics km
+		     ON km.keyword_id = s.resolved_keyword_id
+		    AND km.provider = s.provider
+		    AND km.metric_rank = 1
 		  WHERE `+where+`
-		  GROUP BY s.keyword_text
-		  ORDER BY latest_ts DESC
+		  GROUP BY s.id, s.resolved_keyword_id, s.keyword_text, s.location_id,
+		           l.location_name, l.country_iso, l.language_code, s.provider, s.ts
+		  ORDER BY s.ts DESC, s.id DESC
 		  LIMIT ?`,
 		qargs...)
 	if err != nil {
@@ -2697,52 +2717,69 @@ func contentOpportunitiesProvider(db *sql.DB, pid, searchEngine string, limit in
 	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
-		var keyword, titles string
-		var titlesNull sql.NullString
+		var keyword, locationName, languageCode, resultProvider, titles string
+		var keywordID sql.NullInt64
+		var countryISO, titlesNull sql.NullString
+		var snapshotID, locationID int64
 		var resultCount, top10Count, latestTS int64
-		var volume, difficulty sql.NullInt64
-		if err := rows.Scan(&keyword, &resultCount, &top10Count, &latestTS, &titlesNull, &volume, &difficulty); err != nil {
+		var volume, difficulty, metricsTS sql.NullInt64
+		if err := rows.Scan(&snapshotID, &keywordID, &keyword, &locationID, &locationName, &countryISO,
+			&languageCode, &resultProvider, &resultCount, &top10Count, &latestTS,
+			&titlesNull, &volume, &difficulty, &metricsTS); err != nil {
 			return nil, err
 		}
 		if titlesNull.Valid {
 			titles = titlesNull.String
 		}
-		score := int64(50)
-		reason := "Latest cached SERP; no volume or difficulty metrics are available for this search engine."
-		if volume.Valid || difficulty.Valid {
-			reason = "Score combines current search volume and keyword difficulty from the latest cached metrics."
-			if volume.Valid {
-				switch {
-				case volume.Int64 >= 10000:
-					score += 20
-				case volume.Int64 >= 1000:
-					score += 15
-				case volume.Int64 >= 100:
-					score += 8
-				}
+		var score any
+		metricsStatus := "unavailable"
+		reason := "Opportunity score unavailable because this locale has no cached volume or difficulty metrics."
+		if volume.Valid && difficulty.Valid {
+			metricsStatus = "available"
+			reason = "Score combines current search volume and keyword difficulty for this provider and locale."
+			calculated := int64(50)
+			switch {
+			case volume.Int64 >= 10000:
+				calculated += 20
+			case volume.Int64 >= 1000:
+				calculated += 15
+			case volume.Int64 >= 100:
+				calculated += 8
 			}
-			if difficulty.Valid {
-				switch {
-				case difficulty.Int64 <= 30:
-					score += 20
-				case difficulty.Int64 <= 50:
-					score += 10
-				case difficulty.Int64 >= 80:
-					score -= 15
-				}
+			switch {
+			case difficulty.Int64 <= 30:
+				calculated += 20
+			case difficulty.Int64 <= 50:
+				calculated += 10
+			case difficulty.Int64 >= 80:
+				calculated -= 15
 			}
+			score = minInt64(calculated, 100)
+		} else if volume.Valid || difficulty.Valid {
+			metricsStatus = "partial"
+			reason = "Opportunity score pending because this provider and locale has only partial keyword metrics."
 		}
 		out = append(out, map[string]any{
-			"search_engine":     searchEngine,
-			"keyword":           keyword,
-			"opportunity_score": minInt64(score, 100),
-			"result_count":      resultCount,
-			"top10_count":       top10Count,
-			"latest_ts":         latestTS,
-			"example_titles":    splitLimited(titles, " || ", 5),
-			"reason":            reason,
-			"volume":            nullableInt64(volume),
-			"difficulty":        nullableInt64(difficulty),
+			"project_id":                pid,
+			"source_snapshot_id":        snapshotID,
+			"search_engine":             searchEngine,
+			"provider":                  resultProvider,
+			"keyword_id":                nullableInt64(keywordID),
+			"keyword":                   keyword,
+			"location_id":               locationID,
+			"location_name":             locationName,
+			"country_iso":               nullableString(countryISO),
+			"language_code":             languageCode,
+			"opportunity_score":         score,
+			"metrics_status":            metricsStatus,
+			"metrics_last_refreshed_at": nullableInt64(metricsTS),
+			"result_count":              resultCount,
+			"top10_count":               top10Count,
+			"latest_ts":                 latestTS,
+			"example_titles":            splitLimited(titles, " || ", 5),
+			"reason":                    reason,
+			"volume":                    nullableInt64(volume),
+			"difficulty":                nullableInt64(difficulty),
 		})
 	}
 	return map[string]any{"search_engine": searchEngine, "items": out}, rows.Err()
@@ -2821,6 +2858,13 @@ func nullableInt64(v sql.NullInt64) any {
 		return nil
 	}
 	return v.Int64
+}
+
+func nullableString(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.String
 }
 
 func nonEmptyStrings(in []string) []string {

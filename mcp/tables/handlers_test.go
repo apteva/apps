@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -73,6 +74,329 @@ func TestTablesCreate_AndDescribe(t *testing.T) {
 	}
 	if cols[0].Name != "title" || cols[0].Nullable {
 		t.Errorf("first column should be non-nullable title, got %+v", cols[0])
+	}
+}
+
+func TestTablesBatch_DependentReadsAndBestEffortErrors(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "customers",
+		"columns": []any{map[string]any{"name": "name", "type": "text", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "orders",
+		"columns": []any{map[string]any{"name": "customer_id", "type": "number", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "customers", "rows": []any{map[string]any{"name": "Ada"}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "orders", "rows": []any{
+			map[string]any{"customer_id": 1.0}, map[string]any{"customer_id": 2.0},
+		},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "best_effort",
+		"operations": []any{
+			map[string]any{"id": "customer", "operation": "rows_get", "args": map[string]any{"table": "customers", "id": 1}},
+			map[string]any{"id": "orders", "operation": "rows_search", "args": map[string]any{
+				"table": "orders", "where": []any{map[string]any{"col": "customer_id", "op": "eq", "value": map[string]any{"$ref": "customer.row.id"}}},
+			}},
+			map[string]any{"id": "missing", "operation": "rows_count", "args": map[string]any{"table": "does_not_exist"}},
+		},
+	})
+	if out["mode"] != "best_effort" {
+		t.Fatalf("mode=%v", out["mode"])
+	}
+	results := out["results"].(map[string]any)
+	if results["customer"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("customer result=%v", results["customer"])
+	}
+	orders := results["orders"].(map[string]any)
+	if orders["status"] != "ok" || len(orders["result"].(map[string]any)["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("orders result=%v", orders)
+	}
+	if results["missing"].(map[string]any)["status"] != "error" {
+		t.Fatalf("missing result=%v", results["missing"])
+	}
+}
+
+func TestTablesBatch_WriteTransactionRollsBackAllOperations(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "events",
+		"columns": []any{map[string]any{"name": "title", "type": "text", "nullable": false}},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "write_transaction",
+		"operations": []any{
+			map[string]any{"id": "first", "operation": "rows_insert", "args": map[string]any{"table": "events", "rows": []any{map[string]any{"title": "one"}}}},
+			map[string]any{"id": "second", "operation": "rows_insert", "args": map[string]any{"table": "events", "rows": []any{map[string]any{"unknown": "fails"}}}},
+		},
+	})
+	results := out["results"].(map[string]any)
+	t.Logf("transaction results: %#v", results)
+	if results["second"].(map[string]any)["status"] != "error" {
+		t.Fatalf("expected failing operation, got %v", results["second"])
+	}
+	if results["first"].(map[string]any)["status"] != "rolled_back" {
+		t.Fatalf("expected rollback status, got %v", results["first"])
+	}
+	count := mustCall(t, app, ctx, "rows_count", map[string]any{"table": "events"})
+	if count["count"].(int64) != 0 {
+		t.Fatalf("transaction leaked rows: %v", count)
+	}
+}
+
+func TestTablesBatch_RejectsCycles(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	_, err := callTool(app, ctx, "tables_batch", map[string]any{
+		"operations": []any{
+			map[string]any{"id": "a", "operation": "tables_list", "args": map[string]any{"summary": map[string]any{"$ref": "b.tables"}}},
+			map[string]any{"id": "b", "operation": "tables_list", "args": map[string]any{"summary": map[string]any{"$ref": "a.tables"}}},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cycle") {
+		t.Fatalf("expected dependency cycle error, got %v", err)
+	}
+}
+
+func TestTablesBatch_ReadSnapshotUsesSharedReadTransaction(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "books", "rows": []any{map[string]any{"title": "A"}, map[string]any{"title": "B"}},
+	})
+	out := mustCall(t, app, ctx, "tables_batch", map[string]any{
+		"mode": "read_snapshot",
+		"operations": []any{
+			map[string]any{"id": "search", "operation": "rows_search", "args": map[string]any{"table": "books", "include_total": true}},
+			map[string]any{"id": "count", "operation": "rows_count", "args": map[string]any{"table": "books"}},
+		},
+	})
+	results := out["results"].(map[string]any)
+	if results["search"].(map[string]any)["status"] != "ok" || results["count"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("snapshot results=%v", results)
+	}
+	if results["search"].(map[string]any)["result"].(map[string]any)["total"].(int64) != 2 {
+		t.Fatalf("snapshot total=%v", results["search"])
+	}
+}
+
+func TestRecursiveFilterAST_CorrelatedAcrossReadOperations(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{"name": "customers", "columns": []any{
+		map[string]any{"name": "region", "type": "text"},
+	}})
+	mustCall(t, app, ctx, "tables_create", map[string]any{"name": "orders", "columns": []any{
+		map[string]any{"name": "customer_id", "type": "number"},
+		map[string]any{"name": "status", "type": "text"},
+		map[string]any{"name": "amount", "type": "number"},
+	}})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "customers", "rows": []any{
+		map[string]any{"region": "eu"}, map[string]any{"region": "us"},
+	}})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{"table": "orders", "rows": []any{
+		map[string]any{"customer_id": 1, "status": "open", "amount": 10},
+		map[string]any{"customer_id": 2, "status": "open", "amount": 20},
+	}})
+	filter := map[string]any{"and": []any{
+		map[string]any{"compare": map[string]any{"op": "eq", "left": map[string]any{"column": "status"}, "right": map[string]any{"literal": "open"}}},
+		map[string]any{"exists": map[string]any{
+			"table":       "customers",
+			"correlation": []any{map[string]any{"outer": "customer_id", "inner": "id"}},
+			"filter":      map[string]any{"compare": map[string]any{"op": "eq", "left": map[string]any{"column": "region"}, "right": map[string]any{"literal": "eu"}}},
+		}},
+	}}
+	search := mustCall(t, app, ctx, "rows_search", map[string]any{"table": "orders", "filter_ast": filter, "include_total": true})
+	if search["total"].(int64) != 1 || len(search["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("recursive search=%v", search)
+	}
+	count := mustCall(t, app, ctx, "rows_count", map[string]any{"table": "orders", "filter_ast": filter})
+	if count["count"].(int64) != 1 {
+		t.Fatalf("recursive count=%v", count)
+	}
+	agg := mustCall(t, app, ctx, "rows_aggregate", map[string]any{"table": "orders", "filter_ast": filter, "metrics": []any{map[string]any{"name": "n", "op": "count"}}})
+	if len(agg["rows"].([]map[string]any)) != 1 {
+		t.Fatalf("recursive aggregate=%v", agg)
+	}
+	batch := mustCall(t, app, ctx, "tables_batch", map[string]any{"operations": []any{map[string]any{"id": "n", "operation": "rows_count", "args": map[string]any{"table": "orders", "filter_ast": filter}}}})
+	if batch["results"].(map[string]any)["n"].(map[string]any)["status"] != "ok" {
+		t.Fatalf("recursive batch=%v", batch)
+	}
+}
+
+func TestRecursiveFilterAST_BooleanLiteralCoercedOnce(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "flags",
+		"columns": []any{map[string]any{"name": "active", "type": "bool", "nullable": false}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "flags",
+		"rows":  []any{map[string]any{"active": true}, map[string]any{"active": false}},
+	})
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table":         "flags",
+		"include_total": true,
+		"filter_ast": map[string]any{"compare": map[string]any{
+			"op":    "eq",
+			"left":  map[string]any{"column": "active"},
+			"right": map[string]any{"literal": true},
+		}},
+	})
+	if got := out["total"].(int64); got != 1 {
+		t.Fatalf("active=true total=%d, want 1", got)
+	}
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 1 || rows[0]["active"] != true {
+		t.Fatalf("active=true rows=%v", rows)
+	}
+}
+
+func TestRecursiveFilterAST_CastOuterNumericIDToTextUsesIndex(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name":    "companies",
+		"columns": []any{map[string]any{"name": "name", "type": "text"}},
+	})
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name": "contracts",
+		"columns": []any{
+			map[string]any{"name": "commercial_id", "type": "text"},
+			map[string]any{"name": "status", "type": "text"},
+		},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "companies", "rows": []any{map[string]any{"name": "Acme"}},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "contracts", "rows": []any{map[string]any{"commercial_id": "1", "status": "active"}},
+	})
+	mustCall(t, app, ctx, "indexes_create", map[string]any{
+		"table": "contracts", "name": "contracts_commercial_id_idx", "columns": []any{"commercial_id"},
+	})
+	filter := map[string]any{"exists": map[string]any{
+		"table": "contracts",
+		"filter": map[string]any{"compare": map[string]any{
+			"op":   "eq",
+			"left": map[string]any{"column": "commercial_id"},
+			"right": map[string]any{"cast": map[string]any{
+				"type": "text", "expr": map[string]any{"outer_column": "id"},
+			}},
+		}},
+	}}
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{
+		"table": "companies", "filter_ast": filter, "include_total": true,
+	})
+	if got := out["total"].(int64); got != 1 {
+		t.Fatalf("casted correlated filter total=%d, want 1", got)
+	}
+
+	table, err := app.loadTableSchema(ctx, "test-proj", "companies")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clause, args, used, err := app.compileFilter(ctx, "test-proj", table, nil, filter)
+	if err != nil || !used {
+		t.Fatalf("compile filter: used=%v err=%v", used, err)
+	}
+	if !strings.Contains(clause, `"sub0"."commercial_id" = CAST("root"."id" AS TEXT)`) {
+		t.Fatalf("unexpected cast placement: %s", clause)
+	}
+	if strings.Contains(clause, `CAST("sub0"."commercial_id"`) {
+		t.Fatalf("database column was cast: %s", clause)
+	}
+	planRows, err := ctx.AppReadDB().Query(`EXPLAIN QUERY PLAN SELECT * FROM `+quote(table.PhysicalName)+` AS "root" `+clause, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer planRows.Close()
+	foundIndex := false
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := planRows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+		upperDetail := strings.ToUpper(detail)
+		if strings.Contains(upperDetail, "USING") && strings.Contains(upperDetail, "INDEX") && strings.Contains(upperDetail, "COMMERCIAL_ID") {
+			foundIndex = true
+		}
+	}
+	if err := planRows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !foundIndex {
+		t.Fatalf("expected correlated lookup to use contracts_commercial_id_idx, plan=%v", details)
+	}
+}
+
+func TestPreparedPlanCache_InvalidatesOnSchemaChange(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_search", map[string]any{"table": "books", "include_total": false, "where": []any{map[string]any{"col": "rating", "op": "gt", "value": 1}}})
+	app.plans.mu.Lock()
+	cached := len(app.plans.entries)
+	app.plans.mu.Unlock()
+	if cached == 0 {
+		t.Fatal("expected prepared search plan to be cached")
+	}
+	mustCall(t, app, ctx, "indexes_create", map[string]any{"table": "books", "name": "books_rating_idx", "columns": []any{"rating"}})
+	app.plans.mu.Lock()
+	remaining := len(app.plans.entries)
+	app.plans.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("schema change left %d prepared plans cached", remaining)
+	}
+}
+
+func TestRecursiveFilterAST_UsesIndexPlan(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "indexes_create", map[string]any{"table": "books", "name": "books_rating_idx", "columns": []any{"rating"}})
+	table, err := app.loadTableSchema(ctx, "test-proj", "books")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clause, vals, used, err := app.compileFilter(ctx, "test-proj", table, nil, map[string]any{"compare": map[string]any{
+		"op": "eq", "left": map[string]any{"column": "rating"}, "right": map[string]any{"literal": 5},
+	}})
+	if err != nil || !used {
+		t.Fatalf("compile filter: used=%v err=%v", used, err)
+	}
+	rows, err := ctx.AppReadDB().Query(`EXPLAIN QUERY PLAN SELECT * FROM `+quote(table.PhysicalName)+` AS "root" `+clause, vals...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var detail string
+	found := false
+	for rows.Next() {
+		var id, parent, notUsed int
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(detail), "USING INDEX") {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatalf("expected indexed plan, got %q", detail)
 	}
 }
 

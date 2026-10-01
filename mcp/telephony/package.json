@@ -6,6 +6,18 @@
     "typecheck": "tsc -p frontend/tsconfig.json --noEmit",
     "test:frontend": "bun test frontend/tests/*.test.ts && bun test ui/*.test.ts",
     "example": "bun frontend/example/server.ts",
-    "test:example": "bunx --no-install playwright test -c frontend/example/playwright.config.ts"
+    "test:example": "bunx --no-install playwright test -c frontend/example/playwright.config.ts",
+    "benchmark:softphone": "bun benchmarks/softphone/run.ts",
+    "typecheck:benchmark": "tsc -p benchmarks/softphone/tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@apteva/web-sdk": "0.7.0",
+    "@playwright/test": "^1.63.0",
+    "@types/bun": "^1.4.2",
+    "@types/react": "19",
+    "@types/react-dom": "19",
+    "react": "19",
+    "react-dom": "19",
+    "typescript": "^7.0.2"
   }
 }

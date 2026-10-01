@@ -117,6 +117,8 @@ func normalizeMediaKind(kind string) string {
 		return "wear_screenshot"
 	case "automotive_screenshot", "automotive_screenshots":
 		return "automotive_screenshot"
+	case "desktop_screenshot", "desktop_screenshots":
+		return "desktop_screenshot"
 	case "app_preview", "app_previews":
 		return "app_preview"
 	case "review_attachment", "review_attachments":
@@ -132,6 +134,9 @@ func mediaKindSupported(platform, kind string) bool {
 	}
 	if platform == "ios" {
 		return kind == "phone_screenshot" || kind == "tablet_screenshot" || kind == "app_preview" || kind == "review_attachment"
+	}
+	if platform == "macos" {
+		return kind == "desktop_screenshot" || kind == "app_preview" || kind == "review_attachment"
 	}
 	return false
 }
@@ -386,7 +391,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 				selected := mediaKindSet{kind: true}
 				var applyErr error
 				switch d.TargetKind {
-				case "ios":
+				case "ios", "macos":
 					_, applyErr = a.applyAppleStoreConfigScopesWithMediaKinds(d, kindDoc, storeScopeSet{"media": true}, selected)
 				case "android":
 					_, applyErr = a.applyGoogleStoreConfigScopesWithMediaKinds(d, kindDoc, storeScopeSet{"media": true}, selected)
@@ -433,7 +438,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 			applyErr = a.applyDesiredTesting(d, doc)
 		} else {
 			switch d.TargetKind {
-			case "ios":
+			case "ios", "macos":
 				_, applyErr = a.applyAppleStoreConfigScopes(d, doc, one)
 			case "android":
 				_, applyErr = a.applyGoogleStoreConfigScopes(d, doc, one)
@@ -464,7 +469,7 @@ func (a *App) applyStoreConfigScoped(d *Deployment, build *Build, strict bool, r
 		}
 	}
 	observed, observeErr := func() (map[string]any, error) {
-		if d.TargetKind == "ios" {
+		if isApplePlatform(d.TargetKind) {
 			return a.observeAppleStoreConfig(d, doc)
 		}
 		return a.observeGoogleStoreConfig(d, doc, cfg)

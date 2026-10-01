@@ -40,6 +40,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gobwas/ws"
 )
@@ -290,8 +291,16 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	inputResampler := newPCMResampler(8000, 24000)
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := newTwilioPlaybackTracker()
+	tap := a.listeners.openBridge(callID)
+	defer a.listeners.closeBridge(callID, tap)
 	audioFrontend := newCarrierAudioFrontend(8000)
 	inputSequences := &audioSequenceTracker{}
+	var humanHub *softphoneHub
+	if row.PeerKind == peerKindHuman {
+		humanHub = a.softphones.hubFor(callID)
+		humanHub.setCarrierForward(coreWriter)
+		defer humanHub.finishCarrierForward(coreWriter)
+	}
 	defer func() {
 		select {
 		case <-streamSidCh:
@@ -321,6 +330,10 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(data, &f); err != nil {
 				continue
 			}
+
+			if sequence, err := strconv.ParseUint(f.SequenceNumber, 10, 64); err == nil {
+				inputSequences.observe(sequence, "carrier_to_operator")
+			}
 			switch f.Event {
 			case "start":
 				if f.Start == nil || f.Start.CallSID == "" {
@@ -347,8 +360,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "media":
-				if sequence, err := strconv.ParseUint(f.SequenceNumber, 10, 64); err == nil {
-					inputSequences.observe(sequence, "carrier_to_operator")
+				decodeStarted := time.Now()
+				if humanHub != nil {
+					humanHub.timeline.observe("carrier_media_read", len(data), time.Time{}, "", "")
 				}
 				if f.Media == nil || f.Media.Payload == "" {
 					continue
@@ -366,7 +380,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 				if len(pcm24) == 0 {
 					continue
 				}
-				err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+				tap.publishPCM(0, pcm24)
+				if humanHub != nil {
+					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, decodeStarted, "", "")
+					coreWriter.QueueAudio(pcm16ToBytes(pcm24))
+				} else {
+					err = coreWriter.Write(ws.OpBinary, pcm16ToBytes(pcm24))
+				}
 				if err == nil && localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
 					err = coreWriter.Write(ws.OpText, control)
@@ -417,30 +437,50 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		pacerMode = "live_human"
 	}
 	droppedStaleMS := 0
+	observeSent := tap.jsonOutputObserver(carrierCodecPCMU8)
 	pacer := newTwilioAudioPacerWithPolicy(ctx, streamSID, playback, pacerPolicy, func(payload []byte) error {
-		return twWriter.Write(ws.OpText, payload)
+		started := time.Now()
+		err := twWriter.write(ws.OpText, payload, carrierMediaWriteTimeout(row))
+		if err == nil {
+			observeSent(payload)
+		}
+		if humanHub != nil {
+			stage := "carrier_send"
+			if err != nil {
+				stage = "carrier_send_error"
+			}
+			humanHub.timeline.observe(stage, len(payload), started, "", "")
+		}
+		return err
 	}, func(err error) {
 		globalCtx.Logger().Warn("twilio media writer failed", "call", callID, "err", err)
 		closeState.SetLeg(mediaCloseLegCarrier, ws.StatusInternalServerError, "Twilio media writer failed")
 		cancel()
 	})
+	if humanHub != nil {
+		humanHub.setPacerStats(&pacer.diagnostics)
+	}
 	defer func() {
 		logAudioFrontendDiagnostics(globalCtx.Logger(), audioFrontend, row, "twilio", carrierCodecPCMU8, maxQueuedMS, droppedStaleMS)
 		var preAnswerDroppedMS int64
 		sequenceGaps, dropEvents := inputSequences.snapshot()
+		carrierGaps := sequenceGaps
+		captureGapCount := 0
 		dropEvents = append(dropEvents, pacer.dropEvents()...)
 		if hub := a.softphones.lookup(callID); hub != nil {
 			preAnswerDroppedMS = hub.preAnswerDroppedMS()
 			captureGaps, captureDrops := hub.captureDiagnostics()
 			sequenceGaps += captureGaps
+			captureGapCount = captureGaps
 			dropEvents = append(dropEvents, captureDrops...)
 		}
 		_ = a.db().updateCarrierAudioDiagnostics(callID, carrierAudioDiagnostics{
 			InputAudio: audioFrontend.transportSnapshot(),
 			Provider:   "twilio", Codec: carrierCodecPCMU8, SampleRate: twilioMediaSampleRate,
-			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
+			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: max(droppedStaleMS, int(pacer.diagnostics.snapshot().DroppedMS)),
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
-			SequenceGaps:                 sequenceGaps, DropEvents: dropEvents,
+			CarrierSequenceGaps:          carrierGaps, CaptureSequenceGaps: captureGapCount,
+			SequenceGaps: sequenceGaps, DropEvents: dropEvents,
 		})
 	}()
 

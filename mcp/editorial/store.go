@@ -95,6 +95,9 @@ type Settings struct {
 	Revision int64  `json:"revision"`
 }
 
+var approvalStates = []string{"not_required", "pending", "approved", "changes_requested"}
+var releaseStatuses = []string{"planned", "scheduled", "published", "failed", "cancelled"}
+
 func defaultSettings() Settings {
 	return Settings{Timezone: "", DueTime: defaultDueTime, Brands: []Brand{}, Statuses: []string{"idea", "brief", "in_progress", "review", "ready", "published"}, Formats: []string{"idea", "brief", "article", "video", "podcast", "social_post", "newsletter", "campaign", "refresh"}, Channels: []string{"Website", "Newsletter", "LinkedIn", "Instagram", "YouTube", "Podcast"}}
 }
@@ -159,16 +162,20 @@ func validateItem(d *ItemData, s Settings) error {
 		return invalid("title is too long")
 	}
 	if !has(s.Statuses, d.Status) {
-		return invalid("unknown workflow status")
+		message := fmt.Sprintf("unknown content workflow status %q. Allowed: %s. Omit status to use %q.", d.Status, strings.Join(s.Statuses, ", "), s.Statuses[0])
+		if has(releaseStatuses, d.Status) {
+			message += fmt.Sprintf(" %q is a release status, not a content workflow status for this project.", d.Status)
+		}
+		return invalid(message)
 	}
 	if !has(s.Formats, d.Format) {
-		return invalid("unknown format")
+		return invalid(fmt.Sprintf("unknown content format %q. Allowed: %s. Omit format to use %q.", d.Format, strings.Join(s.Formats, ", "), s.Formats[0]))
 	}
-	if !has([]string{"not_required", "pending", "approved", "changes_requested"}, d.Approval) {
-		return invalid("invalid approval state")
+	if !has(approvalStates, d.Approval) {
+		return invalid(fmt.Sprintf("invalid approval state %q. Allowed: %s.", d.Approval, strings.Join(approvalStates, ", ")))
 	}
 	if d.Approval == "approved" && strings.TrimSpace(d.Reviewer) == "" {
-		return invalid("reviewer is required for approval")
+		return invalid("reviewer is required when approval is \"approved\"")
 	}
 	for _, v := range []string{d.Deadline, d.PlannedAt} {
 		if e := validateDate(v); e != nil {
@@ -198,8 +205,8 @@ func validateRelease(d *ReleaseData) error {
 	if strings.TrimSpace(d.Channel) == "" {
 		return invalid("channel is required")
 	}
-	if !has([]string{"planned", "scheduled", "published", "failed", "cancelled"}, d.Status) {
-		return invalid("invalid release status")
+	if !has(releaseStatuses, d.Status) {
+		return invalid(fmt.Sprintf("invalid release status %q. Allowed: %s. Omit status to use \"planned\".", d.Status, strings.Join(releaseStatuses, ", ")))
 	}
 	if !has([]string{"", "social", "campaigns"}, d.App) {
 		return invalid("app must be social or campaigns")

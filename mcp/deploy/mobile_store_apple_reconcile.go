@@ -618,6 +618,9 @@ func (a *App) reconcileAppleScreenshots(bound *sdk.BoundIntegration, d *Deployme
 }
 
 func appleScreenshotMediaKind(displayType string) string {
+	if strings.Contains(strings.ToUpper(displayType), "DESKTOP") {
+		return "desktop_screenshot"
+	}
 	if strings.Contains(strings.ToUpper(displayType), "IPAD") {
 		return "tablet_screenshot"
 	}

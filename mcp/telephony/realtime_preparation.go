@@ -21,7 +21,7 @@ func (e *answerPreparationFailure) Error() string { return e.cause.Error() }
 func (e *answerPreparationFailure) Unwrap() error { return e.cause }
 func retryAnswerPreparation(err error) bool {
 	var failed *answerPreparationFailure
-	return errors.Is(err, errAnswerPreparationInProgress) || errors.As(err, &failed)
+	return errors.Is(err, errAnswerPreparationInProgress) || errors.Is(err, errAIHandoffPending) || errors.As(err, &failed)
 }
 
 type realtimePreparation struct {
@@ -153,6 +153,9 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 			time.Sleep(20 * time.Millisecond)
 			continue
 		}
+		if err := a.aiHandoffAdmission(row.ID); err != nil {
+			return err
+		}
 		claimed, err := a.db().claimPendingCall(row.ID, row.AgentID, row.ProjectID)
 		if err != nil {
 			return &answerPreparationFailure{fmt.Errorf("claim pending call: %w", err)}
@@ -188,13 +191,27 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 		}
 		*row = *current
 		threadID := "tel-" + strings.TrimPrefix(token, "pending-")
+		if err := a.beginAIHandoff(ctx, row, token, directive, voice, greeting); err != nil {
+			_ = a.db().releaseRealtimePreparation(row.ID, token)
+			return err
+		}
 		fail := func(cause error) error {
 			ctx.Logger().Warn("realtime answer preparation failed", "call", row.ID, "thread", threadID, "agent", row.AgentID, "err", cause)
 			// Spawn can fail after Core accepted it. The unique thread id makes this
 			// cleanup safe even if the caller hung up or another claim replaced ours.
-			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
+			code, retry := aiStartupFailure(cause)
+			if err := ctx.PlatformAPI().KillThread(row.AgentID, threadID); err != nil {
+				code, retry = "cleanup_uncertain", false
+			}
+			if err := a.failAIHandoff(row, token, code, retry); err != nil {
+				return err
+			}
 			_ = a.db().releaseRealtimePreparation(row.ID, token)
-			return &answerPreparationFailure{cause}
+			a.wakeRouting(row.ProjectID)
+			return errAIHandoffPending
+		}
+		if row.AgentID == 0 || strings.TrimSpace(directive) == "" {
+			return fail(errors.New("AI agent and directive are required"))
 		}
 		ctx.Logger().Info("realtime answer preparation started", "call", row.ID, "thread", threadID, "agent", row.AgentID)
 		rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
@@ -208,12 +225,11 @@ func (a *App) runInboundPreparation(ctx *sdk.AppCtx, row *callRow, directive, vo
 		if rt == nil || strings.TrimSpace(rt.AudioBridgeURL) == "" {
 			return fail(errors.New("realtime spawn returned no audio bridge URL"))
 		}
-		res, err = a.db().db.Exec(`UPDATE calls SET thread_id=?,audio_bridge_url=?,directive=?,voice=? WHERE id=? AND status='answering' AND thread_id=?`, threadID, rt.AudioBridgeURL, strings.TrimSpace(directive), voice, row.ID, token)
+		attached, err := a.attachAIHandoff(row, token, threadID, rt.AudioBridgeURL, directive, voice)
 		if err != nil {
 			return fail(fmt.Errorf("persist call answer: %w", err))
 		}
-		n, err = res.RowsAffected()
-		if err != nil || n != 1 {
+		if !attached {
 			_ = ctx.PlatformAPI().KillThread(row.AgentID, threadID)
 			current, _ = a.db().findCall(row.ID)
 			if current == nil || isTerminalStatus(current.Status) {

@@ -375,6 +375,9 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 	if id == 2 {
 		slug = "twilio"
 	}
+	if id == 3 {
+		slug = "gmail"
+	}
 	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
 }
 func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
@@ -832,6 +835,13 @@ func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
 	if r["provider_message_id"] != "ses-msg-123" {
 		t.Errorf("provider_message_id=%v", r["provider_message_id"])
 	}
+	if r["message_id_header"] != "<ses-msg-123@eu-west-1.amazonses.com>" {
+		t.Errorf("message_id_header=%v", r["message_id_header"])
+	}
+	stored, err := dbMessageGet(ctx.AppDB(), "test-proj", r["id"].(int64))
+	if err != nil || stored.MessageIDHeader != r["message_id_header"] {
+		t.Fatalf("stored Message-ID=%q, response=%v, err=%v", stored.MessageIDHeader, r["message_id_header"], err)
+	}
 	if len(plat.executeCalls) != 1 {
 		t.Fatalf("expected 1 provider call, got %d", len(plat.executeCalls))
 	}
@@ -888,6 +898,9 @@ func TestSendMessage_EmailReplyUsesRawMIMEHeaders(t *testing.T) {
 	r := out.(map[string]any)
 	if r["provider_message_id"] != "ses-raw-123" {
 		t.Fatalf("provider_message_id=%v, want ses-raw-123", r["provider_message_id"])
+	}
+	if r["message_id_header"] != "<ses-raw-123@eu-west-1.amazonses.com>" {
+		t.Fatalf("message_id_header=%v", r["message_id_header"])
 	}
 	if len(plat.executeCalls) != 1 {
 		t.Fatalf("expected 1 provider call, got %d", len(plat.executeCalls))

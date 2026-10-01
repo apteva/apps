@@ -126,6 +126,7 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 		t.Fatal(err)
 	}
 	core := waitTestConnection(t, coreBridge.conn)
+	assertListeners := startListenerProbe(t, a, call.ID)
 	// Provider callbacks cannot release the actual socket claim. A second
 	// authenticated handshake still receives 409 while audio continues below.
 	for _, event := range []string{"stream-started", "stream-stopped", "stream-error"} {
@@ -257,6 +258,7 @@ func TestTwilioMediaBridgeFullDuplexAudioContinuity(t *testing.T) {
 		t.Fatalf("Twilio playback cadence underrun: max_gap=%v elapsed=%v intervals=%d", maxGap, steadyElapsed, steadyIntervals)
 	}
 
+	assertListeners()
 	// Re-arm the local speech detector, queue a longer second response, and
 	// verify the complete caller -> Core -> Telephony -> Twilio interruption
 	// control loop while outbound audio is still buffered.

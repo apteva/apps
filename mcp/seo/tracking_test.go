@@ -26,6 +26,8 @@ func newRankTrackingTestDB(t *testing.T) *sql.DB {
 		"migrations/007_keyword_metric_jobs.sql",
 		"migrations/008_daily_rank_tracking.sql",
 		"migrations/009_rank_tracking_frequency.sql",
+		"migrations/010_backlink_summary_index.sql",
+		"migrations/011_keyword_metric_availability.sql",
 	)
 }
 

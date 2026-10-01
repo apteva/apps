@@ -67,7 +67,7 @@ connected phone-number and browser-destination values):
     "issuer_install_id": "11",
     "url": "https://agents.example.com/api/apps/auth/_install/11/me?project_id=PROJECT",
     "format": "apteva-auth",
-    "actions": ["call.read", "call.dial", "call.answer", "call.attach", "call.hangup"]
+    "actions": ["call.read", "call.dial", "call.answer", "call.attach", "call.hangup", "call.hold", "call.recording.control"]
   }],
   "groups": [{
     "id": "sales-team",
@@ -109,6 +109,29 @@ if the provider's standard user-info endpoint does not check revocation. Telepho
 forwards Origin for the provider's browser-origin checks and never follows redirects.
 HTTP is permitted only for localhost development. Provider URLs must not contain
 credentials; the user bearer remains only in the Authorization header.
+
+## Hold music and recording controls
+
+An installation administrator configures project hold music with
+`POST /call-control-settings`, passing either `{"hold_music_url":"https://..."}`
+or `{"hold_music_storage_file_id":123}`. An empty URL or file ID zero disables
+hold. `GET /call-control-settings` reports the configured source, never a
+temporary signed URL. The Storage source must be a nonempty MP3 or WAV in the
+same project. Storage must be bound and provide an externally reachable HTTPS
+public URL; Telephony obtains a fresh seven-day signed, inline proxy URL when
+hold begins. The carrier fetches that URL, so an internal or relative Storage
+URL cannot work. Direct HTTPS URLs must be publicly reachable by Telnyx.
+
+The authenticated call owner can use `hold`, `resume`, `pauseRecording`, and
+`resumeRecording` on `TelephonyClient` or `HeadlessSoftphone`. The verified
+provider must grant `call.hold` and `call.recording.control` respectively;
+existing policies do not acquire these actions automatically. Read and live
+call updates expose `hold_state`, `recording_state`, `control_error`, and
+capabilities. Hold is only available with configured music on a supported
+carrier, and recording pause only for a recording-enabled call. Unsupported
+carriers return an explicit error. Telnyx's successful recording-control API
+response confirms pause/resume; Telnyx does not publish a corresponding state
+webhook. A failed or uncertain response is reported as `unknown`, not paused.
 
 ## Numbers, IVR, groups, and ringing
 

@@ -176,6 +176,30 @@ func TestIOSReleaseAllBuildGroupSkipsAssignment(t *testing.T) {
 	}
 }
 
+func TestMacReleaseFiltersProcessedBuildsByPlatform(t *testing.T) {
+	platform := &testFlightPlatform{groups: []appleBetaGroup{{
+		ID: "group-all", Name: "Public", IsInternal: true, HasAccessToAllBuilds: true,
+	}}}
+	app, release := setupTestFlightRelease(t, platform, "")
+	meta := mobileReleaseMeta{Platform: "macos", AppID: "app-1", BuildNumber: "42"}
+	if err := dbUpdateRelease(globalCtx.AppDB(), release.ID, map[string]any{"release_meta_json": mustJSON(meta)}); err != nil {
+		t.Fatal(err)
+	}
+	release.ReleaseMetaJSON = mustJSON(meta)
+	if err := app.syncIOSRelease(release); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range platform.calls {
+		if call.Tool == "list_builds" {
+			if call.Input["platform"] != "MAC_OS" {
+				t.Fatalf("build lookup platform=%v", call.Input["platform"])
+			}
+			return
+		}
+	}
+	t.Fatal("no App Store build lookup")
+}
+
 func TestIOSReleaseConfirmedRedundantAssignmentSucceeds(t *testing.T) {
 	platform := &testFlightPlatform{
 		groups:        []appleBetaGroup{{ID: "group-1", Name: "Deploy Internal", IsInternal: true}},

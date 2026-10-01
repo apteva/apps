@@ -6,6 +6,19 @@ Run the deterministic app tests on every change:
 apteva test --tier 1,2 .
 ```
 
+For a checkout outside the root Go workspace overlay, set `GOWORK=off` for
+direct Go commands. The inbound incident regressions are in
+`inbound_protection_test.go`: Saturday open and after-hours simulation,
+answer/speak/hangup command ordering, duplicate webhook IDs, repeated callers,
+rotating caller IDs, and suppression before adviser delivery.
+
+Before a live release, call a test route during closed hours and listen until
+the complete announcement ends. Inspect the carrier command and callback
+sequence, confirm the call has `handling_reason=closed_hours`, and verify no
+missed-call pool entry. Then verify a Saturday open call reaches the intended
+destination. Use dedicated test numbers; the deterministic tests cannot prove
+that Telnyx actually played audible speech.
+
 Tier 1 runs the fast in-process suite. Tier 2 compiles and starts the real
 sidecar while deterministic carrier and browser peers exercise HTTP,
 WebSockets, audio, reconnection, recording, lifecycle persistence, and app-bus
@@ -90,3 +103,54 @@ first), a number nobody answers, and a number that goes to voicemail with
 `machine_detection: detect`. Expect `termination.reason` of `busy`,
 `no_answer`, and `completed` with `answered_by: machine`, plus one
 `call.machine_detected` event for the voicemail call.
+
+
+## Telnyx AI carrier activation
+
+`TestCarrierActivation*` covers carrier-confirmed answer state, answered IVR
+handoff, rejected commands, lost callbacks, durable deadlines across restart,
+late preparation, caller cancellation, migration evidence, and media-based talk
+time. A prepared Core session alone must never mark a handoff delivered.
+
+The activation journal allows three command attempts per phase, waits up to ten
+seconds for each accepted command's confirmation, and has a thirty-second total
+budget capped by the call deadline. Failure ends the call with
+`ai_activation_failed` and one callback opportunity. Carrier termination errors
+remain visible and are retried; Telephony cannot guarantee remote termination
+when the carrier API is unavailable.
+
+`TestTier2AIHandoffCarrierActivation` runs a compiled sidecar with loopback
+Functions, Core and Telnyx substitutes. It lets a human offer expire, selects AI,
+checks answer-before-streaming through signed callbacks, verifies two-way audio,
+and checks that the routing decision is applied only after media connects.
+
+```sh
+GOWORK=off go test -short ./...
+GOWORK=off go test -race -short -run 'TestCarrierActivation|TestAIHandoff|TestRealtimePreparation|TestReliability|TestTerminalAnnouncement' .
+GOWORK=off go test -tags integration -run TestTier2AIHandoffCarrierActivation .
+```
+
+These tests make no staging, production or live-carrier requests. They validate
+Telephony's protocol sequence, not an actual PSTN call.
+
+## Live human audio quality
+
+See [AUDIO-QUALITY.md](AUDIO-QUALITY.md) for the local regression matrix, measured
+jitter results, protocol compatibility, queue limits, directional diagnostics,
+and the limits of what local tests can prove. These tests do not use staging or
+production and must not be confused with the opt-in live-carrier profile.
+
+## Repeatable softphone network benchmark
+
+Run `bun run benchmark:softphone` for actual Chromium and local sidecar audio
+measurements under bandwidth, latency, jitter, retransmission stalls and outage
+profiles. See [benchmark instructions](benchmarks/softphone/README.md) for gates,
+artifacts, reproducibility and the distinction between a local network model
+and real carrier/physical audio quality. This does not contact staging or prod.
+
+## Connected-call duration
+
+See [CALL-DURATION.md](CALL-DURATION.md) for snapshotted limits, setup/media
+watchdogs, migration behavior and carrier limits. `TestCallDuration*` advances an
+explicit clock across hour boundaries and exercises the actual database and
+termination paths; it places no real calls.

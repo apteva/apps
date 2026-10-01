@@ -32,13 +32,14 @@ var sipRTPPorts = struct {
 }{next: make(map[string]int)}
 
 type sipRTPMedia struct {
-	conn       *net.UDPConn
-	offer      sipMediaOffer
-	security   *sipMediaSecurity
-	remote     *net.UDPAddr
-	localPort  int
-	closeOnce  sync.Once
-	lastPacket atomic.Int64
+	liveTimeline atomic.Pointer[liveAudioTimeline]
+	conn         *net.UDPConn
+	offer        sipMediaOffer
+	security     *sipMediaSecurity
+	remote       *net.UDPAddr
+	localPort    int
+	closeOnce    sync.Once
+	lastPacket   atomic.Int64
 }
 
 func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, error) {
@@ -66,6 +67,7 @@ func openSIPRTPMedia(cfg sipGatewayConfig, offer sipMediaOffer) (*sipRTPMedia, e
 			conn: conn, offer: offer, security: security, remote: remote, localPort: port,
 		}
 		sipRTPPorts.next[pool] = cfg.RTPPortMin + ((port-cfg.RTPPortMin)/2+1)%count*2
+
 		media.lastPacket.Store(time.Now().UnixNano())
 		return media, nil
 	}
@@ -118,7 +120,15 @@ func (m *sipRTPMedia) writePacket(packet *rtp.Packet) error {
 	if err := m.conn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
 		return err
 	}
+	started := time.Now()
 	_, err = m.conn.WriteToUDP(raw, m.remote)
+	if timeline := m.liveTimeline.Load(); timeline != nil {
+		stage := "carrier_send"
+		if err != nil {
+			stage = "carrier_send_error"
+		}
+		timeline.observe(stage, len(raw), started, "", "")
+	}
 	return err
 }
 
@@ -309,12 +319,15 @@ func (s *sipPlaybackState) hasPending() bool {
 }
 
 type sipRTPOutboundPacket struct {
+	enqueuedAt time.Time
 	payload    []byte
 	itemID     string
 	audioEndMS int
 }
 
 type sipRTPPacer struct {
+	observeSent    func([]byte)
+	diagnostics    livePacerStats
 	ctx            context.Context
 	media          *sipRTPMedia
 	playback       *sipPlaybackState
@@ -350,6 +363,7 @@ func newSIPRTPPacerWithPolicy(
 	playback *sipPlaybackState,
 	policy carrierPacerPolicy,
 	onProgress func(twilioPlaybackProgress) error,
+	observers ...func([]byte),
 ) *sipRTPPacer {
 	queuePackets := sipRTPQueuePackets
 	if policy.dropStale {
@@ -367,6 +381,9 @@ func newSIPRTPPacerWithPolicy(
 		ssrc:          binary.BigEndian.Uint32(seed[6:]),
 		dropStale:     policy.dropStale,
 		trimToPackets: max(1, policy.trimToMS/int(sipRTPPacketTime/time.Millisecond)),
+	}
+	if len(observers) > 0 {
+		pacer.observeSent = observers[0]
 	}
 	go pacer.run()
 	return pacer
@@ -396,6 +413,18 @@ func (p *sipRTPPacer) run() {
 			select {
 			case packet := <-p.queue:
 				p.playback.pending.Add(-1)
+				if p.dropStale && !packet.enqueuedAt.IsZero() && time.Since(packet.enqueuedAt) >= liveAudioMaxAge {
+					p.droppedPackets.Add(1)
+					p.diagnostics.dropped("live_audio_age_limit", 20)
+					p.needsCrossfade.Store(true)
+					p.dropMu.Lock()
+					p.drops = append(p.drops, audioDropEvent{Timestamp: time.Now().UTC().Format(time.RFC3339Nano), Direction: "operator_to_carrier", Reason: "live_audio_age_limit", DurationMS: 20})
+					if len(p.drops) > 100 {
+						p.drops = p.drops[len(p.drops)-100:]
+					}
+					p.dropMu.Unlock()
+					continue
+				}
 				if p.needsCrossfade.Swap(false) && len(p.lastSentPCM) > 0 {
 					pcm := decodeSIPG711(packet.payload, p.media.offer.Codec)
 					applyPCMOverlapCrossfade(p.lastSentPCM, pcm, twilioMediaSampleRate/200)
@@ -410,6 +439,7 @@ func (p *sipRTPPacer) run() {
 				p.sequence++
 				lastSent = now
 				lastFrame = frame
+				writeStarted := time.Now()
 				if err := p.media.writePacket(wire); err != nil {
 					select {
 					case p.errCh <- err:
@@ -417,6 +447,10 @@ func (p *sipRTPPacer) run() {
 					}
 					return
 				}
+				if p.observeSent != nil {
+					p.observeSent(packet.payload)
+				}
+				p.diagnostics.sent(20, writeStarted)
 				if p.onProgress != nil && packet.itemID != "" && packet.audioEndMS > 0 {
 					if err := p.onProgress(twilioPlaybackProgress{
 						ItemID: packet.itemID, AudioEndMS: packet.audioEndMS,
@@ -468,6 +502,7 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		}
 	}
 	if dropped := p.droppedPackets.Load() - droppedBefore; dropped > 0 {
+		p.diagnostics.dropped("stale_live_audio", int(dropped)*20)
 		p.needsCrossfade.Store(true)
 		p.dropMu.Lock()
 		p.drops = append(p.drops, audioDropEvent{
@@ -484,6 +519,9 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 		return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue overflow")
 	}
 	for _, packet := range packets {
+		if packet.enqueuedAt.IsZero() {
+			packet.enqueuedAt = time.Now()
+		}
 		select {
 		case p.queue <- packet:
 			p.playback.pending.Add(1)
@@ -491,6 +529,7 @@ func (p *sipRTPPacer) enqueue(packets []sipRTPOutboundPacket) (int, error) {
 			return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), errors.New("direct SIP playback queue changed concurrently")
 		}
 	}
+	p.diagnostics.queued(len(p.queue) * 20)
 	return len(p.queue) * int(sipRTPPacketTime/time.Millisecond), nil
 }
 
@@ -525,15 +564,31 @@ func (p *sipRTPPacer) clear(ctx context.Context) (int, error) {
 
 func (p *sipRTPPacer) Err() <-chan error { return p.errCh }
 
+type sipBridgeSession struct {
+	callID string
+	ctx    context.Context
+	media  *sipRTPMedia
+	finish func(string, error)
+	hangup func() error
+}
+
 func (a *App) bridgeDirectSIPMedia(session *sipSession) {
-	row, err := a.db().findCall(session.call.ID)
+	session.answerMu.Lock()
+	media := session.media
+	session.answerMu.Unlock()
+	a.bridgeSIPMedia(sipBridgeSession{
+		callID: session.call.ID, ctx: session.ctx, media: media,
+		finish: session.finish, hangup: session.hangup,
+	})
+}
+
+func (a *App) bridgeSIPMedia(session sipBridgeSession) {
+	row, err := a.db().findCall(session.callID)
 	if err != nil {
 		session.finish("local_error", err)
 		return
 	}
-	session.answerMu.Lock()
 	media := session.media
-	session.answerMu.Unlock()
 	if row == nil || media == nil {
 		return
 	}
@@ -572,7 +627,17 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 	ctx, cancel := context.WithCancel(session.ctx)
 	defer cancel()
 	closeState := &websocketCloseState{}
+	tap := a.listeners.openBridge(row.ID)
+	defer a.listeners.closeBridge(row.ID, tap)
+	listenResampler := newPCMResampler(8000, 24000)
 	audioFrontend := newCarrierAudioFrontend(8000)
+	var humanHub *softphoneHub
+	if row.PeerKind == peerKindHuman {
+		humanHub = a.softphones.hubFor(row.ID)
+		media.liveTimeline.Store(&humanHub.timeline)
+		humanHub.setCarrierForward(coreWriter)
+		defer humanHub.finishCarrierForward(coreWriter)
+	}
 	inputResampler := newPCMResampler(8000, 24000)
 	outputResampler := newPCMResampler(24000, 8000)
 	playback := &sipPlaybackState{}
@@ -587,7 +652,14 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 			Type: "playback.progress", ItemID: progress.ItemID, AudioEndMS: progress.AudioEndMS,
 		})
 		return coreWriter.Write(ws.OpText, control)
+	}, func(payload []byte) {
+		if tap.hasListeners() {
+			tap.publish(1, pcm16ToBytes(listenResampler.Process(decodeSIPG711(payload, media.offer.Codec))))
+		}
 	})
+	if humanHub != nil {
+		humanHub.setPacerStats(&pacer.diagnostics)
+	}
 	var workers sync.WaitGroup
 	defer func() {
 		cancel()
@@ -646,6 +718,9 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 				continue
 			}
 			media.lastPacket.Store(time.Now().UnixNano())
+			if humanHub != nil {
+				humanHub.timeline.observe("carrier_media_read", n, time.Time{}, fmt.Sprint(packet.Timestamp), fmt.Sprint(packet.SequenceNumber))
+			}
 			jitter.pushRTP(packet.SequenceNumber, packet.Payload, packet.Timestamp, time.Now())
 		}
 	}()
@@ -675,6 +750,10 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 				if len(pcm24) == 0 {
 					continue
 				}
+				if humanHub != nil {
+					humanHub.timeline.observe("carrier_decoded", len(pcm24)*2, time.Time{}, "", "")
+				}
+				tap.publishPCM(0, pcm24)
 				coreWriter.QueueAudio(pcm16ToBytes(pcm24))
 				if localSpeechStarted {
 					control, _ := json.Marshal(realtimeBridgeControl{Type: "input.speech_started"})
@@ -706,7 +785,7 @@ func (a *App) bridgeDirectSIPMedia(session *sipSession) {
 			SendAheadMS: pacerPolicy.bufferMS, PacerMode: pacerMode, MaxQueuedMS: maxQueuedMS, DroppedStaleMS: droppedStaleMS,
 			PreAnswerMicrophoneDroppedMS: preAnswerDroppedMS,
 			DropEvents:                   pacer.dropEvents(),
-			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int(coreWriter.audioDropped.Load())*20, InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
+			SequenceGaps:                 lost, InboundDroppedMS: inboundDroppedMS + int((coreWriter.audioSnapshot().OverflowBytes+coreWriter.audioSnapshot().StaleBytes)*1000/48000), InboundMaxQueueAgeMS: maxAge, InboundJitterMS: jitterMS,
 		})
 		if session.ctx.Err() == nil {
 			_ = session.hangup()

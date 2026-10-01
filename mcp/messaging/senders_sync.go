@@ -39,8 +39,17 @@ import (
 // missing binding on one channel doesn't block the others.
 func (a *App) refreshSendersFromProviders(ctx *sdk.AppCtx, pid string) error {
 	var firstErr error
-	if bound := ctx.IntegrationFor("email_provider"); bound != nil {
-		if err := a.refreshSESIdentities(ctx, pid, bound.ConnectionID); err != nil && firstErr == nil {
+	for _, bound := range ctx.IntegrationsFor("email_provider") {
+		var err error
+		switch bound.AppSlug {
+		case "aws-ses":
+			err = a.refreshSESIdentities(ctx, pid, bound.ConnectionID)
+		case "gmail":
+			err = a.refreshGmailSenders(ctx, pid, bound.ConnectionID)
+		default:
+			err = fmt.Errorf("unsupported email provider %q", bound.AppSlug)
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -125,7 +134,7 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 	}
 	// Only change state after every page has been validated. Preserve local wiring.
 	for _, r := range anchors {
-		if r.Provider != "aws-ses" {
+		if r.Provider != "aws-ses" || (r.ProviderConnectionID != 0 && r.ProviderConnectionID != connID) {
 			continue
 		}
 		v, ok := inventory[r.Address]
@@ -135,12 +144,12 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 			}
 			continue
 		}
-		if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{ProjectID: pid, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+		if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{ProjectID: pid, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderConnectionID: connID, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
 			return err
 		}
 	}
 	for _, r := range known {
-		if r.Provider != "aws-ses" {
+		if r.Provider != "aws-ses" || (r.ProviderConnectionID != 0 && r.ProviderConnectionID != connID) {
 			continue
 		}
 		v, ok := inventory[r.Address]
@@ -167,7 +176,7 @@ func (a *App) refreshSESIdentities(ctx *sdk.AppCtx, pid string, connID int64) er
 			}
 			continue
 		}
-		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: r.Channel, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, SendingEnabled: v.SendingEnabled, ParentIdentityID: parentID, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
+		if _, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{ProjectID: pid, Channel: r.Channel, Kind: r.Kind, Address: r.Address, Provider: r.Provider, ProviderConnectionID: connID, ProviderIdentityID: r.ProviderIdentityID, Verified: strings.EqualFold(v.VerificationStatus, "SUCCESS"), VerificationStatus: sesStatusToInternal(v.VerificationStatus), DkimStatus: v.VerificationStatus, SendingEnabled: v.SendingEnabled, ParentIdentityID: parentID, InboundBootstrapped: r.InboundBootstrapped, InboundConfig: r.InboundConfig, MarkSyncedNow: true}); err != nil {
 			return err
 		}
 	}
@@ -437,14 +446,15 @@ func (a *App) toolIdentitiesList(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 func identityRowToMap(r *identityRow) map[string]any {
 	m := map[string]any{
-		"id":                   r.ID,
-		"kind":                 r.Kind,
-		"address":              r.Address,
-		"provider":             r.Provider,
-		"verified":             r.Verified,
-		"verification_status":  r.VerificationStatus,
-		"dkim_status":          r.DkimStatus,
-		"inbound_bootstrapped": r.InboundBootstrapped,
+		"id":                     r.ID,
+		"kind":                   r.Kind,
+		"address":                r.Address,
+		"provider":               r.Provider,
+		"provider_connection_id": r.ProviderConnectionID,
+		"verified":               r.Verified,
+		"verification_status":    r.VerificationStatus,
+		"dkim_status":            r.DkimStatus,
+		"inbound_bootstrapped":   r.InboundBootstrapped,
 	}
 	if r.InboundConfig != "" {
 		var cfg map[string]any

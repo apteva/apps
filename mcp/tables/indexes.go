@@ -96,6 +96,7 @@ func (a *App) toolIndexesCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	a.plans.invalidateTable(table.ID)
 	index := TableIndex{Name: name, Columns: columns, Unique: unique, Managed: false}
 	return map[string]any{"index": index}, nil
 }
@@ -208,6 +209,7 @@ func (a *App) toolIndexesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	a.plans.invalidateTable(table.ID)
 	return map[string]any{"dropped": name}, nil
 }
 

@@ -434,6 +434,17 @@ func (a *App) runOutputAttempt(ctx *sdk.AppCtx, id int64) (any, error) {
 	defer cancel()
 	unregister := registerRenderCancel(id, cancel)
 	defer unregister()
+	if snap.Edit != nil {
+		proceduresChanged, procedureErr := a.materializeProceduralAssets(rctx, ctx, snap.Edit, snap.Settings.Output, cid, pid)
+		if procedureErr != nil {
+			return failOutputAttempt(ctx, id, procedureErr)
+		}
+		if proceduresChanged {
+			if _, saveErr := ctx.AppDB().Exec(`UPDATE renders SET edit_snapshot=?,output_snapshot=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`, outputJSON(snap), outputJSON(snap), id); saveErr != nil {
+				return nil, saveErr
+			}
+		}
+	}
 	claim, err = ctx.AppDB().Exec(`UPDATE renders SET status='rendering',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='preparing'`, id)
 	if err != nil {
 		return nil, err

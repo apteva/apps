@@ -24,19 +24,19 @@ func (a *App) mobileSigningIdentityForDeployment(d *Deployment) (*MobileSigningI
 	switch d.TargetKind {
 	case "android":
 		return dbGetMobileSigningIdentity(globalCtx.AppDB(), d.ProjectID, "android", "", strings.TrimSpace(target.PackageName))
-	case "ios":
+	case "ios", "macos":
 		setups, err := dbListMobileSigningSetups(globalCtx.AppDB(), d.ID, d.EnvironmentID)
 		if err != nil {
 			return nil, err
 		}
 		for i := range setups {
-			if setups[i].Platform == "ios" && setups[i].IdentityID > 0 {
+			if setups[i].Platform == d.TargetKind && setups[i].IdentityID > 0 {
 				return dbGetMobileSigningIdentityByID(globalCtx.AppDB(), setups[i].IdentityID)
 			}
 		}
 		return nil, nil
 	default:
-		return nil, errors.New("mobile signing identity requires an Android or iOS deployment")
+		return nil, errors.New("mobile signing identity requires an Android, iOS, or macOS deployment")
 	}
 }
 
@@ -88,7 +88,11 @@ func (a *App) exportMobileSigningRecovery(d *Deployment) ([]byte, string, error)
 			if decodeErr != nil {
 				return nil, "", decodeErr
 			}
-			if err := add("distribution.mobileprovision", profile); err != nil {
+			profileName := "distribution.mobileprovision"
+			if identity.Platform == "macos" {
+				profileName = "distribution.provisionprofile"
+			}
+			if err := add(profileName, profile); err != nil {
 				return nil, "", err
 			}
 		}

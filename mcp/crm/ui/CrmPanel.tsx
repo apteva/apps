@@ -4,6 +4,7 @@
 // shell exposes a Settings pane for the messaging coupling.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { crmPanelInitialRoute, type InboxItem, type InboxResponse } from "./inbox";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -524,7 +525,8 @@ function describeFilter(f: UIFilter): string {
 }
 
 export default function CrmPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<Tab>("contacts");
+  const [initialRoute] = useState(() => crmPanelInitialRoute(typeof window === "undefined" ? "" : window.location.search));
+  const [tab, setTab] = useState<Tab>(initialRoute.tab);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -1577,6 +1579,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
             api={api}
             projectId={projectId}
             lists={lists}
+            initialConversationId={initialRoute.conversationId}
+            initialStatus={initialRoute.status}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
             onReply={(contact, activity, conversation, afterSend) => openCompose({
               mode: "reply",
@@ -3292,28 +3296,6 @@ function RoutingRulesSection({ api, lists }: {
 
 // ─── Inbox (cross-contact triage queue) ───────────────────────────
 
-interface InboxItem {
-  id: number;
-  contact_id: number;
-  contact_name?: string;
-  contact_email?: string;
-  contact_phone?: string;
-  channel: string;
-  subject?: string;
-  status: string;
-  priority: string;
-  last_activity_at: string;
-  snippet?: string;
-  automated?: boolean;
-}
-
-interface InboxResponse {
-  inbox?: InboxItem[];
-  count?: number;
-  total?: number;
-  offset?: number;
-}
-
 function inboxAddressOp(value: string): string {
   const v = value.trim();
   if (v.startsWith("@")) return "domain";
@@ -3325,10 +3307,12 @@ function stripDomainPrefix(value: string): string {
   return value.trim().replace(/^@+/, "");
 }
 
-function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
+function InboxTab({ api, projectId, lists, initialConversationId, initialStatus, onOpenContact, onReply }: {
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>, signal?: AbortSignal) => Promise<T>;
   projectId: string;
   lists: List[];
+  initialConversationId?: number;
+  initialStatus?: string;
   onOpenContact: (contactId: number) => void;
   onReply: (contact: Contact, activity: Activity, conversation: Conversation, afterSend: () => void | Promise<void>) => void;
 }) {
@@ -3344,7 +3328,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   const [threadLoadingMore, setThreadLoadingMore] = useState(false);
   const [threadErr, setThreadErr] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
-  const [statusFilter, setStatusFilter] = useState("open");
+  const [statusFilter, setStatusFilter] = useState(initialStatus || "open");
   const [channelFilter, setChannelFilter] = useState("");
   const [fromFilter, setFromFilter] = useState("");
   const [toFilter, setToFilter] = useState("");
@@ -3356,6 +3340,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   const threadLoadSeq = useRef(0);
   const inboxAbort=useRef<AbortController | null>(null);
   const threadAbort=useRef<AbortController | null>(null);
+  const pendingInitialConversation = useRef(initialConversationId);
 
   const load = useCallback(async (offset = 0) => {
     const seq = ++listLoadSeq.current;
@@ -3386,6 +3371,13 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
         if (cur) {
           const stillHere = nextRows.find((row) => String(row.id) === String(cur.id));
           if (stillHere) return stillHere;
+        }
+        const requested = pendingInitialConversation.current
+          ? nextRows.find((row) => String(row.id) === String(pendingInitialConversation.current))
+          : undefined;
+        if (requested) {
+          pendingInitialConversation.current = undefined;
+          return requested;
         }
         return nextRows[0] || null;
       });

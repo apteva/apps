@@ -103,7 +103,7 @@ func (a *App) submitBuild(d *Deployment, opts *releaseOptions) (*Build, error) {
 	}
 	snapshot := *d
 	go func() {
-		if snapshot.TargetKind == "ios" || snapshot.TargetKind == "android" {
+		if isAppPlatform(snapshot.TargetKind) {
 			cfg, err := parseMobileTargetConfig(snapshot.TargetConfigJSON)
 			if err != nil {
 				a.failBuild(build, err.Error())

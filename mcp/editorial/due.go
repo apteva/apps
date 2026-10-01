@@ -266,7 +266,7 @@ func (a *App) dueCandidates(db *sql.DB, pid string, settings Settings, loc *time
 		brandID, brandName := brandFields(settings, parent.BrandID)
 		out = append(out, dueCandidate{topic: "release.due", ref: id, due: at, payload: map[string]any{
 			"id": id, "item_id": itemID, "revision": revision, "brand_id": brandID, "brand": brandName,
-			"title": parent.Title, "channel": rd.Channel, "status": rd.Status, "url": rd.URL,
+			"title": parent.Title, "format": parent.Format, "channel": rd.Channel, "status": rd.Status, "url": rd.URL,
 			"approval": parent.Approval, "owner": parent.Owner, "due_at": at.UTC().Format(time.RFC3339),
 		}})
 	}

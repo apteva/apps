@@ -200,6 +200,16 @@ func newSIPMediaSecurity(offer sipMediaOffer) (*sipMediaSecurity, error) {
 	if _, err := rand.Read(localKey); err != nil {
 		return nil, fmt.Errorf("generate SRTP key: %w", err)
 	}
+	return newSIPMediaSecurityWithLocalKey(offer, localKey)
+}
+
+func newSIPMediaSecurityWithLocalKey(offer sipMediaOffer, localKey []byte) (*sipMediaSecurity, error) {
+	if !offer.Secure {
+		return nil, nil
+	}
+	if len(localKey) != 30 {
+		return nil, errors.New("invalid local SRTP key length")
+	}
 	if len(offer.RemoteKey) != 30 {
 		return nil, errors.New("invalid remote SRTP key length")
 	}

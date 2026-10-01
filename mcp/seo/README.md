@@ -3,7 +3,7 @@
 Generic SEO research workbench for Apteva. Track domains, keywords, rankings,
 and backlinks; pull metrics from any provider behind one pluggable role.
 
-## Schema (v0.7.1)
+## Schema (v0.7.2)
 
 Twenty tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
@@ -41,7 +41,7 @@ provider response, so provider-specific fields survive without schema churn.
 
 ## Status
 
-v0.7.1 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
+v0.7.2 supports DataForSEO, YepAPI, or both through one provider-neutral adapter.
 An installation may bind multiple providers and designate a default; paid MCP
 tools and panel actions can select a specific provider. Provider locations,
 metrics, rankings, backlinks, and SERP snapshots remain separately tagged.
@@ -82,9 +82,17 @@ active/lost and follow/nofollow filters without making provider requests.
 Google keyword metric refreshes are HTTP/UI-only bulk jobs. DataForSEO requests
 are grouped by locale and sent in batches of up to 1,000 keywords, with separate
 volume and difficulty phases. The app checks account credit before starting,
-retries rate limits with backoff, and resumes only missing fields after a
-partial or interrupted run. SERP/ranking refreshes stay separate because they
-have different provider costs.
+serializes and deduplicates active metric work, retries rate limits with backoff,
+and returns provider-confirmed missing values as successful partial results.
+Unavailable fields are not retried automatically; an explicit Resume starts a
+new attempt. Job details expose per-keyword available, unavailable, pending, and
+failed field states. SERP/ranking refreshes stay separate because they have
+different provider costs.
+
+Content opportunities are returned separately for each provider and locale.
+They include the project, source snapshot, keyword, provider, and locale IDs for
+auditing. A score is emitted only when both volume and difficulty are available;
+partial or unavailable metrics carry an explicit status and a null score.
 
 Automatic Google rank tracking is opt-in and uses DataForSEO's asynchronous
 Standard Queue. Each tracker can run daily, weekly, or monthly. The daily

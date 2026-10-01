@@ -1,0 +1,22 @@
+{
+  "event": "User reported computer crash and restart; no benchmark process survived.",
+  "completed_trials": 13,
+  "incomplete_trials": [
+    {
+      "trial": "sqlite-1000000-run1",
+      "outcome": "load timeout",
+      "batch_zero_based": 657
+    },
+    {
+      "trial": "pebble-1000000-run2",
+      "outcome": "load timeout",
+      "batch_zero_based": 23
+    },
+    {
+      "trial": "sqlite-1000000-run2",
+      "outcome": "interrupted by computer restart; no completed measurement"
+    }
+  ],
+  "continuation_directory": "../2026-09-07-post-restart",
+  "note": "Cause of computer crash was not diagnosed; these observations do not establish that the database benchmark caused it."
+}

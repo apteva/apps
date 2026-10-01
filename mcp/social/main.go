@@ -53,7 +53,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.16.3
+version: 0.16.5
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -95,6 +95,7 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - { method: GET, prefix: /accounts/oauth_done, no_auth: true }
   workers:
     - { name: scheduled_publisher, schedule: "@every 1m" }
     - { name: inbox_collector, schedule: "@every 5m" }
@@ -137,6 +138,45 @@ provides:
       icon: megaphone
       entry: /ui/SocialPanel.mjs
   ui_components:
+    - name: publishing-calendar
+      label: Social · Publishing calendar
+      description: Upcoming scheduled posts, a week calendar, and items needing attention.
+      entry: /ui/SocialPublishingCalendarWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [post.created, post.rescheduled, post.completed, post.deleted, post.draft_created, post.draft_updated, post.draft_submitted, post.draft_approved, post.draft_rejected, post.publish_requested, target.published, target.pending, target.published_warning, target.failed, profile.accounts_moved, account.deleted]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          view: { type: string, title: View, enum: [auto, upcoming, calendar], default: auto }
+          horizon_days: { type: integer, title: Upcoming days, minimum: 1, maximum: 42, default: 7 }
+          max_posts: { type: integer, title: Upcoming post limit, minimum: 1, maximum: 20, default: 5 }
+          show_attention: { type: boolean, title: Show items needing attention, default: true }
+      preview_props: { preview: true }
+    - name: performance
+      label: Social · Performance
+      description: Cached audience totals, daily performance trends, and account coverage.
+      entry: /ui/SocialPerformanceWidget.mjs
+      slots: [dashboard.home]
+      suggested: true
+      visibility: project
+      supported_sizes: [half, full]
+      default_size: half
+      refresh_topics: [metrics.updated, account.added, account.disconnected, account.deleted, profile.accounts_moved]
+      settings_schema:
+        type: object
+        properties:
+          profile_id: { type: integer, title: Profile ID, description: '0 includes all profiles in this project.', minimum: 0, default: 0 }
+          account_ids: { type: string, title: Account IDs, description: 'Optional comma-separated Social account IDs.', default: '' }
+          days: { type: integer, title: Complete days, enum: [7, 28, 90], default: 28 }
+          visibility_metric: { type: string, title: Visibility metric, enum: [views, impressions], default: views }
+          show_trends: { type: boolean, title: Show trends, default: true }
+      preview_props: { preview: true }
     - name: calendar-card
       entry: /ui/SocialCalendarCard.mjs
       slots: [chat.message_attachment]
@@ -721,7 +761,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Account management
 		{Pattern: "/accounts", Handler: a.handleAccountsAPI},
 		{Pattern: "/accounts/start", Handler: a.handleAccountsStart},
-		{Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone},
+		{Method: http.MethodGet, Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone, NoAuth: true},
 		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
 		{Pattern: "/accounts/", Handler: a.handleAccountsItem}, // /accounts/:id (DELETE) and /accounts/:id/pages (GET)
 		{Pattern: "/provider-profiles", Handler: a.handleProviderProfiles},
@@ -734,6 +774,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Post management
 		{Pattern: "/posts", Handler: a.handlePostsAPI},
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
+		// Read-only summaries for project Home widgets.
+		{Pattern: "/widgets/publishing-calendar", Handler: a.handlePublishingWidget},
+		{Pattern: "/widgets/performance", Handler: a.handlePerformanceWidget},
 		// Static info
 		{Pattern: "/platforms", Handler: a.handlePlatforms},
 		// Profiles (brand/client/site containers — see profiles.go)
@@ -771,7 +814,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"force_new":           map[string]any{"type": "boolean"},
 				"return_to": map[string]any{
 					"type":        "string",
-					"description": "Where to redirect the browser after OAuth. Defaults to the social app's panel.",
+					"description": "Optional Social OAuth callback path; must be /api/apps/social/accounts/oauth_done, optionally with the matching project_id.",
 				},
 			}, []string{"platform"}),
 			Handler: a.toolAccountAdd,
@@ -1297,37 +1340,32 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// fall through to fresh OAuth path
 	}
 
-	// Build the panel landing URL. Whether the request came from an
-	// agent (MCP tool) or from the panel's "Add account" button, the
-	// platform redirects there; the panel JS reads ?conn_id and either
-	// finalizes immediately (no page-selection) or shows the picker.
-	returnTo, _ := args["return_to"].(string)
-	if returnTo == "" {
-		returnTo = "/api/apps/social/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
-	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
-		return mcpError("return_to must be a same-origin absolute path"), nil
+	// Both MCP and panel starts return to the same token-validated handoff.
+	returnTo, err := socialOAuthReturnURL(pid, toString(args["return_to"]))
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	callbackToken, callbackHash, err := newOAuthCallbackToken()
+	if err != nil {
+		return nil, fmt.Errorf("create OAuth callback token: %w", err)
 	}
 
 	// Pre-create the pending row so we have a stable id we can hand
 	// the agent. It'll be linked to the connection once OAuth completes.
 	now := time.Now().UTC()
 	res, err := ctx.AppDB().Exec(
-		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id)
-		 VALUES (?, ?, ?, 'pending_oauth', ?, ?)`,
-		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID,
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id, callback_token_hash)
+		 VALUES (?, ?, ?, 'pending_oauth', ?, ?, ?)`,
+		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID, callbackHash,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create pending account: %w", err)
 	}
 	pendingID, _ := res.LastInsertId()
 
-	// Embed the pending id in the return_url so the OAuth callback
-	// landing page knows which row to graduate.
-	sep := "?"
-	if strings.Contains(returnTo, "?") {
-		sep = "&"
-	}
-	returnURL := fmt.Sprintf("%s%spending=%d", returnTo, sep, pendingID)
+	// The platform preserves these parameters when it redirects the browser
+	// back with conn_id and status. Only the token hash is stored locally.
+	returnURL := fmt.Sprintf("%s&pending=%d&callback_token=%s", returnTo, pendingID, url.QueryEscape(callbackToken))
 
 	out, err := ctx.PlatformAPI().StartOAuth(sdk.OAuthStartRequest{
 		IntegrationSlug: def.IntegrationSlug,
@@ -1339,6 +1377,23 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// Roll the pending row back so we don't leak orphaned rows.
 		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
 		return mcpError("OAuth start failed: " + err.Error()), nil
+	}
+	if out == nil || out.ConnectionID <= 0 {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
+		return mcpError("OAuth start did not return a connection ID"), nil
+	}
+	linked, err := ctx.AppDB().Exec(
+		`UPDATE pending_accounts SET connection_id=? WHERE id=? AND project_id=? AND status='pending_oauth'`,
+		out.ConnectionID, pendingID, pid,
+	)
+	if err != nil {
+		_, _ = ctx.AppDB().Exec(`DELETE FROM pending_accounts WHERE id=?`, pendingID)
+		_ = ctx.PlatformAPI().DisconnectConnection(out.ConnectionID)
+		return nil, fmt.Errorf("save pending OAuth connection: %w", err)
+	}
+	if n, _ := linked.RowsAffected(); n != 1 {
+		_ = ctx.PlatformAPI().DisconnectConnection(out.ConnectionID)
+		return mcpError("pending OAuth request disappeared before the connection was linked"), nil
 	}
 
 	return map[string]any{
@@ -9998,26 +10053,36 @@ func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {
 // that postMessages the panel — the panel JS then either auto-finalizes
 // or shows the picker.
 func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	pendingStr := r.URL.Query().Get("pending")
 	connStr := r.URL.Query().Get("conn_id")
 	status := r.URL.Query().Get("status")
+	requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	callbackToken := r.URL.Query().Get("callback_token")
 	pendingID, _ := strconv.ParseInt(pendingStr, 10, 64)
 	connID, _ := strconv.ParseInt(connStr, 10, 64)
 	ready := false
-	row, rowErr := a.getPending(pendingID)
-	if rowErr == nil && !row.expired && row.status == "pending_oauth" {
-		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
-		if requestProject == "" || requestProject == row.projectID {
-			if row.providerSlug == zernioProviderSlug {
+	if pendingID > 0 && requestProject != "" && callbackToken != "" {
+		row, rowErr := a.getPending(pendingID)
+		if rowErr == nil && row.projectID == requestProject && !row.expired && row.status == "pending_oauth" &&
+			oauthCallbackTokenMatches(row.callbackTokenHash, callbackToken) {
+			if row.providerSlug == zernioProviderSlug && a.pendingConnectionAllowed(globalCtx, row, row.connectionID) {
 				if doneConnID, ok := a.completeZernioOAuth(globalCtx, r, row); ok {
 					connID = doneConnID
 					ready = true
 				}
 			} else if connID > 0 && status == "ok" && a.pendingConnectionAllowed(globalCtx, row, connID) {
 				res, err := globalCtx.AppDB().Exec(
-					`UPDATE pending_accounts SET connection_id=?, status='ready'
-					  WHERE id=? AND project_id=? AND status='pending_oauth'`,
-					connID, pendingID, row.projectID,
+					`UPDATE pending_accounts SET status='ready', callback_token_hash=''
+					  WHERE id=? AND project_id=? AND status='pending_oauth' AND connection_id=?
+					    AND callback_token_hash=? AND julianday(expires_at)>julianday(?)`,
+					pendingID, row.projectID, connID, row.callbackTokenHash, pendingExpiry(time.Now().UTC()),
 				)
 				if err == nil {
 					n, _ := res.RowsAffected()
@@ -10043,6 +10108,9 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 		eventType = "social.oauth_ready"
 		heading = "Authorization complete"
 		detail = "You can close this window."
+	} else {
+		pendingID = 0
+		connID = 0
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
@@ -10055,11 +10123,8 @@ setTimeout(function(){ window.location.href = "/" }, 1500);
 }
 
 func (a *App) pendingConnectionAllowed(ctx *sdk.AppCtx, row *pendingRow, connID int64) bool {
-	if row == nil || connID <= 0 {
+	if row == nil || connID <= 0 || row.connectionID != connID {
 		return false
-	}
-	if row.providerSlug == zernioProviderSlug {
-		return row.connectionID == connID
 	}
 	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
 		ProjectID: row.projectID,
@@ -10114,6 +10179,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(parts[0], 10, 64)
 	if err != nil {
 		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "oauth_status" && r.Method == http.MethodGet {
+		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		row, err := a.getPending(id)
+		if err != nil || requestProject == "" || row.projectID != requestProject {
+			http.Error(w, "pending account not found", http.StatusNotFound)
+			return
+		}
+		status := row.status
+		if row.expired && status == "pending_oauth" {
+			status = "expired"
+		}
+		writeJSON(w, map[string]any{"status": status})
 		return
 	}
 	if len(parts) == 2 && parts[1] == "creator-info" && r.Method == http.MethodGet {
@@ -10642,6 +10721,7 @@ type pendingRow struct {
 	providerProfileID string
 	providerState     string
 	providerData      string
+	callbackTokenHash string
 	expired           bool
 }
 
@@ -10651,9 +10731,9 @@ func (a *App) getPending(id int64) (*pendingRow, error) {
 	err := globalCtx.AppDB().QueryRow(
 		`SELECT id, project_id, platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0), COALESCE(provider_slug,''), COALESCE(provider_profile_id,''),
-		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(expires_at,'')
+		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(callback_token_hash,''), COALESCE(expires_at,'')
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &expiresAt)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &row.callbackTokenHash, &expiresAt)
 	if err != nil {
 		return nil, err
 	}

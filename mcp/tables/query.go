@@ -91,7 +91,8 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (resultValue
 		return nil, err
 	}
 	readPhase(ctx, "select")
-	rows, err := conn.QueryContext(qctx, resolved, bound...)
+	queryer := read.queryer()
+	rows, err := queryer.QueryContext(qctx, resolved, bound...)
 	if err != nil {
 		return nil, queryStageErr("select", "<sql>", err)
 	}

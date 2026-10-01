@@ -19,6 +19,7 @@ import { File, FileAudio, Paperclip, X } from "lucide-react";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, parseStoredProfileId, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
+import { socialNavigation, type SocialNavigation } from "./socialNavigation";
 import {
   ACCOUNT_METRICS_STALE_MS,
   accountMetricsNeedRefresh,
@@ -342,13 +343,14 @@ function useAppEvents<T = unknown>(
 type MainTab = "accounts" | "posts" | "inbox" | "metrics";
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<MainTab>("posts");
+  const [navigation] = useState(() => socialNavigation(window.location.search));
+  const [tab, setTab] = useState<MainTab>(navigation.tab);
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
   const [inboxCount, setInboxCount] = useState(0);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
-  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeOpen, setComposeOpen] = useState(navigation.compose);
   // Profile filter — null = "All profiles" (project-wide view).
   // Persists per-project so refreshing the page keeps the user's
   // last-selected brand context.
@@ -356,7 +358,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   const [profilesLoaded, setProfilesLoaded] = useState(false);
   const [profileSelection, setProfileSelection] = useState(() => ({
     projectId,
-    id: storedProfileId(projectId),
+    id: navigation.profileID === undefined ? storedProfileId(projectId) : navigation.profileID,
   }));
   const activeProfileId = profileSelection.projectId === projectId
     ? profileSelection.id
@@ -514,15 +516,27 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     pendingId: number;
     connectionId: number;
   } | null>(null);
+  const [pendingOAuthPopup, setPendingOAuthPopup] = useState<{
+    pendingId: number;
+    popup: Window;
+    projectId?: string | null;
+  } | null>(null);
+  const pendingOAuthPopupRef = useRef(pendingOAuthPopup);
+  pendingOAuthPopupRef.current = pendingOAuthPopup;
   useEffect(() => {
     const onMsg = (ev: MessageEvent) => {
+      const pending = pendingOAuthPopupRef.current;
+      if (!pending || ev.source !== pending.popup) return;
       if (isTrustedOAuthMessage(ev.origin, window.location.origin, ev.data)) {
-        setOauthLanding({
+        if (ev.data.pending_account_id !== pending.pendingId) return;
+        setPendingOAuthPopup((current) => current?.pendingId === ev.data.pending_account_id ? null : current);
+        setOauthLanding((current) => current?.pendingId === ev.data.pending_account_id ? current : ({
           pendingId: ev.data.pending_account_id,
           connectionId: ev.data.connection_id,
-        });
+        }));
         setTab("accounts");
       } else if (ev.origin === window.location.origin && ev.data?.type === "social.oauth_error") {
+        setPendingOAuthPopup(null);
         setStatus("Authorization failed or expired. Start the account connection again.");
         setTab("accounts");
       }
@@ -531,10 +545,51 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
+  // A callback on the Apteva origin cannot postMessage to a popup opener
+  // running on localhost. After the popup closes, use the authenticated
+  // pending-account status endpoint to discover completion instead of trusting its origin.
+  useEffect(() => {
+    if (!pendingOAuthPopup) return;
+    let cancelled = false;
+    let checking = false;
+    let closedAt = 0;
+    const poll = async () => {
+      if (cancelled || checking || !pendingOAuthPopup.popup.closed) return;
+      if (!closedAt) closedAt = Date.now();
+      if (Date.now() - closedAt > 30_000) {
+        setPendingOAuthPopup(null);
+        setStatus("Authorization was not completed. Start the account connection again.");
+        return;
+      }
+      checking = true;
+      try {
+        const res = await fetch(appURL(`/accounts/${pendingOAuthPopup.pendingId}/oauth_status`, pendingOAuthPopup.projectId), {
+          credentials: "same-origin",
+        });
+        const result = res.ok ? await res.json() : null;
+        if (result?.status === "expired" && !cancelled) {
+          setPendingOAuthPopup(null);
+          setStatus("Authorization expired. Start the account connection again.");
+        } else if (result?.status === "ready" && !cancelled) {
+          setPendingOAuthPopup(null);
+          setOauthLanding((current) => current?.pendingId === pendingOAuthPopup.pendingId ? current : ({
+            pendingId: pendingOAuthPopup.pendingId,
+            connectionId: 0,
+          }));
+          setTab("accounts");
+        }
+      } catch {}
+      checking = false;
+    };
+    const timer = window.setInterval(() => { void poll(); }, 1000);
+    void poll();
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [pendingOAuthPopup]);
+
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
   const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
-    setOauthLanding({ pendingId, connectionId });
+    setOauthLanding((current) => current?.pendingId === pendingId ? current : ({ pendingId, connectionId }));
   }, []);
 
   return (
@@ -572,6 +627,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             oauthLanding={oauthLanding}
             onClearLanding={clearOauthLanding}
             onSetLanding={setOauthLandingFromReuse}
+            onOAuthStarted={(pendingId, popup) => setPendingOAuthPopup({ pendingId, popup, projectId })}
             onChange={loadAccounts}
             onImported={loadPosts}
             setStatus={setStatus}
@@ -579,9 +635,10 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         )}
         {tab === "posts" && (
           <PostsView
+            navigation={navigation}
             posts={posts}
             accounts={accounts}
-            activeProfileId={activeProfile?.id || null}
+            activeProfileId={activeProfileId}
             onChange={loadPosts}
             setStatus={setStatus}
             projectId={projectId}
@@ -597,7 +654,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "metrics" && (
-          <MetricsView key={projectId || "global"} posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
+          <MetricsView key={projectId || "global"} initialRange={navigation.range} posts={posts} accounts={navigation.accountIDs.length ? accounts.filter(account => navigation.accountIDs.includes(account.id)) : accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
         )}
       </div>
 
@@ -1001,7 +1058,7 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onChange, onImported, setStatus,
+  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onOAuthStarted, onChange, onImported, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
   activeProfile: Profile | null;
@@ -1009,6 +1066,7 @@ function AccountsView({
   oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
   onSetLanding: (pendingId: number, connectionId: number) => void;
+  onOAuthStarted: (pendingId: number, popup: Window) => void;
   onChange: () => void;
   onImported: () => void;
   setStatus: (s: string) => void;
@@ -1113,6 +1171,7 @@ function AccountsView({
             onSetLanding(pendingId, connId);
             setAdding(false);
           }}
+          onOAuthStarted={onOAuthStarted}
         />
       )}
 
@@ -2550,7 +2609,7 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 function AddAccountDialog({
-  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting,
+  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting, onOAuthStarted,
 }: {
   platforms: PlatformInfo[];
   activeProfile: Profile | null;
@@ -2558,6 +2617,7 @@ function AddAccountDialog({
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
+  onOAuthStarted: (pendingId: number, popup: Window) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
@@ -2646,6 +2706,9 @@ function AddAccountDialog({
         }
         // Navigate the already-open popup to the upstream authorize URL.
         popup.location.href = data.authorize_url;
+        if (Number.isSafeInteger(data.pending_account_id) && data.pending_account_id > 0) {
+          onOAuthStarted(data.pending_account_id, popup);
+        }
         onClose();
       } catch (e) {
         fail("Start failed: " + (e as Error).message);
@@ -4161,8 +4224,9 @@ function StoragePickerDialog({
 // --- PostsView ----------------------------------------------------
 
 function PostsView({
-  posts, accounts, activeProfileId, onChange, setStatus, projectId,
+  posts, accounts, activeProfileId, onChange, setStatus, projectId, navigation,
 }: {
+  navigation: SocialNavigation;
   posts: Post[];
   accounts: SocialAccount[];
   activeProfileId: number | null;
@@ -4172,25 +4236,28 @@ function PostsView({
 }) {
   const preferenceKey = "social.posts.view";
   const [view, setView] = useState<PostViewMode>(() => {
+    if (navigation.calendar) return "calendar";
+    if (navigation.status !== "all" || navigation.postID) return "list";
     try {
       return localStorage.getItem(preferenceKey) === "calendar" ? "calendar" : "list";
     } catch {
       return "list";
     }
   });
-  const [calendarScale, setCalendarScale] = useState<CalendarScale>("month");
-  const [calendarCursor, setCalendarCursor] = useState(() => new Date());
+  const [calendarScale, setCalendarScale] = useState<CalendarScale>(navigation.calendar ? "week" : "month");
+  const [calendarCursor, setCalendarCursor] = useState(() => navigation.anchorDate || new Date());
   const [calendarPosts, setCalendarPosts] = useState<Post[]>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
   const calendarRequestRef = useRef(0);
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [accountFilter, setAccountFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState(navigation.status);
+  const [accountFilter, setAccountFilter] = useState(navigation.accountIDs.length ? "selected" : "all");
   const [selectedPost, setSelectedPost] = useState<Post | null>(null);
   const [menuPostID, setMenuPostID] = useState<number | null>(null);
   const [dayDialog, setDayDialog] = useState<{ date: Date; posts: Post[] } | null>(null);
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
   const [deleteFor, setDeleteFor] = useState<Post | null>(null);
   const [editFor, setEditFor] = useState<Post | null>(null);
+  const [filteredList, setFilteredList] = useState<{ key: string; posts: Post[] } | null>(null);
 
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, view); } catch {}
@@ -4200,10 +4267,10 @@ function PostsView({
     setSelectedPost(null);
     setMenuPostID(null);
     setDayDialog(null);
-  }, [activeProfileId]);
+  }, [activeProfileId, projectId]);
 
   useEffect(() => {
-    if (accountFilter !== "all" && !accounts.some((account) => String(account.id) === accountFilter)) {
+    if (accountFilter !== "all" && accountFilter !== "selected" && !accounts.some((account) => String(account.id) === accountFilter)) {
       setAccountFilter("all");
     }
   }, [accountFilter, accounts]);
@@ -4234,6 +4301,25 @@ function PostsView({
   }, [activeProfileId, projectId, rangeEnd, rangeStart, setStatus]);
 
   const postsRevision = posts.map((post) => `${post.id}:${post.status}:${post.schedule_at}:${post.published_at}`).join("|");
+  const listFilterKey = `${projectId}:${activeProfileId}:${statusFilter}`;
+  useEffect(() => {
+    if (view !== "list" || statusFilter === "all") return;
+    let alive = true;
+    // Attention can include older posts outside the panel's recent list.
+    const statuses = statusFilter === "attention" ? ["failed", "partial"] : [statusFilter];
+    Promise.all(statuses.map(async status => {
+      const params = new URLSearchParams({ status, limit: "1000" });
+      if (activeProfileId) params.set("profile_id", String(activeProfileId));
+      const response = await fetch(appURL(`/posts?${params}`, projectId), { credentials: "same-origin" });
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      return (data.posts || []) as Post[];
+    })).then(groups => { if (alive) setFilteredList({ key: listFilterKey, posts: groups.flat() }); })
+      .catch(error => { if (alive) { setFilteredList({ key: listFilterKey, posts: [] }); setStatus(`Load filtered posts: ${error.message}`); } });
+    return () => { alive = false; };
+  }, [view, listFilterKey, projectId, activeProfileId, statusFilter, posts, setStatus]);
   useEffect(() => {
     if (view === "calendar") loadCalendarPosts();
   }, [loadCalendarPosts, postsRevision, view]);
@@ -4243,8 +4329,10 @@ function PostsView({
     if (view === "calendar") await loadCalendarPosts();
   }, [loadCalendarPosts, onChange, view]);
 
-  const sourcePosts = view === "calendar" ? calendarPosts : posts;
-  const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter, accountFilter);
+  const sourcePosts = view === "calendar" ? calendarPosts : statusFilter !== "all" ? (filteredList?.key === listFilterKey ? filteredList.posts : []) : posts;
+  const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter === "attention" ? "all" : statusFilter, accountFilter)
+    .filter(post => statusFilter !== "attention" || post.status === "failed" || post.status === "partial")
+    .filter(post => accountFilter !== "selected" || post.targets.some(target => navigation.accountIDs.includes(target.social_account_id)));
   const sortedListPosts = sortPostList(filteredPosts);
 
   useEffect(() => {
@@ -4265,6 +4353,16 @@ function PostsView({
       .catch(() => {});
     return () => { alive = false; };
   }, [projectId, selectedPost?.id, postsRevision]);
+
+  useEffect(() => {
+    if (!navigation.postID) return;
+    let alive = true;
+    fetch(appURL(`/posts/${navigation.postID}`, projectId), { credentials: "same-origin" })
+      .then(async response => { if (!response.ok) throw new Error("Post not found"); return response.json(); })
+      .then(data => { if (alive && data.post) setSelectedPost(data.post); })
+      .catch(error => { if (alive) setStatus(error.message); });
+    return () => { alive = false; };
+  }, [navigation.postID, projectId, setStatus]);
 
   const retry = async (postId: number) => {
     try {
@@ -4354,6 +4452,7 @@ function PostsView({
           aria-label="Filter posts by status"
         >
           <option value="all">All statuses</option>
+          <option value="attention">Failed or partial</option>
           <option value="scheduled">Scheduled</option>
           <option value="published">Published</option>
           <option value="failed">Failed</option>
@@ -4371,6 +4470,7 @@ function PostsView({
           aria-label="Filter posts by account"
         >
           <option value="all">All accounts</option>
+          {navigation.accountIDs.length > 0 && <option value="selected">Selected widget accounts</option>}
           {accounts.map((account) => (
             <option key={account.id} value={account.id}>{account.display_name} · {account.platform}</option>
           ))}
@@ -5694,8 +5794,9 @@ const ANALYTICS_BREAKDOWNS = [
 ] as const;
 
 function MetricsView({
-  posts, accounts, projectId, setStatus, onPostsChanged,
+  posts, accounts, projectId, setStatus, onPostsChanged, initialRange = "28d",
 }: {
+  initialRange?: string;
   posts: Post[];
   accounts: SocialAccount[];
   projectId?: string | null;
@@ -5708,7 +5809,7 @@ function MetricsView({
   const [activeAccountId, setActiveAccountId] = useState<number | null>(accounts[0]?.id ?? null);
   const [syncFor, setSyncFor] = useState<Record<number, "loading" | "done" | { error: string }>>({});
   const [refreshingFor, setRefreshingFor] = useState<Record<number, boolean>>({});
-  const [analyticsRange, setAnalyticsRange] = useState("28d");
+  const [analyticsRange, setAnalyticsRange] = useState(initialRange);
   const [breakdownDimension, setBreakdownDimension] = useState("device");
   const [breakdownFilter, setBreakdownFilter] = useState("all");
   const autoLoadedAccounts = useRef<Set<string>>(new Set());

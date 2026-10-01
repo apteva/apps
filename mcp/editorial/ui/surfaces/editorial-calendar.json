@@ -1,0 +1,48 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "editorial-calendar",
+  "version": "1.0.0",
+  "title": "Editorial calendar",
+  "description": "Upcoming publications, deadlines, and channel releases",
+  "icon": "calendar",
+  "context": {"scope": "project"},
+  "presentation": "widget",
+  "data_sources": {
+    "summary": {
+      "request": {
+        "method": "GET",
+        "path": "/mobile/calendar-summary",
+        "query": {
+          "date_field": "$settings.date_field",
+          "brand_id": "$settings.brand_id",
+          "include_releases": "$settings.show_releases",
+          "horizon_days": "$settings.horizon_days",
+          "limit": 12
+        }
+      },
+      "response": {"item": "$"},
+      "refresh": {"on_appear": true, "pull_to_refresh": true}
+    }
+  },
+  "blocks": [
+    {
+      "id": "upcoming",
+      "type": "list",
+      "title": "Upcoming",
+      "source": "summary",
+      "items": "$.events",
+      "limit": 12,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.title}",
+        "subtitle": [
+          {"value": "{item.at}", "format": "date_time"},
+          {"value": "{item.detail}"},
+          {"value": "{item.brand_name}", "fallback": "{item.kind_label}"}
+        ],
+        "badge": {"value": "{item.kind_label}"}
+      },
+      "empty": {"title": "Nothing scheduled", "icon": "calendar"}
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schema": "apteva-native-surface/v1",
+  "id": "messages",
+  "version": "1.0.0",
+  "title": "Messages",
+  "description": "Recent SMS and WhatsApp conversations",
+  "icon": "message-circle",
+  "context": {"scope": "project"},
+  "presentation": "widget",
+  "data_sources": {
+    "conversations": {
+      "request": {
+        "method": "GET",
+        "path": "/mobile/conversations",
+        "query": {
+          "default_channel": "$settings.default_channel",
+          "max_conversations": "$settings.max_conversations"
+        }
+      },
+      "response": {"item": "$"},
+      "refresh": {
+        "on_appear": true,
+        "pull_to_refresh": true
+      }
+    }
+  },
+  "blocks": [
+    {
+      "id": "conversations",
+      "type": "list",
+      "title": "Conversations",
+      "source": "conversations",
+      "items": "$.conversations",
+      "limit": 20,
+      "item": {
+        "id": "{item.id}",
+        "title": "{item.peer}",
+        "subtitle": [
+          {"value": "{item.channel}"},
+          {"value": "{item.preview}"},
+          {"value": "{item.latest_at}", "format": "date_time"}
+        ],
+        "badge": {"value": "{item.status}"}
+      },
+      "empty": {
+        "title": "No SMS or WhatsApp conversations",
+        "icon": "message-circle"
+      }
+    }
+  ]
+}

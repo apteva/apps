@@ -1,12 +1,17 @@
-# CRM v0.9.2
+# CRM v0.9.6
 
 Apteva's contact, inbox, audience and opportunity sidecar. The supported dashboard
 is `ui/CrmPanel.tsx`, bundled as `CrmPanel.mjs`. `apteva.yaml` is embedded directly
 into the binary and is the single manifest source. `MCPTools()` supplies the
 executable input contracts, checked against the manifest by tests.
 
-Release `crm/v0.9.2` repairs the correctness, concurrency and performance issues
-identified in the `crm/v0.9.1` audit.
+Release `crm/v0.9.6` fixes email reply threading with Messaging. Outbound
+activities use the RFC `message_id_header` when available and retain the
+provider ID separately. Inbound matching recognizes legacy SES provider IDs
+only when the reference has an `amazonses.com` domain and belongs to the same
+project and contact. A matched legacy root is corrected to the delivered RFC
+header. The Customer inbox component introduced in `crm/v0.9.5` remains
+available.
 
 ## Capabilities
 
@@ -20,6 +25,8 @@ identified in the `crm/v0.9.1` audit.
 - HTTP endpoints mounted at `/api/apps/crm/*`, MCP tools, event subscribers and
   workers. Project installations use their own partition; global installations
   require an explicit project on every request.
+- A configurable Customer inbox dashboard component shows open, pending or all
+  conversations for one channel and refreshes from CRM conversation events.
 
 ## Data contracts
 
@@ -52,6 +59,28 @@ those IDs by current active/contact/delivery eligibility. `not_in_segment`
 requires an active static segment from the same project. Dynamic references are
 rejected, including when evaluating legacy definitions.
 
+## Segment definitions
+
+`segments_create.definition` and `segments_update.patch.definition` are arrays
+whose conditions are AND-ed. For example:
+
+```json
+{
+  "name": "Recent VIP contacts",
+  "kind": "dynamic",
+  "definition": [
+    {"predicate": "tag_in", "tags": ["vip"]},
+    {"predicate": "last_activity_within", "days": 30}
+  ]
+}
+```
+
+Synthetic predicates are `tag_in`, `tag_not_in`, `attribute`,
+`last_activity_within`, `channel_present`, `in_list`, `not_in_list` and
+`not_in_segment`. Core contact fields use `{"field":"company","op":"eq",
+"value":"Acme"}`. The MCP input schema contains copyable examples for every
+shape and their required arguments.
+
 ## Paging
 
 | Surface | Contract |
@@ -66,6 +95,19 @@ rejected, including when evaluating legacy definitions.
 For list/segment evaluation, pass the returned `next_after_contact_id` into the
 next request; stop on an empty `contact_ids` page. Do not use page length as the
 full audience size. Static membership does not itself guarantee messageability.
+
+## Dashboard inbox component
+
+The suggested `customer-inbox` component is available in the dashboard home at
+half or full width. It reads the existing paged `/inbox` endpoint and shows the
+contact, channel, priority, automated flag, subject, latest-message preview and
+relative activity time. Settings choose the default status, channel and a limit
+from 4 to 20 conversations.
+
+Rows link to `/apps/crm/page?tab=inbox` with the conversation and status encoded.
+The full panel opens the Inbox tab and selects that conversation, keeping reply
+composition and status mutations in the richer CRM surface. The component is
+read-only and does not send messages or change CRM data.
 
 ## Messaging and automation
 
@@ -105,6 +147,12 @@ triggers and only on actual transitions. Inbound and recovery events also commit
 with their mutations. Other CRUD handlers enqueue after their database commit;
 there remains a process-crash gap between those two operations. Do not treat
 these latter events as an exactly-once replication feed.
+
+Contact-scoped events carry sorted `list_ids` snapshots. Activity and inbound
+message events also carry `attributed_list_ids`, which identify only the lists
+that directly caused or received that activity. Delete and merge events preserve
+explicit before/after list snapshots, while list-scoped segment events expose
+their optional `list_id`. Arrays are always present, including when empty.
 
 Workers log suppression duration/routes/changed rows/retries and event batch and
 pending counts. Suppressions are indexed per snapshot and written in batches of
