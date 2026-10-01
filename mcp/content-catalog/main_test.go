@@ -104,6 +104,9 @@ func attach(t *testing.T, a *App, ctx *sdk.AppCtx, session string, file int64) s
 func TestManifestToolsAndMigrations(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"))
 	m := (&App{}).Manifest()
+	if m.Runtime.Source == nil || m.Runtime.Source.Ref != "content-catalog/v"+m.Version {
+		t.Fatalf("release source ref must match version %s", m.Version)
+	}
 	declared := map[string]bool{}
 	for _, spec := range m.Provides.MCPTools {
 		declared[spec.Name] = true
