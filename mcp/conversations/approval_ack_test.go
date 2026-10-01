@@ -189,3 +189,28 @@ func TestFailedApprovalDeliveryDoesNotStartThinking(t *testing.T) {
 	default:
 	}
 }
+
+func TestApprovalCompletionIdentifiesDurableReplacement(t *testing.T) {
+	app, ctx, _ := newTestEnv(t)
+	conv := mkConversation(t, app, 41)
+	caller := boundConversationCaller(t, app, conv, 41)
+	app.streamer.emitAck(conv.ID, conversationThreadID(conv.ID), 41)
+	var completion *ResponseProgress
+	app.streamer.onFrame = func(frame StreamFrame) {
+		if frame.Progress != nil && frame.Progress.Phase == "idle" {
+			completion = frame.Progress
+		}
+	}
+	out, err := app.toolRequestApproval(caller, ctx, map[string]any{"conversation_id": conv.ID, "title": "Proceed?"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := out.(map[string]any)["message_id"].(int64)
+	if completion == nil || completion.CompletionMessageID != id {
+		t.Fatalf("completion=%+v; want durable approval %d", completion, id)
+	}
+	row, err := app.store.GetMessage(id)
+	if err != nil || row.ComponentKind != kindApproval {
+		t.Fatalf("replacement must already exist: %+v, %v", row, err)
+	}
+}

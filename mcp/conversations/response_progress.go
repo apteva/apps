@@ -10,14 +10,15 @@ import (
 // Only a user-triggered response owns live progress. Background model work
 // after a final reply, or while waiting for approval, must stay invisible.
 type ResponseProgress struct {
-	Phase          string    `json:"phase"`
-	RunID          string    `json:"run_id"`
-	Revision       uint64    `json:"revision"`
-	AfterMessageID int64     `json:"after_message_id"`
-	StartedAt      time.Time `json:"started_at"`
-	ToolName       string    `json:"tool_name,omitempty"`
-	CallID         string    `json:"call_id,omitempty"`
-	ToolStartedAt  time.Time `json:"tool_started_at,omitempty"`
+	CompletionMessageID int64     `json:"completion_message_id,omitempty"`
+	Phase               string    `json:"phase"`
+	RunID               string    `json:"run_id"`
+	Revision            uint64    `json:"revision"`
+	AfterMessageID      int64     `json:"after_message_id"`
+	StartedAt           time.Time `json:"started_at"`
+	ToolName            string    `json:"tool_name,omitempty"`
+	CallID              string    `json:"call_id,omitempty"`
+	ToolStartedAt       time.Time `json:"tool_started_at,omitempty"`
 }
 type responseProgressState struct {
 	ResponseProgress
@@ -42,6 +43,12 @@ func (s *streamer) progressFrame(p *responseProgressState) StreamFrame {
 	return StreamFrame{Type: "stream", ConversationID: p.chatID, AgentID: p.agentID, ThreadID: p.threadID, CreatedAt: time.Now(), Progress: &value}
 }
 func (s *streamer) finishResponse(chat string, agent int64, afterMessageIDs ...int64) {
+	s.finishResponseWithMessage(chat, agent, 0, afterMessageIDs...)
+}
+
+// Message and progress frames use independent queues. Include the durable
+// replacement so clients need not clear their indicator before it arrives.
+func (s *streamer) finishResponseWithMessage(chat string, agent, messageID int64, afterMessageIDs ...int64) {
 	s.mu.Lock()
 	p := s.responses[responseProgressKey(chat, agent)]
 	if p == nil || (len(afterMessageIDs) == 0 && s.telemetryConnected && p.inboundPreview != "" && !p.inboundReceived) || (len(afterMessageIDs) > 0 && p.AfterMessageID != afterMessageIDs[0]) {
@@ -52,6 +59,7 @@ func (s *streamer) finishResponse(chat string, agent int64, afterMessageIDs ...i
 	s.progressSeq++
 	p.Revision = s.progressSeq
 	p.Phase = "idle"
+	p.CompletionMessageID = messageID
 	p.ToolName = ""
 	p.CallID = ""
 	frame := s.progressFrame(p)
