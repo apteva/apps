@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: actors
 display_name: Actors
-version: 0.2.2
+version: 0.2.3
 description: |
   Reusable browser actors with named operations, crawl queues, URL fan-out,
   revisioned definitions, structured datasets, durable run history, and Jobs schedules.
@@ -90,7 +90,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: actors/v0.2.2
+    ref: actors/v0.2.3
     entry: mcp/actors
   port: 8080
   health_check: /health

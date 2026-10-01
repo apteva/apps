@@ -93,7 +93,7 @@ func (a *App) platformTools() []sdk.Tool {
 		{Name: "actors_task_list", Description: "List saved tasks in the current project.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolTaskList},
 		{Name: "actors_task_run", Description: "Queue a saved task using its pinned revision and inputs.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskRun},
 		{Name: "actors_task_delete", Description: "Delete a saved task; actor definitions and historical runs remain.", InputSchema: schemaObject(map[string]any{"id": integer}, []string{"id"}), Handler: a.toolTaskDelete},
-		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
+		{Name: "actors_dataset_read", Description: "Read committed dataset items for a run, including partial results after failure. Pass next_cursor as after for the next page.", InputSchema: schemaObject(map[string]any{"run_id": integer, "dataset": map[string]any{"type": "string", "description": "Optional named dataset within a crawl run."}, "after": map[string]any{"type": "integer", "minimum": 0}, "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 200}}, []string{"run_id"}), Handler: a.toolDatasetRead},
 	}
 }
 
@@ -240,12 +240,68 @@ func persistDatasetPage(ctx *sdk.AppCtx, runID int64, items []map[string]any) er
 
 func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64ArgLocal(args, "run_id")
-	var status string
-	if err := ctx.AppDB().QueryRow(`SELECT status FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&status); err != nil {
+	var status, snapshot string
+	if err := ctx.AppDB().QueryRow(`SELECT status,COALESCE(definition_snapshot_json,'{}') FROM actors_runs WHERE id=? AND project_id=?`, id, projectID(ctx)).Scan(&status, &snapshot); err != nil {
 		return nil, errors.New("run not found")
 	}
+	var definition actorDefinition
+	if err := json.Unmarshal([]byte(snapshot), &definition); err != nil {
+		return nil, err
+	}
+	dataset := strings.TrimSpace(stringArg(args, "dataset"))
+	datasets := []map[string]any{}
+	table := "actors_dataset_items"
+	if definition.SchemaVersion == 2 {
+		table = "actors_crawl_records"
+		counts, err := ctx.AppDB().Query(`SELECT dataset,COUNT(*) FROM actors_crawl_records WHERE run_id=? AND project_id=? GROUP BY dataset ORDER BY dataset`, id, projectID(ctx))
+		if err != nil {
+			return nil, err
+		}
+		for counts.Next() {
+			var name string
+			var count int
+			if err := counts.Scan(&name, &count); err != nil {
+				counts.Close()
+				return nil, err
+			}
+			datasets = append(datasets, map[string]any{"name": name, "count": count, "schema": definition.Crawl.Datasets[name].Schema})
+		}
+		err = counts.Err()
+		counts.Close()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		var count int
+		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM actors_dataset_items WHERE run_id=? AND project_id=?`, id, projectID(ctx)).Scan(&count); err != nil {
+			return nil, err
+		}
+		datasets = append(datasets, map[string]any{"name": "default", "count": count, "schema": definition.OutputSchema})
+		if dataset != "" && dataset != "default" {
+			return nil, errors.New("dataset not found in run")
+		}
+	}
+	total := 0
+	found := dataset == ""
+	for _, entry := range datasets {
+		if dataset == "" || entry["name"] == dataset {
+			total += entry["count"].(int)
+			found = true
+		}
+	}
+	if !found {
+		return nil, errors.New("dataset not found in run")
+	}
 	limit := boundedInt(intArg(args, "limit"), 50, 1, 200)
-	rows, err := ctx.AppDB().Query(`SELECT id,item_json FROM actors_dataset_items WHERE run_id=? AND project_id=? AND id>? ORDER BY id LIMIT ?`, id, projectID(ctx), int64ArgLocal(args, "after"), limit+1)
+	query := "SELECT id,item_json FROM " + table + " WHERE run_id=? AND project_id=? AND id>?"
+	params := []any{id, projectID(ctx), int64ArgLocal(args, "after")}
+	if definition.SchemaVersion == 2 && dataset != "" {
+		query += " AND dataset=?"
+		params = append(params, dataset)
+	}
+	query += " ORDER BY id LIMIT ?"
+	params = append(params, limit+1)
+	rows, err := ctx.AppDB().Query(query, params...)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +328,7 @@ func (a *App) toolDatasetRead(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		cursor = rowID
 		size += len(raw)
 	}
-	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more}, rows.Err()
+	return map[string]any{"run_id": id, "status": status, "items": items, "next_cursor": cursor, "has_more": more, "dataset": dataset, "datasets": datasets, "total": total}, rows.Err()
 }
 
 func (a *App) platformRoutes() []sdk.Route {
@@ -304,7 +360,7 @@ func (a *App) toolRoute(handler func(*sdk.AppCtx, map[string]any) (any, error)) 
 			args["id"] = id
 			args["run_id"] = id
 		}
-		for _, key := range []string{"after", "limit"} {
+		for _, key := range []string{"after", "limit", "dataset"} {
 			if value := r.URL.Query().Get(key); value != "" {
 				args[key] = value
 			}

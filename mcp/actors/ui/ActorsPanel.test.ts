@@ -39,3 +39,18 @@ describe("dashboard panel contract", () => {
     expect(endpoint("/actors", { projectId: "a", installId: 1 })).toContain("project_id=a");
   });
 });
+
+describe("data explorer", () => {
+  test("columns include schema fields missing from the first row", async () => {
+    const { dataColumns } = await import("./ActorsPanel");
+    expect(dataColumns([{ name: "A" }, { name: "B", score: 0 }], { name: "string", optional: "string?" })).toEqual(["name", "optional", "score"]);
+  });
+  test("CSV exports preserve zero, escape quotes and nested values, and quote formula-like text", async () => {
+    const { csvRows } = await import("./ActorsPanel");
+    const csv = csvRows([{ name: '=SUM(1,2)', score: 0, note: 'a"b', nested: { x: true } }], ["name", "score", "note", "nested"]);
+    expect(csv).toContain('"\'=SUM(1,2)"');
+    expect(csv).toContain('"0"');
+    expect(csv).toContain('"a""b"');
+    expect(csv).toContain('"{""x"":true}"');
+  });
+});

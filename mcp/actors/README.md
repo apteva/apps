@@ -15,6 +15,7 @@ Actors is a standalone Apteva app for reusable browser workflows. It depends dir
 - Page-by-page dataset persistence and cursor reads, including partial output after failure; private JSONL/CSV exports on success.
 - Jobs schedules pinned to actor revisions, deterministic preset rotation and occurrence deduplication.
 - Project-scoped MCP tools, HTTP routes and a self-contained Actors panel mounted by the dashboard, with project and installation IDs on every Actors request.
+- Data explorer: choose a run and named dataset, browse typed rows with cursor pagination, search loaded rows, inspect full records, and export shown rows as JSON or CSV. Crawl reads use immutable run results, including partial results, rather than the latest materialized dataset.
 
 This is the working foundation for the platform described in `PLATFORM_PROPOSAL.md`, not completion of the entire roadmap. Durable distributed queues, checkpoint resume, full JSON Schema contracts, isolated code actors, public API publication, webhooks and a shared catalog remain future work.
 
