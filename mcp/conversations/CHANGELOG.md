@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.24.28 — 2026-10-01
+
+- Suppress the duplicate generic Thinking row after an acknowledgement while a hidden pacing tool is prepared.
+- Keep visible work tools, streamed replies, approval cards, and final responses unchanged.
+
 ## 0.24.27 — 2026-10-01
 
 - Normalize spacing around text, lists, tool groups, and cards across panels, widgets, and embedded chats.
