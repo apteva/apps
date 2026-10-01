@@ -1,0 +1,41 @@
+{
+  "name": "ufcstats",
+  "description": "UFCStats event and fight crawl through Computer. Flat keyed datasets support repeatable updates.",
+  "definition": {
+    "schema_version": 2,
+    "browser": {},
+    "allowed_hosts": ["ufcstats.com", "www.ufcstats.com"],
+    "limits": {"max_items": 100000, "max_duration_seconds": 3600},
+    "crawl": {
+      "seeds": ["http://www.ufcstats.com/statistics/events/completed"],
+      "frontier": {"max_depth": 2, "max_pages": 10000, "max_items": 100000, "max_retries": 2, "delay_ms": 1000, "dedupe": "canonical_url"},
+      "datasets": {
+        "ufc_events": {"key": "event_url", "schema": {"event_url": "url", "name": "string", "date": "date", "location": "string"}},
+        "ufc_fights": {"key": "fight_url", "schema": {"fight_url": "url", "fighter_1": "string", "fighter_2": "string", "fighter_1_url": "url", "fighter_2_url": "url", "weight_class": "string", "method": "string", "round": "string", "time": "string"}},
+        "ufc_fight_totals": {"key_fields": ["fight_url", "fighter_url"], "schema": {"fight_url": "url", "fighter_url": "url", "fighter_name": "string", "significant_strikes": "string", "takedowns": "string"}},
+        "ufc_fighters": {"key": "fighter_url", "schema": {"fighter_url": "url", "name": "string?", "record": "string?"}}
+      },
+      "routes": {
+        "events_index": {
+          "match": "/statistics/events/completed",
+          "extract": [{"dataset": "ufc_events", "items": "tbody tr:has(a[href*='/event-details/'])", "fields": {"event_url": {"selector": "a[href*='/event-details/']", "type": "url", "attribute": "href", "required": true}, "name": {"selector": "a[href*='/event-details/']", "type": "text"}, "date": {"selector": ".b-statistics__date", "type": "text"}, "location": {"selector": "td:nth-child(2)", "type": "text"}}, "transforms": {"date": "date"}}],
+          "follow": [{"field": "event_url", "route": "event"}],
+          "paginate": {"locator": {"selector": "a[href*='page=']"}, "max_pages": 31}
+        },
+        "event": {
+          "match": "/event-details/",
+          "extract": [{"dataset": "ufc_fights", "items": "tbody tr[data-link]", "fields": {"fight_url": {"type": "url", "attribute": "data-link", "required": true}, "fighter_1": {"selector": "td:nth-child(2) p:nth-child(1)", "type": "text"}, "fighter_2": {"selector": "td:nth-child(2) p:nth-child(2)", "type": "text"}, "fighter_1_url": {"selector": "td:nth-child(2) p:nth-child(1) a", "type": "url", "attribute": "href", "required": true}, "fighter_2_url": {"selector": "td:nth-child(2) p:nth-child(2) a", "type": "url", "attribute": "href", "required": true}, "weight_class": {"selector": "td:nth-child(7)", "type": "text"}, "method": {"selector": "td:nth-child(8)", "type": "text"}, "round": {"selector": "td:nth-child(9)", "type": "text"}, "time": {"selector": "td:nth-child(10)", "type": "text"}}}],
+          "follow": [{"field": "fight_url", "route": "fight"}, {"field": "fighter_1_url", "route": "fighter"}, {"field": "fighter_2_url", "route": "fighter"}]
+        },
+        "fight": {
+          "match": "/fight-details/",
+          "extract": [{"dataset": "ufc_fight_totals", "items": ".b-fight-details__table-body tr", "repeat": 2, "fields": {"fight_url": {"source": "url", "type": "url", "required": true}, "fighter_url": {"selector": "a[href*='/fighter-details/']:nth-of-type($index)", "type": "url", "attribute": "href", "required": true}, "fighter_name": {"selector": "td:nth-child(1) p:nth-child($index)", "type": "text"}, "significant_strikes": {"selector": "td:nth-child(3) p:nth-child($index)", "type": "text"}, "takedowns": {"selector": "td:nth-child(6) p:nth-child($index)", "type": "text"}}}]
+        },
+        "fighter": {
+          "match": "/fighter-details/",
+          "extract": [{"dataset": "ufc_fighters", "items": "body", "fields": {"fighter_url": {"source": "url", "type": "url", "required": true}, "name": {"selector": "h2", "type": "text"}, "record": {"selector": "h2", "type": "text"}}}]
+        }
+      }
+    }
+  }
+}
