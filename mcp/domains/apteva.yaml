@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.7.0
+version: 0.8.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -36,6 +36,15 @@ requires:
     - platform.connections.execute
     - platform.connections.read
   integrations:
+    - role: valuation_provider
+      kind: integration
+      compatible_slugs: [replicate]
+      capabilities: [domains.appraise]
+      tools:
+        domains.appraise: appraise_domains
+      required: false
+      label: "Domain valuation provider (Replicate / HumbleWorth)"
+      hint: "Runs paid AI domain estimates and stores the returned valuation history."
     - role: dns_provider
       kind: integration
       mode: multiple
@@ -76,6 +85,8 @@ provides:
     - { name: domain_sale_publish, description: "Publish a domain marketplace listing through Dynadot or Spaceship." }
     - { name: domain_sale_remove, description: "Remove a domain marketplace listing through Dynadot or Spaceship." }
     - { name: domain_sale_get, description: "Read marketplace listing status through Dynadot or Spaceship." }
+    - { name: domain_estimate_start, description: "Start and store a paid domain valuation through Replicate/HumbleWorth." }
+    - { name: domain_estimate_list, description: "List stored domain valuation history." }
     - { name: domain_update, description: "Update metadata or explicitly change/unbind a DNS connection." }
     - { name: domain_sync, description: "Refresh domain registration expiry from Porkbun." }
     - { name: domain_registration_status, description: "Inspect, cancel unsubmitted purchases, and read ownership for recovery." }

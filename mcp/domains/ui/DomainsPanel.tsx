@@ -1123,6 +1123,7 @@ function RecordsPane({
           onUpdated={onUpdated}
         />
         <SaleControls domain={domain} callTool={callTool} />
+        <ValuationControls domain={domain} callTool={callTool} />
         <div className="text-xs mb-2">
           {domain.connection_mode === "unmanaged"
             ? "Unmanaged — select a DNS connection to edit records"
@@ -1263,6 +1264,15 @@ function SaleControls({domain, callTool}: {domain: Domain; callTool: ToolCaller}
   const publish=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_publish",{domain:domain.name,listing_type:mode,price,minimum_offer:offer});setStatus("Listing published.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
   const remove=async()=>{setBusy(true);setStatus("");try{await callTool("domain_sale_remove",{domain:domain.name});setStatus("Listing removed.")}catch(e){setStatus((e as Error).message)}finally{setBusy(false)}};
   return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 font-medium">Marketplace listing</div><div className="grid grid-cols-2 gap-2"><select className={inputCls} value={mode} onChange={e=>setMode(e.target.value)}><option value="buy_now">Buy now</option><option value="make_offer">Make offer</option><option value="buy_now_and_make_offer">Buy now + offers</option></select><input className={inputCls} placeholder="Price" value={price} onChange={e=>setPrice(e.target.value)}/><input className={inputCls} placeholder="Minimum offer (optional)" value={offer} onChange={e=>setOffer(e.target.value)}/></div><div className="mt-2 flex gap-2"><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy||!price&&mode!=="make_offer"} onClick={publish}>Publish listing</button><button className="rounded border border-border px-3 py-1.5 disabled:opacity-50" disabled={busy} onClick={remove}>Remove listing</button></div>{status&&<p className="mt-2 text-xs text-text-dim">{status}</p>}</section>;
+}
+
+function ValuationControls({domain, callTool}: {domain: Domain; callTool: ToolCaller}) {
+  const [rows,setRows]=useState<Record<string,unknown>[]>([]); const [busy,setBusy]=useState(false); const [msg,setMsg]=useState("");
+  const load=async()=>{try{const r=await callTool("domain_estimate_list",{});setRows((r.valuations as Record<string,unknown>[])||[])}catch(e){setMsg((e as Error).message)}};
+  useEffect(()=>{load()},[]);
+  const start=async()=>{setBusy(true);setMsg("");try{await callTool("domain_estimate_start",{domain:domain.name});setMsg("Estimate submitted and stored.");await load()}catch(e){setMsg((e as Error).message)}finally{setBusy(false)}};
+  const own=rows.filter(r=>r.domain===domain.name);
+  return <section className="my-3 rounded border border-border bg-surface-2 p-3"><div className="mb-2 flex items-center justify-between"><span className="font-medium">Stored value estimates</span><button className="rounded bg-accent px-3 py-1.5 text-white disabled:opacity-50" disabled={busy} onClick={start}>Estimate with HumbleWorth</button></div>{own.length===0?<p className="text-xs text-text-dim">No stored estimate yet. Replicate billing applies.</p>:own.slice(0,3).map((r,i)=><div key={String(r.id||i)} className="text-xs text-text-dim">{String(r.status)} · auction ${String(r.auction??"—")} · marketplace ${String(r.marketplace??"—")} · brokerage ${String(r.brokerage??"—")} · {String(r.created_at||"")}</div>)}{msg&&<p className="mt-2 text-xs text-text-dim">{msg}</p>}</section>;
 }
 
 function AddRecordForm({
