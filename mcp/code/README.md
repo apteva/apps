@@ -1,5 +1,14 @@
 # Apteva Code
 
+## Agent skill
+
+Code declares `how-to-use-code` (`/code`) in `provides.skills`, with its playbook
+at `skills/how-to-use-code.md`. It covers source import and editing, reviewed
+ZIPs/patches, workspace execution and apply-back, optional native revisions, and
+building applications with the published `@apteva/web-sdk`, including Auth,
+scoped app HTTP/MCP calls, CRM search/create/update and shared app frontend
+components. This exported skill ships in Code 0.14.6.
+
 ## v0.14.5
 
 Corrects the release source pin so installations build `code/v0.14.5`, including

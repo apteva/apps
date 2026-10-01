@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	"gopkg.in/yaml.v3"
 )
 
 // Tier 1 — the embedded manifest must always parse and round-trip
@@ -49,6 +50,47 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !workspacesOptional {
 		t.Error("Workspaces >=0.6.1 must remain an optional dependency")
+	}
+}
+
+func TestCodeSkillManifestAndSourceAgree(t *testing.T) {
+	app := &App{}
+	manifest := app.Manifest()
+	if len(manifest.Provides.Skills) != 1 {
+		t.Fatalf("expected one exported Code skill, got %d", len(manifest.Provides.Skills))
+	}
+	skill := manifest.Provides.Skills[0]
+	if skill.Name != "how-to-use-code" || skill.Command != "/code" || skill.Description == "" || skill.BodyFile != "skills/how-to-use-code.md" || skill.Body != "" {
+		t.Fatalf("incomplete exported skill: %+v", skill)
+	}
+	raw, err := os.ReadFile(skill.BodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(string(raw), "---", 3)
+	if len(parts) != 3 || strings.TrimSpace(parts[0]) != "" || strings.TrimSpace(parts[2]) == "" {
+		t.Fatal("skill requires YAML frontmatter and a non-empty body")
+	}
+	var front struct {
+		Name        string   `yaml:"name"`
+		Description string   `yaml:"description"`
+		Command     string   `yaml:"command"`
+		Triggers    []string `yaml:"triggers"`
+	}
+	if err := yaml.Unmarshal([]byte(parts[1]), &front); err != nil {
+		t.Fatal(err)
+	}
+	if front.Name != skill.Name || front.Command != skill.Command || front.Description == "" {
+		t.Fatal("skill frontmatter must preserve the manifest's install identity and command")
+	}
+	tools := map[string]bool{}
+	for _, tool := range app.MCPTools() {
+		tools[tool.Name] = true
+	}
+	for _, trigger := range front.Triggers {
+		if (strings.HasPrefix(trigger, "repos_") || strings.HasPrefix(trigger, "code_")) && !tools[trigger] {
+			t.Errorf("skill references unavailable tool %q", trigger)
+		}
 	}
 }
 

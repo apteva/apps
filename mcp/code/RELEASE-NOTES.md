@@ -1,3 +1,19 @@
+# Apteva Code 0.14.6
+
+Exports `how-to-use-code` through `provides.skills` with the `/code` command.
+The playbook covers ZIP and Git imports, reviewed edits, workspace execution
+and apply-back, optional native revisions, and building connected interfaces
+with the published Apteva Web SDK. SDK examples cover authentication, scoped
+app calls, CRM search/create/update, and loading another app's frontend.
+
+The runtime source pin matches `code/v0.14.6`. Validation checks the skill's
+manifest/file identity, available Code tools, and TypeScript examples against
+the published SDK package.
+
+Pins the sidecar to the current published Go app SDK, `v0.91.0`.
+
+---
+
 # Apteva Code 0.14.5
 
 Corrects the runtime source ref that made 0.14.4 installations build 0.14.3
