@@ -4,7 +4,13 @@ Control plane for Apteva tenants. Each managed tenant is a separate `apteva` pro
 
 ## Current behavior
 
-**Fleet v0.10.10** retains the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.76.0**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
+**Fleet v0.10.11** retains the safety and performance fixes from the v0.10.5 audit and uses **app-sdk v0.76.0**. See [AUDIT_FIXES.md](AUDIT_FIXES.md) for the changes, validation and rollout requirements.
+
+Version 0.10.11 fixes hosted direct-ingress preparation. The tool now keeps its
+outer tenant operation lease through Instances preflight and the cutover, while
+the preparation helper no longer tries to acquire the same lease a second time.
+Failed preflight releases the lease so the operator can retry, while competing
+tenant operations remain blocked during preparation.
 
 Version 0.10.10 corrects the release source pin: the 0.10.9 manifest pointed to
 `fleet/v0.10.8`, so source installs built 0.10.8 and missed the deployment timeout

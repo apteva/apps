@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.10.10
+version: 0.10.11
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -54,6 +54,9 @@ description: |
   v0.10.9 gives Functions deployments a bounded 150-second timeout through
   tenant_app_call, preserves caller cancellation, supports timeout_ms overrides,
   and uses app-sdk v0.76.0. Existing lifecycle and transfer protections remain.
+
+  v0.10.11 fixes hosted direct-ingress preparation by keeping the outer tenant
+  operation lock for the full cutover attempt without acquiring it twice.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/fleet
@@ -213,7 +216,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.10.10
+    ref: fleet/v0.10.11
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
