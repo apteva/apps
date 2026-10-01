@@ -4,7 +4,7 @@ import { splitActivityPaint } from "./toolActivityPaint";
 import type { ResponseProgress } from "./types";
 import { pendingResponsePhase, responseToolGroup } from "./responseActivity";
 import { ChatToolActivity } from "./ToolActivity";
-import { buildChatTimeline, isApprovalRequestTool, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
+import { buildChatTimeline, isVisibleChatTool, type ToolActivity as TimelineTool } from "./toolActivityModel";
 import { toChatToolActivity, useToolVisualRegistry } from "./toolActivityAdapter";
 import { useConversationLocalization, type ConversationLocalization, type ConversationMessageKey, type ConversationMessageParams } from "./i18n";
 import { AttachmentContent, GenericComponents, reportSectionsText } from "./messageContent";
@@ -1753,18 +1753,13 @@ export const ConversationChat = forwardRef<ConversationComposerHandle, {
           // rendered. Old cards and verdict edits cannot settle a later turn.
           const approvalDelivered = messages.some(m => m.role === "agent" && m.component_kind === "approval"
             && m.agent_id === p.agent_id && m.id > p.after_message_id);
-          // An acknowledgement is the user-facing status for this turn. A
-          // second model pass may spend time preparing an internal tool such
-          // as `pace`; keep that hidden interval empty until a visible tool,
-          // stream, card, or final reply arrives instead of adding a second
-          // generic Thinking row underneath the acknowledgement.
-          const acknowledgementVisible = p.phase === "thinking" && messages.some(m =>
-            m.role === "agent" && m.phase === "acknowledgement" && m.agent_id === p.agent_id && m.id > p.after_message_id,
-          );
-          if (acknowledgementVisible) return null;
+          // An acknowledgement or progress message is not completion. Keep
+          // Thinking until a live text stream or pulsing tool owns feedback.
+          const finalDelivered = messages.some(m => m.role === "agent" && !m.component_kind
+            && m.phase === "final" && m.agent_id === p.agent_id && m.id > p.after_message_id);
+          if (finalDelivered) return null;
           if (awaitingProgressMessage(p)) return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
-          const hiddenTool = p.tool_name && !isVisibleChatTool(p.tool_name) && !isApprovalRequestTool(p.tool_name);
-          if (p.phase === "idle" || approvalDelivered || hiddenTool || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
+          if (p.phase === "idle" || approvalDelivered || (continuingKey && continuingToolKeys.has(continuingKey)) || ownsToolGroup({agentId:p.agent_id,threadId:p.thread_id,afterMessageId:p.after_message_id,createdAt:Date.parse(p.started_at)}) || bubbles.some(b=>b.agentId===p.agent_id && b.text && !b.done)) return null;
           return <ThinkingMessagePlaceholder key={`progress-${p.agent_id}`}/>;
         })}
       </> : null}

@@ -442,9 +442,9 @@ for (const host of ["dashboard","external","package"]) {
   await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
   await phase("continuing",4);
   await expect(row.getByText("Listing repositories",{exact:true})).toBeVisible();
-  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
   await expect(row.getByText("42ms",{exact:true})).toHaveCount(0);
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await page.screenshot({path:test.info().outputPath("continuing-tool.png")});
   await phase("idle",5);
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
@@ -493,7 +493,8 @@ for (const host of ["dashboard","external","package"]) {
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
   // A durable intermediate reply moves the tail away from the tool group.
   await request.post("/emit",{data:{...frame,response_progress:{phase:"continuing",run_id:"ack-1",revision:1,started_at:start,after_message_id:0}}});
-  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toBeVisible();
+  await expect(row.locator(".chat-tool-copy-running")).toHaveCount(1);
+  await expect(page.getByRole("status",{name:"Thinking",exact:true})).toHaveCount(0);
   await request.post("/append-message",{data:{id:900,conversation_id:chat,role:"agent",agent_id:41,phase:"intermediate",content:"I am checking the next step.",components:[],created_at:new Date().toISOString()}});
   await expect(page.getByText("I am checking the next step.")).toBeVisible();
   await expect(row.locator(".chat-tool-copy-running")).toHaveCount(0);
